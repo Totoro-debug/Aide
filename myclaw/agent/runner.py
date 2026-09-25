@@ -7,11 +7,13 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal, Protocol, cast
+from uuid import UUID
 
 from loguru import logger
 
 from myclaw.agent.confirmation import ConfirmationAborted
 from myclaw.agent.run_errors import CommittableAgentRunError
+from myclaw.agent.session.backup_store import FileMutationRecorder
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationRequester,
     ModelToolCall,
@@ -251,6 +253,8 @@ class AgentRunner:
         externalize_result: Callable[[ToolResult], ToolResult] | None,
         cancel_requested: Callable[[], bool] | None,
         max_iterations: int,
+        file_mutation_recorder: FileMutationRecorder | None = None,
+        run_token: UUID | None = None,
         stop_on_tool_error: bool = False,
         propagate_unexpected_errors: bool = False,
         tool_calls_as_tasks: bool = True,
@@ -490,6 +494,8 @@ class AgentRunner:
                                 confirmation,
                                 state,
                                 as_task=tool_calls_as_tasks,
+                                file_mutation_recorder=file_mutation_recorder,
+                                run_token=run_token,
                             )
                         except BaseException as failure:
                             if not isinstance(failure, Exception) and state.result is not None:
@@ -664,12 +670,24 @@ async def _await_tool_call(
     state: _ToolCallState,
     *,
     as_task: bool,
+    file_mutation_recorder: FileMutationRecorder | None,
+    run_token: UUID | None,
 ) -> ToolResult:
+    async def invoke_gateway() -> ToolResult:
+        if file_mutation_recorder is None and run_token is None:
+            return await gateway.call(tool_call, confirmation=confirmation)
+        return await gateway.call(
+            tool_call,
+            confirmation=confirmation,
+            file_mutation_recorder=file_mutation_recorder,
+            run_token=run_token,
+        )
+
     if not as_task:
-        result = await gateway.call(tool_call, confirmation=confirmation)
+        result = await invoke_gateway()
         state.result = result
         return result
-    operation = asyncio.create_task(gateway.call(tool_call, confirmation=confirmation))
+    operation = asyncio.create_task(invoke_gateway())
     try:
         result = await operation
         state.result = result

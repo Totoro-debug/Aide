@@ -14,7 +14,7 @@ from threading import Event as ThreadEvent
 from threading import Thread
 from types import TracebackType
 from typing import Any, ClassVar, Literal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from loguru import logger
@@ -29,6 +29,7 @@ from myclaw.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
 from myclaw.agent.permission import PermissionSnapshot, RuntimePermissionControl
 from myclaw.agent.run_errors import CommittableAgentRunError
 from myclaw.agent.runner import AgentRunner, AgentRunnerResult, AgentRunnerRouter
+from myclaw.agent.session.backup_store import FileBackupStore
 from myclaw.agent.session.session import Session
 from myclaw.agent.tools.base import BaseTool
 from myclaw.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
@@ -4390,6 +4391,74 @@ async def test_foreground_commit_assigns_anchor_and_keeps_internal_fields_out_of
 
     loaded = Session.load(session.workspace_state, session.session_id)
     assert loaded.restore_candidates()[0].anchor_id == 1
+
+
+@pytest.mark.asyncio
+async def test_foreground_file_backup_uses_the_committed_user_run_token(
+    tmp_path: Path,
+) -> None:
+    tool_call = ModelToolCall(
+        id="write-call",
+        name="write_file",
+        arguments=json.dumps({"path": "tracked.txt", "content": "after"}),
+    )
+    router = _Router((_response("write", tool_call=tool_call), _response("done")))
+    loop, session, bus = _runtime(tmp_path, router)
+
+    tracked = session.workspace_state.workspace_path / "tracked.txt"
+    tracked.write_bytes(b"before")
+    await loop.start()
+    try:
+        await collect_foreground_outbound(bus, "Track this file change.")
+        await session.wait_for_pending_persist()
+    finally:
+        await loop.close()
+
+    user = next(message for message in session.messages if message["role"] == "user")
+    journal = FileBackupStore(session.workspace_state, session.session_id).inspect()
+    assert len(journal.entries) == 1
+    assert journal.entries[0].run_token == UUID(user["restore_run_token"])
+    assert FileBackupStore(session.workspace_state, session.session_id).read_backup(1) == b"before"
+    assert tracked.read_bytes() == b"after"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "finish_reason"),
+    [
+        (ModelCallError(ErrorInfo("model_failed", "provider failed")), "failed"),
+        (ModelCallError(ErrorInfo("turn_cancelled", TURN_CANCELLED_MESSAGE)), "cancelled"),
+    ],
+    ids=("failed", "cancelled"),
+)
+async def test_foreground_file_backup_keeps_failed_or_cancelled_run_token_association(
+    tmp_path: Path,
+    failure: ModelCallError,
+    finish_reason: str,
+) -> None:
+    tool_call = ModelToolCall(
+        id="write-call",
+        name="write_file",
+        arguments=json.dumps({"path": "tracked.txt", "content": "after"}),
+    )
+    router = _Router((_response("write", tool_call=tool_call), failure))
+    loop, session, bus = _runtime(tmp_path, router)
+
+    tracked = session.workspace_state.workspace_path / "tracked.txt"
+    tracked.write_bytes(b"before")
+    await loop.start()
+    try:
+        observed = await collect_foreground_outbound(bus, "Track this interrupted file change.")
+        await session.wait_for_pending_persist()
+    finally:
+        await loop.close()
+
+    user = next(message for message in session.messages if message["role"] == "user")
+    journal = FileBackupStore(session.workspace_state, session.session_id).inspect()
+    assert len(journal.entries) == 1
+    assert journal.entries[0].run_token == UUID(user["restore_run_token"])
+    assert observed[-1].metadata["finish_reason"] == finish_reason
+    assert tracked.read_bytes() == b"after"
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 from loguru import logger
 
 from myclaw.agent.confirmation import ConfirmationAborted, ConfirmationUnavailable
+from myclaw.agent.session.backup_store import FileMutationRecorder
 from myclaw.agent.tools.base import (
     ArtifactReference,
     BaseTool,
@@ -392,6 +393,8 @@ class ToolGateway:
         tool_call: ModelToolCall,
         *,
         confirmation: ConfirmationRequester | None = None,
+        file_mutation_recorder: FileMutationRecorder | None = None,
+        run_token: UUID | None = None,
     ) -> ToolResult:
         """Parse, prepare, confirm when needed, execute, and normalize one call."""
         raw_arguments = tool_call.arguments
@@ -413,6 +416,7 @@ class ToolGateway:
             if not isinstance(facts, ToolInvocationFacts):
                 raise TypeError("Tool preparation returned an invalid value")
             execution_arguments = facts.execution_arguments
+            mutation_target = _file_mutation_target(facts)
         except asyncio.CancelledError:
             raise
         except ToolError as error:
@@ -422,7 +426,11 @@ class ToolGateway:
             return _result(tool_call, "error", _generic_tool_failure(tool.name))
 
         try:
-            refusal = self._refusal_reason(tool, execution_arguments)
+            refusal = self._refusal_reason(
+                tool,
+                execution_arguments,
+                mutation_target=mutation_target,
+            )
         except asyncio.CancelledError:
             raise
         except ToolError as error:
@@ -493,6 +501,9 @@ class ToolGateway:
                 execution_arguments,
                 authorization=authorization,
                 confirmation_state=confirmation_state,
+                file_mutation_recorder=file_mutation_recorder,
+                run_token=run_token,
+                mutation_target=mutation_target,
             )
 
         try:
@@ -538,14 +549,25 @@ class ToolGateway:
             execution_arguments,
             authorization=authorization,
             confirmation_state=confirmation_state,
+            file_mutation_recorder=file_mutation_recorder,
+            run_token=run_token,
+            mutation_target=mutation_target,
         )
 
     @staticmethod
-    def _refusal_reason(tool: BaseTool, prepared_arguments: dict[str, Any]) -> str | None:
+    def _refusal_reason(
+        tool: BaseTool,
+        prepared_arguments: dict[str, Any],
+        *,
+        mutation_target: Path | None,
+    ) -> str | None:
         refusal = getattr(tool, "refusal_reason", None)
         if refusal is None:
             return None
-        reason = cast(Callable[..., object], refusal)(**deepcopy(prepared_arguments))
+        refusal_arguments = deepcopy(prepared_arguments)
+        if mutation_target is not None and isinstance(tool, (WriteFileTool, EditFileTool)):
+            refusal_arguments["path"] = str(mutation_target)
+        reason = cast(Callable[..., object], refusal)(**refusal_arguments)
         if reason is not None and not isinstance(reason, str):
             raise TypeError("Tool refusal checks must return a string reason or None")
         return reason
@@ -558,12 +580,30 @@ class ToolGateway:
         *,
         authorization: ToolAuthorizationSession,
         confirmation_state: list[ToolConfirmationMetadata | None],
+        file_mutation_recorder: FileMutationRecorder | None,
+        run_token: UUID | None,
+        mutation_target: Path | None,
     ) -> ToolResult:
         try:
-            content = await tool.execute_authorized(
-                deepcopy(prepared_arguments),
-                authorization,
-            )
+            if (
+                self._permission_context.origin == "foreground"
+                and file_mutation_recorder is not None
+                and run_token is not None
+                and mutation_target is not None
+                and isinstance(tool, (WriteFileTool, EditFileTool))
+            ):
+                content = await tool.execute_authorized(
+                    deepcopy(prepared_arguments),
+                    authorization,
+                    mutation_recorder=file_mutation_recorder,
+                    run_token=run_token,
+                    mutation_target=mutation_target,
+                )
+            else:
+                content = await tool.execute_authorized(
+                    deepcopy(prepared_arguments),
+                    authorization,
+                )
             if not isinstance(content, str):
                 raise TypeError("Tool execution must return a string")
         except asyncio.CancelledError:
@@ -621,6 +661,13 @@ def _context_from_snapshot(
         workspace_root=workspace_root,
         origin=context.origin,
         configured_schedule_level=context.configured_schedule_level,
+    )
+
+
+def _file_mutation_target(facts: ToolInvocationFacts) -> Path | None:
+    return next(
+        (access.path for access in facts.file_accesses if access.role == "write"),
+        None,
     )
 
 

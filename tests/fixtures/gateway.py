@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from typing import Any
+from uuid import UUID
 
+from myclaw.agent.session.backup_store import FileMutationRecorder
 from myclaw.agent.tools.base import BaseTool
 from myclaw.agent.tools.permission import PermissionContext
 from myclaw.agent.tools.tool_gateway import (
@@ -43,6 +45,13 @@ class SingleToolGateway(ToolGateway):
         tool_call: ModelToolCall,
         *,
         confirmation: ConfirmationRequester | None = None,
+        file_mutation_recorder: FileMutationRecorder | None = None,
+        run_token: UUID | None = None,
     ) -> ToolResult:
         requester = self._confirmation if confirmation is None else confirmation
-        return await self._gateway.call(tool_call, confirmation=requester)
+        return await self._gateway.call(
+            tool_call,
+            confirmation=requester,
+            file_mutation_recorder=file_mutation_recorder,
+            run_token=run_token,
+        )

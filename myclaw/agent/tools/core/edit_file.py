@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
+from uuid import UUID
 
+from myclaw.agent.session.backup_store import FileMutationRecorder
 from myclaw.agent.tools.base import BaseTool, ToolError, ToolParam
+from myclaw.agent.tools.core._file_mutation import (
+    execute_recorded_mutation,
+    is_protected_restore_target,
+)
 from myclaw.agent.tools.permission import FileAccess
 
 
@@ -46,6 +52,13 @@ class EditFileTool(BaseTool):
             ),
         )
 
+    def refusal_reason(self, *, path: str, **arguments: object) -> str | None:
+        del arguments
+        target = self.resolve_path_argument(workspace=self._workspace, requested=path)
+        if is_protected_restore_target(self._workspace, target):
+            return "Built-in File Tools cannot write to protected restore state."
+        return None
+
     async def execute(
         self,
         *,
@@ -55,6 +68,58 @@ class EditFileTool(BaseTool):
         replace_all: bool,
     ) -> str:
         target = self.resolve_path_argument(workspace=self._workspace, requested=path)
+        return await self._execute_at_target(
+            target=target,
+            old_text=old_text,
+            new_text=new_text,
+            replace_all=replace_all,
+            recorder=None,
+            run_token=None,
+        )
+
+    async def execute_authorized(
+        self,
+        arguments: dict[str, Any],
+        authorization: object,
+        *,
+        mutation_recorder: FileMutationRecorder | None = None,
+        run_token: UUID | None = None,
+        mutation_target: Path | None = None,
+    ) -> str:
+        del authorization
+        path = arguments.get("path")
+        old_text = arguments.get("old_text")
+        new_text = arguments.get("new_text")
+        replace_all = arguments.get("replace_all")
+        if (
+            not isinstance(path, str)
+            or not isinstance(old_text, str)
+            or not isinstance(new_text, str)
+            or not isinstance(replace_all, bool)
+        ):
+            raise ToolError("Edit File arguments are invalid.")
+        target = mutation_target
+        if target is None:
+            target = self.resolve_path_argument(workspace=self._workspace, requested=path)
+        return await self._execute_at_target(
+            target=target,
+            old_text=old_text,
+            new_text=new_text,
+            replace_all=replace_all,
+            recorder=(mutation_recorder if run_token is not None else None),
+            run_token=(run_token if mutation_recorder is not None else None),
+        )
+
+    async def _execute_at_target(
+        self,
+        *,
+        target: Path,
+        old_text: str,
+        new_text: str,
+        replace_all: bool,
+        recorder: FileMutationRecorder | None,
+        run_token: UUID | None,
+    ) -> str:
         try:
             raw_content = target.read_bytes()
         except OSError as error:
@@ -77,8 +142,17 @@ class EditFileTool(BaseTool):
             if replace_all
             else content.replace(old_text, new_text, 1)
         )
-        try:
-            target.write_bytes(replacement.encode("utf-8"))
-        except (OSError, UnicodeError) as error:
-            raise ToolError(f"Edit File write failed: {error}") from error
-        return "File edited successfully."
+
+        async def mutation() -> str:
+            try:
+                target.write_bytes(replacement.encode("utf-8"))
+            except (OSError, UnicodeError) as error:
+                raise ToolError(f"Edit File write failed: {error}") from error
+            return "File edited successfully."
+
+        return await execute_recorded_mutation(
+            mutation,
+            recorder=recorder,
+            run_token=run_token,
+            target=target,
+        )

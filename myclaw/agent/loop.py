@@ -49,6 +49,7 @@ from myclaw.agent.runner import (
     AgentRunnerToolCallStarted,
     _build_assistant_repair_message,
 )
+from myclaw.agent.session.backup_store import FileBackupStore
 from myclaw.agent.session.session import (
     Session,
     SessionRestoreBefore,
@@ -1330,6 +1331,10 @@ class AgentLoop:
             run_id=self._new_uuid(),
         )
         self._active_foreground_owner = foreground_owner
+        file_mutation_recorder = FileBackupStore(
+            active_session.workspace_state,
+            active_session.session_id,
+        )
         try:
             result = await run_context.runner.run(
                 initial_messages,
@@ -1340,6 +1345,8 @@ class AgentLoop:
                 externalize_result=self._result_externalizer_for(active_session),
                 cancel_requested=lambda: self._cancel_requested,
                 max_iterations=self._max_iterations,
+                file_mutation_recorder=file_mutation_recorder,
+                run_token=restore_run_token,
             )
         except ModelCallError as failure:
             await self._publish_preparation_failure(failure.error)

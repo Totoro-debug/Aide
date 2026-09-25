@@ -2836,6 +2836,8 @@ async def test_loop_commits_failed_runner_result_once_before_one_safe_terminal(
         assert commit_calls == 1
         assert persist_calls == 1
         assert [message["role"] for message in session.messages] == ["user", "assistant"]
+        assert session.messages[0]["restore_anchor_id"] == 1
+        assert session.messages[0]["restore_before"]["last_compacted"] == 0
         assert session.messages[-1]["status"] == "error"
         assert session.metadata["blackboard"] == {
             "goal": staged.goal,
@@ -3187,6 +3189,8 @@ async def test_preparation_cancellation_publishes_the_cancelled_terminal(
         }
         assert [message["role"] for message in session.messages] == ["user", "assistant"]
         assert session.messages[-1]["status"] == "interrupted"
+        assert session.messages[0]["restore_anchor_id"] == 1
+        assert session.messages[0]["restore_before"]["last_compacted"] == 0
         assert session.metadata["token_usage"]["model_calls"] == 0
     finally:
         await loop.close()
@@ -3701,6 +3705,17 @@ async def test_blank_foreground_input_performs_zero_task_framing_attempts(
         "output_tokens": 0,
         "total_tokens": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_blank_foreground_input_releases_cancel_waiter(tmp_path: Path) -> None:
+    loop, session, _bus = _runtime(tmp_path, _Router(()))
+    execution_ready = asyncio.Event()
+
+    await loop._execute_foreground(InboundMessage(" \n\t "), execution_ready=execution_ready)
+
+    assert execution_ready.is_set()
+    assert session.messages == []
 
 
 @pytest.mark.asyncio
@@ -4340,6 +4355,41 @@ async def test_late_title_is_persisted_by_the_next_completed_turn(tmp_path: Path
         "user",
         "assistant",
     ]
+
+
+@pytest.mark.asyncio
+async def test_foreground_commit_assigns_anchor_and_keeps_internal_fields_out_of_projections(
+    tmp_path: Path,
+) -> None:
+    router = _CapturingRouter(
+        (_response("Committed response."), _response("Response after anchored history."))
+    )
+    loop, session, bus = _runtime(tmp_path, router)
+
+    await loop.start()
+    try:
+        await collect_foreground_outbound(bus, "Persist this input.")
+        await session.wait_for_pending_persist()
+        await collect_foreground_outbound(bus, "Use the prior context.")
+        await session.wait_for_pending_persist()
+        terminal_projection = loop.project_foreground_conversation()
+    finally:
+        await loop.close()
+
+    user = session.messages[0]
+    assert user["restore_anchor_id"] == 1
+    assert isinstance(user["restore_run_token"], str)
+    assert user["restore_before"]["last_compacted"] == 0
+    hidden_fields = {"restore_anchor_id", "restore_run_token", "restore_before"}
+    assert len(router.requests) == 2
+    assert any(message.get("content") == "Persist this input." for message in router.requests[1])
+    assert all(hidden_fields.isdisjoint(message) for message in terminal_projection.messages)
+    assert all(
+        hidden_fields.isdisjoint(message) for request in router.requests for message in request
+    )
+
+    loaded = Session.load(session.workspace_state, session.session_id)
+    assert loaded.restore_candidates()[0].anchor_id == 1
 
 
 @pytest.mark.asyncio

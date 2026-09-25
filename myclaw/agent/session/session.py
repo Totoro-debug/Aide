@@ -9,6 +9,7 @@ import math
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -31,7 +32,13 @@ from myclaw.utils.validation import (
     token_usage_validation_issue,
 )
 
-__all__ = ["Session", "SessionStoragePartition"]
+__all__ = [
+    "RestoreAnchor",
+    "Session",
+    "SessionRestoreBefore",
+    "SessionRestoreResult",
+    "SessionStoragePartition",
+]
 
 
 class SessionStoragePartition(StrEnum):
@@ -43,6 +50,9 @@ class SessionStoragePartition(StrEnum):
 
 _HEADER_FIELDS = frozenset({"session_id", "created_at", "updated_at", "last_compacted", "metadata"})
 _TOKEN_USAGE_PATCH_KEYS = frozenset({"token_usage", "token_usage_delta", "usage_delta"})
+_RESTORE_MESSAGE_FIELDS = frozenset({"restore_anchor_id", "restore_run_token", "restore_before"})
+_RESTORE_BEFORE_FIELDS = frozenset({"metadata", "last_compacted"})
+_RESTORE_NEXT_ANCHOR_ID = "restore_next_anchor_id"
 _SESSION_ID_PATTERN = re.compile(
     r"(?P<timestamp>\d{8}-\d{6}-\d{6})_"
     r"(?P<uuid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
@@ -51,6 +61,36 @@ _SCHEDULE_SESSION_ID_PATTERN = re.compile(
     r"schedule_(?P<uuid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})"
 )
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRestoreBefore:
+    """Detached Session-owned state captured immediately before one input."""
+
+    metadata: dict[str, Any]
+    last_compacted: int
+
+
+@dataclass(frozen=True, slots=True)
+class RestoreAnchor:
+    """Presentation-safe details for one persisted foreground User message."""
+
+    anchor_id: int
+    run_token: UUID
+    content: str
+    timestamp: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRestoreResult:
+    """Result of one strict durable Session truncation."""
+
+    session_id: str
+    anchor_id: int
+    removed_messages: int
+    updated_at: datetime
+
+
 class Session:
     """Own the in-memory state and identity of one Conversation Session."""
 
@@ -89,6 +129,7 @@ class Session:
         require_aware_datetime(created_at, field="created_at")
         require_aware_datetime(updated_at, field="updated_at")
         require_nonnegative_int(last_compacted, field="last_compacted")
+        _validate_restore_sequence(messages, metadata, partition=resolved_partition)
         session = object.__new__(cls)
         session._workspace_state = workspace_state
         session._session_id = session_id
@@ -216,6 +257,36 @@ class Session:
     def updated_at(self) -> datetime:
         return self._updated_at
 
+    def capture_restore_before(self) -> SessionRestoreBefore:
+        """Capture detached Session state before a foreground User input."""
+        self._ensure_not_abandoned()
+        self._require_foreground_restore()
+        return SessionRestoreBefore(
+            metadata=copy.deepcopy(self.metadata),
+            last_compacted=self.last_compacted,
+        )
+
+    def restore_candidates(self) -> tuple[RestoreAnchor, ...]:
+        """Return the persisted foreground User messages that can be restored."""
+        self._ensure_not_abandoned()
+        self._require_foreground_restore()
+        candidates: list[RestoreAnchor] = []
+        for message in self._persisted_restore_messages():
+            _validate_message(message)
+            fields = _restore_anchor_fields(message)
+            if fields is None:
+                continue
+            anchor_id, run_token, _ = fields
+            candidates.append(
+                RestoreAnchor(
+                    anchor_id=anchor_id,
+                    run_token=UUID(run_token),
+                    content=message["content"],
+                    timestamp=message["timestamp"],
+                )
+            )
+        return tuple(candidates)
+
     def commit_agent_run(
         self,
         messages: list[dict[str, Any]],
@@ -225,12 +296,22 @@ class Session:
         usage_delta: dict[str, int] | None = None,
         metadata_updates: dict[str, Any] | None = None,
         metadata_removals: tuple[str, ...] = (),
+        restore_before: SessionRestoreBefore | None = None,
+        restore_run_token: UUID | None = None,
     ) -> None:
         """Atomically publish one Agent Run terminal increment."""
         self._ensure_not_abandoned()
         if not isinstance(messages, list):
             raise TypeError("messages must be a list")
         require_nonnegative_int(pending_last_compacted, field="pending_last_compacted")
+        restore_snapshot = _copy_restore_before(restore_before)
+        if (restore_snapshot is None) != (restore_run_token is None):
+            raise ValueError("restore_before and restore_run_token must be supplied together")
+        if restore_snapshot is not None:
+            self._require_foreground_restore()
+            assert restore_run_token is not None
+            require_uuid4(restore_run_token, field="restore_run_token")
+        anchor_id: int | None = None
 
         if pending_action_summary is None:
             action_summary = ""
@@ -275,6 +356,22 @@ class Session:
             if "timestamp" in copied:
                 raise ValueError("timestamp is reserved for Session message timestamps")
             copied["timestamp"] = format_rfc3339_milliseconds(self._clock_now())
+            if _RESTORE_MESSAGE_FIELDS.intersection(copied):
+                raise ValueError("restore anchor fields are Session-owned")
+            if restore_snapshot is not None and copied["role"] == "user":
+                if anchor_id is not None:
+                    raise ValueError("one Agent Run may commit only one User restore anchor")
+                anchor_id = _next_restore_anchor_id(candidate_metadata, candidate_messages)
+                copied.update(
+                    {
+                        "restore_anchor_id": anchor_id,
+                        "restore_run_token": str(restore_run_token),
+                        "restore_before": {
+                            "metadata": copy.deepcopy(restore_snapshot.metadata),
+                            "last_compacted": restore_snapshot.last_compacted,
+                        },
+                    }
+                )
             try:
                 _validate_message(copied)
             except KeyError as error:
@@ -282,6 +379,11 @@ class Session:
             candidate_messages.append(copied)
             if copied["role"] == "assistant":
                 updated_usage = _accumulate_token_usage(updated_usage, copied["token_usage"])
+
+        if restore_snapshot is not None:
+            if anchor_id is None:
+                raise ValueError("restore anchor requires one User message")
+            candidate_metadata[_RESTORE_NEXT_ANCHOR_ID] = anchor_id + 1
 
         if pending_last_compacted > len(candidate_messages):
             raise ValueError("pending_last_compacted must not exceed final message count")
@@ -297,6 +399,73 @@ class Session:
         self.__dict__ = candidate_state
         self.persist()
 
+    def restore_before_durably(self, anchor_id: int) -> SessionRestoreResult:
+        """Strictly persist the Session state immediately before ``anchor_id``."""
+        self._ensure_not_abandoned()
+        self._require_foreground_restore()
+        _validate_restore_anchor_id(anchor_id)
+        if any(not task.done() for task in self._persist_tasks):
+            raise RuntimeError("Pending Session snapshots must finish before restore")
+        if not any(
+            _restore_anchor_fields(message) is not None
+            and message["restore_anchor_id"] == anchor_id
+            for message in self._persisted_restore_messages()
+        ):
+            raise ValueError(f"unknown persisted restore anchor ID: {anchor_id}")
+
+        anchor_index: int | None = None
+        anchor_before: SessionRestoreBefore | None = None
+        for index, message in enumerate(self.messages):
+            _validate_message(message)
+            fields = _restore_anchor_fields(message)
+            if fields is None or fields[0] != anchor_id:
+                continue
+            if anchor_index is not None:
+                raise ValueError(f"duplicate restore anchor ID: {anchor_id}")
+            anchor_index = index
+            anchor_before = fields[2]
+        if anchor_index is None or anchor_before is None:
+            raise ValueError(f"unknown restore anchor ID: {anchor_id}")
+
+        retained_messages = copy.deepcopy(self.messages[:anchor_index])
+        if anchor_before.last_compacted > len(retained_messages):
+            raise ValueError("restore_before.last_compacted exceeds retained message count")
+        removed_messages = len(self.messages) - len(retained_messages)
+        current_next_id = _next_restore_anchor_id(self.metadata, self.messages)
+        restored_next_id = _next_restore_anchor_id(anchor_before.metadata, retained_messages)
+        restored_metadata = copy.deepcopy(anchor_before.metadata)
+        restored_metadata[_RESTORE_NEXT_ANCHOR_ID] = max(
+            current_next_id,
+            restored_next_id,
+            anchor_id + 1,
+        )
+        _validate_metadata(restored_metadata)
+
+        restored_at = self._clock_now()
+        content = _serialize_session_state(
+            session_id=self._session_id,
+            created_at=self._created_at,
+            updated_at=restored_at,
+            last_compacted=anchor_before.last_compacted,
+            metadata=restored_metadata,
+            messages=retained_messages,
+        )
+        candidate_state = self.__dict__.copy()
+        candidate_state.update(
+            messages=retained_messages,
+            metadata=restored_metadata,
+            last_compacted=anchor_before.last_compacted,
+            _updated_at=restored_at,
+        )
+        self._write_content(content)
+        self.__dict__ = candidate_state
+        return SessionRestoreResult(
+            session_id=self._session_id,
+            anchor_id=anchor_id,
+            removed_messages=removed_messages,
+            updated_at=restored_at,
+        )
+
     def update_metadata(self, metadata: dict[str, Any] | None = None, **updates: Any) -> None:
         """Apply a copied shallow metadata patch and accumulate token usage deltas."""
         self._ensure_not_abandoned()
@@ -307,6 +476,8 @@ class Session:
             patch.update(metadata)
         patch.update(updates)
         copied_patch = _copy_json_object(patch, field="metadata")
+        if _RESTORE_NEXT_ANCHOR_ID in copied_patch:
+            raise ValueError("restore anchor counter is Session-owned")
         _normalize_blackboard_metadata(copied_patch, invalid_is_absent=False)
 
         token_delta = copied_patch.pop("token_usage_delta", None)
@@ -407,18 +578,14 @@ class Session:
                 pending.cancel()
 
     def _serialized_state(self) -> bytes:
-        header = {
-            "session_id": self._session_id,
-            "created_at": format_rfc3339_milliseconds(self._created_at),
-            "updated_at": format_rfc3339_milliseconds(self._updated_at),
-            "last_compacted": self.last_compacted,
-            "metadata": copy.deepcopy(self.metadata),
-        }
-        records = (header, *copy.deepcopy(self.messages))
-        return "".join(
-            json.dumps(record, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n"
-            for record in records
-        ).encode("utf-8")
+        return _serialize_session_state(
+            session_id=self._session_id,
+            created_at=self._created_at,
+            updated_at=self._updated_at,
+            last_compacted=self.last_compacted,
+            metadata=self.metadata,
+            messages=self.messages,
+        )
 
     async def _persist_after(
         self,
@@ -444,6 +611,21 @@ class Session:
     def _ensure_not_abandoned(self) -> None:
         if self._abandoned:
             raise RuntimeError("Session has been abandoned")
+
+    def _require_foreground_restore(self) -> None:
+        if self._storage_partition is not SessionStoragePartition.FOREGROUND:
+            raise ValueError("Restore anchors are only supported for foreground Sessions")
+
+    def _persisted_restore_messages(self) -> list[dict[str, Any]]:
+        try:
+            persisted = self.load(
+                self._workspace_state,
+                self._session_id,
+                partition=SessionStoragePartition.FOREGROUND,
+            )
+        except FileNotFoundError:
+            return []
+        return persisted.messages
 
     def _write_content(self, content: bytes) -> None:
         if self._storage_partition is SessionStoragePartition.FOREGROUND:
@@ -667,6 +849,8 @@ def _validate_metadata(metadata: dict[str, Any]) -> None:
         raise ValueError("metadata.title is not normalized")
     _validate_token_usage(metadata.get("token_usage"), field="metadata.token_usage")
     _validate_action_summary(metadata.get("summary", ""), field="metadata.summary")
+    if _RESTORE_NEXT_ANCHOR_ID in metadata:
+        _validate_restore_next_anchor_id(metadata[_RESTORE_NEXT_ANCHOR_ID])
     _normalize_blackboard_metadata(metadata, invalid_is_absent=False)
 
 
@@ -726,6 +910,8 @@ def _validate_agent_run_metadata_patch(
     required_removals = {"title", "token_usage"}.intersection(removals)
     if required_removals:
         raise ValueError("required Session metadata cannot be removed")
+    if _RESTORE_NEXT_ANCHOR_ID in updates or _RESTORE_NEXT_ANCHOR_ID in removals:
+        raise ValueError("restore anchor counter is Session-owned")
 
 
 def _validate_metadata_removals(value: tuple[str, ...]) -> frozenset[str]:
@@ -780,6 +966,7 @@ def _validate_message(message: dict[str, Any]) -> None:
     require_aware_datetime(timestamp, field="message timestamp")
     if role != "assistant" and "context_usage" in message:
         raise ValueError("context_usage is only valid on assistant messages")
+    _restore_anchor_fields(message)
     if role == "user":
         if not message["content"].strip():
             raise ValueError("user message content must not be blank")
@@ -885,3 +1072,123 @@ def _accumulate_token_usage(
         key: current[key] + delta[key]
         for key in ("model_calls", "input_tokens", "output_tokens", "total_tokens")
     }
+
+
+def _copy_restore_before(value: SessionRestoreBefore | None) -> SessionRestoreBefore | None:
+    if value is None:
+        return None
+    if not isinstance(value, SessionRestoreBefore):
+        raise TypeError("restore_before must be a SessionRestoreBefore")
+    metadata = _copy_json_object(value.metadata, field="restore_before.metadata")
+    _validate_metadata(metadata)
+    require_nonnegative_int(value.last_compacted, field="restore_before.last_compacted")
+    return SessionRestoreBefore(metadata=metadata, last_compacted=value.last_compacted)
+
+
+def _validate_restore_anchor_id(value: Any) -> None:
+    require_nonnegative_int(value, field="restore_anchor_id")
+    if value == 0:
+        raise ValueError("restore_anchor_id must be a positive integer")
+
+
+def _validate_restore_next_anchor_id(value: Any) -> None:
+    require_nonnegative_int(value, field=_RESTORE_NEXT_ANCHOR_ID)
+    if value == 0:
+        raise ValueError(f"{_RESTORE_NEXT_ANCHOR_ID} must be a positive integer")
+
+
+def _next_restore_anchor_id(
+    metadata: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> int:
+    configured_value = metadata.get(_RESTORE_NEXT_ANCHOR_ID, 1)
+    _validate_restore_next_anchor_id(configured_value)
+    configured = cast(int, configured_value)
+    maximum = 0
+    for message in messages:
+        fields = _restore_anchor_fields(message)
+        if fields is not None:
+            maximum = max(maximum, fields[0])
+    return max(configured, maximum + 1)
+
+
+def _validate_restore_sequence(
+    messages: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    *,
+    partition: SessionStoragePartition,
+) -> None:
+    last_anchor_id = 0
+    for message in messages:
+        fields = _restore_anchor_fields(message)
+        if fields is None:
+            continue
+        if partition is not SessionStoragePartition.FOREGROUND:
+            raise ValueError("Restore anchors are only supported for foreground Sessions")
+        if fields[0] <= last_anchor_id:
+            raise ValueError("Restore anchor IDs must increase in Session order")
+        last_anchor_id = fields[0]
+    next_anchor_id = metadata.get(_RESTORE_NEXT_ANCHOR_ID)
+    if partition is not SessionStoragePartition.FOREGROUND and next_anchor_id is not None:
+        raise ValueError("Restore anchors are only supported for foreground Sessions")
+    if last_anchor_id and next_anchor_id is None:
+        raise ValueError("Restore anchor counter is missing")
+    if next_anchor_id is not None:
+        _validate_restore_next_anchor_id(next_anchor_id)
+        if next_anchor_id <= last_anchor_id:
+            raise ValueError("Restore anchor counter must exceed persisted IDs")
+
+
+def _restore_before_from_value(value: Any) -> SessionRestoreBefore:
+    if not isinstance(value, dict) or set(value) != _RESTORE_BEFORE_FIELDS:
+        raise ValueError("restore_before must contain metadata and last_compacted")
+    metadata = value["metadata"]
+    if not isinstance(metadata, dict):
+        raise ValueError("restore_before.metadata must be an object")
+    copied_metadata = _copy_json_object(metadata, field="restore_before.metadata")
+    _validate_metadata(copied_metadata)
+    last_compacted = value["last_compacted"]
+    require_nonnegative_int(last_compacted, field="restore_before.last_compacted")
+    return SessionRestoreBefore(metadata=copied_metadata, last_compacted=last_compacted)
+
+
+def _restore_anchor_fields(
+    message: dict[str, Any],
+) -> tuple[int, str, SessionRestoreBefore] | None:
+    present = _RESTORE_MESSAGE_FIELDS.intersection(message)
+    if not present:
+        return None
+    if message.get("role") != "user":
+        raise ValueError("restore anchor fields are only valid on User messages")
+    if present != _RESTORE_MESSAGE_FIELDS:
+        raise ValueError("restore anchor fields must be persisted together")
+    anchor_id = message["restore_anchor_id"]
+    _validate_restore_anchor_id(anchor_id)
+    run_token = message["restore_run_token"]
+    if not isinstance(run_token, str):
+        raise ValueError("restore_run_token must be a canonical UUID4 string")
+    require_uuid4_string(run_token, field="restore_run_token")
+    return anchor_id, run_token, _restore_before_from_value(message["restore_before"])
+
+
+def _serialize_session_state(
+    *,
+    session_id: str,
+    created_at: datetime,
+    updated_at: datetime,
+    last_compacted: int,
+    metadata: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> bytes:
+    header = {
+        "session_id": session_id,
+        "created_at": format_rfc3339_milliseconds(created_at),
+        "updated_at": format_rfc3339_milliseconds(updated_at),
+        "last_compacted": last_compacted,
+        "metadata": copy.deepcopy(metadata),
+    }
+    records = (header, *copy.deepcopy(messages))
+    return "".join(
+        json.dumps(record, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n"
+        for record in records
+    ).encode("utf-8")

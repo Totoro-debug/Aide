@@ -49,7 +49,11 @@ from myclaw.agent.runner import (
     AgentRunnerToolCallStarted,
     _build_assistant_repair_message,
 )
-from myclaw.agent.session.session import Session, SessionStoragePartition
+from myclaw.agent.session.session import (
+    Session,
+    SessionRestoreBefore,
+    SessionStoragePartition,
+)
 from myclaw.agent.tools.base import BaseTool
 from myclaw.agent.tools.core.exec_host import ExecHost
 from myclaw.agent.tools.deferred import build_agent_run_gateway
@@ -367,7 +371,9 @@ class AgentLoop:
             raise RuntimeError("Agent Loop is no longer active")
         return ForegroundConversationProjection(
             session_id=self._session.session_id,
-            messages=tuple(deepcopy(message) for message in self._session.messages),
+            messages=tuple(
+                _project_terminal_message(message) for message in self._session.messages
+            ),
         )
 
     def bind_confirmation_callback(self, callback: ConfirmationCallback) -> None:
@@ -982,6 +988,8 @@ class AgentLoop:
         usage_delta: dict[str, int] | None = None,
         metadata_updates: dict[str, Any] | None = None,
         metadata_removals: tuple[str, ...] = (),
+        restore_before: SessionRestoreBefore | None = None,
+        restore_run_token: UUID | None = None,
     ) -> None:
         values = context.controller.terminal_commit_values()
         combined_usage = _merge_usage_deltas(values.usage_delta, usage_delta)
@@ -992,6 +1000,8 @@ class AgentLoop:
             usage_delta=combined_usage or None,
             metadata_updates=metadata_updates,
             metadata_removals=metadata_removals,
+            restore_before=restore_before,
+            restore_run_token=restore_run_token,
         )
 
     def _commit_schedule_run(
@@ -1106,6 +1116,11 @@ class AgentLoop:
         execution_ready: asyncio.Event,
     ) -> None:
         active_session = self._session
+        if not inbound.content.strip():
+            execution_ready.set()
+            return
+        restore_before = active_session.capture_restore_before()
+        restore_run_token = self._new_uuid()
         permission_snapshot = self._permission_control.snapshot(self._exec_host.resolved_shell)
         skill_state = self._skill_loader.skills
         manual_invocation = self._skill_loader.resolve_manual(inbound.content)
@@ -1131,6 +1146,8 @@ class AgentLoop:
                             manual_invocation=manual_invocation,
                             execution_ready=execution_ready,
                             permission_snapshot=permission_snapshot,
+                            restore_before=restore_before,
+                            restore_run_token=restore_run_token,
                         )
                 else:
                     assert title_coordination is not None
@@ -1143,6 +1160,8 @@ class AgentLoop:
                             manual_invocation=manual_invocation,
                             execution_ready=execution_ready,
                             permission_snapshot=permission_snapshot,
+                            restore_before=restore_before,
+                            restore_run_token=restore_run_token,
                         )
         finally:
             execution_ready.set()
@@ -1168,6 +1187,8 @@ class AgentLoop:
         manual_invocation: ManualSkillInvocation | None = None,
         execution_ready: asyncio.Event,
         permission_snapshot: PermissionSnapshot,
+        restore_before: SessionRestoreBefore | None = None,
+        restore_run_token: UUID | None = None,
     ) -> bool:
         current_user = {"role": "user", "content": inbound.content}
         if title_work is not None:
@@ -1224,6 +1245,8 @@ class AgentLoop:
                     framing_usage=framing_usage,
                     metadata_updates=metadata_patch()[0],
                     metadata_removals=metadata_patch()[1],
+                    restore_before=restore_before,
+                    restore_run_token=restore_run_token,
                 )
 
             if framing_result.status != "resolved":
@@ -1253,6 +1276,8 @@ class AgentLoop:
                 framing_usage=framing_usage,
                 metadata_updates=metadata_patch()[0],
                 metadata_removals=metadata_patch()[1],
+                restore_before=restore_before,
+                restore_run_token=restore_run_token,
             )
         except CommittableAgentRunError as failure:
             return await self._finish_foreground_terminal(
@@ -1263,6 +1288,8 @@ class AgentLoop:
                 framing_usage=framing_usage,
                 metadata_updates=metadata_patch()[0],
                 metadata_removals=metadata_patch()[1],
+                restore_before=restore_before,
+                restore_run_token=restore_run_token,
             )
         except ModelCallError as failure:
             if failure.error.code == "model_context_overflow":
@@ -1276,6 +1303,8 @@ class AgentLoop:
                 framing_usage=framing_usage,
                 metadata_updates=metadata_patch()[0],
                 metadata_removals=metadata_patch()[1],
+                restore_before=restore_before,
+                restore_run_token=restore_run_token,
             )
         except Exception as error:
             _runtime_logger().error(
@@ -1290,6 +1319,8 @@ class AgentLoop:
                 framing_usage=framing_usage,
                 metadata_updates=metadata_patch()[0],
                 metadata_removals=metadata_patch()[1],
+                restore_before=restore_before,
+                restore_run_token=restore_run_token,
             )
 
         if title_work is not None and not title_work.coordination.prepared.done():
@@ -1324,6 +1355,8 @@ class AgentLoop:
                 framing_usage=framing_usage,
                 metadata_updates=metadata_patch()[0],
                 metadata_removals=metadata_patch()[1],
+                restore_before=restore_before,
+                restore_run_token=restore_run_token,
             )
         finally:
             if self._active_foreground_owner is foreground_owner:
@@ -1354,6 +1387,8 @@ class AgentLoop:
                     usage_delta=framing_usage,
                     metadata_updates=metadata_updates,
                     metadata_removals=metadata_removals,
+                    restore_before=restore_before,
+                    restore_run_token=restore_run_token,
                 )
             except (OSError, UnicodeError) as failure:
                 _runtime_logger().error(
@@ -1384,6 +1419,8 @@ class AgentLoop:
         framing_usage: dict[str, int] | None,
         metadata_updates: dict[str, Any] | None,
         metadata_removals: tuple[str, ...],
+        restore_before: SessionRestoreBefore | None,
+        restore_run_token: UUID | None,
     ) -> bool:
         if self._aborted:
             return False
@@ -1408,6 +1445,8 @@ class AgentLoop:
                     usage_delta=framing_usage,
                     metadata_updates=metadata_updates,
                     metadata_removals=metadata_removals,
+                    restore_before=restore_before,
+                    restore_run_token=restore_run_token,
                 )
         except (OSError, UnicodeError) as failure:
             _runtime_logger().error(
@@ -1774,6 +1813,14 @@ def _log_agent_failure(error: ErrorInfo) -> None:
         error.code,
         type(failure).__name__,
     )
+
+
+def _project_terminal_message(message: dict[str, Any]) -> dict[str, Any]:
+    projected = deepcopy(message)
+    projected.pop("restore_anchor_id", None)
+    projected.pop("restore_run_token", None)
+    projected.pop("restore_before", None)
+    return projected
 
 
 def _latest_assistant_content(session: Session) -> str:

@@ -20,6 +20,12 @@ UPDATED_AT = CREATED_AT + timedelta(seconds=5)
 SESSION_ID = "20260711-153012-123000_550e8400-e29b-41d4-a716-446655440000"
 OTHER_SESSION_ID = "20260711-153012-123000_6fa459ea-ee8a-4ca4-894e-db77e160355e"
 SCHEDULE_JOB_ID = "6fa459ea-ee8a-4ca4-894e-db77e160355e"
+RESTORE_TOKENS = (
+    UUID("550e8400-e29b-41d4-a716-446655440000"),
+    UUID("6fa459ea-ee8a-4ca4-894e-db77e160355e"),
+    UUID("7c9e6679-7425-40de-944b-2b7b2c3d4e5f"),
+    UUID("8c9e6679-7425-40de-944b-2b7b2c3d4e5f"),
+)
 ZERO_USAGE = {
     "model_calls": 0,
     "input_tokens": 0,
@@ -3065,3 +3071,326 @@ def test_commit_agent_run_does_not_modify_conversation_summary_or_fact_state(
 
     assert summary_path.read_bytes() == existing_summary
     assert persist_calls == [None]
+
+
+def _commit_restore_user(
+    session: Session,
+    content: str,
+    run_token: UUID,
+) -> None:
+    restore_before = session.capture_restore_before()
+    session.commit_agent_run(
+        [{"role": "user", "content": content}],
+        pending_last_compacted=session.last_compacted,
+        pending_action_summary=None,
+        restore_before=restore_before,
+        restore_run_token=run_token,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("selected_index", "expected_contents"),
+    [
+        (0, ()),
+        (1, ("first",)),
+        (2, ("first", "second")),
+    ],
+)
+async def test_restore_truncates_by_anchor_id_and_never_reuses_ids_after_restart(
+    agent_home: Path,
+    workspace: Path,
+    selected_index: int,
+    expected_contents: tuple[str, ...],
+) -> None:
+    now_value = [CREATED_AT]
+    state = _state(workspace, agent_home)
+    session = Session.create(state, now=lambda: now_value[0])
+    for index, content in enumerate(("first", "second", "third")):
+        _commit_restore_user(session, content, RESTORE_TOKENS[index])
+    await session.wait_for_pending_persist()
+
+    candidates = session.restore_candidates()
+    assert [candidate.anchor_id for candidate in candidates] == [1, 2, 3]
+    assert [candidate.content for candidate in candidates] == ["first", "second", "third"]
+
+    now_value[0] = UPDATED_AT
+    result = session.restore_before_durably(candidates[selected_index].anchor_id)
+
+    assert result.session_id == session.session_id
+    assert result.anchor_id == selected_index + 1
+    assert [message["content"] for message in session.messages] == list(expected_contents)
+    assert session.updated_at == UPDATED_AT
+    assert (state.sessions_directory / f"{session.session_id}.jsonl").exists()
+    loaded = Session.load(state, session.session_id)
+    assert loaded.session_id == session.session_id
+    assert loaded.messages == session.messages
+    assert loaded.updated_at == UPDATED_AT
+
+    if selected_index == 0:
+        with pytest.raises(ValueError, match="Session-owned"):
+            loaded.update_metadata(restore_next_anchor_id=1)
+
+    _commit_restore_user(loaded, "new branch", RESTORE_TOKENS[3])
+    await loaded.wait_for_pending_persist()
+    assert loaded.restore_candidates()[-1].anchor_id == 4
+
+
+@pytest.mark.asyncio
+async def test_restore_uses_anchor_id_for_repeated_input_text(
+    agent_home: Path,
+    workspace: Path,
+) -> None:
+    state = _state(workspace, agent_home)
+    session = Session.create(state, now=lambda: CREATED_AT)
+    for index in range(3):
+        _commit_restore_user(session, "repeat", RESTORE_TOKENS[index])
+    await session.wait_for_pending_persist()
+
+    session.restore_before_durably(2)
+
+    assert [message["content"] for message in session.messages] == ["repeat"]
+    assert [candidate.anchor_id for candidate in session.restore_candidates()] == [1]
+
+
+@pytest.mark.asyncio
+async def test_restore_restores_complete_session_state_before_selected_user(
+    agent_home: Path,
+    workspace: Path,
+) -> None:
+    state = _state(workspace, agent_home)
+    session = Session.create(state, now=lambda: CREATED_AT)
+    session.update_metadata(
+        title="Before first",
+        summary="First summary",
+        blackboard={"goal": "First goal", "completion_boundary": "First boundary"},
+        usage_delta={"model_calls": 1, "input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+    )
+    _commit_restore_user(session, "first", RESTORE_TOKENS[0])
+    session.update_metadata(
+        title="Before second",
+        summary="Second summary",
+        blackboard={"goal": "Second goal", "completion_boundary": "Second boundary"},
+        usage_delta={"model_calls": 1, "input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+    )
+    session.last_compacted = 1
+    _commit_restore_user(session, "second", RESTORE_TOKENS[1])
+    session.update_metadata(
+        title="Current title",
+        summary="Current summary",
+        blackboard={"goal": "Current goal", "completion_boundary": "Current boundary"},
+    )
+    await session.wait_for_pending_persist()
+
+    session.restore_before_durably(2)
+
+    assert [message["content"] for message in session.messages] == ["first"]
+    assert session.last_compacted == 1
+    assert session.metadata["title"] == "Before second"
+    assert session.metadata["summary"] == "Second summary"
+    assert session.metadata["blackboard"] == {
+        "goal": "Second goal",
+        "completion_boundary": "Second boundary",
+    }
+    assert session.metadata["token_usage"] == {
+        "model_calls": 2,
+        "input_tokens": 6,
+        "output_tokens": 3,
+        "total_tokens": 9,
+    }
+    assert session.metadata["restore_next_anchor_id"] == 3
+
+
+@pytest.mark.asyncio
+async def test_restore_strict_write_failure_does_not_publish_truncated_state(
+    agent_home: Path,
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _state(workspace, agent_home)
+    session = Session.create(state, now=lambda: CREATED_AT)
+    _commit_restore_user(session, "first", RESTORE_TOKENS[0])
+    _commit_restore_user(session, "second", RESTORE_TOKENS[1])
+    await session.wait_for_pending_persist()
+    path = state.sessions_directory / f"{session.session_id}.jsonl"
+    before_bytes = path.read_bytes()
+    before_messages = copy.deepcopy(session.messages)
+    before_metadata = copy.deepcopy(session.metadata)
+
+    def fail_write(_content: bytes) -> None:
+        raise OSError("strict restore write failed")
+
+    monkeypatch.setattr(session, "_write_content", fail_write)
+    with pytest.raises(OSError, match="strict restore write failed"):
+        session.restore_before_durably(1)
+
+    assert path.read_bytes() == before_bytes
+    assert session.messages == before_messages
+    assert session.metadata == before_metadata
+
+
+@pytest.mark.asyncio
+async def test_restore_anchor_fields_are_durable_but_hidden_from_projections(
+    agent_home: Path,
+    workspace: Path,
+) -> None:
+    state = _state(workspace, agent_home)
+    session = Session.create(state, now=lambda: CREATED_AT)
+    _commit_restore_user(session, "private anchor fields", RESTORE_TOKENS[0])
+    await session.wait_for_pending_persist()
+
+    loaded = Session.load(state, session.session_id)
+    persisted_user = loaded.messages[0]
+    assert persisted_user["restore_anchor_id"] == 1
+    assert persisted_user["restore_run_token"] == str(RESTORE_TOKENS[0])
+    assert persisted_user["restore_before"] == {
+        "metadata": {
+            "title": "Untitled session",
+            "token_usage": dict(ZERO_USAGE),
+            "summary": "",
+        },
+        "last_compacted": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_restore_excludes_user_until_snapshot_is_persisted(
+    agent_home: Path,
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _state(workspace, agent_home)
+    session = Session.create(state, now=lambda: CREATED_AT)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    original_persist_after = session._persist_after
+
+    async def blocked_persist(previous: asyncio.Task[None] | None, content: bytes) -> None:
+        started.set()
+        await release.wait()
+        await original_persist_after(previous, content)
+
+    monkeypatch.setattr(session, "_persist_after", blocked_persist)
+    _commit_restore_user(session, "not yet persisted", RESTORE_TOKENS[0])
+    await started.wait()
+
+    assert session.restore_candidates() == ()
+    with pytest.raises(RuntimeError, match="Pending Session snapshots"):
+        session.restore_before_durably(1)
+
+    release.set()
+    await session.wait_for_pending_persist()
+    assert [anchor.anchor_id for anchor in session.restore_candidates()] == [1]
+
+
+@pytest.mark.asyncio
+async def test_restore_waits_for_older_snapshot_before_strict_truncation(
+    agent_home: Path,
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _state(workspace, agent_home)
+    session = Session.create(state, now=lambda: CREATED_AT)
+    _commit_restore_user(session, "first", RESTORE_TOKENS[0])
+    _commit_restore_user(session, "second", RESTORE_TOKENS[1])
+    await session.wait_for_pending_persist()
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    original_persist_after = session._persist_after
+
+    async def blocked_persist(previous: asyncio.Task[None] | None, content: bytes) -> None:
+        started.set()
+        await release.wait()
+        await original_persist_after(previous, content)
+
+    monkeypatch.setattr(session, "_persist_after", blocked_persist)
+    session.update_metadata(title="Old snapshot title")
+    session.persist()
+    await started.wait()
+
+    with pytest.raises(RuntimeError, match="Pending Session snapshots"):
+        session.restore_before_durably(2)
+
+    release.set()
+    await session.wait_for_pending_persist()
+    session.restore_before_durably(2)
+    loaded = Session.load(state, session.session_id)
+    assert [message["content"] for message in loaded.messages] == ["first"]
+    assert loaded.metadata["title"] == "Untitled session"
+
+
+@pytest.mark.asyncio
+async def test_schedule_session_rejects_restore_anchors_on_load_and_access(
+    agent_home: Path,
+    workspace: Path,
+) -> None:
+    state = _state(workspace, agent_home)
+    foreground = Session.create(state, now=lambda: CREATED_AT)
+    _commit_restore_user(foreground, "foreground", RESTORE_TOKENS[0])
+    await foreground.wait_for_pending_persist()
+
+    schedule = Session.create_schedule(state, SCHEDULE_JOB_ID, now=lambda: CREATED_AT)
+    with pytest.raises(ValueError, match="foreground Sessions"):
+        schedule.capture_restore_before()
+    with pytest.raises(ValueError, match="foreground Sessions"):
+        schedule.restore_candidates()
+    with pytest.raises(ValueError, match="foreground Sessions"):
+        schedule.restore_before_durably(1)
+
+    seed_session_state(
+        schedule,
+        messages=[copy.deepcopy(foreground.messages[0])],
+        metadata=copy.deepcopy(schedule.metadata),
+        last_compacted=0,
+    )
+    schedule.close()
+    with pytest.raises(ValueError, match="foreground Sessions"):
+        Session.load(state, schedule.session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("corruption", "error"),
+    [
+        ("duplicate", "must increase"),
+        ("out_of_order", "must increase"),
+        ("counter_reused", "must exceed"),
+        ("counter_missing", "counter is missing"),
+    ],
+)
+async def test_load_rejects_invalid_restore_anchor_sequence(
+    agent_home: Path,
+    workspace: Path,
+    corruption: str,
+    error: str,
+) -> None:
+    state = _state(workspace, agent_home)
+    session = Session.create(
+        state,
+        now=lambda: CREATED_AT,
+        new_uuid=lambda: RESTORE_TOKENS[0],
+    )
+    _commit_restore_user(session, "first", RESTORE_TOKENS[0])
+    _commit_restore_user(session, "second", RESTORE_TOKENS[1])
+    await session.wait_for_pending_persist()
+    records = [
+        json.loads(line)
+        for line in (state.sessions_directory / f"{session.session_id}.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+
+    if corruption == "duplicate":
+        records[2]["restore_anchor_id"] = 1
+    elif corruption == "out_of_order":
+        records[1]["restore_anchor_id"] = 2
+        records[2]["restore_anchor_id"] = 1
+    elif corruption == "counter_reused":
+        records[0]["metadata"]["restore_next_anchor_id"] = 2
+    else:
+        del records[0]["metadata"]["restore_next_anchor_id"]
+    _write_jsonl(state, records)
+
+    with pytest.raises(ValueError, match=error):
+        Session.load(state, session.session_id)

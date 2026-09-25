@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from myclaw.agent.confirmation import BackgroundConfirmationOwner
 from myclaw.agent.loop import AgentLoop
 from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.message_bus import MessageBus
@@ -33,7 +34,7 @@ from myclaw.provider.models import (
     ReasoningEffort,
 )
 from myclaw.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
-from myclaw.schedule.service import ScheduleJobExecutionError, ScheduleService
+from myclaw.schedule.service import ScheduleJobExecutionError, ScheduleOccurrence, ScheduleService
 from myclaw.schedule.store import WorkspaceScheduleStore
 from myclaw.utils import scheduler as scheduler_module
 from myclaw.utils.scheduler import AsyncioSchedulerClock
@@ -285,6 +286,10 @@ async def _wait_until(predicate: object) -> None:
             return
         await asyncio.sleep(0)
     raise AssertionError("condition did not become true")
+
+
+async def _unexpected_dream() -> object:
+    raise AssertionError("unexpected Dream execution")
 
 
 def _service(**kwargs: Any) -> ScheduleService:
@@ -1255,6 +1260,345 @@ async def test_terminal_commit_keeps_job_active_until_store_operation_finishes(
     release_commit.set()
     await _wait_until(lambda: service.status_snapshot().active_job_count == 0)
     await service.close()
+
+
+@pytest.mark.asyncio
+async def test_pause_and_wait_idle_stops_admission_and_waits_for_natural_terminal_commit(
+    workspace: Path,
+    agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _state(workspace, agent_home)
+    store = WorkspaceScheduleStore(state)
+    job = _every_job(created_at_ms=int((START - timedelta(seconds=20)).timestamp() * 1000))
+    await store.add_user_job(job)
+    clock = ControlledClock(START)
+    occurrence_started = asyncio.Event()
+    release_occurrence = asyncio.Event()
+    occurrence_cancelled = asyncio.Event()
+    terminal_started = asyncio.Event()
+    release_terminal = asyncio.Event()
+    calls = 0
+
+    async def execute_user_job(active_job: ScheduleJob) -> None:
+        nonlocal calls
+        del active_job
+        calls += 1
+        occurrence_started.set()
+        try:
+            await release_occurrence.wait()
+        except asyncio.CancelledError:
+            occurrence_cancelled.set()
+            raise
+
+    original_commit_terminal = store.commit_terminal
+
+    async def blocked_commit_terminal(*args: object, **kwargs: object) -> ScheduleJob | None:
+        terminal_started.set()
+        await release_terminal.wait()
+        return await original_commit_terminal(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(store, "commit_terminal", blocked_commit_terminal)
+    service = _service(store=store, callback=execute_user_job, clock=clock)
+
+    service.start()
+    await occurrence_started.wait()
+
+    paused = asyncio.create_task(service.pause_and_wait_idle())
+    await asyncio.sleep(0)
+    clock.advance(60)
+    await asyncio.sleep(0)
+
+    assert calls == 1
+    assert not occurrence_cancelled.is_set()
+    assert not paused.done()
+
+    release_occurrence.set()
+    await terminal_started.wait()
+    assert not paused.done()
+    release_terminal.set()
+    await paused
+
+    assert calls == 1
+    assert not occurrence_cancelled.is_set()
+    saved = await store.snapshot()
+    assert saved[0].state.last_status == "ok"
+
+    service.resume()
+    clock.wait_started.clear()
+    await clock.wait_started.wait()
+    clock.advance(10)
+    await _wait_until(lambda: calls == 2 and service.status_snapshot().active_job_count == 0)
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_pause_and_wait_idle_waits_for_background_confirmation_naturally(
+    workspace: Path,
+    agent_home: Path,
+) -> None:
+    state = _state(workspace, agent_home)
+    job = _job()
+    clock = ControlledClock(START)
+    confirmation_started = asyncio.Event()
+    release_confirmation = asyncio.Event()
+    confirmation_finished = asyncio.Event()
+    occurrence_cancelled = asyncio.Event()
+    service: ScheduleService | None = None
+
+    async def execute_occurrence(occurrence: object) -> None:
+        assert isinstance(occurrence, ScheduleOccurrence)
+        assert service is not None
+        owner = BackgroundConfirmationOwner(
+            generation_id=UUID("123e4567-e89b-42d3-a456-426614174000"),
+            job_id=job.job_id,
+            occurrence_id=occurrence.occurrence_id,
+        )
+        service.bind_occurrence_owner(occurrence, owner)
+        service.confirmation_waiting(occurrence)
+        confirmation_started.set()
+        try:
+            await release_confirmation.wait()
+        except asyncio.CancelledError:
+            occurrence_cancelled.set()
+            raise
+        service.confirmation_finished(occurrence)
+        confirmation_finished.set()
+
+    service = ScheduleService(
+        workspace_state=state,
+        clock=clock,
+        execute_user_occurrence=execute_occurrence,
+        execute_dream=_unexpected_dream,
+    )
+    await service.add_user_job(job)
+    service.start()
+    await confirmation_started.wait()
+
+    paused = asyncio.create_task(service.pause_and_wait_idle())
+    await asyncio.sleep(0)
+    assert not paused.done()
+    assert not occurrence_cancelled.is_set()
+
+    release_confirmation.set()
+    await paused
+
+    assert confirmation_finished.is_set()
+    assert not occurrence_cancelled.is_set()
+    assert await service._store.snapshot() == ()
+    service.resume()
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_idle_wait_releases_shared_barrier_and_resumes_admission(
+    workspace: Path,
+    agent_home: Path,
+) -> None:
+    state = _state(workspace, agent_home)
+    first_job = _job()
+    second_job = _job(job_id=OTHER_UUID)
+    clock = ControlledClock(START)
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    second_started = asyncio.Event()
+    occurrence_cancelled = asyncio.Event()
+    service: ScheduleService | None = None
+
+    async def execute_occurrence(occurrence: object) -> None:
+        assert isinstance(occurrence, ScheduleOccurrence)
+        assert service is not None
+        if occurrence.job.job_id == first_job.job_id:
+            owner = BackgroundConfirmationOwner(
+                generation_id=UUID("223e4567-e89b-42d3-a456-426614174000"),
+                job_id=first_job.job_id,
+                occurrence_id=occurrence.occurrence_id,
+            )
+            service.bind_occurrence_owner(occurrence, owner)
+            service.confirmation_waiting(occurrence)
+            first_started.set()
+            try:
+                await release_first.wait()
+            except asyncio.CancelledError:
+                occurrence_cancelled.set()
+                raise
+            service.confirmation_finished(occurrence)
+            return
+        second_started.set()
+
+    service = ScheduleService(
+        workspace_state=state,
+        clock=clock,
+        execute_user_occurrence=execute_occurrence,
+        execute_dream=_unexpected_dream,
+    )
+    await service.add_user_job(first_job)
+    service.start()
+    await first_started.wait()
+
+    first_waiter = asyncio.create_task(service.pause_and_wait_idle())
+    second_waiter = asyncio.create_task(service.pause_and_wait_idle())
+    await asyncio.sleep(0)
+    assert not first_waiter.done()
+    assert not second_waiter.done()
+
+    first_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_waiter
+    await asyncio.wait_for(second_waiter, timeout=1)
+
+    await service.add_user_job(second_job)
+    await second_started.wait()
+    assert not occurrence_cancelled.is_set()
+
+    release_first.set()
+    await _wait_until(lambda: service.status_snapshot().active_job_count == 0)
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_pause_does_not_release_idle_waiter_before_run_cleanup(
+    workspace: Path,
+    agent_home: Path,
+) -> None:
+    state = _state(workspace, agent_home)
+    store = WorkspaceScheduleStore(state)
+    await store.add_user_job(_job())
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    cleanup_release = asyncio.Event()
+
+    async def execute_user_job(active_job: ScheduleJob) -> None:
+        del active_job
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await cleanup_release.wait()
+            raise
+
+    service = _service(
+        store=store,
+        callback=execute_user_job,
+        clock=ControlledClock(START),
+    )
+    service.start()
+    await started.wait()
+    idle = asyncio.create_task(service.pause_and_wait_idle())
+    await _wait_until(lambda: service._paused)
+
+    draining = asyncio.create_task(service.pause_and_drain())
+    await cancelled.wait()
+    await asyncio.sleep(0)
+
+    assert not idle.done()
+    assert not draining.done()
+    assert len(service._run_tasks) == 1
+    assert service.status_snapshot().active_job_count == 1
+
+    cleanup_release.set()
+    await asyncio.gather(idle, draining)
+
+    assert service._run_tasks == set()
+    assert service._terminal_commit_tasks == set()
+    assert service.status_snapshot().active_job_count == 0
+    service.resume()
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_close_does_not_release_idle_waiter_before_terminal_commit(
+    workspace: Path,
+    agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _state(workspace, agent_home)
+    store = WorkspaceScheduleStore(state)
+    job = _every_job(created_at_ms=int((START - timedelta(seconds=20)).timestamp() * 1000))
+    await store.add_user_job(job)
+    original_commit_terminal = store.commit_terminal
+    commit_started = asyncio.Event()
+    release_commit = asyncio.Event()
+
+    async def blocked_commit_terminal(*args: object, **kwargs: object) -> ScheduleJob | None:
+        commit_started.set()
+        await release_commit.wait()
+        return await original_commit_terminal(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(store, "commit_terminal", blocked_commit_terminal)
+    service = _service(
+        store=store,
+        callback=RecordingScheduleCallback(),
+        clock=ControlledClock(START),
+    )
+    service.start()
+    await commit_started.wait()
+    idle = asyncio.create_task(service.pause_and_wait_idle())
+    await _wait_until(lambda: service._paused)
+
+    closing = asyncio.create_task(service.close())
+    await asyncio.sleep(0)
+
+    assert not idle.done()
+    assert not closing.done()
+    assert len(service._terminal_commit_tasks) == 1
+
+    release_commit.set()
+    await asyncio.gather(idle, closing)
+
+    assert service._run_tasks == set()
+    assert service._terminal_commit_tasks == set()
+    assert service.status_snapshot().active_job_count == 0
+
+
+@pytest.mark.asyncio
+async def test_abort_does_not_release_idle_waiter_before_run_cleanup(
+    workspace: Path,
+    agent_home: Path,
+) -> None:
+    state = _state(workspace, agent_home)
+    store = WorkspaceScheduleStore(state)
+    await store.add_user_job(_job())
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    cleanup_release = asyncio.Event()
+
+    async def execute_user_job(active_job: ScheduleJob) -> None:
+        del active_job
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await cleanup_release.wait()
+            raise
+
+    service = _service(
+        store=store,
+        callback=execute_user_job,
+        clock=ControlledClock(START),
+    )
+    service.start()
+    await started.wait()
+    idle = asyncio.create_task(service.pause_and_wait_idle())
+    await _wait_until(lambda: service._paused)
+
+    service.abort()
+    await cancelled.wait()
+    await asyncio.sleep(0)
+
+    assert not idle.done()
+    assert len(service._run_tasks) == 1
+    assert service.status_snapshot().active_job_count == 1
+
+    cleanup_release.set()
+    await idle
+
+    assert service._run_tasks == set()
+    assert service._terminal_commit_tasks == set()
+    assert service.status_snapshot().active_job_count == 0
+    await service.abort_and_wait()
 
 
 @pytest.mark.asyncio

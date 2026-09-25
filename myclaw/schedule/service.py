@@ -163,6 +163,8 @@ class ScheduleService:
         self._faulted_event = asyncio.Event()
         self._close_task: asyncio.Task[None] | None = None
         self._pause_task: asyncio.Task[None] | None = None
+        self._idle_pause_task: asyncio.Task[None] | None = None
+        self._idle_pause_release: asyncio.Event | None = None
         self._abort_task: asyncio.Task[None] | None = None
         self._faulted = False
         self._aborted = False
@@ -175,6 +177,8 @@ class ScheduleService:
         """Start the single dispatcher; repeated starts are idempotent."""
         if self._pause_task is not None and not self._pause_task.done():
             raise RuntimeError("Schedule Service pause is still draining")
+        if self._idle_pause_task is not None and not self._idle_pause_task.done():
+            raise RuntimeError("Schedule Service idle pause is still waiting")
         if self._paused:
             self.resume()
             return
@@ -221,11 +225,44 @@ class ScheduleService:
         if self._close_task is not None:
             await await_task_preserving_cancellation(self._close_task)
             return
+        if self._idle_pause_task is not None:
+            self._release_idle_pause(resume=False)
         task = self._pause_task
         if task is None:
             task = asyncio.create_task(self._pause_owned_tasks())
             self._pause_task = task
         await await_task_preserving_cancellation(task)
+
+    async def pause_and_wait_idle(self) -> None:
+        """Pause new occurrences and await active work without canceling it."""
+        if self._aborted:
+            await self.abort_and_wait()
+            return
+        if self._close_task is not None:
+            await await_task_preserving_cancellation(self._close_task)
+            return
+        if self._pause_task is not None:
+            raise RuntimeError("Schedule Service cancellation pause is already active")
+        task = self._idle_pause_task
+        if task is None:
+            release = asyncio.Event()
+            task = asyncio.create_task(self._pause_and_wait_idle_owned(release))
+            self._idle_pause_task = task
+            self._idle_pause_release = release
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if self._idle_pause_task is task:
+                self._release_idle_pause()
+            raise
+        # A cancellation pause or shutdown may take ownership of the barrier.
+        # Do not report idle until that operation has finished draining its tasks.
+        if self._aborted:
+            await self.abort_and_wait()
+        elif self._close_task is not None:
+            await await_task_preserving_cancellation(self._close_task)
+        elif self._pause_task is not None:
+            await await_task_preserving_cancellation(self._pause_task)
 
     def resume(self) -> None:
         """Resume dispatch after a completed pause barrier."""
@@ -233,6 +270,9 @@ class ScheduleService:
             raise RuntimeError("Schedule Service is closed")
         if self._pause_task is not None and not self._pause_task.done():
             raise RuntimeError("Schedule Service pause is still draining")
+        if self._idle_pause_task is not None:
+            self._release_idle_pause()
+            return
         if not self._paused:
             return
         self._paused = False
@@ -268,6 +308,8 @@ class ScheduleService:
         self._closing.set()
         self._paused = True
         self._cancel_terminal_commits = True
+        if self._idle_pause_release is not None:
+            self._idle_pause_release.set()
         loop_task = self._loop_task
         if loop_task is not None and not loop_task.done():
             loop_task.cancel()
@@ -419,10 +461,7 @@ class ScheduleService:
                 for active in self._active_runs.values()
                 if active.confirmation_abort_pending
                 and active.owner is not None
-                and (
-                    generation_id is None
-                    or active.owner.generation_id == generation_id
-                )
+                and (generation_id is None or active.owner.generation_id == generation_id)
             )
             if not pending:
                 return
@@ -443,10 +482,7 @@ class ScheduleService:
         *,
         require_terminal: bool,
     ) -> None:
-        tasks = tuple(
-            active.task
-            for active in active_runs
-        )
+        tasks = tuple(active.task for active in active_runs)
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for active in active_runs:
             job_id = active.occurrence.job.job_id
@@ -482,15 +518,11 @@ class ScheduleService:
         self._loop_task = None
         retry_at_jobs = self._consumed_at_jobs.intersection(self._active_job_ids)
         confirmation_aborts = tuple(
-            active
-            for active in self._active_runs.values()
-            if active.confirmation_abort_pending
+            active for active in self._active_runs.values() if active.confirmation_abort_pending
         )
         confirmation_abort_tasks = {active.task for active in confirmation_aborts}
         ordinary_tasks = tuple(
-            task
-            for task in self._run_tasks
-            if task not in confirmation_abort_tasks
+            task for task in self._run_tasks if task not in confirmation_abort_tasks
         )
         for task in ordinary_tasks:
             if not task.done():
@@ -507,6 +539,83 @@ class ScheduleService:
         self._active_job_ids.clear()
         self._active_runs.clear()
         self._cancelled_confirmation_generations.clear()
+
+    async def _pause_and_wait_idle_owned(self, release: asyncio.Event) -> None:
+        async with self._reservation_gate:
+            if release.is_set() or self._closing.is_set() or self._aborted:
+                return
+            self._paused = True
+        loop_task = self._loop_task
+        if loop_task is not None and not loop_task.done():
+            loop_task.cancel()
+        if loop_task is not None:
+            await asyncio.gather(loop_task, return_exceptions=True)
+            if self._loop_task is loop_task:
+                self._loop_task = None
+        try:
+            while not release.is_set():
+                tasks = tuple(self._run_tasks) + tuple(self._terminal_commit_tasks)
+                if not tasks:
+                    return
+                release_task = asyncio.create_task(release.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        (*tasks, release_task),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    if not release_task.done():
+                        release_task.cancel()
+                    await asyncio.gather(release_task, return_exceptions=True)
+                if release_task in done or release.is_set():
+                    return
+                completed = tuple(task for task in done if task is not release_task)
+                if completed:
+                    await asyncio.gather(*completed, return_exceptions=True)
+        except asyncio.CancelledError:
+            release.set()
+            if self._idle_pause_release is release:
+                self._release_idle_pause()
+            raise
+
+    def _release_idle_pause(self, *, resume: bool = True) -> None:
+        release = self._idle_pause_release
+        task = self._idle_pause_task
+        if release is None or task is None:
+            return
+        release.set()
+        self._idle_pause_release = None
+        self._idle_pause_task = None
+        if not resume or not self._paused or self._aborted or self._close_task is not None:
+            return
+        self._paused = False
+        self._cancel_terminal_commits = False
+        loop_task = self._loop_task
+        if loop_task is None:
+            self._prepare_start()
+            self._activate_prepared()
+            return
+        if loop_task.done():
+            self._loop_task = None
+            self._prepare_start()
+            self._activate_prepared()
+            return
+        loop_task.add_done_callback(
+            lambda finished: self._restart_after_idle_pause(finished, release)
+        )
+
+    def _restart_after_idle_pause(
+        self,
+        loop_task: asyncio.Task[None],
+        release: asyncio.Event,
+    ) -> None:
+        if not release.is_set() or self._loop_task is not loop_task:
+            return
+        if self._paused or self._closing.is_set() or self._aborted or self._close_task is not None:
+            return
+        self._loop_task = None
+        self._prepare_start()
+        self._activate_prepared()
 
     async def _drain_cancelled_tasks(self) -> None:
         loop_task = self._loop_task
@@ -541,6 +650,8 @@ class ScheduleService:
     async def _close_owned_tasks(self) -> None:
         self._closing.set()
         self._paused = True
+        if self._idle_pause_release is not None:
+            self._idle_pause_release.set()
         loop_task = self._loop_task
         if loop_task is not None:
             loop_task.cancel()
@@ -914,7 +1025,11 @@ class ScheduleService:
                 )
                 if not retain_for_abort_drain:
                     self._active_job_ids.discard(job.job_id)
-                if active is not None and active.occurrence == occurrence and not retain_for_abort_drain:
+                if (
+                    active is not None
+                    and active.occurrence == occurrence
+                    and not retain_for_abort_drain
+                ):
                     self._active_runs.pop(job.job_id, None)
 
     async def _commit_terminal(

@@ -732,6 +732,57 @@ async def test_pause_and_drain_cancels_user_and_dream_then_resume_keeps_progress
 
 
 @pytest.mark.asyncio
+async def test_pause_and_wait_idle_waits_for_dream_to_finish_naturally(
+    workspace: Path,
+    agent_home: Path,
+) -> None:
+    state = _state(workspace, agent_home)
+    clock = _AdvancingClock()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def execute_user_job(job: ScheduleJob) -> None:
+        raise AssertionError(f"unexpected user Job: {job.job_id}")
+
+    async def execute_dream() -> object:
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return None
+
+    service = ScheduleService(
+        workspace_state=state,
+        clock=clock,
+        execute_user_job=execute_user_job,
+        execute_dream=execute_dream,
+    )
+    await service.register_dream_job(schedule=JobSchedule.every(60))
+
+    service.start()
+    await clock.wait_started.wait()
+    clock.advance(60)
+    await started.wait()
+
+    paused = asyncio.create_task(service.pause_and_wait_idle())
+    await asyncio.sleep(0)
+    assert not paused.done()
+    assert not cancelled.is_set()
+
+    release.set()
+    await paused
+
+    assert not cancelled.is_set()
+    saved = await WorkspaceScheduleStore(state).snapshot()
+    assert saved[0].state.last_status == "ok"
+    service.resume()
+    await service.close()
+
+
+@pytest.mark.asyncio
 async def test_pause_and_drain_cancels_one_shot_terminal_commit_and_retries_once(
     workspace: Path,
     agent_home: Path,

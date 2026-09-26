@@ -42,13 +42,24 @@ from myclaw.agent.confirmation import (
 from myclaw.agent.loop import AgentLoop, ConfirmationRequestView, ForegroundConversationProjection
 from myclaw.agent.memory.dream import DreamResult
 from myclaw.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
-from myclaw.agent.session.session import Session
+from myclaw.agent.session.backup_store import BackupGap, FileBackupStore
+from myclaw.agent.session.restore import (
+    RestoreFileResult,
+    RestoreFileStatus,
+    RestoreManager,
+    RestoreMode,
+    RestorePlan,
+    RestoreResult,
+    RestoreTarget,
+)
+from myclaw.agent.session.session import RestoreAnchor, Session, SessionRestoreResult
 from myclaw.agent.tools.permission import MCPToolIdentity
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ModelToolCall,
 )
+from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
 from myclaw.errors import ErrorInfo
@@ -57,7 +68,11 @@ from myclaw.management.commands import (
     ManagementCommandDispatcher,
     ManagementCommandResult,
 )
-from myclaw.management.service import FatalManagementError, ManagementError
+from myclaw.management.service import (
+    FatalManagementError,
+    ManagementError,
+    RestoreListingReport,
+)
 from myclaw.provider.models import (
     ModelCompleted,
     ModelContinuation,
@@ -1288,6 +1303,16 @@ async def _wait_for_session_picker(
             await pilot.pause()
 
 
+async def _wait_for_screen_id(
+    app: TerminalConversationApp,
+    pilot: Pilot[None],
+    screen_id: str,
+) -> None:
+    async with asyncio.timeout(2):
+        while app.screen.id != screen_id:
+            await pilot.pause()
+
+
 async def _wait_for_confirmation(
     app: TerminalConversationApp,
     pilot: Pilot[None],
@@ -1304,6 +1329,597 @@ async def _wait_for_confirmation(
         refreshed = asyncio.Event()
         app.call_after_refresh(refreshed.set)
         await refreshed.wait()
+
+
+@pytest.mark.asyncio
+async def test_restore_workflow_conflict_result_refreshes_projection_and_history() -> None:
+    selected_modes: list[RestoreMode | str] = []
+    cancel_calls = 0
+    acknowledgement_calls = 0
+    anchor_token = UUID("550e8400-e29b-41d4-a716-446655440001")
+    projection = ForegroundConversationProjection(
+        session_id="20260926-120000-000000_550e8400-e29b-41d4-a716-446655440000",
+        messages=(),
+    )
+    target = RestoreTarget(
+        canonical_target=Path("tracked.txt"),
+        operation_id=1,
+        requested_targets=(Path("tracked.txt"),),
+        before_exists=True,
+        before_sha256="before",
+        before_bytes=b"before",
+        latest_after_exists=True,
+        latest_after_sha256="after",
+        external=False,
+        session_owned=False,
+    )
+    plan = RestorePlan(
+        session_id=projection.session_id,
+        anchor_id=2,
+        session_digest="digest",
+        journal_revision=1,
+        removed_users=1,
+        removed_messages=3,
+        targets=(target,),
+        external_target_count=0,
+        backup_gaps=(),
+        integrity_issues=(),
+        conflict_targets=(target.canonical_target,),
+        discarded_run_tokens=(anchor_token,),
+        available_modes=(RestoreMode.CONVERSATION_ONLY, RestoreMode.FILES),
+    )
+    restore_result = RestoreResult(
+        session_id=projection.session_id,
+        anchor_id=2,
+        mode=RestoreMode.FILES,
+        removed_users=1,
+        removed_messages=3,
+        file_results=(
+            RestoreFileResult(
+                target=target.canonical_target,
+                operation_id=1,
+                status=RestoreFileStatus.RESTORED,
+                conflict=True,
+            ),
+        ),
+        session_result=SessionRestoreResult(
+            session_id=projection.session_id,
+            anchor_id=2,
+            removed_messages=3,
+            updated_at=NOW,
+        ),
+        failure_notification_acknowledged=True,
+    )
+
+    class Management:
+        async def restore_listing(self) -> RestoreListingReport:
+            return RestoreListingReport(
+                session_id=projection.session_id,
+                anchors=(
+                    RestoreAnchor(
+                        anchor_id=2,
+                        run_token=anchor_token,
+                        content="discarded input",
+                        timestamp="2026-09-26T12:00:00.000+08:00",
+                    ),
+                ),
+            )
+
+        async def restore_inspect(self, _anchor_id: int) -> RestorePlan:
+            return plan
+
+        async def restore_commit(
+            self,
+            _plan: RestorePlan,
+            mode: RestoreMode | str,
+        ) -> RestoreResult:
+            selected_modes.append(mode)
+            object.__setattr__(
+                projection,
+                "messages",
+                ({"role": "user", "content": "kept input"},),
+            )
+            return restore_result
+
+        async def restore_result(self) -> RestoreResult | None:
+            return None
+
+        async def restore_cancel(self) -> None:
+            nonlocal cancel_calls
+            cancel_calls += 1
+
+        async def restore_acknowledge_failure(self) -> RestoreResult | None:
+            nonlocal acknowledgement_calls
+            acknowledgement_calls += 1
+            return restore_result
+
+    class Control:
+        @property
+        def has_active_run(self) -> bool:
+            return False
+
+        def foreground_input_admitted(self) -> bool:
+            return True
+
+        def bind_confirmation_callback(self, _callback: object) -> None:
+            return None
+
+        def unbind_confirmation_callback(self, _callback: object) -> None:
+            return None
+
+        async def cancel_active_run(self) -> None:
+            return None
+
+        def respond_to_confirmation(self, _confirmation_id: object, _decision: object) -> None:
+            return None
+
+        def project_foreground_conversation(self) -> ForegroundConversationProjection:
+            return projection
+
+    app = TerminalConversationApp(
+        bus=MessageBus(),
+        control=Control(),
+        management_dispatcher=ManagementCommandDispatcher(cast(Any, Management())),
+    )
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        input_area = app.query_one("#conversation-input", _ConversationInput)
+        input_area.remember_submission("kept input")
+        input_area.remember_submission("discarded input")
+
+        await pilot.press(*list("/restore"), "enter")
+        await _wait_for_screen_id(app, pilot, "restore-anchor-picker")
+        await pilot.press(*list("ordinary input"))
+        assert app.screen.id == "restore-anchor-picker"
+        await pilot.click("#restore-anchor-options", offset=(4, 1))
+        await _wait_for_screen_id(app, pilot, "restore-mode-picker")
+        await pilot.pause()
+
+        mode_options = app.screen.query_one("#restore-mode-options", OptionList)
+        assert app.screen.focused is mode_options
+        assert str(mode_options.options[0].prompt).startswith("Conversation only")
+        assert str(mode_options.options[1].prompt) == "Conversation + files"
+        await pilot.press("down", "enter")
+        await _wait_for_screen_id(app, pilot, "restore-confirmation")
+
+        confirmation_cancel = app.screen.query_one("#restore-confirmation-cancel", Button)
+        assert app.screen.focused is not None
+        assert app.screen.focused.id == confirmation_cancel.id
+        confirmation_text = _visible_screen_text(app)
+        assert "Remove: 1 User and 3 total messages" in confirmation_text
+        assert "Files: 1 tracked, 0 external" in confirmation_text
+        assert "Not independently rolled back:" in confirmation_text
+        assert "may still overwrite later manual, Exec, or MCP changes" in confirmation_text
+        await pilot.click(offset=(1, 1))
+        assert app.screen.id == "restore-confirmation"
+        await pilot.click("#restore-confirmation-approve")
+
+        await _wait_for_screen_id(app, pilot, "_default")
+        async with asyncio.timeout(2):
+            while app._restore_workflow_active:
+                await pilot.pause()
+
+        visible_text = _visible_screen_text(app)
+        assert "Restored conflicting files:" in visible_text
+        assert "tracked.txt" in visible_text
+        assert "restore-failure" not in str(app.screen.id)
+        assert selected_modes == [RestoreMode.FILES]
+        assert cancel_calls == 0
+        assert acknowledgement_calls == 0
+
+        await pilot.press("up")
+        assert input_area.text == "/restore"
+        assert "discarded input" not in input_area._history
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("has_gap", "cancel_key"),
+    ((False, "escape"), (True, "ctrl+c")),
+)
+async def test_restore_workflow_no_files_and_gap_only_branches(
+    has_gap: bool,
+    cancel_key: str,
+) -> None:
+    cancel_calls = 0
+    anchor_token = UUID("550e8400-e29b-41d4-a716-446655440002")
+    session_id = "20260926-120000-000000_550e8400-e29b-41d4-a716-446655440000"
+    plan = RestorePlan(
+        session_id=session_id,
+        anchor_id=1,
+        session_digest="digest",
+        journal_revision=1,
+        removed_users=1,
+        removed_messages=1,
+        targets=(),
+        external_target_count=0,
+        backup_gaps=(
+            BackupGap(
+                operation_id=1,
+                revision=1,
+                run_token=anchor_token,
+                requested_target="missing.txt",
+                canonical_target="missing.txt",
+                reason="target_read_failed",
+            ),
+        )
+        if has_gap
+        else (),
+        integrity_issues=(),
+        conflict_targets=(),
+        discarded_run_tokens=(anchor_token,),
+        available_modes=(RestoreMode.CONVERSATION_ONLY,),
+    )
+    projection = ForegroundConversationProjection(session_id=session_id, messages=())
+
+    class Management:
+        async def restore_listing(self) -> RestoreListingReport:
+            return RestoreListingReport(
+                session_id=session_id,
+                anchors=(
+                    RestoreAnchor(
+                        anchor_id=1,
+                        run_token=anchor_token,
+                        content="discarded input",
+                        timestamp="2026-09-26T12:00:00.000+08:00",
+                    ),
+                ),
+            )
+
+        async def restore_inspect(self, _anchor_id: int) -> RestorePlan:
+            return plan
+
+        async def restore_commit(
+            self,
+            _plan: RestorePlan,
+            _mode: RestoreMode | str,
+        ) -> RestoreResult:
+            raise AssertionError("cancelled restore must not commit")
+
+        async def restore_result(self) -> RestoreResult | None:
+            return None
+
+        async def restore_cancel(self) -> None:
+            nonlocal cancel_calls
+            cancel_calls += 1
+
+    class Control:
+        @property
+        def has_active_run(self) -> bool:
+            return False
+
+        def foreground_input_admitted(self) -> bool:
+            return cancel_calls > 0
+
+        def bind_confirmation_callback(self, _callback: object) -> None:
+            return None
+
+        def unbind_confirmation_callback(self, _callback: object) -> None:
+            return None
+
+        async def cancel_active_run(self) -> None:
+            return None
+
+        def respond_to_confirmation(self, _confirmation_id: object, _decision: object) -> None:
+            return None
+
+        def project_foreground_conversation(self) -> ForegroundConversationProjection:
+            return projection
+
+    app = TerminalConversationApp(
+        bus=MessageBus(),
+        control=Control(),
+        management_dispatcher=ManagementCommandDispatcher(cast(Any, Management())),
+    )
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.press(*list("/restore"), "enter")
+        await _wait_for_screen_id(app, pilot, "restore-anchor-picker")
+        await pilot.press("enter")
+        if has_gap:
+            await _wait_for_screen_id(app, pilot, "restore-mode-picker")
+            assert "incomplete backup coverage" in _visible_screen_text(app)
+            await pilot.press("enter")
+        await _wait_for_screen_id(app, pilot, "restore-confirmation")
+        assert "Files: 0 tracked, 0 external" in _visible_screen_text(app)
+        await pilot.press(cancel_key)
+        await asyncio.sleep(0)
+
+        assert cancel_calls == 1
+        assert app.screen.id != "restore-confirmation"
+
+
+@pytest.mark.asyncio
+async def test_restore_waiting_barrier_can_be_cancelled_before_inspection_finishes() -> None:
+    inspect_started = asyncio.Event()
+    cancel_calls = 0
+    anchor_token = UUID("550e8400-e29b-41d4-a716-446655440003")
+    session_id = "20260926-120000-000000_550e8400-e29b-41d4-a716-446655440000"
+    plan = RestorePlan(
+        session_id=session_id,
+        anchor_id=1,
+        session_digest="digest",
+        journal_revision=1,
+        removed_users=1,
+        removed_messages=1,
+        targets=(),
+        external_target_count=0,
+        backup_gaps=(),
+        integrity_issues=(),
+        conflict_targets=(),
+        discarded_run_tokens=(anchor_token,),
+        available_modes=(RestoreMode.CONVERSATION_ONLY,),
+    )
+
+    class Management:
+        async def restore_listing(self) -> RestoreListingReport:
+            return RestoreListingReport(
+                session_id=session_id,
+                anchors=(
+                    RestoreAnchor(
+                        anchor_id=1,
+                        run_token=anchor_token,
+                        content="discarded input",
+                        timestamp="2026-09-26T12:00:00.000+08:00",
+                    ),
+                ),
+            )
+
+        async def restore_inspect(self, _anchor_id: int) -> RestorePlan:
+            inspect_started.set()
+            await asyncio.Event().wait()
+            return plan
+
+        async def restore_commit(
+            self,
+            _plan: RestorePlan,
+            _mode: RestoreMode | str,
+        ) -> RestoreResult:
+            raise AssertionError("cancelled inspection must not commit")
+
+        async def restore_result(self) -> RestoreResult | None:
+            return None
+
+        async def restore_cancel(self) -> None:
+            nonlocal cancel_calls
+            cancel_calls += 1
+
+    class Control:
+        @property
+        def has_active_run(self) -> bool:
+            return False
+
+        def foreground_input_admitted(self) -> bool:
+            return cancel_calls > 0
+
+        def bind_confirmation_callback(self, _callback: object) -> None:
+            return None
+
+        def unbind_confirmation_callback(self, _callback: object) -> None:
+            return None
+
+        async def cancel_active_run(self) -> None:
+            return None
+
+        def respond_to_confirmation(self, _confirmation_id: object, _decision: object) -> None:
+            return None
+
+        def project_foreground_conversation(self) -> ForegroundConversationProjection:
+            return ForegroundConversationProjection(session_id=session_id, messages=())
+
+    app = TerminalConversationApp(
+        bus=MessageBus(),
+        control=Control(),
+        management_dispatcher=ManagementCommandDispatcher(cast(Any, Management())),
+    )
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.press(*list("/restore"), "enter")
+        await _wait_for_screen_id(app, pilot, "restore-anchor-picker")
+        await pilot.press("enter")
+        await _wait_for_screen_id(app, pilot, "restore-waiting")
+        await asyncio.wait_for(inspect_started.wait(), timeout=1)
+        await pilot.press("escape")
+        async with asyncio.timeout(2):
+            while app._restore_workflow_active:
+                await pilot.pause()
+
+        assert cancel_calls == 1
+        assert app.screen.id != "restore-waiting"
+
+
+@pytest.mark.asyncio
+async def test_restore_inspection_failure_dismisses_waiting_screen() -> None:
+    cancel_calls = 0
+    anchor_token = UUID("550e8400-e29b-41d4-a716-446655440004")
+    session_id = "20260926-120000-000000_550e8400-e29b-41d4-a716-446655440000"
+
+    class Management:
+        async def restore_listing(self) -> RestoreListingReport:
+            return RestoreListingReport(
+                session_id=session_id,
+                anchors=(
+                    RestoreAnchor(
+                        anchor_id=1,
+                        run_token=anchor_token,
+                        content="discarded input",
+                        timestamp="2026-09-26T12:00:00.000+08:00",
+                    ),
+                ),
+            )
+
+        async def restore_inspect(self, _anchor_id: int) -> RestorePlan:
+            raise RuntimeError("injected inspection failure")
+
+        async def restore_result(self) -> RestoreResult | None:
+            return None
+
+        async def restore_cancel(self) -> None:
+            nonlocal cancel_calls
+            cancel_calls += 1
+
+    app = TerminalConversationApp(
+        bus=MessageBus(),
+        control=_DirectControl(),
+        management_dispatcher=ManagementCommandDispatcher(cast(Any, Management())),
+    )
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.press(*list("/restore"), "enter")
+        await _wait_for_screen_id(app, pilot, "restore-anchor-picker")
+        await pilot.press("enter")
+        async with asyncio.timeout(2):
+            while app._restore_workflow_active:
+                await pilot.pause()
+
+        assert app.screen.id == "_default"
+        assert cancel_calls == 1
+        assert app.query_one("#conversation-input", _ConversationInput).read_only is False
+        assert any(
+            "Session Restore failed." in str(cast(Static, row).content)
+            for row in app.query(".management-row")
+        )
+
+
+@pytest.mark.asyncio
+async def test_restore_failure_notification_acknowledgement_survives_restart(
+    agent_home: Path,
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    discarded_input = "discard this persisted input"
+    blocked = workspace / "blocked.txt"
+    successful_conflict = workspace / "conflict.txt"
+    blocked.write_bytes(b"blocked before")
+    successful_conflict.write_bytes(b"conflict before")
+    session_ids: list[str] = []
+    original_replace = HOST_FILESYSTEM.atomic_replace_bytes
+
+    def fail_blocked_restore(target: Path, content: bytes) -> None:
+        if Path(target) == blocked and content == b"blocked before":
+            raise PermissionError("injected restore permission failure")
+        original_replace(target, content)
+
+    monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_bytes", fail_blocked_restore)
+
+    async def restore_with_failure(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
+        initial = cast(AgentLoop, app._control)
+        session = initial.session
+        session_ids.append(session.session_id)
+        run_token = UUID("550e8400-e29b-41d4-a716-446655440005")
+        restore_before = session.capture_restore_before()
+        session.commit_agent_run(
+            [{"role": "user", "content": discarded_input}],
+            pending_last_compacted=session.last_compacted,
+            pending_action_summary="",
+            restore_before=restore_before,
+            restore_run_token=run_token,
+        )
+        store = FileBackupStore(session.workspace_state, session.session_id)
+        for target, tool_content, later_content in (
+            (blocked, b"blocked by tool", b"blocked later"),
+            (successful_conflict, b"conflict by tool", b"conflict later"),
+        ):
+            ticket = store.before_write(run_token, target)
+            assert ticket is not None
+            target.write_bytes(tool_content)
+            store.after_write(ticket)
+            target.write_bytes(later_content)
+        await session.wait_for_pending_persist()
+
+        input_area = app.query_one("#conversation-input", _ConversationInput)
+        input_area.remember_submission(discarded_input)
+        await pilot.press(*list("/restore"), "enter")
+        await _wait_for_screen_id(app, pilot, "restore-anchor-picker")
+        await pilot.press("enter")
+        await _wait_for_screen_id(app, pilot, "restore-mode-picker")
+        await pilot.press("down", "enter")
+        await _wait_for_screen_id(app, pilot, "restore-confirmation")
+        confirmation_text = _visible_screen_text(app)
+        assert "Not independently rolled back:" in confirmation_text
+        assert "may still overwrite later manual, Exec, or MCP changes" in confirmation_text
+        assert app.screen.focused is app.screen.query_one("#restore-confirmation-cancel")
+        await pilot.press("right", "enter")
+        await _wait_for_screen_id(app, pilot, "restore-failure")
+
+        notification_details = tuple(
+            str(cast(Static, detail).content)
+            for detail in app.screen.query(".restore-failure-detail")
+        )
+        assert f"Failed: {blocked}" in notification_details
+        assert f"Restored conflict: {successful_conflict}" in notification_details
+        assert input_area.read_only is True
+        assert discarded_input not in input_area._history
+        assert "/restore" in input_area._history
+        assert cast(AgentLoop, app._control).session.session_id == session.session_id
+        assert Session.load(session.workspace_state, session.session_id).messages == []
+        assert blocked.read_bytes() == b"blocked later"
+        assert successful_conflict.read_bytes() == b"conflict before"
+        assert any(
+            "Restored conflicting files:" in str(cast(Static, row).content)
+            and str(successful_conflict) in str(cast(Static, row).content)
+            for row in app.query(".management-row")
+        )
+
+    await _run_cli_terminal_case(
+        agent_home=agent_home,
+        workspace=workspace,
+        monkeypatch=monkeypatch,
+        scenario=restore_with_failure,
+        size=(100, 30),
+    )
+
+    session_id = session_ids[0]
+    pending = await RestoreManager(WorkspaceState(workspace), session_id).recover_pending()
+    assert pending is not None
+    assert pending.failure_notification_pending is True
+
+    async def acknowledge_after_restart(
+        app: TerminalConversationApp,
+        pilot: Pilot[None],
+    ) -> None:
+        await _wait_for_screen_id(app, pilot, "restore-failure")
+        assert f"Failed: {blocked}" in {
+            str(cast(Static, detail).content)
+            for detail in app.screen.query(".restore-failure-detail")
+        }
+        await pilot.press("enter")
+        async with asyncio.timeout(2):
+            while app._restore_workflow_active:
+                await pilot.pause()
+        assert app.screen.id != "restore-failure"
+
+    await _run_cli_terminal_case(
+        agent_home=agent_home,
+        workspace=workspace,
+        monkeypatch=monkeypatch,
+        scenario=acknowledge_after_restart,
+        size=(100, 30),
+    )
+
+    acknowledged = await RestoreManager(WorkspaceState(workspace), session_id).recover_pending()
+    assert acknowledged is not None
+    assert acknowledged.failure_notification_acknowledged is True
+
+    async def verify_acknowledged_restart(
+        app: TerminalConversationApp,
+        pilot: Pilot[None],
+    ) -> None:
+        async with asyncio.timeout(2):
+            while (
+                app._restore_result_worker is not None
+                and not app._restore_result_worker.is_finished
+            ):
+                await pilot.pause()
+        assert app.screen.id != "restore-failure"
+
+    await _run_cli_terminal_case(
+        agent_home=agent_home,
+        workspace=workspace,
+        monkeypatch=monkeypatch,
+        scenario=verify_acknowledged_restart,
+        size=(100, 30),
+    )
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
-from textual.widgets import Static
+from textual.widgets import OptionList, Static
 
 import myclaw.terminal.cli as cli
 from myclaw.agent.loop import AgentLoop, ForegroundConversationProjection
@@ -804,7 +804,7 @@ async def test_terminal_rejects_ordinary_input_while_restore_barrier_is_held() -
 
 
 @pytest.mark.asyncio
-async def test_terminal_releases_restore_listing_without_t07_picker() -> None:
+async def test_restore_anchor_picker_shows_local_preview_and_cancels_without_mutation() -> None:
     cancel_calls = 0
 
     class Management:
@@ -815,7 +815,7 @@ async def test_terminal_releases_restore_listing_without_t07_picker() -> None:
                     RestoreAnchor(
                         anchor_id=1,
                         run_token=ANCHOR_TOKEN,
-                        content="Restore this input",
+                        content="Restore\nthis input",
                         timestamp="2026-09-26T12:00:00.000+08:00",
                     ),
                 ),
@@ -857,13 +857,31 @@ async def test_terminal_releases_restore_listing_without_t07_picker() -> None:
 
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.press(*list("/restore"), "enter")
-        await pilot.pause()
+        async with asyncio.timeout(1):
+            while app.screen.id != "restore-anchor-picker":
+                await pilot.pause()
 
-        assert cancel_calls == 1
-        assert any(
-            "Restore anchors:" in str(cast(Static, row).content)
-            for row in app.query(".management-row")
+        picker_text = "\n".join(
+            str(option.prompt)
+            for option in app.screen.query_one("#restore-anchor-options", OptionList).options
         )
+        assert "1." in picker_text
+        assert "Restore this input" in picker_text
+        assert (
+            datetime.fromisoformat("2026-09-26T12:00:00.000+08:00")
+            .astimezone()
+            .strftime("%Y-%m-%d %H:%M")
+            in picker_text
+        )
+        assert app.screen.focused is app.screen.query_one("#restore-anchor-options")
+
+        await pilot.click(offset=(1, 1))
+        assert app.screen.id == "restore-anchor-picker"
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert cancel_calls == 1
+        assert app.screen.id != "restore-anchor-picker"
 
         await pilot.press(*list("ordinary input"), "enter")
         await pilot.pause()

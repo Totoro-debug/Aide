@@ -274,6 +274,9 @@ class ManagementViewService:
         self._restore_commit = restore_commit or _restore_unavailable_commit
         self._restore_result = restore_result or _restore_unavailable_result
         self._restore_cancel = restore_cancel or _restore_unavailable_cancel
+        self._restore_acknowledge_failure: Callable[[], Awaitable[RestoreResult | None]] = (
+            _restore_unavailable_result
+        )
         self._ensure_management_mutation_allowed = (
             ensure_management_mutation_allowed or _allow_management_mutation
         )
@@ -563,6 +566,18 @@ class ManagementViewService:
         """Cancel a pre-confirmation restore and release its admission barriers."""
         self._ensure_active()
         await self._restore_cancel()
+
+    def bind_restore_acknowledge_failure(
+        self,
+        callback: Callable[[], Awaitable[RestoreResult | None]],
+    ) -> None:
+        """Bind the runtime-owned durable failure acknowledgement action."""
+        self._restore_acknowledge_failure = callback
+
+    async def restore_acknowledge_failure(self) -> RestoreResult | None:
+        """Persist acknowledgement of the latest File Restore failure notice."""
+        self._ensure_active()
+        return await self._restore_acknowledge_failure()
 
 
 def _session_title(session: Session) -> str:

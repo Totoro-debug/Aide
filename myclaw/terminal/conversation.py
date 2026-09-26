@@ -56,11 +56,14 @@ from myclaw.agent.loop import (
 )
 from myclaw.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
 from myclaw.agent.permission import PERMISSION_LEVELS, ToolPermissionLevel
+from myclaw.agent.session.restore import RestoreMode, RestorePlan, RestoreResult
+from myclaw.agent.session.session import RestoreAnchor
 from myclaw.management.commands import (
     MANAGEMENT_COMMANDS,
     RELOAD_SKILL_MANAGEMENT_COMMAND,
     RESUME_MANAGEMENT_COMMAND,
     ManagementCommandDispatcher,
+    ManagementCommandResult,
 )
 from myclaw.management.service import FatalManagementError, SessionListingEntry
 from myclaw.provider.models import REASONING_EFFORT_LEVELS, ReasoningEffort
@@ -81,6 +84,7 @@ _TOOL_NAME_MAX_CHARS = 80
 _GENERIC_TOOL_FAILURE_REASON = "The operation did not complete."
 _RELOAD_SKILL_MANAGEMENT_COMMAND_TOKEN = RELOAD_SKILL_MANAGEMENT_COMMAND.token
 _RESUME_MANAGEMENT_COMMAND_TOKEN = RESUME_MANAGEMENT_COMMAND.token
+_RESTORE_MANAGEMENT_COMMAND_TOKEN = "/restore"
 _UNSAFE_TOOL_DETAIL_PATTERN = re.compile(
     r"(?:^\s*[\[{])|(?:[\"'][^\"']+[\"']\s*:)|"
     r"(?:\b(?:api[_-]?key|authorization|bearer|password|secret|token)\b)|"
@@ -213,6 +217,17 @@ class _ConversationInput(TextArea):
         self._history.append(text)
         self._history_index = None
         self._history_draft = ""
+
+    def forget_submissions(self, submissions: Sequence[str]) -> None:
+        """Remove the newest matching accepted inputs after Session truncation."""
+        history = list(self._history)
+        for submission in submissions:
+            for index in range(len(history) - 1, -1, -1):
+                if history[index] == submission:
+                    del history[index]
+                    break
+        self._history = history
+        self._leave_history()
 
     def _navigate_history(self, direction: int) -> bool:
         if not self._history or (self.text and self._history_index is None):
@@ -722,6 +737,424 @@ class _SessionPickerScreen(ModalScreen[str | None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class _RestoreAnchorPickerScreen(ModalScreen[int | None]):
+    """Choose one persisted User input without dismissing on outside clicks."""
+
+    CSS = """
+    _RestoreAnchorPickerScreen {
+        align: center middle;
+        padding: 1 2;
+    }
+
+    #restore-anchor-panel {
+        width: 86%;
+        max-width: 84;
+        height: 80%;
+        max-height: 90%;
+        padding: 1 2;
+        border: round $panel;
+        background: $surface;
+    }
+
+    #restore-anchor-heading,
+    #restore-anchor-notice {
+        width: 100%;
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #restore-anchor-heading {
+        text-style: bold;
+    }
+
+    #restore-anchor-notice {
+        color: $text-muted;
+    }
+
+    #restore-anchor-options {
+        width: 100%;
+        height: 1fr;
+        min-height: 3;
+        overflow-y: auto;
+    }
+    """
+
+    BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+c", "cancel", "Cancel", show=False, priority=True),
+    ]
+
+    def __init__(self, anchors: tuple[RestoreAnchor, ...]) -> None:
+        super().__init__(id="restore-anchor-picker")
+        self._anchors = anchors
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="restore-anchor-panel"):
+            yield Static("Restore Session", id="restore-anchor-heading", markup=False)
+            yield Static(
+                "Persisted User inputs",
+                id="restore-anchor-notice",
+                markup=False,
+            )
+            yield OptionList(
+                *(
+                    Option(_restore_anchor_label(anchor), id=str(anchor.anchor_id))
+                    for anchor in self._anchors
+                ),
+                id="restore-anchor-options",
+                markup=False,
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#restore-anchor-options", OptionList).focus()
+
+    @on(OptionList.OptionSelected, "#restore-anchor-options")
+    def _option_selected(self, message: OptionList.OptionSelected) -> None:
+        message.stop()
+        option_id = message.option_id
+        if not isinstance(option_id, str):
+            return
+        try:
+            anchor_id = int(option_id)
+        except (TypeError, ValueError):
+            return
+        self.dismiss(anchor_id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class _RestoreWaitingScreen(ModalScreen[bool]):
+    """Keep the pre-confirmation restore barrier cancellable while it settles."""
+
+    CSS = """
+    _RestoreWaitingScreen {
+        align: center middle;
+        padding: 1 2;
+    }
+
+    #restore-waiting-panel {
+        width: 70%;
+        max-width: 64;
+        height: auto;
+        padding: 1 2;
+        border: round $panel;
+        background: $surface;
+    }
+
+    #restore-waiting-heading,
+    #restore-waiting-message {
+        width: 100%;
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #restore-waiting-heading {
+        text-style: bold;
+    }
+    """
+
+    BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+c", "cancel", "Cancel", show=False, priority=True),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__(id="restore-waiting")
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="restore-waiting-panel"):
+            yield Static("Preparing Session Restore", id="restore-waiting-heading", markup=False)
+            yield Static(
+                "Waiting for active work to finish.",
+                id="restore-waiting-message",
+                markup=False,
+            )
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
+class _RestoreModeScreen(ModalScreen[RestoreMode | None]):
+    """Choose the scope of one inspected Session Restore."""
+
+    CSS = """
+    _RestoreModeScreen {
+        align: center middle;
+        padding: 1 2;
+    }
+
+    #restore-mode-panel {
+        width: 86%;
+        max-width: 84;
+        height: auto;
+        max-height: 90%;
+        padding: 1 2;
+        border: round $panel;
+        background: $surface;
+    }
+
+    #restore-mode-heading,
+    #restore-mode-notice {
+        width: 100%;
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #restore-mode-heading {
+        text-style: bold;
+    }
+
+    #restore-mode-notice {
+        color: $text-warning;
+    }
+
+    #restore-mode-options {
+        width: 100%;
+        height: auto;
+        min-height: 3;
+    }
+    """
+
+    BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+c", "cancel", "Cancel", show=False, priority=True),
+    ]
+
+    def __init__(self, plan: RestorePlan) -> None:
+        super().__init__(id="restore-mode-picker")
+        self._modes = plan.available_modes
+        self._has_gap = bool(plan.backup_gaps or plan.integrity_issues)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="restore-mode-panel"):
+            yield Static("Restore scope", id="restore-mode-heading", markup=False)
+            if self._has_gap:
+                yield Static(
+                    "File Restore unavailable: the selected range has incomplete backup coverage.",
+                    id="restore-mode-notice",
+                    markup=False,
+                )
+            yield OptionList(
+                *(Option(_restore_mode_label(mode), id=mode.value) for mode in self._modes),
+                id="restore-mode-options",
+                markup=False,
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#restore-mode-options", OptionList).focus()
+
+    @on(OptionList.OptionSelected, "#restore-mode-options")
+    def _option_selected(self, message: OptionList.OptionSelected) -> None:
+        message.stop()
+        option_id = message.option_id
+        if not isinstance(option_id, str):
+            return
+        try:
+            mode = RestoreMode(option_id)
+        except (TypeError, ValueError):
+            return
+        if mode in self._modes:
+            self.dismiss(mode)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class _RestoreConfirmationScreen(ModalScreen[bool]):
+    """Confirm the entire Session Restore operation once."""
+
+    CSS = """
+    _RestoreConfirmationScreen {
+        align: center middle;
+        padding: 1 2;
+    }
+
+    #restore-confirmation-panel {
+        width: 86%;
+        max-width: 84;
+        height: auto;
+        max-height: 90%;
+        padding: 1 2;
+        border: round $warning;
+        background: $surface;
+        overflow-y: auto;
+    }
+
+    #restore-confirmation-heading,
+    .restore-confirmation-detail,
+    #restore-confirmation-scope {
+        width: 100%;
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #restore-confirmation-heading {
+        text-style: bold;
+    }
+
+    #restore-confirmation-scope {
+        color: $text-warning;
+    }
+
+    #restore-confirmation-actions {
+        width: 100%;
+        height: auto;
+        align: center middle;
+        margin-top: 1;
+    }
+
+    #restore-confirmation-actions Button {
+        margin: 0 1;
+        height: 3;
+    }
+    """
+
+    BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("ctrl+c", "cancel", "Cancel", show=False, priority=True),
+        Binding("left,up", "focus_cancel", "Cancel", show=False),
+        Binding("right,down", "focus_confirm", "Restore", show=False),
+    ]
+
+    def __init__(self, plan: RestorePlan, mode: RestoreMode) -> None:
+        super().__init__(id="restore-confirmation")
+        self._plan = plan
+        self._mode = mode
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="restore-confirmation-panel"):
+            yield Static("Confirm Session Restore", id="restore-confirmation-heading", markup=False)
+            yield Static(
+                f"Remove: {self._plan.removed_users} User and "
+                f"{self._plan.removed_messages} total messages",
+                classes="restore-confirmation-detail",
+                markup=False,
+            )
+            yield Static(
+                f"Files: {len(self._plan.targets)} tracked, "
+                f"{self._plan.external_target_count} external",
+                classes="restore-confirmation-detail",
+                markup=False,
+            )
+            if self._mode is RestoreMode.FILES:
+                scope = "Scope: Conversation Session and eligible File Restore."
+            else:
+                scope = "Scope: Conversation Session only; files remain unchanged."
+            yield Static(scope, id="restore-confirmation-scope", markup=False)
+            yield Static(
+                "Not independently rolled back: Conversation Summary, Long-term Memory, Schedule, "
+                "Exec/MCP effects, Dream, Tool Artifacts, Session Log, and manual edits.",
+                classes="restore-confirmation-detail",
+                markup=False,
+            )
+            if self._mode is RestoreMode.FILES:
+                yield Static(
+                    "File Restore may still overwrite later manual, Exec, or MCP changes "
+                    "to tracked files.",
+                    classes="restore-confirmation-detail",
+                    markup=False,
+                )
+            with Horizontal(id="restore-confirmation-actions"):
+                yield Button("Cancel", id="restore-confirmation-cancel")
+                yield Button("Restore", variant="warning", id="restore-confirmation-approve")
+
+    def on_mount(self) -> None:
+        self.query_one("#restore-confirmation-cancel", Button).focus()
+
+    @on(Button.Pressed)
+    def _button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(event.button.id == "restore-confirmation-approve")
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def action_focus_cancel(self) -> None:
+        self.query_one("#restore-confirmation-cancel", Button).focus()
+
+    def action_focus_confirm(self) -> None:
+        self.query_one("#restore-confirmation-approve", Button).focus()
+
+
+class _RestoreFailureScreen(ModalScreen[bool]):
+    """Require acknowledgement for a partially failed File Restore."""
+
+    CSS = """
+    _RestoreFailureScreen {
+        align: center middle;
+        padding: 1 2;
+    }
+
+    #restore-failure-panel {
+        width: 86%;
+        max-width: 84;
+        height: auto;
+        max-height: 90%;
+        padding: 1 2;
+        border: round $error;
+        background: $surface;
+        overflow-y: auto;
+    }
+
+    #restore-failure-heading,
+    .restore-failure-detail {
+        width: 100%;
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #restore-failure-heading {
+        text-style: bold;
+    }
+
+    #restore-failure-actions {
+        width: 100%;
+        height: auto;
+        align: center middle;
+        margin-top: 1;
+    }
+    """
+
+    BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
+        Binding("escape", "acknowledge", "Acknowledge", show=False),
+        Binding("ctrl+c", "acknowledge", "Acknowledge", show=False, priority=True),
+    ]
+
+    def __init__(self, result: RestoreResult) -> None:
+        super().__init__(id="restore-failure")
+        self._result = result
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="restore-failure-panel"):
+            yield Static("File Restore incomplete", id="restore-failure-heading", markup=False)
+            for item in self._result.failures:
+                yield Static(
+                    f"Failed: {item.target}",
+                    classes="restore-failure-detail",
+                    markup=False,
+                )
+            for target in self._result.successful_conflicts:
+                yield Static(
+                    f"Restored conflict: {target}",
+                    classes="restore-failure-detail",
+                    markup=False,
+                )
+            with Horizontal(id="restore-failure-actions"):
+                yield Button("Acknowledge", id="restore-failure-acknowledge")
+
+    def on_mount(self) -> None:
+        self.query_one("#restore-failure-acknowledge", Button).focus()
+
+    @on(Button.Pressed)
+    def _button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(True)
+
+    def action_acknowledge(self) -> None:
+        self.dismiss(True)
 
 
 class _SessionSwitchConfirmationScreen(ModalScreen[bool]):
@@ -2182,6 +2615,11 @@ class TerminalConversationApp(App[None]):
         self._size_screen: _SizeInsufficientScreen | None = None
         self._outbound_worker: Worker[None] | None = None
         self._resume_worker: Worker[None] | None = None
+        self._restore_worker: Worker[None] | None = None
+        self._restore_result_worker: Worker[None] | None = None
+        self._restore_workflow_active = False
+        self._restore_anchors: tuple[RestoreAnchor, ...] = ()
+        self._restore_plan: RestorePlan | None = None
         self._cancel_requested_turn: object | None = None
         self._active_run_projection: _MessageBusRunProjection | None = None
         self._active_confirmation_id: UUID | None = None
@@ -2387,6 +2825,13 @@ class TerminalConversationApp(App[None]):
             exclusive=True,
             exit_on_error=False,
         )
+        self._restore_result_worker = self.run_worker(
+            self._restore_startup_notification(),
+            name="restore-startup-notification",
+            group="restore-startup-notification",
+            exclusive=False,
+            exit_on_error=False,
+        )
         if not self._size_insufficient:
             self.query_one(_ConversationInput).focus()
 
@@ -2421,6 +2866,14 @@ class TerminalConversationApp(App[None]):
                 self._resume_worker.cancel()
                 with suppress(WorkerError):
                     await self._resume_worker.wait()
+            if self._restore_worker is not None:
+                self._restore_worker.cancel()
+                with suppress(WorkerError):
+                    await self._restore_worker.wait()
+            if self._restore_result_worker is not None:
+                self._restore_result_worker.cancel()
+                with suppress(WorkerError):
+                    await self._restore_result_worker.wait()
         except BaseException as worker_error:
             cleanup_errors.append(worker_error)
 
@@ -2442,6 +2895,11 @@ class TerminalConversationApp(App[None]):
         self._completion_dismissed_text = None
         self._outbound_worker = None
         self._resume_worker = None
+        self._restore_worker = None
+        self._restore_result_worker = None
+        self._restore_workflow_active = False
+        self._restore_anchors = ()
+        self._restore_plan = None
         self._presentation_quiesced = True
         self._active_confirmation_token = None
         self._conversation_display = None
@@ -2587,7 +3045,7 @@ class TerminalConversationApp(App[None]):
         with suppress(NoMatches, NoScreen, ScreenStackError):
             input_area = self.query_one("#conversation-input", _ConversationInput)
             input_area.active_turn_token = None
-            input_area.read_only = False
+            input_area.read_only = self._restore_workflow_active
             input_area.text = ""
         self._hide_command_completion()
         display = self._conversation_display
@@ -2952,6 +3410,7 @@ class TerminalConversationApp(App[None]):
             not text.strip()
             or self._size_insufficient
             or (self._resume_worker is not None and not self._resume_worker.is_finished)
+            or self._restore_workflow_active
         ):
             return
         if text.strip().casefold() in {"exit", "quit"}:
@@ -2979,8 +3438,21 @@ class TerminalConversationApp(App[None]):
             message.text_area.remember_submission(text)
             message.text_area.text = ""
             if result.restore_listing is not None:
-                await self._management_dispatcher.restore_cancel()
-                await self._mount_management_rows(text, result.output)
+                listing = result.restore_listing
+                if not listing.anchors:
+                    await self._management_dispatcher.restore_cancel()
+                    await self._mount_management_rows(text, result.output)
+                    return
+                self._restore_workflow_active = True
+                self._restore_anchors = listing.anchors
+                message.text_area.read_only = True
+                self._restore_worker = self.run_worker(
+                    self._run_restore_workflow(listing.anchors, message.text_area),
+                    name="restore-session",
+                    group="restore-session",
+                    exclusive=False,
+                    exit_on_error=False,
+                )
             elif result.resume_sessions is not None:
                 await self._open_resume_picker(
                     result.resume_sessions,
@@ -3664,6 +4136,228 @@ class TerminalConversationApp(App[None]):
             parent=parent,
         )
 
+    async def _restore_picker_selection(
+        self,
+        anchors: tuple[RestoreAnchor, ...],
+    ) -> int | None:
+        result: asyncio.Future[int | None] = asyncio.get_running_loop().create_future()
+
+        def on_dismissed(value: int | None) -> None:
+            if not result.done():
+                result.set_result(value)
+
+        await self.push_screen(
+            _RestoreAnchorPickerScreen(anchors),
+            callback=on_dismissed,
+        )
+        return await result
+
+    async def _restore_inspection(
+        self,
+        anchor_id: int,
+    ) -> tuple[ManagementCommandResult | None, bool]:
+        cancelled: asyncio.Future[bool | None] = asyncio.get_running_loop().create_future()
+        waiting = _RestoreWaitingScreen()
+
+        def on_dismissed(value: bool | None) -> None:
+            if not cancelled.done():
+                cancelled.set_result(value)
+
+        await self.push_screen(waiting, callback=on_dismissed)
+        inspection_task = asyncio.create_task(
+            self._management_dispatcher.restore_inspect(anchor_id)
+        )
+        try:
+            done, _ = await asyncio.wait(
+                (inspection_task, cancelled),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancelled in done and cancelled.result() is False:
+                with suppress(Exception, CancelledError):
+                    await self._management_dispatcher.restore_cancel()
+                if not inspection_task.done():
+                    inspection_task.cancel()
+                with suppress(Exception, CancelledError):
+                    await inspection_task
+                return None, True
+            inspection = await inspection_task
+            return inspection, False
+        except CancelledError:
+            if not inspection_task.done():
+                inspection_task.cancel()
+            with suppress(Exception, CancelledError):
+                await inspection_task
+            raise
+        finally:
+            if self.screen is waiting:
+                with suppress(Exception):
+                    await waiting.dismiss(True)
+
+    async def _restore_mode_selection(self, plan: RestorePlan) -> RestoreMode | None:
+        result: asyncio.Future[RestoreMode | None] = asyncio.get_running_loop().create_future()
+
+        def on_dismissed(value: RestoreMode | None) -> None:
+            if not result.done():
+                result.set_result(value)
+
+        await self.push_screen(
+            _RestoreModeScreen(plan),
+            callback=on_dismissed,
+        )
+        return await result
+
+    async def _restore_confirmation(self, plan: RestorePlan, mode: RestoreMode) -> bool:
+        result: asyncio.Future[bool | None] = asyncio.get_running_loop().create_future()
+
+        def on_dismissed(value: bool | None) -> None:
+            if not result.done():
+                result.set_result(value)
+
+        await self.push_screen(
+            _RestoreConfirmationScreen(plan, mode),
+            callback=on_dismissed,
+        )
+        return (await result) is True
+
+    async def _show_restore_failure_notification(self, result: RestoreResult) -> None:
+        if not result.failure_notification_pending:
+            return
+        acknowledged: asyncio.Future[bool | None] = asyncio.get_running_loop().create_future()
+
+        def on_dismissed(value: bool | None) -> None:
+            if not acknowledged.done():
+                acknowledged.set_result(value)
+
+        await self.push_screen(
+            _RestoreFailureScreen(result),
+            callback=on_dismissed,
+        )
+        if (await acknowledged) is not True:
+            return
+        acknowledge = getattr(
+            self._management_dispatcher,
+            "restore_acknowledge_failure",
+            None,
+        )
+        if callable(acknowledge):
+            await acknowledge()
+
+    async def _restore_startup_notification(self) -> None:
+        input_area: _ConversationInput | None = None
+        try:
+            result_command = await self._management_dispatcher.restore_result()
+            result = result_command.restore_result
+            if not isinstance(result, RestoreResult) or not result.failure_notification_pending:
+                return
+            input_area = self._conversation_input
+            if input_area is None:
+                input_area = self.query_one("#conversation-input", _ConversationInput)
+            self._restore_workflow_active = True
+            input_area.read_only = True
+            await self._show_restore_failure_notification(result)
+        except CancelledError:
+            raise
+        except Exception:
+            return
+        finally:
+            if self._restore_worker is None:
+                self._restore_workflow_active = False
+                if input_area is not None:
+                    input_area.read_only = False
+                    if not self._closing and not self._presentation_quiesced:
+                        with suppress(Exception):
+                            input_area.focus()
+
+    async def _run_restore_workflow(
+        self,
+        anchors: tuple[RestoreAnchor, ...],
+        input_area: _ConversationInput,
+    ) -> None:
+        committed = False
+        try:
+            anchor_id = await self._restore_picker_selection(anchors)
+            if anchor_id is None:
+                await self._management_dispatcher.restore_cancel()
+                return
+
+            inspection, cancelled = await self._restore_inspection(anchor_id)
+            if cancelled:
+                return
+            assert inspection is not None
+            plan = inspection.restore_plan
+            if plan is None:
+                await self._mount_management_rows(
+                    _RESTORE_MANAGEMENT_COMMAND_TOKEN,
+                    inspection.output or "Session Restore could not be inspected.",
+                )
+                return
+            self._restore_plan = plan
+
+            if plan.targets or plan.backup_gaps or plan.integrity_issues:
+                mode = await self._restore_mode_selection(plan)
+                if mode is None:
+                    await self._management_dispatcher.restore_cancel()
+                    return
+            else:
+                mode = RestoreMode.CONVERSATION_ONLY
+
+            if not await self._restore_confirmation(plan, mode):
+                await self._management_dispatcher.restore_cancel()
+                return
+
+            committed = True
+            commit = await self._management_dispatcher.restore_commit(plan, mode)
+            result = commit.restore_result
+            if not isinstance(result, RestoreResult):
+                await self._mount_management_rows(
+                    _RESTORE_MANAGEMENT_COMMAND_TOKEN,
+                    commit.output or "Session Restore could not be completed.",
+                )
+                return
+
+            input_area.forget_submissions(
+                tuple(anchor.content for anchor in anchors if anchor.anchor_id >= plan.anchor_id)
+            )
+            self._restore_plan = None
+            if not await self._replace_display_from_session(result.session_id):
+                await self._mount_management_rows(
+                    _RESTORE_MANAGEMENT_COMMAND_TOKEN,
+                    "Conversation Session authority changed before display replacement.",
+                )
+                return
+            await self._mount_management_rows(
+                _RESTORE_MANAGEMENT_COMMAND_TOKEN,
+                commit.output,
+            )
+            if result.failure_notification_pending:
+                await self._show_restore_failure_notification(result)
+        except FatalManagementError as fatal_error:
+            self._fatal_management_error = fatal_error
+            if not self._closing:
+                self.exit(return_code=1)
+        except CancelledError:
+            if not committed:
+                with suppress(Exception):
+                    await self._management_dispatcher.restore_cancel()
+            raise
+        except Exception:
+            if not committed:
+                with suppress(Exception):
+                    await self._management_dispatcher.restore_cancel()
+            if not self._closing:
+                await self._mount_management_rows(
+                    _RESTORE_MANAGEMENT_COMMAND_TOKEN,
+                    "Session Restore failed.",
+                )
+        finally:
+            self._restore_plan = None
+            self._restore_anchors = ()
+            self._restore_workflow_active = False
+            input_area.read_only = False
+            if not self._closing and not self._presentation_quiesced:
+                with suppress(Exception):
+                    input_area.focus()
+
     async def _open_resume_picker(
         self,
         sessions: tuple[SessionListingEntry, ...],
@@ -3837,6 +4531,29 @@ def _completion_candidates(
 def _session_picker_label(session: SessionListingEntry) -> str:
     local_updated_at = session.updated_at.astimezone().strftime("%Y-%m-%d %H:%M")
     return f"{session.title} | {local_updated_at}"
+
+
+def _restore_anchor_label(anchor: RestoreAnchor) -> str:
+    try:
+        local_timestamp = (
+            datetime.fromisoformat(anchor.timestamp).astimezone().strftime("%Y-%m-%d %H:%M")
+        )
+    except (TypeError, ValueError):
+        local_timestamp = anchor.timestamp
+    return f"{anchor.anchor_id}. {local_timestamp} | {_restore_preview(anchor.content)}"
+
+
+def _restore_preview(content: str) -> str:
+    normalized = " ".join(content.split())
+    if len(normalized) <= 96:
+        return normalized
+    return f"{normalized[:93]}..."
+
+
+def _restore_mode_label(mode: RestoreMode) -> str:
+    if mode is RestoreMode.CONVERSATION_ONLY:
+        return "Conversation only (default)"
+    return "Conversation + files"
 
 
 def _persisted_role_and_content(message: Mapping[str, object]) -> tuple[str, str]:

@@ -109,6 +109,8 @@ class ManagementPort(Protocol):
 
     async def restore_cancel(self) -> None: ...
 
+    async def restore_acknowledge_failure(self) -> RestoreResult | None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class ManagementCommandResult:
@@ -420,6 +422,21 @@ class ManagementCommandDispatcher:
                 output="Session Restore cancelled.",
             )
 
+    async def restore_acknowledge_failure(self) -> ManagementCommandResult:
+        with without_session_log():
+            try:
+                result = await self._management.restore_acknowledge_failure()
+            except ManagementError as management_error:
+                return ManagementCommandResult(
+                    handled=True,
+                    output=f"{management_error.error.code}: {management_error.error.message}",
+                )
+            return ManagementCommandResult(
+                handled=True,
+                output=None if result is None else _restore_result_output(result),
+                restore_result=result,
+            )
+
 
 def _restore_preview(content: str) -> str:
     normalized = " ".join(content.split())
@@ -429,8 +446,12 @@ def _restore_preview(content: str) -> str:
 
 
 def _restore_result_output(result: RestoreResult) -> str:
-    return (
+    lines = [
         f"Session Restore completed: removed {result.removed_users} User "
         f"and {result.removed_messages} total messages; "
         f"mode={result.mode.value}."
-    )
+    ]
+    if result.successful_conflicts:
+        lines.append("Restored conflicting files:")
+        lines.extend(str(path) for path in result.successful_conflicts)
+    return "\n".join(lines)

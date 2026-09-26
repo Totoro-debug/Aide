@@ -934,6 +934,20 @@ async def _run_cli_conversation(
         async def restore_result() -> RestoreResult | None:
             return latest_restore_result
 
+        async def restore_acknowledge_failure() -> RestoreResult | None:
+            nonlocal latest_restore_result
+            result = latest_restore_result
+            if result is None or workspace_state is None:
+                return result
+            acknowledged = RestoreManager(
+                workspace_state,
+                result.session_id,
+                now=local_now,
+            ).acknowledge_failure_notification()
+            if acknowledged is not None:
+                latest_restore_result = acknowledged
+            return acknowledged
+
         async def restore_cancel() -> None:
             if restore_committing:
                 raise ManagementError(_RESTORE_IN_PROGRESS_ERROR)
@@ -980,6 +994,13 @@ async def _run_cli_conversation(
             restore_cancel=restore_cancel,
             ensure_management_mutation_allowed=ensure_management_mutation_allowed,
         )
+        bind_restore_acknowledge_failure = getattr(
+            management,
+            "bind_restore_acknowledge_failure",
+            None,
+        )
+        if callable(bind_restore_acknowledge_failure):
+            bind_restore_acknowledge_failure(restore_acknowledge_failure)
         dispatcher = ManagementCommandDispatcher(management)
         terminal_app = TerminalConversationApp(
             bus=bus,

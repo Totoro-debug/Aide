@@ -1,4 +1,4 @@
-"""Auditable Windows and POSIX release validation for tool permissions."""
+"""Auditable Windows and POSIX release validation for Session Restore and tools."""
 
 from __future__ import annotations
 
@@ -56,6 +56,7 @@ POSIX_CASES: Final[frozenset[str]] = frozenset(
 def _platform() -> Literal["windows", "posix"]:
     return "windows" if os.name == "nt" else "posix"
 
+
 COLLECTION_PATHS: Final[tuple[str, ...]] = (
     "tests/tools/core/test_exec_host.py",
     "tests/tools/core/test_exec_bash_policy.py",
@@ -70,6 +71,8 @@ COLLECTION_PATHS: Final[tuple[str, ...]] = (
     "tests/scheduling/test_schedule_dream.py",
     "tests/agent/test_confirmation.py",
     "tests/terminal/test_conversation.py",
+    "tests/restore",
+    "tests/sessions/test_session_resume.py",
     "tests/test_permission_loop.py",
     "tests/tools/test_mcp.py",
     "tests/tools/test_tool_search.py",
@@ -87,6 +90,8 @@ TARGETED_TEST_PATHS: Final[tuple[str, ...]] = (
     "tests/configuration",
     "tests/tools",
     "tests/agent",
+    "tests/restore",
+    "tests/sessions",
     "tests/scheduling",
     "tests/management",
     "tests/terminal",
@@ -166,6 +171,23 @@ def _node_pattern(path: str, test_name: str) -> str:
 
 def _node_patterns(path: str, *test_names: str) -> tuple[str, ...]:
     return tuple(_node_pattern(path, test_name) for test_name in test_names)
+
+
+RESTORE_PATH_MATRIX_PATTERNS: Final[tuple[str, ...]] = _node_patterns(
+    "tests/restore/test_path_matrix.py",
+    "test_restore_path_matrix_restores_existing_new_and_external_targets",
+    "test_restore_path_matrix_does_not_follow_a_retargeted_link",
+    "test_restore_path_matrix_reports_a_file_failure_and_truncates_session",
+)
+RESTORE_PATH_MATRIX_NODES: Final[frozenset[str]] = frozenset(
+    {
+        "tests/restore/test_path_matrix.py::test_restore_path_matrix_restores_existing_new_and_external_targets[existing]",
+        "tests/restore/test_path_matrix.py::test_restore_path_matrix_restores_existing_new_and_external_targets[new]",
+        "tests/restore/test_path_matrix.py::test_restore_path_matrix_restores_existing_new_and_external_targets[external]",
+        "tests/restore/test_path_matrix.py::test_restore_path_matrix_does_not_follow_a_retargeted_link",
+        "tests/restore/test_path_matrix.py::test_restore_path_matrix_reports_a_file_failure_and_truncates_session",
+    }
+)
 
 
 COVERAGE_RULES: Final[tuple[CoverageRule, ...]] = (
@@ -461,6 +483,7 @@ COVERAGE_RULES: Final[tuple[CoverageRule, ...]] = (
             "test_user_occurrence_captures_one_immutable_permission_snapshot_at_admission",
         ),
     ),
+    CoverageRule("restore-path-matrix", 5, RESTORE_PATH_MATRIX_PATTERNS),
 )
 
 
@@ -745,7 +768,10 @@ async def _exercise_bash_host() -> dict[str, object]:
                     raise RuntimeError(f"bash {name} was not classified as an external path")
                 if "outside-release-sentinel" in result.content:
                     raise RuntimeError(f"bash {name} exposed the declined outside file")
-            if name == "full-access-catastrophic" and "catastrophic" not in requests[0].reason.lower():
+            if (
+                name == "full-access-catastrophic"
+                and "catastrophic" not in requests[0].reason.lower()
+            ):
                 raise RuntimeError("bash catastrophic command was not classified as catastrophic")
             if name == "identity-duplicate-path" and "identity" not in requests[0].reason.lower():
                 raise RuntimeError("bash repeated PATH was not classified as ambiguous identity")
@@ -770,13 +796,19 @@ async def _exercise_bash_host() -> dict[str, object]:
         await check_case("read-outside", "read-only", "cat ../outside.txt", expected="confirm")
         if outside.read_text(encoding="utf-8") != "outside-release-sentinel\n":
             raise RuntimeError("declined outside read changed its sentinel")
-        await check_case("write-inside", "workspace-write", "touch ./created.txt", expected="direct")
+        await check_case(
+            "write-inside", "workspace-write", "touch ./created.txt", expected="direct"
+        )
         if not (workspace / "created.txt").is_file():
             raise RuntimeError("direct workspace write did not create its file")
-        await check_case("write-outside", "workspace-write", "rm ../outside.txt", expected="confirm")
+        await check_case(
+            "write-outside", "workspace-write", "rm ../outside.txt", expected="confirm"
+        )
         if outside.read_text(encoding="utf-8") != "outside-release-sentinel\n":
             raise RuntimeError("declined outside write changed its sentinel")
-        await check_case("full-access-ordinary", "full-access", "cat ./inside.txt", expected="direct")
+        await check_case(
+            "full-access-ordinary", "full-access", "cat ./inside.txt", expected="direct"
+        )
         await check_case(
             "full-access-catastrophic",
             "full-access",
@@ -972,8 +1004,8 @@ def _windows_path_capability_evidence() -> dict[str, object]:
         "hardlink": {"available": hardlink_available},
         "symlink_limitations": symlink_errors,
         "release_gate": (
-            "Executed Windows junction, reparse, and hard-link regression nodes are the gate; "
-            "privilege-dependent symlink-only fixture variants are reported but are not the gate."
+            "The Session Restore path matrix requires file-symlink privilege; missing privilege "
+            "fails the Windows gate. Junction, reparse, and hard-link evidence is retained too."
         ),
     }
 
@@ -1048,11 +1080,16 @@ SKIP_RULES: Final[tuple[SkipRule, ...]] = (
             "test_grep_does_not_traverse_an_explicit_directory_link",
             "test_grep_skips_file_links_outside_the_approved_root",
             "test_grep_reports_explicit_file_links_by_their_visible_paths",
+        )
+        + _node_patterns(
+            "tests/restore/test_path_matrix.py",
+            "test_restore_path_matrix_does_not_follow_a_retargeted_link",
         ),
         (
             r"^(?:file symbolic links are unavailable|file links unavailable|"
             r"directory symlinks unavailable|directory links unavailable|"
-            r"symbolic links are unavailable on this host)(?::.*)?$"
+            r"symbolic links are unavailable on this host|"
+            r"file symlink privilege unavailable on this host)(?::.*)?$"
         ),
     ),
     SkipRule(
@@ -1221,6 +1258,12 @@ def _validate_skips(
         hardlink = cast(Mapping[str, object], path_evidence["hardlink"])
         if hardlink.get("available") is not True:
             raise RuntimeError("skip validation requires a working Windows hard-link capability")
+        file_symlink = cast(Mapping[str, object], path_evidence["file_symlink"])
+        if file_symlink.get("available") is not True:
+            raise RuntimeError(
+                "skip validation requires a working Windows file symlink capability "
+                "for the Session Restore path matrix"
+            )
         missing_alternatives = sorted(REQUIRED_WINDOWS_ALTERNATIVE_NODES - set(passed_nodes))
         if missing_alternatives:
             raise RuntimeError(
@@ -1243,7 +1286,14 @@ def _validate_skips(
             raise RuntimeError("skip validation requires complete real POSIX Bash host evidence")
         missing_smoke = sorted(REQUIRED_POSIX_SMOKE_NODES - set(passed_nodes))
         if missing_smoke:
-            raise RuntimeError("required POSIX smoke nodes did not pass: " + ", ".join(missing_smoke))
+            raise RuntimeError(
+                "required POSIX smoke nodes did not pass: " + ", ".join(missing_smoke)
+            )
+    missing_restore = sorted(RESTORE_PATH_MATRIX_NODES - set(passed_nodes))
+    if missing_restore:
+        raise RuntimeError(
+            "required Session Restore path matrix nodes did not pass: " + ", ".join(missing_restore)
+        )
     classified: list[dict[str, str]] = []
     for skip in skips:
         category = _classify_skip(skip)
@@ -1287,6 +1337,8 @@ def _run_quality(host_results: Sequence[Mapping[str, object]] | None = None) -> 
             passed_nodes=full.passed_nodes,
         )
         _run_command([sys.executable, "-m", "ruff", "check", "myclaw", "tests", "scripts"])
+        _run_command([sys.executable, "-m", "ruff", "format", "--check", "."])
+        _run_command(["git", "diff", "--check"])
         _run_command([sys.executable, "-m", "mypy", "myclaw", "tests", "scripts"])
         build_dir = report_dir / "build"
         build_dir.mkdir()
@@ -1312,8 +1364,14 @@ def _run_quality(host_results: Sequence[Mapping[str, object]] | None = None) -> 
             "validated_skips": skips,
             "required_windows_alternatives": sorted(REQUIRED_WINDOWS_ALTERNATIVE_NODES),
             "required_posix_smoke": sorted(REQUIRED_POSIX_SMOKE_NODES),
+            "required_restore_path_matrix": sorted(RESTORE_PATH_MATRIX_NODES),
         },
-        "static": {"ruff": "passed", "mypy": "passed"},
+        "static": {
+            "ruff_lint": "passed",
+            "ruff_format": "passed",
+            "git_diff_check": "passed",
+            "mypy": "passed",
+        },
         "build": {"artifacts": artifacts},
     }
 

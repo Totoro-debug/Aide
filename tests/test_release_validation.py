@@ -16,6 +16,7 @@ from scripts.release_validation import (
     POSIX_CASES,
     REQUIRED_POSIX_SMOKE_NODES,
     REQUIRED_WINDOWS_ALTERNATIVE_NODES,
+    RESTORE_PATH_MATRIX_NODES,
     CoverageEvidence,
     CoverageRule,
     PytestEvidence,
@@ -70,12 +71,14 @@ def test_real_posix_release_host_covers_permission_and_identity_cases() -> None:
     assert len(results) == 1
     assert results[0]["platform"] == "posix"
     assert results[0]["status"] == "passed"
-    cases = {
-        str(case["name"]): case
-        for case in cast(list[dict[str, object]], results[0]["cases"])
-    }
+    cases = {str(case["name"]): case for case in cast(list[dict[str, object]], results[0]["cases"])}
     assert set(cases) == release_validation.POSIX_CASES
-    for name in ("read-outside", "write-outside", "full-access-catastrophic", "identity-duplicate-path"):
+    for name in (
+        "read-outside",
+        "write-outside",
+        "full-access-catastrophic",
+        "identity-duplicate-path",
+    ):
         assert cases[name]["decision"] == "confirm"
         assert cases[name]["confirmation"] == "declined"
         assert cases[name]["status"] == "refused"
@@ -106,6 +109,7 @@ def test_coverage_rules_are_quantified_and_fail_closed() -> None:
         "dream-exemption",
         "catalog-stability",
         "persistence-schema",
+        "restore-path-matrix",
     }
     assert all(not hasattr(rule, "multiplier") for rule in COVERAGE_RULES)
     assert all(
@@ -164,7 +168,9 @@ def test_workflow_requires_both_platform_reports_for_release_gate() -> None:
         assert "python scripts/release_validation.py --phase all" in " ".join(commands.split())
         assert report in commands
         assert 'python -m pip install -e ".[dev]" "setuptools>=77"' in commands
-        uploads = [step for step in job["steps"] if step.get("uses") == "actions/upload-artifact@v4"]
+        uploads = [
+            step for step in job["steps"] if step.get("uses") == "actions/upload-artifact@v4"
+        ]
         assert len(uploads) == 1
         assert uploads[0]["if"] == "always()"
         assert report in uploads[0]["with"]["path"]
@@ -172,8 +178,7 @@ def test_workflow_requires_both_platform_reports_for_release_gate() -> None:
     windows_steps = document["jobs"]["windows-release"]["steps"]
     assert any(step.get("name") == "Warm Windows PowerShell 5.1" for step in windows_steps)
     assert any(
-        step.get("name") == "Warm Windows PowerShell host resolution"
-        for step in windows_steps
+        step.get("name") == "Warm Windows PowerShell host resolution" for step in windows_steps
     )
 
     gate = document["jobs"]["release-gate"]
@@ -237,7 +242,11 @@ def test_quality_runs_complete_sequence_and_requires_platform_evidence(
     monkeypatch.setattr(
         release_validation,
         "_windows_path_capability_evidence",
-        lambda: {"junction": {"available": True}, "hardlink": {"available": True}},
+        lambda: {
+            "junction": {"available": True},
+            "hardlink": {"available": True},
+            "file_symlink": {"available": True},
+        },
     )
     suites: list[str] = []
     commands: list[list[str]] = []
@@ -250,7 +259,14 @@ def test_quality_runs_complete_sequence_and_requires_platform_evidence(
             if platform == "windows"
             else REQUIRED_POSIX_SMOKE_NODES
         )
-        return PytestEvidence(label, tuple(cast(tuple[str, ...], paths)), 10, 10, tuple(passed), ())
+        return PytestEvidence(
+            label,
+            tuple(cast(tuple[str, ...], paths)),
+            10,
+            10,
+            tuple(passed) + tuple(RESTORE_PATH_MATRIX_NODES),
+            (),
+        )
 
     def command(parts: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
         del kwargs
@@ -266,13 +282,21 @@ def test_quality_runs_complete_sequence_and_requires_platform_evidence(
     report = release_validation._run_quality(_host_evidence(platform))
 
     assert suites == ["targeted", "full"]
-    assert [parts[2:4] for parts in commands] == [
-        ["ruff", "check"],
-        ["mypy", "myclaw"],
-        ["build", "--no-isolation"],
+    assert commands[:4] == [
+        [sys.executable, "-m", "ruff", "check", "myclaw", "tests", "scripts"],
+        [sys.executable, "-m", "ruff", "format", "--check", "."],
+        ["git", "diff", "--check"],
+        [sys.executable, "-m", "mypy", "myclaw", "tests", "scripts"],
     ]
+    assert commands[4][2:4] == ["build", "--no-isolation"]
     assert report["build"] == {"artifacts": ["myclaw-test.whl"]}
     assert report["host_integration"] == _host_evidence(platform)
+    assert report["static"] == {
+        "ruff_lint": "passed",
+        "ruff_format": "passed",
+        "git_diff_check": "passed",
+        "mypy": "passed",
+    }
 
 
 @pytest.mark.parametrize("platform", ("windows", "posix"))
@@ -281,19 +305,29 @@ def test_skip_gate_fails_closed_for_missing_hosts_and_unknown_skips(
     platform: str,
 ) -> None:
     monkeypatch.setattr(release_validation, "_platform", lambda: platform)
-    path_evidence = {"junction": {"available": True}, "hardlink": {"available": True}}
+    path_evidence = {
+        "junction": {"available": True},
+        "hardlink": {"available": True},
+        "file_symlink": {"available": True},
+    }
     passed = (
-        REQUIRED_WINDOWS_ALTERNATIVE_NODES
-        if platform == "windows"
-        else REQUIRED_POSIX_SMOKE_NODES
+        REQUIRED_WINDOWS_ALTERNATIVE_NODES if platform == "windows" else REQUIRED_POSIX_SMOKE_NODES
     )
+    passed_nodes = tuple(passed) + tuple(RESTORE_PATH_MATRIX_NODES)
     with pytest.raises(RuntimeError, match=r"host integration|host evidence"):
         release_validation._validate_skips(
-            (), host_results=(), path_evidence=path_evidence, passed_nodes=tuple(passed)
+            (), host_results=(), path_evidence=path_evidence, passed_nodes=passed_nodes
         )
     with pytest.raises(RuntimeError, match="unclassified pytest skip"):
         release_validation._validate_skips(
             ({"nodeid": "tests/new.py::test_new", "message": "new skip"},),
+            host_results=_host_evidence(platform),
+            path_evidence=path_evidence,
+            passed_nodes=passed_nodes,
+        )
+    with pytest.raises(RuntimeError, match="path matrix nodes did not pass"):
+        release_validation._validate_skips(
+            (),
             host_results=_host_evidence(platform),
             path_evidence=path_evidence,
             passed_nodes=tuple(passed),
@@ -311,15 +345,30 @@ def test_skip_gate_fails_closed_for_missing_hosts_and_unknown_skips(
                 (),
                 host_results=[{"selector": "auto", "platform": "posix", "family": "bash"}],
                 path_evidence=path_evidence,
-                passed_nodes=tuple(passed),
+                passed_nodes=passed_nodes,
             )
     else:
         with pytest.raises(RuntimeError, match="junction capability"):
             release_validation._validate_skips(
                 (),
                 host_results=_host_evidence(platform),
-                path_evidence={"junction": {"available": False}, "hardlink": {"available": True}},
-                passed_nodes=tuple(passed),
+                path_evidence={
+                    "junction": {"available": False},
+                    "hardlink": {"available": True},
+                    "file_symlink": {"available": True},
+                },
+                passed_nodes=passed_nodes,
+            )
+        with pytest.raises(RuntimeError, match="file symlink capability"):
+            release_validation._validate_skips(
+                (),
+                host_results=_host_evidence(platform),
+                path_evidence={
+                    "junction": {"available": True},
+                    "hardlink": {"available": True},
+                    "file_symlink": {"available": False},
+                },
+                passed_nodes=passed_nodes,
             )
 
 
@@ -345,8 +394,12 @@ def test_skip_allowlists_are_platform_specific(monkeypatch: pytest.MonkeyPatch) 
     assert release_validation._classify_skip(windows_junction_skip) == "unclassified"
     monkeypatch.setattr(release_validation, "_platform", lambda: "posix")
     assert release_validation._classify_skip(posix_smoke_skip) == "unclassified"
-    assert release_validation._classify_skip(windows_junction_skip) == "waived-windows-junction-scope"
-    assert release_validation._classify_skip(native_windows_skip) == "waived-native-windows-path-scope"
+    assert (
+        release_validation._classify_skip(windows_junction_skip) == "waived-windows-junction-scope"
+    )
+    assert (
+        release_validation._classify_skip(native_windows_skip) == "waived-native-windows-path-scope"
+    )
     assert (
         release_validation._classify_skip(powershell_path_skip)
         == "waived-windows-powershell-path-scope"

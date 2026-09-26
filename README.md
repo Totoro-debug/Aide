@@ -108,6 +108,7 @@ Workspace 的 `.myclaw/schedule.json` 使用严格 canonical Schedule Job schema
 | 命令 | 用途 |
 | --- | --- |
 | `/resume` | 从当前 Workspace 的会话列表选择并恢复历史会话 |
+| `/restore` | 将当前前台 Conversation Session 截断到一个 Restore Anchor |
 | `/status` | 查看运行状态与上下文用量 |
 | `/config` | 查看脱敏后的配置 |
 | `/permission` | 选择前台 Tool 权限级别 |
@@ -115,6 +116,45 @@ Workspace 的 `.myclaw/schedule.json` 使用严格 canonical Schedule Job schema
 | `/memory` | 查看长期记忆 |
 | `/dream` | 将待处理的会话摘要整理为长期记忆 |
 | `/reload_skill` | 重新加载 `~/.myclaw/skills/` 中的 Skill |
+
+## Session Restore
+
+`/restore` 只作用于当前前台 Conversation Session，不会选择其他 Session 或
+Schedule Session。它只列出已经提交的前台 User message；每条消息都是一个
+Restore Anchor，使用当前 Session 内单调递增且永不复用的数字 ID，并按最新优先显示
+本地时间和一行预览。前台 Agent Run 或排队的 User input 尚未结束时，`/restore`
+不会打开。产品需求以[父规格 #262](https://github.com/Totoro-debug/MyClaw/issues/262)
+为准；当前架构与领域术语分别见
+[ADR-0028](docs/adr/0028-session-restore-architecture.md)和 `CONTEXT.md`。
+
+选择 anchor 后，Session Restore 会删除该 User message 及其后的所有 Session
+message，并恢复该输入之前的 title、Blackboard、Action Summary、`last_compacted`、
+token usage 和其他 Session-owned metadata。原 Session ID 保留，即使结果是空 Session
+也会持久化；显示和前台输入历史会从持久化 Session 重建，Management Command history
+保留。
+
+恢复范围可选为：
+
+- `conversation-only`：只恢复 Conversation Session，文件保持不变；被截断分支的
+  File Backup 记录从 active journal branch 移除。
+- `conversation-plus-files`：在恢复 Conversation Session 的同时，尝试恢复当前选定
+  active range 中由已授权前台 `write_file` 和 `edit_file` 实际修改的文件，包含 Workspace
+  外部路径。没有 tracked file write 时会直接进入 conversation-only confirmation。
+
+File Restore 是按变更记录工作的，不是 filesystem snapshot。选定范围内的 known
+Backup Gap 会禁用 File Restore，并说明 backup coverage 不完整；备份失败不会阻止原
+Tool 继续执行，也不会立即弹出警告。如果 backup 和 Gap marker 都无法保存后进程崩溃，
+缺失 coverage 可能无法知道。当前文件 bytes 或 existence 不同属于 conflict，但仍会尝试
+恢复；成功恢复的 conflict 会列在普通结果中。单个文件无法安全恢复时会保持原样，其他
+文件继续处理，Session 仍会严格截断；只有出现 partial file failure 才显示失败通知，列出
+失败路径和成功恢复的 conflict，并持久化 acknowledgement。
+
+最终确认后的 restore transaction 不能取消。进程重启时，startup recovery 会在加载全局
+Memory、Schedule 和前台 Session 之前完成 pending transaction，并按 durable target list
+幂等续作；Session persistence 失败会阻止普通对话继续。Conversation Summary、Long-term
+Memory、Schedule、Dream、Exec/MCP effects、manual edits、Tool Artifacts、Session Log
+以及 result files 不作为独立 rollback 目标而被保留；这些参与者后来改动过的 tracked file
+仍可能被 File Restore 覆盖。
 
 POSIX Bash 在 Read-Only 和 Workspace-Write 下也使用严格 Exec 策略：只读候选为 `pwd`、`ls`、`cat`、`head`、`tail`、`wc`、`stat`、`file`、`grep`、`rg`、`find`、`sort`、`uniq`、`cut`、`diff`，写入候选为 `mkdir`、`touch`、`cp`、`mv`、`rm`。每个候选只接受固定参数语法和静态路径角色；固定的简单 pipeline 可以直通。Bash 命令必须是唯一的 PATH native executable，或受信任的 `pwd` builtin；重复 PATH、symlink、别名、函数、脚本、shim、Workspace executable、歧义/未知身份、动态展开、重定向、控制流、glob、follow/watch、外部预处理和 `find` action 都会请求一次确认。Read-Only 只允许 Workspace 读取，Workspace-Write 允许 Workspace 读取和写入；Full-Access 允许可解析的非灾难性动态 Bash Exec 直通，但灾难性操作和检查器不确定仍需确认。Bash Git 与 PowerShell Git 使用相同的固定环境隔离、diff/show 参数加固和 Workspace 内仓库配置审计。
 

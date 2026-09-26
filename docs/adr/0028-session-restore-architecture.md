@@ -124,7 +124,8 @@ metadata are not restored.
 A successfully restored conflict is listed in the ordinary Session Restore
 result. A target that cannot be safely restored is listed by path in the
 failure result, while replay continues for every other target. The Session is
-strictly durably truncated even when one or more files fail. A failure modal is
+strictly durably truncated even when one or more files fail, so a partial File
+Restore never prevents the Conversation Session rollback. A failure modal is
 shown only when at least one file fails and lists failed paths plus successful
 conflicts; its acknowledgement is durable so an interrupted restart can show
 it again. Conversation-only restore leaves files unchanged and removes the

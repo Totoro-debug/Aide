@@ -22,7 +22,12 @@ from myclaw.agent.permission import (
     ToolPermissionLevel,
     validate_permission_level,
 )
-from myclaw.agent.session.session import Session, SessionStoragePartition
+from myclaw.agent.session.restore import RestoreMode, RestorePlan, RestoreResult
+from myclaw.agent.session.session import (
+    RestoreAnchor,
+    Session,
+    SessionStoragePartition,
+)
 from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader, ConfigView
@@ -89,6 +94,21 @@ class SessionListingReport:
             or self.skipped_count < 0
         ):
             raise ValueError("skipped_count must be a nonnegative integer")
+
+
+@dataclass(frozen=True, slots=True)
+class RestoreListingReport:
+    """Persisted Restore Anchors for the current foreground Session."""
+
+    session_id: str
+    anchors: tuple[RestoreAnchor, ...]
+
+    def __post_init__(self) -> None:
+        Session._require_id(self.session_id, partition=SessionStoragePartition.FOREGROUND)
+        if not isinstance(self.anchors, tuple) or not all(
+            isinstance(anchor, RestoreAnchor) for anchor in self.anchors
+        ):
+            raise TypeError("anchors must be a tuple of RestoreAnchor values")
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,7 +232,7 @@ class FatalManagementError(ManagementError):
 
 
 class ManagementViewService:
-    """Read global configuration and dynamically selected runtime-owned views."""
+    """Expose global configuration and runtime-owned Management views and actions."""
 
     def __init__(
         self,
@@ -229,6 +249,13 @@ class ManagementViewService:
         monotonic: Callable[[], float],
         reasoning_effort_control: _ReasoningEffortControl,
         permission_control: RuntimePermissionControl,
+        restore_listing: Callable[[], Awaitable[RestoreListingReport]] | None = None,
+        restore_inspect: Callable[[int], Awaitable[RestorePlan]] | None = None,
+        restore_commit: Callable[[RestorePlan, RestoreMode | str], Awaitable[RestoreResult]]
+        | None = None,
+        restore_result: Callable[[], Awaitable[RestoreResult | None]] | None = None,
+        restore_cancel: Callable[[], Awaitable[None]] | None = None,
+        ensure_management_mutation_allowed: Callable[[], None] | None = None,
     ) -> None:
         self._config = ConfigLoader(agent_home)
         self._current_agent_loop = current_agent_loop
@@ -242,12 +269,21 @@ class ManagementViewService:
         self._dream = dream
         self._reasoning_effort_control = reasoning_effort_control
         self._permission_control = permission_control
+        self._restore_listing = restore_listing or _restore_unavailable_listing
+        self._restore_inspect = restore_inspect or _restore_unavailable_inspect
+        self._restore_commit = restore_commit or _restore_unavailable_commit
+        self._restore_result = restore_result or _restore_unavailable_result
+        self._restore_cancel = restore_cancel or _restore_unavailable_cancel
+        self._ensure_management_mutation_allowed = (
+            ensure_management_mutation_allowed or _allow_management_mutation
+        )
         self._aborted = False
 
     async def reload_skill(self) -> tuple[SkillMetadata, ...]:
         """Reload the current Agent Loop Skill state and return published metadata."""
+        self._ensure_active()
+        self._ensure_management_mutation_allowed()
         try:
-            self._ensure_active()
             current_agent_loop = self._current_agent_loop()
             metadata = current_agent_loop.reload_skill()
             if not isinstance(metadata, tuple) or not all(
@@ -307,6 +343,7 @@ class ManagementViewService:
     async def dream(self) -> DreamResult:
         """Run one foreground Memory Task and return its safe summary."""
         self._ensure_active()
+        self._ensure_management_mutation_allowed()
         self._ensure_current_generation()
         return await self._dream.run()
 
@@ -323,6 +360,7 @@ class ManagementViewService:
     async def update_reasoning_effort(self, effort: ReasoningEffort) -> ReasoningEffort:
         """Publish one validated Runtime-Lifetime chat Reasoning Effort."""
         self._ensure_active()
+        self._ensure_management_mutation_allowed()
         if effort not in REASONING_EFFORT_LEVELS:
             raise ManagementError(
                 ErrorInfo("config_invalid", "Runtime Reasoning Effort is invalid.")
@@ -342,6 +380,7 @@ class ManagementViewService:
     async def update_permission_level(self, level: ToolPermissionLevel) -> ToolPermissionLevel:
         """Select a foreground level without changing User Configuration."""
         self._ensure_active()
+        self._ensure_management_mutation_allowed()
         try:
             validated = validate_permission_level(level)
         except ValueError as error:
@@ -481,6 +520,7 @@ class ManagementViewService:
     async def resume(self, session_id: str, *, force: bool = False) -> ResumeResult:
         """Revalidate and select one Session from the current Workspace."""
         self._ensure_active()
+        self._ensure_management_mutation_allowed()
         self._ensure_current_generation()
         await self._prepare_session_resume(session_id)
         listing = await self._resumable_listing()
@@ -495,9 +535,65 @@ class ManagementViewService:
         await self._replace_agent_loop(session_id, force)
         return ResumeResult(session_id=session_id)
 
+    async def restore_listing(self) -> RestoreListingReport:
+        """Return persisted Restore Anchors for the active foreground Session."""
+        self._ensure_active()
+        return await self._restore_listing()
+
+    async def restore_inspect(self, anchor_id: int) -> RestorePlan:
+        """Freeze restore admission and inspect one persisted Restore Anchor."""
+        self._ensure_active()
+        return await self._restore_inspect(anchor_id)
+
+    async def restore_commit(
+        self,
+        plan: RestorePlan,
+        mode: RestoreMode | str,
+    ) -> RestoreResult:
+        """Commit one previously inspected Session Restore plan."""
+        self._ensure_active()
+        return await self._restore_commit(plan, mode)
+
+    async def restore_result(self) -> RestoreResult | None:
+        """Return the latest completed restore result, if one is available."""
+        self._ensure_active()
+        return await self._restore_result()
+
+    async def restore_cancel(self) -> None:
+        """Cancel a pre-confirmation restore and release its admission barriers."""
+        self._ensure_active()
+        await self._restore_cancel()
+
 
 def _session_title(session: Session) -> str:
     title = session.metadata.get("title")
     if not isinstance(title, str):
         raise ValueError("Session title is malformed")
     return title
+
+
+def _allow_management_mutation() -> None:
+    return None
+
+
+async def _restore_unavailable_listing() -> RestoreListingReport:
+    raise ManagementError(ErrorInfo("route_unavailable", "Session Restore is unavailable."))
+
+
+async def _restore_unavailable_inspect(_anchor_id: int) -> RestorePlan:
+    raise ManagementError(ErrorInfo("route_unavailable", "Session Restore is unavailable."))
+
+
+async def _restore_unavailable_commit(
+    _plan: RestorePlan,
+    _mode: RestoreMode | str,
+) -> RestoreResult:
+    raise ManagementError(ErrorInfo("route_unavailable", "Session Restore is unavailable."))
+
+
+async def _restore_unavailable_result() -> RestoreResult | None:
+    raise ManagementError(ErrorInfo("route_unavailable", "Session Restore is unavailable."))
+
+
+async def _restore_unavailable_cancel() -> None:
+    raise ManagementError(ErrorInfo("route_unavailable", "Session Restore is unavailable."))

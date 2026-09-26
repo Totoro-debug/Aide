@@ -139,6 +139,8 @@ class TerminalAgentLoopControl(Protocol):
     @property
     def has_active_run(self) -> bool: ...
 
+    def foreground_input_admitted(self) -> bool: ...
+
     async def cancel_active_run(self) -> None: ...
 
     def bind_confirmation_callback(self, callback: ConfirmationCallback) -> None: ...
@@ -365,6 +367,28 @@ class AgentLoop:
             raise RuntimeError("Agent Loop is no longer active")
         task = self._execution_task
         return task is not None and not task.done()
+
+    def foreground_input_admitted(self) -> bool:
+        """Return whether a new ordinary foreground input may be queued."""
+        return not (
+            self._aborted or self._closing or self._closed or self._replacement_barrier_held
+        )
+
+    async def wait_for_restore_idle(self) -> None:
+        """Drain title work before the strict Session restore write."""
+        if self._aborted:
+            raise RuntimeError("Agent Loop is no longer active")
+        while True:
+            title_tasks = tuple(
+                work.task for work in self._title_work.values() if not work.task.done()
+            )
+            if title_tasks:
+                for title_task in title_tasks:
+                    await asyncio.shield(title_task)
+                continue
+            await self._session.wait_for_pending_persist()
+            if not any(not work.task.done() for work in self._title_work.values()):
+                return
 
     def project_foreground_conversation(self) -> ForegroundConversationProjection:
         """Return presentation data without exposing the owned Session."""
@@ -819,9 +843,9 @@ class AgentLoop:
             route="schedule",
             project_messages=project_messages,
         )
-        schedule_confirmation: Callable[
-            [ConfirmationRequest], Awaitable[ConfirmationDecision]
-        ] | None = None
+        schedule_confirmation: (
+            Callable[[ConfirmationRequest], Awaitable[ConfirmationDecision]] | None
+        ) = None
         if occurrence is not None and permission_snapshot is not None:
             background_owner = self._schedule_service.occurrence_owner(occurrence)
 

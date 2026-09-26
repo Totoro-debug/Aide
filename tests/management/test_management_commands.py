@@ -109,6 +109,7 @@ def test_management_command_catalog_owns_ordered_tokens_and_descriptions() -> No
         ("/effort", "Set Chat Reasoning Effort"),
         ("/permission", "Set Foreground Tool Permission Level"),
         ("/resume", "Resume a Conversation Session"),
+        ("/restore", "Restore the current Conversation Session"),
         ("/memory", "View Long-term Memory"),
         ("/dream", "Process pending Conversation Summaries"),
         ("/reload_skill", "Reload Skills"),

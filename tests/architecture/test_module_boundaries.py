@@ -800,6 +800,7 @@ def test_agent_loop_control_interface_is_consolidated() -> None:
         if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
     } == {
         "has_active_run",
+        "foreground_input_admitted",
         "cancel_active_run",
         "bind_confirmation_callback",
         "respond_to_confirmation",

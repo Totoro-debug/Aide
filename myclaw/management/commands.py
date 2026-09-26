@@ -1,4 +1,4 @@
-"""Standalone dispatch for read-only Management Commands."""
+"""Standalone dispatch for Management Commands."""
 
 import json
 from collections.abc import Mapping
@@ -10,11 +10,13 @@ from loguru import logger
 
 from myclaw.agent.memory.dream import DreamResult
 from myclaw.agent.permission import ToolPermissionLevel
+from myclaw.agent.session.restore import RestoreMode, RestorePlan, RestoreResult
 from myclaw.config.config import ConfigView
 from myclaw.logging.session import without_session_log
 from myclaw.management.service import (
     FatalManagementError,
     ManagementError,
+    RestoreListingReport,
     ResumeResult,
     RuntimeStatus,
     SessionListingEntry,
@@ -41,6 +43,10 @@ _PERMISSION_COMMAND = ManagementCommandDefinition(
     "Set Foreground Tool Permission Level",
 )
 RESUME_MANAGEMENT_COMMAND = ManagementCommandDefinition("/resume", "Resume a Conversation Session")
+RESTORE_MANAGEMENT_COMMAND = ManagementCommandDefinition(
+    "/restore",
+    "Restore the current Conversation Session",
+)
 _MEMORY_COMMAND = ManagementCommandDefinition("/memory", "View Long-term Memory")
 _DREAM_COMMAND = ManagementCommandDefinition(
     "/dream",
@@ -56,6 +62,7 @@ MANAGEMENT_COMMANDS = (
     _EFFORT_COMMAND,
     _PERMISSION_COMMAND,
     RESUME_MANAGEMENT_COMMAND,
+    RESTORE_MANAGEMENT_COMMAND,
     _MEMORY_COMMAND,
     _DREAM_COMMAND,
     RELOAD_SKILL_MANAGEMENT_COMMAND,
@@ -88,6 +95,20 @@ class ManagementPort(Protocol):
 
     async def resume(self, session_id: str, *, force: bool = False) -> ResumeResult: ...
 
+    async def restore_listing(self) -> RestoreListingReport: ...
+
+    async def restore_inspect(self, anchor_id: int) -> RestorePlan: ...
+
+    async def restore_commit(
+        self,
+        plan: RestorePlan,
+        mode: RestoreMode | str,
+    ) -> RestoreResult: ...
+
+    async def restore_result(self) -> RestoreResult | None: ...
+
+    async def restore_cancel(self) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class ManagementCommandResult:
@@ -101,6 +122,9 @@ class ManagementCommandResult:
     resumed_session_id: str | None = None
     resume_skipped_count: int = 0
     skill_metadata: tuple[SkillMetadata, ...] | None = None
+    restore_listing: RestoreListingReport | None = None
+    restore_plan: RestorePlan | None = None
+    restore_result: RestoreResult | None = None
 
 
 class ManagementCommandDispatcher:
@@ -180,6 +204,29 @@ class ManagementCommandDispatcher:
                     output="\n".join(lines),
                     resume_sessions=sessions,
                     resume_skipped_count=listing.skipped_count,
+                )
+            if parsed_command is RESTORE_MANAGEMENT_COMMAND:
+                try:
+                    restore_listing = await management.restore_listing()
+                except ManagementError as management_error:
+                    return ManagementCommandResult(
+                        handled=True,
+                        output=f"{management_error.error.code}: {management_error.error.message}",
+                    )
+                if not restore_listing.anchors:
+                    output = "No persisted Restore Anchors in the current Conversation Session."
+                else:
+                    lines = ["Restore anchors:"]
+                    lines.extend(
+                        f"{anchor.anchor_id}. {anchor.timestamp} | "
+                        f"{_restore_preview(anchor.content)}"
+                        for anchor in restore_listing.anchors
+                    )
+                    output = "\n".join(lines)
+                return ManagementCommandResult(
+                    handled=True,
+                    output=output,
+                    restore_listing=restore_listing,
                 )
             if parsed_command is _STATUS_COMMAND:
                 try:
@@ -307,3 +354,83 @@ class ManagementCommandDispatcher:
                     output=output,
                     resumed_session_id=result.session_id,
                 )
+
+    async def restore_inspect(self, anchor_id: int) -> ManagementCommandResult:
+        with without_session_log():
+            try:
+                plan = await self._management.restore_inspect(anchor_id)
+            except ManagementError as management_error:
+                return ManagementCommandResult(
+                    handled=True,
+                    output=f"{management_error.error.code}: {management_error.error.message}",
+                )
+            return ManagementCommandResult(
+                handled=True,
+                output=None,
+                restore_plan=plan,
+            )
+
+    async def restore_commit(
+        self,
+        plan: RestorePlan,
+        mode: RestoreMode | str,
+    ) -> ManagementCommandResult:
+        with without_session_log():
+            try:
+                result = await self._management.restore_commit(plan, mode)
+            except FatalManagementError:
+                raise
+            except ManagementError as management_error:
+                return ManagementCommandResult(
+                    handled=True,
+                    output=f"{management_error.error.code}: {management_error.error.message}",
+                )
+            return ManagementCommandResult(
+                handled=True,
+                output=_restore_result_output(result),
+                restore_result=result,
+            )
+
+    async def restore_result(self) -> ManagementCommandResult:
+        with without_session_log():
+            try:
+                result = await self._management.restore_result()
+            except ManagementError as management_error:
+                return ManagementCommandResult(
+                    handled=True,
+                    output=f"{management_error.error.code}: {management_error.error.message}",
+                )
+            return ManagementCommandResult(
+                handled=True,
+                output=None if result is None else _restore_result_output(result),
+                restore_result=result,
+            )
+
+    async def restore_cancel(self) -> ManagementCommandResult:
+        with without_session_log():
+            try:
+                await self._management.restore_cancel()
+            except ManagementError as management_error:
+                return ManagementCommandResult(
+                    handled=True,
+                    output=f"{management_error.error.code}: {management_error.error.message}",
+                )
+            return ManagementCommandResult(
+                handled=True,
+                output="Session Restore cancelled.",
+            )
+
+
+def _restore_preview(content: str) -> str:
+    normalized = " ".join(content.split())
+    if len(normalized) <= 96:
+        return normalized
+    return f"{normalized[:93]}..."
+
+
+def _restore_result_output(result: RestoreResult) -> str:
+    return (
+        f"Session Restore completed: removed {result.removed_users} User "
+        f"and {result.removed_messages} total messages; "
+        f"mode={result.mode.value}."
+    )

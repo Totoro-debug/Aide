@@ -584,6 +584,9 @@ class _ScriptedControl:
     def has_active_run(self) -> bool:
         return self._active
 
+    def foreground_input_admitted(self) -> bool:
+        return True
+
     def bind_confirmation_callback(
         self, callback: Callable[[ConfirmationRequestView], None]
     ) -> None:
@@ -840,6 +843,9 @@ class _DirectControl:
     @property
     def has_active_run(self) -> bool:
         return False
+
+    def foreground_input_admitted(self) -> bool:
+        return True
 
     async def cancel_active_run(self) -> None:
         return None
@@ -5781,6 +5787,7 @@ async def test_management_completion_supports_keyboard_filtering_and_escape() ->
                     "/effort - ",
                     "/permission - ",
                     "/resume - ",
+                    "/restore - ",
                     "/memory - ",
                     "/dream - ",
                 )
@@ -5792,8 +5799,8 @@ async def test_management_completion_supports_keyboard_filtering_and_escape() ->
             "/effort - Set Chat Reasoning Effort",
             "/permission - Set Foreground Tool Permission Level",
             "/resume - Resume a Conversation Session",
+            "/restore - Restore the current Conversation Session",
             "/memory - View Long-term Memory",
-            "/dream - Process pending Conversation Summaries",
         ]
         assert any(text == "/" for text, _x, _y in _screenshot_text_nodes(app))
         assert app.screen.focused is input_area
@@ -5822,6 +5829,7 @@ async def test_management_completion_supports_keyboard_filtering_and_escape() ->
                     "/effort - ",
                     "/permission - ",
                     "/resume - ",
+                    "/restore - ",
                     "/memory - ",
                     "/dream - ",
                 )
@@ -5842,6 +5850,7 @@ async def test_management_completion_supports_keyboard_filtering_and_escape() ->
                     "/status - ",
                     "/effort - ",
                     "/resume - ",
+                    "/restore - ",
                     "/memory - ",
                     "/dream - ",
                 )
@@ -5888,6 +5897,7 @@ async def test_management_completion_keeps_the_composer_visible(
                         "/effort - ",
                         "/permission - ",
                         "/resume - ",
+                        "/restore - ",
                         "/memory - ",
                         "/dream - ",
                     )
@@ -5898,8 +5908,8 @@ async def test_management_completion_keeps_the_composer_visible(
                 "/effort - Set Chat Reasoning Effort",
                 "/permission - Set Foreground Tool Permission Level",
                 "/resume - Resume a Conversation Session",
+                "/restore - Restore the current Conversation Session",
                 "/memory - View Long-term Memory",
-                "/dream - Process pending Conversation Summaries",
             ]
         else:
             assert all(
@@ -5929,6 +5939,7 @@ async def test_management_completion_mouse_selection_updates_the_composer() -> N
                 (
                     "/config - ",
                     "/resume - ",
+                    "/restore - ",
                     "/memory - ",
                     "/dream - ",
                 )
@@ -5966,6 +5977,7 @@ async def test_skill_completion_merges_after_management_commands_with_safe_label
             "/effort - Set Chat Reasoning Effort",
             "/permission - Set Foreground Tool Permission Level",
             "/resume - Resume a Conversation Session",
+            "/restore - Restore the current Conversation Session",
             "/memory - View Long-term Memory",
             "/dream - Process pending Conversation Summaries",
             "/reload_skill - Reload Skills",

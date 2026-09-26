@@ -16,6 +16,14 @@ from myclaw.agent.memory.dream import Dream
 from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.message_bus import MessageBus
 from myclaw.agent.permission import PermissionSnapshot, RuntimePermissionControl
+from myclaw.agent.session.restore import (
+    RestoreError,
+    RestoreManager,
+    RestoreMode,
+    RestorePlan,
+    RestoreResult,
+    StaleRestorePlan,
+)
 from myclaw.agent.tools.core.exec_host import (
     EXEC_CAPABILITY_ERROR,
     create_exec_host,
@@ -35,6 +43,7 @@ from myclaw.agent.workspace_state import (
     WorkspaceStateError,
     normalize_workspace_path,
 )
+from myclaw.agent.workspace_state import WorkspaceState as RuntimeWorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigError, ConfigLoader, UserConfiguration
 from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
@@ -43,6 +52,7 @@ from myclaw.management.service import (
     FatalManagementError,
     ManagementError,
     ManagementViewService,
+    RestoreListingReport,
 )
 from myclaw.provider.factory import create_provider
 from myclaw.provider.model_router import ModelRouter
@@ -52,6 +62,7 @@ from myclaw.terminal.conversation import (
     TerminalConversationApp,
     is_interactive_terminal,
 )
+from myclaw.utils.async_tasks import await_task_preserving_cancellation
 from myclaw.utils.scheduler import AsyncioSchedulerClock
 from myclaw.utils.time import local_now
 
@@ -86,10 +97,23 @@ _RUNTIME_STARTUP_ERROR = ErrorInfo(
     "persistence_error",
     "MyClaw runtime could not be started.",
 )
+_RESTORE_STARTUP_ERROR = ErrorInfo(
+    "persistence_error",
+    "Workspace Restore could not be recovered.",
+)
+_RESTORE_ADMISSION_ERROR = ErrorInfo(
+    "model_invalid_request",
+    "Finish or cancel the active foreground run and clear queued input before restoring.",
+)
+_RESTORE_IN_PROGRESS_ERROR = ErrorInfo(
+    "model_invalid_request",
+    "Session Restore is waiting for confirmation.",
+)
 _SAFE_FATAL_MANAGEMENT_ERRORS = (
     _MODEL_CONTEXT_OVERFLOW_ERROR,
     _TARGET_SESSION_PREPARATION_ERROR,
     _RUNTIME_SESSION_REPLACEMENT_ERROR,
+    _RESTORE_STARTUP_ERROR,
 )
 
 
@@ -221,6 +245,17 @@ async def _run_cli_conversation(
     started = False
     primary_error: BaseException | None = None
     cleanup_errors: list[BaseException] = []
+    startup_restore_result: RestoreResult | None = None
+    startup_session_id: str | None = None
+    restore_manager: RestoreManager | None = None
+    restore_plan: RestorePlan | None = None
+    restore_barrier_loop: AgentLoop | None = None
+    restore_barrier_held = False
+    restore_schedule_paused = False
+    restore_committing = False
+    restore_inspection_task: asyncio.Task[object] | None = None
+    restore_blocked = False
+    latest_restore_result: RestoreResult | None = None
     permission_control = RuntimePermissionControl(
         getattr(configuration.runtime, "permission_level", "workspace-write")
     )
@@ -244,6 +279,16 @@ async def _run_cli_conversation(
             _print_exec_notice(resolved_exec_shell.diagnostic or EXEC_CAPABILITY_ERROR)
         workspace_state = WorkspaceState(workspace_path)
         workspace_state.initialize(agent_home_root=agent_home.path)
+        if isinstance(workspace_state, RuntimeWorkspaceState):
+            try:
+                startup_restore_result = await RestoreManager(workspace_state).recover_pending()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                raise FatalManagementError(_RESTORE_STARTUP_ERROR) from error
+            if startup_restore_result is not None:
+                startup_session_id = startup_restore_result.session_id
+                latest_restore_result = startup_restore_result
 
         mcp_manager = MCPRuntimeManager(
             workspace_path,
@@ -374,6 +419,7 @@ async def _run_cli_conversation(
             nonlocal current_loop, pending_target
             nonlocal replacement_failed_closed
             async with replacement_lock:
+                ensure_management_mutation_allowed()
                 old_loop = current_loop
                 if old_loop is None:
                     raise ManagementError(
@@ -553,7 +599,356 @@ async def _run_cli_conversation(
                 finally:
                     await release_replacement_barrier(resume_inbound=not destructive_started)
 
-        initial_loop = create_agent_loop(None)
+        def ensure_management_mutation_allowed() -> None:
+            if restore_blocked:
+                raise FatalManagementError(_RESTORE_STARTUP_ERROR)
+            if restore_barrier_held or restore_committing:
+                raise ManagementError(_RESTORE_IN_PROGRESS_ERROR)
+
+        async def release_restore_barriers() -> None:
+            nonlocal restore_barrier_loop, restore_barrier_held
+            nonlocal restore_schedule_paused, restore_manager, restore_plan
+            nonlocal restore_committing
+            loop = restore_barrier_loop
+            release_error: BaseException | None = None
+            if loop is not None and restore_barrier_held:
+                try:
+                    await loop._release_replacement_barrier(resume_inbound=True)
+                except BaseException as error:
+                    release_error = error
+                finally:
+                    restore_barrier_held = False
+            if restore_schedule_paused and schedule_service is not None:
+                try:
+                    schedule_service.resume()
+                except BaseException as error:
+                    if release_error is None:
+                        release_error = error
+                finally:
+                    restore_schedule_paused = False
+            restore_barrier_loop = None
+            restore_manager = None
+            restore_plan = None
+            restore_committing = False
+            if release_error is not None:
+                raise release_error
+
+        async def restore_listing() -> RestoreListingReport:
+            nonlocal restore_barrier_loop, restore_barrier_held
+            barrier_acquired = False
+            if restore_blocked:
+                raise FatalManagementError(_RESTORE_STARTUP_ERROR)
+            if restore_barrier_held or restore_committing:
+                raise ManagementError(_RESTORE_IN_PROGRESS_ERROR)
+            if bus is None:
+                raise ManagementError(
+                    ErrorInfo("route_unavailable", "Session Restore is unavailable.")
+                )
+            try:
+                async with replacement_lock:
+                    ensure_management_mutation_allowed()
+                    loop = current_agent_loop()
+                    if loop.control.has_active_run or await bus.inbound_snapshot():
+                        raise ManagementError(_RESTORE_ADMISSION_ERROR)
+                    await loop._pause_for_replacement()
+                    restore_barrier_loop = loop
+                    restore_barrier_held = True
+                    barrier_acquired = True
+                    if loop.control.has_active_run or await bus.inbound_snapshot():
+                        raise ManagementError(_RESTORE_ADMISSION_ERROR)
+                    anchors = loop.session.restore_candidates()
+                    if not anchors:
+                        await release_restore_barriers()
+            except ManagementError:
+                if barrier_acquired:
+                    await release_restore_barriers()
+                raise
+            except asyncio.CancelledError:
+                if barrier_acquired:
+                    await release_restore_barriers()
+                raise
+            except (OSError, UnicodeError, ValueError) as error:
+                if barrier_acquired:
+                    await release_restore_barriers()
+                raise ManagementError(
+                    ErrorInfo("persistence_error", "Restore Anchors could not be listed.")
+                ) from error
+            return RestoreListingReport(
+                session_id=loop.session.session_id,
+                anchors=tuple(reversed(anchors)),
+            )
+
+        async def wait_for_restore_idle(loop: AgentLoop) -> None:
+            wait = getattr(loop, "wait_for_restore_idle", None)
+            if callable(wait):
+                await wait()
+                return
+            await wait_for_session_persist(loop, loop.session.session_id)
+
+        async def restore_inspect(anchor_id: int) -> RestorePlan:
+            nonlocal restore_manager, restore_plan, restore_barrier_loop
+            nonlocal restore_barrier_held, restore_schedule_paused
+            nonlocal restore_inspection_task
+            if restore_blocked:
+                raise FatalManagementError(_RESTORE_STARTUP_ERROR)
+            if (
+                restore_committing
+                or restore_plan is not None
+                or restore_inspection_task is not None
+                or not restore_barrier_held
+            ):
+                raise ManagementError(_RESTORE_IN_PROGRESS_ERROR)
+            loop = current_agent_loop()
+            if bus is None or schedule_service is None or workspace_state is None:
+                raise ManagementError(
+                    ErrorInfo("route_unavailable", "Session Restore is unavailable.")
+                )
+            inspection_task = asyncio.current_task()
+            if inspection_task is None:
+                raise RuntimeError("Session Restore inspection requires an asyncio Task")
+            restore_inspection_task = inspection_task
+            try:
+                if loop.control.has_active_run or await bus.inbound_snapshot():
+                    raise ManagementError(_RESTORE_ADMISSION_ERROR)
+                if restore_barrier_loop is not loop:
+                    raise ManagementError(_RESTORE_IN_PROGRESS_ERROR)
+                if loop.control.has_active_run or await bus.inbound_snapshot():
+                    raise ManagementError(_RESTORE_ADMISSION_ERROR)
+                restore_schedule_paused = True
+                await schedule_service.pause_and_wait_idle()
+                await wait_for_restore_idle(loop)
+                restore_manager = RestoreManager(
+                    workspace_state,
+                    loop.session.session_id,
+                    now=local_now,
+                )
+                inspected = restore_manager.inspect(loop.session, anchor_id)
+                restore_manager.revalidate(inspected)
+                restore_plan = inspected
+                return inspected
+            except asyncio.CancelledError:
+                await release_restore_barriers()
+                raise
+            except ManagementError:
+                await release_restore_barriers()
+                raise
+            except StaleRestorePlan as error:
+                await release_restore_barriers()
+                raise ManagementError(
+                    ErrorInfo(
+                        "model_invalid_request",
+                        "The selected Restore plan is stale; no changes were made.",
+                    )
+                ) from error
+            except (RestoreError, OSError, UnicodeError, ValueError) as error:
+                await release_restore_barriers()
+                raise ManagementError(
+                    ErrorInfo("persistence_error", "Session Restore could not be inspected.")
+                ) from error
+            finally:
+                if restore_inspection_task is inspection_task:
+                    restore_inspection_task = None
+
+        async def rebuild_after_restore(old_loop: AgentLoop, session_id: str) -> None:
+            nonlocal active_loop, active_mcp_snapshot, active_mcp_keywords
+            nonlocal current_loop, pending_target, replacement_failed_closed
+            nonlocal restore_barrier_held, restore_schedule_paused
+            target: AgentLoop | None = None
+            try:
+                if mcp_manager is None or mcp_keyword_preparer is None:
+                    raise ManagementError(
+                        ErrorInfo("route_unavailable", "Runtime Generation is unavailable.")
+                    )
+                if terminal_app is None or schedule_service is None or bus is None:
+                    raise ManagementError(
+                        ErrorInfo("route_unavailable", "Session Restore is unavailable.")
+                    )
+                candidate_report = await mcp_manager.prepare_generation()
+                candidate_keywords = await mcp_keyword_preparer.prepare(
+                    candidate_report.snapshot,
+                    configuration.mcp,
+                )
+                _report_mcp_generation(candidate_report)
+                target = create_agent_loop(
+                    session_id,
+                    mcp_snapshot=candidate_report.snapshot,
+                    mcp_keywords=candidate_keywords,
+                )
+                pending_target = target
+                target.preflight()
+            except BaseException as error:
+                replacement_failed_closed = True
+                current_loop = None
+                if management is not None:
+                    management.deactivate()
+                cleanup_errors: list[BaseException] = []
+                if pending_target is not None:
+                    try:
+                        await abort_loop_once(pending_target)
+                    except BaseException as cleanup_error:
+                        cleanup_errors.append(cleanup_error)
+                    finally:
+                        pending_target = None
+                try:
+                    await abort_loop_once(old_loop)
+                except BaseException as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+                if isinstance(error, asyncio.CancelledError):
+                    if cleanup_errors:
+                        raise error from BaseExceptionGroup(
+                            "Restored Runtime Generation cleanup failed",
+                            tuple(cleanup_errors),
+                        )
+                    raise
+                if cleanup_errors:
+                    raise FatalManagementError(
+                        _RUNTIME_SESSION_REPLACEMENT_ERROR
+                    ) from BaseExceptionGroup(
+                        "Restored Runtime Generation cleanup failed",
+                        (error, *cleanup_errors),
+                    )
+                raise FatalManagementError(_RUNTIME_SESSION_REPLACEMENT_ERROR) from error
+
+            assert target is not None
+            assert mcp_manager is not None
+            assert terminal_app is not None
+            assert schedule_service is not None
+            assert bus is not None
+            destructive_started = True
+            try:
+                generation_id = getattr(old_loop, "generation_id", None)
+                if generation_id is not None:
+                    cancel_generation = getattr(
+                        schedule_service,
+                        "cancel_confirmation_generation",
+                        None,
+                    )
+                    if callable(cancel_generation):
+                        cancel_generation(generation_id)
+                    await confirmation_coordinator.cancel_generation(generation_id)
+                    await _drain_schedule_confirmation_aborts(
+                        schedule_service,
+                        generation_id=generation_id,
+                    )
+                await terminal_app.quiesce_for_rebind()
+                current_loop = None
+                await abort_loop_once(old_loop)
+                await bus.reset()
+                await terminal_app.rebind_agent_loop(
+                    control=target.control,
+                    skill_metadata=target.skill_metadata,
+                    session_projection=target.project_foreground_conversation(),
+                )
+                await target.start()
+                mcp_manager.activate_generation(candidate_report)
+                active_mcp_snapshot = candidate_report.snapshot
+                active_mcp_keywords = candidate_keywords
+                current_loop = target
+                active_loop = target
+                pending_target = None
+                if restore_barrier_held:
+                    await old_loop._release_replacement_barrier(resume_inbound=True)
+                    restore_barrier_held = False
+                if restore_schedule_paused:
+                    schedule_service.resume()
+                    restore_schedule_paused = False
+            except asyncio.CancelledError:
+                replacement_failed_closed = True
+                current_loop = None
+                if management is not None:
+                    management.deactivate()
+                raise
+            except BaseException as error:
+                replacement_failed_closed = True
+                current_loop = None
+                if management is not None:
+                    management.deactivate()
+                raise FatalManagementError(_RUNTIME_SESSION_REPLACEMENT_ERROR) from error
+            finally:
+                if not destructive_started and restore_barrier_held:
+                    await old_loop._release_replacement_barrier(resume_inbound=True)
+                    restore_barrier_held = False
+
+        async def restore_commit(plan: RestorePlan, mode: RestoreMode | str) -> RestoreResult:
+            nonlocal restore_committing, latest_restore_result, restore_manager, restore_plan
+            nonlocal restore_barrier_loop, restore_blocked, replacement_failed_closed, current_loop
+            if restore_blocked:
+                raise FatalManagementError(_RESTORE_STARTUP_ERROR)
+            if restore_manager is None or restore_plan is None or plan != restore_plan:
+                raise ManagementError(
+                    ErrorInfo(
+                        "model_invalid_request",
+                        "The selected Restore plan is stale; no changes were made.",
+                    )
+                )
+            if restore_committing:
+                raise ManagementError(_RESTORE_IN_PROGRESS_ERROR)
+            old_loop = restore_barrier_loop
+            if old_loop is None or not restore_barrier_held:
+                raise ManagementError(_RESTORE_IN_PROGRESS_ERROR)
+            restore_committing = True
+            try:
+                async with replacement_lock:
+                    restore_manager.revalidate(plan)
+                    result = await restore_manager.execute(plan, mode)
+                    await rebuild_after_restore(old_loop, plan.session_id)
+                latest_restore_result = result
+                restore_manager = None
+                restore_plan = None
+                restore_barrier_loop = None
+                restore_committing = False
+                return result
+            except asyncio.CancelledError:
+                restore_blocked = True
+                replacement_failed_closed = True
+                current_loop = None
+                if management is not None:
+                    management.deactivate()
+                raise
+            except StaleRestorePlan as error:
+                await release_restore_barriers()
+                raise ManagementError(
+                    ErrorInfo(
+                        "model_invalid_request",
+                        "The selected Restore plan is stale; no changes were made.",
+                    )
+                ) from error
+            except (RestoreError, OSError, UnicodeError, ValueError) as error:
+                pending_path = (
+                    workspace_state.path / "restore" / plan.session_id / "pending.json"
+                    if workspace_state is not None
+                    else None
+                )
+                if pending_path is not None and pending_path.exists():
+                    restore_blocked = True
+                    replacement_failed_closed = True
+                    current_loop = None
+                    if management is not None:
+                        management.deactivate()
+                    raise FatalManagementError(_RESTORE_STARTUP_ERROR) from error
+                await release_restore_barriers()
+                raise ManagementError(
+                    ErrorInfo("persistence_error", "Session Restore could not be completed.")
+                ) from error
+
+        async def restore_result() -> RestoreResult | None:
+            return latest_restore_result
+
+        async def restore_cancel() -> None:
+            if restore_committing:
+                raise ManagementError(_RESTORE_IN_PROGRESS_ERROR)
+            inspection_task = restore_inspection_task
+            if inspection_task is not None and inspection_task is not asyncio.current_task():
+                inspection_task.cancel()
+                try:
+                    await await_task_preserving_cancellation(inspection_task)
+                except asyncio.CancelledError:
+                    pass
+                return
+            if restore_barrier_held:
+                await release_restore_barriers()
+
+        initial_loop = create_agent_loop(startup_session_id)
         active_loop = initial_loop
         initial_loop.preflight()
         schedule_service._prepare_start()
@@ -578,6 +973,12 @@ async def _run_cli_conversation(
             monotonic=monotonic,
             reasoning_effort_control=router,
             permission_control=permission_control,
+            restore_listing=restore_listing,
+            restore_inspect=restore_inspect,
+            restore_commit=restore_commit,
+            restore_result=restore_result,
+            restore_cancel=restore_cancel,
+            ensure_management_mutation_allowed=ensure_management_mutation_allowed,
         )
         dispatcher = ManagementCommandDispatcher(management)
         terminal_app = TerminalConversationApp(

@@ -2978,7 +2978,10 @@ class TerminalConversationApp(App[None]):
                 return
             message.text_area.remember_submission(text)
             message.text_area.text = ""
-            if result.resume_sessions is not None:
+            if result.restore_listing is not None:
+                await self._management_dispatcher.restore_cancel()
+                await self._mount_management_rows(text, result.output)
+            elif result.resume_sessions is not None:
                 await self._open_resume_picker(
                     result.resume_sessions,
                     message.text_area,
@@ -2988,6 +2991,14 @@ class TerminalConversationApp(App[None]):
                 await self._mount_management_rows(text, result.output)
             return
 
+        foreground_input_admitted = getattr(self._control, "foreground_input_admitted", None)
+        if callable(foreground_input_admitted) and not foreground_input_admitted():
+            message.text_area.text = ""
+            await self._mount_management_rows(
+                "input",
+                "restore_in_progress: Session Restore is waiting for confirmation.",
+            )
+            return
         message.text_area.remember_submission(text)
         message.text_area.text = ""
         self._pending_inputs.append(text)

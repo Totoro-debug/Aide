@@ -8,7 +8,7 @@ import json
 import os
 import re
 import secrets
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -127,6 +127,7 @@ class _StoreState:
     next_operation_id: int
     revision: int
     journal_operation_ids: tuple[int, ...]
+    discarded_operation_ids: tuple[int, ...]
 
 
 class FileBackupStore:
@@ -167,6 +168,7 @@ class FileBackupStore:
                     operation_id + 1,
                     revision,
                     state.journal_operation_ids,
+                    state.discarded_operation_ids,
                 )
                 try:
                     self._write_state(paths, reserved)
@@ -251,6 +253,7 @@ class FileBackupStore:
                                 operation_id + 1,
                                 revision,
                                 state.journal_operation_ids,
+                                state.discarded_operation_ids,
                             ),
                         )
                     except Exception:
@@ -296,6 +299,7 @@ class FileBackupStore:
                         max(state.next_operation_id, ticket.operation_id + 1),
                         revision,
                         state.journal_operation_ids,
+                        state.discarded_operation_ids,
                     ),
                 )
                 self._write_operation(paths, _entry_object(updated), replace_existing=True)
@@ -356,6 +360,45 @@ class FileBackupStore:
         """Check every recorded blob without returning its contents."""
         return self.inspect().integrity_issues
 
+    def discard_run_tokens(self, run_tokens: Iterable[UUID]) -> int:
+        """Remove matching operations from the active branch without deleting evidence."""
+        tokens = frozenset(run_tokens)
+        for token in tokens:
+            require_uuid4(token, field="run_token")
+        if not tokens:
+            return 0
+
+        with self._lock:
+            paths = self._prepare_store()
+            state = self._load_state(paths)
+            removed: list[int] = []
+            for operation_id in state.journal_operation_ids:
+                operation = self._read_operation(
+                    paths,
+                    self._entry_path(paths, operation_id),
+                    operation_id,
+                )
+                if operation.run_token in tokens:
+                    removed.append(operation_id)
+            if not removed:
+                return 0
+            revision = state.revision + 1
+            removed_set = set(removed)
+            updated = _StoreState(
+                next_operation_id=state.next_operation_id,
+                revision=revision,
+                journal_operation_ids=tuple(
+                    operation_id
+                    for operation_id in state.journal_operation_ids
+                    if operation_id not in removed_set
+                ),
+                discarded_operation_ids=tuple(
+                    sorted(set(state.discarded_operation_ids).union(removed_set))
+                ),
+            )
+            self._write_state(paths, updated)
+            return len(removed)
+
     def _is_restore_target(self, requested: Path, canonical: Path) -> bool:
         protected = Path(os.path.abspath(self._workspace_state.path / "restore"))
         protected_resolved = protected.resolve(strict=False)
@@ -409,20 +452,30 @@ class FileBackupStore:
         max_operation_id = max(operation_ids, default=0)
         max_revision = self._max_record_revision(paths)
         if state is None:
-            state = _StoreState(max_operation_id + 1, max_revision, operation_ids)
+            state = _StoreState(max_operation_id + 1, max_revision, operation_ids, ())
             needs_write = True
         else:
             next_id = max(state.next_operation_id, max_operation_id + 1)
             revision = max(state.revision, max_revision)
+            discarded_operation_ids = tuple(sorted(set(state.discarded_operation_ids)))
             journal_operation_ids = tuple(
-                sorted(set(state.journal_operation_ids).union(operation_ids))
+                sorted(
+                    (set(state.journal_operation_ids).union(operation_ids))
+                    - set(discarded_operation_ids)
+                )
             )
             if (
                 next_id != state.next_operation_id
                 or revision != state.revision
                 or journal_operation_ids != state.journal_operation_ids
+                or discarded_operation_ids != state.discarded_operation_ids
             ):
-                state = _StoreState(next_id, revision, journal_operation_ids)
+                state = _StoreState(
+                    next_id,
+                    revision,
+                    journal_operation_ids,
+                    discarded_operation_ids,
+                )
                 needs_write = True
 
         if needs_write:
@@ -439,6 +492,7 @@ class FileBackupStore:
                 "next_operation_id": state.next_operation_id,
                 "revision": state.revision,
                 "journal_operation_ids": list(state.journal_operation_ids),
+                "discarded_operation_ids": list(state.discarded_operation_ids),
             }
         )
         state_path = HOST_FILESYSTEM.path_for_io(paths.state)
@@ -600,6 +654,7 @@ def _state_with_operation(
         next_operation_id=max(state.next_operation_id, operation_id + 1),
         revision=max(state.revision, revision),
         journal_operation_ids=operation_ids,
+        discarded_operation_ids=state.discarded_operation_ids,
     )
 
 
@@ -790,18 +845,28 @@ def _decode_signed_json(content: bytes) -> dict[str, object]:
 
 def _decode_state(content: bytes) -> _StoreState:
     value = _decode_signed_json(content)
-    if set(value) != {
-        "schema_version",
-        "next_operation_id",
-        "revision",
-        "journal_operation_ids",
-    }:
+    if set(value) not in (
+        {
+            "schema_version",
+            "next_operation_id",
+            "revision",
+            "journal_operation_ids",
+        },
+        {
+            "schema_version",
+            "next_operation_id",
+            "revision",
+            "journal_operation_ids",
+            "discarded_operation_ids",
+        },
+    ):
         raise BackupStoreError("Restore state fields do not match the schema.")
     if value["schema_version"] != _SCHEMA_VERSION:
         raise BackupStoreError("Restore state schema version is unsupported.")
     next_id = value["next_operation_id"]
     revision = value["revision"]
     operation_ids_value = value["journal_operation_ids"]
+    discarded_ids_value = value.get("discarded_operation_ids", [])
     if isinstance(next_id, bool) or not isinstance(next_id, int) or next_id < 1:
         raise BackupStoreError("Restore state operation counter is invalid.")
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
@@ -817,7 +882,20 @@ def _decode_state(content: bytes) -> _StoreState:
     operation_ids = tuple(operation_ids_value)
     if operation_ids != tuple(sorted(set(operation_ids))):
         raise BackupStoreError("Restore state journal operation IDs are invalid.")
-    return _StoreState(next_id, revision, operation_ids)
+    if not isinstance(discarded_ids_value, list) or any(
+        isinstance(operation_id, bool)
+        or not isinstance(operation_id, int)
+        or operation_id < 1
+        or operation_id >= next_id
+        for operation_id in discarded_ids_value
+    ):
+        raise BackupStoreError("Restore state discarded operation IDs are invalid.")
+    discarded_ids = tuple(discarded_ids_value)
+    if discarded_ids != tuple(sorted(set(discarded_ids))):
+        raise BackupStoreError("Restore state discarded operation IDs are invalid.")
+    if set(operation_ids).intersection(discarded_ids):
+        raise BackupStoreError("Restore state operation IDs cannot be both active and discarded.")
+    return _StoreState(next_id, revision, operation_ids, discarded_ids)
 
 
 def _file_state_object(state: FileState) -> dict[str, object]:

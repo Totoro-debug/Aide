@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ SESSION_ID = "20260926-120000-123456_12345678-1234-4234-8234-123456789abc"
 FIRST_TOKEN = UUID("12345678-1234-4234-8234-123456789abc")
 SECOND_TOKEN = UUID("22345678-1234-4234-8234-123456789abc")
 NOW = datetime(2026, 9, 26, 12, 0, 0, 123000, tzinfo=UTC)
+AfterRestorePhase = Callable[[str, Callable[[], None]], None]
 
 
 def _commit_user(session: Session, content: str, token: UUID) -> None:
@@ -157,7 +159,7 @@ async def test_file_restore_replays_conflicts_deletes_new_files_and_continues_af
     monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_bytes", fail_one_target)
     monkeypatch.setattr(
         restore_module,
-        "_sync_directory",
+        "sync_directory",
         lambda path: synced_directories.append(Path(path)),
     )
     manager = RestoreManager(state, session.session_id, now=lambda: NOW)
@@ -293,6 +295,7 @@ async def test_backup_gap_only_disables_file_mode_inside_selected_range(
 async def test_recovery_is_idempotent_after_each_durable_phase(
     workspace: Path,
     interrupted_phase: str,
+    after_restore_phase: AfterRestorePhase,
 ) -> None:
     state = WorkspaceState(workspace)
     session = Session.create(state, new_uuid=lambda: FIRST_TOKEN, now=lambda: NOW)
@@ -307,16 +310,11 @@ async def test_recovery_is_idempotent_after_each_durable_phase(
     await session.wait_for_pending_persist()
     plan = RestoreManager(state, session.session_id, now=lambda: NOW).inspect(session, 1)
 
-    def interrupt(phase: str) -> None:
-        if phase == interrupted_phase:
-            raise RuntimeError(f"injected interruption after {phase}")
+    def interrupt() -> None:
+        raise RuntimeError(f"injected interruption after {interrupted_phase}")
 
-    manager = RestoreManager(
-        state,
-        session.session_id,
-        now=lambda: NOW,
-        phase_hook=interrupt,
-    )
+    after_restore_phase(interrupted_phase, interrupt)
+    manager = RestoreManager(state, session.session_id, now=lambda: NOW)
     with pytest.raises(RuntimeError, match="injected interruption"):
         await manager.execute(plan, RestoreMode.FILES)
 
@@ -334,6 +332,7 @@ async def test_recovery_is_idempotent_after_each_durable_phase(
 @pytest.mark.asyncio
 async def test_startup_recovery_prefers_incomplete_transaction_over_completed_result(
     workspace: Path,
+    after_restore_phase: AfterRestorePhase,
 ) -> None:
     state = WorkspaceState(workspace)
     completed_session = Session.create(state, new_uuid=lambda: FIRST_TOKEN, now=lambda: NOW)
@@ -363,16 +362,11 @@ async def test_startup_recovery_prefers_incomplete_transaction_over_completed_re
     pending_store.after_write(pending_ticket)
     await pending_session.wait_for_pending_persist()
 
-    def interrupt(phase: str) -> None:
-        if phase == "pending_intent":
-            raise RuntimeError("injected pending transaction")
+    def interrupt() -> None:
+        raise RuntimeError("injected pending transaction")
 
-    pending_manager = RestoreManager(
-        state,
-        pending_session.session_id,
-        now=lambda: NOW,
-        phase_hook=interrupt,
-    )
+    after_restore_phase("pending_intent", interrupt)
+    pending_manager = RestoreManager(state, pending_session.session_id, now=lambda: NOW)
     with pytest.raises(RuntimeError, match="injected pending transaction"):
         await pending_manager.execute(
             pending_manager.inspect(pending_session, 1),
@@ -391,6 +385,7 @@ async def test_startup_recovery_prefers_incomplete_transaction_over_completed_re
 @pytest.mark.asyncio
 async def test_missing_safety_snapshot_does_not_mutate_on_recovery(
     workspace: Path,
+    after_restore_phase: AfterRestorePhase,
 ) -> None:
     state = WorkspaceState(workspace)
     session = Session.create(state, new_uuid=lambda: FIRST_TOKEN, now=lambda: NOW)
@@ -405,18 +400,15 @@ async def test_missing_safety_snapshot_does_not_mutate_on_recovery(
     await session.wait_for_pending_persist()
     plan = RestoreManager(state, session.session_id, now=lambda: NOW).inspect(session, 1)
 
-    def remove_safety_after_intent(phase: str) -> None:
-        if phase == "pending_intent":
-            shutil.rmtree(workspace / ".myclaw" / "restore" / session.session_id / "latest-safety")
-            raise RuntimeError("injected crash after pending intent")
+    def remove_safety_after_intent() -> None:
+        shutil.rmtree(workspace / ".myclaw" / "restore" / session.session_id / "latest-safety")
+        raise RuntimeError("injected crash after pending intent")
 
+    after_restore_phase("pending_intent", remove_safety_after_intent)
     with pytest.raises(RuntimeError, match="injected crash"):
-        await RestoreManager(
-            state,
-            session.session_id,
-            now=lambda: NOW,
-            phase_hook=remove_safety_after_intent,
-        ).execute(plan, RestoreMode.FILES)
+        await RestoreManager(state, session.session_id, now=lambda: NOW).execute(
+            plan, RestoreMode.FILES
+        )
 
     with pytest.raises(RestoreSafetyError):
         await RestoreManager(state, session.session_id, now=lambda: NOW).recover_pending()
@@ -434,6 +426,7 @@ async def test_missing_safety_snapshot_does_not_mutate_on_recovery(
 async def test_damaged_safety_snapshot_content_does_not_mutate_on_recovery(
     workspace: Path,
     damaged_name: str,
+    after_restore_phase: AfterRestorePhase,
 ) -> None:
     state = WorkspaceState(workspace)
     session = Session.create(state, new_uuid=lambda: FIRST_TOKEN, now=lambda: NOW)
@@ -448,21 +441,17 @@ async def test_damaged_safety_snapshot_content_does_not_mutate_on_recovery(
     await session.wait_for_pending_persist()
     plan = RestoreManager(state, session.session_id, now=lambda: NOW).inspect(session, 1)
 
-    def damage_snapshot(phase: str) -> None:
-        if phase != "pending_intent":
-            return
+    def damage_snapshot() -> None:
         latest = workspace / ".myclaw" / "restore" / session.session_id / "latest-safety"
         manifest = json.loads((latest / "manifest.json").read_bytes())
         (latest / manifest["generation"] / damaged_name).write_bytes(b"")
         raise RuntimeError("injected crash with damaged safety snapshot")
 
+    after_restore_phase("pending_intent", damage_snapshot)
     with pytest.raises(RuntimeError, match="damaged safety snapshot"):
-        await RestoreManager(
-            state,
-            session.session_id,
-            now=lambda: NOW,
-            phase_hook=damage_snapshot,
-        ).execute(plan, RestoreMode.FILES)
+        await RestoreManager(state, session.session_id, now=lambda: NOW).execute(
+            plan, RestoreMode.FILES
+        )
 
     with pytest.raises(RestoreSafetyError):
         await RestoreManager(state, session.session_id, now=lambda: NOW).recover_pending()
@@ -513,6 +502,7 @@ async def test_safety_snapshot_write_failure_causes_zero_mutation(
 async def test_published_snapshot_survives_old_generation_cleanup_failure(
     workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
+    after_restore_phase: AfterRestorePhase,
 ) -> None:
     state = WorkspaceState(workspace)
     session = Session.create(state, new_uuid=lambda: FIRST_TOKEN, now=lambda: NOW)
@@ -547,17 +537,12 @@ async def test_published_snapshot_survives_old_generation_cleanup_failure(
             raise PermissionError("injected old generation cleanup failure")
         original_rmtree(path)
 
-    def interrupt(phase: str) -> None:
-        if phase == "pending_intent":
-            raise RuntimeError("injected crash after replacement snapshot")
+    def interrupt() -> None:
+        raise RuntimeError("injected crash after replacement snapshot")
 
     monkeypatch.setattr(shutil, "rmtree", refuse_old_generation)
-    second_manager = RestoreManager(
-        state,
-        session.session_id,
-        now=lambda: NOW,
-        phase_hook=interrupt,
-    )
+    after_restore_phase("pending_intent", interrupt)
+    second_manager = RestoreManager(state, session.session_id, now=lambda: NOW)
     with pytest.raises(RuntimeError, match="replacement snapshot"):
         await second_manager.execute(second_manager.inspect(continued, 2), RestoreMode.FILES)
 

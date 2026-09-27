@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from myclaw.terminal.conversation import TerminalConversationApp
 
 SESSION_ID = "20260926-120000-000000_550e8400-e29b-41d4-a716-446655440000"
 ANCHOR_TOKEN = UUID("550e8400-e29b-41d4-a716-446655440001")
+AfterRestorePhase = Callable[[str, Callable[[], None]], None]
 
 
 @pytest.mark.asyncio
@@ -527,6 +529,7 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
 async def test_cli_recovers_pending_restore_before_runtime_components(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    after_restore_phase: AfterRestorePhase,
 ) -> None:
     events: list[str] = []
     home = AgentHome(tmp_path / "agent-home")
@@ -547,16 +550,14 @@ async def test_cli_recovers_pending_restore_before_runtime_components(
     await session.wait_for_pending_persist()
     plan = SessionRestoreManager(state, session.session_id).inspect(session, 1)
 
-    def interrupt_after_pending(phase: str) -> None:
-        if phase == "pending_intent":
-            raise RuntimeError("injected startup recovery interruption")
+    def interrupt_after_pending() -> None:
+        raise RuntimeError("injected startup recovery interruption")
 
+    after_restore_phase("pending_intent", interrupt_after_pending)
     with pytest.raises(RuntimeError, match="startup recovery interruption"):
-        await SessionRestoreManager(
-            state,
-            session.session_id,
-            phase_hook=interrupt_after_pending,
-        ).execute(plan, RestoreMode.CONVERSATION_ONLY)
+        await SessionRestoreManager(state, session.session_id).execute(
+            plan, RestoreMode.CONVERSATION_ONLY
+        )
     loaded_session_ids: list[str | None] = []
 
     class FakeRestoreManager:

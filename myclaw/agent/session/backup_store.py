@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import errno
 import hashlib
 import json
 import os
@@ -14,9 +13,14 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
-from typing import BinaryIO, Final, Protocol
+from typing import BinaryIO, Protocol
 from uuid import UUID
 
+from myclaw.agent.session._restore_persistence import (
+    canonical_json_bytes,
+    sha256_hex,
+    sync_created_directory,
+)
 from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 from myclaw.utils.validation import require_uuid4, require_uuid4_string
@@ -32,13 +36,6 @@ _SHA256 = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _BLOB_NAME = re.compile(r"[0-9a-f]{48}\.bin", re.ASCII)
 _GAP_CODES = frozenset(
     {"target_read_failed", "blob_write_failed", "journal_write_failed", "store_unavailable"}
-)
-_POSIX_UNSUPPORTED_SYNC_ERRNOS: Final = frozenset(
-    {
-        errno.EINVAL,
-        getattr(errno, "ENOTSUP", errno.EINVAL),
-        getattr(errno, "EOPNOTSUPP", errno.EINVAL),
-    }
 )
 
 
@@ -209,7 +206,7 @@ class FileBackupStore:
                         return BackupTicket(
                             operation_id, run_token, requested, canonical, recorded=False
                         )
-                    before = FileState(True, _sha256(content), blob_name)
+                    before = FileState(True, sha256_hex(content), blob_name)
                 entry = BackupJournalEntry(
                     operation_id=operation_id,
                     revision=revision,
@@ -288,7 +285,7 @@ class FileBackupStore:
                     return
                 after = _capture_target(ticket.canonical_target)
                 after_state = (
-                    FileState(False, None) if after is None else FileState(True, _sha256(after))
+                    FileState(False, None) if after is None else FileState(True, sha256_hex(after))
                 )
                 state = self._load_state(paths)
                 revision = state.revision + 1
@@ -355,10 +352,6 @@ class FileBackupStore:
             if not operation.before.exists:
                 return None
             return self._read_backup_blob(paths, operation)
-
-    def verify_integrity(self) -> tuple[BackupIntegrityIssue, ...]:
-        """Check every recorded blob without returning its contents."""
-        return self.inspect().integrity_issues
 
     def discard_run_tokens(self, run_tokens: Iterable[UUID]) -> int:
         """Remove matching operations from the active branch without deleting evidence."""
@@ -430,7 +423,7 @@ class FileBackupStore:
         HOST_FILESYSTEM.restrict_private_directory(owned)
         identity = _directory_identity(owned)
         if identity not in self._durable_directories:
-            _sync_created_directory(owned)
+            sync_created_directory(owned)
             if _directory_identity(owned) != identity:
                 raise OSError("Restore directory identity changed during persistence.")
             self._durable_directories.add(identity)
@@ -599,7 +592,7 @@ class FileBackupStore:
             content = _read_owned_file(path, within=paths.blobs)
         except Exception as error:
             raise BackupIntegrityError(entry.operation_id, "missing_or_unsafe_blob") from error
-        if _sha256(content) != digest:
+        if sha256_hex(content) != digest:
             raise BackupIntegrityError(entry.operation_id, "hash_mismatch")
         return content
 
@@ -713,41 +706,11 @@ def _capture_target(path: Path) -> bytes | None:
         return stream.read()
 
 
-def _sync_created_directory(path: Path) -> None:
-    if not getattr(os, "O_DIRECTORY", 0):
-        return
-    _sync_directory(path)
-    _sync_directory(path.parent)
-
-
 def _directory_identity(path: Path) -> tuple[Path, int, int]:
     status = HOST_FILESYSTEM.path_for_io(path).lstat()
     if not HOST_FILESYSTEM.is_directory(status):
         raise OSError("Restore directory identity is unsafe.")
     return path, status.st_dev, status.st_ino
-
-
-def _sync_directory(path: Path) -> None:
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    try:
-        descriptor = os.open(HOST_FILESYSTEM.path_for_io(path), flags)
-    except OSError as error:
-        if error.errno in _POSIX_UNSUPPORTED_SYNC_ERRNOS:
-            return
-        raise
-    try:
-        try:
-            os.fsync(descriptor)
-        except OSError as error:
-            if error.errno not in _POSIX_UNSUPPORTED_SYNC_ERRNOS:
-                raise
-    finally:
-        os.close(descriptor)
 
 
 @contextmanager
@@ -806,25 +769,11 @@ def _path_entry_exists(path: Path) -> bool:
     return True
 
 
-def _sha256(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()
-
-
-def _canonical_json(value: object) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-
 def _encode_signed_json(value: dict[str, object]) -> bytes:
-    body = _canonical_json(value)
+    body = canonical_json_bytes(value)
     signed = dict(value)
-    signed["integrity_sha256"] = _sha256(body)
-    return _canonical_json(signed)
+    signed["integrity_sha256"] = sha256_hex(body)
+    return canonical_json_bytes(signed)
 
 
 def _decode_signed_json(content: bytes) -> dict[str, object]:
@@ -838,7 +787,7 @@ def _decode_signed_json(content: bytes) -> dict[str, object]:
     body = {key: member for key, member in value.items() if key != "integrity_sha256"}
     if not isinstance(checksum, str) or _SHA256.fullmatch(checksum) is None:
         raise BackupStoreError("Restore state is missing its integrity hash.")
-    if _sha256(_canonical_json(body)) != checksum:
+    if sha256_hex(canonical_json_bytes(body)) != checksum:
         raise BackupStoreError("Restore state integrity check failed.")
     return body
 

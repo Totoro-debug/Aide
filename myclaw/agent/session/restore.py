@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import base64
-import errno
-import hashlib
 import json
 import os
 import shutil
@@ -16,6 +14,12 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from myclaw.agent.session._restore_persistence import (
+    canonical_json_bytes,
+    sha256_hex,
+    sync_created_directory,
+    sync_directory,
+)
 from myclaw.agent.session.backup_store import (
     BackupGap,
     BackupIntegrityIssue,
@@ -28,13 +32,6 @@ from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 
 _SCHEMA_VERSION = 1
-_POSIX_UNSUPPORTED_SYNC_ERRNOS = frozenset(
-    {
-        errno.EINVAL,
-        getattr(errno, "ENOTSUP", errno.EINVAL),
-        getattr(errno, "EOPNOTSUPP", errno.EINVAL),
-    }
-)
 
 
 class RestoreError(Exception):
@@ -118,17 +115,6 @@ class RestorePlan:
     discarded_run_tokens: tuple[UUID, ...]
     available_modes: tuple[RestoreMode, ...]
 
-    @property
-    def summary(self) -> RestoreSummary:
-        return RestoreSummary(
-            removed_users=self.removed_users,
-            removed_messages=self.removed_messages,
-            tracked_target_count=len(self.targets),
-            external_target_count=self.external_target_count,
-            conflict_targets=self.conflict_targets,
-            backup_gaps=self.backup_gaps,
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class RestoreFileResult:
@@ -139,18 +125,6 @@ class RestoreFileResult:
     status: RestoreFileStatus
     conflict: bool = False
     error: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class RestoreSummary:
-    """Compact presentation data derived from one immutable plan."""
-
-    removed_users: int
-    removed_messages: int
-    tracked_target_count: int
-    external_target_count: int
-    conflict_targets: tuple[Path, ...]
-    backup_gaps: tuple[BackupGap, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,9 +198,6 @@ class _PendingTransaction:
     failure_notification_acknowledged: bool = False
 
 
-PhaseHook = Callable[[str], None]
-
-
 class RestoreManager:
     """Own the durable restore protocol behind a small storage seam."""
 
@@ -236,7 +207,6 @@ class RestoreManager:
         session_id: str | None = None,
         *,
         now: Callable[[], datetime] | None = None,
-        phase_hook: PhaseHook | None = None,
     ) -> None:
         if not isinstance(workspace_state, WorkspaceState):
             raise TypeError("workspace_state must be a WorkspaceState")
@@ -245,7 +215,6 @@ class RestoreManager:
         self._workspace_state = workspace_state
         self._session_id = session_id
         self._now = now
-        self._phase_hook = phase_hook
 
     def inspect(self, session: Session, anchor_id: int) -> RestorePlan:
         """Inspect persisted Session anchors and its active journal."""
@@ -301,7 +270,7 @@ class RestoreManager:
         return RestorePlan(
             session_id=persisted.session_id,
             anchor_id=anchor_id,
-            session_digest=_sha256(session_bytes),
+            session_digest=sha256_hex(session_bytes),
             journal_revision=journal.revision,
             removed_users=sum(
                 message.get("role") == "user" for message in persisted.messages[anchor_index:]
@@ -355,7 +324,7 @@ class RestoreManager:
         store = FileBackupStore(self._workspace_state, plan.session_id)
         journal = store.inspect()
         if (
-            _sha256(session_bytes) != plan.session_digest
+            sha256_hex(session_bytes) != plan.session_digest
             or journal.revision != plan.journal_revision
         ):
             raise StaleRestorePlan("restore plan changed during execution")
@@ -407,7 +376,6 @@ class RestoreManager:
             targets=pending_targets,
         )
         _write_pending(self._workspace_state, pending)
-        self._after_phase("pending_intent")
         return await self._continue_pending(pending)
 
     async def recover_pending(self) -> RestoreResult | None:
@@ -461,7 +429,6 @@ class RestoreManager:
             store.discard_run_tokens(pending.discarded_run_tokens)
             pending.phase = _RestorePhase.JOURNAL_PRUNED
             _write_pending(self._workspace_state, pending)
-            self._after_phase(_RestorePhase.JOURNAL_PRUNED)
 
         if pending.mode is RestoreMode.FILES and pending.phase in {
             _RestorePhase.JOURNAL_PRUNED,
@@ -478,7 +445,6 @@ class RestoreManager:
                 pending.current_operation_id = item.target.operation_id
                 pending.phase = _RestorePhase.FILE_INTENT
                 _write_pending(self._workspace_state, pending)
-                self._after_phase(_RestorePhase.FILE_INTENT)
                 if item.preflight_error is not None:
                     item.result = RestoreFileResult(
                         target=item.target.canonical_target,
@@ -501,20 +467,16 @@ class RestoreManager:
                 pending.current_operation_id = None
                 pending.phase = _RestorePhase.FILE_REPLAY
                 _write_pending(self._workspace_state, pending)
-                self._after_phase("file_result")
             pending.phase = _RestorePhase.FILES_REPLAYED
             _write_pending(self._workspace_state, pending)
-            self._after_phase(_RestorePhase.FILES_REPLAYED)
         elif pending.phase is _RestorePhase.JOURNAL_PRUNED:
             pending.phase = _RestorePhase.FILES_REPLAYED
             _write_pending(self._workspace_state, pending)
-            self._after_phase(_RestorePhase.FILES_REPLAYED)
 
         if pending.phase in {_RestorePhase.FILES_REPLAYED, _RestorePhase.SESSION_WRITE}:
             if pending.phase is _RestorePhase.FILES_REPLAYED:
                 pending.phase = _RestorePhase.SESSION_WRITE
                 _write_pending(self._workspace_state, pending)
-                self._after_phase(_RestorePhase.SESSION_WRITE)
             if pending.session_result is None:
                 session = Session.load(
                     self._workspace_state,
@@ -535,16 +497,10 @@ class RestoreManager:
                     )
             pending.phase = _RestorePhase.SESSION_PERSISTED
             _write_pending(self._workspace_state, pending)
-            self._after_phase(_RestorePhase.SESSION_PERSISTED)
 
         pending.phase = _RestorePhase.COMPLETE
         _write_pending(self._workspace_state, pending)
-        self._after_phase(_RestorePhase.COMPLETE)
         return _result_from_pending(pending)
-
-    def _after_phase(self, phase: str) -> None:
-        if self._phase_hook is not None:
-            self._phase_hook(phase)
 
 
 def _coerce_mode(value: RestoreMode | str) -> RestoreMode:
@@ -647,7 +603,7 @@ def _delete_target(path: Path) -> None:
         return
     owned = HOST_FILESYSTEM.require_owned_regular_file(path, within=path.parent)
     HOST_FILESYSTEM.path_for_io(owned).unlink()
-    _sync_directory(owned.parent)
+    sync_directory(owned.parent)
 
 
 def _error_text(error: Exception) -> str:
@@ -675,7 +631,7 @@ def _ensure_private_directory(path: Path, within: Path) -> Path:
     owned = HOST_FILESYSTEM.require_owned_directory(path, within=within)
     HOST_FILESYSTEM.restrict_private_directory(owned)
     if created:
-        _sync_created_directory(owned)
+        sync_created_directory(owned)
     return owned
 
 
@@ -688,7 +644,7 @@ def _write_internal(path: Path, content: bytes, *, within: Path) -> None:
 
 
 def _write_json(path: Path, value: dict[str, object], *, within: Path) -> None:
-    _write_internal(path, _canonical_json(value), within=within)
+    _write_internal(path, canonical_json_bytes(value), within=within)
 
 
 def _write_safety_snapshot(
@@ -704,8 +660,8 @@ def _write_safety_snapshot(
     generation = f"snapshot-{os.urandom(16).hex()}"
     generation_root = _ensure_private_directory(latest_root / generation, latest_root)
     try:
-        journal_content = _canonical_json(_journal_object(journal, store))
-        targets_content = _canonical_json(
+        journal_content = canonical_json_bytes(_journal_object(journal, store))
+        targets_content = canonical_json_bytes(
             {
                 "schema_version": _SCHEMA_VERSION,
                 "targets": [
@@ -729,8 +685,8 @@ def _write_safety_snapshot(
                 "generation": generation,
                 "session_digest": plan.session_digest,
                 "journal_revision": plan.journal_revision,
-                "journal_digest": _sha256(journal_content),
-                "targets_digest": _sha256(targets_content),
+                "journal_digest": sha256_hex(journal_content),
+                "targets_digest": sha256_hex(targets_content),
             },
             within=latest_root,
         )
@@ -837,11 +793,11 @@ def _verify_safety_snapshot(workspace_state: WorkspaceState, pending: _PendingTr
         session_content = _read_internal(generation_root / "session.jsonl", within=generation_root)
         journal_content = _read_internal(generation_root / "journal.json", within=generation_root)
         targets_content = _read_internal(generation_root / "targets.json", within=generation_root)
-        if complete != b"complete\n" or _sha256(session_content) != pending.session_digest:
+        if complete != b"complete\n" or sha256_hex(session_content) != pending.session_digest:
             raise RestoreSafetyError("pending restore safety snapshot content is invalid")
-        if _sha256(journal_content) != manifest["journal_digest"]:
+        if sha256_hex(journal_content) != manifest["journal_digest"]:
             raise RestoreSafetyError("pending restore safety journal digest is invalid")
-        if _sha256(targets_content) != manifest["targets_digest"]:
+        if sha256_hex(targets_content) != manifest["targets_digest"]:
             raise RestoreSafetyError("pending restore safety target digest is invalid")
         journal_value = _decode_json_object(journal_content)
         if (
@@ -1109,7 +1065,7 @@ def _target_from_object(value: object) -> RestoreTarget:
         raise PendingRestoreError("restore target fields are malformed")
     before_bytes = _decode_bytes(value.get("before_b64"))
     if before_exists:
-        if before_bytes is not None and _sha256(before_bytes) != before_sha256:
+        if before_bytes is not None and sha256_hex(before_bytes) != before_sha256:
             raise PendingRestoreError("restore target backup digest does not match its bytes")
     elif before_bytes is not None:
         raise PendingRestoreError("absent restore target must not contain backup bytes")
@@ -1144,7 +1100,7 @@ def _observed_from_object(value: object) -> _ObservedTarget:
     if not isinstance(exists, bool) or (digest is not None and not isinstance(digest, str)):
         raise PendingRestoreError("restore observed target fields are malformed")
     content = _decode_bytes(value.get("content_b64"))
-    if exists != (content is not None) or (content is not None and _sha256(content) != digest):
+    if exists != (content is not None) or (content is not None and sha256_hex(content) != digest):
         raise PendingRestoreError("restore observed target digest does not match its bytes")
     if not exists and digest is not None:
         raise PendingRestoreError("absent observed target must not contain a digest")
@@ -1259,16 +1215,6 @@ def _decode_bytes(value: object) -> bytes | None:
         raise PendingRestoreError("restore byte field is malformed") from error
 
 
-def _canonical_json(value: object) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-
 def _failure_notification_pending(pending: _PendingTransaction) -> bool:
     return (
         any(
@@ -1277,38 +1223,6 @@ def _failure_notification_pending(pending: _PendingTransaction) -> bool:
         )
         and not pending.failure_notification_acknowledged
     )
-
-
-def _sync_created_directory(path: Path) -> None:
-    if not getattr(os, "O_DIRECTORY", 0):
-        return
-    _sync_directory(path)
-    _sync_directory(path.parent)
-
-
-def _sync_directory(path: Path) -> None:
-    if not getattr(os, "O_DIRECTORY", 0):
-        return
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    try:
-        descriptor = os.open(HOST_FILESYSTEM.path_for_io(path), flags)
-    except OSError as error:
-        if error.errno in _POSIX_UNSUPPORTED_SYNC_ERRNOS:
-            return
-        raise
-    try:
-        try:
-            os.fsync(descriptor)
-        except OSError as error:
-            if error.errno not in _POSIX_UNSUPPORTED_SYNC_ERRNOS:
-                raise
-    finally:
-        os.close(descriptor)
 
 
 def _anchor_index(messages: list[dict[str, Any]], anchor_id: int) -> int:
@@ -1423,15 +1337,11 @@ def _observe_target(path: Path) -> _ObservedTarget:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    return _ObservedTarget(True, _sha256(content), content)
+    return _ObservedTarget(True, sha256_hex(content), content)
 
 
 def _path_key(path: Path) -> str:
     return os.path.normcase(os.path.abspath(path))
-
-
-def _sha256(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()
 
 
 __all__ = [
@@ -1445,7 +1355,6 @@ __all__ = [
     "RestorePlan",
     "RestoreResult",
     "RestoreSafetyError",
-    "RestoreSummary",
     "RestoreTarget",
     "StaleRestorePlan",
 ]

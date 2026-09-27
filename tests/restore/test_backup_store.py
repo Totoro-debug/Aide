@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 
 from myclaw.agent.session import backup_store as backup_store_module
+from myclaw.agent.session._restore_persistence import canonical_json_bytes, sha256_hex
 from myclaw.agent.session.backup_store import (
     BackupIntegrityError,
     BackupIntegrityIssue,
@@ -21,6 +22,17 @@ from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 
 SESSION_ID = "20260926-120000-123456_12345678-1234-4234-8234-123456789abc"
+
+
+def test_restore_persistence_primitives_keep_canonical_bytes_and_digest() -> None:
+    content = canonical_json_bytes({"z": "雪", "a": [1, True, None]})
+
+    assert content == b'{"a":[1,true,null],"z":"\xe9\x9b\xaa"}'
+    assert sha256_hex(content) == (
+        "33290394113200823ebc40344b2b193d16aefef53759dd97228b0a4fcf8762c9"
+    )
+    with pytest.raises(ValueError):
+        canonical_json_bytes({"value": float("nan")})
 
 
 def test_backup_store_records_existing_bytes_and_nonexistence(workspace: Path) -> None:
@@ -166,7 +178,7 @@ def test_new_restore_directories_enter_the_durability_sync_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     synced: list[Path] = []
-    monkeypatch.setattr(backup_store_module, "_sync_created_directory", synced.append)
+    monkeypatch.setattr(backup_store_module, "sync_created_directory", synced.append)
     store = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
 
     store.before_write(uuid4(), workspace.parent / "new-target.bin")
@@ -196,7 +208,7 @@ def test_failed_directory_sync_is_retried_without_blocking_the_caller(
             failed = True
             raise OSError("injected directory sync failure")
 
-    monkeypatch.setattr(backup_store_module, "_sync_created_directory", fail_restore_once)
+    monkeypatch.setattr(backup_store_module, "sync_created_directory", fail_restore_once)
     store = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
     target = workspace.parent / "sync-retry.bin"
 
@@ -339,7 +351,7 @@ def test_integrity_check_reports_missing_or_corrupt_blob(
         blob.write_bytes(b"corrupted backup")
         reason = "hash_mismatch"
 
-    assert store.verify_integrity() == (BackupIntegrityIssue(1, reason),)
+    assert store.inspect().integrity_issues == (BackupIntegrityIssue(1, reason),)
     with pytest.raises(BackupIntegrityError):
         store.read_backup(ticket.operation_id)
     assert b"sensitive backup bytes" not in repr(store.inspect()).encode("utf-8")

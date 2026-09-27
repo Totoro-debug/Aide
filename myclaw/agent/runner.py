@@ -11,7 +11,6 @@ from uuid import UUID
 
 from loguru import logger
 
-from myclaw.agent.confirmation import ConfirmationAborted
 from myclaw.agent.run_errors import CommittableAgentRunError
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationRequester,
@@ -20,6 +19,7 @@ from myclaw.agent.tools.tool_gateway import (
     ToolResult,
 )
 from myclaw.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
+from myclaw.permission.confirmation import ConfirmationAborted
 from myclaw.provider.errors import ModelCallError
 from myclaw.provider.models import (
     ModelCompleted,

@@ -29,7 +29,6 @@ from myclaw.agent.tools.mcp import (
     mcp_tool_spec_from_remote,
     normalize_nullable,
 )
-from myclaw.agent.tools.permission import MCPToolIdentity, PermissionContext
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
@@ -38,6 +37,7 @@ from myclaw.agent.tools.tool_gateway import (
     ToolGateway,
 )
 from myclaw.config.config import MCPServerConfiguration
+from myclaw.permission.policy import MCPToolIdentity, PermissionContext
 from tests.fixtures.gateway import SingleToolGateway
 from tests.fixtures.mcp_wire import (
     http_wire_server,

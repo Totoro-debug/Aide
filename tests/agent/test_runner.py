@@ -10,7 +10,6 @@ from uuid import uuid4
 
 import pytest
 
-from myclaw.agent.confirmation import ConfirmationAborted
 from myclaw.agent.run_errors import CommittableAgentRunError
 from myclaw.agent.runner import (
     AgentRunner,
@@ -28,6 +27,7 @@ from myclaw.agent.tools.tool_gateway import (
     ToolResult,
 )
 from myclaw.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
+from myclaw.permission.confirmation import ConfirmationAborted
 from myclaw.provider.errors import ModelCallError
 from myclaw.provider.models import (
     AssistantModelMessage,

@@ -15,11 +15,11 @@ from myclaw.agent.loop import (
     TerminalAgentLoopControl,
 )
 from myclaw.agent.message_bus import InboundMessage, MessageBus
-from myclaw.agent.permission import RuntimePermissionControl
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader, UserConfiguration
 from myclaw.management.commands import ManagementCommandDispatcher
 from myclaw.management.service import FatalManagementError
+from myclaw.permission.state import RuntimePermissionControl
 from myclaw.provider.models import AssistantModelMessage, ModelCompleted, ModelResponse, ModelUsage
 from myclaw.skills.catalog import SkillMetadata
 from tests.configuration.test_config import VALID_CONFIG

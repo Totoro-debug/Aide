@@ -8,7 +8,6 @@ from typing import Protocol
 
 from loguru import logger
 
-from myclaw.agent.permission import ToolPermissionLevel
 from myclaw.config.config import ConfigView
 from myclaw.logging.session import without_session_log
 from myclaw.management.service import (
@@ -21,6 +20,7 @@ from myclaw.management.service import (
     SessionListingReport,
 )
 from myclaw.memory.dream import DreamResult
+from myclaw.permission.state import ToolPermissionLevel
 from myclaw.provider.models import ReasoningEffort
 from myclaw.session.restore import RestoreMode, RestorePlan, RestoreResult
 from myclaw.skills.catalog import SkillMetadata

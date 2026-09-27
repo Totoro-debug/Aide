@@ -9,12 +9,12 @@ from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 from myclaw.agent.tools.base import BaseTool, ToolError
-from myclaw.agent.tools.permission import (
+from myclaw.agent.tools.schema import Schema
+from myclaw.permission.policy import (
     ScheduleAction,
     ScheduleActionName,
     ToolInvocationFacts,
 )
-from myclaw.agent.tools.schema import Schema
 from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.schedule.service import ScheduleService, ScheduleStaleRemovalError
 from myclaw.utils.text import normalize_title_candidate

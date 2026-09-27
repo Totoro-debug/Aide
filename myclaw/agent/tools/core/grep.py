@@ -16,7 +16,7 @@ from myclaw.agent.tools.core._directory import (
     normalize_glob_pattern,
     report_path,
 )
-from myclaw.agent.tools.permission import FileAccess
+from myclaw.permission.policy import FileAccess
 
 _OUTPUT_MODES: Final = frozenset({"content", "files_with_matches", "count"})
 _TYPE_PATTERNS: Final = {

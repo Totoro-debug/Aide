@@ -33,15 +33,8 @@ from textual.widget import Widget
 from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
 
 import myclaw.terminal.cli as cli
-from myclaw.agent.confirmation import (
-    BackgroundConfirmationOwner,
-    ConfirmationAborted,
-    ConfirmationEnvelope,
-    ToolConfirmationCoordinator,
-)
 from myclaw.agent.loop import AgentLoop, ConfirmationRequestView, ForegroundConversationProjection
 from myclaw.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
-from myclaw.agent.tools.permission import MCPToolIdentity
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
@@ -62,6 +55,13 @@ from myclaw.management.service import (
     RuntimeStatus,
 )
 from myclaw.memory.dream import DreamResult
+from myclaw.permission.confirmation import (
+    BackgroundConfirmationOwner,
+    ConfirmationAborted,
+    ConfirmationEnvelope,
+    ToolConfirmationCoordinator,
+)
+from myclaw.permission.policy import MCPToolIdentity
 from myclaw.provider.models import (
     ModelCompleted,
     ModelContinuation,

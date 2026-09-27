@@ -14,13 +14,13 @@ from myclaw.agent.tools.core.web_fetch import (
     WebFetchTool,
 )
 from myclaw.agent.tools.network_safety import DNSResolver
-from myclaw.agent.tools.permission import PermissionContext
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ConfirmationRequester,
     ModelToolCall,
 )
+from myclaw.permission.policy import PermissionContext
 from tests.fixtures import SingleToolGateway
 
 

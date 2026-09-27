@@ -11,7 +11,7 @@ from myclaw.agent.tools.core._file_mutation import (
     execute_recorded_mutation,
     is_protected_restore_target,
 )
-from myclaw.agent.tools.permission import FileAccess
+from myclaw.permission.policy import FileAccess
 from myclaw.session.backup_store import FileMutationRecorder
 
 

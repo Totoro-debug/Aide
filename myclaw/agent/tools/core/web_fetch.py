@@ -31,7 +31,7 @@ from myclaw.agent.tools.network_safety import (
     TargetResolution,
     resolve_target,
 )
-from myclaw.agent.tools.permission import (
+from myclaw.permission.policy import (
     NetworkAssessment,
     NetworkTargetRisk,
     NormalizedNetworkTarget,

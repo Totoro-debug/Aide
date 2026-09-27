@@ -4,7 +4,6 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from myclaw.agent.permission import RuntimePermissionControl
 from myclaw.config.agent_home import AgentHome
 from myclaw.management.service import (
     ManagementViewService,
@@ -12,6 +11,7 @@ from myclaw.management.service import (
 )
 from myclaw.memory.dream import DreamResult
 from myclaw.memory.manager import MemoryManager
+from myclaw.permission.state import RuntimePermissionControl
 from myclaw.provider.models import ReasoningEffort
 from myclaw.skills.catalog import SkillMetadata
 from myclaw.workspace.state import WorkspaceState

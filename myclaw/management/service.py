@@ -8,11 +8,6 @@ from typing import Any, Protocol
 from loguru import logger
 
 from myclaw import __version__
-from myclaw.agent.permission import (
-    RuntimePermissionControl,
-    ToolPermissionLevel,
-    validate_permission_level,
-)
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader, ConfigView
 from myclaw.context.budget import (
@@ -25,6 +20,11 @@ from myclaw.context.budget import (
 )
 from myclaw.errors import ErrorInfo
 from myclaw.memory.dream import DreamResult
+from myclaw.permission.state import (
+    RuntimePermissionControl,
+    ToolPermissionLevel,
+    validate_permission_level,
+)
 from myclaw.provider.models import REASONING_EFFORT_LEVELS, ReasoningEffort
 from myclaw.session.restore import RestoreMode, RestorePlan, RestoreResult
 from myclaw.session.session import (

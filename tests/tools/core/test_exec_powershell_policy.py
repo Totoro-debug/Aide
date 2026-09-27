@@ -26,12 +26,12 @@ from myclaw.agent.tools.core.exec_policy import (
     ExecOutcome,
     catastrophic_matches,
 )
-from myclaw.agent.tools.permission import PermissionContext, PermissionSnapshot
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationRequest,
     ModelToolCall,
     ToolGateway,
 )
+from myclaw.permission.policy import PermissionContext, PermissionSnapshot
 
 _POWERSHELL_CANDIDATE_FIXTURES = (
     ("Get-ChildItem -LiteralPath .", "read-only"),

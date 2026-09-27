@@ -11,7 +11,7 @@ from myclaw.agent.tools.core._directory import (
     report_path,
     requested_path_has_directory_link,
 )
-from myclaw.agent.tools.permission import FileAccess
+from myclaw.permission.policy import FileAccess
 
 
 class ListDirTool(BaseTool):

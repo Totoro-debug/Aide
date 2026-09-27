@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Annotated
 
 from myclaw.agent.tools.base import BaseTool, ToolError, ToolParam
-from myclaw.agent.tools.permission import FileAccess
+from myclaw.permission.policy import FileAccess
 
 
 class ReadFileTool(BaseTool):

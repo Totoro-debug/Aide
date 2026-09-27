@@ -9,8 +9,8 @@ from uuid import UUID, uuid4
 import pytest
 
 from myclaw.agent.tools.core.schedule import ScheduleTool
-from myclaw.agent.tools.permission import PermissionContext
 from myclaw.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRequest, ModelToolCall
+from myclaw.permission.policy import PermissionContext
 from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.schedule.service import ScheduleService, ScheduleStaleRemovalError
 from myclaw.schedule.store import WorkspaceScheduleStore

@@ -9,7 +9,7 @@ from ipaddress import ip_address
 from typing import Protocol
 
 from myclaw.agent.tools.base import is_public_ip
-from myclaw.agent.tools.permission import NetworkTargetRisk
+from myclaw.permission.policy import NetworkTargetRisk
 
 type TargetRisk = NetworkTargetRisk
 

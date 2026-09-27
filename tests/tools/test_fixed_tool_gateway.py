@@ -14,7 +14,6 @@ from myclaw.agent.tools.base import BaseTool
 from myclaw.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES, build_agent_run_gateway
 from myclaw.agent.tools.mcp import MCPTool, MCPToolSpec
 from myclaw.agent.tools.mcp_runtime import MCPRuntimeManager, allocate_mcp_tool_name
-from myclaw.agent.tools.permission import PermissionContext
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
@@ -22,6 +21,7 @@ from myclaw.agent.tools.tool_gateway import (
     ToolGateway,
 )
 from myclaw.config.config import MCPServerConfiguration
+from myclaw.permission.policy import PermissionContext
 from myclaw.schedule.service import ScheduleService
 from myclaw.workspace.state import WorkspaceState
 

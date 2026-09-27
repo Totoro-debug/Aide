@@ -15,21 +15,12 @@ from loguru import logger
 from tzlocal import get_localzone_name
 
 from myclaw.agent.blackboard import Blackboard
-from myclaw.agent.confirmation import (
-    BackgroundConfirmationOwner,
-    CallbackConfirmationRequester,
-    ConfirmationAborted,
-    ConfirmationEnvelope,
-    ConfirmationUnavailable,
-    ForegroundConfirmationOwner,
-)
 from myclaw.agent.message_bus import (
     InboundMessage,
     MessageBus,
     OutboundMessage,
     OutboundMessageType,
 )
-from myclaw.agent.permission import PermissionSnapshot, RuntimePermissionControl
 from myclaw.agent.run_errors import CommittableAgentRunError
 from myclaw.agent.runner import (
     AgentRunner,
@@ -42,7 +33,6 @@ from myclaw.agent.runner import (
 from myclaw.agent.tools.base import BaseTool
 from myclaw.agent.tools.core.exec_host import ExecHost
 from myclaw.agent.tools.deferred import build_agent_run_gateway
-from myclaw.agent.tools.permission import MCPToolIdentity, PermissionContext
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
@@ -69,6 +59,16 @@ from myclaw.logging.session import session_log
 from myclaw.management.commands import MANAGEMENT_COMMANDS
 from myclaw.management.service import RuntimeStatusInput
 from myclaw.memory.manager import MemoryManager
+from myclaw.permission.confirmation import (
+    BackgroundConfirmationOwner,
+    CallbackConfirmationRequester,
+    ConfirmationAborted,
+    ConfirmationEnvelope,
+    ConfirmationUnavailable,
+    ForegroundConfirmationOwner,
+)
+from myclaw.permission.policy import MCPToolIdentity, PermissionContext
+from myclaw.permission.state import PermissionSnapshot, RuntimePermissionControl
 from myclaw.provider.errors import ModelCallError
 from myclaw.provider.model_router import ModelRouteStatus
 from myclaw.provider.models import ModelCompleted, ModelRoute, ReasoningDelta, TextDelta

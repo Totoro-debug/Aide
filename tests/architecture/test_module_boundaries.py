@@ -72,6 +72,11 @@ def test_feature_packages_have_canonical_locations() -> None:
         assert (PACKAGE_ROOT / "context" / f"{module}.py").is_file()
     assert not (PACKAGE_ROOT / "agent" / "context.py").exists()
     assert not (PACKAGE_ROOT / "agent" / "context_budget.py").exists()
+    for module in ("state", "policy", "confirmation"):
+        assert (PACKAGE_ROOT / "permission" / f"{module}.py").is_file()
+    assert not (PACKAGE_ROOT / "agent" / "permission.py").exists()
+    assert not (PACKAGE_ROOT / "agent" / "confirmation.py").exists()
+    assert not (PACKAGE_ROOT / "agent" / "tools" / "permission.py").exists()
 
     probe = subprocess.run(
         [
@@ -84,6 +89,7 @@ def test_feature_packages_have_canonical_locations() -> None:
                 "assert importlib.util.find_spec('myclaw.session.session') is not None\n"
                 "assert importlib.util.find_spec('myclaw.memory.manager') is not None\n"
                 "assert importlib.util.find_spec('myclaw.context.controller') is not None\n"
+                "assert importlib.util.find_spec('myclaw.permission.policy') is not None\n"
                 "for module in ('myclaw.agent.session.session', 'myclaw.agent.memory.manager'):\n"
                 "    try:\n"
                 "        spec = importlib.util.find_spec(module)\n"
@@ -459,7 +465,10 @@ def test_production_tools_have_no_legacy_string_authorization_surface() -> None:
         "_authorization_callback",
     }
     violations: list[str] = []
-    for path in _python_files(PACKAGE_ROOT / "agent" / "tools"):
+    for path in (
+        *_python_files(PACKAGE_ROOT / "agent" / "tools"),
+        PACKAGE_ROOT / "permission" / "policy.py",
+    ):
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(path))
         for node in ast.walk(tree):

@@ -8,14 +8,14 @@ from uuid import UUID
 
 import pytest
 
-from myclaw.agent.confirmation import (
+from myclaw.agent.tools.core.exec_policy import ExecAssessment, ResolvedExecShell
+from myclaw.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRequest
+from myclaw.permission.confirmation import (
     BackgroundConfirmationOwner,
     ConfirmationAborted,
     ConfirmationEnvelope,
 )
-from myclaw.agent.permission import PermissionSnapshot, ToolPermissionLevel
-from myclaw.agent.tools.core.exec_policy import ExecAssessment, ResolvedExecShell
-from myclaw.agent.tools.permission import (
+from myclaw.permission.policy import (
     FileAccess,
     MCPToolIdentity,
     NetworkAssessment,
@@ -24,7 +24,7 @@ from myclaw.agent.tools.permission import (
     ToolInvocationFacts,
     ToolPermissionPolicy,
 )
-from myclaw.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRequest
+from myclaw.permission.state import PermissionSnapshot, ToolPermissionLevel
 from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.schedule.service import ScheduleOccurrence, ScheduleService
 from myclaw.schedule.store import ScheduleStoreFaultedError

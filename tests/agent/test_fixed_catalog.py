@@ -15,7 +15,6 @@ from mcp.types import CallToolResult
 
 from myclaw.agent.loop import AgentLoop, ConfirmationRequestView
 from myclaw.agent.message_bus import MessageBus
-from myclaw.agent.permission import RuntimePermissionControl
 from myclaw.agent.tools.base import BaseTool
 from myclaw.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
 from myclaw.agent.tools.core.web_fetch import AioHttpWebFetchClient, HTTPResponseBoundary
@@ -26,6 +25,7 @@ from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
 from myclaw.errors import ErrorInfo
 from myclaw.memory.manager import MemoryManager
+from myclaw.permission.state import RuntimePermissionControl
 from myclaw.provider.errors import ModelCallError
 from myclaw.provider.model_router import ModelRouter
 from myclaw.provider.models import (

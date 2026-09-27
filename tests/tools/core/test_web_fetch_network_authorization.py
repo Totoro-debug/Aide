@@ -11,7 +11,6 @@ from typing import cast
 import pytest
 from aiohttp import ClientConnectorCertificateError
 
-from myclaw.agent.permission import ToolPermissionLevel
 from myclaw.agent.tools.base import ToolError
 from myclaw.agent.tools.core.web_fetch import (
     AioHttpWebFetchClient,
@@ -21,7 +20,6 @@ from myclaw.agent.tools.core.web_fetch import (
 )
 from myclaw.agent.tools.core.web_search import WebSearchTool
 from myclaw.agent.tools.network_safety import DNSResolver
-from myclaw.agent.tools.permission import PermissionContext
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
@@ -30,6 +28,8 @@ from myclaw.agent.tools.tool_gateway import (
     ToolGateway,
     ToolResult,
 )
+from myclaw.permission.policy import PermissionContext
+from myclaw.permission.state import ToolPermissionLevel
 
 _TLS_CERTIFICATE = """-----BEGIN CERTIFICATE-----
 MIIC/zCCAeegAwIBAgIUZ+U95pMk7qZehIoDeGwFbm0fc0kwDQYJKoZIhvcNAQEL

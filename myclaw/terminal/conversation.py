@@ -42,21 +42,12 @@ from textual.widgets import Button, Input, Markdown, OptionList, Static, TextAre
 from textual.widgets.option_list import Option
 from textual.worker import Worker, WorkerError
 
-from myclaw.agent.confirmation import (
-    ConfirmationDecision as CoordinatorConfirmationDecision,
-)
-from myclaw.agent.confirmation import (
-    ConfirmationEnvelope,
-    ConfirmationPresentationCoordinator,
-    ConfirmationUnavailable,
-)
 from myclaw.agent.loop import (
     ConfirmationRequestView,
     ForegroundConversationProjection,
     TerminalAgentLoopControl,
 )
 from myclaw.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
-from myclaw.agent.permission import PERMISSION_LEVELS, ToolPermissionLevel
 from myclaw.management.commands import (
     MANAGEMENT_COMMANDS,
     RELOAD_SKILL_MANAGEMENT_COMMAND,
@@ -65,6 +56,15 @@ from myclaw.management.commands import (
     ManagementCommandResult,
 )
 from myclaw.management.service import FatalManagementError, RuntimeStatus, SessionListingEntry
+from myclaw.permission.confirmation import (
+    ConfirmationDecision as CoordinatorConfirmationDecision,
+)
+from myclaw.permission.confirmation import (
+    ConfirmationEnvelope,
+    ConfirmationPresentationCoordinator,
+    ConfirmationUnavailable,
+)
+from myclaw.permission.state import PERMISSION_LEVELS, ToolPermissionLevel
 from myclaw.provider.models import REASONING_EFFORT_LEVELS, ReasoningEffort
 from myclaw.session.restore import RestoreMode, RestorePlan, RestoreResult
 from myclaw.session.session import RestoreAnchor

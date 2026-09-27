@@ -9,7 +9,7 @@ from uuid import UUID
 import pytest
 
 from myclaw.agent.tools.base import BaseTool, ToolError, ToolParam
-from myclaw.agent.tools.permission import ToolInvocationFacts
+from myclaw.permission.policy import ToolInvocationFacts
 
 
 class _RepresentativeTool(BaseTool):

@@ -9,13 +9,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
-from myclaw.agent.permission import (
-    PERMISSION_LEVELS,
-    PermissionSnapshot,
-    RuntimePermissionControl,
-    ToolPermissionLevel,
-    validate_permission_level,
-)
 from myclaw.agent.tools.core.exec_policy import (
     EXEC_CATASTROPHIC_REASON,
     EXEC_CONFIRMATION_REASON,
@@ -27,6 +20,13 @@ from myclaw.agent.tools.core.exec_policy import (
     bash_recursive_forced_delete_targets,
     classify_bash_command,
     classify_powershell_command,
+)
+from myclaw.permission.state import (
+    PERMISSION_LEVELS,
+    PermissionSnapshot,
+    RuntimePermissionControl,
+    ToolPermissionLevel,
+    validate_permission_level,
 )
 from myclaw.utils.host_filesystem import host_path_is_within
 

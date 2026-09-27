@@ -18,7 +18,13 @@ from myclaw.agent.tools.core.grep import GrepTool
 from myclaw.agent.tools.core.list_dir import ListDirTool
 from myclaw.agent.tools.core.read_file import ReadFileTool
 from myclaw.agent.tools.core.write_file import WriteFileTool
-from myclaw.agent.tools.permission import (
+from myclaw.agent.tools.tool_gateway import (
+    ConfirmationDecision,
+    ConfirmationRequest,
+    ModelToolCall,
+    ToolGateway,
+)
+from myclaw.permission.policy import (
     PermissionContext,
     PermissionSnapshot,
     RuntimePermissionControl,
@@ -26,12 +32,6 @@ from myclaw.agent.tools.permission import (
     ToolInvocationFacts,
     ToolPermissionLevel,
     ToolPermissionPolicy,
-)
-from myclaw.agent.tools.tool_gateway import (
-    ConfirmationDecision,
-    ConfirmationRequest,
-    ModelToolCall,
-    ToolGateway,
 )
 
 

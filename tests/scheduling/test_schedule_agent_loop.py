@@ -17,7 +17,6 @@ import pytest
 import myclaw.context.builder as context
 from myclaw.agent.loop import AgentLoop, ConfirmationRequestView
 from myclaw.agent.message_bus import MessageBus
-from myclaw.agent.permission import RuntimePermissionControl
 from myclaw.agent.runner import AgentRunner, AgentRunnerResult
 from myclaw.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
 from myclaw.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
@@ -28,6 +27,7 @@ from myclaw.context.builder import ContextBuilder
 from myclaw.management.commands import ManagementCommandDispatcher
 from myclaw.memory.dream import Dream
 from myclaw.memory.manager import MemoryManager
+from myclaw.permission.state import RuntimePermissionControl
 from myclaw.provider.model_router import ModelRouter
 from myclaw.provider.models import (
     AssistantModelMessage,

@@ -7,13 +7,13 @@ from typing import Any
 from uuid import UUID
 
 from myclaw.agent.tools.base import BaseTool
-from myclaw.agent.tools.permission import PermissionContext
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationRequester,
     ModelToolCall,
     ToolGateway,
     ToolResult,
 )
+from myclaw.permission.policy import PermissionContext
 from myclaw.session.backup_store import FileMutationRecorder
 
 

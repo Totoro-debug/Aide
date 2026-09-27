@@ -24,7 +24,7 @@ from myclaw.agent.tools.core.exec_policy import (
     destructive_matches,
 )
 from myclaw.agent.tools.network_safety import DNSResolver, SocketDNSResolver, assess_target
-from myclaw.agent.tools.permission import (
+from myclaw.permission.policy import (
     NetworkAssessment,
     NetworkTargetRisk,
     NormalizedNetworkTarget,

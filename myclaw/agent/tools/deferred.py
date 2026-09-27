@@ -6,13 +6,13 @@ from collections.abc import Collection, Mapping, Sequence
 
 from myclaw.agent.tools.base import BaseTool
 from myclaw.agent.tools.core.tool_search import ToolSearchTool
-from myclaw.agent.tools.permission import PermissionContext, PermissionSnapshot
 from myclaw.agent.tools.search import (
     BUILTIN_TOOL_SEARCH_KEYWORDS,
     ToolSearchDocument,
     ToolSearchIndex,
 )
 from myclaw.agent.tools.tool_gateway import ToolGateway
+from myclaw.permission.policy import PermissionContext, PermissionSnapshot
 
 RUN_BASELINE_TOOL_NAMES: tuple[str, ...] = (
     "read_file",

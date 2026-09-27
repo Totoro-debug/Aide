@@ -7,17 +7,17 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from myclaw.agent.permission import PermissionSnapshot
 from myclaw.agent.tools.base import BaseTool
 from myclaw.agent.tools.core.edit_file import EditFileTool
 from myclaw.agent.tools.core.exec_host import resolve_exec_shell
 from myclaw.agent.tools.core.write_file import WriteFileTool
-from myclaw.agent.tools.permission import PermissionContext, ToolPermissionLevel, ToolRunOrigin
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ModelToolCall,
     ToolGateway,
 )
+from myclaw.permission.policy import PermissionContext, ToolPermissionLevel, ToolRunOrigin
+from myclaw.permission.state import PermissionSnapshot
 from myclaw.session.backup_store import BackupTicket, FileBackupStore
 from myclaw.workspace.state import WorkspaceState
 

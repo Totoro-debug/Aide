@@ -13,10 +13,10 @@ from zoneinfo import ZoneInfo
 from croniter import croniter  # type: ignore[import-untyped]
 from loguru import logger
 
-from myclaw.agent.confirmation import BackgroundConfirmationOwner, ConfirmationAborted
-from myclaw.agent.permission import PermissionSnapshot
 from myclaw.errors import ErrorInfo
 from myclaw.logging.session import session_log
+from myclaw.permission.confirmation import BackgroundConfirmationOwner, ConfirmationAborted
+from myclaw.permission.state import PermissionSnapshot
 from myclaw.schedule.model import DREAM_JOB_ID, DREAM_JOB_TITLE, JobSchedule, ScheduleJob
 from myclaw.schedule.store import (
     ScheduleStaleRemovalError,

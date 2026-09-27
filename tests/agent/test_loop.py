@@ -24,7 +24,6 @@ import myclaw.context.controller as compactor_module
 from myclaw.agent.blackboard import Blackboard
 from myclaw.agent.loop import AgentLoop, ConfirmationRequestView, ModelContextOverflowError
 from myclaw.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
-from myclaw.agent.permission import PermissionSnapshot, RuntimePermissionControl
 from myclaw.agent.run_errors import CommittableAgentRunError
 from myclaw.agent.runner import AgentRunner, AgentRunnerResult, AgentRunnerRouter
 from myclaw.agent.tools.base import BaseTool
@@ -37,6 +36,7 @@ from myclaw.context.budget import estimate_request_tokens
 from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
 from myclaw.logging.session import session_log as real_session_log
 from myclaw.memory.manager import MemoryManager
+from myclaw.permission.state import PermissionSnapshot, RuntimePermissionControl
 from myclaw.provider.errors import ModelCallError
 from myclaw.provider.model_router import ModelRouter
 from myclaw.provider.models import (

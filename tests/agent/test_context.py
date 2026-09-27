@@ -15,9 +15,9 @@ import pytest
 import myclaw.context.builder as context
 from myclaw.agent.blackboard import Blackboard
 from myclaw.agent.tools.core.exec_host import resolve_exec_shell
-from myclaw.agent.tools.permission import PermissionSnapshot
 from myclaw.context.builder import ContextBuilder
 from myclaw.memory.manager import MemoryManager
+from myclaw.permission.policy import PermissionSnapshot
 from myclaw.skills.catalog import (
     ManualSkillInvocation,
     SkillLoader,

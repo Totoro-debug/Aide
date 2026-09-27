@@ -11,13 +11,10 @@ from uuid import UUID, uuid4
 import pytest
 from textual.widgets import OptionList, Static
 
-import myclaw.agent.session.restore as restore_module
+import myclaw.session.restore as restore_module
 import myclaw.terminal.cli as cli
 from myclaw.agent.loop import AgentLoop, ForegroundConversationProjection
 from myclaw.agent.message_bus import MessageBus
-from myclaw.agent.session.restore import RestoreManager as SessionRestoreManager
-from myclaw.agent.session.restore import RestoreMode, RestoreRecoveryRequired
-from myclaw.agent.session.session import RestoreAnchor, Session
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import UserConfiguration
 from myclaw.management.commands import ManagementCommandDispatcher, ManagementPort
@@ -27,6 +24,9 @@ from myclaw.management.service import (
     ManagementViewService,
     RestoreListingReport,
 )
+from myclaw.session.restore import RestoreManager as SessionRestoreManager
+from myclaw.session.restore import RestoreMode, RestoreRecoveryRequired
+from myclaw.session.session import RestoreAnchor, Session
 from myclaw.terminal.conversation import TerminalConversationApp
 from myclaw.workspace.state import WorkspaceState
 

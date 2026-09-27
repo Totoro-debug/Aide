@@ -57,8 +57,6 @@ from myclaw.agent.loop import (
 )
 from myclaw.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
 from myclaw.agent.permission import PERMISSION_LEVELS, ToolPermissionLevel
-from myclaw.agent.session.restore import RestoreMode, RestorePlan, RestoreResult
-from myclaw.agent.session.session import RestoreAnchor
 from myclaw.management.commands import (
     MANAGEMENT_COMMANDS,
     RELOAD_SKILL_MANAGEMENT_COMMAND,
@@ -68,6 +66,8 @@ from myclaw.management.commands import (
 )
 from myclaw.management.service import FatalManagementError, RuntimeStatus, SessionListingEntry
 from myclaw.provider.models import REASONING_EFFORT_LEVELS, ReasoningEffort
+from myclaw.session.restore import RestoreMode, RestorePlan, RestoreResult
+from myclaw.session.session import RestoreAnchor
 from myclaw.skills.catalog import SkillMetadata
 from myclaw.terminal.keyboard import EnhancedKeyboardAction, EnhancedKeyboardAdapter
 

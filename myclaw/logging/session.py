@@ -10,7 +10,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from myclaw.agent.session.session import Session
+from myclaw.session.session import Session
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 from myclaw.workspace.state import WorkspaceState
 

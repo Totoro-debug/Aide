@@ -49,12 +49,6 @@ from myclaw.agent.runner import (
     AgentRunnerToolCallStarted,
     _build_assistant_repair_message,
 )
-from myclaw.agent.session.backup_store import FileBackupStore
-from myclaw.agent.session.session import (
-    Session,
-    SessionRestoreBefore,
-    SessionStoragePartition,
-)
 from myclaw.agent.tools.base import BaseTool
 from myclaw.agent.tools.core.exec_host import ExecHost
 from myclaw.agent.tools.deferred import build_agent_run_gateway
@@ -83,6 +77,12 @@ from myclaw.schedule.service import (
     ScheduleJobExecutionError,
     ScheduleOccurrence,
     ScheduleService,
+)
+from myclaw.session.backup_store import FileBackupStore
+from myclaw.session.session import (
+    Session,
+    SessionRestoreBefore,
+    SessionStoragePartition,
 )
 from myclaw.skills.catalog import LoadedSkill, ManualSkillInvocation, SkillLoader, SkillMetadata
 from myclaw.utils.async_tasks import await_task_preserving_cancellation

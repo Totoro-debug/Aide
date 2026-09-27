@@ -17,15 +17,6 @@ from myclaw.agent.memory.dream import Dream
 from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.message_bus import MessageBus
 from myclaw.agent.permission import PermissionSnapshot, RuntimePermissionControl
-from myclaw.agent.session.restore import (
-    RestoreError,
-    RestoreManager,
-    RestoreMode,
-    RestorePlan,
-    RestoreRecoveryRequired,
-    RestoreResult,
-    StaleRestorePlan,
-)
 from myclaw.agent.tools.core.exec_host import (
     EXEC_CAPABILITY_ERROR,
     create_exec_host,
@@ -54,6 +45,15 @@ from myclaw.provider.factory import create_provider
 from myclaw.provider.model_router import ModelRouter
 from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.schedule.service import ScheduleOccurrence, ScheduleService
+from myclaw.session.restore import (
+    RestoreError,
+    RestoreManager,
+    RestoreMode,
+    RestorePlan,
+    RestoreRecoveryRequired,
+    RestoreResult,
+    StaleRestorePlan,
+)
 from myclaw.terminal.conversation import (
     TerminalConversationApp,
     is_interactive_terminal,

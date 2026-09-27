@@ -15,7 +15,6 @@ import myclaw.agent.tools.mcp as mcp_adapter
 import myclaw.agent.tools.mcp_runtime as mcp_runtime
 import myclaw.terminal.cli as cli
 from myclaw.agent.runner import AgentRunner
-from myclaw.agent.session.session import Session
 from myclaw.agent.tools.mcp import MCPServerConnection
 from myclaw.agent.tools.mcp_runtime import MCPServerFailure, MCPStartupReport
 from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolGateway
@@ -30,6 +29,7 @@ from myclaw.provider.models import (
     ModelResponse,
     ModelUsage,
 )
+from myclaw.session.session import Session
 from myclaw.workspace.state import WorkspaceState
 from tests.fixtures import DetachedRequestPreparer
 from tests.fixtures.mcp_wire import ObservedLifetimes, stdio_wire_configuration, wire_tool

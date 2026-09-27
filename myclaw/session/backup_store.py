@@ -16,7 +16,7 @@ from threading import RLock
 from typing import BinaryIO, Protocol
 from uuid import UUID
 
-from myclaw.agent.session._restore_persistence import (
+from myclaw.session._restore_persistence import (
     canonical_json_bytes,
     sha256_hex,
     sync_created_directory,

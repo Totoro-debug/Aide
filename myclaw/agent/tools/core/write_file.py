@@ -6,13 +6,13 @@ from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID
 
-from myclaw.agent.session.backup_store import FileMutationRecorder
 from myclaw.agent.tools.base import BaseTool, ToolError, ToolParam
 from myclaw.agent.tools.core._file_mutation import (
     execute_recorded_mutation,
     is_protected_restore_target,
 )
 from myclaw.agent.tools.permission import FileAccess
+from myclaw.session.backup_store import FileMutationRecorder
 
 
 class WriteFileTool(BaseTool):

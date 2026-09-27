@@ -10,7 +10,6 @@ from loguru import logger
 
 from myclaw.agent.memory.dream import DreamResult
 from myclaw.agent.permission import ToolPermissionLevel
-from myclaw.agent.session.restore import RestoreMode, RestorePlan, RestoreResult
 from myclaw.config.config import ConfigView
 from myclaw.logging.session import without_session_log
 from myclaw.management.service import (
@@ -23,6 +22,7 @@ from myclaw.management.service import (
     SessionListingReport,
 )
 from myclaw.provider.models import ReasoningEffort
+from myclaw.session.restore import RestoreMode, RestorePlan, RestoreResult
 from myclaw.skills.catalog import SkillMetadata
 from myclaw.utils.time import format_rfc3339_milliseconds
 

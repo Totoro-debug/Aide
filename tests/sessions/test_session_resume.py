@@ -5,8 +5,8 @@ from uuid import UUID
 
 import pytest
 
-from myclaw.agent.session.session import Session, SessionStoragePartition
 from myclaw.config.agent_home import AgentHome
+from myclaw.session.session import Session, SessionStoragePartition
 from myclaw.workspace.state import WorkspaceState
 from tests.fixtures.session import seed_session_state
 from tests.management.factories import management_service

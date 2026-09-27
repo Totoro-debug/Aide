@@ -14,20 +14,20 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from myclaw.agent.session._restore_persistence import (
+from myclaw.session._restore_persistence import (
     canonical_json_bytes,
     sha256_hex,
     sync_created_directory,
     sync_directory,
 )
-from myclaw.agent.session.backup_store import (
+from myclaw.session.backup_store import (
     BackupGap,
     BackupIntegrityIssue,
     BackupJournal,
     BackupJournalEntry,
     FileBackupStore,
 )
-from myclaw.agent.session.session import Session, SessionRestoreResult
+from myclaw.session.session import Session, SessionRestoreResult
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 from myclaw.workspace.state import WorkspaceState
 

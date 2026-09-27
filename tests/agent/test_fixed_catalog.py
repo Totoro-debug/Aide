@@ -17,7 +17,6 @@ from myclaw.agent.loop import AgentLoop, ConfirmationRequestView
 from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.message_bus import MessageBus
 from myclaw.agent.permission import RuntimePermissionControl
-from myclaw.agent.session.session import Session
 from myclaw.agent.tools.base import BaseTool
 from myclaw.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
 from myclaw.agent.tools.core.web_fetch import AioHttpWebFetchClient, HTTPResponseBoundary
@@ -39,6 +38,7 @@ from myclaw.provider.models import (
     ReasoningEffort,
 )
 from myclaw.schedule.service import ScheduleService
+from myclaw.session.session import Session
 from myclaw.templates import render_template
 from myclaw.workspace.state import WorkspaceState
 from tests.configuration.test_config import VALID_CONFIG

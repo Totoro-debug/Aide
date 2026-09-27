@@ -7,7 +7,6 @@ import pytest
 from myclaw.agent.memory.dream import DreamResult
 from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.permission import RuntimePermissionControl
-from myclaw.agent.session.session import Session
 from myclaw.config.agent_home import AgentHome
 from myclaw.errors import ErrorInfo
 from myclaw.management.service import (
@@ -16,6 +15,7 @@ from myclaw.management.service import (
     RuntimeStatusInput,
 )
 from myclaw.provider.models import ReasoningEffort
+from myclaw.session.session import Session
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 from myclaw.workspace.state import WorkspaceState
 from tests.fixtures.diagnostic_capture import capture_diagnostics

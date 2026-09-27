@@ -19,7 +19,6 @@ import myclaw.terminal.cli as cli
 from myclaw.agent.loop import ModelContextOverflowError, TerminalAgentLoopControl
 from myclaw.agent.message_bus import MessageBus
 from myclaw.agent.permission import RuntimePermissionControl
-from myclaw.agent.session.session import Session
 from myclaw.agent.tools.mcp_runtime import MCPRuntimeManager
 from myclaw.config.agent_home import AgentHome
 from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
@@ -31,6 +30,7 @@ from myclaw.management.service import (
     ResumeResult,
 )
 from myclaw.provider.model_router import ModelRouteStatus
+from myclaw.session.session import Session
 from myclaw.skills.catalog import SkillMetadata
 from myclaw.terminal.conversation import TerminalConversationApp
 from myclaw.utils.time import local_now

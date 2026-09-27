@@ -29,8 +29,6 @@ from myclaw.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
 from myclaw.agent.permission import PermissionSnapshot, RuntimePermissionControl
 from myclaw.agent.run_errors import CommittableAgentRunError
 from myclaw.agent.runner import AgentRunner, AgentRunnerResult, AgentRunnerRouter
-from myclaw.agent.session.backup_store import FileBackupStore
-from myclaw.agent.session.session import Session
 from myclaw.agent.tools.base import BaseTool
 from myclaw.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
 from myclaw.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
@@ -53,6 +51,8 @@ from myclaw.provider.models import (
 )
 from myclaw.schedule.model import ScheduleJob
 from myclaw.schedule.service import ScheduleService
+from myclaw.session.backup_store import FileBackupStore
+from myclaw.session.session import Session
 from myclaw.skills.catalog import (
     LoadedSkill,
     SkillLoader,

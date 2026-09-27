@@ -24,7 +24,6 @@ from myclaw.agent.context_budget import (
 )
 from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.run_errors import CommittableAgentRunError
-from myclaw.agent.session.session import Session
 from myclaw.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from myclaw.provider.errors import ModelCallError, model_context_overflow_error
 from myclaw.provider.model_router import ModelAttemptGuard, ModelRouteStatus
@@ -35,6 +34,7 @@ from myclaw.provider.models import (
     ModelRoute,
     ModelStreamEvent,
 )
+from myclaw.session.session import Session
 from myclaw.templates import render_template
 from myclaw.utils.validation import empty_token_usage
 

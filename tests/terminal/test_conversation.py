@@ -42,17 +42,6 @@ from myclaw.agent.confirmation import (
 from myclaw.agent.loop import AgentLoop, ConfirmationRequestView, ForegroundConversationProjection
 from myclaw.agent.memory.dream import DreamResult
 from myclaw.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
-from myclaw.agent.session.backup_store import BackupGap, FileBackupStore
-from myclaw.agent.session.restore import (
-    RestoreFileResult,
-    RestoreFileStatus,
-    RestoreManager,
-    RestoreMode,
-    RestorePlan,
-    RestoreResult,
-    RestoreTarget,
-)
-from myclaw.agent.session.session import RestoreAnchor, Session, SessionRestoreResult
 from myclaw.agent.tools.permission import MCPToolIdentity
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationDecision,
@@ -81,6 +70,17 @@ from myclaw.provider.models import (
     ReasoningEffort,
     TextDelta,
 )
+from myclaw.session.backup_store import BackupGap, FileBackupStore
+from myclaw.session.restore import (
+    RestoreFileResult,
+    RestoreFileStatus,
+    RestoreManager,
+    RestoreMode,
+    RestorePlan,
+    RestoreResult,
+    RestoreTarget,
+)
+from myclaw.session.session import RestoreAnchor, Session, SessionRestoreResult
 from myclaw.skills.catalog import SkillMetadata
 from myclaw.templates import render_template
 from myclaw.terminal.conversation import (

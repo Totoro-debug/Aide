@@ -59,9 +59,11 @@ def test_retired_prompt_and_session_assembly_modules_are_absent() -> None:
         assert spec is None
 
 
-def test_agent_owned_packages_have_no_top_level_compatibility_exports() -> None:
-    retired_modules = ("memory", "session", "tools")
+def test_feature_packages_have_canonical_locations() -> None:
+    retired_modules = ("memory", "tools")
     assert all(not (PACKAGE_ROOT / module).exists() for module in retired_modules)
+    assert (PACKAGE_ROOT / "session" / "session.py").is_file()
+    assert not tuple((PACKAGE_ROOT / "agent" / "session").glob("*.py"))
 
     probe = subprocess.run(
         [
@@ -69,8 +71,10 @@ def test_agent_owned_packages_have_no_top_level_compatibility_exports() -> None:
             "-c",
             (
                 "import importlib.util\n"
-                "modules = ('myclaw.memory', 'myclaw.session', 'myclaw.tools')\n"
+                "modules = ('myclaw.memory', 'myclaw.tools')\n"
                 "assert all(importlib.util.find_spec(module) is None for module in modules)\n"
+                "assert importlib.util.find_spec('myclaw.session.session') is not None\n"
+                "assert importlib.util.find_spec('myclaw.agent.session.session') is None\n"
             ),
         ],
         cwd=PROJECT_ROOT,

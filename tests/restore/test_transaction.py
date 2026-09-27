@@ -11,17 +11,17 @@ from uuid import UUID
 
 import pytest
 
-import myclaw.agent.session.restore as restore_module
-from myclaw.agent.session._restore_persistence import canonical_json_bytes, sha256_hex
-from myclaw.agent.session.backup_store import FileBackupStore
-from myclaw.agent.session.restore import (
+import myclaw.session.restore as restore_module
+from myclaw.session._restore_persistence import canonical_json_bytes, sha256_hex
+from myclaw.session.backup_store import FileBackupStore
+from myclaw.session.restore import (
     RestoreManager,
     RestoreMode,
     RestoreRecoveryRequired,
     RestoreSafetyError,
     StaleRestorePlan,
 )
-from myclaw.agent.session.session import Session
+from myclaw.session.session import Session
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 from myclaw.workspace.state import WorkspaceState
 

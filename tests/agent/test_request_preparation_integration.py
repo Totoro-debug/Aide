@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 import pytest
 
-from myclaw.agent.session.session import Session, SessionStoragePartition
+from myclaw.session.session import Session, SessionStoragePartition
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import collect_foreground_outbound
 from tests.fixtures.session import seed_session_state

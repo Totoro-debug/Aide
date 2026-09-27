@@ -14,7 +14,6 @@ from myclaw.agent.confirmation import (
     ConfirmationEnvelope,
 )
 from myclaw.agent.permission import PermissionSnapshot, ToolPermissionLevel
-from myclaw.agent.session.session import Session
 from myclaw.agent.tools.core.exec_policy import ExecAssessment, ResolvedExecShell
 from myclaw.agent.tools.permission import (
     FileAccess,
@@ -29,6 +28,7 @@ from myclaw.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRe
 from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.schedule.service import ScheduleOccurrence, ScheduleService
 from myclaw.schedule.store import ScheduleStoreFaultedError
+from myclaw.session.session import Session
 from myclaw.workspace.state import WorkspaceState
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)

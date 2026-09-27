@@ -4,7 +4,7 @@ from collections.abc import Callable
 
 import pytest
 
-import myclaw.agent.session.restore as restore_module
+import myclaw.session.restore as restore_module
 from myclaw.workspace.state import WorkspaceState
 
 AfterRestorePhase = Callable[[str, Callable[[], None]], None]

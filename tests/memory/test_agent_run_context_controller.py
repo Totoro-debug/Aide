@@ -25,7 +25,6 @@ from myclaw.agent.memory.conversation_compactor import (
 from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.run_errors import CommittableAgentRunError
 from myclaw.agent.runner import AgentRunner
-from myclaw.agent.session.session import Session
 from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolResult
 from myclaw.config.config import (
     MemoryConfiguration,
@@ -46,6 +45,7 @@ from myclaw.provider.models import (
     ModelRoute,
     ModelUsage,
 )
+from myclaw.session.session import Session
 from myclaw.workspace.state import WorkspaceState
 from tests.fixtures import FakeClock, ScriptedFakeProvider, ScriptedFakeRouter, StreamScript
 from tests.fixtures.session import seed_session_state

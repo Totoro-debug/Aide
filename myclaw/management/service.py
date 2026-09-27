@@ -22,16 +22,16 @@ from myclaw.agent.permission import (
     ToolPermissionLevel,
     validate_permission_level,
 )
-from myclaw.agent.session.restore import RestoreMode, RestorePlan, RestoreResult
-from myclaw.agent.session.session import (
-    RestoreAnchor,
-    Session,
-    SessionStoragePartition,
-)
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader, ConfigView
 from myclaw.errors import ErrorInfo
 from myclaw.provider.models import REASONING_EFFORT_LEVELS, ReasoningEffort
+from myclaw.session.restore import RestoreMode, RestorePlan, RestoreResult
+from myclaw.session.session import (
+    RestoreAnchor,
+    Session,
+    SessionStoragePartition,
+)
 from myclaw.skills.catalog import SkillMetadata
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 from myclaw.utils.validation import require_nonnegative_int, require_nonnegative_number

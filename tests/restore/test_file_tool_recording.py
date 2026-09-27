@@ -8,7 +8,6 @@ from uuid import UUID, uuid4
 import pytest
 
 from myclaw.agent.permission import PermissionSnapshot
-from myclaw.agent.session.backup_store import BackupTicket, FileBackupStore
 from myclaw.agent.tools.base import BaseTool
 from myclaw.agent.tools.core.edit_file import EditFileTool
 from myclaw.agent.tools.core.exec_host import resolve_exec_shell
@@ -19,6 +18,7 @@ from myclaw.agent.tools.tool_gateway import (
     ModelToolCall,
     ToolGateway,
 )
+from myclaw.session.backup_store import BackupTicket, FileBackupStore
 from myclaw.workspace.state import WorkspaceState
 
 SESSION_ID = "20260926-120000-123456_12345678-1234-4234-8234-123456789abc"

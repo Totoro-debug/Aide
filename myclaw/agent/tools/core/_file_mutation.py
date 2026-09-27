@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from uuid import UUID
 
-from myclaw.agent.session.backup_store import FileMutationRecorder
+from myclaw.session.backup_store import FileMutationRecorder
 from myclaw.utils.host_filesystem import host_path_is_within
 
 

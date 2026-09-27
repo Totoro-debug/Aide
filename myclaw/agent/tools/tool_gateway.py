@@ -14,7 +14,6 @@ from uuid import UUID, uuid4
 from loguru import logger
 
 from myclaw.agent.confirmation import ConfirmationAborted, ConfirmationUnavailable
-from myclaw.agent.session.backup_store import FileMutationRecorder
 from myclaw.agent.tools.base import (
     ArtifactReference,
     BaseTool,
@@ -43,6 +42,7 @@ from myclaw.agent.tools.permission import (
     ToolPermissionPolicy,
 )
 from myclaw.schedule.service import ScheduleService
+from myclaw.session.backup_store import FileMutationRecorder
 from myclaw.utils.validation import require_uuid4
 
 type ConfirmationDecision = Literal["approved", "declined"]

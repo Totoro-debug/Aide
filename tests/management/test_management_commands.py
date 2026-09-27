@@ -10,7 +10,6 @@ from loguru import logger
 
 from myclaw.agent.memory.dream import DreamResult
 from myclaw.agent.memory.manager import MemoryManager
-from myclaw.agent.session.session import Session
 from myclaw.config.agent_home import AgentHome
 from myclaw.errors import ErrorInfo
 from myclaw.management.commands import (
@@ -20,6 +19,7 @@ from myclaw.management.commands import (
     ManagementCommandResult,
 )
 from myclaw.management.service import RuntimeStatusInput
+from myclaw.session.session import Session
 from myclaw.skills.catalog import SkillMetadata
 from myclaw.workspace.state import WorkspaceState
 from tests.fixtures.diagnostic_capture import capture_diagnostics, configured_process_logging

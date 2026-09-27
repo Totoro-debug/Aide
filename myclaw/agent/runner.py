@@ -13,7 +13,6 @@ from loguru import logger
 
 from myclaw.agent.confirmation import ConfirmationAborted
 from myclaw.agent.run_errors import CommittableAgentRunError
-from myclaw.agent.session.backup_store import FileMutationRecorder
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationRequester,
     ModelToolCall,
@@ -31,6 +30,7 @@ from myclaw.provider.models import (
     ReasoningDelta,
     TextDelta,
 )
+from myclaw.session.backup_store import FileMutationRecorder
 from myclaw.utils.validation import empty_token_usage, token_usage_validation_issue
 
 type AgentRunnerRoute = Literal["chat", "schedule"]

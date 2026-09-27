@@ -136,6 +136,26 @@ _Avoid_: Autonomous Skill Invocation, always-loaded Skill, Management Command
 A durable conversational thread owned by one Workspace and represented by one active in-memory Session authority during foreground execution.
 _Avoid_: Chat ID, terminal session, Workspace, runtime checkpoint, background task
 
+**Restore Anchor**:
+A persisted foreground user message in a Conversation Session that identifies the state immediately before that message and has a Session-scoped monotonically increasing number that is never reused.
+_Avoid_: queued input, active Agent Run, timestamp, backup
+
+**Session Restore**:
+A Management Command action that truncates one Conversation Session to a Restore Anchor, with an optional File Restore.
+_Avoid_: Session resume, Conversation Summary rollback, conversation branch
+
+**File Restore**:
+The Session Restore mode that attempts to return eligible files changed by that Conversation Session to their state before the Restore Anchor, while reporting any file it cannot restore.
+_Avoid_: Workspace reset, Exec rollback, MCP side-effect rollback
+
+**File Backup**:
+The byte-for-byte state of a file captured immediately before an eligible Built-in Tool attempts to modify it, associated with the foreground Restore Anchor that owns the Tool call.
+_Avoid_: Workspace snapshot, file version, metadata backup
+
+**Backup Gap**:
+A known eligible Built-in Tool modification that continued without a usable File Backup and makes File Restore unavailable for every restore range containing it.
+_Avoid_: file conflict, Tool error, missing legacy backup
+
 **Memory System**:
 The three-layer memory structure owned by a Workspace: Short-term Memory, Conversation Summary, and Long-term Memory.
 _Avoid_: Single memory store, vector memory, raw transcript archive

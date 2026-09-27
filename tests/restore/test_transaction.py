@@ -17,6 +17,7 @@ from myclaw.agent.session.backup_store import FileBackupStore
 from myclaw.agent.session.restore import (
     RestoreManager,
     RestoreMode,
+    RestoreRecoveryRequired,
     RestoreSafetyError,
     StaleRestorePlan,
 )
@@ -497,8 +498,10 @@ async def test_recovery_is_idempotent_after_each_durable_phase(
 
     after_restore_phase(interrupted_phase, interrupt)
     manager = RestoreManager(state, session.session_id, now=lambda: NOW)
-    with pytest.raises(RuntimeError, match="injected interruption"):
+    with pytest.raises(RestoreRecoveryRequired) as raised:
         await manager.execute(plan, RestoreMode.FILES)
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert "injected interruption" in str(raised.value.__cause__)
 
     recovered = await RestoreManager(state, session.session_id, now=lambda: NOW).recover_pending()
     repeated = await RestoreManager(state, session.session_id, now=lambda: NOW).recover_pending()
@@ -549,11 +552,12 @@ async def test_startup_recovery_prefers_incomplete_transaction_over_completed_re
 
     after_restore_phase("pending_intent", interrupt)
     pending_manager = RestoreManager(state, pending_session.session_id, now=lambda: NOW)
-    with pytest.raises(RuntimeError, match="injected pending transaction"):
+    with pytest.raises(RestoreRecoveryRequired) as raised:
         await pending_manager.execute(
             pending_manager.inspect(pending_session, 1),
             RestoreMode.FILES,
         )
+    assert isinstance(raised.value.__cause__, RuntimeError)
 
     recovered = await RestoreManager(state, now=lambda: NOW).recover_pending()
 
@@ -587,10 +591,11 @@ async def test_missing_safety_snapshot_does_not_mutate_on_recovery(
         raise RuntimeError("injected crash after pending intent")
 
     after_restore_phase("pending_intent", remove_safety_after_intent)
-    with pytest.raises(RuntimeError, match="injected crash"):
+    with pytest.raises(RestoreRecoveryRequired) as raised:
         await RestoreManager(state, session.session_id, now=lambda: NOW).execute(
             plan, RestoreMode.FILES
         )
+    assert isinstance(raised.value.__cause__, RuntimeError)
 
     with pytest.raises(RestoreSafetyError):
         await RestoreManager(state, session.session_id, now=lambda: NOW).recover_pending()
@@ -630,10 +635,11 @@ async def test_damaged_safety_snapshot_content_does_not_mutate_on_recovery(
         raise RuntimeError("injected crash with damaged safety snapshot")
 
     after_restore_phase("pending_intent", damage_snapshot)
-    with pytest.raises(RuntimeError, match="damaged safety snapshot"):
+    with pytest.raises(RestoreRecoveryRequired) as raised:
         await RestoreManager(state, session.session_id, now=lambda: NOW).execute(
             plan, RestoreMode.FILES
         )
+    assert isinstance(raised.value.__cause__, RuntimeError)
 
     with pytest.raises(RestoreSafetyError):
         await RestoreManager(state, session.session_id, now=lambda: NOW).recover_pending()
@@ -681,6 +687,39 @@ async def test_safety_snapshot_write_failure_causes_zero_mutation(
 
 
 @pytest.mark.asyncio
+async def test_pending_write_failure_after_replace_requires_recovery(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = WorkspaceState(workspace)
+    session = Session.create(state, new_uuid=lambda: FIRST_TOKEN, now=lambda: NOW)
+    _commit_user(session, "pending write failure", FIRST_TOKEN)
+    await session.wait_for_pending_persist()
+    manager = RestoreManager(state, session.session_id, now=lambda: NOW)
+    plan = manager.inspect(session, 1)
+    original_restrict = HOST_FILESYSTEM.restrict_private_file
+
+    def fail_after_replace(path: Path) -> None:
+        if path.name == "pending.json":
+            raise OSError("injected post-replace failure")
+        original_restrict(path)
+
+    monkeypatch.setattr(HOST_FILESYSTEM, "restrict_private_file", fail_after_replace)
+    with pytest.raises(RestoreRecoveryRequired) as raised:
+        await manager.execute(plan, RestoreMode.CONVERSATION_ONLY)
+    assert isinstance(raised.value.__cause__, OSError)
+    assert "post-replace failure" not in str(raised.value)
+    assert Session.load(state, session.session_id, now=lambda: NOW).messages[-1]["content"] == (
+        "pending write failure"
+    )
+
+    monkeypatch.undo()
+    recovered = await RestoreManager(state, session.session_id, now=lambda: NOW).recover_pending()
+    assert recovered is not None
+    assert Session.load(state, session.session_id, now=lambda: NOW).messages == []
+
+
+@pytest.mark.asyncio
 async def test_published_snapshot_survives_old_generation_cleanup_failure(
     workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -725,8 +764,9 @@ async def test_published_snapshot_survives_old_generation_cleanup_failure(
     monkeypatch.setattr(shutil, "rmtree", refuse_old_generation)
     after_restore_phase("pending_intent", interrupt)
     second_manager = RestoreManager(state, session.session_id, now=lambda: NOW)
-    with pytest.raises(RuntimeError, match="replacement snapshot"):
+    with pytest.raises(RestoreRecoveryRequired) as raised:
         await second_manager.execute(second_manager.inspect(continued, 2), RestoreMode.FILES)
+    assert isinstance(raised.value.__cause__, RuntimeError)
 
     second_manifest = json.loads((latest / "manifest.json").read_bytes())
     assert second_manifest["generation"] != first_generation
@@ -758,8 +798,10 @@ async def test_session_write_failure_retains_pending_for_later_recovery(
 
     monkeypatch.setattr(Session, "restore_before_durably", fail_session_write)
     manager = RestoreManager(state, session.session_id, now=lambda: NOW)
-    with pytest.raises(OSError, match="strict Session write failure"):
+    with pytest.raises(RestoreRecoveryRequired) as raised:
         await manager.execute(manager.inspect(session, 1), RestoreMode.FILES)
+    assert isinstance(raised.value.__cause__, OSError)
+    assert "strict Session write failure" in str(raised.value.__cause__)
     assert target.read_bytes() == b"before"
     assert Session.load(state, session.session_id, now=lambda: NOW).messages[-1]["content"] == (
         "session write failure"

@@ -22,6 +22,7 @@ from myclaw.agent.session.restore import (
     RestoreManager,
     RestoreMode,
     RestorePlan,
+    RestoreRecoveryRequired,
     RestoreResult,
     StaleRestorePlan,
 )
@@ -921,19 +922,14 @@ async def _run_cli_conversation(
                         "The selected Restore plan is stale; no changes were made.",
                     )
                 ) from error
+            except RestoreRecoveryRequired as error:
+                restore_blocked = True
+                replacement_failed_closed = True
+                current_loop = None
+                if management is not None:
+                    management.deactivate()
+                raise FatalManagementError(_RESTORE_STARTUP_ERROR) from error
             except (RestoreError, OSError, UnicodeError, ValueError) as error:
-                pending_path = (
-                    workspace_state.path / "restore" / plan.session_id / "pending.json"
-                    if workspace_state is not None
-                    else None
-                )
-                if pending_path is not None and pending_path.exists():
-                    restore_blocked = True
-                    replacement_failed_closed = True
-                    current_loop = None
-                    if management is not None:
-                        management.deactivate()
-                    raise FatalManagementError(_RESTORE_STARTUP_ERROR) from error
                 await release_restore_barriers()
                 raise ManagementError(
                     ErrorInfo("persistence_error", "Session Restore could not be completed.")

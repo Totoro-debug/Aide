@@ -11,11 +11,12 @@ from uuid import UUID, uuid4
 import pytest
 from textual.widgets import OptionList, Static
 
+import myclaw.agent.session.restore as restore_module
 import myclaw.terminal.cli as cli
 from myclaw.agent.loop import AgentLoop, ForegroundConversationProjection
 from myclaw.agent.message_bus import MessageBus
 from myclaw.agent.session.restore import RestoreManager as SessionRestoreManager
-from myclaw.agent.session.restore import RestoreMode
+from myclaw.agent.session.restore import RestoreMode, RestoreRecoveryRequired
 from myclaw.agent.session.session import RestoreAnchor, Session
 from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
@@ -75,7 +76,9 @@ async def test_restore_command_lists_persisted_anchors_without_exposing_restore_
         "double_listing",
         "lock_race",
         "stale",
+        "safe_failure",
         "persist_failure",
+        "unknown_failure",
         "rebuild_failure",
         "handover_failure",
         "handover_cancel",
@@ -470,6 +473,40 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
                     plan,
                     RestoreMode.CONVERSATION_ONLY,
                 )
+            if admission == "safe_failure":
+
+                def fail_snapshot(*_args: object, **_kwargs: object) -> str:
+                    raise OSError("secret safety snapshot write failure")
+
+                monkeypatch.setattr(restore_module, "_write_safety_snapshot", fail_snapshot)
+                failed = await self.dispatcher.restore_commit(
+                    plan,
+                    RestoreMode.CONVERSATION_ONLY,
+                )
+                assert failed.output == "persistence_error: Session Restore could not be completed."
+                assert loop.barrier is False
+                assert bus.paused is False
+                assert "management_deactivate" not in events
+                assert (await self.dispatcher.dispatch("/restore")).restore_listing is not None
+                assert (
+                    await self.dispatcher.restore_cancel()
+                ).output == "Session Restore cancelled."
+                return
+            if admission == "unknown_failure":
+                original_path_exists = restore_module._path_exists
+
+                def fail_pending_check(path: Path) -> bool:
+                    if path.name == "pending.json":
+                        raise OSError("secret pending state check failure")
+                    return original_path_exists(path)
+
+                monkeypatch.setattr(restore_module, "_path_exists", fail_pending_check)
+                try:
+                    await self.dispatcher.restore_commit(plan, RestoreMode.CONVERSATION_ONLY)
+                except FatalManagementError:
+                    assert loop.barrier is True
+                    raise
+                pytest.fail("uncertain pending state must close the runtime")
             blocked_resume = await self.dispatcher.resume(loop.session.session_id)
             assert blocked_resume.output == (
                 "model_invalid_request: Session Restore is waiting for confirmation."
@@ -528,7 +565,13 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
             exec_shell="auto",
         ),
     )
-    if admission in {"persist_failure", "rebuild_failure", "handover_failure", "handover_cancel"}:
+    if admission in {
+        "persist_failure",
+        "unknown_failure",
+        "rebuild_failure",
+        "handover_failure",
+        "handover_cancel",
+    }:
         expected_error = (
             asyncio.CancelledError if admission == "handover_cancel" else FatalManagementError
         )
@@ -542,11 +585,20 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
             assert raised.value.error.code == "persistence_error"
             expected_message = (
                 "Workspace Restore could not be recovered."
-                if admission == "persist_failure"
+                if admission in {"persist_failure", "unknown_failure"}
                 else "Runtime Session replacement could not be completed."
             )
             assert raised.value.error.message == expected_message
             assert "secret" not in str(raised.value)
+        if admission in {"persist_failure", "unknown_failure"}:
+            assert current_callback is not None
+            with pytest.raises(ManagementError):
+                current_callback()
+            assert "management_deactivate" in events
+            last_pause = max(index for index, event in enumerate(events) if event == "loop_pause")
+            last_idle = max(index for index, event in enumerate(events) if event == "schedule_idle")
+            assert "loop_release:True" not in events[last_pause:]
+            assert "schedule_resume" not in events[last_idle:]
         if admission in {"handover_failure", "handover_cancel"}:
             assert current_callback is not None
             with pytest.raises(ManagementError):
@@ -623,10 +675,11 @@ async def test_cli_recovers_pending_restore_before_runtime_components(
         raise RuntimeError("injected startup recovery interruption")
 
     after_restore_phase("pending_intent", interrupt_after_pending)
-    with pytest.raises(RuntimeError, match="startup recovery interruption"):
+    with pytest.raises(RestoreRecoveryRequired) as raised:
         await SessionRestoreManager(state, session.session_id).execute(
             plan, RestoreMode.CONVERSATION_ONLY
         )
+    assert isinstance(raised.value.__cause__, RuntimeError)
     loaded_session_ids: list[str | None] = []
 
     class FakeRestoreManager:

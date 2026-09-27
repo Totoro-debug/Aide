@@ -38,6 +38,10 @@ class RestoreError(Exception):
     """Base error for a restore operation that cannot be completed safely."""
 
 
+class RestoreRecoveryRequired(RestoreError):
+    """The failed transaction must be finished by startup recovery."""
+
+
 class StaleRestorePlan(RestoreError, ValueError):
     """The persisted Session or active journal changed after inspection."""
 
@@ -302,6 +306,23 @@ class RestoreManager:
     async def execute(self, plan: RestorePlan, mode: RestoreMode | str) -> RestoreResult:
         """Persist safety state, replay the selected range, and truncate Session."""
         plan = self.revalidate(plan)
+        pending_path = self._workspace_state.path / "restore" / plan.session_id / "pending.json"
+        try:
+            return await self._execute_transaction(plan, mode)
+        except StaleRestorePlan:
+            raise
+        except Exception as error:
+            try:
+                no_pending = not _path_exists(pending_path)
+            except Exception:
+                no_pending = False
+            if no_pending:
+                raise
+            raise RestoreRecoveryRequired("restore requires startup recovery") from error
+
+    async def _execute_transaction(
+        self, plan: RestorePlan, mode: RestoreMode | str
+    ) -> RestoreResult:
         selected_mode = _coerce_mode(mode)
         if selected_mode not in plan.available_modes:
             raise RestoreModeUnavailable(

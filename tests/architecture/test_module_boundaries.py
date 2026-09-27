@@ -1089,7 +1089,10 @@ def test_runner_summary_and_dream_keep_context_builder_out_of_their_boundaries()
     violations = [
         f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
         for path in paths
-        for module, line in _imports(path)
+        for module, line in _resolved_imports(
+            path.read_text(encoding="utf-8"),
+            package=tuple(path.parent.relative_to(PROJECT_ROOT).parts),
+        )
         if module == "myclaw.context.builder" or module.startswith("myclaw.context.builder.")
     ]
     assert violations == []

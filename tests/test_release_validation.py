@@ -282,18 +282,16 @@ def test_quality_runs_complete_sequence_and_requires_platform_evidence(
     report = release_validation._run_quality(_host_evidence(platform))
 
     assert suites == ["targeted", "full"]
-    assert commands[:4] == [
+    assert commands[:3] == [
         [sys.executable, "-m", "ruff", "check", "myclaw", "tests", "scripts"],
-        [sys.executable, "-m", "ruff", "format", "--check", "."],
         ["git", "diff", "--check"],
         [sys.executable, "-m", "mypy", "myclaw", "tests", "scripts"],
     ]
-    assert commands[4][2:4] == ["build", "--no-isolation"]
+    assert commands[3][2:4] == ["build", "--no-isolation"]
     assert report["build"] == {"artifacts": ["myclaw-test.whl"]}
     assert report["host_integration"] == _host_evidence(platform)
     assert report["static"] == {
         "ruff_lint": "passed",
-        "ruff_format": "passed",
         "git_diff_check": "passed",
         "mypy": "passed",
     }

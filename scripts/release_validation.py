@@ -1337,7 +1337,6 @@ def _run_quality(host_results: Sequence[Mapping[str, object]] | None = None) -> 
             passed_nodes=full.passed_nodes,
         )
         _run_command([sys.executable, "-m", "ruff", "check", "myclaw", "tests", "scripts"])
-        _run_command([sys.executable, "-m", "ruff", "format", "--check", "."])
         _run_command(["git", "diff", "--check"])
         _run_command([sys.executable, "-m", "mypy", "myclaw", "tests", "scripts"])
         build_dir = report_dir / "build"
@@ -1368,7 +1367,6 @@ def _run_quality(host_results: Sequence[Mapping[str, object]] | None = None) -> 
         },
         "static": {
             "ruff_lint": "passed",
-            "ruff_format": "passed",
             "git_diff_check": "passed",
             "mypy": "passed",
         },

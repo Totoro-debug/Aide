@@ -20,6 +20,7 @@ from myclaw.agent.loop import ModelContextOverflowError, TerminalAgentLoopContro
 from myclaw.agent.message_bus import MessageBus
 from myclaw.agent.permission import RuntimePermissionControl
 from myclaw.agent.session.session import Session
+from myclaw.agent.tools.mcp_runtime import MCPRuntimeManager
 from myclaw.agent.workspace_state import WorkspaceState, WorkspaceStateError
 from myclaw.config.agent_home import AgentHome
 from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
@@ -1823,9 +1824,23 @@ async def test_cli_same_session_resume_waits_for_pending_persist_before_target_l
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_point",
+    (
+        "quiesce",
+        "schedule_pause",
+        "old_abort",
+        "bus_reset",
+        "rebind",
+        "target_start",
+        "mcp_activate",
+        "cancel",
+    ),
+)
 async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    failure_point: str,
 ) -> None:
     events: list[str] = []
     current_callback: Callable[[], object] | None = None
@@ -1864,7 +1879,8 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
         async def reset(self) -> None:
             assert_unavailable()
             events.append("bus_reset")
-            raise RuntimeError("reset secret C:\\sensitive\\bus")
+            if failure_point == "bus_reset":
+                raise RuntimeError("reset secret C:\\sensitive\\bus")
 
     class FakeRouter:
         def __init__(self, **kwargs: object) -> None:
@@ -1913,6 +1929,8 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
             if pause_count == 1:
                 assert_current(initial_loop)
             events.append("schedule_pause")
+            if failure_point == "schedule_pause" and pause_count == 1:
+                raise RuntimeError("pause secret")
 
         async def close(self) -> None:
             events.append("schedule_close")
@@ -1941,6 +1959,11 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
 
         async def start(self) -> None:
             events.append("old_start")
+            if self is target_loop:
+                if failure_point == "cancel":
+                    raise asyncio.CancelledError
+                if failure_point == "target_start":
+                    raise RuntimeError("start secret")
 
         async def close(self) -> None:
             events.append("old_close" if self is initial_loop else "target_close")
@@ -1949,6 +1972,8 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
             if self is initial_loop:
                 assert_unavailable()
                 events.append("old_abort")
+                if failure_point == "old_abort":
+                    raise RuntimeError("abort secret")
             else:
                 events.append("target_abort")
 
@@ -1972,7 +1997,8 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
             )
 
         def deactivate(self) -> None:
-            return None
+            assert_unavailable()
+            events.append("management_deactivate")
 
     class FakeDispatcher:
         def __init__(self, management: object) -> None:
@@ -1988,10 +2014,21 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
 
         async def quiesce_for_rebind(self) -> None:
             events.append("quiesce")
+            if failure_point == "quiesce":
+                raise RuntimeError("quiesce secret")
 
         async def rebind_agent_loop(self, **kwargs: object) -> None:
             del kwargs
             events.append("rebind")
+            if failure_point == "rebind":
+                raise RuntimeError("rebind secret")
+
+    if failure_point == "mcp_activate":
+        def fail_activate(_manager: object, _report: object) -> None:
+            events.append("mcp_activate")
+            raise RuntimeError("activation secret")
+
+        monkeypatch.setattr(MCPRuntimeManager, "activate_generation", fail_activate)
 
     monkeypatch.setattr(cli, "WorkspaceState", FakeWorkspaceState)
     monkeypatch.setattr(cli, "MessageBus", FakeBus)
@@ -2011,20 +2048,22 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
         runtime=SimpleNamespace(max_iterations=50),
     )
 
-    with pytest.raises(FatalManagementError) as raised:
+    expected_error = asyncio.CancelledError if failure_point == "cancel" else FatalManagementError
+    with pytest.raises(expected_error) as raised:
         await cli._run_cli_conversation(
             agent_home=home,
             workspace=tmp_path / "workspace",
             configuration=configuration,
         )
 
-    assert raised.value.error.code == "persistence_error"
-    assert "reset secret" not in str(raised.value)
+    if isinstance(raised.value, FatalManagementError):
+        assert raised.value.error.code == "persistence_error"
+        assert "secret" not in str(raised.value)
     assert current_callback is not None
     assert_unavailable()
     assert events.count("old_abort") == 1
     assert events.count("target_abort") == 1
-    assert "rebind" not in events
+    assert "management_deactivate" in events
     assert "schedule_resume" not in events
 
 

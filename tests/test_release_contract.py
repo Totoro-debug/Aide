@@ -610,20 +610,19 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
 def test_cli_source_records_cutover_and_shutdown_order() -> None:
     cli_tree = _source_ast(ROOT / "myclaw" / "terminal" / "cli.py")
     replacement = _source_function(cli_tree, "replace_agent_loop")
+    restore = _source_function(cli_tree, "rebuild_after_restore")
+    handover = _source_function(cli_tree, "handover_prepared_generation")
     preflight_lines = _attribute_call_lines(replacement, "target", "preflight")
-    quiesce_lines = _attribute_call_lines(replacement, "terminal_app", "quiesce_for_rebind")
-    pause_lines = _attribute_call_lines(replacement, "schedule_service", "pause_and_drain")
-    reset_lines = _attribute_call_lines(replacement, "bus", "reset")
-    rebind_lines = _attribute_call_lines(replacement, "terminal_app", "rebind_agent_loop")
-    start_lines = _attribute_call_lines(replacement, "target", "start")
+    quiesce_lines = _attribute_call_lines(handover, "terminal_app", "quiesce_for_rebind")
+    pause_lines = _attribute_call_lines(handover, "schedule_service", "pause_and_drain")
+    reset_lines = _attribute_call_lines(handover, "bus", "reset")
+    rebind_lines = _attribute_call_lines(handover, "terminal_app", "rebind_agent_loop")
+    start_lines = _attribute_call_lines(handover, "target", "start")
+    activate_lines = _attribute_call_lines(handover, "mcp_manager", "activate_generation")
     resume_lines = _attribute_call_lines(replacement, "schedule_service", "resume")
-    current_none_lines = _assignment_lines(replacement, "current_loop", None)
-    current_target_lines = _assignment_lines(replacement, "current_loop", "target")
-    old_abort_lines = tuple(
-        line
-        for line in _named_call_lines(replacement, {"abort_loop_once"})
-        if current_none_lines and line > min(current_none_lines)
-    )
+    current_none_lines = _assignment_lines(handover, "current_loop", None)
+    current_target_lines = _assignment_lines(handover, "current_loop", "target")
+    old_abort_lines = _named_call_lines(handover, {"abort_loop_once"})
 
     cutover = (
         min(quiesce_lines),
@@ -633,11 +632,20 @@ def test_cli_source_records_cutover_and_shutdown_order() -> None:
         min(reset_lines),
         min(rebind_lines),
         min(start_lines),
-        min(line for line in current_target_lines if line > min(start_lines)),
-        min(resume_lines),
+        min(activate_lines),
+        min(current_target_lines),
     )
-    assert min(preflight_lines) < cutover[0]
     assert cutover == tuple(sorted(cutover))
+    for path in (replacement, restore):
+        assert min(_attribute_call_lines(path, "target", "preflight")) < min(
+            _named_call_lines(path, {"cancel_old_generation_confirmations"})
+        ) < min(_named_call_lines(path, {"handover_prepared_generation"}))
+    assert min(preflight_lines) < min(
+        _named_call_lines(replacement, {"handover_prepared_generation"})
+    ) < min(resume_lines)
+    assert min(_named_call_lines(restore, {"handover_prepared_generation"})) < min(
+        _attribute_call_lines(restore, "old_loop", "_release_replacement_barrier")
+    ) < min(_attribute_call_lines(restore, "schedule_service", "resume"))
 
     conversation = _source_function(cli_tree, "_run_cli_conversation")
     shutdown = next(

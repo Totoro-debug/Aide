@@ -471,6 +471,7 @@ async def test_cli_uses_failed_mcp_candidate_without_mutating_old_generation(
     old_loop: Any | None = None
     target_loop: Any | None = None
     replace_callback: Callable[[str, bool], Any] | None = None
+    current_callback: Callable[[], object] | None = None
     initial_tool = object()
     keyword_snapshots: list[tuple[object, ...]] = []
 
@@ -505,6 +506,9 @@ async def test_cli_uses_failed_mcp_candidate_without_mutating_old_generation(
 
         def activate_generation(self, report: object) -> tuple[object, ...]:
             assert cast(Any, report).failed_servers == (failed_name,)
+            assert current_callback is not None
+            with pytest.raises(ManagementError):
+                current_callback()
             events.append("mcp_activate")
             return ()
 
@@ -622,7 +626,11 @@ async def test_cli_uses_failed_mcp_candidate_without_mutating_old_generation(
             events.append("replacement_pause")
 
         async def _release_replacement_barrier(self, *, resume_inbound: bool) -> None:
-            del resume_inbound
+            assert resume_inbound is True
+            assert current_callback is not None
+            assert current_callback() is target_loop
+            events.append("publish_observed")
+            events.append("barrier_release")
 
         def project_foreground_conversation(self) -> object:
             return SimpleNamespace(session_id=self.session.session_id, messages=())
@@ -630,7 +638,8 @@ async def test_cli_uses_failed_mcp_candidate_without_mutating_old_generation(
     class FakeManagementService:
         def __init__(self, *args: object, **kwargs: object) -> None:
             del args
-            nonlocal replace_callback
+            nonlocal current_callback, replace_callback
+            current_callback = cast(Callable[[], object], kwargs["current_agent_loop"])
             replace_callback = cast(Callable[[str, bool], Any], kwargs["replace_agent_loop"])
 
         def deactivate(self) -> None:
@@ -694,7 +703,11 @@ async def test_cli_uses_failed_mcp_candidate_without_mutating_old_generation(
     assert events.index("keywords_prepare_1") < events.index("old_init")
     assert events.index("mcp_prepare") < events.index("keywords_prepare_2")
     assert events.index("keywords_prepare_2") < events.index("replacement_pause")
-    assert events.index("mcp_activate") < events.index("schedule_resume")
+    assert events.index("rebind") < events.index("target_start")
+    assert events.index("target_start") < events.index("mcp_activate")
+    assert events.index("mcp_activate") < events.index("publish_observed")
+    assert events.index("publish_observed") < events.index("barrier_release")
+    assert events.index("barrier_release") < events.index("schedule_resume")
     assert events[-5:] == [
         "schedule_close",
         "target_close",

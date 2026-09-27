@@ -21,7 +21,12 @@ from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import UserConfiguration
 from myclaw.management.commands import ManagementCommandDispatcher, ManagementPort
-from myclaw.management.service import FatalManagementError, RestoreListingReport
+from myclaw.management.service import (
+    FatalManagementError,
+    ManagementError,
+    ManagementViewService,
+    RestoreListingReport,
+)
 from myclaw.terminal.conversation import TerminalConversationApp
 
 SESSION_ID = "20260926-120000-000000_550e8400-e29b-41d4-a716-446655440000"
@@ -72,6 +77,8 @@ async def test_restore_command_lists_persisted_anchors_without_exposing_restore_
         "stale",
         "persist_failure",
         "rebuild_failure",
+        "handover_failure",
+        "handover_cancel",
     ),
 )
 async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
@@ -86,10 +93,21 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
     workspace.mkdir()
     now = datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
     loops: list[object] = []
+    current_callback: Callable[[], AgentLoop] | None = None
     bus_ref: dict[str, object] = {}
     schedule_waiting = asyncio.Event()
     loop_pause_waiting = asyncio.Event()
     loop_pause_release = asyncio.Event()
+
+    class FakeConfirmationCoordinator:
+        async def request(self, _request: object) -> None:
+            raise AssertionError("No confirmation is expected in this restore test")
+
+        async def cancel_generation(self, _generation_id: UUID) -> None:
+            events.append("coordinator_cancel")
+
+        async def close(self) -> None:
+            return None
 
     class FakeBus:
         def __init__(self) -> None:
@@ -134,7 +152,12 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
             )
 
         def activate_generation(self, _report: object) -> None:
+            assert current_callback is not None
+            with pytest.raises(ManagementError):
+                current_callback()
             events.append("mcp_activate")
+            if admission == "handover_failure":
+                raise RuntimeError("activation secret")
 
         async def close(self) -> None:
             events.append("mcp_close")
@@ -194,14 +217,18 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
             self.paused = False
             events.append("schedule_resume")
 
+        def cancel_confirmation_generation(self, _generation_id: UUID) -> None:
+            events.append("schedule_cancel")
+
         async def pause_and_drain(self) -> None:
-            return None
+            events.append("schedule_pause")
 
         def status_snapshot(self) -> object:
             return SimpleNamespace(to_dict=lambda: {})
 
-        async def drain_confirmation_aborts(self, **_kwargs: object) -> None:
-            return None
+        async def drain_confirmation_aborts(self, **kwargs: object) -> None:
+            if kwargs.get("generation_id") is not None:
+                events.append("confirmation_drain")
 
         async def close(self) -> None:
             events.append("schedule_close")
@@ -242,6 +269,8 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
         async def start(self) -> None:
             self.started = True
             events.append("loop_start")
+            if len(loops) > 1:
+                events.append("target_start")
 
         async def wait_for_restore_idle(self) -> None:
             events.append("session_idle")
@@ -256,6 +285,10 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
 
         async def _release_replacement_barrier(self, *, resume_inbound: bool) -> None:
             self.barrier = False
+            if len(loops) > 1 and self is loops[0]:
+                assert current_callback is not None
+                assert current_callback() is loops[1]
+                events.append("publish_observed")
             events.append(f"loop_release:{resume_inbound}")
 
         async def abort(self) -> None:
@@ -291,6 +324,8 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
         async def rebind_agent_loop(self, *, control: object, **_kwargs: object) -> None:
             self.control = control
             events.append("terminal_rebind")
+            if admission == "handover_cancel":
+                raise asyncio.CancelledError
 
         async def run_async(self) -> None:
             loop = cast(FakeLoop, self.control)
@@ -462,6 +497,16 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
             )
             assert bus.paused is False
 
+    class RecordingManagementService(ManagementViewService):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            nonlocal current_callback
+            current_callback = cast(Callable[[], AgentLoop], kwargs["current_agent_loop"])
+            super().__init__(*args, **kwargs)
+
+        def deactivate(self) -> None:
+            events.append("management_deactivate")
+            super().deactivate()
+
     monkeypatch.setattr(cli, "MCPRuntimeManager", FakeMCP)
     monkeypatch.setattr(cli, "MCPKeywordPreparer", FakeKeywords)
     monkeypatch.setattr(cli, "MessageBus", FakeBus)
@@ -471,6 +516,8 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
     monkeypatch.setattr(cli, "ScheduleService", FakeSchedule)
     monkeypatch.setattr(cli, "AgentLoop", FakeLoop)
     monkeypatch.setattr(cli, "TerminalConversationApp", FakeApp)
+    monkeypatch.setattr(cli, "ManagementViewService", RecordingManagementService)
+    monkeypatch.setattr(cli, "ToolConfirmationCoordinator", FakeConfirmationCoordinator)
 
     configuration = SimpleNamespace(
         mcp={},
@@ -481,20 +528,33 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
             exec_shell="auto",
         ),
     )
-    if admission in {"persist_failure", "rebuild_failure"}:
-        with pytest.raises(FatalManagementError) as raised:
+    if admission in {"persist_failure", "rebuild_failure", "handover_failure", "handover_cancel"}:
+        expected_error = (
+            asyncio.CancelledError if admission == "handover_cancel" else FatalManagementError
+        )
+        with pytest.raises(expected_error) as raised:
             await cli._run_cli_conversation(
                 agent_home=home,
                 workspace=workspace,
                 configuration=cast(UserConfiguration, configuration),
             )
-        assert raised.value.error.code == "persistence_error"
-        expected_message = (
-            "Workspace Restore could not be recovered."
-            if admission == "persist_failure"
-            else "Runtime Session replacement could not be completed."
-        )
-        assert raised.value.error.message == expected_message
+        if isinstance(raised.value, FatalManagementError):
+            assert raised.value.error.code == "persistence_error"
+            expected_message = (
+                "Workspace Restore could not be recovered."
+                if admission == "persist_failure"
+                else "Runtime Session replacement could not be completed."
+            )
+            assert raised.value.error.message == expected_message
+            assert "secret" not in str(raised.value)
+        if admission in {"handover_failure", "handover_cancel"}:
+            assert current_callback is not None
+            with pytest.raises(ManagementError):
+                current_callback()
+            assert "management_deactivate" in events
+            assert "schedule_resume" not in events[events.index("terminal_quiesce") :]
+            assert events.count("loop_abort") == 2
+            assert all(cast(FakeLoop, loop).aborted for loop in loops)
         if admission == "rebuild_failure":
             old_loop = cast(FakeLoop, loops[0])
             assert old_loop.aborted is True
@@ -520,6 +580,15 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
     assert events.count("schedule_resume") == 2
     assert events.index("loop_pause") < events.index("schedule_idle")
     assert events.index("schedule_idle") < events.index("mcp_prepare")
+    assert events.index("schedule_cancel") < events.index("coordinator_cancel")
+    assert events.index("coordinator_cancel") < events.index("confirmation_drain")
+    assert events.index("confirmation_drain") < events.index("terminal_quiesce")
+    assert events.index("terminal_rebind") < events.index("target_start")
+    assert events.index("target_start") < events.index("mcp_activate")
+    assert events.index("mcp_activate") < events.index("publish_observed")
+    assert events.index("publish_observed") < events.index("loop_release:True", events.index("publish_observed"))
+    assert events.index("loop_release:True", events.index("publish_observed")) < events.index("schedule_resume", events.index("publish_observed"))
+    assert "schedule_pause" not in events[: events.index("schedule_resume", events.index("publish_observed"))]
     assert events.index("loop_abort") < max(
         index for index, event in enumerate(events) if event == "loop_release:True"
     )

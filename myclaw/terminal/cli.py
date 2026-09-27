@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Mapping
 from pathlib import Path
 from time import monotonic
+from typing import Literal
 from uuid import uuid4
 
 import typer
@@ -268,6 +269,58 @@ async def _run_cli_conversation(
             return
         aborted_loops.append(loop)
         await loop.abort()
+
+    async def cancel_old_generation_confirmations(old_loop: AgentLoop) -> None:
+        generation_id = getattr(old_loop, "generation_id", None)
+        if generation_id is None:
+            return
+        assert schedule_service is not None
+        cancel_generation = getattr(
+            schedule_service,
+            "cancel_confirmation_generation",
+            None,
+        )
+        if callable(cancel_generation):
+            cancel_generation(generation_id)
+        await confirmation_coordinator.cancel_generation(generation_id)
+        await _drain_schedule_confirmation_aborts(
+            schedule_service,
+            generation_id=generation_id,
+        )
+
+    async def handover_prepared_generation(
+        old_loop: AgentLoop,
+        target: AgentLoop,
+        candidate_report: MCPSnapshotReport,
+        candidate_keywords: Mapping[str, tuple[str, ...]],
+        *,
+        schedule_state: Literal["needs_canceling_pause", "already_idle"],
+    ) -> None:
+        nonlocal active_loop, active_mcp_snapshot, active_mcp_keywords
+        nonlocal current_loop, pending_target
+        assert terminal_app is not None
+        assert schedule_service is not None
+        assert bus is not None
+        assert mcp_manager is not None
+
+        await terminal_app.quiesce_for_rebind()
+        if schedule_state == "needs_canceling_pause":
+            await schedule_service.pause_and_drain()
+        current_loop = None
+        await abort_loop_once(old_loop)
+        await bus.reset()
+        await terminal_app.rebind_agent_loop(
+            control=target.control,
+            skill_metadata=target.skill_metadata,
+            session_projection=target.project_foreground_conversation(),
+        )
+        await target.start()
+        mcp_manager.activate_generation(candidate_report)
+        active_mcp_snapshot = candidate_report.snapshot
+        active_mcp_keywords = candidate_keywords
+        current_loop = target
+        active_loop = target
+        pending_target = None
 
     try:
         workspace_path = normalize_workspace_path(workspace)
@@ -551,37 +604,14 @@ async def _run_cli_conversation(
 
                 destructive_started = True
                 try:
-                    generation_id = getattr(old_loop, "generation_id", None)
-                    if generation_id is not None:
-                        cancel_generation = getattr(
-                            schedule_service,
-                            "cancel_confirmation_generation",
-                            None,
-                        )
-                        if callable(cancel_generation):
-                            cancel_generation(generation_id)
-                        await confirmation_coordinator.cancel_generation(generation_id)
-                        await _drain_schedule_confirmation_aborts(
-                            schedule_service,
-                            generation_id=generation_id,
-                        )
-                    await terminal_app.quiesce_for_rebind()
-                    await schedule_service.pause_and_drain()
-                    current_loop = None
-                    await abort_loop_once(old_loop)
-                    await bus.reset()
-                    await terminal_app.rebind_agent_loop(
-                        control=target.control,
-                        skill_metadata=target.skill_metadata,
-                        session_projection=target.project_foreground_conversation(),
+                    await cancel_old_generation_confirmations(old_loop)
+                    await handover_prepared_generation(
+                        old_loop,
+                        target,
+                        candidate_report,
+                        candidate_keywords,
+                        schedule_state="needs_canceling_pause",
                     )
-                    await target.start()
-                    mcp_manager.activate_generation(candidate_report)
-                    active_mcp_snapshot = candidate_report.snapshot
-                    active_mcp_keywords = candidate_keywords
-                    current_loop = target
-                    active_loop = target
-                    pending_target = None
                     await release_replacement_barrier(resume_inbound=True)
                     schedule_service.resume()
                 except asyncio.CancelledError:
@@ -816,36 +846,14 @@ async def _run_cli_conversation(
             assert bus is not None
             destructive_started = True
             try:
-                generation_id = getattr(old_loop, "generation_id", None)
-                if generation_id is not None:
-                    cancel_generation = getattr(
-                        schedule_service,
-                        "cancel_confirmation_generation",
-                        None,
-                    )
-                    if callable(cancel_generation):
-                        cancel_generation(generation_id)
-                    await confirmation_coordinator.cancel_generation(generation_id)
-                    await _drain_schedule_confirmation_aborts(
-                        schedule_service,
-                        generation_id=generation_id,
-                    )
-                await terminal_app.quiesce_for_rebind()
-                current_loop = None
-                await abort_loop_once(old_loop)
-                await bus.reset()
-                await terminal_app.rebind_agent_loop(
-                    control=target.control,
-                    skill_metadata=target.skill_metadata,
-                    session_projection=target.project_foreground_conversation(),
+                await cancel_old_generation_confirmations(old_loop)
+                await handover_prepared_generation(
+                    old_loop,
+                    target,
+                    candidate_report,
+                    candidate_keywords,
+                    schedule_state="already_idle",
                 )
-                await target.start()
-                mcp_manager.activate_generation(candidate_report)
-                active_mcp_snapshot = candidate_report.snapshot
-                active_mcp_keywords = candidate_keywords
-                current_loop = target
-                active_loop = target
-                pending_target = None
                 if restore_barrier_held:
                     await old_loop._release_replacement_barrier(resume_inbound=True)
                     restore_barrier_held = False

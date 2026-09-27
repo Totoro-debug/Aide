@@ -23,15 +23,6 @@ from myclaw.agent.confirmation import (
     ConfirmationUnavailable,
     ForegroundConfirmationOwner,
 )
-from myclaw.agent.context import ContextBuilder
-from myclaw.agent.context_budget import ContextBudget, ContextUsageSnapshot, estimate_request_tokens
-from myclaw.agent.memory.conversation_compactor import (
-    AgentRunContextController,
-    AgentRunContextRequestPreparer,
-    AgentRunContextRouterAdapter,
-    AgentRunRouter,
-    latest_main_agent_usage_anchor,
-)
 from myclaw.agent.message_bus import (
     InboundMessage,
     MessageBus,
@@ -60,6 +51,15 @@ from myclaw.agent.tools.tool_gateway import (
 )
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import UserConfiguration
+from myclaw.context.budget import ContextBudget, ContextUsageSnapshot, estimate_request_tokens
+from myclaw.context.builder import ContextBuilder
+from myclaw.context.controller import (
+    AgentRunContextController,
+    AgentRunContextRequestPreparer,
+    AgentRunContextRouterAdapter,
+    AgentRunRouter,
+    latest_main_agent_usage_anchor,
+)
 from myclaw.errors import (
     MODEL_CONTEXT_OVERFLOW_MESSAGE,
     TURN_CANCELLED_MESSAGE,

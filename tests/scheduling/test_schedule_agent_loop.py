@@ -14,8 +14,7 @@ from uuid import UUID
 
 import pytest
 
-import myclaw.agent.context as context
-from myclaw.agent.context import ContextBuilder
+import myclaw.context.builder as context
 from myclaw.agent.loop import AgentLoop, ConfirmationRequestView
 from myclaw.agent.message_bus import MessageBus
 from myclaw.agent.permission import RuntimePermissionControl
@@ -25,6 +24,7 @@ from myclaw.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
 from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolGateway
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
+from myclaw.context.builder import ContextBuilder
 from myclaw.management.commands import ManagementCommandDispatcher
 from myclaw.memory.dream import Dream
 from myclaw.memory.manager import MemoryManager

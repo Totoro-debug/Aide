@@ -8,14 +8,6 @@ from typing import Any, Protocol
 from loguru import logger
 
 from myclaw import __version__
-from myclaw.agent.context_budget import (
-    CONTEXT_ESTIMATOR_VERSION,
-    ContextBudget,
-    ContextUsageSnapshot,
-    ProjectionSource,
-    estimate_request_tokens,
-    project_next_request_tokens,
-)
 from myclaw.agent.permission import (
     RuntimePermissionControl,
     ToolPermissionLevel,
@@ -23,6 +15,14 @@ from myclaw.agent.permission import (
 )
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader, ConfigView
+from myclaw.context.budget import (
+    CONTEXT_ESTIMATOR_VERSION,
+    ContextBudget,
+    ContextUsageSnapshot,
+    ProjectionSource,
+    estimate_request_tokens,
+    project_next_request_tokens,
+)
 from myclaw.errors import ErrorInfo
 from myclaw.memory.dream import DreamResult
 from myclaw.provider.models import REASONING_EFFORT_LEVELS, ReasoningEffort

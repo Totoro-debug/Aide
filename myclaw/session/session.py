@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any, Self, cast
 from uuid import UUID, uuid4
 
-from myclaw.agent.context_budget import ContextUsageSnapshot
 from myclaw.agent.tools.base import ArtifactReference
+from myclaw.context.budget import ContextUsageSnapshot
 from myclaw.utils.async_tasks import await_task_preserving_cancellation
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 from myclaw.utils.text import normalize_title as _normalize_title

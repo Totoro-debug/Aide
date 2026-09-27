@@ -8,15 +8,15 @@ from typing import Any
 import pytest
 from mcp.types import CallToolResult
 
-from myclaw.agent.memory.conversation_compactor import (
+from myclaw.agent.runner import AgentRunner, AgentRunnerResult
+from myclaw.agent.tools.mcp import MCPTool, MCPToolSpec
+from myclaw.agent.tools.tool_gateway import ToolGateway
+from myclaw.context.controller import (
     AgentRunContextController,
     AgentRunContextRequestPreparer,
     AgentRunContextRouterAdapter,
     AgentRunContextSnapshot,
 )
-from myclaw.agent.runner import AgentRunner, AgentRunnerResult
-from myclaw.agent.tools.mcp import MCPTool, MCPToolSpec
-from myclaw.agent.tools.tool_gateway import ToolGateway
 from myclaw.memory.manager import MemoryManager
 from myclaw.provider.model_router import ModelRouteStatus
 from myclaw.provider.models import (

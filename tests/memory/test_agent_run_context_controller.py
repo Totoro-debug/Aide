@@ -9,19 +9,6 @@ from typing import Any, Literal, cast
 
 import pytest
 
-from myclaw.agent.context_budget import (
-    estimate_request_tokens,
-    estimate_run_slice_tokens,
-    request_fits_model_context,
-)
-from myclaw.agent.memory.conversation_compactor import (
-    AgentRunContextController,
-    AgentRunContextRequestPreparer,
-    AgentRunContextRouterAdapter,
-    AgentRunContextSnapshot,
-    _request_hard_guard,
-    latest_main_agent_usage_anchor,
-)
 from myclaw.agent.run_errors import CommittableAgentRunError
 from myclaw.agent.runner import AgentRunner
 from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolResult
@@ -32,6 +19,19 @@ from myclaw.config.config import (
     RouteConfiguration,
     RuntimeConfiguration,
     UserConfiguration,
+)
+from myclaw.context.budget import (
+    estimate_request_tokens,
+    estimate_run_slice_tokens,
+    request_fits_model_context,
+)
+from myclaw.context.controller import (
+    AgentRunContextController,
+    AgentRunContextRequestPreparer,
+    AgentRunContextRouterAdapter,
+    AgentRunContextSnapshot,
+    _request_hard_guard,
+    latest_main_agent_usage_anchor,
 )
 from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
 from myclaw.memory.manager import MemoryManager

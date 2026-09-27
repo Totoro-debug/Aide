@@ -10,7 +10,8 @@ from datetime import datetime
 from hashlib import sha256
 from typing import Any, Literal, NoReturn, Protocol
 
-from myclaw.agent.context_budget import (
+from myclaw.agent.run_errors import CommittableAgentRunError
+from myclaw.context.budget import (
     CONTEXT_ESTIMATOR_VERSION,
     ContextBudget,
     ContextProjection,
@@ -22,7 +23,6 @@ from myclaw.agent.context_budget import (
     reported_model_usage_total,
     request_fits_model_context,
 )
-from myclaw.agent.run_errors import CommittableAgentRunError
 from myclaw.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from myclaw.memory.manager import MemoryManager
 from myclaw.provider.errors import ModelCallError, model_context_overflow_error

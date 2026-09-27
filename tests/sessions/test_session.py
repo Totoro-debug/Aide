@@ -8,7 +8,7 @@ from uuid import UUID
 
 import pytest
 
-from myclaw.agent.context_budget import CONTEXT_ESTIMATOR_VERSION, ContextUsageSnapshot
+from myclaw.context.budget import CONTEXT_ESTIMATOR_VERSION, ContextUsageSnapshot
 from myclaw.session.session import Session, SessionStoragePartition
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 from myclaw.workspace.state import WorkspaceState

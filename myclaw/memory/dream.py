@@ -11,9 +11,9 @@ from typing import Annotated, Any, Literal, Protocol
 
 from loguru import logger
 
-from myclaw.agent.context_budget import request_fits_model_context
 from myclaw.agent.tools.base import BaseTool, ToolError, ToolParam
 from myclaw.agent.tools.tool_gateway import ToolGateway
+from myclaw.context.budget import request_fits_model_context
 from myclaw.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from myclaw.logging.session import without_session_log
 from myclaw.memory.manager import (

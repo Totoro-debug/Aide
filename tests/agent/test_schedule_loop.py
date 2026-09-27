@@ -12,7 +12,7 @@ from uuid import UUID
 import pytest
 from mcp.types import CallToolResult
 
-import myclaw.agent.memory.conversation_compactor as compactor_module
+import myclaw.context.controller as compactor_module
 from myclaw.agent.loop import AgentLoop
 from myclaw.agent.message_bus import InboundMessage, MessageBus
 from myclaw.agent.permission import PermissionSnapshot, RuntimePermissionControl

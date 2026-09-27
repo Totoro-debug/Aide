@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.agent.context import ContextBuilder
+from myclaw.context.builder import ContextBuilder
 
 PROJECT_ROOT = Path(__file__).parents[2]
 PACKAGE_ROOT = PROJECT_ROOT / "myclaw"
@@ -67,6 +67,11 @@ def test_feature_packages_have_canonical_locations() -> None:
     for module in ("manager", "records", "store", "dream"):
         assert (PACKAGE_ROOT / "memory" / f"{module}.py").is_file()
         assert not (PACKAGE_ROOT / "agent" / "memory" / f"{module}.py").exists()
+    assert not tuple((PACKAGE_ROOT / "agent" / "memory").glob("*.py"))
+    for module in ("builder", "budget", "controller"):
+        assert (PACKAGE_ROOT / "context" / f"{module}.py").is_file()
+    assert not (PACKAGE_ROOT / "agent" / "context.py").exists()
+    assert not (PACKAGE_ROOT / "agent" / "context_budget.py").exists()
 
     probe = subprocess.run(
         [
@@ -77,9 +82,14 @@ def test_feature_packages_have_canonical_locations() -> None:
                 "modules = ('myclaw.tools',)\n"
                 "assert all(importlib.util.find_spec(module) is None for module in modules)\n"
                 "assert importlib.util.find_spec('myclaw.session.session') is not None\n"
-                "assert importlib.util.find_spec('myclaw.agent.session.session') is None\n"
                 "assert importlib.util.find_spec('myclaw.memory.manager') is not None\n"
-                "assert importlib.util.find_spec('myclaw.agent.memory.manager') is None\n"
+                "assert importlib.util.find_spec('myclaw.context.controller') is not None\n"
+                "for module in ('myclaw.agent.session.session', 'myclaw.agent.memory.manager'):\n"
+                "    try:\n"
+                "        spec = importlib.util.find_spec(module)\n"
+                "    except ModuleNotFoundError:\n"
+                "        spec = None\n"
+                "    assert spec is None\n"
             ),
         ],
         cwd=PROJECT_ROOT,
@@ -775,7 +785,7 @@ def test_mcp_keyword_module_does_not_import_private_configuration_implementation
 
 
 def test_context_builder_does_not_import_model_request_runtime_boundaries() -> None:
-    path = PACKAGE_ROOT / "agent" / "context.py"
+    path = PACKAGE_ROOT / "context" / "builder.py"
     forbidden_prefixes = (
         "myclaw.provider",
         "myclaw.router",
@@ -968,7 +978,7 @@ def test_issue_243_production_model_calls_use_one_explicit_run_context_seam() ->
         }
 
     compactor_tree = ast.parse(
-        (PACKAGE_ROOT / "agent" / "memory" / "conversation_compactor.py").read_text(
+        (PACKAGE_ROOT / "context" / "controller.py").read_text(
             encoding="utf-8"
         )
     )
@@ -1027,22 +1037,23 @@ def test_issue_243_production_model_calls_use_one_explicit_run_context_seam() ->
 def test_runner_summary_and_dream_keep_context_builder_out_of_their_boundaries() -> None:
     paths = (
         PACKAGE_ROOT / "agent" / "runner.py",
-        PACKAGE_ROOT / "agent" / "memory" / "conversation_compactor.py",
+        PACKAGE_ROOT / "context" / "controller.py",
         PACKAGE_ROOT / "memory" / "dream.py",
     )
     violations = [
         f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
         for path in paths
         for module, line in _imports(path)
-        if module == "myclaw.agent.context" or module.startswith("myclaw.agent.context.")
+        if module == "myclaw.context.builder" or module.startswith("myclaw.context.builder.")
     ]
     assert violations == []
 
 
-def test_agent_modules_do_not_depend_on_terminal_presentation() -> None:
+def test_nonterminal_modules_do_not_depend_on_terminal_presentation() -> None:
     violations = [
         f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
-        for path in _python_files(PACKAGE_ROOT / "agent")
+        for path in _python_files(PACKAGE_ROOT)
+        if path.relative_to(PACKAGE_ROOT).parts[0] != "terminal"
         for module, line in _imports(path)
         if module == "myclaw.terminal" or module.startswith("myclaw.terminal.")
     ]
@@ -1146,8 +1157,12 @@ def test_package_initializers_do_not_create_aggregate_import_entries() -> None:
         for node in tree.body:
             if isinstance(node, ast.Import):
                 modules = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module is not None:
-                modules = [node.module]
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    violations.append(
+                        f"{path.relative_to(PROJECT_ROOT)}:{node.lineno} imports a sibling module"
+                    )
+                modules = [node.module] if node.module is not None else []
             else:
                 continue
             violations.extend(

@@ -14,6 +14,7 @@ import pytest
 from myclaw.agent.session import backup_store as backup_store_module
 from myclaw.agent.session._restore_persistence import canonical_json_bytes, sha256_hex
 from myclaw.agent.session.backup_store import (
+    BackupGap,
     BackupIntegrityError,
     BackupIntegrityIssue,
     BackupStoreError,
@@ -160,6 +161,7 @@ def test_hard_link_to_restore_blob_is_not_recorded_as_an_ordinary_target(
     target.write_bytes(b"protected backup bytes")
     first_ticket = store.before_write(uuid4(), target)
     assert first_ticket is not None
+    store.after_write(first_ticket)
     first_entry = store.inspect().entries[0]
     assert first_entry.before.blob_name is not None
     blob = workspace / ".myclaw" / "restore" / SESSION_ID / "blobs" / first_entry.before.blob_name
@@ -604,6 +606,86 @@ def test_backup_can_be_reopened_and_read_in_a_new_process(workspace: Path) -> No
         text=True,
     )
     assert result.stdout.strip() == f"{len(original)} {hashlib.sha256(original).hexdigest()}"
+
+
+def test_incomplete_post_write_state_is_reported_as_gap_after_reopen(
+    workspace: Path,
+) -> None:
+    store = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
+    target = workspace.parent / "incomplete-post-write.bin"
+    target.write_bytes(b"before")
+    run_token = uuid4()
+    ticket = store.before_write(run_token, target)
+    assert ticket is not None
+
+    journal = FileBackupStore(WorkspaceState(workspace), SESSION_ID).inspect()
+
+    assert journal.entries[0].after is None
+    assert journal.gaps == (
+        BackupGap(
+            operation_id=ticket.operation_id,
+            revision=journal.entries[0].revision,
+            run_token=run_token,
+            requested_target=str(target.absolute()),
+            canonical_target=str(target.resolve()),
+            reason="post_write_state_unavailable",
+        ),
+    )
+
+
+def test_post_write_observation_failure_is_reported_as_gap_without_tool_effect(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
+    target = workspace.parent / "post-write-observation-failure.bin"
+    target.write_bytes(b"before")
+    run_token = uuid4()
+    ticket = store.before_write(run_token, target)
+    assert ticket is not None
+    target.write_bytes(b"tool result")
+    capture = backup_store_module._capture_target
+
+    def fail_observation(path: Path) -> bytes | None:
+        if Path(path) == ticket.canonical_target:
+            raise OSError("injected post-write observation failure")
+        return capture(path)
+
+    monkeypatch.setattr(backup_store_module, "_capture_target", fail_observation)
+
+    store.after_write(ticket)
+    journal = FileBackupStore(WorkspaceState(workspace), SESSION_ID).inspect()
+
+    assert target.read_bytes() == b"tool result"
+    assert [gap.reason for gap in journal.gaps] == ["post_write_state_unavailable"]
+
+
+def test_post_write_replace_failure_is_reported_as_gap_after_reopen(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
+    target = workspace.parent / "post-write-replace-failure.bin"
+    target.write_bytes(b"before")
+    ticket = store.before_write(uuid4(), target)
+    assert ticket is not None
+    entry_path = workspace / ".myclaw" / "restore" / SESSION_ID / "entries" / "1.json"
+    replace = HOST_FILESYSTEM.atomic_replace_bytes
+
+    def fail_entry_replace(path: Path, content: bytes) -> None:
+        if Path(path) == entry_path:
+            raise OSError("injected post-write entry replace failure")
+        replace(path, content)
+
+    monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_bytes", fail_entry_replace)
+    target.write_bytes(b"tool result")
+
+    store.after_write(ticket)
+    journal = FileBackupStore(WorkspaceState(workspace), SESSION_ID).inspect()
+
+    assert target.read_bytes() == b"tool result"
+    assert journal.entries[0].after is None
+    assert [gap.reason for gap in journal.gaps] == ["post_write_state_unavailable"]
 
 
 def test_backup_store_has_no_small_file_size_limit(workspace: Path) -> None:

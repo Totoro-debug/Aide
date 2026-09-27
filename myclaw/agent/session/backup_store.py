@@ -36,7 +36,13 @@ _SESSION_ID = re.compile(
 _SHA256 = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _BLOB_NAME = re.compile(r"[0-9a-f]{48}\.bin", re.ASCII)
 _GAP_CODES = frozenset(
-    {"target_read_failed", "blob_write_failed", "journal_write_failed", "store_unavailable"}
+    {
+        "target_read_failed",
+        "blob_write_failed",
+        "journal_write_failed",
+        "store_unavailable",
+        "post_write_state_unavailable",
+    }
 )
 
 
@@ -371,20 +377,34 @@ class FileBackupStore:
                     gaps.append(operation)
                     continue
                 entries.append(operation)
-                if not operation.before.exists:
-                    continue
-                try:
-                    self._verify_backup_blob(paths, operation)
-                except BackupIntegrityError as error:
-                    issues.append(
-                        BackupIntegrityIssue(operation_id, error.reason, operation.run_token)
-                    )
-                except Exception:
-                    issues.append(
-                        BackupIntegrityIssue(
-                            operation_id,
-                            "unsafe_or_unreadable_blob",
-                            operation.run_token,
+                if operation.before.exists:
+                    try:
+                        self._verify_backup_blob(paths, operation)
+                    except BackupIntegrityError as error:
+                        issues.append(
+                            BackupIntegrityIssue(
+                                operation_id,
+                                error.reason,
+                                operation.run_token,
+                            )
+                        )
+                    except Exception:
+                        issues.append(
+                            BackupIntegrityIssue(
+                                operation_id,
+                                "unsafe_or_unreadable_blob",
+                                operation.run_token,
+                            )
+                        )
+                if operation.after is None:
+                    gaps.append(
+                        BackupGap(
+                            operation_id=operation.operation_id,
+                            revision=operation.revision,
+                            run_token=operation.run_token,
+                            requested_target=operation.requested_target,
+                            canonical_target=operation.canonical_target,
+                            reason="post_write_state_unavailable",
                         )
                     )
             return BackupJournal(

@@ -178,6 +178,7 @@ async def test_file_restore_replays_conflicts_deletes_new_files_and_continues_af
     )
     manager = RestoreManager(state, session.session_id, now=lambda: NOW)
     plan = manager.inspect(session, 1)
+    assert plan.backup_gaps == ()
     result = await manager.execute(plan, RestoreMode.FILES)
 
     assert existing.read_bytes() == b"original"
@@ -290,6 +291,57 @@ async def test_backup_gap_only_disables_file_mode_inside_selected_range(
     assert later_plan.available_modes == (RestoreMode.CONVERSATION_ONLY, RestoreMode.FILES)
     assert earlier_plan.available_modes == (RestoreMode.CONVERSATION_ONLY,)
     assert len(earlier_plan.backup_gaps) == 1
+
+
+@pytest.mark.asyncio
+async def test_incomplete_post_write_state_disables_files_after_external_change(
+    workspace: Path,
+) -> None:
+    state = WorkspaceState(workspace)
+    session = Session.create(state, new_uuid=lambda: FIRST_TOKEN, now=lambda: NOW)
+    target = workspace / "incomplete-post-write.txt"
+    target.write_bytes(b"before")
+    _commit_user(session, "incomplete post-write", FIRST_TOKEN)
+    store = FileBackupStore(state, session.session_id)
+    ticket = store.before_write(FIRST_TOKEN, target)
+    assert ticket is not None
+    target.write_bytes(b"tool result")
+    target.write_bytes(b"external modification")
+    await session.wait_for_pending_persist()
+
+    plan = RestoreManager(state, session.session_id, now=lambda: NOW).inspect(session, 1)
+
+    assert plan.available_modes == (RestoreMode.CONVERSATION_ONLY,)
+    assert [gap.reason for gap in plan.backup_gaps] == ["post_write_state_unavailable"]
+
+
+@pytest.mark.asyncio
+async def test_incomplete_post_write_state_outside_selected_range_does_not_disable_files(
+    workspace: Path,
+) -> None:
+    state = WorkspaceState(workspace)
+    session = Session.create(state, new_uuid=lambda: FIRST_TOKEN, now=lambda: NOW)
+    incomplete = workspace / "incomplete-earlier.txt"
+    complete = workspace / "complete-later.txt"
+    incomplete.write_bytes(b"before incomplete")
+    complete.write_bytes(b"before complete")
+    store = FileBackupStore(state, session.session_id)
+
+    _commit_user(session, "incomplete", FIRST_TOKEN)
+    incomplete_ticket = store.before_write(FIRST_TOKEN, incomplete)
+    assert incomplete_ticket is not None
+    incomplete.write_bytes(b"tool result")
+    _commit_user(session, "complete", SECOND_TOKEN)
+    complete_ticket = store.before_write(SECOND_TOKEN, complete)
+    assert complete_ticket is not None
+    complete.write_bytes(b"after complete")
+    store.after_write(complete_ticket)
+    await session.wait_for_pending_persist()
+
+    plan = RestoreManager(state, session.session_id, now=lambda: NOW).inspect(session, 2)
+
+    assert plan.backup_gaps == ()
+    assert plan.available_modes == (RestoreMode.CONVERSATION_ONLY, RestoreMode.FILES)
 
 
 @pytest.mark.asyncio

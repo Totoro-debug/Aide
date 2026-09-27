@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any, Literal, cast
@@ -97,8 +97,10 @@ async def test_committable_preparation_failure_forms_terminal_result_without_mod
             tools: Sequence[dict[str, Any]],
             continuation: ModelContinuation | None,
             continuation_revision: int,
+            is_micro_compression_eligible: Callable[[str], bool] | None,
         ) -> list[dict[str, Any]]:
             del self, increment, latest_cycle_start, tools, continuation, continuation_revision
+            del is_micro_compression_eligible
             raise CommittableAgentRunError(error)
 
     provider = ScriptedFakeProvider()
@@ -178,6 +180,7 @@ async def test_runner_uses_run_local_router_and_request_provenance_recorder() ->
             tools: Sequence[dict[str, Any]],
             continuation: ModelContinuation | None,
             continuation_revision: int,
+            is_micro_compression_eligible: Callable[[str], bool] | None,
         ) -> list[dict[str, Any]]:
             return await super().prepare(
                 increment=increment,
@@ -185,15 +188,8 @@ async def test_runner_uses_run_local_router_and_request_provenance_recorder() ->
                 tools=tools,
                 continuation=continuation,
                 continuation_revision=continuation_revision,
+                is_micro_compression_eligible=is_micro_compression_eligible,
             )
-
-        def observe_request_projection(
-            self,
-            _messages: Sequence[dict[str, Any]],
-            *,
-            micro_compression_enabled: bool,
-        ) -> None:
-            del micro_compression_enabled
 
         def record_response(
             self,
@@ -340,11 +336,6 @@ class _DirectGateway:
         return False
 
 
-class _MicroCompressionGateway(_DirectGateway):
-    def is_micro_compression_eligible(self, tool_name: str) -> bool:
-        return tool_name in {"work", "read_file"}
-
-
 class _RetryingRouter:
     def __init__(self) -> None:
         self.logical_calls = 0
@@ -393,7 +384,6 @@ class _RecordingRequestPreparer(DetachedRequestPreparer):
     def __init__(self, initial_messages: Sequence[dict[str, Any]]) -> None:
         super().__init__(initial_messages)
         self.requests: list[dict[str, Any]] = []
-        self.observations: list[dict[str, Any]] = []
 
     async def prepare(
         self,
@@ -403,6 +393,7 @@ class _RecordingRequestPreparer(DetachedRequestPreparer):
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None,
         continuation_revision: int,
+        is_micro_compression_eligible: Callable[[str], bool] | None,
     ) -> list[dict[str, Any]]:
         prepared = await super().prepare(
             increment=increment,
@@ -410,6 +401,7 @@ class _RecordingRequestPreparer(DetachedRequestPreparer):
             tools=tools,
             continuation=continuation,
             continuation_revision=continuation_revision,
+            is_micro_compression_eligible=is_micro_compression_eligible,
         )
         self.requests.append(
             {
@@ -419,22 +411,10 @@ class _RecordingRequestPreparer(DetachedRequestPreparer):
                 "tools": deepcopy(tuple(tools)),
                 "continuation": continuation,
                 "continuation_revision": continuation_revision,
+                "has_micro_compression_predicate": is_micro_compression_eligible is not None,
             }
         )
         return prepared
-
-    def observe_request_projection(
-        self,
-        messages: Sequence[dict[str, Any]],
-        *,
-        micro_compression_enabled: bool,
-    ) -> None:
-        self.observations.append(
-            {
-                "messages": deepcopy(list(messages)),
-                "micro_compression_enabled": micro_compression_enabled,
-            }
-        )
 
 
 def _tool_iteration_scripts(count: int) -> tuple[StreamScript, ...]:
@@ -557,14 +537,10 @@ async def test_runner_prepares_each_logical_request_with_run_local_context() -> 
     ] == [None, "test-provider", None]
     assert all(request["tools"] == tuple(gateway.schemas) for request in preparer.requests)
     assert [len(request["increment"]) for request in preparer.requests] == [0, 2, 4]
-    assert [observation["messages"] for observation in preparer.observations] == [
+    assert [request["prepared"] for request in preparer.requests] == [
         request.messages for request in provider.stream_requests
     ]
-    assert [observation["micro_compression_enabled"] for observation in preparer.observations] == [
-        False,
-        False,
-        False,
-    ]
+    assert all(request["has_micro_compression_predicate"] for request in preparer.requests)
     assert all(
         message["role"] in {"assistant", "tool"}
         for request in preparer.requests
@@ -584,6 +560,7 @@ async def test_detached_request_preparation_is_value_equivalent() -> None:
         tools=(),
         continuation=None,
         continuation_revision=0,
+        is_micro_compression_eligible=None,
     )
 
     assert prepared == messages
@@ -603,6 +580,7 @@ async def test_request_preparer_cannot_mutate_runner_messages_or_provider_tools(
             tools: Sequence[dict[str, Any]],
             continuation: ModelContinuation | None,
             continuation_revision: int,
+            is_micro_compression_eligible: Callable[[str], bool] | None,
         ) -> list[dict[str, Any]]:
             prepared = await super().prepare(
                 increment=increment,
@@ -610,19 +588,11 @@ async def test_request_preparer_cannot_mutate_runner_messages_or_provider_tools(
                 tools=tools,
                 continuation=continuation,
                 continuation_revision=continuation_revision,
+                is_micro_compression_eligible=is_micro_compression_eligible,
             )
             prepared[0]["content"]["nested"].append("projected")
             tools[0]["parameters"]["enum"].append("mutated")
             return prepared
-
-        def observe_request_projection(
-            self,
-            messages: Sequence[dict[str, Any]],
-            *,
-            micro_compression_enabled: bool,
-        ) -> None:
-            del micro_compression_enabled
-            messages[0]["content"]["nested"].append("observed")
 
     provider = ScriptedFakeProvider(
         streams=(
@@ -675,8 +645,10 @@ async def test_request_prepare_failure_propagates_original_without_provider_call
             tools: Sequence[dict[str, Any]],
             continuation: ModelContinuation | None,
             continuation_revision: int,
+            is_micro_compression_eligible: Callable[[str], bool] | None,
         ) -> list[dict[str, Any]]:
             del self, increment, latest_cycle_start, tools, continuation, continuation_revision
+            del is_micro_compression_eligible
             raise failure
 
     provider = ScriptedFakeProvider()
@@ -704,69 +676,22 @@ async def test_request_prepare_failure_propagates_original_without_provider_call
 
 
 @pytest.mark.asyncio
-async def test_request_projection_observer_failure_stops_before_provider() -> None:
-    failure = RuntimeError("observer failed")
+async def test_request_prepare_cancelled_error_stops_before_provider() -> None:
+    failure = asyncio.CancelledError("preparation cancelled")
 
-    class FailingObserverPreparer(DetachedRequestPreparer):
-        def observe_request_projection(
+    class CancellingPreparer(DetachedRequestPreparer):
+        async def prepare(
             self,
-            _messages: Sequence[dict[str, Any]],
             *,
-            micro_compression_enabled: bool,
-        ) -> None:
-            del micro_compression_enabled
-            raise failure
-
-    provider = ScriptedFakeProvider(
-        streams=(
-            StreamScript(
-                events=(
-                    ModelCompleted(
-                        response=ModelResponse(
-                            message=AssistantModelMessage(content="unexpected"),
-                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
-                            finish_reason="stop",
-                        )
-                    ),
-                )
-            ),
-        )
-    )
-    initial_messages = [{"role": "user", "content": "request"}]
-
-    with pytest.raises(RuntimeError) as captured:
-        await AgentRunner(
-            ScriptedFakeRouter(provider),
-            FailingObserverPreparer(initial_messages),
-        ).run(
-            initial_messages,
-            model="chat",
-            tool_gateway=None,
-            on_output=_ignore_output,
-            confirmation=None,
-            externalize_result=None,
-            cancel_requested=None,
-            max_iterations=50,
-            propagate_unexpected_errors=True,
-        )
-
-    assert captured.value is failure
-    assert str(captured.value.__cause__) == "Agent Runner request preparation failed"
-    assert provider.stream_requests == []
-
-
-@pytest.mark.asyncio
-async def test_request_projection_observer_cancelled_error_stops_before_provider() -> None:
-    failure = asyncio.CancelledError("observer cancelled")
-
-    class CancellingObserverPreparer(DetachedRequestPreparer):
-        def observe_request_projection(
-            self,
-            _messages: Sequence[dict[str, Any]],
-            *,
-            micro_compression_enabled: bool,
-        ) -> None:
-            del micro_compression_enabled
+            increment: Sequence[dict[str, Any]],
+            latest_cycle_start: int | None,
+            tools: Sequence[dict[str, Any]],
+            continuation: ModelContinuation | None,
+            continuation_revision: int,
+            is_micro_compression_eligible: Callable[[str], bool] | None,
+        ) -> list[dict[str, Any]]:
+            del self, increment, latest_cycle_start, tools, continuation, continuation_revision
+            del is_micro_compression_eligible
             raise failure
 
     provider = ScriptedFakeProvider()
@@ -775,7 +700,7 @@ async def test_request_projection_observer_cancelled_error_stops_before_provider
     with pytest.raises(asyncio.CancelledError) as captured:
         await AgentRunner(
             ScriptedFakeRouter(provider),
-            CancellingObserverPreparer(initial_messages),
+            CancellingPreparer(initial_messages),
         ).run(
             initial_messages,
             model="chat",
@@ -1730,370 +1655,6 @@ async def test_runner_normalizes_externalizer_failure_to_safe_tool_error() -> No
         "content": "work result could not be stored.",
         "artifact": None,
     }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("iterations", "expected_omitted_results"),
-    ((10, 0), (11, 10), (12, 11)),
-)
-async def test_runner_micro_compresses_only_stale_tool_results_after_eleventh_call(
-    iterations: int,
-    expected_omitted_results: int,
-) -> None:
-    large_content = "x" * 513
-    tool_results = tuple(
-        ToolResult(
-            tool_call_id=f"call-{number}",
-            name="work",
-            status=("success", "error", "refused")[number % 3],
-            content=large_content,
-        )
-        for number in range(iterations)
-    )
-    final_script = StreamScript(
-        events=(
-            ModelCompleted(
-                response=ModelResponse(
-                    message=AssistantModelMessage(content="Done"),
-                    usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
-                    finish_reason="stop",
-                )
-            ),
-        )
-    )
-    provider = ScriptedFakeProvider(streams=(*_tool_iteration_scripts(iterations), final_script))
-    gateway = _MicroCompressionGateway([], tool_results)
-    initial_messages = [{"role": "user", "content": "Keep working."}]
-    original_initial_messages = [dict(message) for message in initial_messages]
-    preparer = _RecordingRequestPreparer(initial_messages)
-
-    result = await AgentRunner(ScriptedFakeRouter(provider), preparer).run(
-        initial_messages,
-        model="chat",
-        tool_gateway=gateway,  # type: ignore[arg-type]
-        on_output=_ignore_output,
-        confirmation=None,
-        externalize_result=None,
-        cancel_requested=None,
-        max_iterations=50,
-    )
-
-    assert len(provider.stream_requests) == len(preparer.requests) == iterations + 1
-    assert [request["continuation_revision"] for request in preparer.requests] == list(
-        range(iterations + 1)
-    )
-    assert [observation["messages"] for observation in preparer.observations] == [
-        request.messages for request in provider.stream_requests
-    ]
-    assert [observation["micro_compression_enabled"] for observation in preparer.observations] == [
-        False
-    ] * 11 + [True] * max(0, iterations - 10)
-    request_tool_messages = [
-        message
-        for message in provider.stream_requests[-1].messages
-        if message.get("role") == "tool"
-    ]
-    assert len(request_tool_messages) == iterations
-    assert (
-        sum(
-            message["content"] == "[work result omitted from context]"
-            for message in request_tool_messages
-        )
-        == expected_omitted_results
-    )
-    assert request_tool_messages[-1]["content"] == large_content
-    preparer_tool_messages = [
-        message for message in preparer.requests[-1]["prepared"] if message.get("role") == "tool"
-    ]
-    preparer_increment_tools = [
-        message for message in preparer.requests[-1]["increment"] if message.get("role") == "tool"
-    ]
-    assert len(preparer_tool_messages) == iterations
-    assert len(preparer_increment_tools) == iterations
-    assert all(message["content"] == large_content for message in preparer_tool_messages)
-    assert all(message["content"] == large_content for message in preparer_increment_tools)
-    assert initial_messages == original_initial_messages
-    assert all(
-        message["content"] == large_content
-        for message in result.messages
-        if message.get("role") == "tool"
-    )
-    assert {message["status"] for message in result.messages if message.get("role") == "tool"} == {
-        "success",
-        "error",
-        "refused",
-    }
-
-
-@pytest.mark.asyncio
-async def test_runner_micro_compression_includes_eligible_history_but_keeps_recent_cycle() -> None:
-    large_content = "h" * 513
-    history: list[dict[str, Any]] = [
-        {"role": "user", "content": "Previous request."},
-        {
-            "role": "tool",
-            "tool_call_id": "old-call",
-            "name": "read_file",
-            "status": "success",
-            "content": large_content,
-            "artifact": None,
-        },
-        {
-            "role": "tool",
-            "tool_call_id": "boundary-call",
-            "name": "read_file",
-            "status": "success",
-            "content": "b" * 512,
-            "artifact": None,
-        },
-        {
-            "role": "tool",
-            "tool_call_id": "non-eligible-call",
-            "name": "write_file",
-            "status": "success",
-            "content": large_content,
-            "artifact": None,
-        },
-        {"role": "user", "content": "Current request."},
-    ]
-    final_script = StreamScript(
-        events=(
-            ModelCompleted(
-                response=ModelResponse(
-                    message=AssistantModelMessage(content="Done"),
-                    usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
-                    finish_reason="stop",
-                )
-            ),
-        )
-    )
-    provider = ScriptedFakeProvider(streams=(*_tool_iteration_scripts(11), final_script))
-    gateway = _MicroCompressionGateway(
-        [],
-        tuple(
-            ToolResult(
-                tool_call_id=f"call-{number}",
-                name="work",
-                status="success",
-                content=large_content,
-            )
-            for number in range(11)
-        ),
-    )
-    original_history = [dict(message) for message in history]
-    preparer = _RecordingRequestPreparer(history)
-
-    result = await AgentRunner(ScriptedFakeRouter(provider), preparer).run(
-        history,
-        model="chat",
-        tool_gateway=gateway,  # type: ignore[arg-type]
-        on_output=_ignore_output,
-        confirmation=None,
-        externalize_result=None,
-        cancel_requested=None,
-        max_iterations=50,
-    )
-
-    assert len(provider.stream_requests) == len(preparer.requests) == 12
-    assert [request["continuation_revision"] for request in preparer.requests] == list(range(12))
-    assert [observation["messages"] for observation in preparer.observations] == [
-        request.messages for request in provider.stream_requests
-    ]
-    assert [observation["micro_compression_enabled"] for observation in preparer.observations] == [
-        False
-    ] * 9 + [True] * 3
-    final_request = provider.stream_requests[-1].messages
-    old_tool = next(
-        message for message in final_request if message.get("tool_call_id") == "old-call"
-    )
-    assert old_tool["content"] == "[read_file result omitted from context]"
-    boundary_tool = next(
-        message for message in final_request if message.get("tool_call_id") == "boundary-call"
-    )
-    assert boundary_tool["content"] == "b" * 512
-    non_eligible_tool = next(
-        message for message in final_request if message.get("tool_call_id") == "non-eligible-call"
-    )
-    assert non_eligible_tool["content"] == large_content
-    current_cycle_tool = [
-        message
-        for message in final_request
-        if message.get("role") == "tool" and message.get("tool_call_id") == "call-10"
-    ]
-    assert current_cycle_tool[0]["content"] == large_content
-    assert history == original_history
-    assert all(
-        message["content"] == large_content
-        for message in result.messages
-        if message.get("role") == "tool"
-    )
-
-
-@pytest.mark.asyncio
-async def test_runner_micro_compression_recounts_retained_history_before_provider_request() -> None:
-    class RetainedProjectionPreparer(DetachedRequestPreparer):
-        def observe_request_projection(
-            self,
-            _messages: Sequence[dict[str, Any]],
-            *,
-            micro_compression_enabled: bool,
-        ) -> None:
-            del micro_compression_enabled
-
-    large_content = "h" * 513
-    history: list[dict[str, Any]] = [
-        {"role": "user", "content": "Previous request."},
-        *[
-            message
-            for number in range(11)
-            for message in (
-                {
-                    "role": "assistant",
-                    "content": f"history assistant {number}",
-                    "tool_calls": [
-                        {"id": f"history-call-{number}", "name": "read_file", "arguments": "{}"}
-                    ],
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": f"history-call-{number}",
-                    "name": "read_file",
-                    "status": "success",
-                    "content": large_content,
-                    "artifact": None,
-                },
-            )
-        ],
-    ]
-    provider = ScriptedFakeProvider(
-        streams=(
-            StreamScript(
-                events=(
-                    ModelCompleted(
-                        response=ModelResponse(
-                            message=AssistantModelMessage(content="Done"),
-                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
-                            finish_reason="stop",
-                        )
-                    ),
-                )
-            ),
-        )
-    )
-    gateway = _MicroCompressionGateway([])
-
-    await AgentRunner(
-        ScriptedFakeRouter(provider),
-        RetainedProjectionPreparer(history),
-    ).run(
-        history,
-        model="chat",
-        tool_gateway=gateway,  # type: ignore[arg-type]
-        on_output=_ignore_output,
-        confirmation=None,
-        externalize_result=None,
-        cancel_requested=None,
-        max_iterations=50,
-    )
-
-    assert (
-        sum(
-            message.get("content") == "[read_file result omitted from context]"
-            for message in provider.stream_requests[0].messages
-        )
-        == 10
-    )
-
-
-@pytest.mark.asyncio
-async def test_runner_recomputes_latest_cycle_after_preparer_removes_history() -> None:
-    class PrefixDroppingPreparer(DetachedRequestPreparer):
-        async def prepare(
-            self,
-            *,
-            increment: Sequence[dict[str, Any]],
-            latest_cycle_start: int | None,
-            tools: Sequence[dict[str, Any]],
-            continuation: ModelContinuation | None,
-            continuation_revision: int,
-        ) -> list[dict[str, Any]]:
-            prepared = await super().prepare(
-                increment=increment,
-                latest_cycle_start=latest_cycle_start,
-                tools=tools,
-                continuation=continuation,
-                continuation_revision=continuation_revision,
-            )
-            return prepared[4:]
-
-        def observe_request_projection(
-            self,
-            _messages: Sequence[dict[str, Any]],
-            *,
-            micro_compression_enabled: bool,
-        ) -> None:
-            del micro_compression_enabled
-
-    large_content = "x" * 513
-    history: list[dict[str, Any]] = [
-        {"role": "system", "content": "System"},
-        {"role": "user", "content": "Previous request."},
-        {"role": "assistant", "content": "Previous response.", "tool_calls": []},
-        {"role": "tool", "name": "read_file", "content": large_content},
-        {"role": "user", "content": "Current request."},
-    ]
-    final_script = StreamScript(
-        events=(
-            ModelCompleted(
-                response=ModelResponse(
-                    message=AssistantModelMessage(content="Done"),
-                    usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
-                    finish_reason="stop",
-                )
-            ),
-        )
-    )
-    provider = ScriptedFakeProvider(streams=(*_tool_iteration_scripts(11), final_script))
-    gateway = _MicroCompressionGateway(
-        [],
-        tuple(
-            ToolResult(
-                tool_call_id=f"call-{number}",
-                name="work",
-                status="success",
-                content=large_content,
-            )
-            for number in range(11)
-        ),
-    )
-
-    result = await AgentRunner(
-        ScriptedFakeRouter(provider),
-        PrefixDroppingPreparer(history),
-    ).run(
-        history,
-        model="chat",
-        tool_gateway=gateway,  # type: ignore[arg-type]
-        on_output=_ignore_output,
-        confirmation=None,
-        externalize_result=None,
-        cancel_requested=None,
-        max_iterations=50,
-    )
-
-    final_request_tools = {
-        message["tool_call_id"]: message
-        for message in provider.stream_requests[-1].messages
-        if message.get("role") == "tool"
-    }
-    assert final_request_tools["call-9"]["content"] == "[work result omitted from context]"
-    assert final_request_tools["call-10"]["content"] == large_content
-    assert all(
-        message["content"] == large_content
-        for message in result.messages
-        if message.get("role") == "tool"
-    )
 
 
 @pytest.mark.asyncio

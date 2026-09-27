@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from copy import deepcopy
 from typing import Any
 
@@ -23,17 +23,16 @@ class DetachedRequestPreparer:
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None,
         continuation_revision: int,
+        is_micro_compression_eligible: Callable[[str], bool] | None,
     ) -> list[dict[str, Any]]:
-        del latest_cycle_start, tools, continuation, continuation_revision
+        del (
+            latest_cycle_start,
+            tools,
+            continuation,
+            continuation_revision,
+            is_micro_compression_eligible,
+        )
         return deepcopy([*self._initial_messages, *increment])
-
-    def observe_request_projection(
-        self,
-        _messages: Sequence[dict[str, Any]],
-        *,
-        micro_compression_enabled: bool,
-    ) -> None:
-        del micro_compression_enabled
 
     def record_response(
         self,

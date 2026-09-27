@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Literal, Protocol, cast
+from typing import Any, ClassVar, Literal, Protocol
 from uuid import UUID
 
 from loguru import logger
@@ -48,8 +48,6 @@ _MAX_ITERATIONS_MESSAGE = (
     "MyClaw 本轮对话已经达到最大循环次数，仍没有输出最终结果。"  # noqa: RUF001
     "可以再次尝试本次请求或者尝试给出更明确的任务目标。"
 )
-_MICRO_COMPRESSION_TOOL_CALL_THRESHOLD = 10
-_TOOL_RESULT_MICRO_COMPRESSION_CHAR_LIMIT = 512
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,14 +113,8 @@ class AgentRunRequestPreparer(Protocol):
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None,
         continuation_revision: int,
+        is_micro_compression_eligible: Callable[[str], bool] | None,
     ) -> Sequence[dict[str, Any]]: ...
-
-    def observe_request_projection(
-        self,
-        messages: Sequence[dict[str, Any]],
-        *,
-        micro_compression_enabled: bool,
-    ) -> None: ...
 
     def record_response(
         self,
@@ -132,62 +124,6 @@ class AgentRunRequestPreparer(Protocol):
         response: ModelResponse,
         increment: Sequence[dict[str, Any]],
     ) -> dict[str, object] | None: ...
-
-
-def _project_for_model_request(
-    messages: Sequence[dict[str, Any]],
-    *,
-    omit_tool_results_before: int | None,
-    gateway: ToolGateway,
-) -> list[dict[str, Any]]:
-    """Project stale Tool content for one detached Provider request."""
-    projected = deepcopy(list(messages))
-    if omit_tool_results_before is None:
-        return projected
-
-    for index, message in enumerate(projected):
-        if index >= omit_tool_results_before or message.get("role") != "tool":
-            continue
-        name = message.get("name")
-        content = message.get("content")
-        if (
-            not isinstance(name, str)
-            or not gateway.is_micro_compression_eligible(name)
-            or not isinstance(content, str)
-            or len(content) <= _TOOL_RESULT_MICRO_COMPRESSION_CHAR_LIMIT
-        ):
-            continue
-        message["content"] = f"[{name} result omitted from context]"
-    return projected
-
-
-def _micro_compression_eligible_count(
-    messages: Sequence[dict[str, Any]],
-    *,
-    gateway: ToolGateway,
-) -> int:
-    return sum(
-        1
-        for message in messages
-        if message.get("role") == "tool"
-        and isinstance(message.get("name"), str)
-        and message.get("status", "success") in {"success", "error", "refused"}
-        and gateway.is_micro_compression_eligible(cast(str, message["name"]))
-    )
-
-
-def _latest_completed_cycle_start(messages: Sequence[dict[str, Any]]) -> int | None:
-    for index in range(len(messages) - 1, -1, -1):
-        message = messages[index]
-        tool_calls = message.get("tool_calls")
-        if (
-            message.get("role") == "assistant"
-            and isinstance(tool_calls, Sequence)
-            and not isinstance(tool_calls, (str, bytes))
-            and tool_calls
-        ):
-            return index
-    return None
 
 
 @dataclass(slots=True)
@@ -274,8 +210,6 @@ class AgentRunner:
         model_call_started = False
         is_cancel_requested = cancel_requested or _never_cancel
         externalize = externalize_result or _identity_tool_result
-        eligible_tool_call_count = 0
-        micro_compression_enabled = False
         latest_cycle_start: int | None = None
         continuation_revision = 0
 
@@ -341,41 +275,17 @@ class AgentRunner:
                     () if tool_gateway is None else tuple(deepcopy(tool_gateway.schemas))
                 )
                 try:
-                    prepared_messages = await active_preparer.prepare(
+                    request_messages = await active_preparer.prepare(
                         increment=deepcopy(increment),
                         latest_cycle_start=latest_cycle_start,
                         tools=deepcopy(exposed_tools),
                         continuation=continuation,
                         continuation_revision=continuation_revision,
-                    )
-                except (asyncio.CancelledError, ModelCallError):
-                    raise
-                except BaseException as error:
-                    raise _PropagatedFailure(
-                        error,
-                        "Agent Runner request preparation failed",
-                    ) from error
-                request_messages: Sequence[dict[str, Any]]
-                if tool_gateway is not None:
-                    retained_eligible_count = _micro_compression_eligible_count(
-                        prepared_messages,
-                        gateway=tool_gateway,
-                    )
-                    micro_compression_enabled = (
-                        retained_eligible_count > _MICRO_COMPRESSION_TOOL_CALL_THRESHOLD
-                    )
-                if tool_gateway is not None and micro_compression_enabled:
-                    request_messages = _project_for_model_request(
-                        prepared_messages,
-                        omit_tool_results_before=_latest_completed_cycle_start(prepared_messages),
-                        gateway=tool_gateway,
-                    )
-                else:
-                    request_messages = prepared_messages
-                try:
-                    active_preparer.observe_request_projection(
-                        deepcopy(list(request_messages)),
-                        micro_compression_enabled=micro_compression_enabled,
+                        is_micro_compression_eligible=(
+                            None
+                            if tool_gateway is None
+                            else tool_gateway.is_micro_compression_eligible
+                        ),
                     )
                 except (asyncio.CancelledError, ModelCallError):
                     raise
@@ -529,10 +439,6 @@ class AgentRunner:
                     result = _externalize_tool_result(result, externalize)
                     _append_run_message(runtime_messages, increment, _tool_run_message(result))
                     pending_tool_calls.pop(0)
-                    if tool_gateway.is_micro_compression_eligible(tool_call.name):
-                        eligible_tool_call_count += 1
-                        if eligible_tool_call_count > _MICRO_COMPRESSION_TOOL_CALL_THRESHOLD:
-                            micro_compression_enabled = True
                     await emit(
                         AgentRunnerToolCallFinished(
                             tool_call_id=tool_call.id,

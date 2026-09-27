@@ -2328,6 +2328,7 @@ async def test_request_preparer_reuses_run_start_revision_without_duplicate_summ
         tools=(),
         continuation=None,
         continuation_revision=0,
+        is_micro_compression_eligible=None,
     )
 
     assert len(provider.complete_requests) == 2
@@ -2348,60 +2349,42 @@ async def test_runner_final_projection_changes_revision_and_repeats_stably(
         controller,
         router=_context_router(
             provider,
-            chat_status=_chat_status(context_window=4_000, max_output=100),
-            memory_status=_memory_status(context_window=4_000, max_output=100),
+            chat_status=_chat_status(context_window=16_384, max_output=100),
+            memory_status=_memory_status(context_window=16_384, max_output=100),
         ),
         requested_route="chat",
-        project_messages=_project_messages,
+        project_messages=_project_messages_with_tool_calls,
         current_user={"role": "user", "content": "current request"},
     )
 
-    first = await preparer.prepare(
-        increment=(),
-        latest_cycle_start=None,
-        tools=(),
-        continuation=None,
-        continuation_revision=0,
+    increment = tuple(
+        message for number in range(11) for message in _react_cycle(str(number), size=513)
     )
-    provider_projection = deepcopy(first)
-    provider_projection[-1]["content"] = "[read_file result omitted from context]"
-    preparer.observe_request_projection(
-        provider_projection,
-        micro_compression_enabled=True,
-    )
-    second = await preparer.prepare(
-        increment=(),
-        latest_cycle_start=None,
-        tools=(),
-        continuation=None,
-        continuation_revision=0,
-    )
-    prepared_revision = controller._checked_preparation_revision
-    preparer.observe_request_projection(
-        provider_projection,
-        micro_compression_enabled=True,
-    )
-    omitted_revision = controller._checked_preparation_revision
-    third = await preparer.prepare(
-        increment=(),
-        latest_cycle_start=None,
-        tools=(),
-        continuation=None,
-        continuation_revision=0,
-    )
-    preparer.observe_request_projection(
-        provider_projection,
-        micro_compression_enabled=True,
-    )
-    repeated_omitted_revision = controller._checked_preparation_revision
+    original_increment = deepcopy(increment)
+    requests = [
+        await preparer.prepare(
+            increment=increment,
+            latest_cycle_start=len(increment) - 2,
+            tools=(),
+            continuation=None,
+            continuation_revision=0,
+            is_micro_compression_eligible=lambda name: name == "read_file",
+        )
+        for _ in range(3)
+    ]
 
-    assert second == third == first
-    assert prepared_revision is not None
-    assert omitted_revision is not None
-    assert prepared_revision != omitted_revision
-    assert repeated_omitted_revision == omitted_revision
+    assert requests[0] == requests[1] == requests[2]
+    assert (
+        sum(
+            message.get("content") == "[read_file result omitted from context]"
+            for message in requests[0]
+        )
+        == 10
+    )
+    assert requests[0][-1]["content"] == increment[-1]["content"]
+    assert increment == original_increment
     assert provider.complete_requests == []
-    assert sum(message.get("content") == "current request" for message in third) == 1
+    assert sum(message.get("content") == "current request" for message in requests[0]) == 1
 
 
 @pytest.mark.asyncio

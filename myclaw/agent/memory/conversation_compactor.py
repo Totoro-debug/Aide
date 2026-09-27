@@ -43,6 +43,8 @@ type CompactionProjection = Callable[
     list[dict[str, Any]],
 ]
 _COMPACTION_JSON_TRANSLATION = str.maketrans({"`": r"\u0060"})
+_MICRO_COMPRESSION_TOOL_CALL_THRESHOLD = 10
+_TOOL_RESULT_MICRO_COMPRESSION_CHAR_LIMIT = 512
 
 __all__ = [
     "AgentRunContextController",
@@ -558,7 +560,7 @@ class AgentRunContextController:
         *,
         micro_compression_enabled: bool,
     ) -> None:
-        """Record the final Runner-owned projection before the Provider call."""
+        """Record the final Provider projection before the Provider call."""
         preparation_revision = self._context_revision(
             current_user=observation.current_user,
             tools=observation.tools,
@@ -968,7 +970,6 @@ class AgentRunContextRequestPreparer:
         self._compact_ratio = compact_ratio
         self._estimator_version = estimator_version
         self._micro_compression_enabled = False
-        self._pending_observation: _ReactRevisionObservation | None = None
 
     async def prepare(
         self,
@@ -978,8 +979,8 @@ class AgentRunContextRequestPreparer:
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None,
         continuation_revision: int,
+        is_micro_compression_eligible: Callable[[str], bool] | None,
     ) -> list[dict[str, Any]]:
-        self._pending_observation = None
         route_status = self._router.call_route_status(
             self._requested_route,
             continuation=continuation,
@@ -998,8 +999,22 @@ class AgentRunContextRequestPreparer:
             continuation_revision=continuation_revision,
             micro_compression_enabled=self._micro_compression_enabled,
         )
-        prepared_messages = tuple(deepcopy(list(prepared_messages)))
-        self._pending_observation = _ReactRevisionObservation(
+        request_messages = deepcopy(list(prepared_messages))
+        micro_compression_enabled = (
+            is_micro_compression_eligible is not None
+            and _micro_compression_eligible_count(
+                request_messages, is_micro_compression_eligible=is_micro_compression_eligible
+            )
+            > _MICRO_COMPRESSION_TOOL_CALL_THRESHOLD
+        )
+        if micro_compression_enabled:
+            assert is_micro_compression_eligible is not None
+            request_messages = _project_for_model_request(
+                request_messages,
+                omit_tool_results_before=_latest_completed_cycle_start(request_messages),
+                is_micro_compression_eligible=is_micro_compression_eligible,
+            )
+        observation = _ReactRevisionObservation(
             current_user=None if self._current_user is None else deepcopy(self._current_user),
             tools=tuple(deepcopy(list(tools))),
             route_status=route_status,
@@ -1010,25 +1025,13 @@ class AgentRunContextRequestPreparer:
             latest_cycle_start=latest_cycle_start,
             continuation_revision=continuation_revision,
         )
-        return deepcopy(list(prepared_messages))
-
-    def observe_request_projection(
-        self,
-        messages: Sequence[dict[str, Any]],
-        *,
-        micro_compression_enabled: bool,
-    ) -> None:
-        """Record Runner-owned request state for the next model-visible revision."""
-        observation = self._pending_observation
-        if observation is None:
-            raise RuntimeError("request projection observation requires one completed preparation")
-        self._pending_observation = None
         self._controller.observe_react_request_projection(
             observation,
-            messages,
+            request_messages,
             micro_compression_enabled=micro_compression_enabled,
         )
         self._micro_compression_enabled = micro_compression_enabled
+        return deepcopy(request_messages)
 
     def record_response(
         self,
@@ -1050,6 +1053,61 @@ class AgentRunContextRequestPreparer:
             route_status=route_status,
             estimator_version=self._estimator_version,
         ).to_dict()
+
+
+def _micro_compression_eligible_count(
+    messages: Sequence[dict[str, Any]],
+    *,
+    is_micro_compression_eligible: Callable[[str], bool],
+) -> int:
+    return sum(
+        1
+        for message in messages
+        if message.get("role") == "tool"
+        and isinstance(message.get("name"), str)
+        and message.get("status", "success") in {"success", "error", "refused"}
+        and is_micro_compression_eligible(message["name"])
+    )
+
+
+def _latest_completed_cycle_start(messages: Sequence[dict[str, Any]]) -> int | None:
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        tool_calls = message.get("tool_calls")
+        if (
+            message.get("role") == "assistant"
+            and isinstance(tool_calls, Sequence)
+            and not isinstance(tool_calls, (str, bytes))
+            and tool_calls
+        ):
+            return index
+    return None
+
+
+def _project_for_model_request(
+    messages: Sequence[dict[str, Any]],
+    *,
+    omit_tool_results_before: int | None,
+    is_micro_compression_eligible: Callable[[str], bool],
+) -> list[dict[str, Any]]:
+    projected = deepcopy(list(messages))
+    if omit_tool_results_before is None:
+        return projected
+
+    for index, message in enumerate(projected):
+        if index >= omit_tool_results_before or message.get("role") != "tool":
+            continue
+        name = message.get("name")
+        content = message.get("content")
+        if (
+            not isinstance(name, str)
+            or not is_micro_compression_eligible(name)
+            or not isinstance(content, str)
+            or len(content) <= _TOOL_RESULT_MICRO_COMPRESSION_CHAR_LIMIT
+        ):
+            continue
+        message["content"] = f"[{name} result omitted from context]"
+    return projected
 
 
 class AgentRunContextRouterAdapter:

@@ -127,6 +127,7 @@ class ManagementCommandResult:
     restore_listing: RestoreListingReport | None = None
     restore_plan: RestorePlan | None = None
     restore_result: RestoreResult | None = None
+    status_view: RuntimeStatus | None = None
 
 
 class ManagementCommandDispatcher:
@@ -236,7 +237,8 @@ class ManagementCommandDispatcher:
                     output = json.dumps(status.to_dict(), ensure_ascii=False, indent=2)
                 except ManagementError as management_error:
                     output = f"{management_error.error.code}: {management_error.error.message}"
-                return ManagementCommandResult(handled=True, output=output)
+                    return ManagementCommandResult(handled=True, output=output)
+                return ManagementCommandResult(handled=True, output=output, status_view=status)
             if parsed_command is _MEMORY_COMMAND:
                 try:
                     output = await management.memory_view()

@@ -22,6 +22,7 @@ from uuid import UUID, uuid4
 from markdown_it import MarkdownIt
 from markdown_it.rules_core.state_core import StateCore
 from markdown_it.token import Token
+from rich.cells import cell_len, set_cell_size
 from rich.style import Style
 from rich.text import Text
 from textual import on
@@ -37,7 +38,7 @@ from textual.screen import ModalScreen
 from textual.scrollbar import ScrollTo
 from textual.timer import Timer
 from textual.widget import Widget
-from textual.widgets import Button, Markdown, OptionList, Static, TextArea
+from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 from textual.worker import Worker, WorkerError
 
@@ -65,7 +66,7 @@ from myclaw.management.commands import (
     ManagementCommandDispatcher,
     ManagementCommandResult,
 )
-from myclaw.management.service import FatalManagementError, SessionListingEntry
+from myclaw.management.service import FatalManagementError, RuntimeStatus, SessionListingEntry
 from myclaw.provider.models import REASONING_EFFORT_LEVELS, ReasoningEffort
 from myclaw.skills.catalog import SkillMetadata
 from myclaw.terminal.keyboard import EnhancedKeyboardAction, EnhancedKeyboardAdapter
@@ -135,9 +136,10 @@ class _ToolRowState:
 
 
 class _ActivityGroupHeading(Static):
-    """Mouse-only disclosure title for one Agent Run Activity Group."""
+    """Disclosure title for one Agent Run Activity Group."""
 
     FOCUS_ON_CLICK = False
+    can_focus = True
     activity_group: _ActivityGroupState | None = None
 
     class Clicked(Message):
@@ -153,6 +155,15 @@ class _ActivityGroupHeading(Static):
         event.prevent_default()
         self.post_message(self.Clicked(self))
 
+    async def _on_key(self, event: Key) -> None:
+        if event.key in {"enter", "space"} and self.activity_group is not None:
+            event.stop()
+            event.prevent_default()
+            if self.activity_group.toggleable:
+                self.post_message(self.Clicked(self))
+            return
+        await super()._on_key(event)
+
     def on_unmount(self, event: Unmount) -> None:
         del event
         self.activity_group = None
@@ -165,6 +176,7 @@ class _ActivityGroupState:
     expanded: bool = True
     toggleable: bool = False
     elapsed: float = 0.0
+    outcome: _TerminalOutcome | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,12 +377,11 @@ class _CompletionCandidate:
     def display_label(self) -> Text:
         """Return a markup-disabled, single-line label for OptionList."""
         description = " ".join(self.description.split())
-        return Text(
-            f"{self.token} - {description}",
-            no_wrap=True,
-            overflow="ellipsis",
-            end="",
-        )
+        label = Text(no_wrap=True, overflow="ellipsis", end="")
+        label.append(self.token, style="bold")
+        label.append(f"  {self.kind.value.title()}  ", style="dim")
+        label.append(description, style="dim")
+        return label
 
 
 class _CommandCompletion(OptionList):
@@ -402,6 +413,7 @@ class _ReasoningEffortSelector(Static):
     def __init__(self, effort: ReasoningEffort = "medium", *, id: str | None = None) -> None:
         super().__init__("", id=id, markup=False)
         self._selected_index = 0
+        self._current_effort = effort
         self.set_effort(effort)
 
     @property
@@ -409,19 +421,36 @@ class _ReasoningEffortSelector(Static):
         return REASONING_EFFORT_LEVELS[self._selected_index]
 
     def set_effort(self, effort: ReasoningEffort) -> None:
+        self._current_effort = effort
         self._selected_index = REASONING_EFFORT_LEVELS.index(effort)
         self._refresh_content()
 
     def _refresh_content(self) -> None:
-        content = Text()
+        content = Text(f"Current: {self._current_effort} | Pending: {self.selected_effort}\n")
         for index, effort in enumerate(REASONING_EFFORT_LEVELS):
             if index:
                 content.append("  ")
             if index == self._selected_index:
-                content.append(effort, style="reverse bold")
+                content.append(
+                    effort,
+                    style=Style(reverse=True, bold=True, meta={"effort": effort}),
+                )
             else:
-                content.append(effort)
+                content.append(effort, style=Style(meta={"effort": effort}))
         self.update(content)
+
+    @on(Click)
+    async def _on_click(self, event: Click) -> None:
+        if event.widget is not self:
+            return
+        selected = event.style.meta.get("effort")
+        if selected not in REASONING_EFFORT_LEVELS:
+            return
+        event.stop()
+        event.prevent_default()
+        self._selected_index = REASONING_EFFORT_LEVELS.index(selected)
+        self._refresh_content()
+        self.post_message(self.Confirmed(self))
 
     async def _on_key(self, event: Key) -> None:
         if event.key in {"left", "right"}:
@@ -468,6 +497,7 @@ class _PermissionSelector(Static):
     ) -> None:
         super().__init__("", id=id, markup=False)
         self._selected_index = 0
+        self._current_level = permission_level
         self.set_permission_level(permission_level)
 
     @property
@@ -475,6 +505,7 @@ class _PermissionSelector(Static):
         return PERMISSION_LEVELS[self._selected_index]
 
     def set_permission_level(self, permission_level: ToolPermissionLevel) -> None:
+        self._current_level = permission_level
         self._selected_index = PERMISSION_LEVELS.index(permission_level)
         self._refresh_content()
 
@@ -482,7 +513,17 @@ class _PermissionSelector(Static):
         available_width = self.content_region.width
         inline_width = sum(map(len, _PERMISSION_LABELS)) + 2 * (len(_PERMISSION_LABELS) - 1)
         separator = "\n" if available_width and available_width < inline_width else "  "
-        content = Text(no_wrap=True)
+        current_label = _PERMISSION_LABELS[PERMISSION_LEVELS.index(self._current_level)]
+        pending_label = _PERMISSION_LABELS[self._selected_index]
+        if available_width and available_width < 50:
+            short_labels = ("Read", "Write", "Full")
+            current_short = short_labels[PERMISSION_LEVELS.index(self._current_level)]
+            pending_short = short_labels[self._selected_index]
+            prefix = "Current:" if available_width >= 22 else ""
+            heading = f"{prefix}{current_short} -> {pending_short}"
+        else:
+            heading = f"Current: {current_label} | Pending: {pending_label}"
+        content = Text(f"{heading}\n", no_wrap=True)
         for index, (level, label) in enumerate(
             zip(PERMISSION_LEVELS, _PERMISSION_LABELS, strict=True)
         ):
@@ -685,6 +726,12 @@ class _SessionPickerScreen(ModalScreen[str | None]):
         min-height: 3;
         overflow-y: auto;
     }
+
+    #session-picker-filter {
+        width: 100%;
+        height: 3;
+        margin-bottom: 1;
+    }
     """
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
@@ -718,6 +765,7 @@ class _SessionPickerScreen(ModalScreen[str | None]):
                     markup=False,
                     classes="session-picker-notice",
                 )
+            yield Input(placeholder="Filter by title", id="session-picker-filter")
             yield OptionList(
                 *(
                     Option(_session_picker_label(session), id=session.id)
@@ -728,7 +776,34 @@ class _SessionPickerScreen(ModalScreen[str | None]):
             )
 
     def on_mount(self) -> None:
-        self.query_one("#session-picker-options", OptionList).focus()
+        self.query_one("#session-picker-filter", Input).focus()
+
+    @on(Input.Changed, "#session-picker-filter")
+    def _filter_changed(self, message: Input.Changed) -> None:
+        search = message.value.casefold().strip()
+        options = self.query_one("#session-picker-options", OptionList)
+        options.set_options(
+            Option(_session_picker_label(session), id=session.id)
+            for session in self._sessions
+            if search in session.title.casefold()
+        )
+        if options.option_count:
+            options.highlighted = 0
+
+    @on(Key)
+    def _filter_key(self, event: Key) -> None:
+        if not self.query_one("#session-picker-filter", Input).has_focus:
+            return
+        options = self.query_one("#session-picker-options", OptionList)
+        if event.key == "down" and options.option_count:
+            event.stop()
+            event.prevent_default()
+            options.focus()
+        elif event.key == "enter" and options.option_count:
+            event.stop()
+            event.prevent_default()
+            option = options.get_option_at_index(options.highlighted or 0)
+            self.dismiss(option.id)
 
     @on(OptionList.OptionSelected, "#session-picker-options")
     def _option_selected(self, message: OptionList.OptionSelected) -> None:
@@ -779,6 +854,12 @@ class _RestoreAnchorPickerScreen(ModalScreen[int | None]):
         min-height: 3;
         overflow-y: auto;
     }
+
+    #restore-anchor-filter {
+        width: 100%;
+        height: 3;
+        margin-bottom: 1;
+    }
     """
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
@@ -798,6 +879,7 @@ class _RestoreAnchorPickerScreen(ModalScreen[int | None]):
                 id="restore-anchor-notice",
                 markup=False,
             )
+            yield Input(placeholder="Filter ID, time or preview", id="restore-anchor-filter")
             yield OptionList(
                 *(
                     Option(_restore_anchor_label(anchor), id=str(anchor.anchor_id))
@@ -808,7 +890,35 @@ class _RestoreAnchorPickerScreen(ModalScreen[int | None]):
             )
 
     def on_mount(self) -> None:
-        self.query_one("#restore-anchor-options", OptionList).focus()
+        self.query_one("#restore-anchor-filter", Input).focus()
+
+    @on(Input.Changed, "#restore-anchor-filter")
+    def _filter_changed(self, message: Input.Changed) -> None:
+        search = message.value.casefold().strip()
+        options = self.query_one("#restore-anchor-options", OptionList)
+        options.set_options(
+            Option(_restore_anchor_label(anchor), id=str(anchor.anchor_id))
+            for anchor in self._anchors
+            if search in _restore_anchor_label(anchor).casefold()
+        )
+        if options.option_count:
+            options.highlighted = 0
+
+    @on(Key)
+    def _filter_key(self, event: Key) -> None:
+        if not self.query_one("#restore-anchor-filter", Input).has_focus:
+            return
+        options = self.query_one("#restore-anchor-options", OptionList)
+        if event.key == "down" and options.option_count:
+            event.stop()
+            event.prevent_default()
+            options.focus()
+        elif event.key == "enter" and options.option_count:
+            event.stop()
+            event.prevent_default()
+            option = options.get_option_at_index(options.highlighted or 0)
+            if isinstance(option.id, str):
+                self.dismiss(int(option.id))
 
     @on(OptionList.OptionSelected, "#restore-anchor-options")
     def _option_selected(self, message: OptionList.OptionSelected) -> None:
@@ -889,11 +999,17 @@ class _RestoreModeScreen(ModalScreen[RestoreMode | None]):
     #restore-mode-panel {
         width: 86%;
         max-width: 84;
-        height: auto;
+        height: 90%;
         max-height: 90%;
         padding: 1 2;
         border: round $panel;
         background: $surface;
+    }
+
+    #restore-mode-details {
+        width: 100%;
+        height: 1fr;
+        overflow-y: auto;
     }
 
     #restore-mode-heading,
@@ -913,8 +1029,14 @@ class _RestoreModeScreen(ModalScreen[RestoreMode | None]):
 
     #restore-mode-options {
         width: 100%;
+        height: 3;
+    }
+
+    #restore-mode-impact {
+        width: 100%;
         height: auto;
-        min-height: 3;
+        margin-bottom: 1;
+        color: $text-warning;
     }
     """
 
@@ -925,18 +1047,23 @@ class _RestoreModeScreen(ModalScreen[RestoreMode | None]):
 
     def __init__(self, plan: RestorePlan) -> None:
         super().__init__(id="restore-mode-picker")
+        self._plan = plan
         self._modes = plan.available_modes
         self._has_gap = bool(plan.backup_gaps or plan.integrity_issues)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="restore-mode-panel"):
             yield Static("Restore scope", id="restore-mode-heading", markup=False)
-            if self._has_gap:
+            with VerticalScroll(id="restore-mode-details"):
                 yield Static(
-                    "File Restore unavailable: the selected range has incomplete backup coverage.",
-                    id="restore-mode-notice",
-                    markup=False,
+                    _restore_impact_text(self._plan), id="restore-mode-impact", markup=False
                 )
+                if self._has_gap:
+                    yield Static(
+                        "File Restore unavailable: the selected range has incomplete backup coverage.",
+                        id="restore-mode-notice",
+                        markup=False,
+                    )
             yield OptionList(
                 *(Option(_restore_mode_label(mode), id=mode.value) for mode in self._modes),
                 id="restore-mode-options",
@@ -980,7 +1107,7 @@ class _RestoreConfirmationScreen(ModalScreen[bool]):
         padding: 1 2;
         border: round $warning;
         background: $surface;
-        overflow-y: auto;
+        overflow-y: hidden;
     }
 
     #restore-confirmation-heading,
@@ -1001,14 +1128,22 @@ class _RestoreConfirmationScreen(ModalScreen[bool]):
 
     #restore-confirmation-actions {
         width: 100%;
-        height: auto;
+        height: 3;
         align: center middle;
         margin-top: 1;
     }
 
     #restore-confirmation-actions Button {
-        margin: 0 1;
+        width: 1fr;
+        min-width: 0;
+        margin: 0;
         height: 3;
+    }
+
+    #restore-confirmation-details {
+        width: 100%;
+        height: 1fr;
+        overflow-y: auto;
     }
     """
 
@@ -1027,36 +1162,42 @@ class _RestoreConfirmationScreen(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         with Vertical(id="restore-confirmation-panel"):
             yield Static("Confirm Session Restore", id="restore-confirmation-heading", markup=False)
-            yield Static(
-                f"Remove: {self._plan.removed_users} User and "
-                f"{self._plan.removed_messages} total messages",
-                classes="restore-confirmation-detail",
-                markup=False,
-            )
-            yield Static(
-                f"Files: {len(self._plan.targets)} tracked, "
-                f"{self._plan.external_target_count} external",
-                classes="restore-confirmation-detail",
-                markup=False,
-            )
-            if self._mode is RestoreMode.FILES:
-                scope = "Scope: Conversation Session and eligible File Restore."
-            else:
-                scope = "Scope: Conversation Session only; files remain unchanged."
-            yield Static(scope, id="restore-confirmation-scope", markup=False)
-            yield Static(
-                "Not independently rolled back: Conversation Summary, Long-term Memory, Schedule, "
-                "Exec/MCP effects, Dream, Tool Artifacts, Session Log, and manual edits.",
-                classes="restore-confirmation-detail",
-                markup=False,
-            )
-            if self._mode is RestoreMode.FILES:
+            with VerticalScroll(id="restore-confirmation-details"):
                 yield Static(
-                    "File Restore may still overwrite later manual, Exec, or MCP changes "
-                    "to tracked files.",
+                    _restore_impact_text(self._plan),
                     classes="restore-confirmation-detail",
                     markup=False,
                 )
+                yield Static(
+                    f"Remove: {self._plan.removed_users} User and "
+                    f"{self._plan.removed_messages} total messages",
+                    classes="restore-confirmation-detail",
+                    markup=False,
+                )
+                yield Static(
+                    f"Files: {len(self._plan.targets)} tracked, "
+                    f"{self._plan.external_target_count} external",
+                    classes="restore-confirmation-detail",
+                    markup=False,
+                )
+                if self._mode is RestoreMode.FILES:
+                    scope = "Scope: Conversation Session and eligible File Restore."
+                else:
+                    scope = "Scope: Conversation Session only; files remain unchanged."
+                yield Static(scope, id="restore-confirmation-scope", markup=False)
+                yield Static(
+                    "Not independently rolled back: Conversation Summary, Long-term Memory, Schedule, "
+                    "Exec/MCP effects, Dream, Tool Artifacts, Session Log, and manual edits.",
+                    classes="restore-confirmation-detail",
+                    markup=False,
+                )
+                if self._mode is RestoreMode.FILES:
+                    yield Static(
+                        "File Restore may still overwrite later manual, Exec, or MCP changes "
+                        "to tracked files.",
+                        classes="restore-confirmation-detail",
+                        markup=False,
+                    )
             with Horizontal(id="restore-confirmation-actions"):
                 yield Button("Cancel", id="restore-confirmation-cancel")
                 yield Button("Restore", variant="warning", id="restore-confirmation-approve")
@@ -1916,14 +2057,25 @@ class _ToolConfirmationScreen(ModalScreen[ConfirmationDecision]):
         padding: 1 2;
     }
 
+    _ToolConfirmationScreen Center {
+        width: 100%;
+        height: 100%;
+    }
+
     #confirmation-panel {
         width: 80%;
         max-width: 72;
-        height: auto;
+        height: 90%;
         max-height: 90%;
         padding: 1 2;
         border: round $warning;
         background: $surface;
+        overflow-y: hidden;
+    }
+
+    #confirmation-details-scroll {
+        width: 100%;
+        height: 1fr;
         overflow-y: auto;
     }
 
@@ -1948,13 +2100,14 @@ class _ToolConfirmationScreen(ModalScreen[ConfirmationDecision]):
 
     #confirmation-actions {
         width: 100%;
-        height: auto;
+        height: 3;
         align: center middle;
-        margin-top: 1;
     }
 
     #confirmation-actions Button {
-        margin: 0 1;
+        width: 1fr;
+        min-width: 0;
+        margin: 0;
         height: 3;
     }
     """
@@ -1976,29 +2129,30 @@ class _ToolConfirmationScreen(ModalScreen[ConfirmationDecision]):
         with Center():
             with Vertical(id="confirmation-panel"):
                 yield Static(heading, id="confirmation-heading", markup=False)
-                if is_background:
-                    job_id = getattr(self._request, "job_id", "")
-                    title = getattr(self._request, "title", "")
+                with VerticalScroll(id="confirmation-details-scroll"):
+                    if is_background:
+                        job_id = getattr(self._request, "job_id", "")
+                        title = getattr(self._request, "title", "")
+                        yield Static(
+                            f"Source: {job_id} + {title}",
+                            id="confirmation-source",
+                            markup=False,
+                        )
                     yield Static(
-                        f"Source: {job_id} + {title}",
-                        id="confirmation-source",
+                        f"Tool: {_friendly_name(self._request.tool_name, fallback='Tool')}",
+                        id="confirmation-tool",
                         markup=False,
                     )
-                yield Static(
-                    f"Tool: {_friendly_name(self._request.tool_name, fallback='Tool')}",
-                    id="confirmation-tool",
-                    markup=False,
-                )
-                reason = self._request.reason or self._request.summary
-                yield Static(f"Reason: {reason}", id="confirmation-reason", markup=False)
-                for warning in self._request.warnings:
-                    yield Static(
-                        f"Warning: {warning}",
-                        markup=False,
-                        classes="confirmation-warning",
-                    )
-                for detail in _confirmation_detail_lines(self._request):
-                    yield Static(detail, markup=False, classes="confirmation-details")
+                    reason = self._request.reason or self._request.summary
+                    yield Static(f"Reason: {reason}", id="confirmation-reason", markup=False)
+                    for warning in self._request.warnings:
+                        yield Static(
+                            f"Warning: {warning}",
+                            markup=False,
+                            classes="confirmation-warning",
+                        )
+                    for detail in _confirmation_detail_lines(self._request):
+                        yield Static(detail, markup=False, classes="confirmation-details")
                 with Horizontal(id="confirmation-actions"):
                     yield Button("Decline", id="confirmation-decline")
                     yield Button("Approve", variant="success", id="confirmation-approve")
@@ -2008,7 +2162,7 @@ class _ToolConfirmationScreen(ModalScreen[ConfirmationDecision]):
 
     def restore_after_size(self) -> None:
         """Reveal the confirmation heading after a constrained background layout."""
-        self.query_one("#confirmation-panel", Vertical).scroll_home(
+        self.query_one("#confirmation-details-scroll", VerticalScroll).scroll_home(
             animate=False,
             immediate=True,
         )
@@ -2335,10 +2489,16 @@ class _MessageBusRunProjection:
         if group is None:
             return
         group.toggleable = True
+        group.outcome = outcome
+        group.heading.can_focus = True
+        group.heading.set_class(False, "-running")
+        group.heading.set_class(True, f"-{outcome}")
         group.expanded = outcome != "completed"
         group.content.display = group.expanded
         group.heading.update(
-            _activity_group_heading_text(expanded=group.expanded, elapsed=group.elapsed)
+            _activity_group_heading_text(
+                expanded=group.expanded, elapsed=group.elapsed, outcome=outcome
+            )
         )
 
 
@@ -2401,6 +2561,7 @@ class TerminalConversationApp(App[None]):
 
     #conversation-display {
         height: 1fr;
+        min-height: 3;
         width: 100%;
         padding: 1 2;
         scrollbar-size-vertical: 1;
@@ -2448,7 +2609,7 @@ class TerminalConversationApp(App[None]):
     }
 
     .message {
-        width: 72%;
+        width: 95%;
         max-width: 100%;
         min-width: 0;
         height: auto;
@@ -2458,7 +2619,7 @@ class TerminalConversationApp(App[None]):
     }
 
     .message-compact {
-        width: 100%;
+        width: 95%;
     }
 
     .user-message {
@@ -2501,6 +2662,22 @@ class TerminalConversationApp(App[None]):
         background: transparent;
     }
 
+    .agent-run-activity-heading:focus {
+        background: $panel;
+    }
+
+    .agent-run-activity-heading.-running {
+        color: $primary;
+    }
+
+    .agent-run-activity-heading.-failed {
+        color: $error;
+    }
+
+    .agent-run-activity-heading.-cancelled {
+        color: $warning;
+    }
+
     .agent-run-activity-content {
         width: 100%;
         height: auto;
@@ -2510,14 +2687,13 @@ class TerminalConversationApp(App[None]):
 
     #command-completion {
         display: none;
-        overlay: screen;
-        offset: 0 -9;
         width: 100%;
-        max-height: 9;
+        height: 7;
+        max-height: 7;
         text-wrap: nowrap;
         text-overflow: ellipsis;
         background: transparent;
-        border: round $panel;
+        border-top: solid $panel;
     }
 
     .management-row {
@@ -2541,7 +2717,6 @@ class TerminalConversationApp(App[None]):
     #conversation-input-region {
         height: auto;
         min-height: 3;
-        max-height: 8;
         width: 100%;
     }
 
@@ -2567,18 +2742,28 @@ class TerminalConversationApp(App[None]):
     #pending-queue {
         display: none;
         height: auto;
-        max-height: 4;
+        max-height: 2;
         width: 100%;
         padding: 0 1;
         color: $text-muted;
     }
 
-    #turn-status {
-        display: none;
+    #status-bar {
         height: 1;
         width: 100%;
         padding: 0 1;
         color: $text-muted;
+        background: $panel;
+    }
+
+    .management-heading {
+        color: $primary;
+        text-style: bold;
+        margin-bottom: 0;
+    }
+
+    .management-output {
+        color: $text;
     }
 
     .turn-status {
@@ -2634,6 +2819,9 @@ class TerminalConversationApp(App[None]):
         self._draining_inputs = False
         self._completion_options: tuple[_CompletionCandidate, ...] = ()
         self._completion_dismissed_text: str | None = None
+        self._working = False
+        self._status_view: RuntimeStatus | None = None
+        self._status_generation = 0
         self._permission_current_level: ToolPermissionLevel | None = None
         self._permission_warning_result: asyncio.Future[bool | None] | None = None
         self._closing = False
@@ -2797,10 +2985,10 @@ class TerminalConversationApp(App[None]):
             ),
             Static("New content below", id="new-content", markup=False),
             Static("", id="pending-queue", markup=False),
-            Static("Working", id="turn-status", markup=False),
             _ReasoningEffortSelector(id="reasoning-effort-selector"),
             _PermissionSelector(id="permission-selector"),
             _ConversationInput(id="conversation-input", placeholder="Message MyClaw"),
+            Static("Ready", id="status-bar", markup=False),
             id="conversation-input-region",
         )
         yield Static(
@@ -2834,6 +3022,7 @@ class TerminalConversationApp(App[None]):
         )
         if not self._size_insufficient:
             self.query_one(_ConversationInput).focus()
+        self._schedule_status_refresh()
 
     async def on_unmount(self, event: Unmount) -> None:
         del event
@@ -3088,6 +3277,7 @@ class TerminalConversationApp(App[None]):
                 exit_on_error=False,
             )
             self._presentation_quiesced = False
+            self._schedule_status_refresh()
         except BaseException:
             self._closing = True
             self._presentation_quiesced = True
@@ -3138,6 +3328,7 @@ class TerminalConversationApp(App[None]):
             return
         if result.output is not None:
             await self._mount_management_rows("/effort", result.output)
+        self._schedule_status_refresh()
 
     @on(_ReasoningEffortSelector.Cancelled)
     def _reasoning_effort_cancelled(self, message: _ReasoningEffortSelector.Cancelled) -> None:
@@ -3178,6 +3369,7 @@ class TerminalConversationApp(App[None]):
             return
         if result.output is not None:
             await self._mount_management_rows("/permission", result.output)
+        self._schedule_status_refresh()
 
     @on(_PermissionSelector.Cancelled)
     def _permission_cancelled(self, message: _PermissionSelector.Cancelled) -> None:
@@ -3192,13 +3384,17 @@ class TerminalConversationApp(App[None]):
             display = self.query_one("#conversation-display", _ConversationDisplay)
             display.layout_changed(state.heading)
             self._set_activity_group_expanded(state, not state.expanded)
-        with suppress(NoMatches, NoScreen, ScreenStackError):
-            self.screen.set_focus(
-                self.query_one("#conversation-input", _ConversationInput),
-                scroll_visible=False,
-            )
+        if not message.heading.has_focus:
+            with suppress(NoMatches, NoScreen, ScreenStackError):
+                self.screen.set_focus(
+                    self.query_one("#conversation-input", _ConversationInput),
+                    scroll_visible=False,
+                )
 
     def on_resize(self, event: Resize) -> None:
+        self._resize_completion()
+        self._render_status_bar()
+        self._refresh_pending_queue()
         too_small = (
             event.size.width < _MIN_TERMINAL_WIDTH or event.size.height < _MIN_TERMINAL_HEIGHT
         )
@@ -3320,6 +3516,60 @@ class TerminalConversationApp(App[None]):
         completion.highlighted = 0
         completion.display = True
         self._completion_options = candidates
+        self._resize_completion()
+
+    def _resize_completion(self) -> None:
+        with suppress(NoMatches, NoScreen, ScreenStackError):
+            completion = self.query_one("#command-completion", _CommandCompletion)
+            new_content = self.query_one("#new-content", Static)
+            reserved = 7 + (2 if self._pending_inputs else 0) + int(new_content.display)
+            completion.styles.height = max(1, min(7, self.size.height - reserved))
+
+    def _schedule_status_refresh(self) -> None:
+        self._status_generation += 1
+        generation = self._status_generation
+        self._status_view = None
+        self._render_status_bar()
+        self.run_worker(
+            self._refresh_status_bar(generation),
+            name="status-bar-refresh",
+            group="status-bar-refresh",
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    async def _refresh_status_bar(self, generation: int) -> None:
+        try:
+            result = await self._management_dispatcher.dispatch("/status")
+        except Exception:
+            result = None
+        if generation != self._status_generation or self._closing:
+            return
+        self._status_view = None if result is None else result.status_view
+        self._render_status_bar()
+
+    def _render_status_bar(self) -> None:
+        with suppress(NoMatches, NoScreen, ScreenStackError):
+            status = self._status_view
+            state = "Working" if self._working else "Ready"
+            width = self.size.width
+            available = max(1, width - 2)
+            content = state
+            if width >= 40:
+                model = "-" if status is None else status.chat_model
+                permission = "-" if status is None else status.current_permission_level
+                full = f"{state} | Model: {model} | Permission: {permission}"
+                if cell_len(full) <= available:
+                    content = full
+                else:
+                    model_width = max(1, available - cell_len(state) - 3)
+                    content = f"{state} | {_queue_excerpt(f'Model: {model}', model_width)}"
+            elif width >= 28:
+                permission = "-" if status is None else status.current_permission_level
+                compact = f"{state} | {permission}"
+                if cell_len(compact) <= available:
+                    content = compact
+            self.query_one("#status-bar", Static).update(content)
 
     def _hide_command_completion(self, *, remember_text: str | None = None) -> None:
         self._completion_options = ()
@@ -3460,7 +3710,9 @@ class TerminalConversationApp(App[None]):
                     skipped_count=result.resume_skipped_count,
                 )
             else:
-                await self._mount_management_rows(text, result.output)
+                await self._mount_management_rows(
+                    text, result.output, status_view=result.status_view
+                )
             return
 
         foreground_input_admitted = getattr(self._control, "foreground_input_admitted", None)
@@ -3908,6 +4160,7 @@ class TerminalConversationApp(App[None]):
             _activity_group_heading_text(
                 expanded=expanded,
                 elapsed=elapsed,
+                toggleable=toggleable,
             ),
             markup=False,
             classes="agent-run-activity-heading",
@@ -3928,6 +4181,8 @@ class TerminalConversationApp(App[None]):
             elapsed=elapsed,
         )
         heading.activity_group = state
+        heading.can_focus = toggleable
+        heading.set_class(not toggleable, "-running")
         if not expanded:
             content.display = False
         self._scroll_to_latest()
@@ -3946,6 +4201,8 @@ class TerminalConversationApp(App[None]):
             _activity_group_heading_text(
                 expanded=expanded,
                 elapsed=activity_group.elapsed,
+                outcome=activity_group.outcome,
+                toggleable=activity_group.toggleable,
             )
         )
         self._scroll_to_latest()
@@ -4008,7 +4265,9 @@ class TerminalConversationApp(App[None]):
         await display.mount(Static(content, markup=False, classes="turn-status"))
         self._scroll_to_latest(display)
 
-    async def _mount_management_rows(self, command: str, output: str | None) -> None:
+    async def _mount_management_rows(
+        self, command: str, output: str | None, *, status_view: RuntimeStatus | None = None
+    ) -> None:
         display = self._conversation_display
         if display is None:
             display = self.query_one("#conversation-display", _ConversationDisplay)
@@ -4016,18 +4275,23 @@ class TerminalConversationApp(App[None]):
             Static(
                 f"Command: {command}",
                 markup=False,
-                classes="management-row",
+                classes="management-row management-heading",
             )
         )
         if output is not None:
-            await self._mount_management_output(output, scroll=False)
+            await self._mount_management_output(
+                _status_view_text(status_view) if status_view is not None else output,
+                scroll=False,
+            )
         self._scroll_to_latest()
 
     async def _mount_management_output(self, output: str, *, scroll: bool = True) -> None:
         display = self._conversation_display
         if display is None:
             display = self.query_one("#conversation-display", _ConversationDisplay)
-        await display.mount(Static(output, markup=False, classes="management-row"))
+        await display.mount(
+            Static(output, markup=False, classes="management-row management-output")
+        )
         if scroll:
             self._scroll_to_latest()
 
@@ -4035,7 +4299,10 @@ class TerminalConversationApp(App[None]):
         conversation_projection = self._control.project_foreground_conversation()
         if conversation_projection.session_id != expected_session_id:
             return False
-        return await self._replace_display_from_projection(conversation_projection)
+        replaced = await self._replace_display_from_projection(conversation_projection)
+        if replaced:
+            self._schedule_status_refresh()
+        return replaced
 
     async def _replace_display_from_projection(
         self,
@@ -4067,6 +4334,17 @@ class TerminalConversationApp(App[None]):
                     expanded=historical.outcome != "completed",
                     toggleable=True,
                     elapsed=historical.elapsed,
+                )
+                group.outcome = historical.outcome
+                if historical.outcome is not None:
+                    group.heading.set_class(True, f"-{historical.outcome}")
+                group.heading.update(
+                    _activity_group_heading_text(
+                        expanded=group.expanded,
+                        elapsed=group.elapsed,
+                        outcome=group.outcome,
+                        toggleable=True,
+                    )
                 )
                 for item in historical.activity:
                     await self._mount_persisted_activity_message(item, display, group.content)
@@ -4470,13 +4748,20 @@ class TerminalConversationApp(App[None]):
                 queue.update("")
                 queue.display = False
                 return
-            values = " | ".join(text.replace("\n", "↵") for text in self._pending_inputs)
-            queue.update(f"Pending ({len(self._pending_inputs)}): {values}")
+            count = len(self._pending_inputs)
+            available = max(1, self.size.width - 2)
+            suffix = f" +{count - 2} more" if count > 2 else ""
+            shown = list(self._pending_inputs)[:2]
+            separator_width = 3 if len(shown) == 2 else 0
+            share = max(1, (available - cell_len(suffix) - separator_width) // len(shown))
+            summaries = [_queue_excerpt(" ".join(value.split()), min(48, share)) for value in shown]
+            detail = " | ".join(summaries) + suffix
+            queue.update(f"Pending ({count})\n{detail}")
             queue.display = True
 
     def _set_working(self, working: bool) -> None:
-        with suppress(NoMatches, NoScreen, ScreenStackError):
-            self.query_one("#turn-status", Static).display = working
+        self._working = working
+        self._render_status_bar()
 
     @staticmethod
     def _message_classes(role: str, display: _ConversationDisplay) -> str:
@@ -4528,9 +4813,60 @@ def _completion_candidates(
     return management + skills
 
 
+def _queue_excerpt(value: str, width: int) -> str:
+    if cell_len(value) <= width:
+        return value
+    if width <= 1:
+        return "…"
+    return f"{set_cell_size(value, width - 1).rstrip()}…"
+
+
+def _status_view_text(status: RuntimeStatus) -> str:
+    values = status.to_dict()
+    groups = (
+        ("Runtime", ("version", "uptime_seconds")),
+        ("Model", ("chat_model", "chat_reasoning_effort")),
+        (
+            "Context budget",
+            (
+                "context_window",
+                "max_output",
+                "available_context",
+                "compact_ratio",
+                "compact_context_window",
+                "projected_next_request_tokens",
+                "projection_source",
+                "input_budget_used_percent",
+            ),
+        ),
+        ("Permission", ("configured_permission_level", "current_permission_level")),
+        ("Session", ("session_message_count", "last_compacted")),
+        ("Cumulative usage", ("cumulative_usage",)),
+        ("Schedule", ("schedule",)),
+    )
+    lines: list[str] = []
+    for title, keys in groups:
+        present = [key for key in keys if key in values]
+        if not present:
+            continue
+        if lines:
+            lines.append("")
+        lines.append(title)
+        for key in present:
+            value = values[key]
+            if key == "input_budget_used_percent":
+                filled = round(min(100.0, status.input_budget_used_percent) / 5)
+                value = f"{value}% [{'#' * filled}{'.' * (20 - filled)}]"
+            elif isinstance(value, dict):
+                value = json.dumps(value, ensure_ascii=False, sort_keys=True)
+            lines.append(f"  {key}: {value}")
+    return "\n".join(lines)
+
+
 def _session_picker_label(session: SessionListingEntry) -> str:
     local_updated_at = session.updated_at.astimezone().strftime("%Y-%m-%d %H:%M")
-    return f"{session.title} | {local_updated_at}"
+    noun = "message" if session.message_count == 1 else "messages"
+    return f"{session.title} | {local_updated_at} | {session.message_count} {noun}"
 
 
 def _restore_anchor_label(anchor: RestoreAnchor) -> str:
@@ -4554,6 +4890,17 @@ def _restore_mode_label(mode: RestoreMode) -> str:
     if mode is RestoreMode.CONVERSATION_ONLY:
         return "Conversation only (default)"
     return "Conversation + files"
+
+
+def _restore_impact_text(plan: RestorePlan) -> str:
+    text = (
+        f"Impact: {plan.removed_messages} messages removed; "
+        f"{len(plan.targets)} file targets ({plan.external_target_count} external)."
+    )
+    if plan.backup_gaps or plan.integrity_issues:
+        text += " File Restore unavailable: backup coverage is incomplete."
+    text += " Memory, Schedule and Exec/MCP effects cannot be restored."
+    return text
 
 
 def _persisted_role_and_content(message: Mapping[str, object]) -> tuple[str, str]:
@@ -4891,9 +5238,21 @@ def _format_activity_duration(elapsed: float) -> str:
     return f"{hours}h {minutes}min {seconds}s"
 
 
-def _activity_group_heading_text(*, expanded: bool, elapsed: float) -> str:
+def _activity_group_heading_text(
+    *,
+    expanded: bool,
+    elapsed: float,
+    outcome: _TerminalOutcome | None = None,
+    toggleable: bool = False,
+) -> str:
     symbol = _ACTIVITY_EXPANDED_SYMBOL if expanded else _ACTIVITY_COLLAPSED_SYMBOL
-    return f"{symbol} {_format_activity_duration(elapsed)}"
+    label = {
+        None: "Activity" if toggleable else "Running",
+        "completed": "Completed",
+        "failed": "Failed",
+        "cancelled": "Cancelled",
+    }[outcome]
+    return f"{symbol} {label} | {_format_activity_duration(elapsed)}"
 
 
 def _concise_tool_name(tool_name: str) -> str:

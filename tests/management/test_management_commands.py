@@ -164,7 +164,9 @@ class _PermissionManagement:
 
 
 @pytest.mark.asyncio
-async def test_permission_command_returns_current_selection_and_commits_only_selected_level() -> None:
+async def test_permission_command_returns_current_selection_and_commits_only_selected_level() -> (
+    None
+):
     management = _PermissionManagement("read-only")
     dispatcher = ManagementCommandDispatcher(cast(Any, management))
 
@@ -520,9 +522,8 @@ async def test_config_command_keeps_fallback_diagnostic_before_later_fatal_error
     home = AgentHome(agent_home)
     home.initialize()
     config_path = agent_home / "config.toml"
-    content = (
-        '[runtime]\npermission_level = "level-secret"\n\n'
-        + CONFIG_CONTENT.replace('model = "model-id"\n', "", 1)
+    content = '[runtime]\npermission_level = "level-secret"\n\n' + CONFIG_CONTENT.replace(
+        'model = "model-id"\n', "", 1
     )
     config_path.write_text(content, encoding="utf-8")
     dispatcher = ManagementCommandDispatcher(management_service(home))
@@ -533,8 +534,7 @@ async def test_config_command_keeps_fallback_diagnostic_before_later_fatal_error
     assert result.output is not None
     error = "config_invalid: Configuration field 'models.routes.default.model' is required."
     diagnostic = (
-        "Configuration field 'runtime.permission_level' is invalid; "
-        "using 'workspace-write'."
+        "Configuration field 'runtime.permission_level' is invalid; using 'workspace-write'."
     )
     path = f"Path: {config_path}"
     assert result.output.index(error) < result.output.index(diagnostic) < result.output.index(path)
@@ -790,6 +790,7 @@ async def test_status_command_renders_safe_persistence_failure(
         result = await dispatcher.dispatch("/status")
 
     assert result.output == "persistence_error: Runtime status could not be read."
+    assert result.status_view is None
     assert capsys.readouterr().err == ""
     assert not (agent_home / "logs").exists()
 
@@ -872,6 +873,8 @@ async def test_status_command_renders_actual_runtime_and_session_state(
     result = await dispatcher.dispatch("/status")
 
     assert result.handled is True
+    assert result.status_view is not None
+    assert result.output == json.dumps(result.status_view.to_dict(), ensure_ascii=False, indent=2)
     assert json.loads(result.output or "") == {
         "version": "0.1.0",
         "chat_model": "fallback/chat-model",

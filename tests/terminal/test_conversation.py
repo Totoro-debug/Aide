@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -30,7 +30,7 @@ from textual.events import (
 from textual.message import Message
 from textual.pilot import Pilot
 from textual.widget import Widget
-from textual.widgets import Button, Markdown, OptionList, Static, TextArea
+from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
 
 import myclaw.terminal.cli as cli
 from myclaw.agent.confirmation import (
@@ -72,6 +72,7 @@ from myclaw.management.service import (
     FatalManagementError,
     ManagementError,
     RestoreListingReport,
+    RuntimeStatus,
 )
 from myclaw.provider.models import (
     ModelCompleted,
@@ -87,6 +88,8 @@ from myclaw.terminal.conversation import (
     TerminalConversationApp,
     _ConversationInput,
     _format_activity_duration,
+    _RestoreConfirmationScreen,
+    _RestoreModeScreen,
 )
 from myclaw.terminal.conversation import (
     _MessageBusRunProjection as _AgentRunProjection,
@@ -1332,6 +1335,46 @@ async def _wait_for_confirmation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("size", ((40, 15), (80, 24), (120, 32)))
+async def test_restore_mode_and_final_actions_fit_terminal_sizes(size: tuple[int, int]) -> None:
+    plan = RestorePlan(
+        session_id="test-session",
+        anchor_id=1,
+        session_digest="digest",
+        journal_revision=1,
+        removed_users=2,
+        removed_messages=8,
+        targets=(),
+        external_target_count=0,
+        backup_gaps=(),
+        integrity_issues=(),
+        conflict_targets=(),
+        discarded_run_tokens=(),
+        available_modes=(RestoreMode.CONVERSATION_ONLY, RestoreMode.FILES),
+    )
+    app = _terminal_app(cast(Any, _terminal_backend(ScriptedRunSource())))
+
+    async with app.run_test(size=size) as pilot:
+        await app.push_screen(_RestoreModeScreen(plan))
+        await pilot.pause()
+        options = app.screen.query_one("#restore-mode-options", OptionList)
+        assert options.region.height > 0
+        assert options.region.bottom <= size[1]
+        assert app.screen.focused is options
+        await pilot.press("escape")
+
+        await app.push_screen(_RestoreConfirmationScreen(plan, RestoreMode.FILES))
+        await pilot.pause()
+        cancel = app.screen.query_one("#restore-confirmation-cancel", Button)
+        approve = app.screen.query_one("#restore-confirmation-approve", Button)
+        assert cast(Any, app.screen.focused) is cancel
+        assert cancel.region.width > 0 and approve.region.width > 0
+        assert cancel.region.bottom <= size[1] and approve.region.bottom <= size[1]
+        assert not cancel.region.overlaps(approve.region)
+        await pilot.press("escape")
+
+
+@pytest.mark.asyncio
 async def test_restore_workflow_conflict_result_refreshes_projection_and_history() -> None:
     selected_modes: list[RestoreMode | str] = []
     cancel_calls = 0
@@ -1471,12 +1514,20 @@ async def test_restore_workflow_conflict_result_refreshes_projection_and_history
         await _wait_for_screen_id(app, pilot, "restore-anchor-picker")
         await pilot.press(*list("ordinary input"))
         assert app.screen.id == "restore-anchor-picker"
+        assert app.screen.query_one("#restore-anchor-options", OptionList).option_count == 0
+        app.screen.query_one("#restore-anchor-filter", Input).value = "discarded"
+        await pilot.pause()
+        assert app.screen.query_one("#restore-anchor-options", OptionList).options[0].id == "2"
+        await pilot.pause()
         await pilot.click("#restore-anchor-options", offset=(4, 1))
         await _wait_for_screen_id(app, pilot, "restore-mode-picker")
         await pilot.pause()
 
         mode_options = app.screen.query_one("#restore-mode-options", OptionList)
         assert app.screen.focused is mode_options
+        assert "Impact: 3 messages removed; 1 file targets" in str(
+            app.screen.query_one("#restore-mode-impact", Static).content
+        )
         assert str(mode_options.options[0].prompt).startswith("Conversation only")
         assert str(mode_options.options[1].prompt) == "Conversation + files"
         await pilot.press("down", "enter")
@@ -1486,6 +1537,11 @@ async def test_restore_workflow_conflict_result_refreshes_projection_and_history
         assert app.screen.focused is not None
         assert app.screen.focused.id == confirmation_cancel.id
         confirmation_text = _visible_screen_text(app)
+        assert "Impact: 3 messages removed; 1 file targets" in str(
+            app.screen.query_one("#restore-confirmation-details").query_one(
+                ".restore-confirmation-detail", Static
+            ).content
+        )
         assert "Remove: 1 User and 3 total messages" in confirmation_text
         assert "Files: 1 tracked, 0 external" in confirmation_text
         assert "Not independently rolled back:" in confirmation_text
@@ -1995,7 +2051,14 @@ async def test_resume_picker_orders_sessions_and_cancellation_preserves_display(
         assert target.session_id not in picker_text
         assert older.session_id not in picker_text
         assert target.updated_at.astimezone().strftime("%Y-%m-%d %H:%M") in picker_text
-        assert app.screen.focused is app.screen.query_one("#session-picker-options", OptionList)
+        assert app.screen.focused is app.screen.query_one("#session-picker-filter", Input)
+
+        app.screen.query_one("#session-picker-filter", Input).value = "Target"
+        await pilot.pause()
+        filtered = app.screen.query_one("#session-picker-options", OptionList)
+        assert filtered.option_count == 1
+        assert filtered.options[0].id == target.session_id
+        assert "1 message" in str(filtered.options[0].prompt)
 
         await pilot.click(offset=(1, 1))
         assert app.screen.id == "session-picker"
@@ -2328,6 +2391,9 @@ async def test_resume_picker_mouse_selection_rebinds_the_clicked_session(
                 await pilot.pause()
 
         assert "Mouse-selected content." in _visible_screen_text(app)
+        for message in app.query(".message"):
+            row = cast(Widget, message.parent)
+            assert abs(message.outer_size.width - row.content_region.width * 0.95) <= 1
 
     await _run_cli_terminal_case(
         agent_home=agent_home,
@@ -2346,7 +2412,7 @@ async def test_resume_picker_scrolls_in_management_order_and_selects_by_keyboard
     async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
         initial = cast(AgentLoop, app._control)
         sessions: list[Session] = []
-        for index in range(24):
+        for index in range(50):
             session = Session.create(
                 initial.session.workspace_state,
                 now=_constant_datetime(datetime(2027, 1, 1, 0, index, tzinfo=UTC)),
@@ -2381,14 +2447,18 @@ async def test_resume_picker_scrolls_in_management_order_and_selects_by_keyboard
         await pilot.press(*list("/resume"), "enter")
         await _wait_for_session_picker(app, pilot)
         visible_text = _visible_screen_text(app)
-        assert visible_text.index("Session 23") < visible_text.index("Session 22")
+        assert visible_text.index("Session 49") < visible_text.index("Session 48")
         options = app.screen.query_one("#session-picker-options", OptionList)
-        assert options.max_scroll_y > 0
+        async with asyncio.timeout(1):
+            while options.max_scroll_y <= 0:
+                await pilot.pause()
 
-        await pilot._post_mouse_events([MouseScrollDown], offset=(40, 10), times=3)
+        await pilot._post_mouse_events(
+            [MouseScrollDown], offset=(options.region.x + 2, options.region.y + 2), times=3
+        )
         await pilot.pause()
         assert options.scroll_y > 0
-        await pilot.press(*(("down",) * 23), "enter")
+        await pilot.press(*(("down",) * 50), "enter")
 
         async with asyncio.timeout(3):
             while cast(AgentLoop, app._control).session.session_id != sessions[
@@ -2692,7 +2762,7 @@ async def test_resume_projects_unknown_reversed_and_unclassifiable_history_safel
         headings = [
             str(group.query_one(".agent-run-activity-heading", Static).content) for group in groups
         ]
-        assert headings == ["\u25bc 1s", "\u25bc 0s"]
+        assert headings == ["\u25bc Activity | 1s", "\u25bc Activity | 0s"]
         assert all(group.query_one(".agent-run-activity-content").display for group in groups)
         assert "Turn cancelled." not in visible_text
         assert "Turn failed." not in visible_text
@@ -2850,7 +2920,7 @@ async def test_terminal_conversation_starts_blank_and_focuses_input() -> None:
         assert "Message MyClaw" in visible_text
         assert "Welcome" not in visible_text
         assert "Session" not in visible_text
-        assert "model" not in visible_text.casefold()
+        assert "Ready" in visible_text
         assert isinstance(app.screen.focused, TextArea)
         assert runtime.start_calls == 1
 
@@ -3027,17 +3097,18 @@ async def test_active_turn_keeps_input_editable_and_cancellable_before_a_later_t
         await asyncio.sleep(0)
 
         input_area = app.query_one("#conversation-input", TextArea)
-        working = app.query_one("#turn-status", Static)
+        working = app.query_one("#status-bar", Static)
         assert not input_area.read_only
         async with asyncio.timeout(1):
-            while not working.display:
+            while not str(working.content).startswith("Working"):
                 await asyncio.sleep(0)
-        assert working.display
+        assert str(working.content).startswith("Working")
 
         for text in ("queued one", "queued two", "queued three"):
             await pilot.press(*list(text), "enter")
         assert conversation.submissions == ["first"]
-        assert "Pending (3): queued one | queued two | queued three" in _visible_screen_text(app)
+        assert "Pending (3)" in _visible_screen_text(app)
+        assert "+1 more" in _visible_screen_text(app)
 
         await pilot.press("ctrl+c")
         await asyncio.wait_for(submission, timeout=1)
@@ -3053,7 +3124,7 @@ async def test_active_turn_keeps_input_editable_and_cancellable_before_a_later_t
 
         assert conversation.cancel_calls == 1
         assert not input_area.read_only
-        assert not working.display
+        assert str(working.content).startswith("Ready")
         await pilot.press("ctrl+home")
         visible_text = _visible_screen_text(app)
         assert "partial response" in visible_text
@@ -3070,6 +3141,31 @@ async def test_active_turn_keeps_input_editable_and_cancellable_before_a_later_t
         ]
         assert "Recovered response." in _visible_screen_text(app)
         assert all(message.metadata == {} for message in runtime.inbound_history)
+
+
+@pytest.mark.asyncio
+async def test_pending_queue_summary_stays_two_lines_at_narrow_width() -> None:
+    app = _terminal_app(cast(Any, _terminal_backend(ScriptedRunSource())))
+
+    async with app.run_test(size=(40, 15)) as pilot:
+        queue = app.query_one("#pending-queue", Static)
+        for count in range(4):
+            app._pending_inputs.clear()
+            app._pending_inputs.extend(
+                ("first line\n" + "x" * 90, "second line", "third line")[:count]
+            )
+            app._refresh_pending_queue()
+            await pilot.pause()
+            if count == 0:
+                assert not queue.display
+                continue
+            assert queue.display
+            assert f"Pending ({count})" in str(queue.content)
+            assert queue.outer_size.height <= 2
+            assert "first line" in str(queue.content)
+            if count == 3:
+                assert "+1 more" in str(queue.content)
+                assert "third line" not in str(queue.content)
 
 
 @pytest.mark.asyncio
@@ -3903,7 +3999,7 @@ async def test_activity_timing_includes_wait_before_first_outbound() -> None:
         await _wait_for_turn(app)
 
         heading = app.query_one(".agent-run-activity-heading", Static)
-        assert str(heading.content) == "\u25b6 10s"
+        assert str(heading.content) == "\u25b6 Completed | 10s"
 
 
 @pytest.mark.asyncio
@@ -3939,7 +4035,7 @@ async def test_activity_heading_starts_with_accumulated_time_and_freezes_on_succ
         heading = app.query_one(".agent-run-activity-heading", Static)
         content = app.query_one(".agent-run-activity-content")
         assert not heading.can_focus
-        assert str(heading.content) == "\u25bc 5s"
+        assert str(heading.content) == "\u25bc Running | 5s"
         assert content.display
         assert app.screen.focused is app.query_one("#conversation-input", TextArea)
 
@@ -3952,16 +4048,16 @@ async def test_activity_heading_starts_with_accumulated_time_and_freezes_on_succ
         refreshed = asyncio.Event()
         app.call_after_refresh(refreshed.set)
         await refreshed.wait()
-        assert str(heading.content) == "\u25bc 1h 0min 5s"
+        assert str(heading.content) == "\u25bc Running | 1h 0min 5s"
 
         conversation.continue_events.set()
         await asyncio.wait_for(submission, timeout=1)
         await _wait_for_turn(app)
 
-        assert str(heading.content) == "\u25b6 1h 0min 5s"
+        assert str(heading.content) == "\u25b6 Completed | 1h 0min 5s"
         assert not content.display
         projection._refresh_elapsed()
-        assert str(heading.content) == "\u25b6 1h 0min 5s"
+        assert str(heading.content) == "\u25b6 Completed | 1h 0min 5s"
 
 
 @pytest.mark.asyncio
@@ -4030,13 +4126,20 @@ async def test_failed_activity_group_is_mouse_toggleable_without_moving_composer
 
         heading = app.query_one(".agent-run-activity-heading", Static)
         content = app.query_one(".agent-run-activity-content")
-        assert not heading.can_focus
-        assert str(heading.content).startswith("\u25bc ")
+        assert heading.can_focus
+        assert str(heading.content).startswith("\u25bc Failed | ")
+        assert heading.has_class("-failed")
         assert content.display
         assert app.screen.focused is app.query_one("#conversation-input", TextArea)
 
         await pilot.press("enter")
         assert content.display
+        heading.focus()
+        await pilot.press("enter")
+        assert not content.display
+        await pilot.press("space")
+        assert content.display
+        app.query_one("#conversation-input", TextArea).focus()
         await pilot.click(".agent-run-activity-heading")
         assert not content.display
         assert app.screen.focused is app.query_one("#conversation-input", TextArea)
@@ -4091,6 +4194,41 @@ async def test_tool_confirmation_defaults_to_decline_and_shows_effective_operati
         (UUID("16fd2706-8baf-4334-8c7f-ada847da0314"), "declined"),
     ]
     assert conversation.cancel_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", ((40, 15), (80, 24), (120, 32)))
+async def test_tool_confirmation_actions_stay_visible_with_long_details(
+    size: tuple[int, int],
+) -> None:
+    conversation = ConfirmationRunSource(
+        details={"path": "nested/" + "long-name-" * 24, "limit": 20},
+        reason="Review access to the requested path. " * 8,
+        warnings=("The requested path is outside the Workspace. " * 4,),
+    )
+    app = _terminal_app(cast(Any, _terminal_backend(conversation)))
+
+    async with app.run_test(size=size) as pilot:
+        submission = asyncio.create_task(pilot.press(*list("inspect"), "enter"))
+        await asyncio.wait_for(conversation.confirmation_requested.wait(), timeout=1)
+        await _wait_for_confirmation(app, pilot)
+        decline = app.screen.query_one("#confirmation-decline", Button)
+        approve = app.screen.query_one("#confirmation-approve", Button)
+        details = app.screen.query_one("#confirmation-details-scroll")
+        assert app.screen.focused is decline
+        assert decline.region.width > 0 and approve.region.width > 0
+        assert decline.region.bottom <= size[1] and approve.region.bottom <= size[1]
+        assert not decline.region.overlaps(approve.region)
+        if size == (40, 15):
+            assert details.max_scroll_y > 0
+            details.scroll_end(animate=False)
+            await pilot.pause()
+            assert details.scroll_y > 0
+            assert decline.region.bottom <= size[1]
+        await pilot.press("escape")
+        await asyncio.wait_for(submission, timeout=1)
+        await _wait_for_turn(app)
+        assert conversation.responses[0][1] == "declined"
 
 
 @pytest.mark.asyncio
@@ -4167,7 +4305,9 @@ async def test_coordinator_background_confirmation_uses_stable_modal_projection(
             )
         )
 
-        assert any(markdown.source == "Streaming under modal" for markdown in display.query(Markdown))
+        assert any(
+            markdown.source == "Streaming under modal" for markdown in display.query(Markdown)
+        )
         tool_rows = [row for row in display.query(".tool-row") if isinstance(row, Static)]
         assert len(tool_rows) == 1
         assert str(tool_rows[0].content) == "Completed: write_file"
@@ -4346,8 +4486,7 @@ async def test_mcp_confirmation_shows_stable_identity_and_complete_arguments() -
             "MCP Server: calendar-server",
             "Remote Tool: create_event",
             "Model Tool: mcp_calendar-server_create_event",
-            "Arguments: "
-            + json.dumps(arguments, ensure_ascii=False, separators=(",", ":")),
+            "Arguments: " + json.dumps(arguments, ensure_ascii=False, separators=(",", ":")),
         ]
 
         await pilot.press("escape")
@@ -4983,12 +5122,16 @@ async def test_activity_content_uses_main_vertical_scroll_and_keeps_code_horizon
         assert "TAIL" in _visible_screen_text(app)
         assert display.scroll_y == horizontal_scroll_y
 
+        await pilot.press("pageup")
+        await pilot.pause()
+        before_down = display.scroll_y
+
         await pilot._post_mouse_events(
             [MouseScrollDown],
-            offset=(10, min(markdown.region.bottom - 1, 15)),
+            offset=(display.region.x + 5, display.region.y + 3),
             times=3,
         )
-        assert display.scroll_y > horizontal_scroll_y
+        assert display.scroll_y > before_down
         assert app.screen.focused is app.query_one("#conversation-input", TextArea)
 
 
@@ -5242,6 +5385,9 @@ async def test_cancelled_terminal_marker_keeps_the_streamed_candidate_in_activit
 
         group = app.query_one(".agent-run-activity-group")
         content = group.query_one(".agent-run-activity-content")
+        heading = group.query_one(".agent-run-activity-heading", Static)
+        assert str(heading.content).startswith("\u25bc Cancelled | ")
+        assert heading.has_class("-cancelled")
         assert content.display
         assert content.query_one(Markdown).source == "streamed candidate"
         assert not app.query("#conversation-display > .assistant-row")
@@ -5499,21 +5645,23 @@ async def test_narrow_terminal_uses_full_message_width_for_readable_content() ->
 
 
 @pytest.mark.asyncio
-async def test_wide_terminal_constrains_messages_to_a_comfortable_line_width() -> None:
+@pytest.mark.parametrize("size", ((40, 15), (80, 24), (120, 32)))
+async def test_messages_use_95_percent_of_row_width(size: tuple[int, int]) -> None:
     conversation = ScriptedRunSource()
     runtime = _terminal_backend(conversation)
     app = _terminal_app(cast(Any, runtime))
-    terminal_width = 80
     content = "X" * 100
 
-    async with app.run_test(size=(terminal_width, 24)) as pilot:
+    async with app.run_test(size=size) as pilot:
         await pilot.press(*list(content), "enter")
         await asyncio.sleep(0.05)
 
         lines = _content_text_nodes(app, content)
-        display_width = terminal_width - 4
         assert "".join(lines) == content
-        assert max(map(len, lines)) / display_width == pytest.approx(0.72, abs=0.08)
+        for message in app.query(".message"):
+            row = cast(Widget, message.parent)
+            assert row is not None
+            assert abs(message.outer_size.width - row.content_region.width * 0.95) <= 1
 
 
 @pytest.mark.asyncio
@@ -5861,6 +6009,7 @@ async def test_historical_resize_preserves_anchor_within_one_long_message() -> N
     async with app.run_test(size=(100, 24)) as pilot:
         await pilot.press(*list("resize"), "enter")
         await _wait_for_turn(app)
+        display = app.query_one("#conversation-display")
         await pilot.press("ctrl+home", "pagedown", "pagedown")
         await pilot.pause()
         before_resize = _visible_screen_text(app)
@@ -5874,7 +6023,8 @@ async def test_historical_resize_preserves_anchor_within_one_long_message() -> N
         await asyncio.sleep(0.2)
         after_resize = _visible_screen_text(app)
 
-        assert any(anchor in after_resize for anchor in visible_anchors)
+        assert any(anchor.split()[-1] in after_resize for anchor in visible_anchors)
+        assert not cast(Any, display).following
 
 
 @pytest.mark.asyncio
@@ -6383,6 +6533,101 @@ async def test_partial_terminal_stop_failure_restores_all_modes_before_runtime_c
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("size", ((40, 15), (80, 24)))
+async def test_config_output_keeps_original_text_and_scrolls(size: tuple[int, int]) -> None:
+    app = _terminal_app(cast(Any, _terminal_backend(ScriptedRunSource())))
+    output = "Configuration\n\n" + "\n".join(
+        f"    key_{index:02d} = 状态 {'x' * 80}" for index in range(30)
+    )
+
+    async with app.run_test(size=size) as pilot:
+        await app._mount_management_rows("/config", output)
+        await pilot.pause()
+        heading = app.query_one(".management-heading", Static)
+        rendered = app.query_one(".management-output", Static)
+        display = app.query_one("#conversation-display")
+        assert str(rendered.content) == output
+        assert heading.region.y < rendered.region.y
+        assert display.max_scroll_y > 0
+        await pilot.press("ctrl+home")
+        assert "Configuration" in _visible_screen_text(app)
+        await pilot.press("ctrl+end")
+        assert "key_29" in _visible_screen_text(app)
+
+
+@pytest.mark.asyncio
+async def test_status_view_and_bar_show_current_values_and_clear_failed_reads() -> None:
+    status_data = RuntimeStatus(
+        version="0.1.0",
+        chat_model="test/chat-model",
+        chat_reasoning_effort="medium",
+        uptime_seconds=10,
+        context_window=100,
+        max_output=10,
+        available_context=90,
+        compact_ratio=0.9,
+        compact_context_window=81,
+        projected_next_request_tokens=20,
+        projection_source="estimated",
+        input_budget_used_percent=22.2,
+        session_message_count=2,
+        last_compacted=0,
+        cumulative_usage={"input_tokens": 12},
+        schedule={"status": "available"},
+    )
+
+    class Management:
+        current = status_data
+        failing = False
+
+        async def status(self) -> RuntimeStatus:
+            if self.failing:
+                raise ManagementError(ErrorInfo("route_unavailable", "Status unavailable."))
+            return self.current
+
+        async def permission_level(self) -> str:
+            return self.current.current_permission_level
+
+        async def update_permission_level(self, level: str) -> str:
+            self.current = replace(self.current, current_permission_level=cast(Any, level))
+            return level
+
+    management = Management()
+    app = _terminal_app(
+        cast(Any, _terminal_backend(ScriptedRunSource())),
+        management_dispatcher=ManagementCommandDispatcher(cast(Any, management)),
+    )
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        bar = app.query_one("#status-bar", Static)
+        async with asyncio.timeout(1):
+            while "test/chat-model" not in str(bar.content):
+                await pilot.pause()
+        assert "workspace-write" in str(bar.content)
+
+        await pilot.press(*list("/status"), "enter")
+        await pilot.pause()
+        output = "\n".join(
+            str(cast(Static, row).content) for row in app.query(".management-output")
+        )
+        assert "Context budget" in output
+        assert "input_budget_used_percent: 22.2%" in output
+        assert all(key in output for key in status_data.to_dict())
+
+        await pilot.press(*list("/permission"), "enter", "left", "enter")
+        async with asyncio.timeout(1):
+            while "read-only" not in str(bar.content):
+                await pilot.pause()
+
+        management.failing = True
+        app._schedule_status_refresh()
+        async with asyncio.timeout(1):
+            while "Model: -" not in str(bar.content):
+                await pilot.pause()
+        assert "test/chat-model" not in str(bar.content)
+
+
+@pytest.mark.asyncio
 async def test_management_completion_supports_keyboard_filtering_and_escape() -> None:
     conversation = ScriptedRunSource()
     runtime = _terminal_backend(conversation)
@@ -6393,31 +6638,12 @@ async def test_management_completion_supports_keyboard_filtering_and_escape() ->
 
         await pilot.press("/")
 
-        visible_commands = [
-            text
-            for text, _x, _y in _screenshot_text_nodes(app)
-            if text.startswith(
-                (
-                    "/config - ",
-                    "/status - ",
-                    "/effort - ",
-                    "/permission - ",
-                    "/resume - ",
-                    "/restore - ",
-                    "/memory - ",
-                    "/dream - ",
-                )
-            )
+        completion = app.query_one("#command-completion", OptionList)
+        assert [option.id for option in completion.options] == [
+            command.token for command in MANAGEMENT_COMMANDS
         ]
-        assert visible_commands == [
-            "/config - View User Configuration",
-            "/status - View Runtime Status",
-            "/effort - Set Chat Reasoning Effort",
-            "/permission - Set Foreground Tool Permission Level",
-            "/resume - Resume a Conversation Session",
-            "/restore - Restore the current Conversation Session",
-            "/memory - View Long-term Memory",
-        ]
+        assert all("Management" in str(option.prompt) for option in completion.options)
+        assert "/config" in _visible_screen_text(app)
         assert any(text == "/" for text, _x, _y in _screenshot_text_nodes(app))
         assert app.screen.focused is input_area
 
@@ -6437,45 +6663,18 @@ async def test_management_completion_supports_keyboard_filtering_and_escape() ->
         await pilot.press("ctrl+c", "/", "escape")
 
         assert input_area.text == "/"
-        assert not any(
-            text.startswith(
-                (
-                    "/config - ",
-                    "/status - ",
-                    "/effort - ",
-                    "/permission - ",
-                    "/resume - ",
-                    "/restore - ",
-                    "/memory - ",
-                    "/dream - ",
-                )
-            )
-            for text, _x, _y in _screenshot_text_nodes(app)
-        )
+        assert not completion.display
         assert app.screen.focused is input_area
 
         await pilot.press("m")
         await pilot.pause()
 
-        assert [
-            text
-            for text, _x, _y in _screenshot_text_nodes(app)
-            if text.startswith(
-                (
-                    "/config - ",
-                    "/status - ",
-                    "/effort - ",
-                    "/resume - ",
-                    "/restore - ",
-                    "/memory - ",
-                    "/dream - ",
-                )
-            )
-        ] == ["/memory - View Long-term Memory"]
+        assert [option.id for option in completion.options] == ["/memory"]
+        assert "/memory" in _visible_screen_text(app)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", ((80, 24), (30, 12), (20, 10)))
+@pytest.mark.parametrize("size", ((40, 15), (80, 24), (120, 32), (30, 12), (20, 10)))
 async def test_management_completion_keeps_the_composer_visible(
     size: tuple[int, int],
 ) -> None:
@@ -6502,31 +6701,11 @@ async def test_management_completion_keeps_the_composer_visible(
         assert all("\n" not in str(option.prompt) for option in completion.options)
         assert completion.region.bottom <= input_area.region.y
         assert not completion.region.overlaps(input_area.region)
-        if size == (80, 24):
-            assert [
-                text
-                for text, _x, _y in visible_nodes
-                if text.startswith(
-                    (
-                        "/config - ",
-                        "/status - ",
-                        "/effort - ",
-                        "/permission - ",
-                        "/resume - ",
-                        "/restore - ",
-                        "/memory - ",
-                        "/dream - ",
-                    )
-                )
-            ] == [
-                "/config - View User Configuration",
-                "/status - View Runtime Status",
-                "/effort - Set Chat Reasoning Effort",
-                "/permission - Set Foreground Tool Permission Level",
-                "/resume - Resume a Conversation Session",
-                "/restore - Restore the current Conversation Session",
-                "/memory - View Long-term Memory",
-            ]
+        if size[0] >= 80:
+            assert all(
+                command.token in _visible_screen_text(app) for command in MANAGEMENT_COMMANDS[:6]
+            )
+            assert completion.region.height <= 7
         else:
             assert all(
                 completion.render_line(index).text.endswith("\u2026")
@@ -6534,6 +6713,7 @@ async def test_management_completion_keeps_the_composer_visible(
             )
         assert any(text == "/" for text, _x, _y in visible_nodes)
         assert input_area.display
+        assert app.query_one("#conversation-display").region.height >= 3
         assert app.screen.focused is input_area
 
 
@@ -6550,18 +6730,7 @@ async def test_management_completion_mouse_selection_updates_the_composer() -> N
 
         assert app.query_one("#conversation-input", TextArea).text == "/status"
         assert isinstance(app.screen.focused, TextArea)
-        assert not any(
-            text.startswith(
-                (
-                    "/config - ",
-                    "/resume - ",
-                    "/restore - ",
-                    "/memory - ",
-                    "/dream - ",
-                )
-            )
-            for text, _x, _y in _screenshot_text_nodes(app)
-        )
+        assert not app.query_one("#command-completion", OptionList).display
 
 
 @pytest.mark.asyncio
@@ -6588,17 +6757,12 @@ async def test_skill_completion_merges_after_management_commands_with_safe_label
 
         completion = app.query_one("#command-completion", OptionList)
         assert [str(option.prompt) for option in completion.options] == [
-            "/config - View User Configuration",
-            "/status - View Runtime Status",
-            "/effort - Set Chat Reasoning Effort",
-            "/permission - Set Foreground Tool Permission Level",
-            "/resume - Resume a Conversation Session",
-            "/restore - Restore the current Conversation Session",
-            "/memory - View Long-term Memory",
-            "/dream - Process pending Conversation Summaries",
-            "/reload_skill - Reload Skills",
-            "/alpha - First line [bold] stays literal",
-            "/bravo - Second line",
+            *(
+                f"{command.token}  Management  {command.description}"
+                for command in MANAGEMENT_COMMANDS
+            ),
+            "/alpha  Skill  First line [bold] stays literal",
+            "/bravo  Skill  Second line",
         ]
         assert app.query_one("#conversation-input", TextArea).text == "/"
         assert app.screen.focused is app.query_one("#conversation-input", TextArea)
@@ -6632,7 +6796,7 @@ async def test_skill_completion_labels_are_single_line_at_narrow_sizes_and_stop_
         completion = app.query_one("#command-completion", OptionList)
         input_area = app.query_one("#conversation-input", TextArea)
         skill_label = str(completion.options[-1].prompt)
-        assert skill_label.startswith(f"/{long_name} - ")
+        assert skill_label.startswith(f"/{long_name}  Skill  ")
         assert "\n" not in skill_label
         assert "\t" not in skill_label
         assert "[bold]" in skill_label
@@ -6854,9 +7018,7 @@ async def test_completion_direction_keys_take_precedence_over_composer_and_input
             await pilot.press(direction)
             assert input_area.cursor_location == cursor_before
             assert input_area.text == "/"
-            assert any(
-                text.startswith("/config - ") for text, _x, _y in _screenshot_text_nodes(app)
-            )
+            assert any(text.startswith("/config") for text, _x, _y in _screenshot_text_nodes(app))
 
         await pilot.press("up", "down")
         assert input_area.text == "/"
@@ -6878,24 +7040,13 @@ async def test_completion_ctrl_c_closes_completion_before_idle_draft_behavior() 
         input_area = app.query_one("#conversation-input", TextArea)
         await pilot.press("/")
         await pilot.pause()
-        assert any(text.startswith("/config - ") for text, _x, _y in _screenshot_text_nodes(app))
+        assert any(text.startswith("/config") for text, _x, _y in _screenshot_text_nodes(app))
 
         await pilot.press("ctrl+c")
         await pilot.pause()
 
         assert input_area.text == "/"
-        assert not any(
-            text.startswith(
-                (
-                    "/config - ",
-                    "/status - ",
-                    "/resume - ",
-                    "/memory - ",
-                    "/dream - ",
-                )
-            )
-            for text, _x, _y in _screenshot_text_nodes(app)
-        )
+        assert not app.query_one("#command-completion", OptionList).display
         assert app.is_running
         assert app.screen.focused is input_area
 
@@ -6976,7 +7127,8 @@ async def test_effort_selector_cancels_without_rows_or_runtime_updates(
         assert selector.display
         assert selector_state.selected_effort == initial
         assert app.screen.focused is selector
-        visible_text = _visible_screen_text(app)
+        visible_text = cast(Any, selector.render()).plain
+        assert f"Current: {initial} | Pending: {initial}" in visible_text
         assert all(
             re.search(rf"(?<![a-z]){level}(?![a-z])", visible_text) is not None
             for level in ("low", "medium", "high", "xhigh", "max")
@@ -6996,6 +7148,30 @@ async def test_effort_selector_cancels_without_rows_or_runtime_updates(
 
         await pilot.press("up")
         assert input_area.text == "/effort"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", ((40, 15), (80, 24), (120, 32)))
+async def test_effort_selector_mouse_commits_selected_value(size: tuple[int, int]) -> None:
+    management = _EffortManagement("medium")
+    app = _terminal_app(
+        cast(Any, _terminal_backend(ScriptedRunSource())),
+        management_dispatcher=ManagementCommandDispatcher(cast(Any, management)),
+    )
+
+    async with app.run_test(size=size) as pilot:
+        await pilot.press(*list("/effort"), "enter")
+        await pilot.pause()
+        selector = cast(Any, app.query_one("#reasoning-effort-selector", Static))
+        options_line = selector.render().plain.splitlines()[1]
+        left = selector.content_region.x - selector.region.x
+        centered = max(0, (selector.content_region.width - len(options_line)) // 2)
+        high_x = left + centered + options_line.index("high") + 1
+        assert await pilot.click("#reasoning-effort-selector", offset=(high_x, 2))
+        async with asyncio.timeout(1):
+            while management.updated != ["high"]:
+                await pilot.pause()
+        assert app.query_one("#conversation-input", TextArea).display
 
 
 @pytest.mark.asyncio
@@ -7115,11 +7291,15 @@ async def test_permission_selector_reflects_current_level_and_cancels_without_up
             for label in ("Read-Only", "Workspace-Write", "Full-Access")
         )
         rendered_lines = selector.render().plain.splitlines()
-        assert rendered_lines == ["Read-Only", "Workspace-Write", "Full-Access"]
+        assert rendered_lines[1:] == ["Read-Only", "Workspace-Write", "Full-Access"]
+        assert rendered_lines[0].startswith("Current:")
         assert max(map(len, rendered_lines)) <= selector.content_region.width
         assert selector.outer_size.height <= 5
         assert app.screen.focused is selector
 
+        await pilot.press("right" if initial == "read-only" else "left")
+        assert cast(Any, selector).selected_permission_level != initial
+        assert "Current:" in cast(Any, selector).render().plain.splitlines()[0]
         await pilot.press("escape")
         await pilot.pause()
 
@@ -7131,7 +7311,9 @@ async def test_permission_selector_reflects_current_level_and_cancels_without_up
 
 
 @pytest.mark.asyncio
-async def test_permission_full_access_requires_cancel_focused_warning_and_explicit_confirmation() -> None:
+async def test_permission_full_access_requires_cancel_focused_warning_and_explicit_confirmation() -> (
+    None
+):
     conversation = ScriptedRunSource()
     runtime = _terminal_backend(conversation)
     management = _PermissionManagement("workspace-write")
@@ -7216,7 +7398,9 @@ async def test_permission_full_access_warning_actions_fit_narrow_viewport() -> N
         assert not cancel.region.overlaps(confirm.region)
         assert management.updated == []
 
-        assert await pilot.click(confirm, offset=(confirm.size.width // 2, confirm.size.height // 2))
+        assert await pilot.click(
+            confirm, offset=(confirm.size.width // 2, confirm.size.height // 2)
+        )
         await pilot.pause()
         assert management.updated == ["full-access"]
 
@@ -7232,15 +7416,16 @@ async def test_permission_selector_and_warning_support_mouse_without_narrow_over
     )
 
     async with app.run_test(size=(80, 24)) as pilot:
+
         async def click_full_access() -> None:
             await pilot.press(*list("/permission"), "enter")
             await pilot.pause()
             selector = cast(Any, app.query_one("#permission-selector", Static))
-            rendered = selector.render().plain
+            rendered = selector.render().plain.splitlines()[1]
             content_x = selector.content_region.x - selector.region.x
             aligned_x = max(0, (selector.content_region.width - len(rendered)) // 2)
             full_access_x = content_x + aligned_x + rendered.index("Full-Access") + 1
-            assert await pilot.click("#permission-selector", offset=(full_access_x, 1))
+            assert await pilot.click("#permission-selector", offset=(full_access_x, 2))
             await pilot.pause()
 
         await click_full_access()
@@ -7409,7 +7594,7 @@ async def test_effort_persistence_failure_does_not_interrupt_active_run_or_next_
         await pilot.press(*list("/status"), "enter")
         await pilot.pause()
         assert any(
-            '"chat_reasoning_effort": "high"' in str(cast(Static, row).content)
+            "chat_reasoning_effort: high" in str(cast(Static, row).content)
             for row in app.query(".management-row")
         )
         assert initial.control.has_active_run

@@ -131,7 +131,10 @@ Restore Anchor，使用当前 Session 内单调递增且永不复用的数字 ID
 message，并恢复该输入之前的 title、Blackboard、Action Summary、`last_compacted`、
 token usage 和其他 Session-owned metadata。原 Session ID 保留，即使结果是空 Session
 也会持久化；显示和前台输入历史会从持久化 Session 重建，Management Command history
-保留。
+保留。当前 `/restore` 交互成功后，所选 anchor 的完整 User message 原文会作为未提交草稿
+回到输入框，保留换行及首尾空白；用户可以继续编辑、重新提交或清空。File Restore 部分失败
+但 Session 已成功回退时仍会回填；取消、检查或提交失败不会回填，进程重启后由 startup
+recovery 续作完成的恢复也不会创建该草稿。
 
 恢复范围可选为：
 

@@ -4557,6 +4557,17 @@ class TerminalConversationApp(App[None]):
             if anchor_id is None:
                 await self._management_dispatcher.restore_cancel()
                 return
+            selected_anchor = next(
+                (anchor for anchor in anchors if anchor.anchor_id == anchor_id),
+                None,
+            )
+            if selected_anchor is None:
+                await self._management_dispatcher.restore_cancel()
+                await self._mount_management_rows(
+                    _RESTORE_MANAGEMENT_COMMAND_TOKEN,
+                    "Session Restore selection is no longer available.",
+                )
+                return
 
             inspection, cancelled = await self._restore_inspection(anchor_id)
             if cancelled:
@@ -4567,6 +4578,13 @@ class TerminalConversationApp(App[None]):
                 await self._mount_management_rows(
                     _RESTORE_MANAGEMENT_COMMAND_TOKEN,
                     inspection.output or "Session Restore could not be inspected.",
+                )
+                return
+            if plan.anchor_id != selected_anchor.anchor_id:
+                await self._management_dispatcher.restore_cancel()
+                await self._mount_management_rows(
+                    _RESTORE_MANAGEMENT_COMMAND_TOKEN,
+                    "Session Restore selection changed before confirmation.",
                 )
                 return
             self._restore_plan = plan
@@ -4592,6 +4610,12 @@ class TerminalConversationApp(App[None]):
                     commit.output or "Session Restore could not be completed.",
                 )
                 return
+            if result.anchor_id != plan.anchor_id or result.session_id != plan.session_id:
+                await self._mount_management_rows(
+                    _RESTORE_MANAGEMENT_COMMAND_TOKEN,
+                    "Session Restore result did not match the inspected plan.",
+                )
+                return
 
             input_area.forget_submissions(
                 tuple(anchor.content for anchor in anchors if anchor.anchor_id >= plan.anchor_id)
@@ -4603,6 +4627,10 @@ class TerminalConversationApp(App[None]):
                     "Conversation Session authority changed before display replacement.",
                 )
                 return
+            input_area.text = selected_anchor.content
+            input_area.move_cursor(
+                (len(input_area.document.lines) - 1, len(input_area.document.lines[-1]))
+            )
             await self._mount_management_rows(
                 _RESTORE_MANAGEMENT_COMMAND_TOKEN,
                 commit.output,

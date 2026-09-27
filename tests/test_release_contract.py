@@ -558,7 +558,7 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
     } == {"set_inbound_changed_callback", "unbind_inbound_changed_callback"}
 
     memory_manager = _source_class(
-        _source_ast(ROOT / "myclaw" / "agent" / "memory" / "manager.py"),
+        _source_ast(ROOT / "myclaw" / "memory" / "manager.py"),
         "MemoryManager",
     )
     assert _public_method_names(memory_manager) == {
@@ -571,7 +571,7 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
     }
 
     dream = _source_class(
-        _source_ast(ROOT / "myclaw" / "agent" / "memory" / "dream.py"),
+        _source_ast(ROOT / "myclaw" / "memory" / "dream.py"),
         "Dream",
     )
     assert _parameter_names(_source_function(dream, "__init__")) == (
@@ -735,7 +735,7 @@ def test_composition_and_store_signatures_match_current_contracts() -> None:
 
 def test_session_exposes_the_terminal_agent_run_commit() -> None:
     session = _source_class(
-        _source_ast(ROOT / "myclaw" / "agent" / "session" / "session.py"),
+        _source_ast(ROOT / "myclaw" / "session" / "session.py"),
         "Session",
     )
     assert _direct_method(session, "commit_agent_run")

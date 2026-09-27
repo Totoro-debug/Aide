@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID
 
 if TYPE_CHECKING:
-    from myclaw.agent.tools.tool_gateway import ConfirmationRequest
+    from myclaw.tools.gateway import ConfirmationRequest
 
 
 type ConfirmationDecision = Literal["approved", "declined"]
@@ -60,7 +60,7 @@ class ConfirmationEnvelope:
     title: str | None = None
 
     def __post_init__(self) -> None:
-        from myclaw.agent.tools.tool_gateway import (
+        from myclaw.tools.gateway import (
             ConfirmationRequest as RuntimeConfirmationRequest,
         )
 

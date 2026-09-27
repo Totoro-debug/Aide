@@ -16,7 +16,6 @@ from anthropic import (
     AsyncAnthropic,
 )
 
-from myclaw.agent.tools.tool_gateway import ModelToolCall
 from myclaw.config.config import ProviderConfiguration
 from myclaw.errors import ErrorInfo
 from myclaw.provider.errors import (
@@ -39,6 +38,7 @@ from myclaw.provider.models import (
     last_assistant_message_index,
     require_tool_call_sequence,
 )
+from myclaw.tools.gateway import ModelToolCall
 from myclaw.utils.json_types import JsonObject, JsonValue
 
 _REASONING_EFFORT_MAP: Final[Mapping[ReasoningEffort, str]] = MappingProxyType(

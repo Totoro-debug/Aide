@@ -11,8 +11,6 @@ from typing import Annotated, Any, Literal, Protocol
 
 from loguru import logger
 
-from myclaw.agent.tools.base import BaseTool, ToolError, ToolParam
-from myclaw.agent.tools.tool_gateway import ToolGateway
 from myclaw.context.budget import request_fits_model_context
 from myclaw.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from myclaw.logging.session import without_session_log
@@ -28,6 +26,8 @@ from myclaw.provider.errors import ModelCallError, model_context_overflow_error
 from myclaw.provider.model_router import ModelAttemptGuard, ModelRouteStatus
 from myclaw.provider.models import ModelMessages, ModelResponse
 from myclaw.templates import render_template
+from myclaw.tools.base import BaseTool, ToolError, ToolParam
+from myclaw.tools.gateway import ToolGateway
 from myclaw.utils.validation import require_nonnegative_int
 
 _MEMORY_JSON_TRANSLATION = str.maketrans({"`": r"\u0060"})

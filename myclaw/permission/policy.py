@@ -9,7 +9,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
-from myclaw.agent.tools.core.exec_policy import (
+from myclaw.permission.state import (
+    PERMISSION_LEVELS,
+    PermissionSnapshot,
+    RuntimePermissionControl,
+    ToolPermissionLevel,
+    validate_permission_level,
+)
+from myclaw.tools.exec.policy import (
     EXEC_CATASTROPHIC_REASON,
     EXEC_CONFIRMATION_REASON,
     EXEC_DESTRUCTIVE_REASON,
@@ -20,13 +27,6 @@ from myclaw.agent.tools.core.exec_policy import (
     bash_recursive_forced_delete_targets,
     classify_bash_command,
     classify_powershell_command,
-)
-from myclaw.permission.state import (
-    PERMISSION_LEVELS,
-    PermissionSnapshot,
-    RuntimePermissionControl,
-    ToolPermissionLevel,
-    validate_permission_level,
 )
 from myclaw.utils.host_filesystem import host_path_is_within
 
@@ -433,7 +433,7 @@ def _addresses_are_public(addresses: tuple[IPAddress, ...]) -> bool:
         return False
     # BaseTool imports this module, so defer the canonical classifier import
     # until authorization rather than maintaining a second policy copy here.
-    from myclaw.agent.tools.base import is_public_ip
+    from myclaw.tools.base import is_public_ip
 
     return all(is_public_ip(address) for address in addresses)
 

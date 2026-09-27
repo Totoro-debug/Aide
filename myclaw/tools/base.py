@@ -26,7 +26,6 @@ from uuid import uuid4
 
 from loguru import logger
 
-from myclaw.agent.tools.schema import Schema, ToolParam
 from myclaw.permission.policy import (
     FileAccess,
     FileAccessRole,
@@ -34,6 +33,7 @@ from myclaw.permission.policy import (
     ToolInvocationFacts,
     canonicalize_file_access,
 )
+from myclaw.tools.schema import Schema, ToolParam
 from myclaw.utils.validation import require_nonnegative_int
 
 _METADATA_NAMES = frozenset({"name", "description", "required", "parameters"})

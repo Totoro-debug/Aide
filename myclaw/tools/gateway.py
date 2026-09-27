@@ -13,23 +13,6 @@ from uuid import UUID, uuid4
 
 from loguru import logger
 
-from myclaw.agent.tools.base import (
-    ArtifactReference,
-    BaseTool,
-    ToolError,
-)
-from myclaw.agent.tools.core.edit_file import EditFileTool
-from myclaw.agent.tools.core.exec import ExecTool
-from myclaw.agent.tools.core.exec_host import ExecHost
-from myclaw.agent.tools.core.glob import GlobTool
-from myclaw.agent.tools.core.grep import GrepTool
-from myclaw.agent.tools.core.list_dir import ListDirTool
-from myclaw.agent.tools.core.read_file import ReadFileTool
-from myclaw.agent.tools.core.schedule import ScheduleTool
-from myclaw.agent.tools.core.web_fetch import WebFetchTool
-from myclaw.agent.tools.core.web_search import WebSearchTool
-from myclaw.agent.tools.core.write_file import WriteFileTool
-from myclaw.agent.tools.mcp import MCPTool
 from myclaw.permission.confirmation import ConfirmationAborted, ConfirmationUnavailable
 from myclaw.permission.policy import (
     MCPToolIdentity,
@@ -43,6 +26,23 @@ from myclaw.permission.policy import (
 )
 from myclaw.schedule.service import ScheduleService
 from myclaw.session.backup_store import FileMutationRecorder
+from myclaw.tools.base import (
+    ArtifactReference,
+    BaseTool,
+    ToolError,
+)
+from myclaw.tools.exec.host import ExecHost
+from myclaw.tools.exec.tool import ExecTool
+from myclaw.tools.files.edit_file import EditFileTool
+from myclaw.tools.files.glob import GlobTool
+from myclaw.tools.files.grep import GrepTool
+from myclaw.tools.files.list_dir import ListDirTool
+from myclaw.tools.files.read_file import ReadFileTool
+from myclaw.tools.files.write_file import WriteFileTool
+from myclaw.tools.mcp.tool import MCPTool
+from myclaw.tools.schedule import ScheduleTool
+from myclaw.tools.web.fetch import WebFetchTool
+from myclaw.tools.web.search import WebSearchTool
 from myclaw.utils.validation import require_uuid4
 
 type ConfirmationDecision = Literal["approved", "declined"]

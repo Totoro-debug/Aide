@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from ipaddress import ip_address
 from typing import Protocol
 
-from myclaw.agent.tools.base import is_public_ip
 from myclaw.permission.policy import NetworkTargetRisk
+from myclaw.tools.base import is_public_ip
 
 type TargetRisk = NetworkTargetRisk
 

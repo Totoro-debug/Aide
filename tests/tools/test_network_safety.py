@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from myclaw.agent.tools.network_safety import TargetAssessment, assess_target
+from myclaw.tools.web.network_safety import TargetAssessment, assess_target
 
 
 class _UnexpectedResolver:

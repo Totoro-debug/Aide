@@ -16,16 +16,16 @@ PACKAGE_ROOT = PROJECT_ROOT / "myclaw"
 _CLI_PATH = Path("myclaw/terminal/cli.py")
 _CLI_TOOL_IMPORTS = frozenset(
     {
-        ("myclaw.agent.tools.mcp_runtime", "MCPRuntimeManager"),
-        ("myclaw.agent.tools.mcp_runtime", "MCPServerFailure"),
-        ("myclaw.agent.tools.mcp_runtime", "MCPSnapshotReport"),
-        ("myclaw.agent.tools.mcp_runtime", "MCPStartupReport"),
-        ("myclaw.agent.tools.mcp_runtime", "MCPToolSnapshot"),
-        ("myclaw.agent.tools.mcp_keywords", "MCPKeywordPreparer"),
-        ("myclaw.agent.tools.tool_gateway", "BUILT_IN_TOOL_NAMES"),
-        ("myclaw.agent.tools.core.exec_host", "EXEC_CAPABILITY_ERROR"),
-        ("myclaw.agent.tools.core.exec_host", "create_exec_host"),
-        ("myclaw.agent.tools.core.exec_host", "resolve_exec_shell"),
+        ("myclaw.tools.mcp.runtime", "MCPRuntimeManager"),
+        ("myclaw.tools.mcp.runtime", "MCPServerFailure"),
+        ("myclaw.tools.mcp.runtime", "MCPSnapshotReport"),
+        ("myclaw.tools.mcp.runtime", "MCPStartupReport"),
+        ("myclaw.tools.mcp.runtime", "MCPToolSnapshot"),
+        ("myclaw.tools.mcp.keywords", "MCPKeywordPreparer"),
+        ("myclaw.tools.gateway", "BUILT_IN_TOOL_NAMES"),
+        ("myclaw.tools.exec.host", "EXEC_CAPABILITY_ERROR"),
+        ("myclaw.tools.exec.host", "create_exec_host"),
+        ("myclaw.tools.exec.host", "resolve_exec_shell"),
     }
 )
 _TOOL_EXECUTION_DISPATCH_METHODS = frozenset(
@@ -60,8 +60,6 @@ def test_retired_prompt_and_session_assembly_modules_are_absent() -> None:
 
 
 def test_feature_packages_have_canonical_locations() -> None:
-    retired_modules = ("tools",)
-    assert all(not (PACKAGE_ROOT / module).exists() for module in retired_modules)
     assert (PACKAGE_ROOT / "session" / "session.py").is_file()
     assert not tuple((PACKAGE_ROOT / "agent" / "session").glob("*.py"))
     for module in ("manager", "records", "store", "dream"):
@@ -77,6 +75,36 @@ def test_feature_packages_have_canonical_locations() -> None:
     assert not (PACKAGE_ROOT / "agent" / "permission.py").exists()
     assert not (PACKAGE_ROOT / "agent" / "confirmation.py").exists()
     assert not (PACKAGE_ROOT / "agent" / "tools" / "permission.py").exists()
+    tool_modules = (
+        "base.py",
+        "schema.py",
+        "gateway.py",
+        "schedule.py",
+        "files/read_file.py",
+        "files/write_file.py",
+        "files/edit_file.py",
+        "files/list_dir.py",
+        "files/glob.py",
+        "files/grep.py",
+        "files/_directory.py",
+        "files/_file_mutation.py",
+        "exec/tool.py",
+        "exec/host.py",
+        "exec/policy.py",
+        "web/fetch.py",
+        "web/search.py",
+        "web/network_safety.py",
+        "mcp/tool.py",
+        "mcp/runtime.py",
+        "mcp/keywords.py",
+        "discovery/search.py",
+        "discovery/deferred.py",
+        "discovery/tool_search.py",
+    )
+    tool_packages = ("", "files", "exec", "web", "mcp", "discovery")
+    assert all((PACKAGE_ROOT / "tools" / package / "__init__.py").is_file() for package in tool_packages)
+    assert all((PACKAGE_ROOT / "tools" / module).is_file() for module in tool_modules)
+    assert not tuple((PACKAGE_ROOT / "agent" / "tools").rglob("*.py"))
 
     probe = subprocess.run(
         [
@@ -84,13 +112,15 @@ def test_feature_packages_have_canonical_locations() -> None:
             "-c",
             (
                 "import importlib.util\n"
-                "modules = ('myclaw.tools',)\n"
-                "assert all(importlib.util.find_spec(module) is None for module in modules)\n"
                 "assert importlib.util.find_spec('myclaw.session.session') is not None\n"
                 "assert importlib.util.find_spec('myclaw.memory.manager') is not None\n"
                 "assert importlib.util.find_spec('myclaw.context.controller') is not None\n"
                 "assert importlib.util.find_spec('myclaw.permission.policy') is not None\n"
-                "for module in ('myclaw.agent.session.session', 'myclaw.agent.memory.manager'):\n"
+                "assert importlib.util.find_spec('myclaw.tools.gateway') is not None\n"
+                "assert importlib.util.find_spec('myclaw.tools.mcp.runtime') is not None\n"
+                "assert importlib.util.find_spec('myclaw.tools.exec.host') is not None\n"
+                "for module in ('myclaw.agent.session.session', 'myclaw.agent.memory.manager',\n"
+                "               'myclaw.agent.tools.tool_gateway', 'myclaw.agent.tools.core.exec_host'):\n"
                 "    try:\n"
                 "        spec = importlib.util.find_spec(module)\n"
                 "    except ModuleNotFoundError:\n"
@@ -190,7 +220,7 @@ def _imported_module_names(reference: _StaticImport) -> tuple[str, ...]:
 
 def _is_tools_dependency(reference: _StaticImport) -> bool:
     return any(
-        module == "myclaw.agent.tools" or module.startswith("myclaw.agent.tools.")
+        module == "myclaw.tools" or module.startswith("myclaw.tools.")
         for module in _imported_module_names(reference)
     )
 
@@ -441,8 +471,8 @@ def test_production_tool_execution_dispatch_has_one_gateway_boundary() -> None:
         sources,
         allowed_dispatchers=frozenset(
             {
-                PACKAGE_ROOT / "agent" / "tools" / "base.py",
-                PACKAGE_ROOT / "agent" / "tools" / "tool_gateway.py",
+                PACKAGE_ROOT / "tools" / "base.py",
+                PACKAGE_ROOT / "tools" / "gateway.py",
             }
         ),
     )
@@ -466,7 +496,7 @@ def test_production_tools_have_no_legacy_string_authorization_surface() -> None:
     }
     violations: list[str] = []
     for path in (
-        *_python_files(PACKAGE_ROOT / "agent" / "tools"),
+        *_python_files(PACKAGE_ROOT / "tools"),
         PACKAGE_ROOT / "permission" / "policy.py",
     ):
         source = path.read_text(encoding="utf-8")
@@ -586,8 +616,11 @@ def test_tools_do_not_depend_on_provider() -> None:
     forbidden = {"myclaw.provider"}
     violations = [
         f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
-        for path in _python_files(PACKAGE_ROOT / "agent" / "tools")
-        for module, line in _imports(path)
+        for path in _python_files(PACKAGE_ROOT / "tools")
+        for module, line in _resolved_imports(
+            path.read_text(encoding="utf-8"),
+            package=tuple(path.parent.relative_to(PROJECT_ROOT).parts),
+        )
         if any(module == prefix or module.startswith(f"{prefix}.") for prefix in forbidden)
     ]
 
@@ -624,9 +657,9 @@ def test_terminal_tool_import_checker_allows_each_cli_symbol(
 @pytest.mark.parametrize(
     "source",
     [
-        "from myclaw.agent.tools.mcp_runtime import MCPRuntimeManager as Manager",
-        "from ..agent.tools.mcp_runtime import MCPRuntimeManager",
-        "from ..agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES as BUILT_INS",
+        "from myclaw.tools.mcp.runtime import MCPRuntimeManager as Manager",
+        "from ..tools.mcp.runtime import MCPRuntimeManager",
+        "from ..tools.gateway import BUILT_IN_TOOL_NAMES as BUILT_INS",
     ],
 )
 def test_terminal_tool_import_checker_resolves_allowed_aliases_and_relative_imports(
@@ -642,12 +675,12 @@ def test_terminal_tool_import_checker_resolves_allowed_aliases_and_relative_impo
 
 def test_terminal_tool_import_checker_retains_original_symbol_form_and_line() -> None:
     references = _resolved_static_imports(
-        "\nfrom myclaw.agent.tools.mcp_runtime import MCPRuntimeManager as Manager",
+        "\nfrom myclaw.tools.mcp.runtime import MCPRuntimeManager as Manager",
         package=("myclaw", "terminal"),
     )
 
     assert references == (
-        _StaticImport("myclaw.agent.tools.mcp_runtime", "MCPRuntimeManager", "from", 2),
+        _StaticImport("myclaw.tools.mcp.runtime", "MCPRuntimeManager", "from", 2),
     )
 
 
@@ -661,7 +694,7 @@ def test_terminal_tool_import_checker_retains_original_symbol_form_and_line() ->
 )
 def test_terminal_tool_import_checker_rejects_cli_symbols_outside_cli(path: Path) -> None:
     violations = _terminal_tool_import_violations(
-        {path: "from myclaw.agent.tools.mcp_runtime import MCPRuntimeManager"},
+        {path: "from myclaw.tools.mcp.runtime import MCPRuntimeManager"},
         allowed_symbols={_CLI_PATH: _CLI_TOOL_IMPORTS},
     )
 
@@ -671,17 +704,17 @@ def test_terminal_tool_import_checker_rejects_cli_symbols_outside_cli(path: Path
 @pytest.mark.parametrize(
     "source",
     [
-        "from myclaw.agent.tools.tool_gateway import ToolGateway",
-        "from myclaw.agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES, ToolGateway",
-        "from myclaw.agent.tools.mcp_runtime import allocate_mcp_tool_name",
-        "import myclaw.agent.tools.mcp_runtime",
-        "import myclaw.agent.tools.mcp_runtime as runtime",
-        "from myclaw.agent.tools import mcp_runtime",
-        "from myclaw.agent.tools.mcp_runtime import *",
-        "from myclaw.agent.tools.tool_gateway import ToolGateway as Gateway",
-        "from ..agent.tools.tool_gateway import ToolGateway",
-        "def load():\n    from myclaw.agent.tools.mcp_runtime import allocate_mcp_tool_name",
-        "if TYPE_CHECKING:\n    from myclaw.agent.tools.mcp_runtime import allocate_mcp_tool_name",
+        "from myclaw.tools.gateway import ToolGateway",
+        "from myclaw.tools.gateway import BUILT_IN_TOOL_NAMES, ToolGateway",
+        "from myclaw.tools.mcp.runtime import allocate_mcp_tool_name",
+        "import myclaw.tools.mcp.runtime",
+        "import myclaw.tools.mcp.runtime as runtime",
+        "from myclaw.tools.mcp import runtime",
+        "from myclaw.tools.mcp.runtime import *",
+        "from myclaw.tools.gateway import ToolGateway as Gateway",
+        "from ..tools.gateway import ToolGateway",
+        "def load():\n    from myclaw.tools.mcp.runtime import allocate_mcp_tool_name",
+        "if TYPE_CHECKING:\n    from myclaw.tools.mcp.runtime import allocate_mcp_tool_name",
     ],
 )
 def test_terminal_tool_import_checker_rejects_unapproved_tool_imports(source: str) -> None:
@@ -777,13 +810,13 @@ def test_context_builder_constructor_owns_only_context_dependencies() -> None:
 
 
 def test_mcp_keyword_module_does_not_import_private_configuration_implementation() -> None:
-    path = PACKAGE_ROOT / "agent" / "tools" / "mcp_keywords.py"
+    path = PACKAGE_ROOT / "tools" / "mcp" / "keywords.py"
     source = path.read_text(encoding="utf-8")
     private_configuration_imports = [
         reference
         for reference in _resolved_static_imports(
             source,
-            package=("myclaw", "agent", "tools"),
+            package=("myclaw", "tools", "mcp"),
         )
         if reference.source_module == "myclaw.config.config"
         and reference.symbol is not None
@@ -798,11 +831,13 @@ def test_context_builder_does_not_import_model_request_runtime_boundaries() -> N
     forbidden_prefixes = (
         "myclaw.provider",
         "myclaw.router",
-        "myclaw.agent.tools",
+        "myclaw.tools",
     )
     violations = [
         f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
-        for module, line in _imports(path)
+        for module, line in _resolved_imports(
+            path.read_text(encoding="utf-8"), package=("myclaw", "context")
+        )
         if any(module == prefix or module.startswith(f"{prefix}.") for prefix in forbidden_prefixes)
     ]
 
@@ -1063,7 +1098,10 @@ def test_nonterminal_modules_do_not_depend_on_terminal_presentation() -> None:
         f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
         for path in _python_files(PACKAGE_ROOT)
         if path.relative_to(PACKAGE_ROOT).parts[0] != "terminal"
-        for module, line in _imports(path)
+        for module, line in _resolved_imports(
+            path.read_text(encoding="utf-8"),
+            package=tuple(path.parent.relative_to(PROJECT_ROOT).parts),
+        )
         if module == "myclaw.terminal" or module.startswith("myclaw.terminal.")
     ]
 
@@ -1186,7 +1224,7 @@ def test_package_initializers_do_not_create_aggregate_import_entries() -> None:
 def test_host_selection_is_confined_to_the_workspace_filesystem_adapter() -> None:
     expected = {
         Path("myclaw/utils/host_filesystem.py"),
-        Path("myclaw/agent/tools/core/exec_host.py"),
+        Path("myclaw/tools/exec/host.py"),
     }
     actual = {
         path.relative_to(PROJECT_ROOT)

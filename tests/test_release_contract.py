@@ -304,6 +304,37 @@ def test_clean_distributions_build_and_import_cleanly(
 
     assert any(member.endswith("/myclaw/__init__.py") for member in sdist_members)
     assert "myclaw/__init__.py" in wheel_members
+    source_python_members = {
+        path.relative_to(ROOT).as_posix() for path in (ROOT / "myclaw").rglob("*.py")
+    }
+    wheel_python_members = {
+        member for member in wheel_members if member.startswith("myclaw/") and member.endswith(".py")
+    }
+    assert wheel_python_members == source_python_members
+    assert {
+        "myclaw/workspace/__init__.py",
+        "myclaw/session/__init__.py",
+        "myclaw/memory/__init__.py",
+        "myclaw/context/__init__.py",
+        "myclaw/permission/__init__.py",
+        "myclaw/tools/__init__.py",
+        "myclaw/tools/files/__init__.py",
+        "myclaw/tools/exec/__init__.py",
+        "myclaw/tools/web/__init__.py",
+        "myclaw/tools/mcp/__init__.py",
+        "myclaw/tools/discovery/__init__.py",
+    } <= wheel_python_members
+    assert not wheel_python_members & {
+        "myclaw/agent/workspace_state.py",
+        "myclaw/agent/context.py",
+        "myclaw/agent/context_budget.py",
+        "myclaw/agent/permission.py",
+        "myclaw/agent/confirmation.py",
+    }
+    assert not any(
+        member.startswith(("myclaw/agent/session/", "myclaw/agent/memory/", "myclaw/agent/tools/"))
+        for member in wheel_python_members
+    )
 
     install_root = tmp_path / "clean-install"
     install_result = subprocess.run(
@@ -330,7 +361,21 @@ def test_clean_distributions_build_and_import_cleanly(
         [
             sys.executable,
             "-c",
-            ("import myclaw\nimport myclaw.terminal.cli\n"),
+            (
+                "import myclaw\n"
+                "import myclaw.terminal.cli\n"
+                "import myclaw.workspace.state\n"
+                "import myclaw.session.session\n"
+                "import myclaw.memory.manager\n"
+                "import myclaw.context.builder\n"
+                "import myclaw.permission.policy\n"
+                "import myclaw.tools.gateway\n"
+                "import myclaw.tools.files.read_file\n"
+                "import myclaw.tools.exec.host\n"
+                "import myclaw.tools.web.fetch\n"
+                "import myclaw.tools.mcp.runtime\n"
+                "import myclaw.tools.discovery.search\n"
+            ),
         ],
         cwd=clean_import_dir,
         env={**os.environ, "PYTHONPATH": str(install_root)},

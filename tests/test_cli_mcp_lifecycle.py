@@ -11,13 +11,10 @@ from typing import Any, cast
 
 import pytest
 
-import myclaw.agent.tools.mcp as mcp_adapter
-import myclaw.agent.tools.mcp_runtime as mcp_runtime
 import myclaw.terminal.cli as cli
+import myclaw.tools.mcp.runtime as mcp_runtime
+import myclaw.tools.mcp.tool as mcp_adapter
 from myclaw.agent.runner import AgentRunner
-from myclaw.agent.tools.mcp import MCPServerConnection
-from myclaw.agent.tools.mcp_runtime import MCPServerFailure, MCPStartupReport
-from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolGateway
 from myclaw.config.config import ConfigLoader, MCPServerConfiguration
 from myclaw.errors import ErrorInfo
 from myclaw.management.service import ManagementError
@@ -30,6 +27,9 @@ from myclaw.provider.models import (
     ModelUsage,
 )
 from myclaw.session.session import Session
+from myclaw.tools.gateway import ModelToolCall, ToolGateway
+from myclaw.tools.mcp.runtime import MCPServerFailure, MCPStartupReport
+from myclaw.tools.mcp.tool import MCPServerConnection
 from myclaw.workspace.state import WorkspaceState
 from tests.fixtures import DetachedRequestPreparer
 from tests.fixtures.mcp_wire import ObservedLifetimes, stdio_wire_configuration, wire_tool

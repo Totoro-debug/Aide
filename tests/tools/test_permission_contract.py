@@ -7,18 +7,6 @@ from typing import Any
 
 import pytest
 
-from myclaw.agent.tools.base import BaseTool, ToolError
-from myclaw.agent.tools.core.exec_policy import (
-    ExecAssessment,
-    ExecCommandIdentity,
-    ResolvedExecShell,
-)
-from myclaw.agent.tools.tool_gateway import (
-    ConfirmationDecision,
-    ConfirmationRequest,
-    ModelToolCall,
-    ToolGateway,
-)
 from myclaw.permission.confirmation import ConfirmationAborted
 from myclaw.permission.policy import (
     NetworkAssessment,
@@ -32,6 +20,18 @@ from myclaw.permission.policy import (
     ToolPermissionPolicy,
 )
 from myclaw.permission.state import ToolPermissionLevel
+from myclaw.tools.base import BaseTool, ToolError
+from myclaw.tools.exec.policy import (
+    ExecAssessment,
+    ExecCommandIdentity,
+    ResolvedExecShell,
+)
+from myclaw.tools.gateway import (
+    ConfirmationDecision,
+    ConfirmationRequest,
+    ModelToolCall,
+    ToolGateway,
+)
 
 
 class _RecordingSession:

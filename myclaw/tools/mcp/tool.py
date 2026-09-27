@@ -28,9 +28,9 @@ from mcp.shared.jsonrpc_dispatcher import JSONRPCDispatcher
 from mcp_types.methods import validate_server_result
 from pydantic import ValidationError
 
-from myclaw.agent.tools.base import BaseTool, ToolError
 from myclaw.config.config import MCPServerConfiguration
 from myclaw.permission.policy import MCPToolIdentity, ToolInvocationFacts
+from myclaw.tools.base import BaseTool, ToolError
 from myclaw.utils.async_tasks import await_task_preserving_cancellation
 
 _MISSING = object()

@@ -14,7 +14,6 @@ import pytest
 
 import myclaw.context.builder as context
 from myclaw.agent.blackboard import Blackboard
-from myclaw.agent.tools.core.exec_host import resolve_exec_shell
 from myclaw.context.builder import ContextBuilder
 from myclaw.memory.manager import MemoryManager
 from myclaw.permission.policy import PermissionSnapshot
@@ -23,6 +22,7 @@ from myclaw.skills.catalog import (
     SkillLoader,
     SkillMetadata,
 )
+from myclaw.tools.exec.host import resolve_exec_shell
 from myclaw.workspace.state import WorkspaceState
 
 FIXED_UTC = datetime(2026, 8, 16, 4, 5, 6, 789000, tzinfo=UTC)

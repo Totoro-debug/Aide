@@ -8,8 +8,8 @@ from uuid import UUID
 
 import pytest
 
-from myclaw.agent.tools.base import BaseTool, ToolError, ToolParam
 from myclaw.permission.policy import ToolInvocationFacts
+from myclaw.tools.base import BaseTool, ToolError, ToolParam
 
 
 class _RepresentativeTool(BaseTool):

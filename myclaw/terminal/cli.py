@@ -13,20 +13,6 @@ from tzlocal import get_localzone_name
 
 from myclaw.agent.loop import AgentLoop, ModelContextOverflowError
 from myclaw.agent.message_bus import MessageBus
-from myclaw.agent.tools.core.exec_host import (
-    EXEC_CAPABILITY_ERROR,
-    create_exec_host,
-    resolve_exec_shell,
-)
-from myclaw.agent.tools.mcp_keywords import MCPKeywordPreparer
-from myclaw.agent.tools.mcp_runtime import (
-    MCPRuntimeManager,
-    MCPServerFailure,
-    MCPSnapshotReport,
-    MCPStartupReport,
-    MCPToolSnapshot,
-)
-from myclaw.agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigError, ConfigLoader, UserConfiguration
 from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
@@ -57,6 +43,20 @@ from myclaw.session.restore import (
 from myclaw.terminal.conversation import (
     TerminalConversationApp,
     is_interactive_terminal,
+)
+from myclaw.tools.exec.host import (
+    EXEC_CAPABILITY_ERROR,
+    create_exec_host,
+    resolve_exec_shell,
+)
+from myclaw.tools.gateway import BUILT_IN_TOOL_NAMES
+from myclaw.tools.mcp.keywords import MCPKeywordPreparer
+from myclaw.tools.mcp.runtime import (
+    MCPRuntimeManager,
+    MCPServerFailure,
+    MCPSnapshotReport,
+    MCPStartupReport,
+    MCPToolSnapshot,
 )
 from myclaw.utils.async_tasks import await_task_preserving_cancellation
 from myclaw.utils.scheduler import AsyncioSchedulerClock

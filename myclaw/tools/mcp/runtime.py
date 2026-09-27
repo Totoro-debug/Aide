@@ -12,8 +12,8 @@ from typing import Protocol
 
 from loguru import logger
 
-from myclaw.agent.tools.mcp import MCPServerConnection, MCPTool
 from myclaw.config.config import MCPServerConfiguration
+from myclaw.tools.mcp.tool import MCPServerConnection, MCPTool
 from myclaw.utils.async_tasks import await_task_preserving_cancellation
 
 _MAX_MODEL_TOOL_NAME_LENGTH = 64

@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolGateway
 from myclaw.errors import ErrorInfo
 from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.schedule.service import (
@@ -17,6 +16,7 @@ from myclaw.schedule.service import (
     ScheduleService,
 )
 from myclaw.schedule.store import WorkspaceScheduleStore
+from myclaw.tools.gateway import ModelToolCall, ToolGateway
 from myclaw.workspace.state import WorkspaceState
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)

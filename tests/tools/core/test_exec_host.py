@@ -9,8 +9,7 @@ from typing import Any
 
 import pytest
 
-from myclaw.agent.tools.core.exec import ExecTool
-from myclaw.agent.tools.core.exec_host import (
+from myclaw.tools.exec.host import (
     EXEC_CAPABILITY_ERROR,
     BashExecHost,
     ExecProcessSpec,
@@ -18,14 +17,15 @@ from myclaw.agent.tools.core.exec_host import (
     create_exec_host,
     resolve_exec_shell,
 )
-from myclaw.agent.tools.core.exec_policy import (
+from myclaw.tools.exec.policy import (
     ExecAssessment,
     ExecCommandIdentity,
     ExecOutcome,
     ExecShellSelector,
     catastrophic_matches,
 )
-from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolResult
+from myclaw.tools.exec.tool import ExecTool
+from myclaw.tools.gateway import ModelToolCall, ToolResult
 from tests.fixtures import SingleToolGateway
 
 

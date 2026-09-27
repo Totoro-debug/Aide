@@ -21,7 +21,6 @@ from anthropic import (
 )
 from httpx import Request, Response
 
-from myclaw.agent.tools.tool_gateway import ModelToolCall
 from myclaw.config.config import ProviderConfiguration
 from myclaw.provider.anthropic import AnthropicProvider
 from myclaw.provider.errors import EmptyModelResponseError, ModelCallError
@@ -31,6 +30,7 @@ from myclaw.provider.models import (
     ReasoningDelta,
     TextDelta,
 )
+from myclaw.tools.gateway import ModelToolCall
 from tests.fixtures.provider import error_info_fields, model_response_fields
 
 READ_FILE_SCHEMA: dict[str, Any] = {

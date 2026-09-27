@@ -11,14 +11,14 @@ from typing import Literal
 
 import pytest
 
-from myclaw.agent.tools.core.exec import ExecTool
-from myclaw.agent.tools.core.exec_host import (
+from myclaw.permission.policy import PermissionContext, PermissionSnapshot
+from myclaw.tools.exec.host import (
     ExecProcessSpec,
     PowerShellExecHost,
     create_exec_host,
     resolve_exec_shell,
 )
-from myclaw.agent.tools.core.exec_policy import (
+from myclaw.tools.exec.policy import (
     POWERSHELL_READ_CANDIDATES,
     POWERSHELL_WRITE_CANDIDATES,
     ExecAssessment,
@@ -26,12 +26,12 @@ from myclaw.agent.tools.core.exec_policy import (
     ExecOutcome,
     catastrophic_matches,
 )
-from myclaw.agent.tools.tool_gateway import (
+from myclaw.tools.exec.tool import ExecTool
+from myclaw.tools.gateway import (
     ConfirmationRequest,
     ModelToolCall,
     ToolGateway,
 )
-from myclaw.permission.policy import PermissionContext, PermissionSnapshot
 
 _POWERSHELL_CANDIDATE_FIXTURES = (
     ("Get-ChildItem -LiteralPath .", "read-only"),

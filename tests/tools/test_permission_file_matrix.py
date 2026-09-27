@@ -10,20 +10,6 @@ from typing import Any
 
 import pytest
 
-from myclaw.agent.tools.base import BaseTool, ToolError
-from myclaw.agent.tools.core.edit_file import EditFileTool
-from myclaw.agent.tools.core.exec_host import resolve_exec_shell
-from myclaw.agent.tools.core.glob import GlobTool
-from myclaw.agent.tools.core.grep import GrepTool
-from myclaw.agent.tools.core.list_dir import ListDirTool
-from myclaw.agent.tools.core.read_file import ReadFileTool
-from myclaw.agent.tools.core.write_file import WriteFileTool
-from myclaw.agent.tools.tool_gateway import (
-    ConfirmationDecision,
-    ConfirmationRequest,
-    ModelToolCall,
-    ToolGateway,
-)
 from myclaw.permission.policy import (
     PermissionContext,
     PermissionSnapshot,
@@ -32,6 +18,20 @@ from myclaw.permission.policy import (
     ToolInvocationFacts,
     ToolPermissionLevel,
     ToolPermissionPolicy,
+)
+from myclaw.tools.base import BaseTool, ToolError
+from myclaw.tools.exec.host import resolve_exec_shell
+from myclaw.tools.files.edit_file import EditFileTool
+from myclaw.tools.files.glob import GlobTool
+from myclaw.tools.files.grep import GrepTool
+from myclaw.tools.files.list_dir import ListDirTool
+from myclaw.tools.files.read_file import ReadFileTool
+from myclaw.tools.files.write_file import WriteFileTool
+from myclaw.tools.gateway import (
+    ConfirmationDecision,
+    ConfirmationRequest,
+    ModelToolCall,
+    ToolGateway,
 )
 
 

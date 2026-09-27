@@ -8,15 +8,15 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Final
 
-from myclaw.agent.tools.base import BaseTool, ToolError, ToolParam
-from myclaw.agent.tools.core._directory import (
+from myclaw.permission.policy import FileAccess
+from myclaw.tools.base import BaseTool, ToolError, ToolParam
+from myclaw.tools.files._directory import (
     is_ignored_directory_name,
     iter_directory_entries,
     matches_glob_pattern,
     normalize_glob_pattern,
     report_path,
 )
-from myclaw.permission.policy import FileAccess
 
 _OUTPUT_MODES: Final = frozenset({"content", "files_with_matches", "count"})
 _TYPE_PATTERNS: Final = {

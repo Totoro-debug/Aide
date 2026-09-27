@@ -1,6 +1,5 @@
 import pytest
 
-from myclaw.agent.tools.tool_gateway import ModelToolCall
 from myclaw.provider.errors import EmptyModelResponseError
 from myclaw.provider.models import (
     AssistantModelMessage,
@@ -12,6 +11,7 @@ from myclaw.provider.models import (
     TextDelta,
     last_assistant_message_index,
 )
+from myclaw.tools.gateway import ModelToolCall
 
 
 def test_last_assistant_message_index_returns_the_last_assistant() -> None:

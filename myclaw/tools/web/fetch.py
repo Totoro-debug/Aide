@@ -17,26 +17,26 @@ from urllib.parse import SplitResult, urljoin, urlsplit, urlunsplit
 from aiohttp import ClientResponse, ClientSession, ClientTimeout, TCPConnector
 from aiohttp.abc import AbstractResolver, ResolveResult
 
-from myclaw.agent.tools.base import (
-    BaseTool,
-    ToolError,
-    ToolParam,
-    is_public_ip,
-    truncate_text,
-)
-from myclaw.agent.tools.core.exec_policy import ExecAssessment
-from myclaw.agent.tools.network_safety import (
-    DNSResolver,
-    SocketDNSResolver,
-    TargetResolution,
-    resolve_target,
-)
 from myclaw.permission.policy import (
     NetworkAssessment,
     NetworkTargetRisk,
     NormalizedNetworkTarget,
     ToolAuthorizationSession,
     ToolInvocationFacts,
+)
+from myclaw.tools.base import (
+    BaseTool,
+    ToolError,
+    ToolParam,
+    is_public_ip,
+    truncate_text,
+)
+from myclaw.tools.exec.policy import ExecAssessment
+from myclaw.tools.web.network_safety import (
+    DNSResolver,
+    SocketDNSResolver,
+    TargetResolution,
+    resolve_target,
 )
 
 CONNECT_TIMEOUT_SECONDS = 10.0

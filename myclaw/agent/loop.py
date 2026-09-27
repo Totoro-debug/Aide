@@ -30,15 +30,6 @@ from myclaw.agent.runner import (
     AgentRunnerToolCallStarted,
     _build_assistant_repair_message,
 )
-from myclaw.agent.tools.base import BaseTool
-from myclaw.agent.tools.core.exec_host import ExecHost
-from myclaw.agent.tools.deferred import build_agent_run_gateway
-from myclaw.agent.tools.tool_gateway import (
-    ConfirmationDecision,
-    ConfirmationRequest,
-    ToolGateway,
-    ToolResult,
-)
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import UserConfiguration
 from myclaw.context.budget import ContextBudget, ContextUsageSnapshot, estimate_request_tokens
@@ -85,6 +76,15 @@ from myclaw.session.session import (
     SessionStoragePartition,
 )
 from myclaw.skills.catalog import LoadedSkill, ManualSkillInvocation, SkillLoader, SkillMetadata
+from myclaw.tools.base import BaseTool
+from myclaw.tools.discovery.deferred import build_agent_run_gateway
+from myclaw.tools.exec.host import ExecHost
+from myclaw.tools.gateway import (
+    ConfirmationDecision,
+    ConfirmationRequest,
+    ToolGateway,
+    ToolResult,
+)
 from myclaw.utils.async_tasks import await_task_preserving_cancellation
 from myclaw.workspace.state import WorkspaceState
 

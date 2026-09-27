@@ -9,7 +9,7 @@ from typing import Annotated, Final, cast
 from ddgs import DDGS
 from ddgs.exceptions import DDGSException
 
-from myclaw.agent.tools.base import BaseTool, ToolError, ToolParam
+from myclaw.tools.base import BaseTool, ToolError, ToolParam
 
 _SEARCH_TIMEOUT_SECONDS: Final[float] = 30.0
 

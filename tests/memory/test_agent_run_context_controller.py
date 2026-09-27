@@ -11,7 +11,6 @@ import pytest
 
 from myclaw.agent.run_errors import CommittableAgentRunError
 from myclaw.agent.runner import AgentRunner
-from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolResult
 from myclaw.config.config import (
     MemoryConfiguration,
     ModelsConfiguration,
@@ -46,6 +45,7 @@ from myclaw.provider.models import (
     ModelUsage,
 )
 from myclaw.session.session import Session
+from myclaw.tools.gateway import ModelToolCall, ToolResult
 from myclaw.workspace.state import WorkspaceState
 from tests.fixtures import FakeClock, ScriptedFakeProvider, ScriptedFakeRouter, StreamScript
 from tests.fixtures.session import seed_session_state

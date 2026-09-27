@@ -8,9 +8,9 @@ from typing import ClassVar
 import pytest
 from ddgs.exceptions import DDGSException
 
-from myclaw.agent.tools.base import BaseTool
-from myclaw.agent.tools.core.web_search import WebSearchTool
-from myclaw.agent.tools.tool_gateway import ModelToolCall
+from myclaw.tools.base import BaseTool
+from myclaw.tools.gateway import ModelToolCall
+from myclaw.tools.web.search import WebSearchTool
 from tests.fixtures import SingleToolGateway
 
 
@@ -49,7 +49,7 @@ def fake_ddgs(monkeypatch: pytest.MonkeyPatch) -> type[FakeDDGS]:
     FakeDDGS.records = []
     FakeDDGS.calls = []
     FakeDDGS.failure = None
-    monkeypatch.setattr("myclaw.agent.tools.core.web_search.DDGS", FakeDDGS)
+    monkeypatch.setattr("myclaw.tools.web.search.DDGS", FakeDDGS)
     return FakeDDGS
 
 

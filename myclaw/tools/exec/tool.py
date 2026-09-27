@@ -8,22 +8,6 @@ from pathlib import Path
 from typing import Annotated, Any, Final, Literal
 from urllib.parse import urlsplit
 
-from myclaw.agent.tools.base import BaseTool, ToolError, ToolParam, truncate_text
-from myclaw.agent.tools.core.exec_host import (
-    ExecCapabilityUnavailable,
-    ExecHost,
-    ExecHostError,
-    ExecProcess,
-    create_exec_host,
-    resolve_exec_shell,
-)
-from myclaw.agent.tools.core.exec_policy import (
-    CatastrophicMatch,
-    ExecAssessment,
-    catastrophic_matches,
-    destructive_matches,
-)
-from myclaw.agent.tools.network_safety import DNSResolver, SocketDNSResolver, assess_target
 from myclaw.permission.policy import (
     NetworkAssessment,
     NetworkTargetRisk,
@@ -31,6 +15,22 @@ from myclaw.permission.policy import (
     ToolAuthorizationSession,
     ToolInvocationFacts,
 )
+from myclaw.tools.base import BaseTool, ToolError, ToolParam, truncate_text
+from myclaw.tools.exec.host import (
+    ExecCapabilityUnavailable,
+    ExecHost,
+    ExecHostError,
+    ExecProcess,
+    create_exec_host,
+    resolve_exec_shell,
+)
+from myclaw.tools.exec.policy import (
+    CatastrophicMatch,
+    ExecAssessment,
+    catastrophic_matches,
+    destructive_matches,
+)
+from myclaw.tools.web.network_safety import DNSResolver, SocketDNSResolver, assess_target
 
 _OUTPUT_LIMIT: Final[int] = 4000
 class ExecTool(BaseTool):

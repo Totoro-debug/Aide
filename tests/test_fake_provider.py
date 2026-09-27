@@ -4,7 +4,6 @@ from typing import Any
 
 import pytest
 
-from myclaw.agent.tools.tool_gateway import ModelToolCall
 from myclaw.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
@@ -12,6 +11,7 @@ from myclaw.provider.models import (
     ModelUsage,
     TextDelta,
 )
+from myclaw.tools.gateway import ModelToolCall
 from tests.fixtures.provider import ProviderCall, ScriptedFakeProvider, StreamScript
 
 

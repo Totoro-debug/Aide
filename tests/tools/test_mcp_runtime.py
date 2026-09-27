@@ -13,15 +13,15 @@ import pytest
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, TextContent
 
-import myclaw.agent.tools.mcp as mcp_adapter
-from myclaw.agent.tools.mcp import MCPServerConnection, MCPTool, MCPToolSpec
-from myclaw.agent.tools.mcp_runtime import (
+import myclaw.tools.mcp.tool as mcp_adapter
+from myclaw.config.config import MCPServerConfiguration
+from myclaw.tools.gateway import ModelToolCall, ToolGateway
+from myclaw.tools.mcp.runtime import (
     MCPRuntimeManager,
     MCPToolSnapshot,
     allocate_mcp_tool_name,
 )
-from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolGateway
-from myclaw.config.config import MCPServerConfiguration
+from myclaw.tools.mcp.tool import MCPServerConnection, MCPTool, MCPToolSpec
 from tests.fixtures.mcp_wire import (
     ObservedLifetimes,
     http_wire_server,

@@ -8,8 +8,6 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
-from myclaw.agent.tools.base import BaseTool, ToolError
-from myclaw.agent.tools.schema import Schema
 from myclaw.permission.policy import (
     ScheduleAction,
     ScheduleActionName,
@@ -17,6 +15,8 @@ from myclaw.permission.policy import (
 )
 from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.schedule.service import ScheduleService, ScheduleStaleRemovalError
+from myclaw.tools.base import BaseTool, ToolError
+from myclaw.tools.schema import Schema
 from myclaw.utils.text import normalize_title_candidate
 from myclaw.utils.validation import require_uuid4_string
 

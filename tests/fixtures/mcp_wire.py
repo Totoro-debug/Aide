@@ -156,7 +156,7 @@ class ObservedLifetimes:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import mcp.client.stdio as stdio
 
-        import myclaw.agent.tools.mcp as adapter
+        import myclaw.tools.mcp.tool as adapter
 
         self.processes: list[Any] = []
         self.closed: list[asyncio.Event] = []

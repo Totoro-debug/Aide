@@ -35,11 +35,6 @@ from textual.widgets import Button, Input, Markdown, OptionList, Static, TextAre
 import myclaw.terminal.cli as cli
 from myclaw.agent.loop import AgentLoop, ConfirmationRequestView, ForegroundConversationProjection
 from myclaw.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
-from myclaw.agent.tools.tool_gateway import (
-    ConfirmationDecision,
-    ConfirmationRequest,
-    ModelToolCall,
-)
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
 from myclaw.errors import ErrorInfo
@@ -92,6 +87,11 @@ from myclaw.terminal.conversation import (
 )
 from myclaw.terminal.conversation import (
     _MessageBusRunProjection as _AgentRunProjection,
+)
+from myclaw.tools.gateway import (
+    ConfirmationDecision,
+    ConfirmationRequest,
+    ModelToolCall,
 )
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 from myclaw.utils.json_types import JsonObject

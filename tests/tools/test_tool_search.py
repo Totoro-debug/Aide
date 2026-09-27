@@ -10,9 +10,8 @@ from typing import cast
 
 import pytest
 
-from myclaw.agent.tools.base import ToolError
-from myclaw.agent.tools.core.tool_search import ToolSearchTool
-from myclaw.agent.tools.search import (
+from myclaw.tools.base import ToolError
+from myclaw.tools.discovery.search import (
     BM25_B,
     BM25_K1,
     BUILTIN_TOOL_SEARCH_KEYWORDS,
@@ -21,6 +20,7 @@ from myclaw.agent.tools.search import (
     ToolSearchIndex,
     tokenize_tool_search_text,
 )
+from myclaw.tools.discovery.tool_search import ToolSearchTool
 
 
 def _document(name: str, text: str, catalog_order: int) -> ToolSearchDocument:

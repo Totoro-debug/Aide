@@ -7,8 +7,8 @@ import json
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Annotated, cast
 
-from myclaw.agent.tools.base import BaseTool, ToolParam
-from myclaw.agent.tools.search import MAX_TOOL_SEARCH_RESULTS
+from myclaw.tools.base import BaseTool, ToolParam
+from myclaw.tools.discovery.search import MAX_TOOL_SEARCH_RESULTS
 
 type SearchAndActivate = Callable[
     [str],

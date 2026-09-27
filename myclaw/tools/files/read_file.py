@@ -6,8 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
 
-from myclaw.agent.tools.base import BaseTool, ToolError, ToolParam
 from myclaw.permission.policy import FileAccess
+from myclaw.tools.base import BaseTool, ToolError, ToolParam
 
 
 class ReadFileTool(BaseTool):

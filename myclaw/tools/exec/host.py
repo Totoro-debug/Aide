@@ -17,7 +17,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final, Protocol, cast
 
-from myclaw.agent.tools.core.exec_policy import (
+from myclaw.tools.exec.policy import (
     BASH_APPROVED_BUILTINS,
     ExecAssessment,
     ExecCommandIdentity,

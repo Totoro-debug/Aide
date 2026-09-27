@@ -17,11 +17,6 @@ from myclaw.agent.loop import AgentLoop
 from myclaw.agent.message_bus import InboundMessage, MessageBus
 from myclaw.agent.run_errors import CommittableAgentRunError
 from myclaw.agent.runner import AgentRunner, AgentRunnerResult
-from myclaw.agent.tools.base import BaseTool
-from myclaw.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
-from myclaw.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
-from myclaw.agent.tools.mcp import MCPTool, MCPToolSpec
-from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolGateway, ToolResult
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
 from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
@@ -41,6 +36,11 @@ from myclaw.schedule.model import DREAM_JOB_ID, JobSchedule, ScheduleJob
 from myclaw.schedule.service import ScheduleJobExecutionError, ScheduleService
 from myclaw.session.session import Session, SessionStoragePartition
 from myclaw.skills.catalog import SkillLoader
+from myclaw.tools.base import BaseTool
+from myclaw.tools.discovery.deferred import RUN_BASELINE_TOOL_NAMES
+from myclaw.tools.exec.host import create_exec_host, resolve_exec_shell
+from myclaw.tools.gateway import ModelToolCall, ToolGateway, ToolResult
+from myclaw.tools.mcp.tool import MCPTool, MCPToolSpec
 from myclaw.workspace.state import WorkspaceState
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import TaskFramingRouterAdapter, collect_foreground_outbound

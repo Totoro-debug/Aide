@@ -8,14 +8,14 @@ from typing import Literal
 
 import pytest
 
-from myclaw.agent.tools.core.exec import ExecTool
-from myclaw.agent.tools.core.exec_host import (
+from myclaw.permission.policy import PermissionContext, PermissionSnapshot
+from myclaw.tools.exec.host import (
     BashExecHost,
     ExecProcessSpec,
     ResolvedExecShell,
     resolve_exec_shell,
 )
-from myclaw.agent.tools.core.exec_policy import (
+from myclaw.tools.exec.policy import (
     CatastrophicMatch,
     ExecAssessment,
     ExecCommandIdentity,
@@ -23,8 +23,8 @@ from myclaw.agent.tools.core.exec_policy import (
     ExecOutcome,
     ExecPathAccess,
 )
-from myclaw.agent.tools.tool_gateway import ConfirmationRequest, ModelToolCall, ToolGateway
-from myclaw.permission.policy import PermissionContext, PermissionSnapshot
+from myclaw.tools.exec.tool import ExecTool
+from myclaw.tools.gateway import ConfirmationRequest, ModelToolCall, ToolGateway
 
 
 def _shell() -> ResolvedExecShell:

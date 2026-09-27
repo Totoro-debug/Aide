@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.agent.tools.base import BaseTool
-from myclaw.agent.tools.core.edit_file import EditFileTool
-from myclaw.agent.tools.core.read_file import ReadFileTool
-from myclaw.agent.tools.core.write_file import WriteFileTool
-from myclaw.agent.tools.tool_gateway import (
+from myclaw.tools.base import BaseTool
+from myclaw.tools.files.edit_file import EditFileTool
+from myclaw.tools.files.read_file import ReadFileTool
+from myclaw.tools.files.write_file import WriteFileTool
+from myclaw.tools.gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ConfirmationRequester,

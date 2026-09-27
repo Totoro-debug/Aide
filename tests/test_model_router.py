@@ -8,7 +8,6 @@ from typing import Any, cast
 import pytest
 
 from myclaw.agent.runner import AgentRunner
-from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolResult
 from myclaw.config.config import (
     MemoryConfiguration,
     ModelsConfiguration,
@@ -31,6 +30,7 @@ from myclaw.provider.models import (
     ModelUsage,
     TextDelta,
 )
+from myclaw.tools.gateway import ModelToolCall, ToolResult
 from tests.fixtures import DetachedRequestPreparer, FakeClock, ScriptedFakeProvider, StreamScript
 from tests.fixtures.diagnostic_capture import capture_diagnostics
 

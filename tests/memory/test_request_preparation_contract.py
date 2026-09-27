@@ -9,8 +9,6 @@ import pytest
 from mcp.types import CallToolResult
 
 from myclaw.agent.runner import AgentRunner, AgentRunnerResult
-from myclaw.agent.tools.mcp import MCPTool, MCPToolSpec
-from myclaw.agent.tools.tool_gateway import ToolGateway
 from myclaw.context.controller import (
     AgentRunContextController,
     AgentRunContextRequestPreparer,
@@ -28,6 +26,8 @@ from myclaw.provider.models import (
 )
 from myclaw.schedule.service import ScheduleService
 from myclaw.session.session import Session
+from myclaw.tools.gateway import ToolGateway
+from myclaw.tools.mcp.tool import MCPTool, MCPToolSpec
 from myclaw.workspace.state import WorkspaceState
 from tests.fixtures import FakeClock, ScriptedFakeProvider, ScriptedFakeRouter, StreamScript
 from tests.fixtures.session import seed_session_state

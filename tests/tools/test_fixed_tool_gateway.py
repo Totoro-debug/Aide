@@ -10,19 +10,19 @@ from unittest.mock import patch
 import pytest
 from mcp.types import CallToolResult
 
-from myclaw.agent.tools.base import BaseTool
-from myclaw.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES, build_agent_run_gateway
-from myclaw.agent.tools.mcp import MCPTool, MCPToolSpec
-from myclaw.agent.tools.mcp_runtime import MCPRuntimeManager, allocate_mcp_tool_name
-from myclaw.agent.tools.tool_gateway import (
+from myclaw.config.config import MCPServerConfiguration
+from myclaw.permission.policy import PermissionContext
+from myclaw.schedule.service import ScheduleService
+from myclaw.tools.base import BaseTool
+from myclaw.tools.discovery.deferred import RUN_BASELINE_TOOL_NAMES, build_agent_run_gateway
+from myclaw.tools.gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ModelToolCall,
     ToolGateway,
 )
-from myclaw.config.config import MCPServerConfiguration
-from myclaw.permission.policy import PermissionContext
-from myclaw.schedule.service import ScheduleService
+from myclaw.tools.mcp.runtime import MCPRuntimeManager, allocate_mcp_tool_name
+from myclaw.tools.mcp.tool import MCPTool, MCPToolSpec
 from myclaw.workspace.state import WorkspaceState
 
 

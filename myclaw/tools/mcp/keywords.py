@@ -11,13 +11,13 @@ from hashlib import sha256
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
-from myclaw.agent.tools.mcp import MCPTool
 from myclaw.config.config import (
     ConfigLoader,
     MCPServerConfiguration,
     normalize_mcp_tool_keywords,
 )
 from myclaw.templates import render_template
+from myclaw.tools.mcp.tool import MCPTool
 
 _MAX_KEYWORD_PREPARATION_CONCURRENCY = 4
 

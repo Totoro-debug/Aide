@@ -9,7 +9,6 @@ from typing import Any, Literal
 import pytest
 from markdown_it import MarkdownIt
 
-from myclaw.agent.tools.tool_gateway import ModelToolCall
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import (
     ConfigLoader,
@@ -32,6 +31,7 @@ from myclaw.provider.models import (
     ModelUsage,
 )
 from myclaw.templates import render_template
+from myclaw.tools.gateway import ModelToolCall
 from myclaw.workspace.state import WorkspaceState
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import FakeClock, ScriptedFakeProvider, ScriptedFakeRouter

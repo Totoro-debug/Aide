@@ -8,8 +8,6 @@ from typing import Any, cast
 import pytest
 
 import myclaw.config.config as config_module
-from myclaw.agent.tools.mcp import MCPTool, MCPToolSpec
-from myclaw.agent.tools.mcp_keywords import MCPKeywordPreparer
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader, MCPServerConfiguration
 from myclaw.provider.models import (
@@ -17,6 +15,8 @@ from myclaw.provider.models import (
     ModelResponse,
     ModelUsage,
 )
+from myclaw.tools.mcp.keywords import MCPKeywordPreparer
+from myclaw.tools.mcp.tool import MCPTool, MCPToolSpec
 
 
 class _UnusedMCPSession:

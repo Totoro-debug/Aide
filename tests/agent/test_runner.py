@@ -19,13 +19,6 @@ from myclaw.agent.runner import (
     AgentRunnerToolCallFinished,
     AgentRunnerToolCallStarted,
 )
-from myclaw.agent.tools.base import ArtifactReference
-from myclaw.agent.tools.tool_gateway import (
-    ConfirmationDecision,
-    ConfirmationRequest,
-    ModelToolCall,
-    ToolResult,
-)
 from myclaw.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from myclaw.permission.confirmation import ConfirmationAborted
 from myclaw.provider.errors import ModelCallError
@@ -38,6 +31,13 @@ from myclaw.provider.models import (
     ModelUsage,
     ReasoningDelta,
     TextDelta,
+)
+from myclaw.tools.base import ArtifactReference
+from myclaw.tools.gateway import (
+    ConfirmationDecision,
+    ConfirmationRequest,
+    ModelToolCall,
+    ToolResult,
 )
 from tests.fixtures import (
     DetachedRequestPreparer,

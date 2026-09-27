@@ -8,8 +8,6 @@ from uuid import UUID
 
 import pytest
 
-from myclaw.agent.tools.core.exec_policy import ExecAssessment, ResolvedExecShell
-from myclaw.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRequest
 from myclaw.permission.confirmation import (
     BackgroundConfirmationOwner,
     ConfirmationAborted,
@@ -29,6 +27,8 @@ from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.schedule.service import ScheduleOccurrence, ScheduleService
 from myclaw.schedule.store import ScheduleStoreFaultedError
 from myclaw.session.session import Session
+from myclaw.tools.exec.policy import ExecAssessment, ResolvedExecShell
+from myclaw.tools.gateway import ConfirmationDecision, ConfirmationRequest
 from myclaw.workspace.state import WorkspaceState
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)

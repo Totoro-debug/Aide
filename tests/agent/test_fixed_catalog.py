@@ -15,12 +15,6 @@ from mcp.types import CallToolResult
 
 from myclaw.agent.loop import AgentLoop, ConfirmationRequestView
 from myclaw.agent.message_bus import MessageBus
-from myclaw.agent.tools.base import BaseTool
-from myclaw.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
-from myclaw.agent.tools.core.web_fetch import AioHttpWebFetchClient, HTTPResponseBoundary
-from myclaw.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
-from myclaw.agent.tools.mcp import MCPTool, MCPToolSpec
-from myclaw.agent.tools.tool_gateway import ModelToolCall
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
 from myclaw.errors import ErrorInfo
@@ -40,6 +34,12 @@ from myclaw.provider.models import (
 from myclaw.schedule.service import ScheduleService
 from myclaw.session.session import Session
 from myclaw.templates import render_template
+from myclaw.tools.base import BaseTool
+from myclaw.tools.discovery.deferred import RUN_BASELINE_TOOL_NAMES
+from myclaw.tools.exec.host import create_exec_host, resolve_exec_shell
+from myclaw.tools.gateway import ModelToolCall
+from myclaw.tools.mcp.tool import MCPTool, MCPToolSpec
+from myclaw.tools.web.fetch import AioHttpWebFetchClient, HTTPResponseBoundary
 from myclaw.workspace.state import WorkspaceState
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import TaskFramingRouterAdapter, collect_foreground_outbound
@@ -672,7 +672,7 @@ async def test_agent_loop_tool_failure_keeps_private_diagnostics_out_of_public_o
                 [OSError(f"query={query}"), ValueError("auth=PRIVATE_WEB_CREDENTIAL")],
             )
 
-    monkeypatch.setattr("myclaw.agent.tools.core.web_search.DDGS", FailingDDGS)
+    monkeypatch.setattr("myclaw.tools.web.search.DDGS", FailingDDGS)
     provider = _FixedCatalogProvider(
         (
             _response(

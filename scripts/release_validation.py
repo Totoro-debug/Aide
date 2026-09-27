@@ -19,17 +19,17 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final, Literal, cast
 
-from myclaw.agent.tools.core.exec import ExecTool
-from myclaw.agent.tools.core.exec_host import (
+from myclaw.permission.policy import PermissionContext
+from myclaw.permission.state import PermissionSnapshot
+from myclaw.tools.exec.host import (
     BashExecHost,
     PowerShellExecHost,
     ResolvedExecShell,
     resolve_exec_shell,
 )
-from myclaw.agent.tools.core.exec_policy import ExecAssessment
-from myclaw.agent.tools.tool_gateway import ConfirmationRequest, ModelToolCall, ToolGateway
-from myclaw.permission.policy import PermissionContext
-from myclaw.permission.state import PermissionSnapshot
+from myclaw.tools.exec.policy import ExecAssessment
+from myclaw.tools.exec.tool import ExecTool
+from myclaw.tools.gateway import ConfirmationRequest, ModelToolCall, ToolGateway
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 COMMAND_TIMEOUT_SECONDS: Final[int] = 1_800

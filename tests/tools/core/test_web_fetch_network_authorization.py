@@ -11,16 +11,10 @@ from typing import cast
 import pytest
 from aiohttp import ClientConnectorCertificateError
 
-from myclaw.agent.tools.base import ToolError
-from myclaw.agent.tools.core.web_fetch import (
-    AioHttpWebFetchClient,
-    HTTPClientBoundary,
-    HTTPResponseBoundary,
-    WebFetchTool,
-)
-from myclaw.agent.tools.core.web_search import WebSearchTool
-from myclaw.agent.tools.network_safety import DNSResolver
-from myclaw.agent.tools.tool_gateway import (
+from myclaw.permission.policy import PermissionContext
+from myclaw.permission.state import ToolPermissionLevel
+from myclaw.tools.base import ToolError
+from myclaw.tools.gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ConfirmationRequester,
@@ -28,8 +22,14 @@ from myclaw.agent.tools.tool_gateway import (
     ToolGateway,
     ToolResult,
 )
-from myclaw.permission.policy import PermissionContext
-from myclaw.permission.state import ToolPermissionLevel
+from myclaw.tools.web.fetch import (
+    AioHttpWebFetchClient,
+    HTTPClientBoundary,
+    HTTPResponseBoundary,
+    WebFetchTool,
+)
+from myclaw.tools.web.network_safety import DNSResolver
+from myclaw.tools.web.search import WebSearchTool
 
 _TLS_CERTIFICATE = """-----BEGIN CERTIFICATE-----
 MIIC/zCCAeegAwIBAgIUZ+U95pMk7qZehIoDeGwFbm0fc0kwDQYJKoZIhvcNAQEL
@@ -824,7 +824,7 @@ async def test_web_search_is_direct_with_unchanged_schema_and_result(
         calls.append((query, count))
         return [{"title": "Result", "href": "https://example.test/", "body": "Body"}]
 
-    monkeypatch.setattr("myclaw.agent.tools.core.web_search._search_sync", search)
+    monkeypatch.setattr("myclaw.tools.web.search._search_sync", search)
     tool = WebSearchTool()
     gateway = ToolGateway._for_memory(
         (tool,),

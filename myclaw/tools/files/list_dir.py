@@ -5,13 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated
 
-from myclaw.agent.tools.base import BaseTool, ToolError, ToolParam
-from myclaw.agent.tools.core._directory import (
+from myclaw.permission.policy import FileAccess
+from myclaw.tools.base import BaseTool, ToolError, ToolParam
+from myclaw.tools.files._directory import (
     iter_directory_entries,
     report_path,
     requested_path_has_directory_link,
 )
-from myclaw.permission.policy import FileAccess
 
 
 class ListDirTool(BaseTool):

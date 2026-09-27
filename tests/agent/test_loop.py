@@ -26,10 +26,6 @@ from myclaw.agent.loop import AgentLoop, ConfirmationRequestView, ModelContextOv
 from myclaw.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
 from myclaw.agent.run_errors import CommittableAgentRunError
 from myclaw.agent.runner import AgentRunner, AgentRunnerResult, AgentRunnerRouter
-from myclaw.agent.tools.base import BaseTool
-from myclaw.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
-from myclaw.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
-from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolGateway
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
 from myclaw.context.budget import estimate_request_tokens
@@ -58,6 +54,10 @@ from myclaw.skills.catalog import (
     SkillLoader,
     SkillMetadata,
 )
+from myclaw.tools.base import BaseTool
+from myclaw.tools.discovery.deferred import RUN_BASELINE_TOOL_NAMES
+from myclaw.tools.exec.host import create_exec_host, resolve_exec_shell
+from myclaw.tools.gateway import ModelToolCall, ToolGateway
 from myclaw.workspace.state import WorkspaceState
 from tests.agent.test_context import _FrozenDateTime
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG

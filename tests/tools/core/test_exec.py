@@ -8,17 +8,17 @@ from typing import cast
 
 import pytest
 
-from myclaw.agent.tools import base as tool_base_module
-from myclaw.agent.tools.core.exec import ExecTool
-from myclaw.agent.tools.core.exec_host import BashExecHost, ExecProcessSpec, resolve_exec_shell
-from myclaw.agent.tools.core.exec_policy import ExecAssessment, ExecOutcome
-from myclaw.agent.tools.network_safety import DNSResolver
-from myclaw.agent.tools.tool_gateway import (
+from myclaw.tools import base as tool_base_module
+from myclaw.tools.exec.host import BashExecHost, ExecProcessSpec, resolve_exec_shell
+from myclaw.tools.exec.policy import ExecAssessment, ExecOutcome
+from myclaw.tools.exec.tool import ExecTool
+from myclaw.tools.gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ConfirmationRequester,
     ModelToolCall,
 )
+from myclaw.tools.web.network_safety import DNSResolver
 from tests.fixtures import SingleToolGateway
 
 

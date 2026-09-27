@@ -4,8 +4,8 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Final, Literal, Protocol
 
-from myclaw.agent.tools.tool_gateway import ModelToolCall
 from myclaw.provider.errors import EmptyModelResponseError
+from myclaw.tools.gateway import ModelToolCall
 from myclaw.utils.validation import require_nonnegative_int
 
 type ModelRoute = Literal["default", "chat", "memory", "schedule"]

@@ -6,7 +6,7 @@ from pathlib import Path, PurePath, PureWindowsPath
 
 import pytest
 
-from myclaw.agent.workspace_state import (
+from myclaw.workspace.state import (
     WorkspaceState,
     WorkspaceStateError,
     normalize_workspace_path,
@@ -35,7 +35,7 @@ def test_normalize_workspace_path_preserves_lexical_path_contract(
     with pytest.raises(ValueError, match="Workspace path must be absolute"):
         normalize_workspace_path(PurePath("Project") / "discarded" / "..")
 
-    assert normalize_workspace_path.__module__ == "myclaw.agent.workspace_state"
+    assert normalize_workspace_path.__module__ == "myclaw.workspace.state"
 
 
 def test_workspace_wrapper_module_is_removed() -> None:

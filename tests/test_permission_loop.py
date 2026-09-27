@@ -10,7 +10,6 @@ from myclaw.agent.message_bus import MessageBus
 from myclaw.agent.permission import RuntimePermissionControl
 from myclaw.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
 from myclaw.agent.tools.tool_gateway import ModelToolCall
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
 from myclaw.provider.model_router import ModelRouter
@@ -21,6 +20,7 @@ from myclaw.provider.models import (
     ModelUsage,
 )
 from myclaw.schedule.service import ScheduleService
+from myclaw.workspace.state import WorkspaceState
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import (
     FakeClock,

@@ -26,7 +26,6 @@ from myclaw.agent.session.session import Session, SessionStoragePartition
 from myclaw.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
 from myclaw.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
 from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolGateway
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
 from myclaw.management.commands import ManagementCommandDispatcher
@@ -44,6 +43,7 @@ from myclaw.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
 from myclaw.schedule.service import ScheduleClock, ScheduleService
 from myclaw.schedule.store import WorkspaceScheduleStore
 from myclaw.templates import render_template
+from myclaw.workspace.state import WorkspaceState
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import (
     FakeClock,

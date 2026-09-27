@@ -10,12 +10,12 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
-from myclaw.agent.workspace_state import WorkspaceState, WorkspaceStateError
 from myclaw.errors import ErrorInfo
 from myclaw.schedule.model import DREAM_JOB_ID, JobStatus, ScheduleJob, ScheduleJobState
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 from myclaw.utils.json import strict_json_loads
 from myclaw.utils.validation import require_nonnegative_int, require_uuid4_string
+from myclaw.workspace.state import WorkspaceState, WorkspaceStateError
 
 StoreHealth = Literal["available", "faulted"]
 ReplaceText = Callable[[Path, str], None]

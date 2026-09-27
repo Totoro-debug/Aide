@@ -65,7 +65,6 @@ from myclaw.agent.tools.tool_gateway import (
     ToolGateway,
     ToolResult,
 )
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import UserConfiguration
 from myclaw.errors import (
@@ -87,6 +86,7 @@ from myclaw.schedule.service import (
 )
 from myclaw.skills.catalog import LoadedSkill, ManualSkillInvocation, SkillLoader, SkillMetadata
 from myclaw.utils.async_tasks import await_task_preserving_cancellation
+from myclaw.workspace.state import WorkspaceState
 
 
 class ModelContextOverflowError(Exception):

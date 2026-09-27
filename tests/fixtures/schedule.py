@@ -2,8 +2,8 @@
 
 import json
 
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.schedule.model import ScheduleJob
+from myclaw.workspace.state import WorkspaceState
 
 
 def write_schedule_state(state: WorkspaceState, *jobs: ScheduleJob) -> None:

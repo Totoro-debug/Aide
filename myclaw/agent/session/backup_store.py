@@ -21,9 +21,9 @@ from myclaw.agent.session._restore_persistence import (
     sha256_hex,
     sync_created_directory,
 )
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 from myclaw.utils.validation import require_uuid4, require_uuid4_string
+from myclaw.workspace.state import WorkspaceState
 
 _STATE_SCHEMA_VERSION = 2
 _ENTRY_SCHEMA_VERSION = 1

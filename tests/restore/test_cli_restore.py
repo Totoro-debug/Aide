@@ -18,7 +18,6 @@ from myclaw.agent.message_bus import MessageBus
 from myclaw.agent.session.restore import RestoreManager as SessionRestoreManager
 from myclaw.agent.session.restore import RestoreMode, RestoreRecoveryRequired
 from myclaw.agent.session.session import RestoreAnchor, Session
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import UserConfiguration
 from myclaw.management.commands import ManagementCommandDispatcher, ManagementPort
@@ -29,6 +28,7 @@ from myclaw.management.service import (
     RestoreListingReport,
 )
 from myclaw.terminal.conversation import TerminalConversationApp
+from myclaw.workspace.state import WorkspaceState
 
 SESSION_ID = "20260926-120000-000000_550e8400-e29b-41d4-a716-446655440000"
 ANCHOR_TOKEN = UUID("550e8400-e29b-41d4-a716-446655440001")

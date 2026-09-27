@@ -13,7 +13,7 @@ from myclaw.agent.memory.store import (
     WorkspaceLongTermMemoryStore,
     WorkspaceSummaryCursorStore,
 )
-from myclaw.agent.workspace_state import WorkspaceState
+from myclaw.workspace.state import WorkspaceState
 
 
 @dataclass(frozen=True, slots=True)

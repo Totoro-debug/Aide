@@ -11,8 +11,8 @@ from myclaw.agent.memory.store import (
     WorkspaceLongTermMemoryStore,
     WorkspaceSummaryCursorStore,
 )
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
+from myclaw.workspace.state import WorkspaceState
 
 NOW = datetime(2026, 8, 27, 10, 0, tzinfo=timezone(timedelta(hours=8)))
 

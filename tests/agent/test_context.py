@@ -18,12 +18,12 @@ from myclaw.agent.context import ContextBuilder
 from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.tools.core.exec_host import resolve_exec_shell
 from myclaw.agent.tools.permission import PermissionSnapshot
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.skills.catalog import (
     ManualSkillInvocation,
     SkillLoader,
     SkillMetadata,
 )
+from myclaw.workspace.state import WorkspaceState
 
 FIXED_UTC = datetime(2026, 8, 16, 4, 5, 6, 789000, tzinfo=UTC)
 

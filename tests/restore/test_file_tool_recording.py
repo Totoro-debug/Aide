@@ -19,7 +19,7 @@ from myclaw.agent.tools.tool_gateway import (
     ModelToolCall,
     ToolGateway,
 )
-from myclaw.agent.workspace_state import WorkspaceState
+from myclaw.workspace.state import WorkspaceState
 
 SESSION_ID = "20260926-120000-123456_12345678-1234-4234-8234-123456789abc"
 

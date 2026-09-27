@@ -59,7 +59,6 @@ from myclaw.agent.tools.tool_gateway import (
     ConfirmationRequest,
     ModelToolCall,
 )
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
 from myclaw.errors import ErrorInfo
@@ -96,6 +95,7 @@ from myclaw.terminal.conversation import (
 )
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 from myclaw.utils.json_types import JsonObject
+from myclaw.workspace.state import WorkspaceState
 from tests.agent.test_fixed_catalog import _agent_loop as _direct_agent_loop
 from tests.agent.test_fixed_catalog import _FixedCatalogProvider, _response
 from tests.configuration.test_config import VALID_CONFIG

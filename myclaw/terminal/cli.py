@@ -40,12 +40,6 @@ from myclaw.agent.tools.mcp_runtime import (
     MCPToolSnapshot,
 )
 from myclaw.agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES
-from myclaw.agent.workspace_state import (
-    WorkspaceState,
-    WorkspaceStateError,
-    normalize_workspace_path,
-)
-from myclaw.agent.workspace_state import WorkspaceState as RuntimeWorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigError, ConfigLoader, UserConfiguration
 from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
@@ -67,6 +61,12 @@ from myclaw.terminal.conversation import (
 from myclaw.utils.async_tasks import await_task_preserving_cancellation
 from myclaw.utils.scheduler import AsyncioSchedulerClock
 from myclaw.utils.time import local_now
+from myclaw.workspace.state import (
+    WorkspaceState,
+    WorkspaceStateError,
+    normalize_workspace_path,
+)
+from myclaw.workspace.state import WorkspaceState as RuntimeWorkspaceState
 
 app = typer.Typer(
     add_completion=False,

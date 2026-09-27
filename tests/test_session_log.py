@@ -10,8 +10,8 @@ from uuid import uuid4
 import pytest
 from loguru import logger
 
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.logging.session import session_log, without_session_log
+from myclaw.workspace.state import WorkspaceState
 
 windows_only = pytest.mark.skipif(os.name != "nt", reason="requires native Windows paths")
 

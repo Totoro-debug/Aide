@@ -20,8 +20,8 @@ from myclaw.agent.session.backup_store import (
     BackupStoreError,
     FileBackupStore,
 )
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
+from myclaw.workspace.state import WorkspaceState
 
 SESSION_ID = "20260926-120000-123456_12345678-1234-4234-8234-123456789abc"
 
@@ -593,7 +593,7 @@ def test_backup_can_be_reopened_and_read_in_a_new_process(workspace: Path) -> No
     script = (
         "import hashlib, sys; from pathlib import Path; "
         "from myclaw.agent.session.backup_store import FileBackupStore; "
-        "from myclaw.agent.workspace_state import WorkspaceState; "
+        "from myclaw.workspace.state import WorkspaceState; "
         "store = FileBackupStore(WorkspaceState(Path(sys.argv[1])), sys.argv[2]); "
         "data = store.read_backup(int(sys.argv[3])); "
         "print(len(data), hashlib.sha256(data).hexdigest())"

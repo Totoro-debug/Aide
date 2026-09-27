@@ -21,7 +21,6 @@ from myclaw.agent.message_bus import MessageBus
 from myclaw.agent.permission import RuntimePermissionControl
 from myclaw.agent.session.session import Session
 from myclaw.agent.tools.mcp_runtime import MCPRuntimeManager
-from myclaw.agent.workspace_state import WorkspaceState, WorkspaceStateError
 from myclaw.config.agent_home import AgentHome
 from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
 from myclaw.management.commands import ManagementCommandDispatcher
@@ -35,6 +34,7 @@ from myclaw.provider.model_router import ModelRouteStatus
 from myclaw.skills.catalog import SkillMetadata
 from myclaw.terminal.conversation import TerminalConversationApp
 from myclaw.utils.time import local_now
+from myclaw.workspace.state import WorkspaceState, WorkspaceStateError
 from tests.configuration.test_config import (
     EXPECTED_DEFAULT_CONFIG,
     EXPECTED_REDACTED_CONFIG,

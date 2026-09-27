@@ -18,7 +18,6 @@ from myclaw.agent.permission import RuntimePermissionControl
 from myclaw.agent.session.session import Session, SessionStoragePartition
 from myclaw.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
 from myclaw.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
 from myclaw.errors import ErrorInfo
@@ -38,6 +37,7 @@ from myclaw.schedule.service import ScheduleJobExecutionError, ScheduleOccurrenc
 from myclaw.schedule.store import WorkspaceScheduleStore
 from myclaw.utils import scheduler as scheduler_module
 from myclaw.utils.scheduler import AsyncioSchedulerClock
+from myclaw.workspace.state import WorkspaceState
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import (
     ProviderCall,

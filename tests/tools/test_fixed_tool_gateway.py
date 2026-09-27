@@ -21,9 +21,9 @@ from myclaw.agent.tools.tool_gateway import (
     ModelToolCall,
     ToolGateway,
 )
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.config import MCPServerConfiguration
 from myclaw.schedule.service import ScheduleService
+from myclaw.workspace.state import WorkspaceState
 
 
 class _Clock:

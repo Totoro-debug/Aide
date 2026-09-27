@@ -12,7 +12,6 @@ from markdown_it import MarkdownIt
 from myclaw.agent.memory.dream import Dream, DreamResult
 from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.tools.tool_gateway import ModelToolCall
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import (
     ConfigLoader,
@@ -33,6 +32,7 @@ from myclaw.provider.models import (
     ModelUsage,
 )
 from myclaw.templates import render_template
+from myclaw.workspace.state import WorkspaceState
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import FakeClock, ScriptedFakeProvider, ScriptedFakeRouter
 from tests.fixtures.diagnostic_capture import capture_diagnostics

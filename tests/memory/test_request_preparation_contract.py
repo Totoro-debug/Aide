@@ -19,7 +19,6 @@ from myclaw.agent.runner import AgentRunner, AgentRunnerResult
 from myclaw.agent.session.session import Session
 from myclaw.agent.tools.mcp import MCPTool, MCPToolSpec
 from myclaw.agent.tools.tool_gateway import ToolGateway
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.provider.model_router import ModelRouteStatus
 from myclaw.provider.models import (
     AssistantModelMessage,
@@ -29,6 +28,7 @@ from myclaw.provider.models import (
     ModelUsage,
 )
 from myclaw.schedule.service import ScheduleService
+from myclaw.workspace.state import WorkspaceState
 from tests.fixtures import FakeClock, ScriptedFakeProvider, ScriptedFakeRouter, StreamScript
 from tests.fixtures.session import seed_session_state
 

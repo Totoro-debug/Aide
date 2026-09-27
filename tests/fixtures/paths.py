@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.agent.workspace_state import normalize_workspace_path
+from myclaw.workspace.state import normalize_workspace_path
 
 
 @pytest.fixture

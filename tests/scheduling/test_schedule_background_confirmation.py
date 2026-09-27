@@ -26,10 +26,10 @@ from myclaw.agent.tools.permission import (
     ToolPermissionPolicy,
 )
 from myclaw.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRequest
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.schedule.service import ScheduleOccurrence, ScheduleService
 from myclaw.schedule.store import ScheduleStoreFaultedError
+from myclaw.workspace.state import WorkspaceState
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
 

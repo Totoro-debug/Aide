@@ -24,7 +24,6 @@ from myclaw.agent.tools.core.web_fetch import AioHttpWebFetchClient, HTTPRespons
 from myclaw.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
 from myclaw.agent.tools.mcp import MCPTool, MCPToolSpec
 from myclaw.agent.tools.tool_gateway import ModelToolCall
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
 from myclaw.errors import ErrorInfo
@@ -41,6 +40,7 @@ from myclaw.provider.models import (
 )
 from myclaw.schedule.service import ScheduleService
 from myclaw.templates import render_template
+from myclaw.workspace.state import WorkspaceState
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import TaskFramingRouterAdapter, collect_foreground_outbound
 from tests.fixtures.provider import ProviderCall

@@ -11,10 +11,10 @@ import pytest
 from myclaw.agent.tools.core.schedule import ScheduleTool
 from myclaw.agent.tools.permission import PermissionContext
 from myclaw.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRequest, ModelToolCall
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.schedule.service import ScheduleService, ScheduleStaleRemovalError
 from myclaw.schedule.store import WorkspaceScheduleStore
+from myclaw.workspace.state import WorkspaceState
 from tests.fixtures import SingleToolGateway, write_schedule_state
 
 JOB_UUID = UUID("550e8400-e29b-41d4-a716-446655440000")

@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
 from myclaw.schedule.store import (
     ScheduleStaleRemovalError,
@@ -13,6 +12,7 @@ from myclaw.schedule.store import (
     ScheduleStoreFaultedError,
     WorkspaceScheduleStore,
 )
+from myclaw.workspace.state import WorkspaceState
 from tests.fixtures import write_schedule_state
 
 JOB_ID = "550e8400-e29b-41d4-a716-446655440000"

@@ -9,9 +9,9 @@ from datetime import datetime
 from pathlib import Path
 
 from myclaw.agent.memory.records import SummaryEntry
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 from myclaw.utils.time import format_rfc3339_milliseconds
+from myclaw.workspace.state import WorkspaceState
 
 type AtomicReplaceBytes = Callable[[Path, bytes], None]
 type AtomicReplaceText = Callable[[Path, str], None]

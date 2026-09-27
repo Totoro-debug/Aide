@@ -7,7 +7,6 @@ from typing import Any
 from myclaw.agent.memory.dream import DreamResult
 from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.permission import RuntimePermissionControl
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.management.service import (
     ManagementViewService,
@@ -15,6 +14,7 @@ from myclaw.management.service import (
 )
 from myclaw.provider.models import ReasoningEffort
 from myclaw.skills.catalog import SkillMetadata
+from myclaw.workspace.state import WorkspaceState
 
 
 class _DefaultLoop:

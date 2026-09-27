@@ -9,7 +9,7 @@ import pytest
 from myclaw.agent.session.backup_store import FileBackupStore
 from myclaw.agent.session.restore import RestoreManager, RestoreMode
 from myclaw.agent.session.session import Session
-from myclaw.agent.workspace_state import WorkspaceState
+from myclaw.workspace.state import WorkspaceState
 
 RUN_TOKEN = UUID("12345678-1234-4234-8234-123456789abc")
 

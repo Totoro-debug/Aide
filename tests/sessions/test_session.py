@@ -10,8 +10,8 @@ import pytest
 
 from myclaw.agent.context_budget import CONTEXT_ESTIMATOR_VERSION, ContextUsageSnapshot
 from myclaw.agent.session.session import Session, SessionStoragePartition
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
+from myclaw.workspace.state import WorkspaceState
 from tests.fixtures.session import seed_session_state
 
 LOCAL_OFFSET = timezone(timedelta(hours=8))

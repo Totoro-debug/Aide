@@ -15,7 +15,6 @@ from loguru import logger
 
 from myclaw.agent.confirmation import BackgroundConfirmationOwner, ConfirmationAborted
 from myclaw.agent.permission import PermissionSnapshot
-from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.errors import ErrorInfo
 from myclaw.logging.session import session_log
 from myclaw.schedule.model import DREAM_JOB_ID, DREAM_JOB_TITLE, JobSchedule, ScheduleJob
@@ -26,6 +25,7 @@ from myclaw.schedule.store import (
     WorkspaceScheduleStore,
 )
 from myclaw.utils.async_tasks import await_task_preserving_cancellation
+from myclaw.workspace.state import WorkspaceState
 
 ScheduleHealth = Literal["available", "faulted"]
 

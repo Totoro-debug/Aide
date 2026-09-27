@@ -105,6 +105,8 @@ def test_feature_packages_have_canonical_locations() -> None:
     assert all((PACKAGE_ROOT / "tools" / package / "__init__.py").is_file() for package in tool_packages)
     assert all((PACKAGE_ROOT / "tools" / module).is_file() for module in tool_modules)
     assert not tuple((PACKAGE_ROOT / "agent" / "tools").rglob("*.py"))
+    assert (PACKAGE_ROOT / "schedule" / "clock.py").is_file()
+    assert not (PACKAGE_ROOT / "utils" / "scheduler.py").exists()
 
     probe = subprocess.run(
         [

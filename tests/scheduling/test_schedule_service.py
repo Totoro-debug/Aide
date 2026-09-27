@@ -29,14 +29,14 @@ from myclaw.provider.models import (
     ModelUsage,
     ReasoningEffort,
 )
+from myclaw.schedule import clock as scheduler_module
+from myclaw.schedule.clock import AsyncioSchedulerClock
 from myclaw.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
 from myclaw.schedule.service import ScheduleJobExecutionError, ScheduleOccurrence, ScheduleService
 from myclaw.schedule.store import WorkspaceScheduleStore
 from myclaw.session.session import Session, SessionStoragePartition
 from myclaw.tools.discovery.deferred import RUN_BASELINE_TOOL_NAMES
 from myclaw.tools.exec.host import create_exec_host, resolve_exec_shell
-from myclaw.utils import scheduler as scheduler_module
-from myclaw.utils.scheduler import AsyncioSchedulerClock
 from myclaw.workspace.state import WorkspaceState
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import (

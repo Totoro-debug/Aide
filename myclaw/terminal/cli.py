@@ -29,6 +29,7 @@ from myclaw.permission.confirmation import ToolConfirmationCoordinator
 from myclaw.permission.state import PermissionSnapshot, RuntimePermissionControl
 from myclaw.provider.factory import create_provider
 from myclaw.provider.model_router import ModelRouter
+from myclaw.schedule.clock import AsyncioSchedulerClock
 from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.schedule.service import ScheduleOccurrence, ScheduleService
 from myclaw.session.restore import (
@@ -59,7 +60,6 @@ from myclaw.tools.mcp.runtime import (
     MCPToolSnapshot,
 )
 from myclaw.utils.async_tasks import await_task_preserving_cancellation
-from myclaw.utils.scheduler import AsyncioSchedulerClock
 from myclaw.utils.time import local_now
 from myclaw.workspace.state import (
     WorkspaceState,

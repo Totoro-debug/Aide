@@ -14,7 +14,6 @@ from mcp.types import CallToolResult
 
 import myclaw.agent.memory.conversation_compactor as compactor_module
 from myclaw.agent.loop import AgentLoop
-from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.message_bus import InboundMessage, MessageBus
 from myclaw.agent.permission import PermissionSnapshot, RuntimePermissionControl
 from myclaw.agent.run_errors import CommittableAgentRunError
@@ -28,6 +27,7 @@ from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolGateway, ToolResu
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
 from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
+from myclaw.memory.manager import MemoryManager
 from myclaw.provider.errors import ModelCallError
 from myclaw.provider.models import (
     AssistantModelMessage,

@@ -9,8 +9,6 @@ from typing import Any, Literal
 import pytest
 from markdown_it import MarkdownIt
 
-from myclaw.agent.memory.dream import Dream, DreamResult
-from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.tools.tool_gateway import ModelToolCall
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import (
@@ -23,6 +21,8 @@ from myclaw.config.config import (
     UserConfiguration,
 )
 from myclaw.errors import ErrorInfo
+from myclaw.memory.dream import Dream, DreamResult
+from myclaw.memory.manager import MemoryManager
 from myclaw.provider.errors import ModelCallError
 from myclaw.provider.model_router import ModelAttemptGuard, ModelRouter, ModelRouteStatus
 from myclaw.provider.models import (

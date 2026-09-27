@@ -22,7 +22,6 @@ from myclaw.agent.memory.conversation_compactor import (
     _request_hard_guard,
     latest_main_agent_usage_anchor,
 )
-from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.run_errors import CommittableAgentRunError
 from myclaw.agent.runner import AgentRunner
 from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolResult
@@ -35,6 +34,7 @@ from myclaw.config.config import (
     UserConfiguration,
 )
 from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
+from myclaw.memory.manager import MemoryManager
 from myclaw.provider.errors import ModelCallError
 from myclaw.provider.model_router import ModelRouter, ModelRouteStatus
 from myclaw.provider.models import (

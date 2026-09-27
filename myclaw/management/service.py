@@ -16,7 +16,6 @@ from myclaw.agent.context_budget import (
     estimate_request_tokens,
     project_next_request_tokens,
 )
-from myclaw.agent.memory.dream import DreamResult
 from myclaw.agent.permission import (
     RuntimePermissionControl,
     ToolPermissionLevel,
@@ -25,6 +24,7 @@ from myclaw.agent.permission import (
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader, ConfigView
 from myclaw.errors import ErrorInfo
+from myclaw.memory.dream import DreamResult
 from myclaw.provider.models import REASONING_EFFORT_LEVELS, ReasoningEffort
 from myclaw.session.restore import RestoreMode, RestorePlan, RestoreResult
 from myclaw.session.session import (

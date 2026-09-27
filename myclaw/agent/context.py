@@ -15,8 +15,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from myclaw.agent.blackboard import Blackboard
-from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.permission import PermissionSnapshot
+from myclaw.memory.manager import MemoryManager
 from myclaw.skills.catalog import LoadedSkill, ManualSkillInvocation, SkillLoader
 from myclaw.templates import render_template
 from myclaw.utils.time import format_rfc3339_milliseconds

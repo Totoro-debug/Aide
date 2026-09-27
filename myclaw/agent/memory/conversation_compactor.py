@@ -22,9 +22,9 @@ from myclaw.agent.context_budget import (
     reported_model_usage_total,
     request_fits_model_context,
 )
-from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.run_errors import CommittableAgentRunError
 from myclaw.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
+from myclaw.memory.manager import MemoryManager
 from myclaw.provider.errors import ModelCallError, model_context_overflow_error
 from myclaw.provider.model_router import ModelAttemptGuard, ModelRouteStatus
 from myclaw.provider.models import (

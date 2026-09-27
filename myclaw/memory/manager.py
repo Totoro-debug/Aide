@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from myclaw.agent.memory.records import SummaryEntry
-from myclaw.agent.memory.store import (
+from myclaw.memory.records import SummaryEntry
+from myclaw.memory.store import (
     MemoryPathDeniedError,
     WorkspaceJsonlSummaryStore,
     WorkspaceLongTermMemoryStore,

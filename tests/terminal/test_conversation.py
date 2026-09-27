@@ -40,7 +40,6 @@ from myclaw.agent.confirmation import (
     ToolConfirmationCoordinator,
 )
 from myclaw.agent.loop import AgentLoop, ConfirmationRequestView, ForegroundConversationProjection
-from myclaw.agent.memory.dream import DreamResult
 from myclaw.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
 from myclaw.agent.tools.permission import MCPToolIdentity
 from myclaw.agent.tools.tool_gateway import (
@@ -62,6 +61,7 @@ from myclaw.management.service import (
     RestoreListingReport,
     RuntimeStatus,
 )
+from myclaw.memory.dream import DreamResult
 from myclaw.provider.models import (
     ModelCompleted,
     ModelContinuation,

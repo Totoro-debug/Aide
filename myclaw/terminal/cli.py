@@ -13,8 +13,6 @@ from tzlocal import get_localzone_name
 
 from myclaw.agent.confirmation import ToolConfirmationCoordinator
 from myclaw.agent.loop import AgentLoop, ModelContextOverflowError
-from myclaw.agent.memory.dream import Dream
-from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.message_bus import MessageBus
 from myclaw.agent.permission import PermissionSnapshot, RuntimePermissionControl
 from myclaw.agent.tools.core.exec_host import (
@@ -41,6 +39,8 @@ from myclaw.management.service import (
     ManagementViewService,
     RestoreListingReport,
 )
+from myclaw.memory.dream import Dream
+from myclaw.memory.manager import MemoryManager
 from myclaw.provider.factory import create_provider
 from myclaw.provider.model_router import ModelRouter
 from myclaw.schedule.model import JobSchedule, ScheduleJob

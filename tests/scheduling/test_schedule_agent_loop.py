@@ -17,8 +17,6 @@ import pytest
 import myclaw.agent.context as context
 from myclaw.agent.context import ContextBuilder
 from myclaw.agent.loop import AgentLoop, ConfirmationRequestView
-from myclaw.agent.memory.dream import Dream
-from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.message_bus import MessageBus
 from myclaw.agent.permission import RuntimePermissionControl
 from myclaw.agent.runner import AgentRunner, AgentRunnerResult
@@ -28,6 +26,8 @@ from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolGateway
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
 from myclaw.management.commands import ManagementCommandDispatcher
+from myclaw.memory.dream import Dream
+from myclaw.memory.manager import MemoryManager
 from myclaw.provider.model_router import ModelRouter
 from myclaw.provider.models import (
     AssistantModelMessage,

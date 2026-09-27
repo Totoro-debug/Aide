@@ -5,13 +5,13 @@ from uuid import uuid4
 import pytest
 
 from myclaw.agent.loop import AgentLoop
-from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.message_bus import MessageBus
 from myclaw.agent.permission import RuntimePermissionControl
 from myclaw.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
 from myclaw.agent.tools.tool_gateway import ModelToolCall
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
+from myclaw.memory.manager import MemoryManager
 from myclaw.provider.model_router import ModelRouter
 from myclaw.provider.models import (
     AssistantModelMessage,

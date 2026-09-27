@@ -14,7 +14,6 @@ from loguru import logger
 from mcp.types import CallToolResult
 
 from myclaw.agent.loop import AgentLoop, ConfirmationRequestView
-from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.message_bus import MessageBus
 from myclaw.agent.permission import RuntimePermissionControl
 from myclaw.agent.tools.base import BaseTool
@@ -26,6 +25,7 @@ from myclaw.agent.tools.tool_gateway import ModelToolCall
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
 from myclaw.errors import ErrorInfo
+from myclaw.memory.manager import MemoryManager
 from myclaw.provider.errors import ModelCallError
 from myclaw.provider.model_router import ModelRouter
 from myclaw.provider.models import (

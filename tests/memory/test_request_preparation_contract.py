@@ -14,10 +14,10 @@ from myclaw.agent.memory.conversation_compactor import (
     AgentRunContextRouterAdapter,
     AgentRunContextSnapshot,
 )
-from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.runner import AgentRunner, AgentRunnerResult
 from myclaw.agent.tools.mcp import MCPTool, MCPToolSpec
 from myclaw.agent.tools.tool_gateway import ToolGateway
+from myclaw.memory.manager import MemoryManager
 from myclaw.provider.model_router import ModelRouteStatus
 from myclaw.provider.models import (
     AssistantModelMessage,

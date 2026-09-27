@@ -60,10 +60,13 @@ def test_retired_prompt_and_session_assembly_modules_are_absent() -> None:
 
 
 def test_feature_packages_have_canonical_locations() -> None:
-    retired_modules = ("memory", "tools")
+    retired_modules = ("tools",)
     assert all(not (PACKAGE_ROOT / module).exists() for module in retired_modules)
     assert (PACKAGE_ROOT / "session" / "session.py").is_file()
     assert not tuple((PACKAGE_ROOT / "agent" / "session").glob("*.py"))
+    for module in ("manager", "records", "store", "dream"):
+        assert (PACKAGE_ROOT / "memory" / f"{module}.py").is_file()
+        assert not (PACKAGE_ROOT / "agent" / "memory" / f"{module}.py").exists()
 
     probe = subprocess.run(
         [
@@ -71,10 +74,12 @@ def test_feature_packages_have_canonical_locations() -> None:
             "-c",
             (
                 "import importlib.util\n"
-                "modules = ('myclaw.memory', 'myclaw.tools')\n"
+                "modules = ('myclaw.tools',)\n"
                 "assert all(importlib.util.find_spec(module) is None for module in modules)\n"
                 "assert importlib.util.find_spec('myclaw.session.session') is not None\n"
                 "assert importlib.util.find_spec('myclaw.agent.session.session') is None\n"
+                "assert importlib.util.find_spec('myclaw.memory.manager') is not None\n"
+                "assert importlib.util.find_spec('myclaw.agent.memory.manager') is None\n"
             ),
         ],
         cwd=PROJECT_ROOT,
@@ -1023,7 +1028,7 @@ def test_runner_summary_and_dream_keep_context_builder_out_of_their_boundaries()
     paths = (
         PACKAGE_ROOT / "agent" / "runner.py",
         PACKAGE_ROOT / "agent" / "memory" / "conversation_compactor.py",
-        PACKAGE_ROOT / "agent" / "memory" / "dream.py",
+        PACKAGE_ROOT / "memory" / "dream.py",
     )
     violations = [
         f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"

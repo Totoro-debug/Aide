@@ -4,8 +4,6 @@ from uuid import UUID
 
 import pytest
 
-from myclaw.agent.memory.dream import DreamResult
-from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.permission import RuntimePermissionControl
 from myclaw.config.agent_home import AgentHome
 from myclaw.errors import ErrorInfo
@@ -14,6 +12,8 @@ from myclaw.management.service import (
     RuntimeStatus,
     RuntimeStatusInput,
 )
+from myclaw.memory.dream import DreamResult
+from myclaw.memory.manager import MemoryManager
 from myclaw.provider.models import ReasoningEffort
 from myclaw.session.session import Session
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM

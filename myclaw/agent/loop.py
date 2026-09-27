@@ -32,7 +32,6 @@ from myclaw.agent.memory.conversation_compactor import (
     AgentRunRouter,
     latest_main_agent_usage_anchor,
 )
-from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.message_bus import (
     InboundMessage,
     MessageBus,
@@ -69,6 +68,7 @@ from myclaw.errors import (
 from myclaw.logging.session import session_log
 from myclaw.management.commands import MANAGEMENT_COMMANDS
 from myclaw.management.service import RuntimeStatusInput
+from myclaw.memory.manager import MemoryManager
 from myclaw.provider.errors import ModelCallError
 from myclaw.provider.model_router import ModelRouteStatus
 from myclaw.provider.models import ModelCompleted, ModelRoute, ReasoningDelta, TextDelta

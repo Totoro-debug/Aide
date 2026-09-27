@@ -8,8 +8,6 @@ from uuid import UUID, uuid4
 import pytest
 from loguru import logger
 
-from myclaw.agent.memory.dream import DreamResult
-from myclaw.agent.memory.manager import MemoryManager
 from myclaw.config.agent_home import AgentHome
 from myclaw.errors import ErrorInfo
 from myclaw.management.commands import (
@@ -19,6 +17,8 @@ from myclaw.management.commands import (
     ManagementCommandResult,
 )
 from myclaw.management.service import RuntimeStatusInput
+from myclaw.memory.dream import DreamResult
+from myclaw.memory.manager import MemoryManager
 from myclaw.session.session import Session
 from myclaw.skills.catalog import SkillMetadata
 from myclaw.workspace.state import WorkspaceState

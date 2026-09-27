@@ -1036,6 +1036,14 @@ SKIP_RULES: Final[tuple[SkipRule, ...]] = (
         r"^requires a real POSIX release host$",
     ),
     SkipRule(
+        "waived-posix-mode-scope",
+        _node_patterns(
+            "tests/restore/test_backup_store.py",
+            "test_restore_store_directories_are_private_on_posix",
+        ),
+        r"^POSIX mode bits are not available on Windows$",
+    ),
+    SkipRule(
         "covered-by-headless-windows-terminal-suite",
         _node_patterns(
             "tests/test_cli.py",
@@ -1111,6 +1119,7 @@ SKIP_RULES: Final[tuple[SkipRule, ...]] = (
         )
         + _node_patterns(
             "tests/test_host_filesystem.py",
+            "test_host_path_is_within_uses_host_case_rules",
             "test_windows_host_filesystem_prepares_local_and_unc_io_paths",
             "test_windows_host_filesystem_accepts_an_owned_directory",
             "test_windows_host_filesystem_rejects_redirected_or_external_directory",

@@ -383,21 +383,32 @@ def test_skip_allowlists_are_platform_specific(monkeypatch: pytest.MonkeyPatch) 
         "nodeid": "tests/test_windows_filesystem.py::test_require_owned_regular_file_returns_normalized_owned_path",
         "message": "requires native Windows paths",
     }
+    host_case_skip = {
+        "nodeid": "tests/test_host_filesystem.py::test_host_path_is_within_uses_host_case_rules",
+        "message": "requires native Windows paths",
+    }
+    posix_mode_skip = {
+        "nodeid": "tests/restore/test_backup_store.py::test_restore_store_directories_are_private_on_posix",
+        "message": "POSIX mode bits are not available on Windows",
+    }
     powershell_path_skip = {
         "nodeid": "tests/tools/core/test_exec_powershell_policy.py::test_windows_powershell_51_canonical_workspace_read_executes_directly",
         "message": "requires native Windows PowerShell paths",
     }
     monkeypatch.setattr(release_validation, "_platform", lambda: "windows")
     assert release_validation._classify_skip(posix_smoke_skip) == "waived-posix-host-scope"
+    assert release_validation._classify_skip(posix_mode_skip) == "waived-posix-mode-scope"
     assert release_validation._classify_skip(windows_junction_skip) == "unclassified"
     monkeypatch.setattr(release_validation, "_platform", lambda: "posix")
     assert release_validation._classify_skip(posix_smoke_skip) == "unclassified"
+    assert release_validation._classify_skip(posix_mode_skip) == "unclassified"
     assert (
         release_validation._classify_skip(windows_junction_skip) == "waived-windows-junction-scope"
     )
     assert (
         release_validation._classify_skip(native_windows_skip) == "waived-native-windows-path-scope"
     )
+    assert release_validation._classify_skip(host_case_skip) == "waived-native-windows-path-scope"
     assert (
         release_validation._classify_skip(powershell_path_skip)
         == "waived-windows-powershell-path-scope"

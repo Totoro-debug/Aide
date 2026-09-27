@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import subprocess
@@ -22,6 +23,24 @@ from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 
 SESSION_ID = "20260926-120000-123456_12345678-1234-4234-8234-123456789abc"
+
+
+def _signed_json_bytes(value: dict[str, object]) -> bytes:
+    body = {key: member for key, member in value.items() if key != "integrity_sha256"}
+    signed = dict(body)
+    signed["integrity_sha256"] = sha256_hex(canonical_json_bytes(body))
+    return canonical_json_bytes(signed)
+
+
+def _write_signed_json(path: Path, value: dict[str, object]) -> None:
+    path.write_bytes(_signed_json_bytes(value))
+
+
+def _rewrite_signed_json(path: Path, **updates: object) -> None:
+    value = json.loads(path.read_bytes())
+    value.pop("integrity_sha256", None)
+    value.update(updates)
+    _write_signed_json(path, value)
 
 
 def test_restore_persistence_primitives_keep_canonical_bytes_and_digest() -> None:
@@ -339,7 +358,8 @@ def test_integrity_check_reports_missing_or_corrupt_blob(
     store = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
     target = workspace.parent / f"{damage}.bin"
     target.write_bytes(b"sensitive backup bytes")
-    ticket = store.before_write(uuid4(), target)
+    run_token = uuid4()
+    ticket = store.before_write(run_token, target)
     assert ticket is not None
     entry = store.inspect().entries[0]
     assert entry.before.blob_name is not None
@@ -351,7 +371,9 @@ def test_integrity_check_reports_missing_or_corrupt_blob(
         blob.write_bytes(b"corrupted backup")
         reason = "hash_mismatch"
 
-    assert store.inspect().integrity_issues == (BackupIntegrityIssue(1, reason),)
+    assert store.inspect().integrity_issues == (
+        BackupIntegrityIssue(1, reason, run_token),
+    )
     with pytest.raises(BackupIntegrityError):
         store.read_backup(ticket.operation_id)
     assert b"sensitive backup bytes" not in repr(store.inspect()).encode("utf-8")
@@ -365,7 +387,8 @@ def test_integrity_check_reports_missing_journal_entry_after_reopen(workspace: P
     store = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
     target = workspace.parent / "missing-entry.bin"
     target.write_bytes(b"before")
-    ticket = store.before_write(uuid4(), target)
+    run_token = uuid4()
+    ticket = store.before_write(run_token, target)
     assert ticket is not None
     entry = workspace / ".myclaw" / "restore" / SESSION_ID / "entries" / "1.json"
     entry.unlink()
@@ -375,21 +398,181 @@ def test_integrity_check_reports_missing_journal_entry_after_reopen(workspace: P
 
     assert journal.entries == ()
     assert journal.gaps == ()
-    assert journal.integrity_issues == (BackupIntegrityIssue(1, "missing_journal_entry"),)
+    assert journal.integrity_issues == (
+        BackupIntegrityIssue(1, "missing_journal_entry", run_token),
+    )
 
 
-def test_corrupt_journal_entry_fails_closed_after_reopen(workspace: Path) -> None:
+def test_corrupt_journal_entry_is_reported_as_unreadable_after_reopen(workspace: Path) -> None:
     store = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
     target = workspace.parent / "corrupt-entry.bin"
     target.write_bytes(b"before")
-    ticket = store.before_write(uuid4(), target)
+    run_token = uuid4()
+    ticket = store.before_write(run_token, target)
     assert ticket is not None
     entry = workspace / ".myclaw" / "restore" / SESSION_ID / "entries" / "1.json"
     entry.write_bytes(b"not valid journal JSON")
 
     reopened = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
-    with pytest.raises(BackupStoreError, match="invalid JSON"):
-        reopened.inspect()
+    journal = reopened.inspect()
+
+    assert journal.entries == ()
+    assert journal.integrity_issues == (
+        BackupIntegrityIssue(1, "unreadable_journal_entry", run_token),
+    )
+
+
+@pytest.mark.parametrize("mismatch_field", ["operation_id", "run_token"])
+def test_journal_identity_mismatch_uses_authoritative_store_token(
+    workspace: Path,
+    mismatch_field: str,
+) -> None:
+    store = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
+    target = workspace.parent / "identity-mismatch.bin"
+    target.write_bytes(b"before")
+    run_token = uuid4()
+    ticket = store.before_write(run_token, target)
+    assert ticket is not None
+    entry = workspace / ".myclaw" / "restore" / SESSION_ID / "entries" / "1.json"
+    replacement: object = 2 if mismatch_field == "operation_id" else str(uuid4())
+    _rewrite_signed_json(entry, **{mismatch_field: replacement})
+
+    journal = store.inspect()
+
+    assert journal.entries == ()
+    assert journal.gaps == ()
+    assert journal.integrity_issues == (
+        BackupIntegrityIssue(1, "journal_identity_mismatch", run_token),
+    )
+
+
+def test_v1_state_without_entry_uses_unknown_scope_and_upgrades_to_v2(
+    workspace: Path,
+) -> None:
+    store = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
+    target = workspace.parent / "legacy-missing.bin"
+    target.write_bytes(b"before")
+    ticket = store.before_write(uuid4(), target)
+    assert ticket is not None
+    root = workspace / ".myclaw" / "restore" / SESSION_ID
+    (root / "entries" / "1.json").unlink()
+    _write_signed_json(
+        root / "state.json",
+        {
+            "schema_version": 1,
+            "next_operation_id": 2,
+            "revision": 1,
+            "journal_operation_ids": [1],
+            "discarded_operation_ids": [],
+        },
+    )
+
+    reopened = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
+    journal = reopened.inspect()
+    state = json.loads((root / "state.json").read_bytes())
+
+    assert journal.integrity_issues == (
+        BackupIntegrityIssue(1, "missing_journal_entry", None),
+    )
+    assert state["schema_version"] == 2
+    assert state["active_operations"] == [{"operation_id": 1, "run_token": None}]
+
+
+def test_v1_state_recovers_entry_token_and_upgrades_to_v2(workspace: Path) -> None:
+    store = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
+    target = workspace.parent / "legacy-valid.bin"
+    target.write_bytes(b"before")
+    run_token = uuid4()
+    ticket = store.before_write(run_token, target)
+    assert ticket is not None
+    root = workspace / ".myclaw" / "restore" / SESSION_ID
+    _write_signed_json(
+        root / "state.json",
+        {
+            "schema_version": 1,
+            "next_operation_id": 2,
+            "revision": 1,
+            "journal_operation_ids": [1],
+        },
+    )
+
+    reopened = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
+    journal = reopened.inspect()
+    state = json.loads((root / "state.json").read_bytes())
+
+    assert journal.integrity_issues == ()
+    assert journal.entries[0].run_token == run_token
+    assert state["schema_version"] == 2
+    assert state["active_operations"] == [
+        {"operation_id": 1, "run_token": str(run_token)}
+    ]
+
+
+@pytest.mark.parametrize(
+    "state_fields",
+    [
+        pytest.param(
+            {
+                "active_operations": [
+                    {
+                        "operation_id": 1,
+                        "run_token": "12345678-1234-4234-8234-123456789abc",
+                    },
+                    {
+                        "operation_id": 1,
+                        "run_token": "22345678-1234-4234-8234-123456789abc",
+                    },
+                ],
+                "discarded_operation_ids": [],
+                "next_operation_id": 3,
+            },
+            id="duplicate-operation",
+        ),
+        pytest.param(
+            {
+                "active_operations": [
+                    {
+                        "operation_id": 2,
+                        "run_token": "22345678-1234-4234-8234-123456789abc",
+                    },
+                    {
+                        "operation_id": 1,
+                        "run_token": "12345678-1234-4234-8234-123456789abc",
+                    },
+                ],
+                "discarded_operation_ids": [],
+                "next_operation_id": 3,
+            },
+            id="unordered-operations",
+        ),
+        pytest.param(
+            {
+                "active_operations": [{"operation_id": 1, "run_token": "not-a-uuid"}],
+                "discarded_operation_ids": [],
+                "next_operation_id": 2,
+            },
+            id="invalid-token",
+        ),
+        pytest.param(
+            {
+                "active_operations": [
+                    {
+                        "operation_id": 1,
+                        "run_token": "12345678-1234-4234-8234-123456789abc",
+                    }
+                ],
+                "discarded_operation_ids": [1],
+                "next_operation_id": 2,
+            },
+            id="active-discarded-overlap",
+        ),
+    ],
+)
+def test_state_v2_rejects_invalid_identity_metadata(state_fields: dict[str, object]) -> None:
+    value = {"schema_version": 2, "revision": 1, **state_fields}
+
+    with pytest.raises(BackupStoreError):
+        backup_store_module._decode_state(_signed_json_bytes(value))
 
 
 def test_backup_can_be_reopened_and_read_in_a_new_process(workspace: Path) -> None:

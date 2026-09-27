@@ -245,11 +245,10 @@ class RestoreManager:
             entry for entry in journal.entries if entry.run_token in selected_token_set
         )
         selected_gaps = tuple(gap for gap in journal.gaps if gap.run_token in selected_token_set)
-        selected_operation_ids = {entry.operation_id for entry in selected_entries}
         selected_integrity_issues = tuple(
             issue
             for issue in journal.integrity_issues
-            if issue.operation_id in selected_operation_ids
+            if issue.run_token is None or issue.run_token in selected_token_set
         )
         targets = _build_targets(
             self._workspace_state,

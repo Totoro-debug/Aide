@@ -12,6 +12,7 @@ from uuid import UUID
 import pytest
 
 import myclaw.agent.session.restore as restore_module
+from myclaw.agent.session._restore_persistence import canonical_json_bytes, sha256_hex
 from myclaw.agent.session.backup_store import FileBackupStore
 from myclaw.agent.session.restore import (
     RestoreManager,
@@ -39,6 +40,19 @@ def _commit_user(session: Session, content: str, token: UUID) -> None:
         restore_before=before,
         restore_run_token=token,
     )
+
+
+def _write_v1_state(path: Path) -> None:
+    body: dict[str, object] = {
+        "schema_version": 1,
+        "next_operation_id": 2,
+        "revision": 1,
+        "journal_operation_ids": [1],
+        "discarded_operation_ids": [],
+    }
+    signed = dict(body)
+    signed["integrity_sha256"] = sha256_hex(canonical_json_bytes(body))
+    path.write_bytes(canonical_json_bytes(signed))
 
 
 @pytest.mark.asyncio
@@ -276,6 +290,122 @@ async def test_backup_gap_only_disables_file_mode_inside_selected_range(
     assert later_plan.available_modes == (RestoreMode.CONVERSATION_ONLY, RestoreMode.FILES)
     assert earlier_plan.available_modes == (RestoreMode.CONVERSATION_ONLY,)
     assert len(earlier_plan.backup_gaps) == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_journal_entry_only_disables_files_inside_selected_range(
+    workspace: Path,
+) -> None:
+    state = WorkspaceState(workspace)
+    session = Session.create(state, new_uuid=lambda: FIRST_TOKEN, now=lambda: NOW)
+    valid = workspace / "valid-selected.txt"
+    missing = workspace / "missing-selected.txt"
+    valid.write_bytes(b"before valid")
+    missing.write_bytes(b"before missing")
+    store = FileBackupStore(state, session.session_id)
+
+    _commit_user(session, "valid", FIRST_TOKEN)
+    valid_ticket = store.before_write(FIRST_TOKEN, valid)
+    assert valid_ticket is not None
+    valid.write_bytes(b"after valid")
+    store.after_write(valid_ticket)
+    _commit_user(session, "missing", SECOND_TOKEN)
+    missing_ticket = store.before_write(SECOND_TOKEN, missing)
+    assert missing_ticket is not None
+    (workspace / ".myclaw" / "restore" / session.session_id / "entries" / "2.json").unlink()
+    await session.wait_for_pending_persist()
+
+    plan = RestoreManager(state, session.session_id, now=lambda: NOW).inspect(session, 1)
+
+    assert len(plan.integrity_issues) == 1
+    assert plan.integrity_issues[0].operation_id == missing_ticket.operation_id
+    assert plan.integrity_issues[0].run_token == SECOND_TOKEN
+    assert plan.available_modes == (RestoreMode.CONVERSATION_ONLY,)
+
+
+@pytest.mark.asyncio
+async def test_known_missing_journal_entry_outside_selected_range_does_not_disable_files(
+    workspace: Path,
+) -> None:
+    state = WorkspaceState(workspace)
+    session = Session.create(state, new_uuid=lambda: FIRST_TOKEN, now=lambda: NOW)
+    missing = workspace / "missing-earlier.txt"
+    valid = workspace / "valid-later.txt"
+    missing.write_bytes(b"before missing")
+    valid.write_bytes(b"before valid")
+    store = FileBackupStore(state, session.session_id)
+
+    _commit_user(session, "missing", FIRST_TOKEN)
+    missing_ticket = store.before_write(FIRST_TOKEN, missing)
+    assert missing_ticket is not None
+    (workspace / ".myclaw" / "restore" / session.session_id / "entries" / "1.json").unlink()
+    _commit_user(session, "valid", SECOND_TOKEN)
+    valid_ticket = store.before_write(SECOND_TOKEN, valid)
+    assert valid_ticket is not None
+    valid.write_bytes(b"after valid")
+    store.after_write(valid_ticket)
+    await session.wait_for_pending_persist()
+
+    plan = RestoreManager(state, session.session_id, now=lambda: NOW).inspect(session, 2)
+
+    assert plan.integrity_issues == ()
+    assert plan.available_modes == (RestoreMode.CONVERSATION_ONLY, RestoreMode.FILES)
+
+
+@pytest.mark.asyncio
+async def test_conversation_only_restore_tombstones_missing_entry_without_reopening_it(
+    workspace: Path,
+) -> None:
+    state = WorkspaceState(workspace)
+    session = Session.create(state, new_uuid=lambda: FIRST_TOKEN, now=lambda: NOW)
+    target = workspace / "missing-known.txt"
+    target.write_bytes(b"before")
+    _commit_user(session, "missing known", FIRST_TOKEN)
+    store = FileBackupStore(state, session.session_id)
+    ticket = store.before_write(FIRST_TOKEN, target)
+    assert ticket is not None
+    (workspace / ".myclaw" / "restore" / session.session_id / "entries" / "1.json").unlink()
+    await session.wait_for_pending_persist()
+
+    manager = RestoreManager(state, session.session_id, now=lambda: NOW)
+    plan = manager.inspect(session, 1)
+    result = await manager.execute(plan, RestoreMode.CONVERSATION_ONLY)
+
+    assert result.mode is RestoreMode.CONVERSATION_ONLY
+    assert Session.load(state, session.session_id, now=lambda: NOW).messages == []
+    journal = FileBackupStore(state, session.session_id).inspect()
+    assert journal.entries == ()
+    assert journal.integrity_issues == ()
+
+
+@pytest.mark.asyncio
+async def test_unknown_v1_integrity_issue_disables_files_but_allows_conversation_restore(
+    workspace: Path,
+) -> None:
+    state = WorkspaceState(workspace)
+    session = Session.create(state, new_uuid=lambda: FIRST_TOKEN, now=lambda: NOW)
+    target = workspace / "legacy-unknown.txt"
+    target.write_bytes(b"before")
+    _commit_user(session, "legacy unknown", FIRST_TOKEN)
+    store = FileBackupStore(state, session.session_id)
+    ticket = store.before_write(FIRST_TOKEN, target)
+    assert ticket is not None
+    root = workspace / ".myclaw" / "restore" / session.session_id
+    (root / "entries" / "1.json").unlink()
+    _write_v1_state(root / "state.json")
+    await session.wait_for_pending_persist()
+
+    manager = RestoreManager(state, session.session_id, now=lambda: NOW)
+    plan = manager.inspect(session, 1)
+
+    assert len(plan.integrity_issues) == 1
+    assert plan.integrity_issues[0].run_token is None
+    assert plan.available_modes == (RestoreMode.CONVERSATION_ONLY,)
+
+    result = await manager.execute(plan, RestoreMode.CONVERSATION_ONLY)
+
+    assert result.mode is RestoreMode.CONVERSATION_ONLY
+    assert Session.load(state, session.session_id, now=lambda: NOW).messages == []
 
 
 @pytest.mark.asyncio

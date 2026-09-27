@@ -25,7 +25,8 @@ from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 from myclaw.utils.validation import require_uuid4, require_uuid4_string
 
-_SCHEMA_VERSION = 1
+_STATE_SCHEMA_VERSION = 2
+_ENTRY_SCHEMA_VERSION = 1
 _SESSION_ID = re.compile(
     r"(?P<timestamp>[0-9]{8}-[0-9]{6}-[0-9]{6})_"
     r"(?P<uuid>[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
@@ -41,6 +42,10 @@ _GAP_CODES = frozenset(
 
 class BackupStoreError(Exception):
     """A generic persistence or journal validation failure."""
+
+
+class _JournalIdentityMismatch(BackupStoreError):
+    """A decoded journal entry does not match its Store-state identity."""
 
 
 class BackupIntegrityError(BackupStoreError):
@@ -93,6 +98,7 @@ class BackupGap:
 class BackupIntegrityIssue:
     operation_id: int
     reason: str
+    run_token: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,10 +126,16 @@ class _StorePaths:
 
 
 @dataclass(frozen=True, slots=True)
+class _ActiveOperation:
+    operation_id: int
+    run_token: UUID | None
+
+
+@dataclass(frozen=True, slots=True)
 class _StoreState:
     next_operation_id: int
     revision: int
-    journal_operation_ids: tuple[int, ...]
+    active_operations: tuple[_ActiveOperation, ...]
     discarded_operation_ids: tuple[int, ...]
 
 
@@ -164,7 +176,7 @@ class FileBackupStore:
                 reserved = _StoreState(
                     operation_id + 1,
                     revision,
-                    state.journal_operation_ids,
+                    state.active_operations,
                     state.discarded_operation_ids,
                 )
                 try:
@@ -220,7 +232,7 @@ class FileBackupStore:
                     self._write_operation(paths, _entry_object(entry), replace_existing=False)
                     self._write_state(
                         paths,
-                        _state_with_operation(reserved, operation_id, revision),
+                        _state_with_operation(reserved, operation_id, revision, run_token),
                     )
                 except Exception:
                     self._persist_gap(
@@ -249,7 +261,7 @@ class FileBackupStore:
                             _StoreState(
                                 operation_id + 1,
                                 revision,
-                                state.journal_operation_ids,
+                                state.active_operations,
                                 state.discarded_operation_ids,
                             ),
                         )
@@ -295,7 +307,7 @@ class FileBackupStore:
                     _StoreState(
                         max(state.next_operation_id, ticket.operation_id + 1),
                         revision,
-                        state.journal_operation_ids,
+                        state.active_operations,
                         state.discarded_operation_ids,
                     ),
                 )
@@ -313,12 +325,47 @@ class FileBackupStore:
             issues: list[BackupIntegrityIssue] = []
             revision = state.revision
             operation_paths = dict(self._operation_paths(paths))
-            for operation_id in state.journal_operation_ids:
+            for active in state.active_operations:
+                operation_id = active.operation_id
                 entry_path = operation_paths.get(operation_id)
                 if entry_path is None:
-                    issues.append(BackupIntegrityIssue(operation_id, "missing_journal_entry"))
+                    issues.append(
+                        BackupIntegrityIssue(
+                            operation_id,
+                            "missing_journal_entry",
+                            active.run_token,
+                        )
+                    )
                     continue
-                operation = self._read_operation(paths, entry_path, operation_id)
+                try:
+                    operation = self._read_operation(paths, entry_path, operation_id)
+                except _JournalIdentityMismatch:
+                    issues.append(
+                        BackupIntegrityIssue(
+                            operation_id,
+                            "journal_identity_mismatch",
+                            active.run_token,
+                        )
+                    )
+                    continue
+                except Exception:
+                    issues.append(
+                        BackupIntegrityIssue(
+                            operation_id,
+                            "unreadable_journal_entry",
+                            active.run_token,
+                        )
+                    )
+                    continue
+                if operation.run_token != active.run_token:
+                    issues.append(
+                        BackupIntegrityIssue(
+                            operation_id,
+                            "journal_identity_mismatch",
+                            active.run_token,
+                        )
+                    )
+                    continue
                 revision = max(revision, operation.revision)
                 if isinstance(operation, BackupGap):
                     gaps.append(operation)
@@ -329,9 +376,17 @@ class FileBackupStore:
                 try:
                     self._verify_backup_blob(paths, operation)
                 except BackupIntegrityError as error:
-                    issues.append(BackupIntegrityIssue(operation_id, error.reason))
+                    issues.append(
+                        BackupIntegrityIssue(operation_id, error.reason, operation.run_token)
+                    )
                 except Exception:
-                    issues.append(BackupIntegrityIssue(operation_id, "unsafe_or_unreadable_blob"))
+                    issues.append(
+                        BackupIntegrityIssue(
+                            operation_id,
+                            "unsafe_or_unreadable_blob",
+                            operation.run_token,
+                        )
+                    )
             return BackupJournal(
                 revision=revision,
                 entries=tuple(entries),
@@ -365,28 +420,21 @@ class FileBackupStore:
             paths = self._prepare_store()
             state = self._load_state(paths)
             removed: list[int] = []
-            for operation_id in state.journal_operation_ids:
-                operation = self._read_operation(
-                    paths,
-                    self._entry_path(paths, operation_id),
-                    operation_id,
-                )
-                if operation.run_token in tokens:
-                    removed.append(operation_id)
+            active_operations: list[_ActiveOperation] = []
+            for active in state.active_operations:
+                if active.run_token in tokens:
+                    removed.append(active.operation_id)
+                else:
+                    active_operations.append(active)
             if not removed:
                 return 0
             revision = state.revision + 1
-            removed_set = set(removed)
             updated = _StoreState(
                 next_operation_id=state.next_operation_id,
                 revision=revision,
-                journal_operation_ids=tuple(
-                    operation_id
-                    for operation_id in state.journal_operation_ids
-                    if operation_id not in removed_set
-                ),
+                active_operations=tuple(active_operations),
                 discarded_operation_ids=tuple(
-                    sorted(set(state.discarded_operation_ids).union(removed_set))
+                    sorted(set(state.discarded_operation_ids).union(removed))
                 ),
             )
             self._write_state(paths, updated)
@@ -431,42 +479,71 @@ class FileBackupStore:
 
     def _load_state(self, paths: _StorePaths) -> _StoreState:
         state: _StoreState | None = None
+        state_schema_version: int | None = None
         needs_write = False
         if _path_entry_exists(HOST_FILESYSTEM.path_for_io(paths.state)):
             try:
                 raw = _read_owned_file(paths.state, within=paths.root)
-                state = _decode_state(raw)
+                state, state_schema_version = _decode_state(raw)
             except PermissionError:
                 raise
             except (OSError, ValueError, TypeError, BackupStoreError):
                 state = None
 
-        operation_ids = tuple(operation_id for operation_id, _ in self._operation_paths(paths))
+        operation_paths = self._operation_paths(paths)
+        operation_ids = tuple(operation_id for operation_id, _ in operation_paths)
         max_operation_id = max(operation_ids, default=0)
         max_revision = self._max_record_revision(paths)
+        entry_tokens: dict[int, UUID] = {}
+        for operation_id, path in operation_paths:
+            try:
+                operation = self._read_operation(paths, path, operation_id)
+            except Exception:
+                continue
+            entry_tokens[operation_id] = operation.run_token
+
         if state is None:
-            state = _StoreState(max_operation_id + 1, max_revision, operation_ids, ())
+            active_operations = tuple(
+                _ActiveOperation(operation_id, entry_tokens.get(operation_id))
+                for operation_id in operation_ids
+            )
+            state = _StoreState(
+                max_operation_id + 1,
+                max_revision,
+                active_operations,
+                (),
+            )
             needs_write = True
         else:
             next_id = max(state.next_operation_id, max_operation_id + 1)
             revision = max(state.revision, max_revision)
             discarded_operation_ids = tuple(sorted(set(state.discarded_operation_ids)))
-            journal_operation_ids = tuple(
-                sorted(
-                    (set(state.journal_operation_ids).union(operation_ids))
-                    - set(discarded_operation_ids)
+            existing_operations = {
+                operation.operation_id: operation for operation in state.active_operations
+            }
+            active_operation_ids = (
+                set(existing_operations).union(operation_ids) - set(discarded_operation_ids)
+            )
+            active_operations = tuple(
+                _ActiveOperation(
+                    operation_id,
+                    entry_tokens.get(operation_id)
+                    if state_schema_version == 1 or operation_id not in existing_operations
+                    else existing_operations[operation_id].run_token,
                 )
+                for operation_id in sorted(active_operation_ids)
             )
             if (
                 next_id != state.next_operation_id
                 or revision != state.revision
-                or journal_operation_ids != state.journal_operation_ids
+                or active_operations != state.active_operations
                 or discarded_operation_ids != state.discarded_operation_ids
+                or state_schema_version != _STATE_SCHEMA_VERSION
             ):
                 state = _StoreState(
                     next_id,
                     revision,
-                    journal_operation_ids,
+                    active_operations,
                     discarded_operation_ids,
                 )
                 needs_write = True
@@ -481,10 +558,18 @@ class FileBackupStore:
     def _write_state(self, paths: _StorePaths, state: _StoreState) -> None:
         content = _encode_signed_json(
             {
-                "schema_version": _SCHEMA_VERSION,
+                "schema_version": _STATE_SCHEMA_VERSION,
                 "next_operation_id": state.next_operation_id,
                 "revision": state.revision,
-                "journal_operation_ids": list(state.journal_operation_ids),
+                "active_operations": [
+                    {
+                        "operation_id": operation.operation_id,
+                        "run_token": (
+                            None if operation.run_token is None else str(operation.run_token)
+                        ),
+                    }
+                    for operation in state.active_operations
+                ],
                 "discarded_operation_ids": list(state.discarded_operation_ids),
             }
         )
@@ -542,7 +627,9 @@ class FileBackupStore:
                     existing = self._read_operation(paths, entry_path, operation_id)
                     if isinstance(existing, BackupJournalEntry):
                         self._read_backup_blob(paths, existing)
-                        self._remember_operation(paths, operation_id, revision)
+                        self._remember_operation(
+                            paths, operation_id, revision, existing.run_token
+                        )
                         return
                 except Exception:
                     pass
@@ -559,7 +646,7 @@ class FileBackupStore:
                 _gap_object(gap),
                 replace_existing=_path_entry_exists(HOST_FILESYSTEM.path_for_io(entry_path)),
             )
-            self._remember_operation(paths, operation_id, revision)
+            self._remember_operation(paths, operation_id, revision, run_token)
         except Exception:
             return
 
@@ -568,9 +655,13 @@ class FileBackupStore:
         paths: _StorePaths,
         operation_id: int,
         revision: int,
+        run_token: UUID,
     ) -> None:
         state = self._load_state(paths)
-        self._write_state(paths, _state_with_operation(state, operation_id, revision))
+        self._write_state(
+            paths,
+            _state_with_operation(state, operation_id, revision, run_token),
+        )
 
     def _read_operation(
         self, paths: _StorePaths, path: Path, operation_id: int
@@ -583,7 +674,9 @@ class FileBackupStore:
         except Exception as error:
             raise BackupStoreError("Restore journal entry is unavailable or malformed.") from error
         if operation.operation_id != operation_id:
-            raise BackupStoreError("Restore journal operation ID does not match its file.")
+            raise _JournalIdentityMismatch(
+                "Restore journal operation ID does not match its file."
+            )
         return operation
 
     def _read_backup_blob(self, paths: _StorePaths, entry: BackupJournalEntry) -> bytes:
@@ -641,12 +734,16 @@ def _state_with_operation(
     state: _StoreState,
     operation_id: int,
     revision: int,
+    run_token: UUID,
 ) -> _StoreState:
-    operation_ids = tuple(sorted(set(state.journal_operation_ids) | {operation_id}))
+    operations = {
+        operation.operation_id: operation for operation in state.active_operations
+    }
+    operations[operation_id] = _ActiveOperation(operation_id, run_token)
     return _StoreState(
         next_operation_id=max(state.next_operation_id, operation_id + 1),
         revision=max(state.revision, revision),
-        journal_operation_ids=operation_ids,
+        active_operations=tuple(operations[operation_id] for operation_id in sorted(operations)),
         discarded_operation_ids=state.discarded_operation_ids,
     )
 
@@ -792,59 +889,130 @@ def _decode_signed_json(content: bytes) -> dict[str, object]:
     return body
 
 
-def _decode_state(content: bytes) -> _StoreState:
-    value = _decode_signed_json(content)
-    if set(value) not in (
-        {
-            "schema_version",
-            "next_operation_id",
-            "revision",
-            "journal_operation_ids",
-        },
-        {
-            "schema_version",
-            "next_operation_id",
-            "revision",
-            "journal_operation_ids",
-            "discarded_operation_ids",
-        },
+def _decode_state_id_list(
+    value: object,
+    *,
+    next_operation_id: int,
+    message: str,
+) -> tuple[int, ...]:
+    if not isinstance(value, list) or any(
+        isinstance(operation_id, bool)
+        or not isinstance(operation_id, int)
+        or operation_id < 1
+        or operation_id >= next_operation_id
+        for operation_id in value
     ):
-        raise BackupStoreError("Restore state fields do not match the schema.")
-    if value["schema_version"] != _SCHEMA_VERSION:
-        raise BackupStoreError("Restore state schema version is unsupported.")
-    next_id = value["next_operation_id"]
-    revision = value["revision"]
-    operation_ids_value = value["journal_operation_ids"]
-    discarded_ids_value = value.get("discarded_operation_ids", [])
+        raise BackupStoreError(message)
+    operation_ids = tuple(value)
+    if operation_ids != tuple(sorted(set(operation_ids))):
+        raise BackupStoreError(message)
+    return operation_ids
+
+
+def _decode_state(content: bytes) -> tuple[_StoreState, int]:
+    value = _decode_signed_json(content)
+    next_id = value.get("next_operation_id")
+    revision = value.get("revision")
     if isinstance(next_id, bool) or not isinstance(next_id, int) or next_id < 1:
         raise BackupStoreError("Restore state operation counter is invalid.")
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
         raise BackupStoreError("Restore state revision is invalid.")
-    if not isinstance(operation_ids_value, list) or any(
-        isinstance(operation_id, bool)
-        or not isinstance(operation_id, int)
-        or operation_id < 1
-        or operation_id >= next_id
-        for operation_id in operation_ids_value
+
+    schema_version = value.get("schema_version")
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version not in (1, _STATE_SCHEMA_VERSION)
     ):
-        raise BackupStoreError("Restore state journal operation IDs are invalid.")
-    operation_ids = tuple(operation_ids_value)
+        raise BackupStoreError("Restore state schema version is unsupported.")
+
+    if schema_version == 1:
+        if set(value) not in (
+            {
+                "schema_version",
+                "next_operation_id",
+                "revision",
+                "journal_operation_ids",
+            },
+            {
+                "schema_version",
+                "next_operation_id",
+                "revision",
+                "journal_operation_ids",
+                "discarded_operation_ids",
+            },
+        ):
+            raise BackupStoreError("Restore state fields do not match the schema.")
+        operation_ids = _decode_state_id_list(
+            value["journal_operation_ids"],
+            next_operation_id=next_id,
+            message="Restore state journal operation IDs are invalid.",
+        )
+        discarded_ids = _decode_state_id_list(
+            value.get("discarded_operation_ids", []),
+            next_operation_id=next_id,
+            message="Restore state discarded operation IDs are invalid.",
+        )
+        if set(operation_ids).intersection(discarded_ids):
+            raise BackupStoreError(
+                "Restore state operation IDs cannot be both active and discarded."
+            )
+        active_operations = tuple(
+            _ActiveOperation(operation_id, None) for operation_id in operation_ids
+        )
+        return _StoreState(next_id, revision, active_operations, discarded_ids), 1
+
+    if set(value) != {
+        "schema_version",
+        "next_operation_id",
+        "revision",
+        "active_operations",
+        "discarded_operation_ids",
+    }:
+        raise BackupStoreError("Restore state fields do not match the schema.")
+    active_values = value["active_operations"]
+    if not isinstance(active_values, list):
+        raise BackupStoreError("Restore state active operations are invalid.")
+    active_operations_list: list[_ActiveOperation] = []
+    for active_value in active_values:
+        if not isinstance(active_value, dict) or set(active_value) != {
+            "operation_id",
+            "run_token",
+        }:
+            raise BackupStoreError("Restore state active operations are invalid.")
+        operation_id = active_value["operation_id"]
+        if (
+            isinstance(operation_id, bool)
+            or not isinstance(operation_id, int)
+            or operation_id < 1
+            or operation_id >= next_id
+        ):
+            raise BackupStoreError("Restore state active operations are invalid.")
+        run_token_value = active_value["run_token"]
+        if run_token_value is None:
+            run_token = None
+        else:
+            if not isinstance(run_token_value, str):
+                raise BackupStoreError("Restore state run token is invalid.")
+            try:
+                require_uuid4_string(run_token_value, field="run_token")
+                run_token = UUID(run_token_value)
+            except (TypeError, ValueError) as error:
+                raise BackupStoreError("Restore state run token is invalid.") from error
+        active_operations_list.append(_ActiveOperation(operation_id, run_token))
+    operation_ids = tuple(operation.operation_id for operation in active_operations_list)
     if operation_ids != tuple(sorted(set(operation_ids))):
-        raise BackupStoreError("Restore state journal operation IDs are invalid.")
-    if not isinstance(discarded_ids_value, list) or any(
-        isinstance(operation_id, bool)
-        or not isinstance(operation_id, int)
-        or operation_id < 1
-        or operation_id >= next_id
-        for operation_id in discarded_ids_value
-    ):
-        raise BackupStoreError("Restore state discarded operation IDs are invalid.")
-    discarded_ids = tuple(discarded_ids_value)
-    if discarded_ids != tuple(sorted(set(discarded_ids))):
-        raise BackupStoreError("Restore state discarded operation IDs are invalid.")
+        raise BackupStoreError("Restore state active operations are invalid.")
+    discarded_ids = _decode_state_id_list(
+        value["discarded_operation_ids"],
+        next_operation_id=next_id,
+        message="Restore state discarded operation IDs are invalid.",
+    )
     if set(operation_ids).intersection(discarded_ids):
-        raise BackupStoreError("Restore state operation IDs cannot be both active and discarded.")
-    return _StoreState(next_id, revision, operation_ids, discarded_ids)
+        raise BackupStoreError(
+            "Restore state operation IDs cannot be both active and discarded."
+        )
+    return _StoreState(next_id, revision, tuple(active_operations_list), discarded_ids), 2
 
 
 def _file_state_object(state: FileState) -> dict[str, object]:
@@ -853,7 +1021,7 @@ def _file_state_object(state: FileState) -> dict[str, object]:
 
 def _entry_object(entry: BackupJournalEntry) -> dict[str, object]:
     return {
-        "schema_version": _SCHEMA_VERSION,
+        "schema_version": _ENTRY_SCHEMA_VERSION,
         "kind": "backup",
         "operation_id": entry.operation_id,
         "revision": entry.revision,
@@ -867,7 +1035,7 @@ def _entry_object(entry: BackupJournalEntry) -> dict[str, object]:
 
 def _gap_object(gap: BackupGap) -> dict[str, object]:
     return {
-        "schema_version": _SCHEMA_VERSION,
+        "schema_version": _ENTRY_SCHEMA_VERSION,
         "kind": "gap",
         "operation_id": gap.operation_id,
         "revision": gap.revision,
@@ -913,7 +1081,7 @@ def _decode_operation(content: bytes) -> BackupJournalEntry | BackupGap:
     }
     if not common.issubset(value):
         raise BackupStoreError("Journal entry is missing required fields.")
-    if value["schema_version"] != _SCHEMA_VERSION:
+    if value["schema_version"] != _ENTRY_SCHEMA_VERSION:
         raise BackupStoreError("Journal entry schema version is unsupported.")
     operation_id = value["operation_id"]
     revision = value["revision"]

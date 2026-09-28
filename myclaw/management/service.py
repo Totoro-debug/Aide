@@ -8,7 +8,7 @@ from typing import Any, Protocol
 from loguru import logger
 
 from myclaw import __version__
-from myclaw.agent.context_budget import (
+from myclaw.agent.context.budget import (
     CONTEXT_ESTIMATOR_VERSION,
     ContextBudget,
     ContextUsageSnapshot,

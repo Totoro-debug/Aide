@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from loguru import logger
 
@@ -53,6 +53,110 @@ type ModelAttemptGuard = Callable[
 ]
 
 
+class ModelRouterDelegate(Protocol):
+    """Router methods needed by a bound Agent Run."""
+
+    def stream(
+        self,
+        route: Literal["chat", "schedule"],
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        continuation: ModelContinuation | None = None,
+        guard: ModelAttemptGuard | None = None,
+    ) -> AsyncIterator[ModelStreamEvent]: ...
+
+    def complete(
+        self,
+        route: ModelRoute,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        continuation: ModelContinuation | None = None,
+        guard: ModelAttemptGuard | None = None,
+    ) -> Coroutine[Any, Any, ModelResponse]: ...
+
+    def current_call_status(self, route: ModelRoute) -> ModelRouteStatus | None: ...
+
+    def call_route_status(
+        self,
+        route: ModelRoute,
+        *,
+        continuation: ModelContinuation | None,
+    ) -> ModelRouteStatus: ...
+
+
+class RunModelRouter:
+    """Bind one guard and final route-status snapshot to an Agent Run."""
+
+    def __init__(self, router: ModelRouterDelegate, *, guard: ModelAttemptGuard) -> None:
+        self._router = router
+        self._guard = guard
+        self._call_statuses: dict[ModelRoute, ModelRouteStatus] = {}
+
+    def stream(
+        self,
+        route: Literal["chat", "schedule"],
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        continuation: ModelContinuation | None = None,
+        guard: ModelAttemptGuard | None = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        events = self._router.stream(
+            route,
+            messages=messages,
+            tools=tools,
+            continuation=continuation,
+            guard=self._guard if guard is None else guard,
+        )
+
+        async def observe() -> AsyncIterator[ModelStreamEvent]:
+            try:
+                async for event in events:
+                    yield event
+            finally:
+                self._remember_call_status(route)
+
+        return observe()
+
+    async def complete(
+        self,
+        route: ModelRoute,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        continuation: ModelContinuation | None = None,
+        guard: ModelAttemptGuard | None = None,
+    ) -> ModelResponse:
+        try:
+            return await self._router.complete(
+                route,
+                messages=messages,
+                tools=tools,
+                continuation=continuation,
+                guard=self._guard if guard is None else guard,
+            )
+        finally:
+            self._remember_call_status(route)
+
+    def current_call_status(self, route: ModelRoute) -> ModelRouteStatus | None:
+        return self._call_statuses.get(route)
+
+    def call_route_status(
+        self,
+        route: ModelRoute,
+        *,
+        continuation: ModelContinuation | None,
+    ) -> ModelRouteStatus:
+        return self._router.call_route_status(route, continuation=continuation)
+
+    def _remember_call_status(self, route: ModelRoute) -> None:
+        status = self._router.current_call_status(route)
+        if status is not None:
+            self._call_statuses[route] = status
+
+
 class ModelRouter:
     """Resolve a logical Model Route and coordinate Provider attempts."""
 
@@ -75,6 +179,10 @@ class ModelRouter:
         )
         self._reasoning_effort_override: ReasoningEffort | None = None
         self._close_task: asyncio.Task[None] | None = None
+
+    def for_run(self, *, guard: ModelAttemptGuard) -> RunModelRouter:
+        """Bind a per-attempt guard and final status to one Agent Run."""
+        return RunModelRouter(self, guard=guard)
 
     def route_status(self, requested_route: ModelRoute) -> ModelRouteStatus:
         """Return the current concrete route identity without provider credentials."""

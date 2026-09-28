@@ -8,11 +8,11 @@ from typing import Any
 import pytest
 from mcp.types import CallToolResult
 
-from myclaw.agent.memory.conversation_compactor import (
+from myclaw.agent.context.run_context import (
     AgentRunContextController,
     AgentRunContextRequestPreparer,
-    AgentRunContextRouterAdapter,
     AgentRunContextSnapshot,
+    agent_run_attempt_guard,
 )
 from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.runner import AgentRunner, AgentRunnerResult
@@ -20,7 +20,7 @@ from myclaw.agent.session.session import Session
 from myclaw.agent.tools.mcp import MCPTool, MCPToolSpec
 from myclaw.agent.tools.tool_gateway import ToolGateway
 from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.provider.model_router import ModelRouteStatus
+from myclaw.provider.model_router import ModelRouteStatus, RunModelRouter
 from myclaw.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
@@ -116,7 +116,7 @@ async def _run_once(
             for route in routes
         },
     )
-    adapter = AgentRunContextRouterAdapter(router)
+    adapter = RunModelRouter(router, guard=agent_run_attempt_guard)
     controller = AgentRunContextController(
         snapshot=AgentRunContextSnapshot.from_session(session),
         provider=router,

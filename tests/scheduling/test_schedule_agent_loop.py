@@ -14,8 +14,8 @@ from uuid import UUID
 
 import pytest
 
-import myclaw.agent.context as context
-from myclaw.agent.context import ContextBuilder
+import myclaw.agent.context.builder as context
+from myclaw.agent.context.builder import ContextBuilder
 from myclaw.agent.loop import AgentLoop, ConfirmationRequestView
 from myclaw.agent.memory.dream import Dream
 from myclaw.agent.memory.manager import MemoryManager

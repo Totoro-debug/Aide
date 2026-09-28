@@ -9,17 +9,16 @@ from typing import Any, Literal, cast
 
 import pytest
 
-from myclaw.agent.context_budget import (
+from myclaw.agent.context.budget import (
     estimate_request_tokens,
     estimate_run_slice_tokens,
     request_fits_model_context,
 )
-from myclaw.agent.memory.conversation_compactor import (
+from myclaw.agent.context.run_context import (
     AgentRunContextController,
     AgentRunContextRequestPreparer,
-    AgentRunContextRouterAdapter,
     AgentRunContextSnapshot,
-    _request_hard_guard,
+    agent_run_attempt_guard,
     latest_main_agent_usage_anchor,
 )
 from myclaw.agent.memory.manager import MemoryManager
@@ -38,7 +37,7 @@ from myclaw.config.config import (
 )
 from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
 from myclaw.provider.errors import ModelCallError
-from myclaw.provider.model_router import ModelRouter, ModelRouteStatus
+from myclaw.provider.model_router import ModelRouter, ModelRouteStatus, RunModelRouter
 from myclaw.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
@@ -476,7 +475,7 @@ def _context_router(
     *,
     chat_status: ModelRouteStatus | None = None,
     memory_status: ModelRouteStatus | None = None,
-) -> AgentRunContextRouterAdapter:
+) -> RunModelRouter:
     statuses: dict[ModelRoute, ModelRouteStatus] = {
         "chat": chat_status
         or _chat_status(
@@ -487,7 +486,10 @@ def _context_router(
         ),
         "memory": memory_status or _memory_status(context_window=16_384, max_output=1_024),
     }
-    return AgentRunContextRouterAdapter(ScriptedFakeRouter(provider, route_statuses=statuses))
+    return RunModelRouter(
+        ScriptedFakeRouter(provider, route_statuses=statuses),
+        guard=agent_run_attempt_guard,
+    )
 
 
 def _project_messages(
@@ -1191,7 +1193,7 @@ async def test_explicit_router_adapter_blocks_an_over_budget_attempt_before_prov
         clock=FakeClock(NOW),
         jitter=None,
     )
-    guarded = AgentRunContextRouterAdapter(router)
+    guarded = router.for_run(guard=agent_run_attempt_guard)
 
     with pytest.raises(ModelCallError) as raised:
         await guarded.complete(
@@ -1217,7 +1219,7 @@ def test_compactor_request_guard_matches_the_shared_context_predicate(
         max_output=max_output,
     )
 
-    assert _request_hard_guard(status, messages, tools) is request_fits_model_context(
+    assert agent_run_attempt_guard(status, messages, tools) is request_fits_model_context(
         messages,
         tools,
         context_window=status.context_window,
@@ -1244,7 +1246,7 @@ async def test_explicit_router_adapter_preserves_retry_continuation_and_response
         clock=FakeClock(NOW),
         jitter=None,
     )
-    guarded = AgentRunContextRouterAdapter(router)
+    guarded = router.for_run(guard=agent_run_attempt_guard)
     messages = [{"role": "user", "content": "request"}]
     tools = ({"type": "function", "function": {"name": "work"}},)
 
@@ -1282,7 +1284,7 @@ async def test_explicit_router_adapter_rechecks_smaller_fallback_before_provider
         clock=FakeClock(NOW),
         jitter=None,
     )
-    guarded = AgentRunContextRouterAdapter(router)
+    guarded = router.for_run(guard=agent_run_attempt_guard)
 
     with pytest.raises(ModelCallError) as raised:
         await guarded.complete(
@@ -2504,12 +2506,10 @@ async def test_request_preparer_uses_configured_capacity_after_previous_fallback
         "chat-provider": chat_provider,
         "default-provider": default_provider,
     }
-    router = AgentRunContextRouterAdapter(
-        ModelRouter(
-            configuration=configuration,
-            provider_factory=lambda provider: providers[provider.provider_id],
-        )
-    )
+    router = ModelRouter(
+        configuration=configuration,
+        provider_factory=lambda provider: providers[provider.provider_id],
+    ).for_run(guard=agent_run_attempt_guard)
     controller = AgentRunContextController(
         snapshot=AgentRunContextSnapshot.from_session(session),
         provider=router,

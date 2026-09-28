@@ -19,10 +19,10 @@ from uuid import UUID, uuid4
 import pytest
 from loguru import logger
 
+import myclaw.agent.context.run_context as compactor_module
 import myclaw.agent.loop as loop_module
-import myclaw.agent.memory.conversation_compactor as compactor_module
 from myclaw.agent.blackboard import Blackboard
-from myclaw.agent.context_budget import estimate_request_tokens
+from myclaw.agent.context.budget import estimate_request_tokens
 from myclaw.agent.loop import AgentLoop, ConfirmationRequestView, ModelContextOverflowError
 from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
@@ -1901,7 +1901,7 @@ def test_skill_budget_uses_public_status_projection_and_complete_tools(
     empty_candidate: bool,
     over_budget: bool,
 ) -> None:
-    monkeypatch.setattr("myclaw.agent.context.datetime", _FrozenDateTime)
+    monkeypatch.setattr("myclaw.agent.context.builder.datetime", _FrozenDateTime)
     instruction = tmp_path / "agent-home" / "skills" / "planner" / "SKILL.md"
     instruction.parent.mkdir(parents=True)
     instruction.write_text(

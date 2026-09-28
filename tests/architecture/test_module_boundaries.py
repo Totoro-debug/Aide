@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.agent.context import ContextBuilder
+from myclaw.agent.context.builder import ContextBuilder
 
 PROJECT_ROOT = Path(__file__).parents[2]
 PACKAGE_ROOT = PROJECT_ROOT / "myclaw"
@@ -766,7 +766,7 @@ def test_mcp_keyword_module_does_not_import_private_configuration_implementation
 
 
 def test_context_builder_does_not_import_model_request_runtime_boundaries() -> None:
-    path = PACKAGE_ROOT / "agent" / "context.py"
+    path = PACKAGE_ROOT / "agent" / "context" / "builder.py"
     forbidden_prefixes = (
         "myclaw.provider",
         "myclaw.router",
@@ -959,7 +959,7 @@ def test_issue_243_production_model_calls_use_one_explicit_run_context_seam() ->
         }
 
     compactor_tree = ast.parse(
-        (PACKAGE_ROOT / "agent" / "memory" / "conversation_compactor.py").read_text(
+        (PACKAGE_ROOT / "agent" / "context" / "run_context.py").read_text(
             encoding="utf-8"
         )
     )
@@ -967,16 +967,23 @@ def test_issue_243_production_model_calls_use_one_explicit_run_context_seam() ->
         isinstance(node, ast.ClassDef) and node.name == "ConversationCompactor"
         for node in compactor_tree.body
     )
-    adapter = next(
-        node
+    assert not any(
+        isinstance(node, ast.ClassDef) and node.name == "AgentRunContextRouterAdapter"
         for node in compactor_tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "AgentRunContextRouterAdapter"
+    )
+    provider_tree = ast.parse(
+        (PACKAGE_ROOT / "provider" / "model_router.py").read_text(encoding="utf-8")
+    )
+    run_router = next(
+        node
+        for node in provider_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "RunModelRouter"
     )
     assert not any(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id in {"getattr", "hasattr"}
-        for node in ast.walk(adapter)
+        for node in ast.walk(run_router)
     )
     assert any(
         isinstance(node, ast.Call)
@@ -1018,14 +1025,14 @@ def test_issue_243_production_model_calls_use_one_explicit_run_context_seam() ->
 def test_runner_summary_and_dream_keep_context_builder_out_of_their_boundaries() -> None:
     paths = (
         PACKAGE_ROOT / "agent" / "runner.py",
-        PACKAGE_ROOT / "agent" / "memory" / "conversation_compactor.py",
+        PACKAGE_ROOT / "agent" / "context" / "run_context.py",
         PACKAGE_ROOT / "agent" / "memory" / "dream.py",
     )
     violations = [
         f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
         for path in paths
         for module, line in _imports(path)
-        if module == "myclaw.agent.context" or module.startswith("myclaw.agent.context.")
+        if module == "myclaw.agent.context.builder"
     ]
     assert violations == []
 

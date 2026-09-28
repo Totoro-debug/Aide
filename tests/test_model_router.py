@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1922,3 +1922,215 @@ async def test_model_router_guard_preserves_same_provider_continuation() -> None
     assert len(guard_calls) == 2
     assert all(status == guard_calls[0] for status in guard_calls)
     assert [call.continuation for call in provider.complete_requests] == [None, continuation]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", (False, True), ids=("complete", "stream"))
+async def test_run_model_router_guard_blocks_initial_attempt_before_provider(stream: bool) -> None:
+    provider = ScriptedFakeProvider(
+        completions=(response(),), streams=(StreamScript(events=(completed(),)),)
+    )
+    factory_calls: list[str] = []
+
+    def provider_factory(configuration: ProviderConfiguration) -> ScriptedFakeProvider:
+        factory_calls.append(configuration.provider_id)
+        return provider
+
+    router = ModelRouter(
+        configuration=configuration(),
+        provider_factory=provider_factory,
+        clock=FakeClock(NOW),
+    )
+    observed_statuses: list[ModelRouteStatus] = []
+
+    def reject(status: ModelRouteStatus, messages: object, tools: object) -> bool:
+        del messages, tools
+        observed_statuses.append(status)
+        return False
+
+    run = router.for_run(guard=reject)
+
+    with pytest.raises(ModelCallError) as raised:
+        if stream:
+            await collect(run.stream("chat", **request()))
+        else:
+            await run.complete("default", **request())
+
+    assert raised.value.error.code == "model_context_overflow"
+    assert factory_calls == []
+    assert provider.stream_requests == []
+    assert provider.complete_requests == []
+    assert len(observed_statuses) == 1
+    assert run.current_call_status("chat" if stream else "default") == observed_statuses[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", (False, True), ids=("complete", "stream"))
+async def test_run_model_router_guard_blocks_smaller_fallback_before_provider(
+    stream: bool,
+) -> None:
+    chat_provider = ScriptedFakeProvider(
+        completions=(permanent_failure(),),
+        streams=(StreamScript(events=(), error=permanent_failure()),),
+    )
+    default_provider = ScriptedFakeProvider(
+        completions=(response(),), streams=(StreamScript(events=(completed(),)),)
+    )
+    providers = {"chat-provider": chat_provider, "default-provider": default_provider}
+    factory_calls: list[str] = []
+
+    def provider_factory(configuration: ProviderConfiguration) -> ScriptedFakeProvider:
+        factory_calls.append(configuration.provider_id)
+        return providers[configuration.provider_id]
+
+    router = ModelRouter(
+        configuration=routed_configuration(),
+        provider_factory=provider_factory,
+        clock=FakeClock(NOW),
+        jitter=None,
+    )
+    observed_statuses: list[ModelRouteStatus] = []
+
+    def guard(status: ModelRouteStatus, messages: object, tools: object) -> bool:
+        del messages, tools
+        observed_statuses.append(status)
+        return status.selected_route == "chat"
+
+    run = router.for_run(guard=guard)
+
+    with pytest.raises(ModelCallError) as raised:
+        if stream:
+            await collect(run.stream("chat", **request()))
+        else:
+            await run.complete("chat", **request())
+
+    assert raised.value.error.code == "model_context_overflow"
+    assert factory_calls == ["chat-provider"]
+    assert len(chat_provider.stream_requests if stream else chat_provider.complete_requests) == 1
+    assert default_provider.stream_requests == []
+    assert default_provider.complete_requests == []
+    assert [status.selected_route for status in observed_statuses] == ["chat", "default"]
+    assert run.current_call_status("chat") == observed_statuses[-1]
+
+
+@pytest.mark.asyncio
+async def test_run_model_router_keeps_final_status_within_its_run_and_preview_is_read_only() -> None:
+    chat_provider = ScriptedFakeProvider(
+        streams=(
+            StreamScript(events=(), error=permanent_failure()),
+            StreamScript(events=(completed("Recovered"),)),
+        )
+    )
+    default_provider = ScriptedFakeProvider(
+        streams=(StreamScript(events=(completed("Fallback"),)),)
+    )
+    providers = {"chat-provider": chat_provider, "default-provider": default_provider}
+    router = ModelRouter(
+        configuration=routed_configuration(),
+        provider_factory=lambda provider: providers[provider.provider_id],
+        clock=FakeClock(NOW),
+    )
+    first_run = router.for_run(guard=lambda status, messages, tools: True)
+    second_run = router.for_run(guard=lambda status, messages, tools: True)
+
+    assert first_run.current_call_status("chat") is None
+    assert second_run.current_call_status("chat") is None
+    assert await collect(first_run.stream("chat", **request())) == [completed("Fallback")]
+    fallback_status = first_run.current_call_status("chat")
+    assert fallback_status is not None
+    assert fallback_status.selected_route == "default"
+    assert second_run.current_call_status("chat") is None
+
+    route_statuses_before = router._route_statuses.copy()
+    preview = first_run.call_route_status("chat", continuation=None)
+    assert preview.selected_route == "chat"
+    assert first_run.current_call_status("chat") == fallback_status
+    assert router.current_call_status("chat") == fallback_status
+    assert router._route_statuses == route_statuses_before
+
+    assert await collect(second_run.stream("chat", **request())) == [completed("Recovered")]
+    assert second_run.current_call_status("chat") == preview
+    assert first_run.current_call_status("chat") == fallback_status
+
+
+@pytest.mark.asyncio
+async def test_run_model_router_explicit_guard_overrides_bound_guard() -> None:
+    provider = ScriptedFakeProvider(completions=(response("Allowed"),))
+    router = ModelRouter(
+        configuration=configuration(),
+        provider_factory=lambda _: provider,
+        clock=FakeClock(NOW),
+    )
+    bound_calls: list[ModelRouteStatus] = []
+    override_calls: list[ModelRouteStatus] = []
+
+    def bound_guard(status: ModelRouteStatus, messages: object, tools: object) -> bool:
+        del messages, tools
+        bound_calls.append(status)
+        return False
+
+    def override_guard(status: ModelRouteStatus, messages: object, tools: object) -> bool:
+        del messages, tools
+        override_calls.append(status)
+        return True
+
+    run = router.for_run(guard=bound_guard)
+    assert await run.complete("default", **request(), guard=override_guard) == response("Allowed")
+    assert bound_calls == []
+    assert len(override_calls) == 1
+    assert len(provider.complete_requests) == 1
+    assert run.current_call_status("default") == override_calls[0]
+
+
+@pytest.mark.asyncio
+async def test_run_model_router_preserves_retry_and_continuation() -> None:
+    continuation = ModelContinuation(provider_id="default-provider", payload="opaque-state")
+    provider = ScriptedFakeProvider(
+        completions=(retryable_timeout(), response("Retried"), response("Continued"))
+    )
+    router = ModelRouter(
+        configuration=configuration(),
+        provider_factory=lambda _: provider,
+        clock=FakeClock(NOW),
+        jitter=None,
+    )
+    guarded_attempts: list[ModelRouteStatus] = []
+
+    def guard(status: ModelRouteStatus, messages: object, tools: object) -> bool:
+        del messages, tools
+        guarded_attempts.append(status)
+        return True
+
+    run = router.for_run(guard=guard)
+    assert await run.complete("default", **request()) == response("Retried")
+    assert await run.complete("default", **request(), continuation=continuation) == response(
+        "Continued"
+    )
+    assert [call.continuation for call in provider.complete_requests] == [
+        None,
+        None,
+        continuation,
+    ]
+    assert len(guarded_attempts) == 3
+    assert run.current_call_status("default") == guarded_attempts[-1]
+
+
+@pytest.mark.asyncio
+async def test_run_model_router_records_status_when_stream_is_cancelled() -> None:
+    provider = ScriptedFakeProvider(
+        streams=(StreamScript(events=(TextDelta(delta="Partial"), completed())),)
+    )
+    router = ModelRouter(
+        configuration=configuration(),
+        provider_factory=lambda _: provider,
+        clock=FakeClock(NOW),
+    )
+    run = router.for_run(guard=lambda status, messages, tools: True)
+    stream = cast(AsyncGenerator[object, None], run.stream("chat", **request()))
+
+    assert await anext(stream) == TextDelta(delta="Partial")
+    assert run.current_call_status("chat") is None
+    with pytest.raises(asyncio.CancelledError):
+        await stream.athrow(asyncio.CancelledError())
+
+    assert run.current_call_status("chat") == router.current_call_status("chat")

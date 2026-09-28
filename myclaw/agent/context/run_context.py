@@ -1,16 +1,16 @@
-"""Synchronous Conversation Compaction selection and Conversation Summary persistence."""
+"""Run-local context preparation, compaction, and staged commit values."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 from typing import Any, Literal, NoReturn, Protocol
 
-from myclaw.agent.context_budget import (
+from myclaw.agent.context.budget import (
     CONTEXT_ESTIMATOR_VERSION,
     ContextBudget,
     ContextProjection,
@@ -27,13 +27,12 @@ from myclaw.agent.run_errors import CommittableAgentRunError
 from myclaw.agent.session.session import Session
 from myclaw.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from myclaw.provider.errors import ModelCallError, model_context_overflow_error
-from myclaw.provider.model_router import ModelAttemptGuard, ModelRouteStatus
+from myclaw.provider.model_router import ModelAttemptGuard, ModelRouteStatus, RunModelRouter
 from myclaw.provider.models import (
     ModelContinuation,
     ModelMessages,
     ModelResponse,
     ModelRoute,
-    ModelStreamEvent,
 )
 from myclaw.templates import render_template
 from myclaw.utils.validation import empty_token_usage
@@ -50,10 +49,9 @@ __all__ = [
     "AgentRunContextController",
     "AgentRunContextModelRouter",
     "AgentRunContextRequestPreparer",
-    "AgentRunContextRouterAdapter",
     "AgentRunContextSnapshot",
-    "AgentRunRouter",
     "AgentRunTerminalCommitValues",
+    "agent_run_attempt_guard",
     "latest_main_agent_usage_anchor",
 ]
 
@@ -69,39 +67,6 @@ class AgentRunContextModelRouter(Protocol):
         tools: Sequence[dict[str, Any]],
         guard: ModelAttemptGuard | None = None,
     ) -> ModelResponse: ...
-
-
-class AgentRunRouter(Protocol):
-    """Router contract required by an active foreground or Schedule Agent Run."""
-
-    def stream(
-        self,
-        route: Literal["chat", "schedule"],
-        *,
-        messages: ModelMessages,
-        tools: Sequence[dict[str, Any]],
-        continuation: ModelContinuation | None = None,
-        guard: ModelAttemptGuard | None = None,
-    ) -> AsyncIterator[ModelStreamEvent]: ...
-
-    def complete(
-        self,
-        route: ModelRoute,
-        *,
-        messages: ModelMessages,
-        tools: Sequence[dict[str, Any]],
-        continuation: ModelContinuation | None = None,
-        guard: ModelAttemptGuard | None = None,
-    ) -> Coroutine[Any, Any, ModelResponse]: ...
-
-    def current_call_status(self, route: ModelRoute) -> ModelRouteStatus | None: ...
-
-    def call_route_status(
-        self,
-        route: ModelRoute,
-        *,
-        continuation: ModelContinuation | None,
-    ) -> ModelRouteStatus: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -759,7 +724,7 @@ class AgentRunContextController:
                     "memory",
                     messages=fact_messages,
                     tools=(),
-                    guard=_request_hard_guard,
+                    guard=agent_run_attempt_guard,
                 )
             except ModelCallError as provider_error:
                 self._raise_summary_failure(revision, provider_error)
@@ -808,7 +773,7 @@ class AgentRunContextController:
                 "memory",
                 messages=action_messages,
                 tools=(),
-                guard=_request_hard_guard,
+                guard=agent_run_attempt_guard,
             )
         except ModelCallError as provider_error:
             self._raise_summary_failure(revision, provider_error)
@@ -955,7 +920,7 @@ class AgentRunContextRequestPreparer:
         self,
         controller: AgentRunContextController,
         *,
-        router: AgentRunContextRouterAdapter,
+        router: RunModelRouter,
         requested_route: Literal["chat", "schedule"],
         project_messages: CompactionProjection,
         current_user: dict[str, Any] | None = None,
@@ -1110,76 +1075,6 @@ def _project_for_model_request(
     return projected
 
 
-class AgentRunContextRouterAdapter:
-    """Add the per-attempt hard budget guard in an explicit Agent Run composition."""
-
-    def __init__(self, router: AgentRunRouter) -> None:
-        self._router = router
-        self._call_statuses: dict[ModelRoute, ModelRouteStatus] = {}
-
-    def stream(
-        self,
-        route: Literal["chat", "schedule"],
-        *,
-        messages: ModelMessages,
-        tools: Sequence[dict[str, Any]],
-        continuation: ModelContinuation | None = None,
-        guard: ModelAttemptGuard | None = None,
-    ) -> AsyncIterator[ModelStreamEvent]:
-        events = self._router.stream(
-            route,
-            messages=messages,
-            tools=tools,
-            continuation=continuation,
-            guard=_request_hard_guard if guard is None else guard,
-        )
-
-        async def observe() -> AsyncIterator[ModelStreamEvent]:
-            try:
-                async for event in events:
-                    yield event
-            finally:
-                self._remember_call_status(route)
-
-        return observe()
-
-    async def complete(
-        self,
-        route: ModelRoute,
-        *,
-        messages: ModelMessages,
-        tools: Sequence[dict[str, Any]],
-        continuation: ModelContinuation | None = None,
-        guard: ModelAttemptGuard | None = None,
-    ) -> ModelResponse:
-        try:
-            return await self._router.complete(
-                route,
-                messages=messages,
-                tools=tools,
-                continuation=continuation,
-                guard=_request_hard_guard if guard is None else guard,
-            )
-        finally:
-            self._remember_call_status(route)
-
-    def current_call_status(self, route: ModelRoute) -> ModelRouteStatus | None:
-        return self._call_statuses.get(route)
-
-    def call_route_status(
-        self,
-        route: ModelRoute,
-        *,
-        continuation: ModelContinuation | None,
-    ) -> ModelRouteStatus:
-        return self._router.call_route_status(route, continuation=continuation)
-
-    def _remember_call_status(self, route: ModelRoute) -> None:
-        status = self._router.current_call_status(route)
-        if status is not None:
-            self._call_statuses[route] = status
-
-
 def _completed_run_ranges(messages: Sequence[dict[str, Any]]) -> list[tuple[int, int]]:
     starts = [index for index, message in enumerate(messages) if message.get("role") == "user"]
     return [
@@ -1287,7 +1182,7 @@ def _summary_response_error(response: ModelResponse) -> ModelCallError | None:
     )
 
 
-def _request_hard_guard(
+def agent_run_attempt_guard(
     status: ModelRouteStatus,
     messages: ModelMessages,
     tools: Sequence[dict[str, Any]],

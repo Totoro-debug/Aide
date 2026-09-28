@@ -23,13 +23,12 @@ from myclaw.agent.confirmation import (
     ConfirmationUnavailable,
     ForegroundConfirmationOwner,
 )
-from myclaw.agent.context import ContextBuilder
-from myclaw.agent.context_budget import ContextBudget, ContextUsageSnapshot, estimate_request_tokens
-from myclaw.agent.memory.conversation_compactor import (
+from myclaw.agent.context.budget import ContextBudget, ContextUsageSnapshot, estimate_request_tokens
+from myclaw.agent.context.builder import ContextBuilder
+from myclaw.agent.context.run_context import (
     AgentRunContextController,
     AgentRunContextRequestPreparer,
-    AgentRunContextRouterAdapter,
-    AgentRunRouter,
+    agent_run_attempt_guard,
     latest_main_agent_usage_anchor,
 )
 from myclaw.agent.memory.manager import MemoryManager
@@ -77,7 +76,7 @@ from myclaw.logging.session import session_log
 from myclaw.management.commands import MANAGEMENT_COMMANDS
 from myclaw.management.service import RuntimeStatusInput
 from myclaw.provider.errors import ModelCallError
-from myclaw.provider.model_router import ModelRouteStatus
+from myclaw.provider.model_router import ModelRouterDelegate, ModelRouteStatus, RunModelRouter
 from myclaw.provider.models import ModelCompleted, ModelRoute, ReasoningDelta, TextDelta
 from myclaw.schedule.model import ScheduleJob
 from myclaw.schedule.service import (
@@ -198,7 +197,7 @@ class _AgentRunContext:
     route: Literal["chat", "schedule"]
     current_user: dict[str, Any]
     project_messages: Callable[[Sequence[dict[str, Any]]], list[dict[str, Any]]]
-    router: AgentRunContextRouterAdapter
+    router: RunModelRouter
     controller: AgentRunContextController
     runner: AgentRunner
 
@@ -215,7 +214,7 @@ class AgentLoop:
         configuration: UserConfiguration,
         bus: MessageBus,
         schedule_service: ScheduleService,
-        model_router: AgentRunRouter,
+        model_router: ModelRouterDelegate,
         memory_manager: MemoryManager,
         session_id: str | None,
         now: Callable[[], datetime],
@@ -962,7 +961,7 @@ class AgentLoop:
         route: Literal["chat", "schedule"],
         project_messages: Callable[[Sequence[dict[str, Any]]], list[dict[str, Any]]],
     ) -> _AgentRunContext:
-        run_router = AgentRunContextRouterAdapter(self._model_router)
+        run_router = RunModelRouter(self._model_router, guard=agent_run_attempt_guard)
         controller = AgentRunContextController.from_session(
             session,
             provider=run_router,

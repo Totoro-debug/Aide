@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Self, cast
 from uuid import UUID, uuid4
 
-from myclaw.agent.context_budget import ContextUsageSnapshot
+from myclaw.agent.context.budget import ContextUsageSnapshot
 from myclaw.agent.tools.base import ArtifactReference
 from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.utils.async_tasks import await_task_preserving_cancellation

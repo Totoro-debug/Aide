@@ -12,9 +12,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
-import myclaw.agent.context as context
+import myclaw.agent.context.builder as context
 from myclaw.agent.blackboard import Blackboard
-from myclaw.agent.context import ContextBuilder
+from myclaw.agent.context.builder import ContextBuilder
 from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.tools.core.exec_host import resolve_exec_shell
 from myclaw.agent.tools.permission import PermissionSnapshot
@@ -165,10 +165,10 @@ def test_context_builder_builds_system_history_and_current_user_in_order(
     timezone_name: str,
     expected_time: str,
 ) -> None:
-    monkeypatch.setattr("myclaw.agent.context.platform.system", lambda: "Windows")
-    monkeypatch.setattr("myclaw.agent.context.platform.machine", lambda: "AMD64")
+    monkeypatch.setattr("myclaw.agent.context.builder.platform.system", lambda: "Windows")
+    monkeypatch.setattr("myclaw.agent.context.builder.platform.machine", lambda: "AMD64")
     monkeypatch.setattr(
-        "myclaw.agent.context.platform.python_version",
+        "myclaw.agent.context.builder.platform.python_version",
         lambda: "3.12.13",
     )
     agent_home = workspace.parent / "agent-home"

@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal, Protocol
 
 from loguru import logger
 
-from myclaw.agent.context_budget import request_fits_model_context
+from myclaw.agent.context.budget import request_fits_model_context
 from myclaw.agent.memory.manager import (
     MemoryEditMismatchError,
     MemoryEditReadError,

@@ -743,7 +743,7 @@ def test_session_exposes_the_terminal_agent_run_commit() -> None:
 
 def test_runtime_status_uses_the_canonical_usage_anchor_and_configured_chat_route() -> None:
     loop_tree = _source_ast(ROOT / "myclaw" / "agent" / "loop.py")
-    compactor_tree = _source_ast(ROOT / "myclaw" / "agent" / "memory" / "conversation_compactor.py")
+    compactor_tree = _source_ast(ROOT / "myclaw" / "agent" / "context" / "run_context.py")
 
     anchor_definitions = [
         node
@@ -787,7 +787,7 @@ def test_runtime_status_uses_the_canonical_usage_anchor_and_configured_chat_rout
 
 
 def test_agent_run_context_exports_current_request_and_terminal_contracts() -> None:
-    compactor_tree = _source_ast(ROOT / "myclaw" / "agent" / "memory" / "conversation_compactor.py")
+    compactor_tree = _source_ast(ROOT / "myclaw" / "agent" / "context" / "run_context.py")
     class_names = {node.name for node in compactor_tree.body if isinstance(node, ast.ClassDef)}
     expected_contracts = {"AgentRunContextRequestPreparer", "AgentRunTerminalCommitValues"}
 

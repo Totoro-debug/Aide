@@ -1726,6 +1726,7 @@ async def test_restore_workflow_cancellation_branches_do_not_refill_draft(
                     await pilot.press("enter")
             if cancel_stage == "confirmation":
                 await _wait_for_screen_id(app, pilot, "restore-confirmation")
+                await pilot.pause()
                 assert "Files: 0 tracked, 0 external" in _visible_screen_text(app)
                 await pilot.press(cancel_key)
         async with asyncio.timeout(2):
@@ -4314,7 +4315,7 @@ async def test_activity_heading_starts_with_accumulated_time_and_freezes_on_succ
         projection = app._active_run_projection
         assert projection is not None
         async with asyncio.timeout(1):
-            while projection._started_at is None or not app.query(".agent-run-activity-heading"):
+            while projection._started_at is None or projection._activity_group is None:
                 await pilot.pause()
 
         clock[0] = 5.9

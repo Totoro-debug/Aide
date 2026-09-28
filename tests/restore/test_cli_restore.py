@@ -9,7 +9,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
-from textual.widgets import OptionList, Static
+from textual.widgets import Input, OptionList, Static
 
 import myclaw.session.restore as restore_module
 import myclaw.terminal.cli as cli
@@ -996,7 +996,7 @@ async def test_restore_anchor_picker_shows_local_preview_and_cancels_without_mut
             .strftime("%Y-%m-%d %H:%M")
             in picker_text
         )
-        assert app.screen.focused is app.screen.query_one("#restore-anchor-options")
+        assert app.screen.focused is app.screen.query_one("#restore-anchor-filter", Input)
 
         await pilot.click(offset=(1, 1))
         assert app.screen.id == "restore-anchor-picker"

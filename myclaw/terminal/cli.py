@@ -205,21 +205,6 @@ def _fatal_target_preparation_error(error: Exception) -> FatalManagementError:
     return FatalManagementError(_TARGET_SESSION_PREPARATION_ERROR)
 
 
-async def _drain_schedule_confirmation_aborts(
-    schedule_service: ScheduleService,
-    *,
-    generation_id: object | None = None,
-) -> None:
-    """Drain the optional lifecycle seam while keeping old test fakes usable."""
-    drain = getattr(schedule_service, "drain_confirmation_aborts", None)
-    if not callable(drain):
-        return
-    if generation_id is None:
-        await drain()
-    else:
-        await drain(generation_id=generation_id)
-
-
 async def _run_cli_conversation(
     *,
     agent_home: AgentHome,
@@ -272,22 +257,11 @@ async def _run_cli_conversation(
         await loop.abort()
 
     async def cancel_old_generation_confirmations(old_loop: AgentLoop) -> None:
-        generation_id = getattr(old_loop, "generation_id", None)
-        if generation_id is None:
-            return
+        generation_id = old_loop.generation_id
         assert schedule_service is not None
-        cancel_generation = getattr(
-            schedule_service,
-            "cancel_confirmation_generation",
-            None,
-        )
-        if callable(cancel_generation):
-            cancel_generation(generation_id)
+        schedule_service.cancel_confirmation_generation(generation_id)
         await confirmation_coordinator.cancel_generation(generation_id)
-        await _drain_schedule_confirmation_aborts(
-            schedule_service,
-            generation_id=generation_id,
-        )
+        await schedule_service.drain_confirmation_aborts(generation_id=generation_id)
 
     async def handover_prepared_generation(
         old_loop: AgentLoop,
@@ -421,16 +395,12 @@ async def _run_cli_conversation(
             execute_user_job=execute_user_job,
             execute_user_occurrence=execute_user_occurrence,
             permission_snapshot_factory=capture_schedule_permission_snapshot,
-            cancel_confirmation_owner=getattr(
-                confirmation_coordinator,
-                "cancel_owner",
-                None,
-            ),
+            cancel_confirmation_owner=confirmation_coordinator.cancel_owner,
             execute_dream=dream.run,
             timezone_name=get_localzone_name(),
         )
 
-        def create_agent_loop(
+        async def create_agent_loop(
             session_id: str | None,
             *,
             mcp_snapshot: MCPToolSnapshot | None = None,
@@ -456,9 +426,14 @@ async def _run_cli_conversation(
                 exec_host=exec_host,
                 permission_control=permission_control,
             )
-            bind_confirmation_requester = getattr(loop, "bind_confirmation_requester", None)
-            if callable(bind_confirmation_requester):
-                bind_confirmation_requester(confirmation_coordinator.request)
+            try:
+                loop.bind_confirmation_requester(confirmation_coordinator.request)
+            except BaseException as error:
+                try:
+                    await abort_loop_once(loop)
+                except BaseException as cleanup_error:
+                    raise error from cleanup_error
+                raise
             return loop
 
         def current_agent_loop() -> AgentLoop:
@@ -544,7 +519,7 @@ async def _run_cli_conversation(
                     ) from error
 
                 try:
-                    target = create_agent_loop(
+                    target = await create_agent_loop(
                         session_id,
                         mcp_snapshot=candidate_report.snapshot,
                         mcp_keywords=candidate_keywords,
@@ -709,13 +684,6 @@ async def _run_cli_conversation(
                 anchors=tuple(reversed(anchors)),
             )
 
-        async def wait_for_restore_idle(loop: AgentLoop) -> None:
-            wait = getattr(loop, "wait_for_restore_idle", None)
-            if callable(wait):
-                await wait()
-                return
-            await wait_for_session_persist(loop, loop.session.session_id)
-
         async def restore_inspect(anchor_id: int) -> RestorePlan:
             nonlocal restore_manager, restore_plan, restore_barrier_loop
             nonlocal restore_barrier_held, restore_schedule_paused
@@ -747,7 +715,7 @@ async def _run_cli_conversation(
                     raise ManagementError(_RESTORE_ADMISSION_ERROR)
                 restore_schedule_paused = True
                 await schedule_service.pause_and_wait_idle()
-                await wait_for_restore_idle(loop)
+                await loop.wait_for_restore_idle()
                 restore_manager = RestoreManager(
                     workspace_state,
                     loop.session.session_id,
@@ -771,7 +739,7 @@ async def _run_cli_conversation(
                         "The selected Restore plan is stale; no changes were made.",
                     )
                 ) from error
-            except (RestoreError, OSError, UnicodeError, ValueError) as error:
+            except Exception as error:
                 await release_restore_barriers()
                 raise ManagementError(
                     ErrorInfo("persistence_error", "Session Restore could not be inspected.")
@@ -800,7 +768,7 @@ async def _run_cli_conversation(
                     configuration.mcp,
                 )
                 _report_mcp_generation(candidate_report)
-                target = create_agent_loop(
+                target = await create_agent_loop(
                     session_id,
                     mcp_snapshot=candidate_report.snapshot,
                     mcp_keywords=candidate_keywords,
@@ -966,7 +934,7 @@ async def _run_cli_conversation(
             if restore_barrier_held:
                 await release_restore_barriers()
 
-        initial_loop = create_agent_loop(startup_session_id)
+        initial_loop = await create_agent_loop(startup_session_id)
         active_loop = initial_loop
         initial_loop.preflight()
         schedule_service._prepare_start()
@@ -998,13 +966,7 @@ async def _run_cli_conversation(
             restore_cancel=restore_cancel,
             ensure_management_mutation_allowed=ensure_management_mutation_allowed,
         )
-        bind_restore_acknowledge_failure = getattr(
-            management,
-            "bind_restore_acknowledge_failure",
-            None,
-        )
-        if callable(bind_restore_acknowledge_failure):
-            bind_restore_acknowledge_failure(restore_acknowledge_failure)
+        management.bind_restore_acknowledge_failure(restore_acknowledge_failure)
         dispatcher = ManagementCommandDispatcher(management)
         terminal_app = TerminalConversationApp(
             bus=bus,
@@ -1012,13 +974,7 @@ async def _run_cli_conversation(
             management_dispatcher=dispatcher,
             skill_metadata=initial_loop.skill_metadata,
         )
-        bind_confirmation_coordinator = getattr(
-            terminal_app,
-            "bind_confirmation_coordinator",
-            None,
-        )
-        if callable(bind_confirmation_coordinator):
-            bind_confirmation_coordinator(confirmation_coordinator)
+        terminal_app.bind_confirmation_coordinator(confirmation_coordinator)
 
         await initial_loop.start()
         schedule_service.start()
@@ -1037,7 +993,7 @@ async def _run_cli_conversation(
 
         if schedule_service is not None:
             try:
-                await _drain_schedule_confirmation_aborts(schedule_service)
+                await schedule_service.drain_confirmation_aborts()
             except BaseException as error:
                 cleanup_errors.append(error)
 

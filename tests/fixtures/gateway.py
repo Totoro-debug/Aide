@@ -6,8 +6,8 @@ from collections.abc import Iterable
 from typing import Any
 from uuid import UUID
 
-from myclaw.agent.session.backup_store import FileMutationRecorder
 from myclaw.agent.tools.base import BaseTool
+from myclaw.agent.tools.file_mutation import FileMutationRecorder
 from myclaw.agent.tools.permission import PermissionContext
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationRequester,

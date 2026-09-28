@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -8,7 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from myclaw.agent.permission import PermissionSnapshot
-from myclaw.agent.session.backup_store import BackupTicket, FileBackupStore
+from myclaw.agent.session.backup_store import FileBackupStore
 from myclaw.agent.tools.base import BaseTool
 from myclaw.agent.tools.core.edit_file import EditFileTool
 from myclaw.agent.tools.core.exec_host import resolve_exec_shell
@@ -46,20 +48,15 @@ def _gateway(
 @dataclass
 class _RecordingRecorder:
     before_calls: list[tuple[UUID, Path]] = field(default_factory=list)
-    after_calls: list[BackupTicket | None] = field(default_factory=list)
+    after_calls: list[tuple[UUID, Path]] = field(default_factory=list)
 
-    def before_write(self, run_token: UUID, resolved_target: Path) -> BackupTicket:
+    def begin_write(self, run_token: UUID, resolved_target: Path) -> Callable[[], None]:
         self.before_calls.append((run_token, resolved_target))
-        return BackupTicket(
-            operation_id=len(self.before_calls),
-            run_token=run_token,
-            requested_target=resolved_target,
-            canonical_target=resolved_target,
-            recorded=True,
-        )
 
-    def after_write(self, ticket: BackupTicket | None) -> None:
-        self.after_calls.append(ticket)
+        def complete() -> None:
+            self.after_calls.append((run_token, resolved_target))
+
+        return complete
 
 
 class _NoopTool(BaseTool):
@@ -75,13 +72,18 @@ class _NoopTool(BaseTool):
 
 
 class _FailingRecorder:
-    def before_write(self, run_token: UUID, resolved_target: Path) -> BackupTicket:
-        del run_token, resolved_target
-        raise OSError("backup persistence failed")
+    def __init__(self, *, fail_on_complete: bool = False) -> None:
+        self.fail_on_complete = fail_on_complete
 
-    def after_write(self, ticket: BackupTicket | None) -> None:
-        del ticket
-        raise OSError("gap persistence failed")
+    def begin_write(self, run_token: UUID, resolved_target: Path) -> Callable[[], None]:
+        del run_token, resolved_target
+        if not self.fail_on_complete:
+            raise OSError("backup persistence failed")
+
+        def complete() -> None:
+            raise OSError("gap persistence failed")
+
+        return complete
 
 
 @pytest.mark.asyncio
@@ -105,6 +107,8 @@ async def test_authorized_foreground_write_persists_one_backup_with_run_token(
     assert len(journal.entries) == 1
     assert journal.entries[0].run_token == token
     assert journal.entries[0].canonical_target == str(target.resolve())
+    assert journal.entries[0].after is not None
+    assert journal.entries[0].after.sha256 == hashlib.sha256(b"after").hexdigest()
     assert store.read_backup(1) == b"before"
     assert target.read_bytes() == b"after"
 
@@ -261,16 +265,18 @@ async def test_protected_restore_state_is_rejected_before_authorization_or_recor
     assert not (workspace / ".myclaw" / "restore" / "session" / "state.json").exists()
 
 
+@pytest.mark.parametrize("fail_on_complete", [False, True])
 @pytest.mark.asyncio
 async def test_backup_recorder_failures_do_not_change_write_result(
     workspace: Path,
+    fail_on_complete: bool,
 ) -> None:
     target = workspace / "notes.txt"
     gateway = _gateway(workspace, WriteFileTool(workspace=workspace))
 
     result = await gateway.call(
         _call("write_file", {"path": "notes.txt", "content": "after"}),
-        file_mutation_recorder=_FailingRecorder(),
+        file_mutation_recorder=_FailingRecorder(fail_on_complete=fail_on_complete),
         run_token=uuid4(),
     )
 
@@ -304,6 +310,27 @@ async def test_write_failure_preserves_tool_error_after_one_recording_attempt(
     assert "injected write failure" in result.content
     assert len(recorder.before_calls) == 1
     assert len(recorder.after_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_recorder_completion_failure_preserves_write_error(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = _gateway(workspace, WriteFileTool(workspace=workspace))
+
+    def fail_target_write(_path: Path, _data: bytes) -> int:
+        raise OSError("injected write failure")
+
+    monkeypatch.setattr(Path, "write_bytes", fail_target_write)
+    result = await gateway.call(
+        _call("write_file", {"path": "notes.txt", "content": "after"}),
+        file_mutation_recorder=_FailingRecorder(fail_on_complete=True),
+        run_token=uuid4(),
+    )
+
+    assert result.status == "error"
+    assert "injected write failure" in result.content
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,7 @@ from myclaw.agent.permission import RuntimePermissionControl
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader, UserConfiguration
 from myclaw.management.commands import ManagementCommandDispatcher
-from myclaw.management.service import FatalManagementError
+from myclaw.management.service import FatalManagementError, ManagementViewService
 from myclaw.provider.models import AssistantModelMessage, ModelCompleted, ModelResponse, ModelUsage
 from myclaw.skills.catalog import SkillMetadata
 from tests.configuration.test_config import VALID_CONFIG
@@ -60,6 +60,9 @@ class _CliContractApp:
         self.rebound_skill_metadata: tuple[SkillMetadata, ...] | None = None
         self.events: list[str] = []
         self.target_loop: AgentLoop | None = None
+
+    def bind_confirmation_coordinator(self, coordinator: object) -> None:
+        assert coordinator is not None
 
     def before_same_session_resume(self, loop: AgentLoop) -> None:
         del loop
@@ -149,6 +152,46 @@ async def _exercise_cli_contract(
     assert app.target_loop is not None
     assert app.rebound_skill_metadata is not None
     return app.events, app.target_loop, app.rebound_skill_metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_binding", ["management", "terminal"])
+async def test_cli_missing_required_binding_stops_terminal_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_binding: str,
+) -> None:
+    agent_home = AgentHome(tmp_path / "agent-home")
+    configuration = _configuration(agent_home)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    app_instances = 0
+    run_calls = 0
+
+    class UnboundApp:
+        def __init__(self, **kwargs: object) -> None:
+            nonlocal app_instances
+            del kwargs
+            app_instances += 1
+
+        async def run_async(self) -> None:
+            nonlocal run_calls
+            run_calls += 1
+
+    monkeypatch.setattr(cli, "TerminalConversationApp", UnboundApp)
+    if missing_binding == "management":
+        monkeypatch.setattr(ManagementViewService, "bind_restore_acknowledge_failure", None)
+
+    expected_error = TypeError if missing_binding == "management" else AttributeError
+    with pytest.raises(expected_error):
+        await cli._run_cli_conversation(
+            agent_home=agent_home,
+            workspace=workspace,
+            configuration=configuration,
+        )
+
+    assert app_instances == int(missing_binding == "terminal")
+    assert run_calls == 0
 
 
 @pytest.mark.asyncio
@@ -371,6 +414,9 @@ async def test_cli_force_replacement_cancels_framing_without_old_session_late_wr
             self._bus = bus
             self._control = control
             self._dispatcher = management_dispatcher
+
+        def bind_confirmation_coordinator(self, coordinator: object) -> None:
+            assert coordinator is not None
 
         async def run_async(self) -> None:
             assert blocker is not None

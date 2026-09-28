@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -178,7 +179,7 @@ async def test_cli_starts_mcp_before_initial_loop_and_closes_it_after_loop(
 
     class FakeScheduleService:
         def __init__(self, **kwargs: object) -> None:
-            del kwargs
+            assert callable(kwargs["cancel_confirmation_owner"])
 
         def context_timezone_name(self) -> str:
             return "Asia/Shanghai"
@@ -195,6 +196,9 @@ async def test_cli_starts_mcp_before_initial_loop_and_closes_it_after_loop(
         async def pause_and_drain(self) -> None:
             events.append("schedule_pause")
 
+        async def drain_confirmation_aborts(self, *, generation_id: UUID | None = None) -> None:
+            assert generation_id is None
+
         async def close(self) -> None:
             events.append("schedule_close")
 
@@ -210,6 +214,9 @@ async def test_cli_starts_mcp_before_initial_loop_and_closes_it_after_loop(
             events.append("loop_init")
             self.control = object()
             self.skill_metadata = ()
+
+        def bind_confirmation_requester(self, requester: object) -> None:
+            assert callable(requester)
 
         def preflight(self) -> None:
             events.append("loop_preflight")
@@ -233,6 +240,9 @@ async def test_cli_starts_mcp_before_initial_loop_and_closes_it_after_loop(
         def deactivate(self) -> None:
             pass
 
+        def bind_restore_acknowledge_failure(self, callback: object) -> None:
+            assert callable(callback)
+
     class FakeDispatcher:
         def __init__(self, management: object) -> None:
             del management
@@ -240,6 +250,9 @@ async def test_cli_starts_mcp_before_initial_loop_and_closes_it_after_loop(
     class FakeApp:
         def __init__(self, **kwargs: object) -> None:
             del kwargs
+
+        def bind_confirmation_coordinator(self, coordinator: object) -> None:
+            assert coordinator is not None
 
         async def run_async(self) -> None:
             events.append("app_run")
@@ -357,7 +370,7 @@ async def test_cli_keeps_old_generation_when_mcp_candidate_preparation_fails(
 
     class FakeScheduleService:
         def __init__(self, **kwargs: object) -> None:
-            del kwargs
+            assert callable(kwargs["cancel_confirmation_owner"])
 
         def context_timezone_name(self) -> str:
             return "Asia/Shanghai"
@@ -373,6 +386,9 @@ async def test_cli_keeps_old_generation_when_mcp_candidate_preparation_fails(
 
         async def pause_and_drain(self) -> None:
             events.append("schedule_pause")
+
+        async def drain_confirmation_aborts(self, *, generation_id: UUID | None = None) -> None:
+            assert generation_id is None
 
         async def close(self) -> None:
             pass
@@ -394,6 +410,9 @@ async def test_cli_keeps_old_generation_when_mcp_candidate_preparation_fails(
                 session_id="old-session",
                 wait_for_pending_persist=lambda: None,
             )
+
+        def bind_confirmation_requester(self, requester: object) -> None:
+            assert callable(requester)
 
         def preflight(self) -> None:
             pass
@@ -417,6 +436,9 @@ async def test_cli_keeps_old_generation_when_mcp_candidate_preparation_fails(
         def deactivate(self) -> None:
             pass
 
+        def bind_restore_acknowledge_failure(self, callback: object) -> None:
+            assert callable(callback)
+
     class FakeDispatcher:
         def __init__(self, management: object) -> None:
             del management
@@ -424,6 +446,9 @@ async def test_cli_keeps_old_generation_when_mcp_candidate_preparation_fails(
     class FakeApp:
         def __init__(self, **kwargs: object) -> None:
             del kwargs
+
+        def bind_confirmation_coordinator(self, coordinator: object) -> None:
+            assert coordinator is not None
 
         async def run_async(self) -> None:
             assert replace_callback is not None
@@ -566,7 +591,7 @@ async def test_cli_uses_failed_mcp_candidate_without_mutating_old_generation(
 
     class FakeScheduleService:
         def __init__(self, **kwargs: object) -> None:
-            del kwargs
+            assert callable(kwargs["cancel_confirmation_owner"])
 
         def context_timezone_name(self) -> str:
             return "Asia/Shanghai"
@@ -579,6 +604,15 @@ async def test_cli_uses_failed_mcp_candidate_without_mutating_old_generation(
 
         def start(self) -> None:
             pass
+
+        def cancel_confirmation_generation(self, generation_id: UUID) -> None:
+            assert old_loop is not None
+            assert generation_id == old_loop.generation_id
+            events.append("confirmation_cancel")
+
+        async def drain_confirmation_aborts(self, *, generation_id: UUID | None = None) -> None:
+            if generation_id is not None:
+                events.append("confirmation_drain")
 
         async def pause_and_drain(self) -> None:
             events.append("schedule_pause")
@@ -603,12 +637,16 @@ async def test_cli_uses_failed_mcp_candidate_without_mutating_old_generation(
             self.session = SimpleNamespace(session_id=kwargs["session_id"] or "old")
             self.control = SimpleNamespace(has_active_run=False)
             self.skill_metadata = ()
+            self.generation_id = uuid4()
             if kwargs["session_id"] is None:
                 old_loop = self
                 events.append("old_init")
             else:
                 target_loop = self
                 events.append("target_init")
+
+        def bind_confirmation_requester(self, requester: object) -> None:
+            assert callable(requester)
 
         def preflight(self) -> None:
             pass
@@ -645,6 +683,9 @@ async def test_cli_uses_failed_mcp_candidate_without_mutating_old_generation(
         def deactivate(self) -> None:
             pass
 
+        def bind_restore_acknowledge_failure(self, callback: object) -> None:
+            assert callable(callback)
+
     class FakeDispatcher:
         def __init__(self, management: object) -> None:
             del management
@@ -652,6 +693,9 @@ async def test_cli_uses_failed_mcp_candidate_without_mutating_old_generation(
     class FakeApp:
         def __init__(self, **kwargs: object) -> None:
             del kwargs
+
+        def bind_confirmation_coordinator(self, coordinator: object) -> None:
+            assert coordinator is not None
 
         async def run_async(self) -> None:
             assert replace_callback is not None
@@ -703,6 +747,9 @@ async def test_cli_uses_failed_mcp_candidate_without_mutating_old_generation(
     assert events.index("keywords_prepare_1") < events.index("old_init")
     assert events.index("mcp_prepare") < events.index("keywords_prepare_2")
     assert events.index("keywords_prepare_2") < events.index("replacement_pause")
+    assert events.index("confirmation_cancel") < events.index("confirmation_drain")
+    assert events.index("confirmation_drain") < events.index("quiesce")
+    assert events.count("confirmation_cancel") == events.count("confirmation_drain") == 1
     assert events.index("rebind") < events.index("target_start")
     assert events.index("target_start") < events.index("mcp_activate")
     assert events.index("mcp_activate") < events.index("publish_observed")
@@ -871,7 +918,7 @@ async def test_cli_real_mcp_flow_persists_result_reuses_connection_and_closes(
 
     class FakeScheduleService:
         def __init__(self, **kwargs: object) -> None:
-            del kwargs
+            assert callable(kwargs["cancel_confirmation_owner"])
 
         def context_timezone_name(self) -> str:
             return "Asia/Shanghai"
@@ -884,6 +931,12 @@ async def test_cli_real_mcp_flow_persists_result_reuses_connection_and_closes(
 
         def start(self) -> None:
             pass
+
+        def cancel_confirmation_generation(self, generation_id: UUID) -> None:
+            assert generation_id == loops[0].generation_id
+
+        async def drain_confirmation_aborts(self, *, generation_id: UUID | None = None) -> None:
+            assert generation_id is None or generation_id == loops[0].generation_id
 
         async def pause_and_drain(self) -> None:
             pass
@@ -909,8 +962,12 @@ async def test_cli_real_mcp_flow_persists_result_reuses_connection_and_closes(
             )
             self.control = SimpleNamespace(has_active_run=False)
             self.skill_metadata: tuple[object, ...] = ()
+            self.generation_id = uuid4()
             self.value = f"generation-{len(loops) + 1}"
             loops.append(self)
+
+        def bind_confirmation_requester(self, requester: object) -> None:
+            assert callable(requester)
 
         def preflight(self) -> None:
             assert [tool.name for tool in self.mcp_tools] == ["mcp_local_echo"]
@@ -965,6 +1022,9 @@ async def test_cli_real_mcp_flow_persists_result_reuses_connection_and_closes(
         def deactivate(self) -> None:
             pass
 
+        def bind_restore_acknowledge_failure(self, callback: object) -> None:
+            assert callable(callback)
+
     class FakeDispatcher:
         def __init__(self, management: object) -> None:
             del management
@@ -972,6 +1032,9 @@ async def test_cli_real_mcp_flow_persists_result_reuses_connection_and_closes(
     class FakeApp:
         def __init__(self, **kwargs: object) -> None:
             del kwargs
+
+        def bind_confirmation_coordinator(self, coordinator: object) -> None:
+            assert coordinator is not None
 
         async def run_async(self) -> None:
             assert replace_callback is not None

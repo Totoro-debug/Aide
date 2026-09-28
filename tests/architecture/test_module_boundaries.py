@@ -1185,3 +1185,23 @@ def test_superseded_tool_modules_are_absent() -> None:
     )
 
     assert all(not (PROJECT_ROOT / path).exists() for path in removed)
+
+
+def test_file_tools_and_runner_do_not_import_backup_store() -> None:
+    paths = (
+        PACKAGE_ROOT / "agent" / "runner.py",
+        *_python_files(PACKAGE_ROOT / "agent" / "tools"),
+    )
+    violations = [
+        f"{path.relative_to(PROJECT_ROOT)}:{reference.line} imports {module}"
+        for path in paths
+        for reference in _resolved_static_imports(
+            path.read_text(encoding="utf-8"),
+            package=tuple(path.relative_to(PROJECT_ROOT).parent.parts),
+        )
+        for module in _imported_module_names(reference)
+        if module == "myclaw.agent.session.backup_store"
+        or module.startswith("myclaw.agent.session.backup_store.")
+    ]
+
+    assert violations == []

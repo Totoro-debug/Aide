@@ -7,13 +7,13 @@ import json
 import os
 import re
 import secrets
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
-from typing import BinaryIO, Protocol
+from typing import BinaryIO
 from uuid import UUID
 
 from myclaw.agent.session._restore_persistence import (
@@ -115,14 +115,6 @@ class BackupJournal:
     integrity_issues: tuple[BackupIntegrityIssue, ...]
 
 
-class FileMutationRecorder(Protocol):
-    """Run-local hook around an authorized file mutation."""
-
-    def before_write(self, run_token: UUID, resolved_target: Path) -> BackupTicket | None: ...
-
-    def after_write(self, ticket: BackupTicket | None) -> None: ...
-
-
 @dataclass(frozen=True, slots=True)
 class _StorePaths:
     root: Path
@@ -156,6 +148,15 @@ class FileBackupStore:
         self._session_id = session_id
         self._lock = RLock()
         self._durable_directories: set[tuple[Path, int, int]] = set()
+
+    def begin_write(self, run_token: UUID, resolved_target: Path) -> Callable[[], None]:
+        """Keep the backup ticket private to this mutation's completion callback."""
+        ticket = self.before_write(run_token, resolved_target)
+
+        def complete() -> None:
+            self.after_write(ticket)
+
+        return complete
 
     def before_write(self, run_token: UUID, resolved_target: Path) -> BackupTicket | None:
         """Record a mutation attempt without allowing backup failures to block it."""
@@ -1161,6 +1162,5 @@ __all__ = [
     "BackupStoreError",
     "BackupTicket",
     "FileBackupStore",
-    "FileMutationRecorder",
     "FileState",
 ]

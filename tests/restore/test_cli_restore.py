@@ -9,14 +9,19 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
-from textual.widgets import OptionList, Static
+from textual.widgets import Input, OptionList, Static
 
 import myclaw.agent.session.restore as restore_module
 import myclaw.terminal.cli as cli
 from myclaw.agent.loop import AgentLoop, ForegroundConversationProjection
 from myclaw.agent.message_bus import MessageBus
 from myclaw.agent.session.restore import RestoreManager as SessionRestoreManager
-from myclaw.agent.session.restore import RestoreMode, RestoreRecoveryRequired
+from myclaw.agent.session.restore import (
+    RestoreMode,
+    RestorePlan,
+    RestoreRecoveryRequired,
+    RestoreResult,
+)
 from myclaw.agent.session.session import RestoreAnchor, Session
 from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
@@ -80,8 +85,12 @@ async def test_restore_command_lists_persisted_anchors_without_exposing_restore_
         "persist_failure",
         "unknown_failure",
         "rebuild_failure",
+        "rebuild_binding_failure",
         "handover_failure",
         "handover_cancel",
+        "title_wait",
+        "readiness_missing",
+        "readiness_raises",
     ),
 )
 async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
@@ -101,6 +110,8 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
     schedule_waiting = asyncio.Event()
     loop_pause_waiting = asyncio.Event()
     loop_pause_release = asyncio.Event()
+    title_waiting = asyncio.Event()
+    title_release = asyncio.Event()
 
     class FakeConfirmationCoordinator:
         async def request(self, _request: object) -> None:
@@ -108,6 +119,9 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
 
         async def cancel_generation(self, _generation_id: UUID) -> None:
             events.append("coordinator_cancel")
+
+        async def cancel_owner(self, _owner: object) -> None:
+            return None
 
         async def close(self) -> None:
             return None
@@ -262,6 +276,8 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
             return not self.barrier
 
         def bind_confirmation_requester(self, _requester: object) -> None:
+            if admission == "rebuild_binding_failure" and len(loops) > 1:
+                raise RuntimeError("secret restored generation binding failure")
             return None
 
         def preflight(self) -> None:
@@ -278,6 +294,11 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
         async def wait_for_restore_idle(self) -> None:
             events.append("session_idle")
             await self.session.wait_for_pending_persist()
+            if admission == "readiness_raises":
+                raise RuntimeError("secret readiness failure")
+            if admission == "title_wait":
+                title_waiting.set()
+                await title_release.wait()
 
         async def _pause_for_replacement(self) -> None:
             if admission in {"double_listing", "lock_race"} and not loop_pause_waiting.is_set():
@@ -320,6 +341,9 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
                 kwargs["management_dispatcher"],
             )
             self.control = kwargs["control"]
+
+        def bind_confirmation_coordinator(self, _coordinator: object) -> None:
+            return None
 
         async def quiesce_for_rebind(self) -> None:
             events.append("terminal_quiesce")
@@ -434,6 +458,32 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
                 assert loop.barrier is False
                 assert bus.paused is False
                 return
+            if admission == "title_wait":
+                inspection = asyncio.create_task(self.dispatcher.restore_inspect(1))
+                await title_waiting.wait()
+                assert events.count("restore_manager_created") == 0
+                assert events.count("restore_execute") == 0
+                title_release.set()
+                inspected = await inspection
+                assert inspected.restore_plan is not None
+                assert events.count("restore_manager_created") == 1
+                assert events.count("restore_execute") == 0
+                await self.dispatcher.restore_cancel()
+                assert loop.barrier is False
+                assert bus.paused is False
+                return
+            if admission in {"readiness_missing", "readiness_raises"}:
+                inspected = await self.dispatcher.restore_inspect(1)
+                assert inspected.restore_plan is None
+                assert inspected.output == (
+                    "persistence_error: Session Restore could not be inspected."
+                )
+                assert events.count("restore_manager_created") == 0
+                assert events.count("restore_execute") == 0
+                assert loop.barrier is False
+                assert bus.paused is False
+                assert "schedule_resume" in events
+                return
             inspected = await self.dispatcher.restore_inspect(1)
             assert inspected.restore_plan is not None
             cancelled = await self.dispatcher.restore_cancel()
@@ -544,6 +594,27 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
             events.append("management_deactivate")
             super().deactivate()
 
+    class ObservedRestoreManager(SessionRestoreManager):
+        def __init__(
+            self,
+            workspace_state: WorkspaceState,
+            session_id: str | None = None,
+            *,
+            now: Callable[[], datetime] | None = None,
+        ) -> None:
+            super().__init__(workspace_state, session_id, now=now)
+            if session_id is not None:
+                events.append("restore_manager_created")
+
+        async def execute(self, plan: RestorePlan, mode: RestoreMode | str) -> RestoreResult:
+            events.append("restore_execute")
+            return await super().execute(plan, mode)
+
+    if admission == "readiness_missing":
+        monkeypatch.delattr(FakeLoop, "wait_for_restore_idle")
+    if admission in {"title_wait", "readiness_missing", "readiness_raises"}:
+        monkeypatch.setattr(cli, "RestoreManager", ObservedRestoreManager)
+
     monkeypatch.setattr(cli, "MCPRuntimeManager", FakeMCP)
     monkeypatch.setattr(cli, "MCPKeywordPreparer", FakeKeywords)
     monkeypatch.setattr(cli, "MessageBus", FakeBus)
@@ -569,6 +640,7 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
         "persist_failure",
         "unknown_failure",
         "rebuild_failure",
+        "rebuild_binding_failure",
         "handover_failure",
         "handover_cancel",
     }:
@@ -607,7 +679,7 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
             assert "schedule_resume" not in events[events.index("terminal_quiesce") :]
             assert events.count("loop_abort") == 2
             assert all(cast(FakeLoop, loop).aborted for loop in loops)
-        if admission == "rebuild_failure":
+        if admission in {"rebuild_failure", "rebuild_binding_failure"}:
             old_loop = cast(FakeLoop, loops[0])
             assert old_loop.aborted is True
             assert (
@@ -618,6 +690,12 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
                 ).messages
                 == []
             )
+        if admission == "rebuild_binding_failure":
+            assert len(loops) == 2
+            assert all(cast(FakeLoop, loop).aborted for loop in loops)
+            assert events.count("loop_abort") == 2
+            assert "mcp_activate" not in events
+            assert "target_start" not in events
         return
     await cli._run_cli_conversation(
         agent_home=home,
@@ -813,6 +891,9 @@ async def test_cli_recovers_pending_restore_before_runtime_components(
         def __init__(self, **_kwargs: object) -> None:
             events.append("app_init")
 
+        def bind_confirmation_coordinator(self, _coordinator: object) -> None:
+            return None
+
         async def run_async(self) -> None:
             events.append("app_run")
 
@@ -996,7 +1077,7 @@ async def test_restore_anchor_picker_shows_local_preview_and_cancels_without_mut
             .strftime("%Y-%m-%d %H:%M")
             in picker_text
         )
-        assert app.screen.focused is app.screen.query_one("#restore-anchor-options")
+        assert app.screen.focused is app.screen.query_one("#restore-anchor-filter", Input)
 
         await pilot.click(offset=(1, 1))
         assert app.screen.id == "restore-anchor-picker"

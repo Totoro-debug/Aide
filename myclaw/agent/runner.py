@@ -13,7 +13,7 @@ from loguru import logger
 
 from myclaw.agent.confirmation import ConfirmationAborted
 from myclaw.agent.run_errors import CommittableAgentRunError
-from myclaw.agent.session.backup_store import FileMutationRecorder
+from myclaw.agent.tools.file_mutation import FileMutationRecorder
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationRequester,
     ModelToolCall,

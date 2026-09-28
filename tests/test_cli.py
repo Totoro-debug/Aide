@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from typer.testing import CliRunner
@@ -91,6 +91,9 @@ async def test_cli_async_root_owns_lifetime_components_and_async_shutdown(
             del request
             raise AssertionError("No confirmation is expected in this lifecycle test")
 
+        async def cancel_owner(self, owner: object) -> None:
+            raise AssertionError(f"No confirmation owner is expected: {owner!r}")
+
         async def close(self) -> None:
             events.append("confirmation_close")
 
@@ -155,7 +158,7 @@ async def test_cli_async_root_owns_lifetime_components_and_async_shutdown(
 
     class FakeScheduleService:
         def __init__(self, **kwargs: object) -> None:
-            del kwargs
+            assert callable(kwargs["cancel_confirmation_owner"])
             events.append("schedule_init")
 
         def context_timezone_name(self) -> str:
@@ -216,6 +219,9 @@ async def test_cli_async_root_owns_lifetime_components_and_async_shutdown(
 
         def deactivate(self) -> None:
             events.append("management_deactivate")
+
+        def bind_restore_acknowledge_failure(self, callback: object) -> None:
+            assert callable(callback)
 
     class FakeDispatcher:
         def __init__(self, management: object) -> None:
@@ -319,9 +325,11 @@ async def test_cli_async_root_owns_lifetime_components_and_async_shutdown(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_point", ["binding", "missing_binding", "preflight"])
 async def test_cli_async_root_cleans_partial_startup_without_registering_dream_job(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    failure_point: Literal["binding", "missing_binding", "preflight"],
 ) -> None:
     events: list[str] = []
 
@@ -383,6 +391,9 @@ async def test_cli_async_root_cleans_partial_startup_without_registering_dream_j
         async def pause_and_drain(self) -> None:
             events.append("schedule_pause")
 
+        async def drain_confirmation_aborts(self, *, generation_id: object | None = None) -> None:
+            assert generation_id is None
+
         async def close(self) -> None:
             events.append("schedule_close")
 
@@ -392,6 +403,11 @@ async def test_cli_async_root_cleans_partial_startup_without_registering_dream_j
             events.append("loop_init")
             self.control = object()
             self.skill_metadata = ()
+
+        def bind_confirmation_requester(self, requester: object) -> None:
+            assert callable(requester)
+            if failure_point == "binding":
+                raise RuntimeError("binding contained a secret")
 
         def preflight(self) -> None:
             events.append("loop_preflight")
@@ -407,6 +423,8 @@ async def test_cli_async_root_cleans_partial_startup_without_registering_dream_j
     monkeypatch.setattr(cli, "Dream", FakeDream)
     monkeypatch.setattr(cli, "ScheduleService", FakeScheduleService)
     monkeypatch.setattr(cli, "AgentLoop", FailingAgentLoop)
+    if failure_point == "missing_binding":
+        delattr(FailingAgentLoop, "bind_confirmation_requester")
 
     home = AgentHome(tmp_path / "agent-home")
     configuration: Any = SimpleNamespace(
@@ -415,14 +433,18 @@ async def test_cli_async_root_cleans_partial_startup_without_registering_dream_j
         runtime=SimpleNamespace(max_iterations=50),
     )
 
-    with pytest.raises(RuntimeError, match="preflight contained a secret"):
+    expected_error = AttributeError if failure_point == "missing_binding" else RuntimeError
+    expected_message = (
+        "bind_confirmation_requester" if failure_point == "missing_binding" else failure_point
+    )
+    with pytest.raises(expected_error, match=expected_message):
         await cli._run_cli_conversation(
             agent_home=home,
             workspace=tmp_path / "workspace",
             configuration=configuration,
         )
 
-    assert events == [
+    expected_events = [
         "workspace_initialize",
         "bus_init",
         "router_init",
@@ -430,13 +452,16 @@ async def test_cli_async_root_cleans_partial_startup_without_registering_dream_j
         "dream_init",
         "schedule_init",
         "loop_init",
-        "loop_preflight",
-        "schedule_pause",
-        "schedule_close",
-        "loop_abort",
-        "dream_close",
-        "router_close",
     ]
+    if failure_point == "preflight":
+        expected_events.append("loop_preflight")
+    else:
+        expected_events.append("loop_abort")
+    expected_events.extend(["schedule_pause", "schedule_close"])
+    if failure_point == "preflight":
+        expected_events.append("loop_abort")
+    expected_events.extend(["dream_close", "router_close"])
+    assert events == expected_events
 
 
 @dataclass(slots=True)
@@ -459,7 +484,7 @@ def _invoke_cli_resume_preparation_failure(
     *,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    failure_kind: Literal["constructor", "preflight"],
+    failure_kind: Literal["constructor", "preflight", "binding"],
 ) -> _FatalResumeProbe:
     events: list[str] = []
     loops: list[Any] = []
@@ -583,7 +608,7 @@ def _invoke_cli_resume_preparation_failure(
     class FakeScheduleService:
         def __init__(self, **kwargs: object) -> None:
             nonlocal schedule_instance
-            del kwargs
+            assert callable(kwargs["cancel_confirmation_owner"])
             self.pause_calls = 0
             self.close_calls = 0
             self.resume_calls = 0
@@ -604,6 +629,9 @@ def _invoke_cli_resume_preparation_failure(
         async def pause_and_drain(self) -> None:
             self.pause_calls += 1
             events.append("schedule_pause")
+
+        async def drain_confirmation_aborts(self, *, generation_id: object | None = None) -> None:
+            assert generation_id is None
 
         def resume(self) -> None:
             self.resume_calls += 1
@@ -681,6 +709,12 @@ def _invoke_cli_resume_preparation_failure(
                     raise ModelContextOverflowError(
                         ErrorInfo("model_context_overflow", target_secret)
                     )
+
+        def bind_confirmation_requester(self, requester: object) -> None:
+            assert callable(requester)
+            if self.is_target and failure_kind == "binding":
+                events.append("target_bind")
+                raise RuntimeError(target_secret)
 
         def preflight(self) -> None:
             if not self.is_target:
@@ -964,6 +998,26 @@ def test_cli_resume_preflight_failure_terminates_safely(
     assert probe.events.index("target_preflight") < probe.events.index("target_abort")
 
 
+def test_cli_resume_requester_binding_failure_aborts_unpublished_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    probe = _invoke_cli_resume_preparation_failure(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        failure_kind="binding",
+    )
+
+    _assert_fatal_resume_preparation(
+        probe,
+        safe_error="persistence_error: Conversation Session could not be prepared.",
+        target_abort_count=1,
+    )
+    assert probe.events.index("target_init") < probe.events.index("target_bind")
+    assert probe.events.index("target_bind") < probe.events.index("target_abort")
+    assert "target_preflight" not in probe.events
+
+
 @pytest.mark.asyncio
 async def test_cli_resume_publishes_current_only_after_target_activation(
     monkeypatch: pytest.MonkeyPatch,
@@ -993,6 +1047,9 @@ async def test_cli_resume_publishes_current_only_after_target_activation(
         async def request(self, request: object) -> Literal["approved", "declined"]:
             del request
             raise AssertionError("No confirmation is expected in this replacement test")
+
+        async def cancel_owner(self, owner: object) -> None:
+            raise AssertionError(f"No confirmation owner is expected: {owner!r}")
 
         async def cancel_generation(self, generation_id: UUID) -> None:
             cancelled_generations.append(generation_id)
@@ -1071,6 +1128,7 @@ async def test_cli_resume_publishes_current_only_after_target_activation(
     class FakeScheduleService:
         def __init__(self, **kwargs: object) -> None:
             nonlocal user_executor
+            assert callable(kwargs["cancel_confirmation_owner"])
             user_executor = cast(
                 Callable[[object], Awaitable[None]],
                 kwargs["execute_user_job"],
@@ -1187,6 +1245,9 @@ async def test_cli_resume_publishes_current_only_after_target_activation(
         def deactivate(self) -> None:
             return None
 
+        def bind_restore_acknowledge_failure(self, callback: object) -> None:
+            assert callable(callback)
+
     class FakeDispatcher:
         def __init__(self, management: object) -> None:
             del management
@@ -1196,6 +1257,9 @@ async def test_cli_resume_publishes_current_only_after_target_activation(
         def __init__(self, **kwargs: object) -> None:
             del kwargs
             app_instances.append(self)
+
+        def bind_confirmation_coordinator(self, coordinator: object) -> None:
+            assert isinstance(coordinator, FakeConfirmationCoordinator)
 
         async def run_async(self) -> None:
             nonlocal first_target
@@ -1382,6 +1446,7 @@ async def test_cli_resume_active_requires_force_before_replacing_the_generation(
     class FakeScheduleService:
         def __init__(self, **kwargs: object) -> None:
             nonlocal user_executor
+            assert callable(kwargs["cancel_confirmation_owner"])
             user_executor = cast(
                 Callable[[object], Awaitable[None]],
                 kwargs["execute_user_job"],
@@ -1405,6 +1470,12 @@ async def test_cli_resume_active_requires_force_before_replacing_the_generation(
         def resume(self) -> None:
             events.append("schedule_resume")
 
+        def cancel_confirmation_generation(self, generation_id: UUID) -> None:
+            assert isinstance(generation_id, UUID)
+
+        async def drain_confirmation_aborts(self, *, generation_id: UUID | None = None) -> None:
+            assert generation_id is None or isinstance(generation_id, UUID)
+
         async def close(self) -> None:
             events.append("schedule_close")
 
@@ -1425,12 +1496,16 @@ async def test_cli_resume_active_requires_force_before_replacing_the_generation(
             self.close_calls = 0
             self.abort_calls = 0
             self.replacement_barrier_held = False
+            self.generation_id = uuid4()
             if session_id is None:
                 initial_loop = self
                 events.append("old_init")
             else:
                 target_loop = self
                 events.append("target_init")
+
+        def bind_confirmation_requester(self, requester: object) -> None:
+            assert callable(requester)
 
         def preflight(self) -> None:
             events.append("old_preflight" if self is initial_loop else "target_preflight")
@@ -1489,6 +1564,9 @@ async def test_cli_resume_active_requires_force_before_replacing_the_generation(
         def deactivate(self) -> None:
             return None
 
+        def bind_restore_acknowledge_failure(self, callback: object) -> None:
+            assert callable(callback)
+
         async def resume(self, session_id: str, *, force: bool = False) -> ResumeResult:
             assert replace_callback is not None
             try:
@@ -1501,6 +1579,9 @@ async def test_cli_resume_active_requires_force_before_replacing_the_generation(
     class FakeApp:
         def __init__(self, **kwargs: object) -> None:
             self.dispatcher = cast(ManagementCommandDispatcher, kwargs["management_dispatcher"])
+
+        def bind_confirmation_coordinator(self, coordinator: object) -> None:
+            assert coordinator is not None
 
         async def run_async(self) -> None:
             if abort_outcome == "cancel":
@@ -1683,7 +1764,7 @@ async def test_cli_same_session_resume_waits_for_pending_persist_before_target_l
 
     class FakeScheduleService:
         def __init__(self, **kwargs: object) -> None:
-            del kwargs
+            assert callable(kwargs["cancel_confirmation_owner"])
 
         def context_timezone_name(self) -> str:
             return "Asia/Shanghai"
@@ -1699,6 +1780,12 @@ async def test_cli_same_session_resume_waits_for_pending_persist_before_target_l
 
         async def pause_and_drain(self) -> None:
             return None
+
+        def cancel_confirmation_generation(self, generation_id: UUID) -> None:
+            assert isinstance(generation_id, UUID)
+
+        async def drain_confirmation_aborts(self, *, generation_id: UUID | None = None) -> None:
+            assert generation_id is None or isinstance(generation_id, UUID)
 
         def resume(self) -> None:
             events.append("schedule_resume")
@@ -1723,6 +1810,10 @@ async def test_cli_same_session_resume_waits_for_pending_persist_before_target_l
             self.session = FakeSession()
             self.control = FakeControl()
             self.skill_metadata = ()
+            self.generation_id = uuid4()
+
+        def bind_confirmation_requester(self, requester: object) -> None:
+            assert callable(requester)
 
         def preflight(self) -> None:
             events.append("target_preflight" if self is target_loop else "old_preflight")
@@ -1758,6 +1849,9 @@ async def test_cli_same_session_resume_waits_for_pending_persist_before_target_l
         def deactivate(self) -> None:
             return None
 
+        def bind_restore_acknowledge_failure(self, callback: object) -> None:
+            assert callable(callback)
+
     class FakeDispatcher:
         def __init__(self, management: object) -> None:
             del management
@@ -1765,6 +1859,9 @@ async def test_cli_same_session_resume_waits_for_pending_persist_before_target_l
     class FakeApp:
         def __init__(self, **kwargs: object) -> None:
             del kwargs
+
+        def bind_confirmation_coordinator(self, coordinator: object) -> None:
+            assert coordinator is not None
 
         async def run_async(self) -> None:
             assert replace_callback is not None
@@ -1835,6 +1932,8 @@ async def test_cli_same_session_resume_waits_for_pending_persist_before_target_l
         "target_start",
         "mcp_activate",
         "cancel",
+        "schedule_cancel",
+        "schedule_drain",
     ),
 )
 async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_once(
@@ -1909,7 +2008,7 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
 
     class FakeScheduleService:
         def __init__(self, **kwargs: object) -> None:
-            del kwargs
+            assert callable(kwargs["cancel_confirmation_owner"])
 
         def context_timezone_name(self) -> str:
             return "Asia/Shanghai"
@@ -1922,6 +2021,17 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
 
         def start(self) -> None:
             return None
+
+        def cancel_confirmation_generation(self, generation_id: UUID) -> None:
+            assert isinstance(generation_id, UUID)
+            events.append("confirmation_cancel")
+            if failure_point == "schedule_cancel":
+                raise RuntimeError("cancel secret")
+
+        async def drain_confirmation_aborts(self, *, generation_id: UUID | None = None) -> None:
+            events.append("confirmation_drain")
+            if generation_id is not None and failure_point == "schedule_drain":
+                raise RuntimeError("drain secret")
 
         async def pause_and_drain(self) -> None:
             nonlocal pause_count
@@ -1948,11 +2058,15 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
             self.session = FakeSession("old" if session_id is None else str(session_id))
             self.control = FakeControl()
             self.skill_metadata = ()
+            self.generation_id = uuid4()
             if session_id is None:
                 initial_loop = self
             else:
                 target_loop = self
             events.append("old_init" if session_id is None else "target_init")
+
+        def bind_confirmation_requester(self, requester: object) -> None:
+            assert callable(requester)
 
         def preflight(self) -> None:
             events.append("old_preflight" if self is initial_loop else "target_preflight")
@@ -2000,6 +2114,9 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
             assert_unavailable()
             events.append("management_deactivate")
 
+        def bind_restore_acknowledge_failure(self, callback: object) -> None:
+            assert callable(callback)
+
     class FakeDispatcher:
         def __init__(self, management: object) -> None:
             del management
@@ -2007,6 +2124,9 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
     class FakeApp:
         def __init__(self, **kwargs: object) -> None:
             del kwargs
+
+        def bind_confirmation_coordinator(self, coordinator: object) -> None:
+            assert coordinator is not None
 
         async def run_async(self) -> None:
             assert replace_callback is not None
@@ -2024,11 +2144,18 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
                 raise RuntimeError("rebind secret")
 
     if failure_point == "mcp_activate":
+
         def fail_activate(_manager: object, _report: object) -> None:
             events.append("mcp_activate")
             raise RuntimeError("activation secret")
 
         monkeypatch.setattr(MCPRuntimeManager, "activate_generation", fail_activate)
+    elif failure_point in {"schedule_cancel", "schedule_drain"}:
+
+        def unexpected_activate(_manager: object, _report: object) -> None:
+            pytest.fail("MCP activation must not follow failed confirmation cleanup")
+
+        monkeypatch.setattr(MCPRuntimeManager, "activate_generation", unexpected_activate)
 
     monkeypatch.setattr(cli, "WorkspaceState", FakeWorkspaceState)
     monkeypatch.setattr(cli, "MessageBus", FakeBus)
@@ -2065,6 +2192,14 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
     assert events.count("target_abort") == 1
     assert "management_deactivate" in events
     assert "schedule_resume" not in events
+    if failure_point in {"schedule_cancel", "schedule_drain"}:
+        assert "quiesce" not in events
+        assert "mcp_activate" not in events
+        assert "rebind" not in events
+        assert events.count("confirmation_cancel") == 1
+        assert events.count("confirmation_drain") == (
+            1 if failure_point == "schedule_cancel" else 2
+        )
 
 
 def test_cli_reports_unexpected_startup_failure_without_raw_exception_output(

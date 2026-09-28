@@ -46,6 +46,12 @@ when the User message is committed. A foreground run-local recorder is passed
 through the Tool execution path; mutable anchor state is not attached to
 shared Tool instances.
 
+The File Tool layer owns the structural `FileMutationRecorder` interface. An
+authorized mutation calls `begin_write(run_token, resolved_target)` and receives
+a completion callback; the Session backup store keeps backup tickets and journal
+details private. Recorder setup or completion failure remains best effort and
+does not replace the File Tool's mutation result or exception.
+
 For an authorized `write_file` or `edit_file` mutation, the Tool Gateway has
 already completed preparation and permission handling before the recorder
 resolves the canonical target and attempts a File Backup immediately before
@@ -86,6 +92,12 @@ therefore not silently treated as a tracked branch mutation.
 ID, anchor, removal counts, a digest of the current serialized Session, the
 active journal revision, eligible targets, latest observed post-write state,
 external target counts, and any Backup Gap in the selected active range.
+
+After Schedule reaches natural idle and before inspection, CLI directly waits
+for Agent Loop Restore readiness, including pending title work and Session
+persistence. Inspection failure releases the foreground and Schedule barriers
+before returning the safe management error.
+
 `revalidate()` runs after the runtime idle barriers and before final
 confirmation; execution revalidates again before its first mutation. A stale
 plan fails without mutation.

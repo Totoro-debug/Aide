@@ -14,7 +14,6 @@ from uuid import UUID, uuid4
 from loguru import logger
 
 from myclaw.agent.confirmation import ConfirmationAborted, ConfirmationUnavailable
-from myclaw.agent.session.backup_store import FileMutationRecorder
 from myclaw.agent.tools.base import (
     ArtifactReference,
     BaseTool,
@@ -31,6 +30,7 @@ from myclaw.agent.tools.core.schedule import ScheduleTool
 from myclaw.agent.tools.core.web_fetch import WebFetchTool
 from myclaw.agent.tools.core.web_search import WebSearchTool
 from myclaw.agent.tools.core.write_file import WriteFileTool
+from myclaw.agent.tools.file_mutation import FileMutationRecorder
 from myclaw.agent.tools.mcp import MCPTool
 from myclaw.agent.tools.permission import (
     MCPToolIdentity,

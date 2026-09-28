@@ -161,10 +161,6 @@ class RestoreResult:
         return tuple(item for item in self.file_results if item.status is RestoreFileStatus.FAILED)
 
     @property
-    def failed_files(self) -> tuple[Path, ...]:
-        return tuple(item.target for item in self.failures)
-
-    @property
     def failure_notification_pending(self) -> bool:
         return bool(self.failures) and not self.failure_notification_acknowledged
 

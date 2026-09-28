@@ -123,7 +123,7 @@ async def test_restore_path_matrix_reports_a_file_failure_and_truncates_session(
     manager = RestoreManager(state, session.session_id)
     result = await manager.execute(manager.inspect(session, 1), RestoreMode.FILES)
 
-    assert result.failed_files == (target.resolve(),)
+    assert tuple(item.target for item in result.failures) == (target.resolve(),)
     assert target.read_bytes() == b"tool result"
     assert alias.read_bytes() == b"tool result"
     assert Session.load(state, session.session_id).messages == []

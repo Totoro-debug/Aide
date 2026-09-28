@@ -188,7 +188,7 @@ async def test_file_restore_replays_conflicts_deletes_new_files_and_continues_af
     assert created_directory.resolve() in synced_directories
     assert failed.read_bytes() == b"failed tool result"
     assert result.successful_conflicts == (existing,)
-    assert result.failed_files == (failed,)
+    assert tuple(item.target for item in result.failures) == (failed,)
     assert result.failure_notification_pending is True
     assert Session.load(state, session.session_id, now=lambda: NOW).messages == []
     assert FileBackupStore(state, session.session_id).inspect().entries == ()
@@ -834,7 +834,7 @@ async def test_runtime_owned_target_is_reported_as_file_failure(
     manager = RestoreManager(state, session.session_id, now=lambda: NOW)
     result = await manager.execute(manager.inspect(session, 1), RestoreMode.FILES)
 
-    assert result.failed_files == (runtime_target.resolve(),)
+    assert tuple(item.target for item in result.failures) == (runtime_target.resolve(),)
     assert runtime_target.read_bytes() == b"after"
     assert Session.load(state, session.session_id, now=lambda: NOW).messages == []
 
@@ -860,7 +860,7 @@ async def test_other_session_jsonl_is_a_runtime_owned_failure(workspace: Path) -
     manager = RestoreManager(state, session.session_id, now=lambda: NOW)
     result = await manager.execute(manager.inspect(session, 1), RestoreMode.FILES)
 
-    assert result.failed_files == (other_path.resolve(),)
+    assert tuple(item.target for item in result.failures) == (other_path.resolve(),)
     assert other_path.read_bytes() == b"later runtime bytes"
     assert other_path.read_bytes() != original_other_bytes
     assert Session.load(state, session.session_id, now=lambda: NOW).messages == []
@@ -885,7 +885,7 @@ async def test_hard_link_target_is_left_unchanged_and_reported(workspace: Path) 
     manager = RestoreManager(state, session.session_id, now=lambda: NOW)
     result = await manager.execute(manager.inspect(session, 1), RestoreMode.FILES)
 
-    assert result.failed_files == (target.resolve(),)
+    assert tuple(item.target for item in result.failures) == (target.resolve(),)
     assert target.read_bytes() == b"after"
     assert alias.read_bytes() == b"after"
     assert Session.load(state, session.session_id, now=lambda: NOW).messages == []

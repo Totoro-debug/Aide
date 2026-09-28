@@ -38,6 +38,7 @@ from myclaw.management.service import (
     RestoreListingReport,
 )
 from myclaw.terminal.conversation import TerminalConversationApp
+from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 
 SESSION_ID = "20260926-120000-000000_550e8400-e29b-41d4-a716-446655440000"
 ANCHOR_TOKEN = UUID("550e8400-e29b-41d4-a716-446655440001")
@@ -561,14 +562,14 @@ async def test_cli_restore_rebuilds_same_session_id_and_persists_empty_session(
                 ).output == "Session Restore cancelled."
                 return
             if admission == "unknown_failure":
-                original_path_exists = restore_module._path_exists
+                original_entry_exists = HOST_FILESYSTEM.entry_exists
 
                 def fail_pending_check(path: Path) -> bool:
                     if path.name == "pending.json":
                         raise OSError("secret pending state check failure")
-                    return original_path_exists(path)
+                    return original_entry_exists(path)
 
-                monkeypatch.setattr(restore_module, "_path_exists", fail_pending_check)
+                monkeypatch.setattr(HOST_FILESYSTEM, "entry_exists", fail_pending_check)
                 try:
                     await self.dispatcher.restore_commit(plan, RestoreMode.CONVERSATION_ONLY)
                 except FatalManagementError:

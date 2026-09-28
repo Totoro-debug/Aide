@@ -486,7 +486,7 @@ class FileBackupStore:
 
     def _ensure_directory(self, path: Path, within: Path) -> Path:
         io_path = HOST_FILESYSTEM.path_for_io(path)
-        if not _path_entry_exists(io_path):
+        if not HOST_FILESYSTEM.entry_exists(io_path):
             io_path.mkdir(mode=0o700)
         owned = HOST_FILESYSTEM.require_owned_directory(path, within=within)
         HOST_FILESYSTEM.restrict_private_directory(owned)
@@ -502,7 +502,7 @@ class FileBackupStore:
         state: _StoreState | None = None
         state_schema_version: int | None = None
         needs_write = False
-        if _path_entry_exists(HOST_FILESYSTEM.path_for_io(paths.state)):
+        if HOST_FILESYSTEM.entry_exists(HOST_FILESYSTEM.path_for_io(paths.state)):
             try:
                 raw = _read_owned_file(paths.state, within=paths.root)
                 state, state_schema_version = _decode_state(raw)
@@ -595,10 +595,10 @@ class FileBackupStore:
             }
         )
         state_path = HOST_FILESYSTEM.path_for_io(paths.state)
-        if _path_entry_exists(state_path):
+        if HOST_FILESYSTEM.entry_exists(state_path):
             HOST_FILESYSTEM.require_owned_regular_file(paths.state, within=paths.root)
         HOST_FILESYSTEM.atomic_replace_bytes(paths.state, content)
-        if _path_entry_exists(state_path):
+        if HOST_FILESYSTEM.entry_exists(state_path):
             HOST_FILESYSTEM.restrict_private_file(paths.state)
 
     def _write_blob(self, paths: _StorePaths, content: bytes) -> str:
@@ -643,7 +643,7 @@ class FileBackupStore:
     ) -> None:
         try:
             entry_path = self._entry_path(paths, operation_id)
-            if _path_entry_exists(HOST_FILESYSTEM.path_for_io(entry_path)):
+            if HOST_FILESYSTEM.entry_exists(HOST_FILESYSTEM.path_for_io(entry_path)):
                 try:
                     existing = self._read_operation(paths, entry_path, operation_id)
                     if isinstance(existing, BackupJournalEntry):
@@ -665,7 +665,7 @@ class FileBackupStore:
             self._write_operation(
                 paths,
                 _gap_object(gap),
-                replace_existing=_path_entry_exists(HOST_FILESYSTEM.path_for_io(entry_path)),
+                replace_existing=HOST_FILESYSTEM.entry_exists(HOST_FILESYSTEM.path_for_io(entry_path)),
             )
             self._remember_operation(paths, operation_id, revision, run_token)
         except Exception:
@@ -879,12 +879,6 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
-def _path_entry_exists(path: Path) -> bool:
-    try:
-        path.lstat()
-    except FileNotFoundError:
-        return False
-    return True
 
 
 def _encode_signed_json(value: dict[str, object]) -> bytes:

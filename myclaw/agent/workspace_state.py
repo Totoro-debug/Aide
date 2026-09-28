@@ -113,7 +113,7 @@ class WorkspaceState:
     def _prepare_sessions_directory(self, path: Path) -> Path:
         workspace_root = self._owned_workspace_root()
         state_path = HOST_FILESYSTEM.path_for_io(self.path)
-        if not _path_entry_exists(state_path):
+        if not HOST_FILESYSTEM.entry_exists(state_path):
             state_path.mkdir(exist_ok=True)
         state_root = HOST_FILESYSTEM.require_owned_directory(
             state_path,
@@ -121,7 +121,7 @@ class WorkspaceState:
         )
 
         sessions_path = HOST_FILESYSTEM.path_for_io(path)
-        if not _path_entry_exists(sessions_path):
+        if not HOST_FILESYSTEM.entry_exists(sessions_path):
             sessions_path.mkdir(exist_ok=True)
         return HOST_FILESYSTEM.require_owned_directory(sessions_path, within=state_root)
 
@@ -132,7 +132,7 @@ class WorkspaceState:
     @staticmethod
     def _existing_owned_directory(path: Path, *, within: Path) -> Path | None:
         io_path = HOST_FILESYSTEM.path_for_io(path)
-        if not _path_entry_exists(io_path):
+        if not HOST_FILESYSTEM.entry_exists(io_path):
             return None
         return HOST_FILESYSTEM.require_owned_directory(io_path, within=within)
 
@@ -176,11 +176,3 @@ class WorkspaceState:
             raise WorkspaceStateError(affected) from error
         except RuntimeError as error:
             raise WorkspaceStateError(self.path) from error
-
-
-def _path_entry_exists(path: Path) -> bool:
-    try:
-        path.lstat()
-    except FileNotFoundError:
-        return False
-    return True

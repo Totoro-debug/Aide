@@ -66,6 +66,40 @@ def test_windows_host_filesystem_prepares_local_and_unc_io_paths(tmp_path: Path)
 
     assert WINDOWS_HOST_FILESYSTEM.path_for_io(local) == Path(f"\\\\?\\{local.absolute()}")
     assert WINDOWS_HOST_FILESYSTEM.path_for_io(unc) == Path(r"\\?\UNC\server\share\state.txt")
+    assert WINDOWS_HOST_FILESYSTEM.path_for_io(WINDOWS_HOST_FILESYSTEM.path_for_io(local)) == (
+        WINDOWS_HOST_FILESYSTEM.path_for_io(local)
+    )
+
+
+def test_host_entry_exists_for_existing_and_missing_paths(tmp_path: Path) -> None:
+    existing = tmp_path / "existing.txt"
+    existing.write_text("content", encoding="utf-8")
+
+    assert HOST_FILESYSTEM.entry_exists(existing)
+    assert not HOST_FILESYSTEM.entry_exists(tmp_path / "missing.txt")
+
+
+def test_host_entry_exists_keeps_dangling_link_and_other_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dangling = HOST_FILESYSTEM.path_for_io(tmp_path / "dangling")
+    denied = HOST_FILESYSTEM.path_for_io(tmp_path / "denied")
+    permission_error = PermissionError(errno.EACCES, "denied", str(denied))
+    original_lstat = Path.lstat
+
+    def controlled_lstat(path: Path) -> os.stat_result:
+        if path == dangling:
+            return os.stat_result((S_IFLNK | 0o777, 1, 1, 1, 0, 0, 0, 0, 0, 0))
+        if path == denied:
+            raise permission_error
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", controlled_lstat)
+
+    assert HOST_FILESYSTEM.entry_exists(dangling)
+    with pytest.raises(PermissionError) as captured:
+        HOST_FILESYSTEM.entry_exists(denied)
+    assert captured.value is permission_error
 
 
 @windows_only

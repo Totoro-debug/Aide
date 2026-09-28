@@ -253,6 +253,14 @@ class HostFilesystem:
         """Return the host-native path used for filesystem I/O."""
         return self._adapter.path_for_io(Path(path))
 
+    def entry_exists(self, path: Path) -> bool:
+        """Count any filesystem entry, including a dangling symbolic link."""
+        try:
+            self.path_for_io(path).lstat()
+        except FileNotFoundError:
+            return False
+        return True
+
     def is_directory(self, status: stat_result) -> bool:
         """Return whether a status identifies an ordinary host directory."""
         return self._adapter.is_directory(status)

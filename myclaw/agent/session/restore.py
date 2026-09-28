@@ -313,7 +313,7 @@ class RestoreManager:
             raise
         except Exception as error:
             try:
-                no_pending = not _path_exists(pending_path)
+                no_pending = not HOST_FILESYSTEM.entry_exists(pending_path)
             except Exception:
                 no_pending = False
             if no_pending:
@@ -330,7 +330,7 @@ class RestoreManager:
             )
         root = _restore_session_root(self._workspace_state, plan.session_id)
         pending_path = root / "pending.json"
-        if _path_exists(pending_path):
+        if HOST_FILESYSTEM.entry_exists(pending_path):
             existing = _read_pending(pending_path)
             if existing.session_id != plan.session_id:
                 raise PendingRestoreError("pending restore belongs to a different Session")
@@ -408,7 +408,7 @@ class RestoreManager:
             self._session_id = session_id
         root = _restore_session_root(self._workspace_state, session_id)
         pending_path = root / "pending.json"
-        if not _path_exists(pending_path):
+        if not HOST_FILESYSTEM.entry_exists(pending_path):
             return None
         pending = _read_pending(pending_path)
         if pending.session_id != session_id:
@@ -425,7 +425,7 @@ class RestoreManager:
             self._session_id = session_id
         root = _restore_session_root(self._workspace_state, session_id)
         pending_path = root / "pending.json"
-        if not _path_exists(pending_path):
+        if not HOST_FILESYSTEM.entry_exists(pending_path):
             return None
         pending = _read_pending(pending_path)
         if pending.session_id != session_id:
@@ -645,7 +645,7 @@ def _restore_session_root(workspace_state: WorkspaceState, session_id: str) -> P
 def _ensure_private_directory(path: Path, within: Path) -> Path:
     io_path = HOST_FILESYSTEM.path_for_io(path)
     created = False
-    if not _path_exists(path):
+    if not HOST_FILESYSTEM.entry_exists(path):
         io_path.mkdir(mode=0o700)
         created = True
     owned = HOST_FILESYSTEM.require_owned_directory(path, within=within)
@@ -656,7 +656,7 @@ def _ensure_private_directory(path: Path, within: Path) -> Path:
 
 
 def _write_internal(path: Path, content: bytes, *, within: Path) -> None:
-    if _path_exists(path):
+    if HOST_FILESYSTEM.entry_exists(path):
         HOST_FILESYSTEM.require_owned_regular_file(path, within=within)
     HOST_FILESYSTEM.atomic_replace_bytes(path, content)
     HOST_FILESYSTEM.require_owned_regular_file(path, within=within)
@@ -846,7 +846,7 @@ def _verify_safety_snapshot(workspace_state: WorkspaceState, pending: _PendingTr
 
 def _find_pending_session(workspace_state: WorkspaceState) -> str | None:
     restore_root = workspace_state.path / "restore"
-    if not _path_exists(restore_root):
+    if not HOST_FILESYSTEM.entry_exists(restore_root):
         return None
     owned_root = HOST_FILESYSTEM.require_owned_directory(restore_root, within=workspace_state.path)
     incomplete: list[str] = []
@@ -857,7 +857,7 @@ def _find_pending_session(workspace_state: WorkspaceState) -> str | None:
         except (FileNotFoundError, OSError):
             continue
         candidate = owned_child / "pending.json"
-        if _path_exists(candidate):
+        if HOST_FILESYSTEM.entry_exists(candidate):
             pending = _read_pending(candidate)
             if pending.session_id != child.name:
                 raise PendingRestoreError("pending restore belongs to a different Session")
@@ -1212,12 +1212,6 @@ def _result_from_pending(pending: _PendingTransaction) -> RestoreResult:
     )
 
 
-def _path_exists(path: Path) -> bool:
-    try:
-        HOST_FILESYSTEM.path_for_io(path).lstat()
-    except FileNotFoundError:
-        return False
-    return True
 
 
 def _encode_bytes(content: bytes) -> str:

@@ -22,7 +22,6 @@ from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.utils.async_tasks import await_task_preserving_cancellation
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 from myclaw.utils.text import normalize_title as _normalize_title
-from myclaw.utils.text import normalize_title_candidate
 from myclaw.utils.time import format_rfc3339_milliseconds, local_now
 from myclaw.utils.validation import (
     require_aware_datetime,
@@ -697,15 +696,6 @@ class Session:
             require_uuid4_string(match.group("uuid"), field=field)
         except ValueError as error:
             raise ValueError(f"{field} must be a valid Schedule Session ID") from error
-
-    @staticmethod
-    def _normalize_title(value: str) -> str:
-        return _normalize_title(value)
-
-    @staticmethod
-    def _normalize_title_candidate(value: str) -> str:
-        return normalize_title_candidate(value)
-
 
 def _coerce_partition(value: SessionStoragePartition | str) -> SessionStoragePartition:
     if isinstance(value, SessionStoragePartition):

@@ -86,6 +86,7 @@ from myclaw.schedule.service import (
 )
 from myclaw.skills.catalog import LoadedSkill, ManualSkillInvocation, SkillLoader, SkillMetadata
 from myclaw.utils.async_tasks import await_task_preserving_cancellation
+from myclaw.utils.text import normalize_title, normalize_title_candidate
 
 
 class ModelContextOverflowError(Exception):
@@ -1775,13 +1776,13 @@ class AgentLoop:
                     and coordination.prepared.result()
                     and session.metadata.get("title") == "Untitled session"
                 ):
-                    session.update_metadata(title=Session._normalize_title(content))
+                    session.update_metadata(title=normalize_title(content))
                 raise
             finally:
                 await coordination.wait_until_foreground_idle()
 
     async def _resolve_title(self, content: str) -> tuple[str, dict[str, int] | None]:
-        title = Session._normalize_title(content)
+        title = normalize_title(content)
         usage_delta: dict[str, int] | None = None
         events: Any = None
         try:
@@ -1793,7 +1794,7 @@ class AgentLoop:
                 usage_delta = {"model_calls": 1, **response.usage.to_dict()}
                 if response.message.tool_calls:
                     continue
-                candidate = Session._normalize_title_candidate(response.message.content)
+                candidate = normalize_title_candidate(response.message.content)
                 if candidate:
                     title = candidate
                 break
@@ -1812,7 +1813,7 @@ class AgentLoop:
         return title, usage_delta
 
     def _router_stream_title(self, content: str) -> Any:
-        messages = self._context_builder.build_title_messages(Session._normalize_title(content))
+        messages = self._context_builder.build_title_messages(normalize_title(content))
         return self._model_router.stream(
             "chat",
             messages=messages,

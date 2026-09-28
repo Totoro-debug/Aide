@@ -222,7 +222,7 @@ class ManagementCommandDispatcher:
                     lines = ["Restore anchors:"]
                     lines.extend(
                         f"{anchor.anchor_id}. {anchor.timestamp} | "
-                        f"{_restore_preview(anchor.content)}"
+                        f"{format_restore_preview(anchor.content)}"
                         for anchor in restore_listing.anchors
                     )
                     output = "\n".join(lines)
@@ -440,7 +440,7 @@ class ManagementCommandDispatcher:
             )
 
 
-def _restore_preview(content: str) -> str:
+def format_restore_preview(content: str) -> str:
     normalized = " ".join(content.split())
     if len(normalized) <= 96:
         return normalized

@@ -65,6 +65,7 @@ from myclaw.management.commands import (
     RESUME_MANAGEMENT_COMMAND,
     ManagementCommandDispatcher,
     ManagementCommandResult,
+    format_restore_preview,
 )
 from myclaw.management.service import FatalManagementError, RuntimeStatus, SessionListingEntry
 from myclaw.provider.models import REASONING_EFFORT_LEVELS, ReasoningEffort
@@ -4904,14 +4905,7 @@ def _restore_anchor_label(anchor: RestoreAnchor) -> str:
         )
     except (TypeError, ValueError):
         local_timestamp = anchor.timestamp
-    return f"{anchor.anchor_id}. {local_timestamp} | {_restore_preview(anchor.content)}"
-
-
-def _restore_preview(content: str) -> str:
-    normalized = " ".join(content.split())
-    if len(normalized) <= 96:
-        return normalized
-    return f"{normalized[:93]}..."
+    return f"{anchor.anchor_id}. {local_timestamp} | {format_restore_preview(anchor.content)}"
 
 
 def _restore_mode_label(mode: RestoreMode) -> str:

@@ -26,7 +26,11 @@ from myclaw.agent.session.session import RestoreAnchor, Session
 from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import UserConfiguration
-from myclaw.management.commands import ManagementCommandDispatcher, ManagementPort
+from myclaw.management.commands import (
+    ManagementCommandDispatcher,
+    ManagementPort,
+    format_restore_preview,
+)
 from myclaw.management.service import (
     FatalManagementError,
     ManagementError,
@@ -38,6 +42,20 @@ from myclaw.terminal.conversation import TerminalConversationApp
 SESSION_ID = "20260926-120000-000000_550e8400-e29b-41d4-a716-446655440000"
 ANCHOR_TOKEN = UUID("550e8400-e29b-41d4-a716-446655440001")
 AfterRestorePhase = Callable[[str, Callable[[], None]], None]
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("", ""),
+        ("  first\n\tsecond  ", "first second"),
+        ("x" * 96, "x" * 96),
+        ("x" * 97, "x" * 93 + "..."),
+        ("\u4e2d" * 97, "\u4e2d" * 93 + "..."),
+    ],
+)
+def test_restore_preview_boundaries(content: str, expected: str) -> None:
+    assert format_restore_preview(content) == expected
 
 
 @pytest.mark.asyncio

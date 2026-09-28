@@ -153,40 +153,37 @@ def test_windows_release_entry_is_documented_in_readme() -> None:
     assert "python scripts/release_validation.py --phase all" in readme.read_text(encoding="utf-8")
 
 
-def test_workflow_requires_both_platform_reports_for_release_gate() -> None:
+def test_workflow_requires_windows_report_for_release_gate() -> None:
     workflow = Path(__file__).parents[1] / ".github" / "workflows" / "release-validation.yml"
     document = yaml.load(workflow.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
-    assert set(document["jobs"]) == {"windows-release", "posix-release", "release-gate"}
-    for job_name, runner, report in (
-        ("windows-release", "windows-latest", "windows-release.json"),
-        ("posix-release", "ubuntu-24.04", "posix-release.json"),
-    ):
-        job = document["jobs"][job_name]
-        assert job["runs-on"] == runner
-        commands = "\n".join(step.get("run", "") for step in job["steps"] if isinstance(step, dict))
-        assert "python scripts/release_validation.py --phase all" in " ".join(commands.split())
-        assert report in commands
-        assert 'python -m pip install -e ".[dev]" "setuptools>=77"' in commands
-        uploads = [
-            step for step in job["steps"] if step.get("uses") == "actions/upload-artifact@v4"
-        ]
-        assert len(uploads) == 1
-        assert uploads[0]["if"] == "always()"
-        assert report in uploads[0]["with"]["path"]
+    assert set(document["jobs"]) == {"windows-release", "release-gate"}
+    job = document["jobs"]["windows-release"]
+    assert job["runs-on"] == "windows-latest"
+    windows_steps = job["steps"]
+    commands = "\n".join(step.get("run", "") for step in windows_steps if isinstance(step, dict))
+    assert "python scripts/release_validation.py --phase all" in " ".join(commands.split())
+    assert "windows-release.json" in commands
+    assert 'python -m pip install -e ".[dev]" "setuptools>=77"' in commands
+    uploads = [
+        step for step in windows_steps if step.get("uses") == "actions/upload-artifact@v4"
+    ]
+    assert len(uploads) == 1
+    assert uploads[0]["if"] == "always()"
+    assert "windows-release.json" in uploads[0]["with"]["path"]
 
-    windows_steps = document["jobs"]["windows-release"]["steps"]
     assert any(step.get("name") == "Warm Windows PowerShell 5.1" for step in windows_steps)
     assert any(
         step.get("name") == "Warm Windows PowerShell host resolution" for step in windows_steps
     )
 
     gate = document["jobs"]["release-gate"]
-    assert gate["needs"] == ["windows-release", "posix-release"]
+    assert gate["needs"] == ["windows-release"]
     assert gate["if"] == "always()"
+    assert gate["runs-on"] == "windows-latest"
+    assert gate["steps"][0]["shell"] == "pwsh"
     command = gate["steps"][0]["run"]
-    assert "test '${{ needs.windows-release.result }}' = success" in command
-    assert "test '${{ needs.posix-release.result }}' = success" in command
+    assert "if ('${{ needs.windows-release.result }}' -ne 'success') { exit 1 }" in command
 
 
 def test_skip_classification_is_bound_to_exact_node_and_reason(

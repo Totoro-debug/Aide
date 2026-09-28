@@ -31,17 +31,17 @@ source .venv/bin/activate
 python -m pip install .
 ```
 
-## 跨平台发布验证
+## Windows 发布验证
 
-发布验证在 GitHub Actions 的 Windows 和 Ubuntu 24.04 runner 上分别运行 `--phase all`。Windows 必须真实执行 Windows PowerShell 5.1 和 PowerShell 7 的 Host Exec 检查、执行、Full-Access 动态命令及文件系统能力检查；Ubuntu 必须真实执行 POSIX Bash 的权限、可执行文件身份和确认流程检查。两个平台都运行完整测试、lint、类型检查、构建，并在隔离环境中安装 wheel，从源码树外执行 entry point 与配置 smoke。只有两个平台作业都成功，`release-gate` 才通过；主机缺失或必需测试跳过均不算通过。
+发布验证仅在 GitHub Actions 的 Windows runner 上运行 `--phase all`。Windows 必须真实执行 Windows PowerShell 5.1 和 PowerShell 7 的 Host Exec 检查、执行、Full-Access 动态命令及文件系统能力检查，并运行完整测试、lint、类型检查、构建，在隔离环境中安装 wheel，从源码树外执行 entry point 与配置 smoke。`release-gate` 仅依赖 Windows 作业成功；主机缺失或必需测试跳过均不算通过。
 
-PowerShell 选择器配置位于 `[runtime].exec_shell`；`auto` 优先选择 PowerShell 7，随后选择 Windows PowerShell 5.1，显式选择不会交叉回退。POSIX 发布检查由实际操作系统选择 Bash；命令行保留默认 `--shell both`，不接受显式 PowerShell 选择器。可在各平台本地运行，也可通过面向 `main` 的 PR 或手动触发工作流：
+PowerShell 选择器配置位于 `[runtime].exec_shell`；`auto` 优先选择 PowerShell 7，随后选择 Windows PowerShell 5.1，显式选择不会交叉回退。验证脚本仍可在 POSIX 本地运行，由实际操作系统选择 Bash；命令行保留默认 `--shell both`，不接受显式 PowerShell 选择器。GitHub Actions 仅验证 Windows，可通过推送到 `main`、面向 `main` 的 PR 或手动触发工作流：
 
 ```powershell
 python scripts/release_validation.py --phase all
 ```
 
-`Full-Access` 只移除普通权限提示，不提供 OS sandbox；参数校验、能力错误、业务拒绝、执行错误、灾难性 Exec 和不确定检查仍然有效。发布门禁会输出 skip 分类、Windows junction/reparse 证据、POSIX Bash 主机结果及量化覆盖计数。合并工作流后，将 `release-gate` 设为 `main` 的必需检查；实际 Windows 和 Ubuntu 作业通过前，不视为完成发布验证。
+`Full-Access` 只移除普通权限提示，不提供 OS sandbox；参数校验、能力错误、业务拒绝、执行错误、灾难性 Exec 和不确定检查仍然有效。Windows 发布门禁会输出 skip 分类、Windows junction/reparse 证据、PowerShell 主机结果及量化覆盖计数。合并工作流后，将 `release-gate` 设为 `main` 的必需检查；实际 Windows 作业通过前，不视为完成发布验证。
 
 ## 项目最小配置
 

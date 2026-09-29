@@ -52,6 +52,7 @@ include = ["myclaw*"]
 [tool.setuptools.package-data]
 "myclaw.templates" = ["*.md"]
 "myclaw.service.protocol" = ["*.json"]
+"myclaw.web_assets" = ["*.html", "*.js", "*.css", "*.svg", "*.webmanifest", "assets/*"]
 
 [tool.pytest.ini_options]
 addopts = ["--strict-config", "--strict-markers", "-ra"]

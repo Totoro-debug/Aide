@@ -1,6 +1,7 @@
 """Command-line entry point for MyClaw."""
 
 import asyncio
+import webbrowser
 from collections.abc import Mapping
 from pathlib import Path
 from time import monotonic
@@ -1068,6 +1069,17 @@ async def _run_service_cli_conversation(
         await client.close()
 
 
+async def _create_web_launch_url() -> str:
+    client = await ServiceClient.connect_or_start(
+        AgentHome.production(),
+        Path.cwd(),
+    )
+    try:
+        return await client.create_web_ticket()
+    finally:
+        await client.close()
+
+
 _ORIGINAL_CLI_CONVERSATION = _run_cli_conversation
 
 
@@ -1183,6 +1195,21 @@ def service_stop_command() -> None:
             ErrorInfo(cast(Any, "service_not_running"), "No active local service was found.")
         )
         raise typer.Exit(code=1)
+
+
+@app.command("web")
+def web_command() -> None:
+    """Open the authenticated local Web Interface."""
+    try:
+        url = asyncio.run(_create_web_launch_url())
+        if not webbrowser.open_new_tab(url):
+            console.print(url, markup=False, highlight=False)
+    except ServiceStartupError as error:
+        _print_error_info(ErrorInfo(cast(Any, error.code), error.message))
+        raise typer.Exit(code=1) from None
+    except ServiceError as error:
+        _print_error_info(ErrorInfo(cast(Any, error.code), error.message))
+        raise typer.Exit(code=1) from None
 
 
 @app.command("config")

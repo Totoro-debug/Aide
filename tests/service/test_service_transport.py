@@ -14,6 +14,7 @@ from xml.etree import ElementTree
 import aiohttp
 import pytest
 from aiohttp import web
+from yarl import URL
 
 import myclaw.terminal.cli as cli
 from myclaw.agent.session.restore import RestoreMode
@@ -422,6 +423,121 @@ async def test_cli_restore_refreshes_claim_and_conversation_projection(tmp_path:
         assert client.claim_version == original_version + 1
         assert client.control.project_foreground_conversation().messages == ()
         assert Session.load(state, session.session_id).messages == []
+    finally:
+        if client is not None:
+            await client.close()
+        await ServiceClient.stop_existing(home, port=port)
+
+
+@pytest.mark.asyncio
+async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_bounded(
+    tmp_path: Path,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    port = _free_port()
+    client: ServiceClient | None = None
+    try:
+        client = await ServiceClient.connect_or_start(home, workspace, port=port)
+        launch_url = await client.create_web_ticket()
+        ticket = launch_url.rsplit("#ticket=", 1)[-1]
+        assert ticket
+        assert client.token not in launch_url
+
+        cookie_jar = aiohttp.CookieJar(unsafe=True)
+        async with aiohttp.ClientSession(cookie_jar=cookie_jar) as browser:
+            async with browser.get(f"{client.base_url}/api/v1/service") as response:
+                assert response.status == 401
+
+            async with browser.get(
+                f"{client.base_url}/",
+                headers={"Host": f"outside.example:{port}"},
+            ) as response:
+                assert response.status == 403
+
+            async with browser.post(
+                f"{client.base_url}/api/v1/web/ticket",
+                headers={"Origin": "http://outside.example"},
+                json={"ticket": ticket},
+            ) as response:
+                assert response.status == 403
+
+            async with browser.get(f"{client.base_url}/") as response:
+                assert response.status == 200
+                index = await response.text()
+                assert "MyClaw" in index
+                assert client.token not in index
+
+            async with browser.get(
+                f"{client.base_url}/assets/C:/Windows/win.ini",
+                headers={"Origin": client.base_url},
+            ) as response:
+                assert response.status == 404
+
+            async with browser.post(
+                f"{client.base_url}/api/v1/web/ticket",
+                headers={"Origin": client.base_url},
+                json={"ticket": ticket},
+            ) as response:
+                assert response.status == 200
+                exchanged = await response.json()
+                assert isinstance(exchanged["csrf_token"], str)
+                assert client.token not in await response.text()
+                cookies = browser.cookie_jar.filter_cookies(URL(client.base_url))
+                assert "myclaw_session" in cookies
+                assert "myclaw_csrf" not in cookies
+
+            async with browser.post(
+                f"{client.base_url}/api/v1/web/ticket",
+                headers={"Origin": client.base_url},
+                json={"ticket": ticket},
+            ) as response:
+                assert response.status == 401
+
+            csrf = exchanged["csrf_token"]
+            async with browser.post(
+                f"{client.base_url}/api/v1/clients",
+                headers={"Origin": client.base_url, "X-MyClaw-CSRF": csrf},
+                json={"request_id": "browser-client", "kind": "web"},
+            ) as response:
+                assert response.status == 200
+                web_client = await response.json()
+                assert web_client["client_id"]
+
+            async with browser.get(
+                f"{client.base_url}/api/v1/service",
+                headers={"Origin": client.base_url},
+            ) as response:
+                assert response.status == 200
+
+            async with browser.post(
+                f"{client.base_url}/api/v1/clients",
+                headers={"Origin": client.base_url},
+                json={"request_id": "missing-csrf", "kind": "web"},
+            ) as response:
+                assert response.status == 403
+
+            async with browser.get(
+                f"{client.base_url}/api/v1/service",
+                headers={"Origin": "http://evil.example"},
+            ) as response:
+                assert response.status == 403
+
+            async with browser.get(
+                f"{client.base_url}/assets/../service.token",
+                headers={"Origin": client.base_url},
+            ) as response:
+                assert response.status in {403, 404}
+                assert "service.token" not in await response.text()
+
+        async with aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True)) as foreign:
+            with pytest.raises(aiohttp.WSServerHandshakeError) as handshake:
+                await foreign.ws_connect(
+                    f"{client.base_url}/api/v1/events",
+                    headers={"Origin": "http://evil.example"},
+                )
+            assert handshake.value.status == 403
     finally:
         if client is not None:
             await client.close()

@@ -15,6 +15,7 @@ from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, cast
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import aiohttp
@@ -763,6 +764,21 @@ class ServiceClient:
                 )
             await self._apply_snapshot(snapshot)
         return result
+
+    async def create_web_ticket(self) -> str:
+        """Create a short-lived browser launch URL without exposing the service credential."""
+        response = await self._http_request(
+            "POST",
+            "/api/v1/web/ticket",
+            payload={"request_id": str(uuid4())},
+            mutation=True,
+        )
+        ticket = response.get("ticket")
+        if not isinstance(ticket, str) or not ticket:
+            raise ServiceStartupError(
+                "service_protocol_error", "The local service did not return a Web ticket."
+            )
+        return f"{self.base_url}/#ticket={quote(ticket, safe='')}"
 
     async def close(self) -> None:
         if self._closed:

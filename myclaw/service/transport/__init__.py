@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import mimetypes
 import secrets
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -21,13 +24,30 @@ _API_PREFIX = "/api/v1"
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 _CSRF_HEADER = "X-MyClaw-CSRF"
 _CLIENT_HEADER = "X-MyClaw-Client"
+_WEB_SESSION_COOKIE = "myclaw_session"
+_WEB_TICKET_TTL_SECONDS = 25.0
+_WEB_SESSION_MAX_AGE_SECONDS = 24 * 60 * 60
+_STATIC_CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; connect-src 'self' ws:; base-uri 'none'; "
+    "frame-ancestors 'none'; form-action 'self'"
+)
 
 
 @dataclass(slots=True)
 class _RequestContext:
     request: web.Request
-    token: str
+    token: str | None
     client_id: str | None
+    web_session: _WebSession | None = None
+
+
+@dataclass(slots=True)
+class _WebSession:
+    csrf_token: str
+    expires_at: float
+    client_id: str | None = None
+    reconnect_credential: str | None = None
 
 
 class _WebSocketSink(ServiceSink):
@@ -51,11 +71,25 @@ class LocalServiceTransport:
 
     def __init__(self, service: LocalService) -> None:
         self.service = service
+        self._web_tickets: dict[str, float] = {}
+        self._web_sessions: dict[str, _WebSession] = {}
+        self._web_auth_lock = asyncio.Lock()
+
+    def _prune_web_tickets(self) -> None:
+        now = time.monotonic()
+        for ticket, expires_at in tuple(self._web_tickets.items()):
+            if expires_at <= now:
+                self._web_tickets.pop(ticket, None)
+        for cookie, session in tuple(self._web_sessions.items()):
+            if session.expires_at <= now:
+                self._web_sessions.pop(cookie, None)
 
     def create_app(self) -> web.Application:
         app = web.Application(middlewares=[self._error_middleware])
         app["myclaw.service"] = self.service
         app.router.add_get("/", self._static_index)
+        app.router.add_post(f"{_API_PREFIX}/web/ticket", self._web_ticket)
+        app.router.add_get(f"{_API_PREFIX}/web/session", self._web_session_info)
         app.router.add_get(f"{_API_PREFIX}/service/identity", self._service_identity)
         app.router.add_get(f"{_API_PREFIX}/service", self._service_info)
         app.router.add_post(f"{_API_PREFIX}/clients", self._register_client)
@@ -89,6 +123,8 @@ class LocalServiceTransport:
         )
         app.router.add_post(f"{_API_PREFIX}/service/stop", self._stop_service)
         app.router.add_get(f"{_API_PREFIX}/events", self._events)
+        app.router.add_get("/assets/{asset_path:.*}", self._static_asset)
+        app.router.add_get("/{static_path:.*}", self._static_route)
         return app
 
     @web.middleware
@@ -117,13 +153,119 @@ class LocalServiceTransport:
 
     async def _static_index(self, request: web.Request) -> web.Response:
         self._check_host_origin(request, websocket=False)
-        return web.Response(
-            text=(
-                '<!doctype html><html><head><meta charset="utf-8"><title>MyClaw</title>'
-                "</head><body><main><h1>MyClaw local service</h1></main></body></html>"
-            ),
-            content_type="text/html",
-            headers={"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'"},
+        return self._asset_response("index.html", cache_control="no-store")
+
+    async def _static_asset(self, request: web.Request) -> web.Response:
+        self._check_host_origin(request, websocket=False)
+        asset_path = request.match_info.get("asset_path", "")
+        if not _safe_asset_path(asset_path):
+            raise web.HTTPNotFound()
+        return self._asset_response(
+            f"assets/{asset_path}",
+            cache_control="public, max-age=31536000, immutable",
+        )
+
+    async def _static_route(self, request: web.Request) -> web.Response:
+        self._check_host_origin(request, websocket=False)
+        route_path = request.match_info.get("static_path", "").strip("/")
+        if route_path.startswith("api/"):
+            raise web.HTTPNotFound()
+        if route_path in {"", "index.html"}:
+            return self._asset_response("index.html", cache_control="no-store")
+        if route_path in {"favicon.svg", "manifest.webmanifest"}:
+            return self._asset_response(
+                route_path,
+                cache_control="public, max-age=31536000, immutable",
+            )
+        if "." in Path(route_path).name:
+            raise web.HTTPNotFound()
+        return self._asset_response("index.html", cache_control="no-store")
+
+    @staticmethod
+    def _asset_response(asset_path: str, *, cache_control: str) -> web.Response:
+        try:
+            content = _read_web_asset(asset_path)
+        except (FileNotFoundError, ModuleNotFoundError, OSError):
+            raise web.HTTPNotFound() from None
+        content_type, encoding = mimetypes.guess_type(asset_path)
+        response = web.Response(
+            body=content,
+            content_type=content_type or "application/octet-stream",
+            charset="utf-8" if content_type and content_type.startswith("text/") else None,
+            headers={
+                "Cache-Control": cache_control,
+                "Content-Security-Policy": _STATIC_CSP,
+                "Referrer-Policy": "no-referrer",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+        if encoding is not None:
+            response.headers["Content-Encoding"] = encoding
+        return response
+
+    async def _web_ticket(self, request: web.Request) -> web.Response:
+        if _bearer_token(request) is None:
+            return await self._web_exchange(request)
+        context = self._authenticate(request, mutation=True, client_required=True)
+        client_id = _context_client_id(context)
+        if self.service.client(client_id).kind != "cli":
+            raise service_error(
+                "forbidden", "Only CLI clients may open the Web Interface.", status=403
+            )
+        body = await _json_object(request)
+        request_id = _require_request_id(body)
+        ticket = secrets.token_urlsafe(32)
+        async with self._web_auth_lock:
+            self._prune_web_tickets()
+            self._web_tickets[ticket] = time.monotonic() + _WEB_TICKET_TTL_SECONDS
+        return web.json_response(
+            {
+                "request_id": request_id,
+                "ticket": ticket,
+                "expires_in": int(_WEB_TICKET_TTL_SECONDS),
+            }
+        )
+
+    async def _web_exchange(self, request: web.Request) -> web.Response:
+        self._check_host_origin(request, websocket=False, require_origin=True)
+        body = await _json_object(request)
+        ticket = body.get("ticket")
+        if not isinstance(ticket, str) or not 32 <= len(ticket) <= 128:
+            raise service_error("unauthenticated", "The Web launch ticket is invalid.", status=401)
+        async with self._web_auth_lock:
+            expires_at = self._web_tickets.pop(ticket, None)
+            if expires_at is None or expires_at <= time.monotonic():
+                raise service_error(
+                    "unauthenticated", "The Web launch ticket is invalid or expired.", status=401
+                )
+            session_cookie = secrets.token_urlsafe(32)
+            csrf_token = secrets.token_urlsafe(32)
+            self._prune_web_tickets()
+            self._web_sessions[session_cookie] = _WebSession(
+                csrf_token=csrf_token,
+                expires_at=time.monotonic() + _WEB_SESSION_MAX_AGE_SECONDS,
+            )
+        response = web.json_response({"authenticated": True, "csrf_token": csrf_token})
+        response.set_cookie(
+            _WEB_SESSION_COOKIE,
+            session_cookie,
+            max_age=_WEB_SESSION_MAX_AGE_SECONDS,
+            httponly=True,
+            samesite="Strict",
+            path="/",
+        )
+        return response
+
+    async def _web_session_info(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request)
+        if context.web_session is None:
+            raise service_error("forbidden", "A browser session is required.", status=403)
+        return web.json_response(
+            {
+                "authenticated": True,
+                "csrf_token": context.web_session.csrf_token,
+                "client_id": context.web_session.client_id,
+            }
         )
 
     async def _service_info(self, request: web.Request) -> web.Response:
@@ -165,7 +307,7 @@ class LocalServiceTransport:
         )
 
     async def _register_client(self, request: web.Request) -> web.Response:
-        self._authenticate(request, mutation=True)
+        context = self._authenticate(request, mutation=True)
         body = await _json_object(request)
         request_id = _require_request_id(body)
         kind = body.get("kind")
@@ -179,7 +321,19 @@ class LocalServiceTransport:
             )
         if reconnect is not None and not isinstance(reconnect, str):
             raise service_error("validation_error", "Reconnect credential is invalid.", status=422)
-        client = await self.service.register_client(kind, reconnect)
+        if context.web_session is not None:
+            if kind != "web":
+                raise service_error(
+                    "forbidden", "Browser sessions may only register Web clients.", status=403
+                )
+            session = context.web_session
+            if session.client_id is not None:
+                reconnect = session.reconnect_credential
+            client = await self.service.register_client(kind, reconnect)
+            session.client_id = client.client_id
+            session.reconnect_credential = client.reconnect_credential
+        else:
+            client = await self.service.register_client(kind, reconnect)
         return web.json_response(
             {
                 "request_id": request_id,
@@ -399,29 +553,60 @@ class LocalServiceTransport:
     ) -> _RequestContext:
         self._check_host_origin(request, websocket=websocket)
         token = _bearer_token(request)
-        try:
-            expected = _read_service_token(self.service)
-        except (OSError, ValueError):
-            raise service_error(
-                "unauthenticated", "Service credential is unavailable.", status=401
-            ) from None
-        if token is None or not hmac.compare_digest(token, expected):
-            raise service_error(
-                "unauthenticated", "Service authentication is required.", status=401
-            )
-        if mutation and not hmac.compare_digest(request.headers.get(_CSRF_HEADER, ""), token):
+        web_session: _WebSession | None = None
+        csrf_token: str
+        if token is not None:
+            try:
+                expected = _read_service_token(self.service)
+            except (OSError, ValueError):
+                raise service_error(
+                    "unauthenticated", "Service credential is unavailable.", status=401
+                ) from None
+            if not hmac.compare_digest(token, expected):
+                raise service_error(
+                    "unauthenticated", "Service authentication is required.", status=401
+                )
+            csrf_token = token
+        else:
+            session_cookie = request.cookies.get(_WEB_SESSION_COOKIE)
+            if not session_cookie:
+                raise service_error(
+                    "unauthenticated", "Service authentication is required.", status=401
+                )
+            web_session = self._web_sessions.get(session_cookie)
+            if web_session is None or web_session.expires_at <= time.monotonic():
+                self._web_sessions.pop(session_cookie, None)
+                raise service_error(
+                    "unauthenticated", "Browser authentication has expired.", status=401
+                )
+            csrf_token = web_session.csrf_token
+        if mutation and not hmac.compare_digest(request.headers.get(_CSRF_HEADER, ""), csrf_token):
             raise service_error("forbidden", "A valid CSRF proof is required.", status=403)
         client_id = request.headers.get(_CLIENT_HEADER)
+        if web_session is not None:
+            if web_session.client_id is None and client_id is not None:
+                raise service_error("forbidden", "Browser Client identity is invalid.", status=403)
+            if web_session.client_id is not None:
+                if client_id is not None and client_id != web_session.client_id:
+                    raise service_error(
+                        "forbidden", "Browser Client identity is invalid.", status=403
+                    )
+                client_id = web_session.client_id
         if client_required:
             if not client_id:
                 raise service_error(
                     "unauthenticated", "Client authentication is required.", status=401
                 )
             self.service.client(client_id)
-        return _RequestContext(request, token, client_id)
+        return _RequestContext(request, token, client_id, web_session)
 
     @staticmethod
-    def _check_host_origin(request: web.Request, *, websocket: bool) -> None:
+    def _check_host_origin(
+        request: web.Request,
+        *,
+        websocket: bool,
+        require_origin: bool = False,
+    ) -> None:
         host_header = request.headers.get("Host", "")
         try:
             host = urlsplit(f"http://{host_header}")
@@ -443,7 +628,7 @@ class LocalServiceTransport:
             raise service_error("forbidden", "Only local Host values are accepted.", status=403)
         origin = request.headers.get("Origin")
         if origin is None:
-            if websocket:
+            if websocket or require_origin:
                 raise service_error("forbidden", "WebSocket Origin is required.", status=403)
             return
         try:
@@ -546,6 +731,26 @@ def _consume_task_result(task: asyncio.Task[object]) -> None:
 
 def _path_from_text(value: str) -> Path:
     return Path(value)
+
+
+def _safe_asset_path(value: str) -> bool:
+    if not value or "\x00" in value or "\\" in value or ":" in value:
+        return False
+    parts = value.split("/")
+    return all(part not in {"", ".", ".."} for part in parts)
+
+
+def _read_web_asset(asset_path: str) -> bytes:
+    if not _safe_asset_path(asset_path):
+        raise FileNotFoundError(asset_path)
+    package = resources.files("myclaw.web_assets")
+    asset = package.joinpath(*asset_path.split("/"))
+    if isinstance(package, Path) and isinstance(asset, Path):
+        if not asset.resolve().is_relative_to(package.resolve()):
+            raise FileNotFoundError(asset_path)
+    if not asset.is_file():
+        raise FileNotFoundError(asset_path)
+    return asset.read_bytes()
 
 
 __all__ = ["LocalServiceTransport", "create_app"]

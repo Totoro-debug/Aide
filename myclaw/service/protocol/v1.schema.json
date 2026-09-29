@@ -179,6 +179,83 @@
       "additionalProperties": false,
       "required": ["configured"],
       "properties": {"configured": {"type": "boolean"}}
+    },
+    "project_schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "at_time", "every_seconds", "cron_expr", "timezone"],
+      "properties": {
+        "kind": {"enum": ["at", "every", "cron"]},
+        "at_time": {"type": ["string", "null"]},
+        "every_seconds": {"type": ["integer", "null"], "minimum": 1},
+        "cron_expr": {"type": ["string", "null"]},
+        "timezone": {"type": ["string", "null"]}
+      }
+    },
+    "project_job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "title", "schedule", "due_at", "review_status"],
+      "properties": {
+        "job_id": {"$ref": "#/$defs/identifier"},
+        "title": {"type": "string", "minLength": 1},
+        "schedule": {"$ref": "#/$defs/project_schedule"},
+        "due_at": {"type": ["string", "null"]},
+        "review_status": {"enum": ["overdue", "upcoming", "next_on_resume", "completed"]}
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_id", "path", "name", "schedule_state", "available", "saved_jobs"
+      ],
+      "properties": {
+        "project_id": {"$ref": "#/$defs/identifier"},
+        "path": {"type": "string", "minLength": 1},
+        "name": {"type": "string"},
+        "schedule_state": {
+          "enum": ["available", "unavailable", "awaiting_resume", "removing", "failed"]
+        },
+        "available": {"type": "boolean"},
+        "saved_jobs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/project_job"}
+        }
+      }
+    },
+    "projects_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projects"],
+      "properties": {
+        "projects": {"type": "array", "items": {"$ref": "#/$defs/project"}}
+      }
+    },
+    "project_registration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "project_id", "workspace_id", "schedule_state", "saved_jobs"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "project_id": {"$ref": "#/$defs/identifier"},
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "schedule_state": {
+          "enum": ["available", "unavailable", "awaiting_resume", "removing", "failed"]
+        },
+        "saved_jobs": {"type": "array", "items": {"$ref": "#/$defs/project_job"}}
+      }
+    },
+    "project_schedule_resume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "schedule_state"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "schedule_state": {
+          "enum": ["available", "unavailable", "awaiting_resume", "removing", "failed"]
+        }
+      }
     }
   }
 }

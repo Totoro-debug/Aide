@@ -59,7 +59,11 @@ class ProjectCatalog:
                 return record
         record = ProjectRecord(str(uuid4()), normalized, schedule_state)
         self._records[record.project_id] = record
-        self._save()
+        try:
+            self._save()
+        except Exception:
+            self._records.pop(record.project_id, None)
+            raise
         return record
 
     def remove(self, project_id: str) -> ProjectRecord:
@@ -69,7 +73,11 @@ class ProjectCatalog:
             record = self._records.pop(project_id)
         except KeyError as error:
             raise ProjectCatalogError("Project registration was not found") from error
-        self._save()
+        try:
+            self._save()
+        except Exception:
+            self._records[record.project_id] = record
+            raise
         return record
 
     def set_schedule_state(self, project_id: str, schedule_state: str) -> ProjectRecord:
@@ -88,7 +96,11 @@ class ProjectCatalog:
             raise ProjectCatalogError("Project registration was not found")
         updated = ProjectRecord(record.project_id, record.path, schedule_state)
         self._records[project_id] = updated
-        self._save()
+        try:
+            self._save()
+        except Exception:
+            self._records[project_id] = record
+            raise
         return updated
 
     def _load(self) -> None:
@@ -113,7 +125,18 @@ class ProjectCatalog:
                 if not isinstance(item, dict):
                     raise ValueError("entry")
                 project_id = item["project_id"]
-                path = normalize_workspace_path(Path(item["path"]))
+                raw_path = Path(item["path"])
+                if not raw_path.is_absolute():
+                    raise ValueError("relative path")
+                path = normalize_workspace_path(raw_path)
+                resolved = path.resolve(strict=False)
+                agent_home = self.agent_home.path.resolve(strict=False)
+                if (
+                    resolved == agent_home
+                    or agent_home in resolved.parents
+                    or resolved in agent_home.parents
+                ):
+                    raise ValueError("Agent Home overlap")
                 schedule_state = item.get("schedule_state", "available")
                 if not isinstance(project_id, str) or not project_id:
                     raise ValueError("project id")
@@ -128,9 +151,11 @@ class ProjectCatalog:
                 identity = self._identity(path)
                 if identity in identities:
                     raise ValueError("duplicate path")
+                if project_id in records:
+                    raise ValueError("duplicate project id")
                 identities.add(identity)
                 records[project_id] = ProjectRecord(project_id, path, schedule_state)
-        except (KeyError, TypeError, ValueError) as error:
+        except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
             raise ProjectCatalogError("Project catalog entries are invalid") from error
         self._records = records
 
@@ -165,16 +190,28 @@ class ProjectCatalog:
     def _identity(path: Path) -> str:
         try:
             resolved = path.resolve(strict=False)
-        except OSError as error:
+        except (OSError, RuntimeError) as error:
             raise ProjectCatalogError("Project path could not be resolved") from error
         return os.path.normcase(str(resolved))
 
     def _validate_path(self, path: Path) -> Path:
-        normalized = normalize_workspace_path(path)
-        if not normalized.exists() or not normalized.is_dir():
+        if not path.is_absolute():
+            raise ProjectCatalogError("Project path must be an absolute directory")
+        try:
+            normalized = normalize_workspace_path(path)
+        except (TypeError, ValueError) as error:
+            raise ProjectCatalogError("Project path must be an absolute directory") from error
+        try:
+            available = normalized.exists() and normalized.is_dir()
+        except (OSError, ValueError) as error:
+            raise ProjectCatalogError("Project directory is unavailable") from error
+        if not available:
             raise ProjectCatalogError("Project directory is unavailable")
-        resolved = normalized.resolve(strict=True)
-        agent_home = self.agent_home.path.resolve(strict=False)
+        try:
+            resolved = normalized.resolve(strict=True)
+            agent_home = self.agent_home.path.resolve(strict=False)
+        except (OSError, RuntimeError) as error:
+            raise ProjectCatalogError("Project path could not be resolved") from error
         if (
             resolved == agent_home
             or agent_home in resolved.parents

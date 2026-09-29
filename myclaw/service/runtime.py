@@ -44,12 +44,39 @@ from myclaw.provider.model_router import ModelRouter
 from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.schedule.service import ScheduleOccurrence, ScheduleService
 from myclaw.service.errors import ServiceError, service_error
-from myclaw.service.projects import ProjectCatalog, ProjectRecord
+from myclaw.service.projects import ProjectCatalog, ProjectCatalogError, ProjectRecord
 from myclaw.utils.time import local_now
 
 
 class ServiceSink(Protocol):
     async def send_event(self, event: dict[str, object]) -> None: ...
+
+
+def _project_catalog_service_error(error: ProjectCatalogError) -> ServiceError:
+    message = str(error)
+    if "unavailable" in message:
+        return service_error(
+            "not_found",
+            "Project directory is unavailable.",
+            status=404,
+            field_errors={"path": "must name an existing directory"},
+        )
+    if "catalog" in message or "entries" in message or "format" in message:
+        return service_error(
+            "persistence_error", "The Project catalog could not be read safely.", status=500
+        )
+    if "overlaps Agent Home" in message:
+        detail = "must not overlap Agent Home"
+    elif "absolute directory" in message:
+        detail = "must be an absolute directory"
+    else:
+        detail = "must identify a usable local directory"
+    return service_error(
+        "validation_error",
+        "Project path is invalid.",
+        status=422,
+        field_errors={"path": detail},
+    )
 
 
 def _consume_task_result(task: asyncio.Task[object]) -> None:
@@ -1121,7 +1148,19 @@ class LocalService:
         self, client_id: str, path: Path
     ) -> tuple[ProjectRecord, WorkspaceServiceRuntime, tuple[ScheduleJob, ...]]:
         self._require_client(client_id)
-        record = self.projects.register(path, schedule_state="awaiting_resume")
+        try:
+            record = self.projects.register(path, schedule_state="awaiting_resume")
+        except ProjectCatalogError as error:
+            raise _project_catalog_service_error(error) from error
+        except OSError as error:
+            raise service_error(
+                "persistence_error", "The Project catalog could not be saved.", status=500
+            ) from error
+        if record.schedule_state == "awaiting_resume":
+            key = os.path.normcase(str(record.path.resolve(strict=False)))
+            workspace_id = self._workspace_keys.get(key)
+            if workspace_id is not None:
+                await self._workspaces[workspace_id].pause_schedule_admission()
         workspace = await self.attach_workspace(client_id, record.path)
         jobs = await workspace.schedule_service.public_snapshot()
         if not jobs and record.schedule_state == "awaiting_resume":
@@ -1129,6 +1168,18 @@ class LocalService:
             if any(client.connected for client in self._clients.values()):
                 await workspace.activate_schedule()
         return record, workspace, jobs
+
+    async def project_schedule_jobs(self, record: ProjectRecord) -> tuple[ScheduleJob, ...]:
+        """Read saved user Jobs without admitting Schedule execution."""
+        if not record.path.is_dir():
+            return ()
+        key = os.path.normcase(str(record.path.resolve(strict=False)))
+        workspace_id = self._workspace_keys.get(key)
+        if workspace_id is None:
+            workspace = await self._get_or_create_workspace(record.path)
+        else:
+            workspace = self._workspaces[workspace_id]
+        return await workspace.schedule_service.public_snapshot()
 
     async def resume_project_schedule(
         self, client_id: str, project_id: str, expected_job_ids: set[str]
@@ -1141,6 +1192,8 @@ class LocalService:
             raise service_error("not_found", "Project registration was not found.", status=404)
         if record.schedule_state != "awaiting_resume":
             return record.schedule_state
+        if not record.path.is_dir():
+            raise service_error("not_found", "Project directory is unavailable.", status=404)
         workspace = await self._get_or_create_workspace(record.path)
         jobs = await workspace.schedule_service.public_snapshot()
         if {job.job_id for job in jobs} != expected_job_ids:

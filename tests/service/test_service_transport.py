@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import socket
 import sys
 from pathlib import Path
@@ -22,6 +23,7 @@ from myclaw.agent.session.session import Session
 from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.management.commands import ManagementCommandDispatcher
+from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.service.client import (
     RemoteConfirmationCoordinator,
     RemoteControl,
@@ -40,8 +42,31 @@ from myclaw.service.discovery import (
 )
 from myclaw.service.errors import ServiceError
 from myclaw.service.runtime import LocalService
+from myclaw.service.transport import _project_job_summary
 from myclaw.terminal.conversation import TerminalConversationApp, _ConversationInput
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
+
+
+def test_project_job_review_distinguishes_overdue_and_next_cron_occurrence() -> None:
+    overdue = ScheduleJob(
+        job_id=str(uuid4()),
+        message="Past due task",
+        schedule=JobSchedule.every(3600),
+        created_at_ms=1_600_000_000_000,
+        updated_at_ms=1_600_000_000_000,
+    )
+    cron = ScheduleJob(
+        job_id=str(uuid4()),
+        message="Future cron task",
+        schedule=JobSchedule.cron("0 * * * *", "UTC"),
+        created_at_ms=1_600_000_000_000,
+        updated_at_ms=1_600_000_000_000,
+    )
+
+    assert _project_job_summary(overdue)["review_status"] == "overdue"
+    assert _project_job_summary(overdue)["due_at"] is not None
+    assert _project_job_summary(cron)["review_status"] == "next_on_resume"
+    assert _project_job_summary(cron)["due_at"] is None
 
 
 def _free_port() -> int:
@@ -171,6 +196,93 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
             await second.close()
         if first is not None:
             await first.close()
+        await ServiceClient.stop_existing(home, port=port)
+
+
+@pytest.mark.asyncio
+async def test_project_http_contract_reports_path_errors_and_keeps_cli_workspaces_unregistered(
+    tmp_path: Path,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    cli_workspace = tmp_path / "cli-workspace"
+    cli_workspace.mkdir()
+    port = _free_port()
+    client: ServiceClient | None = None
+    cli_client: ServiceClient | None = None
+    try:
+        client = await ServiceClient.connect_or_start(home, project, port=port)
+        cli_client = await ServiceClient.connect_or_start(home, cli_workspace, port=port)
+        headers = {
+            "Authorization": f"Bearer {client.token}",
+            "X-MyClaw-CSRF": client.token,
+            "X-MyClaw-Client": client.client_id,
+        }
+        async with aiohttp.ClientSession() as http:
+            async with http.post(
+                f"{client.base_url}/api/v1/projects",
+                headers=headers,
+                json={"request_id": "relative", "path": "relative/project"},
+            ) as response:
+                assert response.status == 422
+                error = await response.json()
+                assert error["code"] == "validation_error"
+                assert error["field_errors"]["path"]
+
+            nested_home_path = home.path / "nested"
+            nested_home_path.mkdir()
+            async with http.post(
+                f"{client.base_url}/api/v1/projects",
+                headers=headers,
+                json={"request_id": "agent-home", "path": str(nested_home_path)},
+            ) as response:
+                assert response.status == 422
+                error = await response.json()
+                assert error["code"] == "validation_error"
+                assert "Agent Home" in error["field_errors"]["path"]
+
+            async with http.get(f"{client.base_url}/api/v1/projects", headers=headers) as response:
+                assert response.status == 200
+                assert await response.json() == {"projects": []}
+
+            async with http.post(
+                f"{client.base_url}/api/v1/projects",
+                headers=headers,
+                json={"request_id": "register", "path": str(project)},
+            ) as response:
+                assert response.status == 200
+                registered = await response.json()
+                assert registered["schedule_state"] == "available"
+                project_id = registered["project_id"]
+
+            async with http.post(
+                f"{client.base_url}/api/v1/projects",
+                headers=headers,
+                json={"request_id": "alias", "path": str(project / ".")},
+            ) as response:
+                assert response.status == 200
+                assert (await response.json())["project_id"] == project_id
+
+            shutil.rmtree(project)
+            async with http.get(f"{client.base_url}/api/v1/projects", headers=headers) as response:
+                assert response.status == 200
+                listed = (await response.json())["projects"]
+                assert listed == [
+                    {
+                        "project_id": project_id,
+                        "path": str(project.resolve()),
+                        "name": project.name,
+                        "schedule_state": "available",
+                        "available": False,
+                        "saved_jobs": [],
+                    }
+                ]
+    finally:
+        if cli_client is not None:
+            await cli_client.close()
+        if client is not None:
+            await client.close()
         await ServiceClient.stop_existing(home, port=port)
 
 

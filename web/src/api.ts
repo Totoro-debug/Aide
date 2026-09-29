@@ -1,6 +1,9 @@
 import type {
   BrowserSession,
   BrowserTicketExchange,
+  ProjectListResponse,
+  ProjectRegistration,
+  ProjectScheduleResume,
   RegisteredClient,
   ServiceErrorBody,
   ServiceEvent,
@@ -95,6 +98,29 @@ export function registerWebClient(): Promise<RegisteredClient> {
 
 export function getServiceStatus(): Promise<ServiceStatus> {
   return request<ServiceStatus>("/service");
+}
+
+export function getProjects(): Promise<ProjectListResponse> {
+  return request<ProjectListResponse>("/projects");
+}
+
+export function registerProject(path: string): Promise<ProjectRegistration> {
+  return request<ProjectRegistration>("/projects", {
+    method: "POST",
+    mutation: true,
+    body: { request_id: createRequestId(), path },
+  });
+}
+
+export function resumeProjectSchedule(
+  projectId: string,
+  jobIds: string[],
+): Promise<ProjectScheduleResume> {
+  return request<ProjectScheduleResume>(`/projects/${encodeURIComponent(projectId)}/schedule-resume`, {
+    method: "POST",
+    mutation: true,
+    body: { request_id: createRequestId(), job_ids: jobIds },
+  });
 }
 
 export function openEventStream(

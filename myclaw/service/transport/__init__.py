@@ -10,14 +10,17 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from aiohttp import WSMsgType, web
 
+from ...schedule.model import ScheduleJob
 from ..discovery import identity_proof
 from ..errors import ServiceError, service_error
+from ..projects import ProjectCatalogError
 from ..runtime import LocalService, ServiceSink
 
 _API_PREFIX = "/api/v1"
@@ -32,6 +35,34 @@ _STATIC_CSP = (
     "img-src 'self' data:; connect-src 'self' ws:; base-uri 'none'; "
     "frame-ancestors 'none'; form-action 'self'"
 )
+
+
+def _project_job_summary(job: ScheduleJob) -> dict[str, object]:
+    due_at: datetime | None = None
+    if job.schedule.kind == "at":
+        due_at = job.schedule.at_datetime
+    elif job.schedule.kind == "every" and job.schedule.every_seconds is not None:
+        anchor_ms = (
+            job.state.last_finished_at_ms
+            if job.state.last_finished_at_ms is not None
+            else job.created_at_ms
+        )
+        due_at = datetime.fromtimestamp(anchor_ms / 1000, UTC) + timedelta(
+            seconds=job.schedule.every_seconds
+        )
+    if job.schedule.kind == "at" and job.state.last_status is not None:
+        review_status = "completed"
+    elif due_at is None:
+        review_status = "next_on_resume"
+    else:
+        review_status = "overdue" if due_at <= datetime.now(UTC) else "upcoming"
+    return {
+        "job_id": job.job_id,
+        "title": job.title,
+        "schedule": job.schedule.to_dict(),
+        "due_at": due_at.isoformat() if due_at is not None else None,
+        "review_status": review_status,
+    }
 
 
 @dataclass(slots=True)
@@ -372,7 +403,14 @@ class LocalServiceTransport:
     async def _list_projects(self, request: web.Request) -> web.Response:
         self._authenticate(request)
         projects = []
-        for record in self.service.projects.list():
+        try:
+            records = self.service.projects.list()
+        except ProjectCatalogError as error:
+            raise service_error(
+                "persistence_error", "The Project catalog could not be read safely.", status=500
+            ) from error
+        for record in records:
+            saved_jobs = await self.service.project_schedule_jobs(record)
             projects.append(
                 {
                     "project_id": record.project_id,
@@ -380,6 +418,7 @@ class LocalServiceTransport:
                     "name": record.path.name,
                     "schedule_state": record.schedule_state,
                     "available": record.path.is_dir(),
+                    "saved_jobs": [_project_job_summary(job) for job in saved_jobs],
                 }
             )
         return web.json_response({"projects": projects})
@@ -401,10 +440,7 @@ class LocalServiceTransport:
                 "project_id": record.project_id,
                 "workspace_id": workspace.workspace_id,
                 "schedule_state": record.schedule_state,
-                "saved_jobs": [
-                    {"job_id": job.job_id, "title": job.title, "schedule": job.schedule.to_dict()}
-                    for job in jobs
-                ],
+                "saved_jobs": [_project_job_summary(job) for job in jobs],
             }
         )
 

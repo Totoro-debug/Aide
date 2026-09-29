@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -11,8 +14,11 @@ import pytest
 from myclaw.agent.confirmation import ConfirmationEnvelope, ForegroundConfirmationOwner
 from myclaw.agent.loop import AgentLoop
 from myclaw.agent.tools.tool_gateway import ConfirmationRequest
+from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
+from myclaw.schedule.model import JobSchedule, ScheduleJob
+from myclaw.schedule.store import WorkspaceScheduleStore
 from myclaw.service.client import RemoteControl, ServiceClient
 from myclaw.service.discovery import (
     SERVICE_PROTOCOL_VERSION,
@@ -84,6 +90,109 @@ def test_project_catalog_rejects_agent_home_overlap_and_invalid_file(tmp_path: P
         catalog.register(file_path)
 
 
+def test_project_catalog_deduplicates_a_native_directory_alias(tmp_path: Path) -> None:
+    home = AgentHome(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    alias = tmp_path / "project-alias"
+    project.mkdir()
+    try:
+        alias.symlink_to(project, target_is_directory=True)
+    except (OSError, NotImplementedError) as error:
+        pytest.skip(f"directory symlinks are unavailable: {error}")
+
+    catalog = ProjectCatalog(home)
+    first = catalog.register(project)
+
+    assert catalog.register(alias) == first
+    assert len(catalog.list()) == 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows junction only")
+def test_project_catalog_deduplicates_a_windows_junction(tmp_path: Path) -> None:
+    home = AgentHome(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    alias = tmp_path / "project-junction"
+    project.mkdir()
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(project)], check=True)
+    catalog = ProjectCatalog(home)
+
+    first = catalog.register(project)
+    assert catalog.register(alias) == first
+    assert len(ProjectCatalog(home).list()) == 1
+
+
+@pytest.mark.parametrize("path", ["relative/project", "."])
+def test_project_catalog_rejects_relative_persisted_paths(tmp_path: Path, path: str) -> None:
+    home = AgentHome(tmp_path / "agent-home")
+    home.initialize()
+    original = json.dumps(
+        {"format_version": 1, "projects": [{"project_id": "project", "path": path}]}
+    ).encode()
+    catalog = ProjectCatalog(home)
+    catalog.path.write_bytes(original)
+
+    with pytest.raises(ProjectCatalogError):
+        catalog.list()
+    assert catalog.path.read_bytes() == original
+
+
+def test_project_catalog_rejects_persisted_agent_home_overlap(tmp_path: Path) -> None:
+    home = AgentHome(tmp_path / "agent-home")
+    home.initialize()
+    catalog = ProjectCatalog(home)
+    original = json.dumps(
+        {"format_version": 1, "projects": [{"project_id": "project", "path": str(home.path)}]}
+    ).encode()
+    catalog.path.write_bytes(original)
+
+    with pytest.raises(ProjectCatalogError):
+        catalog.list()
+    assert catalog.path.read_bytes() == original
+
+
+def test_project_catalog_keeps_previous_publication_when_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = AgentHome(tmp_path / "agent-home")
+    first_path = tmp_path / "first"
+    second_path = tmp_path / "second"
+    first_path.mkdir()
+    second_path.mkdir()
+    catalog = ProjectCatalog(home)
+    catalog.register(first_path)
+    original = catalog.path.read_bytes()
+
+    original_replace = os.replace
+
+    def fail_catalog_replace(source: Any, target: Any) -> None:
+        if Path(os.fspath(target)) == catalog.path:
+            raise OSError("injected publication failure")
+        original_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", fail_catalog_replace)
+    with pytest.raises(OSError):
+        catalog.register(second_path)
+
+    assert catalog.path.read_bytes() == original
+    assert [record.path for record in catalog.list()] == [first_path.resolve()]
+    assert [record.path for record in ProjectCatalog(home).list()] == [first_path.resolve()]
+
+
+def test_project_catalog_reports_corruption_without_replacing_the_original_file(
+    tmp_path: Path,
+) -> None:
+    home = AgentHome(tmp_path / "agent-home")
+    catalog = ProjectCatalog(home)
+    home.initialize()
+    original = b'{"format_version": 1, "projects": ['
+    catalog.path.write_bytes(original)
+
+    with pytest.raises(ProjectCatalogError):
+        catalog.list()
+
+    assert catalog.path.read_bytes() == original
+
+
 def test_discovery_rejects_unknown_fields() -> None:
     with pytest.raises(ValueError):
         ServiceDiscovery.from_dict(
@@ -140,6 +249,79 @@ async def test_registered_projects_start_once_and_removal_releases_claims(tmp_pa
         assert project.is_dir()
     finally:
         await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_project_schedule_stays_paused_across_service_restart_until_resumed(
+    tmp_path: Path,
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    state = WorkspaceState(project)
+    state.initialize(agent_home_root=home.path)
+    now_ms = 1_800_000_000_000
+    job = ScheduleJob(
+        job_id=str(uuid4()),
+        message="saved project job",
+        schedule=JobSchedule.every(3600),
+        created_at_ms=now_ms,
+        updated_at_ms=now_ms,
+    )
+    await WorkspaceScheduleStore(state).add_user_job(job)
+
+    first_service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await first_service.start()
+    first_client = await first_service.register_client("web")
+
+    class Sink:
+        async def send_event(self, event: dict[str, object]) -> None:
+            del event
+
+    sink = Sink()
+    await first_service.connect_client(first_client.client_id, sink)
+    active_workspace = await first_service.attach_workspace(first_client.client_id, project)
+    assert active_workspace._schedule_admitted
+    record, first_workspace, saved_jobs = await first_service.register_project(
+        first_client.client_id, project
+    )
+    assert first_workspace is active_workspace
+    assert record.schedule_state == "awaiting_resume"
+    assert [saved.job_id for saved in saved_jobs] == [job.job_id]
+    assert not first_workspace._schedule_admitted
+    await first_service.stop()
+
+    second_service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await second_service.start()
+    second_client = await second_service.register_client("web")
+    await second_service.connect_client(second_client.client_id, sink)
+    try:
+        assert len(second_service.workspaces) == 0
+        persisted = ProjectCatalog(home).list()
+        assert [(item.project_id, item.schedule_state) for item in persisted] == [
+            (record.project_id, "awaiting_resume")
+        ]
+
+        project.rename(tmp_path / "moved-project")
+        with pytest.raises(ServiceError) as missing_error:
+            await second_service.resume_project_schedule(
+                second_client.client_id, record.project_id, {job.job_id}
+            )
+        assert missing_error.value.code == "not_found"
+        (tmp_path / "moved-project").rename(project)
+
+        second_workspace = await second_service.attach_workspace(second_client.client_id, project)
+        assert not second_workspace._schedule_admitted
+        assert second_workspace.schedule_service is not None
+        assert (
+            await second_service.resume_project_schedule(
+                second_client.client_id, record.project_id, {job.job_id}
+            )
+            == "available"
+        )
+        assert second_workspace._schedule_admitted
+    finally:
+        await second_service.stop()
 
 
 @pytest.mark.asyncio

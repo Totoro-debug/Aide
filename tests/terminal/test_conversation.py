@@ -4952,8 +4952,8 @@ async def test_duplicate_late_confirmation_is_shown_once_and_does_not_fail_the_t
 
     async with app.run_test(size=(80, 24)) as pilot:
         submission = asyncio.create_task(pilot.press(*list("inspect"), "enter"))
-        await asyncio.wait_for(conversation.confirmation_requested.wait(), timeout=1)
         await _wait_for_confirmation(app, pilot)
+        assert conversation.confirmation_requested.is_set()
         await pilot.press("right", "enter")
         await asyncio.wait_for(submission, timeout=1)
         await _wait_for_turn(app)
@@ -5950,7 +5950,14 @@ async def test_messages_use_95_percent_of_row_width(size: tuple[int, int]) -> No
 
     async with app.run_test(size=size) as pilot:
         await pilot.press(*list(content), "enter")
-        await asyncio.sleep(0.05)
+        await _wait_for_refresh_condition(
+            app,
+            lambda: (
+                len(app.query(".message")) == 2
+                and all(message.outer_size.width > 0 for message in app.query(".message"))
+                and "".join(_content_text_nodes(app, content)) == content
+            ),
+        )
 
         lines = _content_text_nodes(app, content)
         assert "".join(lines) == content
@@ -6033,7 +6040,10 @@ async def test_role_accents_remain_visible_without_terminal_color(
 
     async with app.run_test(size=(40, 18)) as pilot:
         await pilot.press(*list("hello"), "enter")
-        await asyncio.sleep(0.05)
+        await _wait_for_refresh_condition(
+            app,
+            lambda: "│First answer." in _visible_screen_text(app),
+        )
 
         visible_text = _visible_screen_text(app)
         assert "nocolor" in app.screen.pseudo_classes

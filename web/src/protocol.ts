@@ -20,6 +20,57 @@ export interface ServiceStatus {
   active_workspace_count: number;
 }
 
+export type ProjectScheduleState =
+  | "available"
+  | "unavailable"
+  | "awaiting_resume"
+  | "removing"
+  | "failed";
+
+export type ProjectScheduleKind = "at" | "every" | "cron";
+
+export interface ProjectSchedule {
+  kind: ProjectScheduleKind;
+  at_time: string | null;
+  every_seconds: number | null;
+  cron_expr: string | null;
+  timezone: string | null;
+}
+
+export interface ProjectJob {
+  job_id: string;
+  title: string;
+  schedule: ProjectSchedule;
+  due_at: string | null;
+  review_status: "overdue" | "upcoming" | "next_on_resume" | "completed";
+}
+
+export interface RegisteredProject {
+  project_id: string;
+  path: string;
+  name: string;
+  schedule_state: ProjectScheduleState;
+  available: boolean;
+  saved_jobs: ProjectJob[];
+}
+
+export interface ProjectListResponse {
+  projects: RegisteredProject[];
+}
+
+export interface ProjectRegistration {
+  request_id: string;
+  project_id: string;
+  workspace_id: string;
+  schedule_state: ProjectScheduleState;
+  saved_jobs: ProjectJob[];
+}
+
+export interface ProjectScheduleResume {
+  request_id: string;
+  schedule_state: ProjectScheduleState;
+}
+
 export interface BrowserSession {
   authenticated: true;
   csrf_token: string;

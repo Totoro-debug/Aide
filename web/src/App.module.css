@@ -70,20 +70,70 @@
   align-items: center;
   gap: 10px;
   min-height: 38px;
-  border-left: 2px solid var(--accent-strong);
+  border-left: 2px solid transparent;
   border-radius: 4px;
-  background: var(--accent-soft);
-  color: var(--text-primary);
+  color: var(--text-secondary);
   padding: 0 12px;
   font-size: 13px;
   font-weight: 600;
   text-decoration: none;
 }
 
+.navLinkActive {
+  border-left-color: var(--accent-strong);
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+
 .navLink:focus-visible,
 .navLink:hover {
   background: var(--surface-hover);
   outline: none;
+}
+
+.projectNavigation {
+  display: grid;
+  gap: 2px;
+  margin-top: 22px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 14px;
+}
+
+.projectNavigationLink {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  padding: 7px 8px;
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.projectNavigationLink:hover,
+.projectNavigationLink:focus-visible {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.projectNavigationLink > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.projectNavigationDot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: var(--warning-text);
+}
+
+.projectNavigationDot[data-available="true"] {
+  background: var(--success-text);
 }
 
 .sidebarFooter {
@@ -186,6 +236,7 @@
   padding: 42px 48px 60px;
 }
 
+.projectsPage,
 .statusPage {
   display: grid;
   gap: 28px;
@@ -196,6 +247,21 @@
   align-items: flex-end;
   justify-content: space-between;
   gap: 24px;
+}
+
+.pageDescription {
+  max-width: 620px;
+  margin: 10px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.pageActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .eyebrow {
@@ -307,6 +373,285 @@ h1 {
   font-size: 12px;
   font-weight: 600;
   padding: 0 13px;
+}
+
+.primaryButton {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid var(--accent-strong);
+  border-radius: 5px;
+  background: var(--accent-strong);
+  color: white;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  padding: 0 13px;
+}
+
+.primaryButton:hover,
+.primaryButton:focus-visible {
+  background: var(--accent-deep);
+  outline: none;
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled,
+.iconButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.notice,
+.errorBanner {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 11px 13px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.notice {
+  border-color: var(--success-border);
+  background: var(--success-surface);
+  color: var(--success-text);
+}
+
+.errorBanner {
+  border-color: var(--danger-border);
+  background: var(--danger-surface);
+  color: var(--danger-text);
+}
+
+.projectList {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.projectItem {
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--surface-panel);
+  padding: 20px;
+  scroll-margin-top: 24px;
+}
+
+.projectItemHeader,
+.projectTitleBlock,
+.projectDetails,
+.scheduleReview {
+  display: flex;
+}
+
+.projectItemHeader {
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.projectTitleBlock {
+  min-width: 0;
+  align-items: flex-start;
+  gap: 11px;
+  color: var(--accent-strong);
+}
+
+.projectTitleBlock h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.projectPath {
+  max-width: 760px;
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.availabilityBadge,
+.scheduleBadge {
+  display: inline-flex;
+  min-height: 27px;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  padding: 0 9px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.availabilityBadge[data-available="true"] {
+  border-color: var(--success-border);
+  color: var(--success-text);
+}
+
+.availabilityBadge[data-available="false"] {
+  border-color: var(--warning-border);
+  color: var(--warning-text);
+}
+
+.projectDetails {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 18px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 15px;
+}
+
+.scheduleBadge[data-paused="true"] {
+  border-color: var(--warning-border);
+  color: var(--warning-text);
+}
+
+.scheduleReview {
+  width: 100%;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.scheduleReview h3 {
+  margin: 0 0 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.jobList {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.jobList li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.jobSchedule,
+.jobEmpty {
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+}
+
+.jobEmpty {
+  margin: 0;
+}
+
+.reviewJobList {
+  display: grid;
+  max-height: min(45vh, 320px);
+  gap: 10px;
+  overflow-y: auto;
+  margin: 20px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.reviewJobList li {
+  display: grid;
+  gap: 3px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 10px;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.reviewJobList li span,
+.reviewJobList time {
+  color: var(--text-muted);
+}
+
+.projectForm {
+  display: grid;
+  gap: 8px;
+  margin-top: 24px;
+}
+
+.fieldLabel {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.textInput {
+  width: 100%;
+  min-height: 38px;
+  box-sizing: border-box;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface-app);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  padding: 0 11px;
+}
+
+.textInput:focus {
+  border-color: var(--accent-strong);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.textInput[aria-invalid="true"] {
+  border-color: var(--danger-text);
+}
+
+.fieldHint,
+.fieldError {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.fieldHint {
+  color: var(--text-muted);
+}
+
+.fieldError {
+  color: var(--danger-text);
+}
+
+.dialogActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.spin {
+  animation: spin 1.1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .secondaryButton:hover,
@@ -478,6 +823,21 @@ h1 {
     align-items: flex-start;
     flex-direction: column;
     gap: 14px;
+  }
+
+  .pageActions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .projectItemHeader,
+  .scheduleReview {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .scheduleReview .secondaryButton {
+    align-self: stretch;
   }
 
   .statusGrid {

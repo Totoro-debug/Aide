@@ -96,6 +96,46 @@ def test_config_patch_requires_explicit_secret_operation_and_revision() -> None:
         validator.validate({**patch, "secrets": {"key": {"action": "clear", "value": "old"}}})
 
 
+def test_project_http_shapes_are_versioned_and_preserve_saved_job_review_data() -> None:
+    project = {
+        "project_id": "project-1",
+        "path": "C:/Projects/example",
+        "name": "example",
+        "schedule_state": "awaiting_resume",
+        "available": True,
+        "saved_jobs": [
+            {
+                "job_id": "job-1",
+                "title": "Review",
+                "schedule": {
+                    "kind": "every",
+                    "at_time": None,
+                    "every_seconds": 3600,
+                    "cron_expr": None,
+                    "timezone": None,
+                },
+                "due_at": "2026-10-01T00:00:00+00:00",
+                "review_status": "upcoming",
+            }
+        ],
+    }
+    projects_validator = _validator("projects_response")
+    projects_validator.validate({"projects": [project]})
+    with pytest.raises(ValidationError):
+        projects_validator.validate({"projects": [{**project, "credential": "secret"}]})
+
+    registration_validator = _validator("project_registration")
+    registration_validator.validate(
+        {
+            "request_id": "request-1",
+            "project_id": "project-1",
+            "workspace_id": "workspace-1",
+            "schedule_state": "awaiting_resume",
+            "saved_jobs": project["saved_jobs"],
+        }
+    )
+
+
 def test_client_commands_require_claim_identity_and_typed_payloads() -> None:
     command = {
         "request_id": "request-1",

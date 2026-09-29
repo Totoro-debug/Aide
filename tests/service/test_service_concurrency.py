@@ -1,0 +1,761 @@
+"""Behavior tests for concurrent Session execution through the local service."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from collections.abc import AsyncIterator, Sequence
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, cast
+from uuid import uuid4
+
+import pytest
+from aiohttp.test_utils import TestServer
+
+import myclaw.service.runtime as service_runtime
+from myclaw.agent.memory.manager import MemoryManager
+from myclaw.agent.session.session import Session
+from myclaw.config.agent_home import AgentHome
+from myclaw.config.config import ConfigLoader, ProviderConfiguration
+from myclaw.provider.models import (
+    AssistantModelMessage,
+    ModelCompleted,
+    ModelMessages,
+    ModelResponse,
+    ModelStreamEvent,
+    ModelUsage,
+    TextDelta,
+)
+from myclaw.schedule.model import JobSchedule, ScheduleJob
+from myclaw.service.client import ServiceClient
+from myclaw.service.discovery import ServiceDiscovery, create_credential, write_discovery
+from myclaw.service.errors import ServiceError
+from myclaw.service.runtime import LocalService
+from myclaw.service.transport import create_app
+from tests.configuration.test_config import MINIMAL_VALID_CONFIG
+
+
+class _CollectingSink:
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+        self.changed = asyncio.Event()
+
+    async def send_event(self, event: dict[str, object]) -> None:
+        self.events.append(event)
+        self.changed.set()
+
+    async def wait_for(self, event_type: str, run_id: str) -> dict[str, object]:
+        while True:
+            for event in self.events:
+                if event.get("type") == event_type and event.get("run_id") == run_id:
+                    return event
+            self.changed.clear()
+            await self.changed.wait()
+
+
+class _ConcurrentProvider:
+    def __init__(self, *, block_b: bool = False, early_a_delta: bool = False) -> None:
+        self.session_a_started = asyncio.Event()
+        self.release_a = asyncio.Event()
+        self.session_a_cancelled = asyncio.Event()
+        self.session_b_started = asyncio.Event()
+        self.release_b = asyncio.Event()
+        self.block_b = block_b
+        self.early_a_delta = early_a_delta
+
+    async def complete(
+        self,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        model: str,
+        max_output: int,
+        temperature: float,
+        reasoning_effort: object,
+        timeout: int,
+        continuation: object = None,
+    ) -> ModelResponse:
+        del messages, tools, model, max_output, temperature, reasoning_effort, timeout, continuation
+        return _response(
+            '{"action":"replace","task_goal":"answer the input",'
+            '"completion_boundary":"return one answer"}'
+        )
+
+    def stream(
+        self,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        model: str,
+        max_output: int,
+        temperature: float,
+        reasoning_effort: object,
+        timeout: int,
+        continuation: object = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        del tools, model, max_output, temperature, reasoning_effort, timeout, continuation
+        system = messages[0].get("content") if messages else None
+        user_value = next(
+            (
+                value.get("content")
+                for value in reversed(messages)
+                if value.get("role") == "user" and isinstance(value.get("content"), str)
+            ),
+            "",
+        )
+        user = user_value if isinstance(user_value, str) else ""
+
+        async def emit() -> AsyncIterator[ModelStreamEvent]:
+            if isinstance(system, str) and system.startswith("Generate a concise title"):
+                yield ModelCompleted(_response("Concurrent session"))
+                return
+            if "session-a" in user:
+                self.session_a_started.set()
+                if self.early_a_delta:
+                    yield TextDelta("early from session A")
+                try:
+                    await self.release_a.wait()
+                except asyncio.CancelledError:
+                    self.session_a_cancelled.set()
+                    raise
+                answer = "answer from session A"
+            else:
+                self.session_b_started.set()
+                if self.block_b:
+                    await self.release_b.wait()
+                answer = "answer from session B"
+            yield TextDelta(answer)
+            yield ModelCompleted(_response(answer))
+
+        return emit()
+
+    async def close(self) -> None:
+        return None
+
+
+class _ScheduleProvider:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.complete_calls = 0
+
+    async def complete(
+        self,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        model: str,
+        max_output: int,
+        temperature: float,
+        reasoning_effort: object,
+        timeout: int,
+        continuation: object = None,
+    ) -> ModelResponse:
+        self.complete_calls += 1
+        self.started.set()
+        del messages, tools, model, max_output, temperature, reasoning_effort, timeout, continuation
+        return _response(
+            '{"action":"replace","task_goal":"run the schedule",'
+            '"completion_boundary":"return one result"}'
+        )
+
+    def stream(
+        self,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        model: str,
+        max_output: int,
+        temperature: float,
+        reasoning_effort: object,
+        timeout: int,
+        continuation: object = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        del messages, tools, model, max_output, temperature, reasoning_effort, timeout, continuation
+
+        async def emit() -> AsyncIterator[ModelStreamEvent]:
+            yield ModelCompleted(_response("schedule completion"))
+
+        return emit()
+
+    async def close(self) -> None:
+        return None
+
+
+def _response(content: str) -> ModelResponse:
+    return ModelResponse(
+        message=AssistantModelMessage(content=content),
+        usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+        finish_reason="stop",
+    )
+
+
+def _configured_home(path: Path) -> AgentHome:
+    home = AgentHome(path)
+    home.initialize()
+    (home.path / "config.toml").write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
+    return home
+
+
+def _claim_version(result: dict[str, object]) -> int:
+    claim = cast(dict[str, object], result["claim"])
+    version = claim["claim_version"]
+    assert isinstance(version, int)
+    return version
+
+
+async def _serve(service: LocalService, home: AgentHome) -> tuple[TestServer, int]:
+    create_credential(home)
+    await service.start()
+    server = TestServer(create_app(service), host="127.0.0.1")
+    await server.start_server()
+    port = server.port
+    assert port is not None
+    write_discovery(
+        home,
+        ServiceDiscovery(
+            service.service_instance_id, service.protocol_version, "127.0.0.1", port, os.getpid()
+        ),
+    )
+    return server, port
+
+
+async def _client_output(client: ServiceClient) -> list[str]:
+    output: list[str] = []
+    while True:
+        message = await asyncio.wait_for(client.bus.get_outbound(), timeout=3)
+        output.append(message.content)
+        if message.metadata.get("_streamed") is True:
+            return output
+
+
+@pytest.mark.asyncio
+async def test_two_cli_clients_complete_distinct_sessions_through_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ConcurrentProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    server, port = await _serve(service, home)
+    first: ServiceClient | None = None
+    second: ServiceClient | None = None
+    try:
+        first = await ServiceClient.connect_or_start(home, workspace_path, port=port)
+        second = await ServiceClient.connect_or_start(home, workspace_path, port=port)
+        assert first.workspace_id == second.workspace_id
+        assert first.session_id != second.session_id
+        await first.submit_input("session-a")
+        await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
+        await second.submit_input("session-b")
+        second_output = await _client_output(second)
+        assert "answer from session B" in second_output
+        assert not provider.release_a.is_set()
+        provider.release_a.set()
+        first_output = await _client_output(first)
+        assert "answer from session A" in first_output
+        assert "answer from session B" not in first_output
+        assert "answer from session A" not in second_output
+
+        workspace = service.workspace(first.workspace_id)
+        first_history = Session.load(workspace.workspace_state, first.session_id)
+        second_history = Session.load(workspace.workspace_state, second.session_id)
+        first_content = {str(message["content"]) for message in first_history.messages}
+        second_content = {str(message["content"]) for message in second_history.messages}
+        assert {"session-a", "answer from session A"} <= first_content
+        assert {"session-b", "answer from session B"} <= second_content
+        assert first_content.isdisjoint(second_content)
+    finally:
+        if second is not None:
+            await second.close()
+        if first is not None:
+            await first.close()
+        await server.close()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_cli_switch_does_not_display_background_session_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ConcurrentProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    server, port = await _serve(service, home)
+    client: ServiceClient | None = None
+    other: ServiceClient | None = None
+    try:
+        client = await ServiceClient.connect_or_start(home, workspace_path, port=port)
+        other = await ServiceClient.connect_or_start(home, workspace_path, port=port)
+        background_session = client.session_id
+        await client.submit_input("session-a")
+        await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
+        draft = await client._http_request(
+            "POST",
+            f"/api/v1/workspaces/{client.workspace_id}/sessions",
+            payload={"request_id": str(uuid4())},
+            mutation=True,
+        )
+        selected_session = cast(str, draft["session_id"])
+        await client.switch_session(selected_session)
+        with pytest.raises(ServiceError) as occupied:
+            await other.claim_session(background_session)
+        assert occupied.value.code == "session_claimed"
+        provider.release_a.set()
+        await client.submit_input("session-b")
+        output = await _client_output(client)
+        assert "answer from session B" in output
+        assert "answer from session A" not in output
+        for _ in range(100):
+            try:
+                await other.claim_session(background_session)
+                break
+            except ServiceError as error:
+                assert error.code == "session_claimed"
+                await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("background Session Claim was not released")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(client.bus.get_outbound(), timeout=0.1)
+    finally:
+        if other is not None:
+            await other.close()
+        if client is not None:
+            await client.close()
+        await server.close()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_claim_race_denies_loser_content_over_http_events_and_reconnect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ConcurrentProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    server, port = await _serve(service, home)
+    first: ServiceClient | None = None
+    second: ServiceClient | None = None
+    try:
+        first = await ServiceClient.connect_or_start(home, workspace_path, port=port)
+        second = await ServiceClient.connect_or_start(home, workspace_path, port=port)
+        contested_session = first.session_id
+        await first.submit_input("private claim marker")
+        await _client_output(first)
+        draft = await first._http_request(
+            "POST",
+            f"/api/v1/workspaces/{first.workspace_id}/sessions",
+            payload={"request_id": str(uuid4())},
+            mutation=True,
+        )
+        await first.switch_session(cast(str, draft["session_id"]))
+        attempts = await asyncio.gather(
+            first.claim_session(contested_session),
+            second.claim_session(contested_session),
+            return_exceptions=True,
+        )
+        assert sum(isinstance(result, dict) for result in attempts) == 1
+        assert sum(isinstance(result, ServiceError) for result in attempts) == 1
+        assert all(
+            not isinstance(result, ServiceError) or result.code == "session_claimed"
+            for result in attempts
+        )
+        owner, loser = (first, second) if isinstance(attempts[0], dict) else (second, first)
+        assert owner.session_id == contested_session
+        seen_events: list[dict[str, object]] = []
+        original_handler = loser._handle_event
+
+        async def record_event(event: dict[str, object]) -> None:
+            seen_events.append(event)
+            await original_handler(event)
+
+        monkeypatch.setattr(loser, "_handle_event", record_event)
+        path = f"/api/v1/workspaces/{owner.workspace_id}/sessions/{contested_session}"
+        with pytest.raises(ServiceError) as denied:
+            await loser._http_request(
+                "GET",
+                f"{path}?claim_version={owner.claim_version}",
+                extra_headers={"X-MyClaw-Claim": owner.claim_credential},
+            )
+        assert denied.value.code == "stale_claim"
+        listing = await loser._http_request(
+            "GET", f"/api/v1/workspaces/{owner.workspace_id}/sessions"
+        )
+        assert "private claim marker" not in json.dumps(listing)
+        await owner.submit_input("owner private message")
+        await _client_output(owner)
+        await asyncio.sleep(0)
+        assert not any(
+            event.get("session_id") == contested_session
+            and event.get("type") in {"run.output", "input.accepted"}
+            for event in seen_events
+        )
+        reconnect_credential = loser.reconnect_credential
+        await loser.close()
+        reconnected = await ServiceClient.connect_or_start(
+            home, workspace_path, port=port, reconnect_credential=reconnect_credential
+        )
+        if loser is first:
+            first = reconnected
+        else:
+            second = reconnected
+        with pytest.raises(ServiceError) as denied_after_reconnect:
+            await reconnected._http_request(
+                "GET",
+                f"{path}?claim_version={owner.claim_version}",
+                extra_headers={"X-MyClaw-Claim": owner.claim_credential},
+            )
+        assert denied_after_reconnect.value.code == "stale_claim"
+    finally:
+        if second is not None:
+            await second.close()
+        if first is not None:
+            await first.close()
+        await server.close()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_distinct_sessions_run_in_parallel_and_cancel_is_scoped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ConcurrentProvider(block_b=True)
+
+    def provider_factory(_configuration: ProviderConfiguration) -> _ConcurrentProvider:
+        return provider
+
+    monkeypatch.setattr(service_runtime, "create_provider", provider_factory)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    first_sink = _CollectingSink()
+    second_sink = _CollectingSink()
+    try:
+        first = await service.register_client("cli")
+        second = await service.register_client("cli")
+        workspace = await service.attach_workspace(first.client_id, workspace_path)
+        await service.attach_workspace(second.client_id, workspace_path)
+        await service.connect_client(first.client_id, first_sink)
+        await service.connect_client(second.client_id, second_sink)
+
+        session_a = await workspace.create_draft(first.client_id)
+        session_b = await workspace.create_draft(second.client_id)
+        claim_a = await service.claim(first.client_id, workspace.workspace_id, session_a)
+        claim_b = await service.claim(second.client_id, workspace.workspace_id, session_b)
+        version_a = _claim_version(claim_a)
+        version_b = _claim_version(claim_b)
+
+        await workspace.input(first.client_id, session_a, version_a, "session-a", "run-a")
+        await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
+        await workspace.input(second.client_id, session_b, version_b, "session-b", "run-b")
+        await asyncio.wait_for(provider.session_b_started.wait(), timeout=2)
+
+        await workspace.cancel(first.client_id, session_a, version_a, "run-a")
+        await asyncio.wait_for(provider.session_a_cancelled.wait(), timeout=2)
+        await asyncio.wait_for(first_sink.wait_for("run.cancelled", "run-a"), timeout=2)
+        assert not any(event.get("run_id") == "run-b" for event in first_sink.events)
+        provider.release_b.set()
+        await asyncio.wait_for(second_sink.wait_for("run.completed", "run-b"), timeout=2)
+        assert not any(event.get("type") == "run.cancelled" for event in second_sink.events)
+
+        history_a = Session.load(workspace.workspace_state, session_a)
+        history_b = Session.load(workspace.workspace_state, session_b)
+        content_a = [str(message["content"]) for message in history_a.messages]
+        content_b = [str(message["content"]) for message in history_b.messages]
+        assert "session-a" in content_a
+        assert "answer from session A" not in content_a
+        assert "session-b" in content_b
+        assert "answer from session B" in content_b
+        assert set(content_a).isdisjoint(content_b)
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_switch_keeps_active_claim_until_run_terminates_then_releases_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ConcurrentProvider()
+
+    def provider_factory(_configuration: ProviderConfiguration) -> _ConcurrentProvider:
+        return provider
+
+    monkeypatch.setattr(service_runtime, "create_provider", provider_factory)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    first_sink = _CollectingSink()
+    second_sink = _CollectingSink()
+    try:
+        first = await service.register_client("cli")
+        second = await service.register_client("cli")
+        workspace = await service.attach_workspace(first.client_id, workspace_path)
+        await service.attach_workspace(second.client_id, workspace_path)
+        await service.connect_client(first.client_id, first_sink)
+        await service.connect_client(second.client_id, second_sink)
+
+        session_a = await workspace.create_draft(first.client_id)
+        claim_a = await service.claim(first.client_id, workspace.workspace_id, session_a)
+        version_a = _claim_version(claim_a)
+        await workspace.input(first.client_id, session_a, version_a, "session-a", "run-a")
+        await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
+
+        session_b = await workspace.create_draft(first.client_id)
+        await service.claim(first.client_id, workspace.workspace_id, session_b)
+        with pytest.raises(Exception) as occupied:
+            await service.claim(second.client_id, workspace.workspace_id, session_a)
+        assert getattr(occupied.value, "code", None) == "session_claimed"
+        with pytest.raises(ServiceError) as busy:
+            await service.handle_command(
+                first.client_id,
+                {
+                    "request_id": "release-running-session",
+                    "type": "release",
+                    "workspace_id": workspace.workspace_id,
+                    "session_id": session_a,
+                    "claim_version": version_a,
+                    "payload": {},
+                },
+            )
+        assert busy.value.code == "session_busy"
+
+        await workspace.cancel(first.client_id, session_a, version_a, "run-a")
+        await asyncio.wait_for(first_sink.wait_for("run.cancelled", "run-a"), timeout=2)
+        await asyncio.wait_for(first_sink.wait_for("run.completed", "run-a"), timeout=2)
+        terminal_output = [
+            cast(dict[str, object], cast(dict[str, object], event["payload"])["message"])
+            for event in first_sink.events
+            if event.get("type") == "run.output" and event.get("run_id") == "run-a"
+        ]
+        assert any(
+            isinstance(message.get("metadata"), dict)
+            and cast(dict[str, object], message["metadata"]).get("finish_reason") == "cancelled"
+            for message in terminal_output
+        )
+        for _ in range(100):
+            try:
+                reacquired = await service.claim(
+                    second.client_id, workspace.workspace_id, session_a
+                )
+                break
+            except Exception as error:
+                if getattr(error, "code", None) != "session_claimed":
+                    raise
+                await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("the switched-away Session Claim was not released")
+        assert cast(dict[str, object], reacquired["claim"])["session_id"] == session_a
+        assert provider.session_a_cancelled.is_set()
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_queued_session_output_flows_while_next_run_is_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ConcurrentProvider(early_a_delta=True)
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    sink = _CollectingSink()
+    try:
+        client = await service.register_client("cli")
+        workspace = await service.attach_workspace(client.client_id, workspace_path)
+        await service.connect_client(client.client_id, sink)
+        session_id = await workspace.create_draft(client.client_id)
+        claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
+        version = _claim_version(claim)
+        await workspace.input(client.client_id, session_id, version, "session-b", "first-run")
+        await workspace.input(client.client_id, session_id, version, "session-a", "second-run")
+        await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
+        early = await asyncio.wait_for(sink.wait_for("run.output", "second-run"), timeout=2)
+        message = cast(dict[str, object], cast(dict[str, object], early["payload"])["message"])
+        assert message["content"] == "early from session A"
+        assert not provider.release_a.is_set()
+        provider.release_a.set()
+        await asyncio.wait_for(sink.wait_for("run.completed", "second-run"), timeout=2)
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_command_request_id_does_not_start_a_second_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        workspace = await service.attach_workspace(client.client_id, workspace_path)
+        session_id = await workspace.create_draft(client.client_id)
+        claimed = await service.claim(client.client_id, workspace.workspace_id, session_id)
+        claim_version = _claim_version(claimed)
+        original_input = workspace.input
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        call_count = 0
+
+        async def slow_input(
+            client_id: str,
+            selected_session_id: str,
+            version: int,
+            text: str,
+            run_id: str,
+        ) -> Any:
+            nonlocal call_count
+            call_count += 1
+            entered.set()
+            await release.wait()
+            return await original_input(client_id, selected_session_id, version, text, run_id)
+
+        monkeypatch.setattr(workspace, "input", slow_input)
+        command = {
+            "request_id": "same-input-request",
+            "type": "input",
+            "workspace_id": workspace.workspace_id,
+            "session_id": session_id,
+            "claim_version": claim_version,
+            "payload": {"text": "one input"},
+        }
+        first = asyncio.create_task(service.handle_command(client.client_id, command))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        second = asyncio.create_task(service.handle_command(client.client_id, command))
+        await asyncio.sleep(0)
+        assert not second.done()
+        release.set()
+        first_ack, second_ack = await asyncio.gather(first, second)
+        assert first_ack == second_ack
+        assert call_count == 1
+        assert len(workspace.loops[session_id].run_ids) == 1
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_stale_release_command_cannot_release_a_newer_claim(tmp_path: Path) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        workspace = await service.attach_workspace(client.client_id, workspace_path)
+        session_id = await workspace.create_draft(client.client_id)
+        first = await service.claim(client.client_id, workspace.workspace_id, session_id)
+        first_version = _claim_version(first)
+        await workspace.release(client.client_id, session_id, close_idle=False)
+        second = await service.claim(client.client_id, workspace.workspace_id, session_id)
+        second_version = _claim_version(second)
+        assert second_version == first_version + 1
+
+        with pytest.raises(Exception) as stale:
+            await service.handle_command(
+                client.client_id,
+                {
+                    "request_id": "stale-release",
+                    "type": "release",
+                    "workspace_id": workspace.workspace_id,
+                    "session_id": session_id,
+                    "claim_version": first_version,
+                    "payload": {},
+                },
+            )
+        assert getattr(stale.value, "code", None) == "stale_claim"
+        workspace.require_claim(client.client_id, session_id, second_version)
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_workspace_schedule_and_memory_are_shared_across_clients(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ScheduleProvider()
+
+    def provider_factory(_configuration: ProviderConfiguration) -> _ScheduleProvider:
+        return provider
+
+    monkeypatch.setattr(service_runtime, "create_provider", provider_factory)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    server, port = await _serve(service, home)
+    first: ServiceClient | None = None
+    second: ServiceClient | None = None
+    try:
+        first = await ServiceClient.connect_or_start(home, workspace_path, port=port)
+        second = await ServiceClient.connect_or_start(home, workspace_path, port=port)
+        assert first.workspace_id == second.workspace_id
+        workspace = service.workspace(first.workspace_id)
+        assert workspace.runtime is not None
+        session_a = first.session_id
+        session_b = second.session_id
+        assert session_a != session_b
+        await asyncio.gather(
+            first.submit_input("session A memory"), second.submit_input("session B memory")
+        )
+        await asyncio.gather(_client_output(first), _client_output(second))
+        assert Session.load(workspace.workspace_state, session_a).messages
+        assert Session.load(workspace.workspace_state, session_b).messages
+
+        memory = workspace.runtime.memory_manager
+        timestamp = datetime(2026, 9, 30, tzinfo=UTC)
+        await asyncio.gather(
+            memory.append_summary(f"memory from {session_a}", timestamp),
+            memory.append_summary(f"memory from {session_b}", timestamp),
+        )
+        summaries = await MemoryManager(workspace.workspace_state).claim_summaries(limit=10)
+        assert {entry.content for entry in summaries.entries} == {
+            f"memory from {session_a}",
+            f"memory from {session_b}",
+        }
+        await asyncio.sleep(0.05)
+        provider.complete_calls = 0
+
+        job = ScheduleJob(
+            job_id=str(uuid4()),
+            message="run the shared due job",
+            schedule=JobSchedule.every(3600),
+            created_at_ms=1,
+            updated_at_ms=1,
+        )
+        await workspace.schedule_service.add_user_job(job)
+        for _ in range(100):
+            current = await workspace.schedule_service.public_snapshot()
+            if current and current[0].state.last_status is not None:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("the due Schedule Job did not reach a terminal state")
+        assert current[0].state.last_status == "ok", current[0].state
+        assert provider.started.is_set()
+        assert provider.complete_calls == 1
+    finally:
+        if second is not None:
+            await second.close()
+        if first is not None:
+            await first.close()
+        await server.close()
+        await service.stop()

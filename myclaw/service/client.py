@@ -579,16 +579,26 @@ class ServiceClient:
     async def _handle_event(self, event: Mapping[str, object]) -> None:
         event_type = event.get("type")
         payload = event.get("payload")
+        current_session = (
+            event.get("workspace_id") == self.workspace_id
+            and event.get("session_id") == self.session_id
+        )
         if event_type == "input.accepted":
+            if not current_session:
+                return
             run_id = event.get("run_id")
             if isinstance(run_id, str):
                 self.control.accept_run(run_id)
             await self.bus.accept_one_input()
         elif event_type == "run.output" and isinstance(payload, dict):
+            if not current_session:
+                return
             message = payload.get("message")
             if isinstance(message, dict):
                 await self.bus.put_remote_output(message)
         elif event_type in {"run.completed", "run.cancelled", "run.failed"}:
+            if not current_session:
+                return
             run_id = event.get("run_id")
             if isinstance(run_id, str):
                 self.control.finish_run(run_id)

@@ -71,6 +71,7 @@ class ClientState:
     sequence: int = 0
     events: deque[dict[str, object]] = field(default_factory=lambda: deque(maxlen=256))
     results: dict[str, dict[str, object]] = field(default_factory=dict)
+    inflight: dict[str, asyncio.Task[dict[str, object]]] = field(default_factory=dict)
     claimed: set[tuple[str, str]] = field(default_factory=set)
     current_workspace_id: str | None = None
     current_session_id: str | None = None
@@ -96,6 +97,7 @@ class _LoopState:
     owner_client_id: str | None
     run_ids: deque[str] = field(default_factory=deque)
     output_task: asyncio.Task[None] | None = None
+    release_task: asyncio.Task[None] | None = None
     schedule: bool = False
 
 
@@ -433,9 +435,19 @@ class WorkspaceServiceRuntime:
             raise service_error(
                 "stale_claim", "Conversation Session Claim is not owned by this client."
             )
+        loop_state = self._loops.get(session_id)
+        if loop_state is not None and (
+            loop_state.loop.has_active_run
+            or loop_state.run_ids
+            or await loop_state.bus.inbound_snapshot()
+        ):
+            raise service_error(
+                "session_busy", "Conversation Session still has accepted work.", retryable=True
+            )
         self._claims.pop(session_id, None)
         self.service.client_claim_released(client_id, self.workspace_id, session_id)
-        loop_state = self._loops.get(session_id)
+        if loop_state is not None and loop_state.owner_client_id == client_id:
+            loop_state.owner_client_id = None
         if close_idle and loop_state is not None and not loop_state.loop.has_active_run:
             await self._close_loop(session_id)
 
@@ -552,10 +564,7 @@ class WorkspaceServiceRuntime:
                         "Finish or cancel the active foreground run before switching sessions.",
                     )
                 )
-            previous = self.service.client(client_id).current_session_id
-            await self.claim(client_id, target_session_id)
-            if previous is not None and previous != target_session_id:
-                await self.release(client_id, previous, close_idle=not loop.has_active_run)
+            await self.service.claim(client_id, self.workspace_id, target_session_id)
 
         async def restore_listing() -> RestoreListingReport:
             from myclaw.management.service import RestoreListingReport
@@ -738,6 +747,7 @@ class WorkspaceServiceRuntime:
             session_id=session_id,
             run_id=run_id,
             payload={},
+            target_client_ids=(client_id,),
         )
 
     async def _create_loop(self, session_id: str | None, *, client_id: str | None) -> _LoopState:
@@ -788,7 +798,7 @@ class WorkspaceServiceRuntime:
     async def _forward_output(self, state: _LoopState) -> None:
         session_id = state.loop.session.session_id
         try:
-            while not self._closed:
+            while not self._closed and self._loops.get(session_id) is state:
                 message = await state.bus.get_outbound()
                 run_id = state.run_ids[0] if state.run_ids else None
                 await self.service.emit(
@@ -815,18 +825,73 @@ class WorkspaceServiceRuntime:
                             "finish_reason": message.metadata.get("finish_reason", "completed")
                         },
                     )
+                    if state.release_task is None or state.release_task.done():
+                        state.release_task = asyncio.create_task(
+                            self._release_switched_claim_when_idle(session_id, state)
+                        )
+                        state.release_task.add_done_callback(_consume_task_result)
         except asyncio.CancelledError:
             raise
         except Exception:
             return
 
+    async def _release_switched_claim_when_idle(self, session_id: str, state: _LoopState) -> None:
+        while True:
+            if self._closed or self._loops.get(session_id) is not state:
+                return
+            try:
+                active = state.loop.has_active_run
+            except RuntimeError:
+                return
+            if not active and not state.run_ids:
+                break
+            await asyncio.sleep(0.01)
+        claim = self._claims.get(session_id)
+        if claim is None:
+            return
+        await self._release_switched_claim_if_idle(claim.client_id, session_id)
+
+    async def _release_switched_claim_if_idle(self, client_id: str, session_id: str) -> None:
+        claim = self._claims.get(session_id)
+        if claim is None or claim.client_id != client_id:
+            return
+        client = self.service._clients.get(client_id)
+        if (
+            client is not None
+            and client.current_workspace_id == self.workspace_id
+            and client.current_session_id == session_id
+        ):
+            return
+        await self._release_if_idle(client_id, session_id)
+
+    async def _release_if_idle(self, client_id: str, session_id: str) -> None:
+        state = self._loops.get(session_id)
+        claim = self._claims.get(session_id)
+        if state is None or claim is None or claim.client_id != client_id:
+            return
+        try:
+            if state.loop.has_active_run or state.run_ids or await state.bus.inbound_snapshot():
+                return
+        except RuntimeError:
+            return
+        await self.release(client_id, session_id)
+
     async def _close_loop(self, session_id: str, *, abort: bool = False) -> None:
         state = self._loops.pop(session_id, None)
         if state is None:
             return
+        if state.release_task is not None:
+            release_task = state.release_task
+            state.release_task = None
+            if release_task is not asyncio.current_task():
+                release_task.cancel()
+                await asyncio.gather(release_task, return_exceptions=True)
         if state.output_task is not None:
-            state.output_task.cancel()
-            await asyncio.gather(state.output_task, return_exceptions=True)
+            output_task = state.output_task
+            state.output_task = None
+            if output_task is not asyncio.current_task():
+                output_task.cancel()
+                await asyncio.gather(output_task, return_exceptions=True)
         try:
             if abort:
                 await state.loop.abort()
@@ -1153,10 +1218,20 @@ class LocalService:
     ) -> dict[str, object]:
         client = self._require_client(client_id)
         workspace = self.workspace(workspace_id)
+        previous_workspace_id = client.current_workspace_id
+        previous_session_id = client.current_session_id
         claim = await workspace.claim(client_id, session_id)
         client.claimed.add((workspace_id, session_id))
         client.current_workspace_id = workspace_id
         client.current_session_id = session_id
+        if (
+            previous_workspace_id is not None
+            and previous_session_id is not None
+            and (previous_workspace_id, previous_session_id) != (workspace_id, session_id)
+        ):
+            previous_workspace = self._workspaces.get(previous_workspace_id)
+            if previous_workspace is not None:
+                await previous_workspace._release_if_idle(client_id, previous_session_id)
         projection = workspace.projection(session_id)
         return {
             "claim": {
@@ -1289,6 +1364,27 @@ class LocalService:
         previous = client.results.get(request_id)
         if previous is not None:
             return previous
+        inflight = client.inflight.get(request_id)
+        if inflight is not None:
+            return await asyncio.shield(inflight)
+        task = asyncio.create_task(self._handle_command_once(client_id, command))
+        client.inflight[request_id] = task
+
+        def forget(done: asyncio.Task[dict[str, object]]) -> None:
+            if client.inflight.get(request_id) is done:
+                client.inflight.pop(request_id, None)
+            _consume_task_result(done)
+
+        task.add_done_callback(forget)
+        return await asyncio.shield(task)
+
+    async def _handle_command_once(
+        self, client_id: str, command: Mapping[str, object]
+    ) -> dict[str, object]:
+        client = self._require_client(client_id)
+        request_id = command.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            raise service_error("validation_error", "request_id is required.", status=422)
         command_type = command.get("type")
         workspace_id = command.get("workspace_id")
         session_id = command.get("session_id")
@@ -1304,8 +1400,14 @@ class LocalService:
             result = await self.claim(client_id, workspace_id, session_id)
         elif command_type == "release":
             self._validate_claim_fields(client_id, workspace_id, session_id, claim_version)
-            assert isinstance(workspace_id, str) and isinstance(session_id, str)
-            await self.workspace(workspace_id).release(client_id, session_id)
+            assert (
+                isinstance(workspace_id, str)
+                and isinstance(session_id, str)
+                and isinstance(claim_version, int)
+            )
+            workspace = self.workspace(workspace_id)
+            workspace.require_claim(client_id, session_id, claim_version)
+            await workspace.release(client_id, session_id)
             result = {"released": True}
         elif command_type == "input":
             self._validate_claim_fields(client_id, workspace_id, session_id, claim_version)
@@ -1403,8 +1505,11 @@ class LocalService:
         )
         for client in targets:
             if workspace_id is not None and session_id is not None:
-                if (workspace_id, session_id) not in client.claimed and event_type.startswith(
-                    "run."
+                cancellation_ack = event_type == "run.cancelled" and target_client_ids is not None
+                if (
+                    (workspace_id, session_id) not in client.claimed
+                    and event_type.startswith("run.")
+                    and not cancellation_ack
                 ):
                     continue
             client.sequence += 1

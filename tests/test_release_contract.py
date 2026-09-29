@@ -84,8 +84,30 @@ def _attribute_call_lines(
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == attribute
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == owner
+        and _attribute_owner(node.func.value) == owner
+    )
+
+
+def _attribute_owner(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _attribute_owner(node.value)
+        return None if parent is None else f"{parent}.{node.attr}"
+    return None
+
+
+def _attribute_reference_lines(
+    tree: ast.AST,
+    owner: str,
+    attribute: str,
+) -> tuple[int, ...]:
+    return tuple(
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == attribute
+        and _attribute_owner(node.value) == owner
     )
 
 
@@ -618,7 +640,7 @@ def test_cli_source_records_cutover_and_shutdown_order() -> None:
     reset_lines = _attribute_call_lines(handover, "bus", "reset")
     rebind_lines = _attribute_call_lines(handover, "terminal_app", "rebind_agent_loop")
     start_lines = _attribute_call_lines(handover, "target", "start")
-    activate_lines = _attribute_call_lines(handover, "mcp_manager", "activate_generation")
+    activate_lines = _attribute_call_lines(handover, "runtime", "activate_mcp_generation")
     resume_lines = _attribute_call_lines(replacement, "schedule_service", "resume")
     current_none_lines = _assignment_lines(handover, "current_loop", None)
     current_target_lines = _assignment_lines(handover, "current_loop", "target")
@@ -652,23 +674,31 @@ def test_cli_source_records_cutover_and_shutdown_order() -> None:
         node for node in conversation.body if isinstance(node, ast.Try) and node.finalbody
     )
     final_tree = ast.Module(body=shutdown.finalbody, type_ignores=[])
-    close_lines = _attribute_call_lines(final_tree, "active_loop", "close")
+    runtime_close_lines = _attribute_call_lines(final_tree, "runtime", "close")
+    assert len(runtime_close_lines) == 1
+    assert _attribute_call_lines(conversation, "runtime", "close") == runtime_close_lines
+    foreground_close = _source_function(conversation, "close_foreground_loops")
+    close_lines = _attribute_call_lines(foreground_close, "active_loop", "close")
     assert len(close_lines) == 1
-    assert _attribute_call_lines(conversation, "active_loop", "close") == close_lines
-    abort_lines = _named_call_lines(final_tree, {"abort_loop_once"})
+    abort_lines = _named_call_lines(foreground_close, {"abort_loop_once"})
     assert abort_lines
-    schedule_close_line = min(_attribute_call_lines(final_tree, "schedule_service", "close"))
-    mcp_close_line = min(_attribute_call_lines(final_tree, "mcp_manager", "close"))
-    assert all(schedule_close_line < line < mcp_close_line for line in (*close_lines, *abort_lines))
     shutdown_events = (
+        min(_attribute_call_lines(final_tree, "runtime", "drain_confirmation_aborts")),
         min(_attribute_call_lines(final_tree, "management", "deactivate")),
-        min(_attribute_call_lines(final_tree, "schedule_service", "pause_and_drain")),
-        schedule_close_line,
-        mcp_close_line,
-        min(_attribute_call_lines(final_tree, "dream", "close")),
-        min(_attribute_call_lines(final_tree, "router", "close")),
+        min(runtime_close_lines),
     )
     assert shutdown_events == tuple(sorted(shutdown_events))
+
+    runtime_tree = _source_ast(ROOT / "myclaw" / "agent" / "workspace_runtime.py")
+    runtime_shutdown = _source_function(runtime_tree, "_close_owned_resources")
+    resource_shutdown = (
+        min(_attribute_reference_lines(runtime_shutdown, "schedule", "pause_and_drain")),
+        min(_attribute_reference_lines(runtime_shutdown, "schedule", "close")),
+        min(_attribute_reference_lines(runtime_shutdown, "self._mcp_manager", "close")),
+        min(_attribute_reference_lines(runtime_shutdown, "self._dream", "close")),
+        min(_attribute_reference_lines(runtime_shutdown, "self._router", "close")),
+    )
+    assert resource_shutdown == tuple(sorted(resource_shutdown))
 
 
 def test_composition_and_store_signatures_match_current_contracts() -> None:

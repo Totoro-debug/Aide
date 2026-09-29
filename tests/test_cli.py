@@ -1933,6 +1933,7 @@ async def test_cli_same_session_resume_waits_for_pending_persist_before_target_l
         "mcp_activate",
         "cancel",
         "schedule_cancel",
+        "schedule_cancel_target_abort",
         "schedule_drain",
     ),
 )
@@ -2025,7 +2026,7 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
         def cancel_confirmation_generation(self, generation_id: UUID) -> None:
             assert isinstance(generation_id, UUID)
             events.append("confirmation_cancel")
-            if failure_point == "schedule_cancel":
+            if failure_point in {"schedule_cancel", "schedule_cancel_target_abort"}:
                 raise RuntimeError("cancel secret")
 
         async def drain_confirmation_aborts(self, *, generation_id: UUID | None = None) -> None:
@@ -2090,6 +2091,8 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
                     raise RuntimeError("abort secret")
             else:
                 events.append("target_abort")
+                if failure_point == "schedule_cancel_target_abort":
+                    raise RuntimeError("target abort secret")
 
         async def _pause_for_replacement(self) -> None:
             return None
@@ -2192,13 +2195,13 @@ async def test_cli_resume_destructive_failure_fails_closed_and_aborts_each_loop_
     assert events.count("target_abort") == 1
     assert "management_deactivate" in events
     assert "schedule_resume" not in events
-    if failure_point in {"schedule_cancel", "schedule_drain"}:
+    if failure_point in {"schedule_cancel", "schedule_cancel_target_abort", "schedule_drain"}:
         assert "quiesce" not in events
         assert "mcp_activate" not in events
         assert "rebind" not in events
         assert events.count("confirmation_cancel") == 1
         assert events.count("confirmation_drain") == (
-            1 if failure_point == "schedule_cancel" else 2
+            1 if failure_point in {"schedule_cancel", "schedule_cancel_target_abort"} else 2
         )
 
 

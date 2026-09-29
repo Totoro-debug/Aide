@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://myclaw.local/protocol/v1.schema.json",
+  "title": "MyClaw local service protocol v1",
+  "$defs": {
+    "identifier": {"type": "string", "minLength": 1},
+    "request_id": {"$ref": "#/$defs/identifier"},
+    "claim_version": {"type": "integer", "minimum": 1},
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "field_errors", "retryable", "request_id"],
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "message": {"type": "string"},
+        "field_errors": {"type": "object", "additionalProperties": {"type": "string"}},
+        "retryable": {"type": "boolean"},
+        "request_id": {"$ref": "#/$defs/request_id"}
+      }
+    },
+    "ack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "accepted", "result"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "accepted": {"const": true},
+        "result": {"type": "object"}
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version", "service_instance_id", "stream_id", "seq", "type",
+        "workspace_id", "project_id", "session_id", "run_id", "payload"
+      ],
+      "properties": {
+        "protocol_version": {"const": 1},
+        "service_instance_id": {"$ref": "#/$defs/identifier"},
+        "stream_id": {"$ref": "#/$defs/identifier"},
+        "seq": {"type": "integer", "minimum": 1},
+        "type": {"type": "string", "minLength": 1},
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "project_id": {"type": ["string", "null"]},
+        "session_id": {"type": ["string", "null"]},
+        "run_id": {"type": ["string", "null"]},
+        "payload": {"type": "object"}
+      }
+    },
+    "client_command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "type", "workspace_id", "session_id", "claim_version", "payload"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "type": {
+          "enum": ["claim", "release", "input", "cancel", "confirmation_decide", "subscribe"]
+        },
+        "workspace_id": {"type": ["string", "null"]},
+        "session_id": {"type": ["string", "null"]},
+        "claim_version": {"type": ["integer", "null"], "minimum": 1},
+        "payload": {"type": "object"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"type": {"enum": ["claim", "release", "input", "cancel"]}}},
+          "then": {
+            "properties": {
+              "workspace_id": {"$ref": "#/$defs/identifier"},
+              "session_id": {"$ref": "#/$defs/identifier"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"enum": ["release", "input", "cancel"]}}},
+          "then": {"properties": {"claim_version": {"$ref": "#/$defs/claim_version"}}}
+        },
+        {
+          "if": {"properties": {"type": {"const": "claim"}}},
+          "then": {"properties": {"claim_version": {"const": null}}}
+        },
+        {
+          "if": {"properties": {"type": {"enum": ["claim", "release"]}}},
+          "then": {"properties": {"payload": {"type": "object", "maxProperties": 0}}}
+        },
+        {
+          "if": {"properties": {"type": {"const": "input"}}},
+          "then": {
+            "properties": {
+              "payload": {
+                "type": "object", "additionalProperties": false,
+                "required": ["text"],
+                "properties": {"text": {"type": "string", "minLength": 1}}
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "cancel"}}},
+          "then": {
+            "properties": {
+              "payload": {
+                "type": "object", "additionalProperties": false,
+                "required": ["run_id"],
+                "properties": {"run_id": {"$ref": "#/$defs/identifier"}}
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "confirmation_decide"}}},
+          "then": {
+            "properties": {
+              "payload": {
+                "type": "object", "additionalProperties": false,
+                "required": ["token", "decision"],
+                "properties": {
+                  "token": {"$ref": "#/$defs/identifier"},
+                  "decision": {"enum": ["approved", "declined"]}
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "subscribe"}}},
+          "then": {
+            "properties": {
+              "payload": {
+                "type": "object", "additionalProperties": false,
+                "required": ["last_seq"],
+                "properties": {"last_seq": {"type": ["integer", "null"], "minimum": 1}}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace_id", "session_id", "claim_version", "reconnect_credential"],
+      "properties": {
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "session_id": {"$ref": "#/$defs/identifier"},
+        "claim_version": {"$ref": "#/$defs/claim_version"},
+        "reconnect_credential": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "config_secret_change": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "value"],
+          "properties": {"action": {"const": "replace"}, "value": {"type": "string"}}
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["action"], "properties": {"action": {"const": "clear"}}
+        }
+      ]
+    },
+    "config_patch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "revision", "fields", "secrets"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "revision": {"$ref": "#/$defs/identifier"},
+        "fields": {"type": "object"},
+        "secrets": {
+          "type": "object", "additionalProperties": {"$ref": "#/$defs/config_secret_change"}
+        }
+      }
+    },
+    "redacted_secret": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configured"],
+      "properties": {"configured": {"type": "boolean"}}
+    }
+  }
+}

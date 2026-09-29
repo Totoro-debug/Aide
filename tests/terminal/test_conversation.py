@@ -1719,6 +1719,9 @@ async def test_restore_workflow_cancellation_branches_do_not_refill_draft(
             await pilot.press("enter")
             if has_gap:
                 await _wait_for_screen_id(app, pilot, "restore-mode-picker")
+                async with asyncio.timeout(2):
+                    while "incomplete backup coverage" not in _visible_screen_text(app):
+                        await pilot.pause()
                 assert "incomplete backup coverage" in _visible_screen_text(app)
                 if cancel_stage == "mode":
                     await pilot.press(cancel_key)
@@ -1726,6 +1729,9 @@ async def test_restore_workflow_cancellation_branches_do_not_refill_draft(
                     await pilot.press("enter")
             if cancel_stage == "confirmation":
                 await _wait_for_screen_id(app, pilot, "restore-confirmation")
+                async with asyncio.timeout(2):
+                    while "Files: 0 tracked, 0 external" not in _visible_screen_text(app):
+                        await pilot.pause()
                 assert "Files: 0 tracked, 0 external" in _visible_screen_text(app)
                 await pilot.press(cancel_key)
         async with asyncio.timeout(2):
@@ -6271,10 +6277,13 @@ async def test_user_scroll_takes_over_from_rapid_resize_callbacks() -> None:
         await _wait_for_turn(app)
         await asyncio.sleep(0.05)
         display = app.query_one("#conversation-display")
+        async with asyncio.timeout(3):
+            while display.max_scroll_y == 0:
+                await pilot.pause()
 
         for width, height in ((65, 20), (42, 18), (76, 22), (50, 16), (80, 24)):
             await pilot.press("ctrl+home")
-            async with asyncio.timeout(1):
+            async with asyncio.timeout(3):
                 while display.is_vertical_scroll_end:
                     await pilot.pause()
             assert not display.is_vertical_scroll_end
@@ -6282,7 +6291,7 @@ async def test_user_scroll_takes_over_from_rapid_resize_callbacks() -> None:
             await asyncio.sleep(0)
             await pilot.press("ctrl+end")
             await resize
-            async with asyncio.timeout(1):
+            async with asyncio.timeout(3):
                 while not display.is_vertical_scroll_end:
                     await pilot.pause()
             assert display.is_vertical_scroll_end

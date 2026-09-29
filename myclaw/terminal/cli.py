@@ -16,7 +16,7 @@ from myclaw.agent.loop import AgentLoop, ModelContextOverflowError
 from myclaw.agent.memory.dream import Dream
 from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.message_bus import MessageBus
-from myclaw.agent.permission import PermissionSnapshot, RuntimePermissionControl
+from myclaw.agent.permission import RuntimePermissionControl
 from myclaw.agent.session.restore import (
     RestoreError,
     RestoreManager,
@@ -40,12 +40,15 @@ from myclaw.agent.tools.mcp_runtime import (
     MCPToolSnapshot,
 )
 from myclaw.agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES
+from myclaw.agent.workspace_runtime import (
+    WorkspaceRuntime,
+    WorkspaceRuntimeFactories,
+    WorkspaceRuntimeRestoreError,
+)
 from myclaw.agent.workspace_state import (
     WorkspaceState,
     WorkspaceStateError,
-    normalize_workspace_path,
 )
-from myclaw.agent.workspace_state import WorkspaceState as RuntimeWorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigError, ConfigLoader, UserConfiguration
 from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
@@ -65,7 +68,6 @@ from myclaw.terminal.conversation import (
     is_interactive_terminal,
 )
 from myclaw.utils.async_tasks import await_task_preserving_cancellation
-from myclaw.utils.scheduler import AsyncioSchedulerClock
 from myclaw.utils.time import local_now
 
 app = typer.Typer(
@@ -219,13 +221,13 @@ async def _run_cli_conversation(
     mcp_manager: MCPRuntimeManager | None = None
     active_loop: AgentLoop | None = None
     current_loop: AgentLoop | None = None
+    runtime: WorkspaceRuntime | None = None
     bus: MessageBus | None = None
     management: ManagementViewService | None = None
     terminal_app: TerminalConversationApp | None = None
     pending_target: AgentLoop | None = None
     active_mcp_snapshot: MCPToolSnapshot = ()
     active_mcp_keywords: Mapping[str, tuple[str, ...]] = {}
-    mcp_keyword_preparer: MCPKeywordPreparer | None = None
     replacement_lock = asyncio.Lock()
     aborted_loops: list[AgentLoop] = []
     replacement_failed_closed = False
@@ -256,6 +258,28 @@ async def _run_cli_conversation(
         aborted_loops.append(loop)
         await loop.abort()
 
+    async def close_foreground_loops() -> None:
+        errors: list[BaseException] = []
+        if pending_target is not None:
+            try:
+                await abort_loop_once(pending_target)
+            except BaseException as error:
+                errors.append(error)
+        if active_loop is not None:
+            try:
+                if started and active_loop is current_loop and not replacement_failed_closed:
+                    await active_loop.close()
+                else:
+                    await abort_loop_once(active_loop)
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            raise (
+                errors[0]
+                if len(errors) == 1
+                else BaseExceptionGroup("CLI foreground shutdown failed", errors)
+            )
+
     async def cancel_old_generation_confirmations(old_loop: AgentLoop) -> None:
         generation_id = old_loop.generation_id
         assert schedule_service is not None
@@ -276,7 +300,7 @@ async def _run_cli_conversation(
         assert terminal_app is not None
         assert schedule_service is not None
         assert bus is not None
-        assert mcp_manager is not None
+        assert runtime is not None
 
         await terminal_app.quiesce_for_rebind()
         if schedule_state == "needs_canceling_pause":
@@ -290,62 +314,19 @@ async def _run_cli_conversation(
             session_projection=target.project_foreground_conversation(),
         )
         await target.start()
-        mcp_manager.activate_generation(candidate_report)
-        active_mcp_snapshot = candidate_report.snapshot
+        active_mcp_snapshot = runtime.activate_mcp_generation(candidate_report, candidate_keywords)
         active_mcp_keywords = candidate_keywords
         current_loop = target
         active_loop = target
         pending_target = None
 
     try:
-        workspace_path = normalize_workspace_path(workspace)
         resolved_exec_shell = resolve_exec_shell(
             getattr(configuration.runtime, "exec_shell", "auto")
         )
         exec_host = create_exec_host(resolved_exec_shell)
         if not resolved_exec_shell.available:
             _print_exec_notice(resolved_exec_shell.diagnostic or EXEC_CAPABILITY_ERROR)
-        workspace_state = WorkspaceState(workspace_path)
-        workspace_state.initialize(agent_home_root=agent_home.path)
-        if isinstance(workspace_state, RuntimeWorkspaceState):
-            try:
-                startup_restore_result = await RestoreManager(workspace_state).recover_pending()
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                raise FatalManagementError(_RESTORE_STARTUP_ERROR) from error
-            if startup_restore_result is not None:
-                startup_session_id = startup_restore_result.session_id
-                latest_restore_result = startup_restore_result
-
-        mcp_manager = MCPRuntimeManager(
-            workspace_path,
-            built_in_names=BUILT_IN_TOOL_NAMES,
-        )
-        startup_report = await mcp_manager.start(configuration.mcp)
-        active_mcp_snapshot = startup_report.snapshot
-        _report_mcp_generation(startup_report)
-
-        bus = MessageBus()
-        router = ModelRouter(
-            configuration=configuration,
-            provider_factory=create_provider,
-        )
-        mcp_keyword_preparer = MCPKeywordPreparer(
-            model_router=router,
-            config_loader=ConfigLoader(agent_home),
-        )
-        active_mcp_keywords = await mcp_keyword_preparer.prepare(
-            active_mcp_snapshot,
-            configuration.mcp,
-        )
-        memory_manager = MemoryManager(workspace_state)
-        dream = Dream(
-            memory_manager=memory_manager,
-            model_router=router,
-            batch_size=configuration.memory.batch_size,
-            memory_route_status=router.route_status("memory"),
-        )
 
         async def execute_user_occurrence(occurrence: ScheduleOccurrence) -> None:
             if current_loop is None:
@@ -359,11 +340,54 @@ async def _run_cli_conversation(
 
         configured_schedule_level = permission_control.configured()
 
-        def capture_schedule_permission_snapshot() -> PermissionSnapshot:
-            return PermissionSnapshot(
-                level=configured_schedule_level,
-                exec_shell=exec_host.resolved_shell,
-            )
+        def create_bus_after_mcp_start() -> None:
+            nonlocal bus
+            bus = MessageBus()
+
+        runtime = WorkspaceRuntime.acquire(
+            workspace=workspace,
+            agent_home=agent_home,
+            configuration=configuration,
+            execute_user_job=execute_user_job,
+            execute_user_occurrence=execute_user_occurrence,
+            cancel_confirmation_owner=confirmation_coordinator.cancel_owner,
+            configured_schedule_level=configured_schedule_level,
+            resolved_exec_shell=exec_host.resolved_shell,
+            now=local_now,
+            timezone_name=get_localzone_name(),
+            provider_factory=create_provider,
+            built_in_names=BUILT_IN_TOOL_NAMES,
+            factories=WorkspaceRuntimeFactories(
+                workspace_state=WorkspaceState,
+                restore_manager=RestoreManager,
+                mcp_runtime=MCPRuntimeManager,
+                router=ModelRouter,
+                mcp_keyword_preparer=MCPKeywordPreparer,
+                memory_manager=MemoryManager,
+                dream=Dream,
+                schedule_service=ScheduleService,
+            ),
+        )
+        try:
+            await runtime.start(after_mcp_start=create_bus_after_mcp_start)
+        except WorkspaceRuntimeRestoreError as error:
+            raise FatalManagementError(_RESTORE_STARTUP_ERROR) from error
+
+        workspace_path = runtime.workspace_path
+        workspace_state = runtime.workspace_state
+        startup_restore_result = runtime.startup_restore_result
+        startup_session_id = runtime.startup_session_id
+        latest_restore_result = startup_restore_result
+        mcp_manager = runtime.mcp_manager
+        startup_report = runtime.mcp_startup_report
+        active_mcp_snapshot = runtime.mcp_snapshot
+        active_mcp_keywords = runtime.mcp_keywords
+        router = runtime.router
+        memory_manager = runtime.memory_manager
+        dream = runtime.dream
+        schedule_service = runtime.schedule_service
+        _report_mcp_generation(startup_report)
+        assert bus is not None
 
         async def wait_for_session_persist(loop: AgentLoop, session_id: str) -> None:
             old_session = loop.session
@@ -388,17 +412,6 @@ async def _run_cli_conversation(
                     ErrorInfo("route_unavailable", "Runtime Generation is unavailable.")
                 )
             await wait_for_session_persist(old_loop, session_id)
-
-        schedule_service = ScheduleService(
-            workspace_state=workspace_state,
-            clock=AsyncioSchedulerClock(now=local_now),
-            execute_user_job=execute_user_job,
-            execute_user_occurrence=execute_user_occurrence,
-            permission_snapshot_factory=capture_schedule_permission_snapshot,
-            cancel_confirmation_owner=confirmation_coordinator.cancel_owner,
-            execute_dream=dream.run,
-            timezone_name=get_localzone_name(),
-        )
 
         async def create_agent_loop(
             session_id: str | None,
@@ -458,18 +471,12 @@ async def _run_cli_conversation(
                 target: AgentLoop | None = None
                 replacement_barrier_held = False
                 destructive_started = False
-                if mcp_manager is None:
+                if runtime is None:
                     raise ManagementError(
                         ErrorInfo("route_unavailable", "MCP Runtime Manager is unavailable.")
                     )
                 try:
-                    candidate_report = await mcp_manager.prepare_generation()
-                    if mcp_keyword_preparer is None:
-                        raise RuntimeError("MCP Keyword Preparer is unavailable")
-                    candidate_keywords = await mcp_keyword_preparer.prepare(
-                        candidate_report.snapshot,
-                        configuration.mcp,
-                    )
+                    candidate_report, candidate_keywords = await runtime.prepare_mcp_generation()
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
@@ -754,7 +761,7 @@ async def _run_cli_conversation(
             nonlocal restore_barrier_held, restore_schedule_paused
             target: AgentLoop | None = None
             try:
-                if mcp_manager is None or mcp_keyword_preparer is None:
+                if runtime is None:
                     raise ManagementError(
                         ErrorInfo("route_unavailable", "Runtime Generation is unavailable.")
                     )
@@ -762,11 +769,7 @@ async def _run_cli_conversation(
                     raise ManagementError(
                         ErrorInfo("route_unavailable", "Session Restore is unavailable.")
                     )
-                candidate_report = await mcp_manager.prepare_generation()
-                candidate_keywords = await mcp_keyword_preparer.prepare(
-                    candidate_report.snapshot,
-                    configuration.mcp,
-                )
+                candidate_report, candidate_keywords = await runtime.prepare_mcp_generation()
                 _report_mcp_generation(candidate_report)
                 target = await create_agent_loop(
                     session_id,
@@ -937,12 +940,9 @@ async def _run_cli_conversation(
         initial_loop = await create_agent_loop(startup_session_id)
         active_loop = initial_loop
         initial_loop.preflight()
-        schedule_service._prepare_start()
-        await schedule_service.register_dream_job(
-            schedule=JobSchedule.from_cron_input(
-                configuration.memory.schedule,
-                get_localzone_name(),
-            )
+        assert runtime is not None
+        await runtime.prepare_schedule(
+            JobSchedule.from_cron_input(configuration.memory.schedule, get_localzone_name())
         )
         current_loop = initial_loop
 
@@ -991,9 +991,9 @@ async def _run_cli_conversation(
         except BaseException as error:
             cleanup_errors.append(error)
 
-        if schedule_service is not None:
+        if runtime is not None:
             try:
-                await schedule_service.drain_confirmation_aborts()
+                await runtime.drain_confirmation_aborts()
             except BaseException as error:
                 cleanup_errors.append(error)
 
@@ -1003,46 +1003,12 @@ async def _run_cli_conversation(
             except BaseException as error:
                 cleanup_errors.append(error)
 
-        if schedule_service is not None:
+        if runtime is not None:
             try:
-                await schedule_service.pause_and_drain()
-            except BaseException as error:
-                cleanup_errors.append(error)
-            try:
-                await schedule_service.close()
-            except BaseException as error:
-                cleanup_errors.append(error)
-
-        if pending_target is not None:
-            try:
-                await abort_loop_once(pending_target)
-            except BaseException as error:
-                cleanup_errors.append(error)
-
-        if active_loop is not None:
-            try:
-                if started and active_loop is current_loop and not replacement_failed_closed:
-                    await active_loop.close()
-                else:
-                    await abort_loop_once(active_loop)
-            except BaseException as error:
-                cleanup_errors.append(error)
-
-        if mcp_manager is not None:
-            try:
-                await mcp_manager.close()
-            except BaseException as error:
-                cleanup_errors.append(error)
-
-        if dream is not None:
-            try:
-                await dream.close()
-            except BaseException as error:
-                cleanup_errors.append(error)
-
-        if router is not None:
-            try:
-                await router.close()
+                await runtime.close(
+                    close_foreground=close_foreground_loops,
+                    drain_confirmation_aborts=False,
+                )
             except BaseException as error:
                 cleanup_errors.append(error)
 

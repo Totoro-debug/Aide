@@ -5,7 +5,7 @@ This context defines the language for an independently designed, local-first, si
 ## Language
 
 **Personal Agent**:
-A local-first, single-user Agent runtime that works continuously for one person through a Command-line Conversation.
+A local-first, single-user Agent runtime that works continuously for one person through conversation and explicit management actions.
 _Avoid_: Bot platform, multi-tenant assistant, channel-first agent, agent platform
 
 **Agent Home**:
@@ -15,6 +15,10 @@ _Avoid_: Project workspace, session directory, install directory, configurable d
 **Workspace**:
 The user-selected directory that scopes one Personal Agent interaction and owns its non-global state and file capabilities.
 _Avoid_: Agent Home, install directory, session directory, project ID
+
+**Project**:
+A directory persistently registered in the Web Interface for reuse; it is the Workspace of Conversation Sessions created under it.
+_Avoid_: a copy of Workspace data, Workspace State, backup, project ID
 
 **Workspace State**:
 Persistent Personal Agent state owned by exactly one Workspace rather than by the installation or operating-system account.
@@ -37,8 +41,12 @@ A user-visible group of non-final model output and Tool activity belonging to on
 _Avoid_: Conversation, Agent Run, event log, transcript
 
 **Command-line Conversation**:
-The primary user-facing conversation with the Personal Agent, presented as a full-screen terminal experience.
+The user-facing conversation with the Personal Agent presented as a full-screen terminal experience.
 _Avoid_: Terminal session, shell command, chat channel, one-shot command, plain REPL
+
+**Web Interface**:
+The local-browser entry for one person to converse with and manage the Personal Agent.
+_Avoid_: remote service, multi-user platform, read-only dashboard
 
 **Management Command**:
 An explicit user command for inspecting or changing runtime-managed state without relying on natural-language conversation.
@@ -135,6 +143,10 @@ _Avoid_: Autonomous Skill Invocation, always-loaded Skill, Management Command
 **Conversation Session**:
 A durable conversational thread owned by one Workspace and represented by one active in-memory Session authority during foreground execution.
 _Avoid_: Chat ID, terminal session, Workspace, runtime checkpoint, background task
+
+**Session Claim**:
+The exclusive right of one Web or Command-line client to load and operate one Conversation Session while other clients cannot load it.
+_Avoid_: Workspace lock, shared viewer, permission grant, permanent ownership
 
 **Restore Anchor**:
 A persisted foreground user message in a Conversation Session that identifies the state immediately before that message and has a Session-scoped monotonically increasing number that is never reused.

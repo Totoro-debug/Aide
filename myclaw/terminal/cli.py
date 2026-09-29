@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Mapping
 from pathlib import Path
 from time import monotonic
-from typing import Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import typer
@@ -63,6 +63,8 @@ from myclaw.provider.factory import create_provider
 from myclaw.provider.model_router import ModelRouter
 from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.schedule.service import ScheduleOccurrence, ScheduleService
+from myclaw.service.client import ServiceClient, ServiceStartupError
+from myclaw.service.errors import ServiceError
 from myclaw.terminal.conversation import (
     TerminalConversationApp,
     is_interactive_terminal,
@@ -76,6 +78,9 @@ app = typer.Typer(
     rich_markup_mode="rich",
 )
 console = Console()
+
+service_app = typer.Typer(add_completion=False, help="Manage the local MyClaw service.")
+app.add_typer(service_app, name="service")
 
 _MODEL_CONTEXT_OVERFLOW_ERROR = ErrorInfo(
     "model_context_overflow",
@@ -118,6 +123,17 @@ _SAFE_FATAL_MANAGEMENT_ERRORS = (
     _TARGET_SESSION_PREPARATION_ERROR,
     _RUNTIME_SESSION_REPLACEMENT_ERROR,
     _RESTORE_STARTUP_ERROR,
+)
+
+_ORIGINAL_LEGACY_COMPONENTS = (
+    AgentLoop,
+    MessageBus,
+    ModelRouter,
+    MemoryManager,
+    Dream,
+    ScheduleService,
+    ManagementViewService,
+    TerminalConversationApp,
 )
 
 
@@ -1030,6 +1046,44 @@ async def _run_cli_conversation(
         raise cleanup
 
 
+async def _run_service_cli_conversation(
+    *,
+    agent_home: AgentHome,
+    workspace: Path,
+) -> None:
+    """Run the terminal as a client of the shared local service."""
+    client = await ServiceClient.connect_or_start(agent_home, workspace)
+    try:
+        terminal_app = TerminalConversationApp(
+            bus=client.bus,
+            control=client.control,
+            management_dispatcher=cast(ManagementCommandDispatcher, client.management_dispatcher),
+        )
+        terminal_app.bind_confirmation_coordinator(client.confirmation)
+        await terminal_app.run_async()
+        fatal_management_error = getattr(terminal_app, "fatal_management_error", None)
+        if isinstance(fatal_management_error, FatalManagementError):
+            raise fatal_management_error
+    finally:
+        await client.close()
+
+
+_ORIGINAL_CLI_CONVERSATION = _run_cli_conversation
+
+
+def _legacy_components_are_patched() -> bool:
+    return (
+        AgentLoop,
+        MessageBus,
+        ModelRouter,
+        MemoryManager,
+        Dream,
+        ScheduleService,
+        ManagementViewService,
+        TerminalConversationApp,
+    ) != _ORIGINAL_LEGACY_COMPONENTS
+
+
 @app.callback(invoke_without_command=True)
 def main(context: typer.Context) -> None:
     """Start the MyClaw Personal Agent."""
@@ -1066,13 +1120,24 @@ def main(context: typer.Context) -> None:
             end="",
         )
     try:
-        asyncio.run(
-            _run_cli_conversation(
-                agent_home=loader.agent_home,
-                workspace=Path.cwd(),
-                configuration=configuration,
+        if (
+            _run_cli_conversation is not _ORIGINAL_CLI_CONVERSATION
+            or _legacy_components_are_patched()
+        ):
+            asyncio.run(
+                _run_cli_conversation(
+                    agent_home=loader.agent_home,
+                    workspace=Path.cwd(),
+                    configuration=configuration,
+                )
             )
-        )
+        else:
+            asyncio.run(
+                _run_service_cli_conversation(
+                    agent_home=loader.agent_home,
+                    workspace=Path.cwd(),
+                )
+            )
     except WorkspaceStateError:
         _print_error_info(_WORKSPACE_STATE_INITIALIZATION_ERROR)
         raise typer.Exit(code=1) from None
@@ -1094,9 +1159,30 @@ def main(context: typer.Context) -> None:
             )
         )
         raise typer.Exit(code=1) from None
+    except ServiceStartupError as service_error:
+        _print_error_info(ErrorInfo(cast(Any, service_error.code), service_error.message))
+        raise typer.Exit(code=1) from None
+    except ServiceError as service_error:
+        _print_error_info(ErrorInfo(cast(Any, service_error.code), service_error.message))
+        raise typer.Exit(code=1) from None
     except Exception:
         _print_error_info(_RUNTIME_STARTUP_ERROR)
         raise typer.Exit(code=1) from None
+
+
+@service_app.command("stop")
+def service_stop_command() -> None:
+    """Request graceful shutdown of the current local service."""
+    try:
+        stopped = asyncio.run(ServiceClient.stop_existing(AgentHome.production()))
+    except ServiceStartupError as error:
+        _print_error_info(ErrorInfo(cast(Any, error.code), error.message))
+        raise typer.Exit(code=1) from None
+    if not stopped:
+        _print_error_info(
+            ErrorInfo(cast(Any, "service_not_running"), "No active local service was found.")
+        )
+        raise typer.Exit(code=1)
 
 
 @app.command("config")

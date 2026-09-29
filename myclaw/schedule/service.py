@@ -233,6 +233,32 @@ class ScheduleService:
             self._pause_task = task
         await await_task_preserving_cancellation(task)
 
+    async def pause_admission(self) -> None:
+        """Stop admitting new occurrences while allowing active work to finish.
+
+        The local service uses this boundary during its reconnect grace period.
+        Full cancellation remains the responsibility of ``pause_and_drain`` so
+        terminal Schedule persistence follows the existing shutdown contract.
+        """
+        if self._aborted:
+            return
+        if self._close_task is not None:
+            await await_task_preserving_cancellation(self._close_task)
+            return
+        if self._pause_task is not None and not self._pause_task.done():
+            await await_task_preserving_cancellation(self._pause_task)
+            return
+        if self._idle_pause_task is not None:
+            self._release_idle_pause(resume=False)
+        async with self._reservation_gate:
+            self._paused = True
+        loop_task = self._loop_task
+        if loop_task is not None and not loop_task.done():
+            loop_task.cancel()
+            await asyncio.gather(loop_task, return_exceptions=True)
+        if self._loop_task is loop_task:
+            self._loop_task = None
+
     async def pause_and_wait_idle(self) -> None:
         """Pause new occurrences and await active work without canceling it."""
         if self._aborted:

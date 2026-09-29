@@ -220,3 +220,37 @@ async def test_schedule_service_callback_cancellation_leaves_job_pending(
     await service.close()
 
     assert await store.snapshot() == (job,)
+
+
+@pytest.mark.asyncio
+async def test_pause_admission_stops_dispatch_without_cancelling_active_job(
+    workspace: Path,
+    agent_home: Path,
+) -> None:
+    state = _state(workspace, agent_home)
+    store = WorkspaceScheduleStore(state)
+    job = ScheduleJob(
+        job_id="550e8400-e29b-41d4-a716-446655440001",
+        message="Run this once.",
+        schedule=JobSchedule.at("2026-08-07T11:59:00.000+00:00"),
+        created_at_ms=1,
+        updated_at_ms=1,
+    )
+    await store.add_user_job(job)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def callback(active_job: ScheduleJob) -> None:
+        assert active_job == job
+        started.set()
+        await release.wait()
+
+    service = _service(state, execute_user_job=callback)
+    service.start()
+    await started.wait()
+    await service.pause_admission()
+    assert service._loop_task is None
+    assert service.status_snapshot().active_job_count == 1
+    release.set()
+    await _wait_until(lambda: service.status_snapshot().active_job_count == 0)
+    await service.close()

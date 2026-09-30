@@ -1373,6 +1373,18 @@ class AgentLoop:
                 run_token=restore_run_token,
             )
         except ModelCallError as failure:
+            if failure.error.code == "turn_cancelled":
+                return await self._finish_foreground_terminal(
+                    active_session,
+                    run_context,
+                    current_user,
+                    error=failure.error,
+                    framing_usage=framing_usage,
+                    metadata_updates=metadata_patch()[0],
+                    metadata_removals=metadata_patch()[1],
+                    restore_before=restore_before,
+                    restore_run_token=restore_run_token,
+                )
             await self._publish_preparation_failure(failure.error)
             return True
         except asyncio.CancelledError:
@@ -1392,6 +1404,19 @@ class AgentLoop:
         finally:
             if self._active_foreground_owner is foreground_owner:
                 self._active_foreground_owner = None
+
+        if result.finish_reason == "cancelled" and not result.messages:
+            return await self._finish_foreground_terminal(
+                active_session,
+                run_context,
+                current_user,
+                error=result.error or ErrorInfo("turn_cancelled", TURN_CANCELLED_MESSAGE),
+                framing_usage=framing_usage,
+                metadata_updates=metadata_patch()[0],
+                metadata_removals=metadata_patch()[1],
+                restore_before=restore_before,
+                restore_run_token=restore_run_token,
+            )
 
         if self._aborted:
             return False

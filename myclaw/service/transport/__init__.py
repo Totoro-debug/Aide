@@ -651,7 +651,11 @@ class LocalServiceTransport:
         await socket.prepare(request)
         sink = _WebSocketSink(socket)
         try:
-            await self.service.connect_client(client_id, sink)
+            await self.service.connect_client(
+                client_id,
+                sink,
+                wait_for_subscribe=self.service.client(client_id).kind == "web",
+            )
             async for message in socket:
                 if message.type is WSMsgType.TEXT:
                     value: object = None

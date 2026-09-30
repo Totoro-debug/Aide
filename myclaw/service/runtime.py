@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
@@ -106,6 +106,11 @@ class ClientState:
     current_workspace_id: str | None = None
     current_session_id: str | None = None
     disconnect_task: asyncio.Task[None] | None = None
+    reconnect_deadline: float | None = None
+    delivery_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    subscribed: bool = True
+    resync_required: bool = False
+    expired: bool = False
 
 
 @dataclass(slots=True)
@@ -430,6 +435,12 @@ class WorkspaceServiceRuntime:
                         "Conversation Session is already claimed by another client.",
                         retryable=True,
                     )
+                if existing.status != "claimed":
+                    raise service_error(
+                        "stale_claim",
+                        "Conversation Session Claim is not active.",
+                        retryable=True,
+                    )
                 return existing
             draft_owner = self._draft_clients.get(session_id)
             if draft_owner is not None and draft_owner != client_id:
@@ -478,6 +489,19 @@ class WorkspaceServiceRuntime:
             self._claims[session_id] = claim
             self._draft_clients.pop(session_id, None)
             return claim
+
+    def set_client_connection(self, client_id: str, *, connected: bool) -> None:
+        """Move this client's Claims across the reconnect grace boundary."""
+        for claim in self._claims.values():
+            if claim.client_id != client_id:
+                continue
+            if connected:
+                if claim.status == "reconnecting":
+                    claim.status = "claimed"
+                    claim.disconnected_at = None
+            elif claim.status == "claimed":
+                claim.status = "reconnecting"
+                claim.disconnected_at = self.service._monotonic()
 
     def require_claim(
         self,
@@ -543,32 +567,42 @@ class WorkspaceServiceRuntime:
     async def expire_client(self, client_id: str) -> None:
         if self._restore_owner == client_id:
             await self._release_restore_barrier(client_id)
-        for session_id, claim in tuple(self._claims.items()):
-            if claim.client_id != client_id:
-                continue
+        owned_claims = tuple(
+            claim for claim in self._claims.values() if claim.client_id == client_id
+        )
+        for claim in owned_claims:
+            claim.status = "draining"
+        errors: list[Exception] = []
+        for claim in owned_claims:
+            session_id = claim.session_id
             loop_state = self._loops.get(session_id)
             try:
                 if loop_state is not None:
+                    await self.service.confirmation.cancel_generation(loop_state.loop.generation_id)
                     try:
                         await loop_state.loop.cancel_active_run()
                     except RuntimeError:
                         pass
-                    await self._close_loop(session_id, abort=True)
-            finally:
-                self._claims.pop(session_id, None)
-                self.service.client_claim_released(client_id, self.workspace_id, session_id)
-                await self.service.emit(
-                    "session.released",
-                    workspace_id=self.workspace_id,
-                    session_id=session_id,
-                    run_id=None,
-                    payload={},
-                    target_client_ids=self.service.workspace_audience(self.workspace_id),
-                )
+                    await self._close_loop(session_id)
+            except Exception as error:
+                errors.append(error)
+                continue
+            self._claims.pop(session_id, None)
+            self.service.client_claim_released(client_id, self.workspace_id, session_id)
+            await self.service.emit(
+                "session.released",
+                workspace_id=self.workspace_id,
+                session_id=session_id,
+                run_id=None,
+                payload={},
+                target_client_ids=self.service.workspace_audience(self.workspace_id),
+            )
         for session_id, owner in tuple(self._draft_clients.items()):
             if owner == client_id:
                 self._draft_clients.pop(session_id, None)
                 await self._close_loop(session_id, abort=True)
+        if errors:
+            raise ExceptionGroup("Client Session cleanup failed", errors)
 
     def confirmation_source(
         self, owner: ConfirmationOwner
@@ -1082,11 +1116,13 @@ class LocalService:
         *,
         reconnect_timeout: float = 30.0,
         monotonic_now: Callable[[], float] = monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.agent_home = agent_home
         self.configuration = configuration
         self.reconnect_timeout = reconnect_timeout
         self._monotonic = monotonic_now
+        self._sleep = sleep
         self.service_instance_id = str(uuid4())
         self.protocol_version = 1
         self.state = "starting"
@@ -1140,21 +1176,22 @@ class LocalService:
             raise service_error("admission_closed", "The local service is stopping.")
         if reconnect_credential is not None:
             client_id = self._client_by_reconnect.get(reconnect_credential)
-            if client_id is not None:
-                client = self._clients[client_id]
-                if client.kind != kind or client.connected:
-                    raise service_error(
-                        "client_already_connected",
-                        "This Client is already connected or has a different kind.",
-                    )
-                if client.disconnect_task is not None:
-                    client.disconnect_task.cancel()
-                    client.disconnect_task = None
-                self._client_by_reconnect.pop(client.reconnect_credential, None)
-                client.reconnect_credential = str(uuid4())
-                client.web_control_credential = str(uuid4()) if kind == "web" else None
-                self._client_by_reconnect[client.reconnect_credential] = client_id
-                return client
+            if client_id is None:
+                raise service_error(
+                    "stale_client", "This Client reconnect credential is no longer valid.",
+                    retryable=True,
+                )
+            client = self._require_client(client_id)
+            if client.kind != kind or client.connected:
+                raise service_error(
+                    "client_already_connected",
+                    "This Client is already connected or has a different kind.",
+                )
+            self._client_by_reconnect.pop(client.reconnect_credential, None)
+            client.reconnect_credential = str(uuid4())
+            client.web_control_credential = str(uuid4()) if kind == "web" else None
+            self._client_by_reconnect[client.reconnect_credential] = client_id
+            return client
         permission = (
             self.configuration.runtime.permission_level if self.configuration else "workspace-write"
         )
@@ -1187,12 +1224,21 @@ class LocalService:
             ):
                 client.current_session_id = None
 
-    async def connect_client(self, client_id: str, sink: ServiceSink) -> None:
+    async def connect_client(
+        self,
+        client_id: str,
+        sink: ServiceSink,
+        *,
+        wait_for_subscribe: bool = False,
+    ) -> None:
         client = self._require_client(client_id)
         if client.connected:
             raise service_error("client_already_connected", "This Client already has a connection.")
         client.connected = True
         client.sink = sink
+        client.subscribed = False
+        client.expired = False
+        client.reconnect_deadline = None
         if client.disconnect_task is not None:
             client.disconnect_task.cancel()
             client.disconnect_task = None
@@ -1201,12 +1247,22 @@ class LocalService:
             self._global_reconnect_task = None
         if self.state == "reconnecting":
             self.state = "ready"
+        for workspace in self._workspaces.values():
+            workspace.set_client_connection(client_id, connected=True)
         if self.state == "ready":
             for workspace in self._workspaces.values():
                 if self._schedule_allowed(workspace):
                     await workspace.activate_schedule()
-        for event in tuple(client.events):
-            await sink.send_event(event)
+        if not wait_for_subscribe:
+            async with client.delivery_lock:
+                client.subscribed = True
+                if client.resync_required:
+                    await self._send_snapshot_required(client, reason="slow_consumer")
+                    if client.connected:
+                        client.resync_required = False
+                else:
+                    for event in tuple(client.events):
+                        await self._send_event(client, event)
 
     async def disconnect_client(self, client_id: str, *, sink: ServiceSink | None = None) -> None:
         client = self._clients.get(client_id)
@@ -1214,15 +1270,24 @@ class LocalService:
             return
         client.connected = False
         client.sink = None
+        client.subscribed = False
+        for workspace in self._workspaces.values():
+            workspace.set_client_connection(client_id, connected=False)
         if client.disconnect_task is not None:
             client.disconnect_task.cancel()
-        client.disconnect_task = asyncio.create_task(self._expire_client_later(client_id))
+        expiry_deadline = self._monotonic() + self.reconnect_timeout
+        client.reconnect_deadline = expiry_deadline
+        client.disconnect_task = asyncio.create_task(
+            self._expire_client_later(client_id, expiry_deadline)
+        )
         if not any(candidate.connected for candidate in self._clients.values()):
             if self.state == "ready":
                 self.state = "reconnecting"
                 for workspace in self._workspaces.values():
                     await workspace.pause_schedule_admission()
-                self._global_reconnect_task = asyncio.create_task(self._stop_after_grace())
+                self._global_reconnect_task = asyncio.create_task(
+                    self._stop_after_grace(expiry_deadline)
+                )
 
     async def attach_workspace(self, client_id: str, path: Path) -> WorkspaceServiceRuntime:
         client = self._require_client(client_id)
@@ -1694,7 +1759,7 @@ class LocalService:
             result = {"decided": True}
         elif command_type == "subscribe":
             last_seq = payload.get("last_seq")
-            await self._replay(client, last_seq)
+            await self._replay(client, last_seq, payload.get("stream_id"))
             result = {"subscribed": True, "stream_id": client.stream_id, "seq": client.sequence}
         else:
             raise service_error("validation_error", "Unsupported client command.", status=422)
@@ -1745,22 +1810,23 @@ class LocalService:
                     and not cancellation_ack
                 ):
                     continue
-            client.sequence += 1
-            event = {
-                "protocol_version": self.protocol_version,
-                "service_instance_id": self.service_instance_id,
-                "stream_id": client.stream_id,
-                "seq": client.sequence,
-                "type": event_type,
-                "workspace_id": workspace_id,
-                "project_id": project_id,
-                "session_id": session_id,
-                "run_id": run_id,
-                "payload": payload,
-            }
-            client.events.append(event)
-            if client.connected and client.sink is not None:
-                await self._send_event(client, event)
+            async with client.delivery_lock:
+                client.sequence += 1
+                event = {
+                    "protocol_version": self.protocol_version,
+                    "service_instance_id": self.service_instance_id,
+                    "stream_id": client.stream_id,
+                    "seq": client.sequence,
+                    "type": event_type,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "payload": payload,
+                }
+                client.events.append(event)
+                if client.connected and client.subscribed and client.sink is not None:
+                    await self._send_event(client, event)
 
     def confirmation_source(
         self, owner: ConfirmationOwner
@@ -1825,50 +1891,153 @@ class LocalService:
         client = self._clients.get(client_id)
         if client is None:
             raise service_error("unauthenticated", "Client identity is not recognized.", status=401)
+        if client.expired or (
+            not client.connected
+            and client.reconnect_deadline is not None
+            and self._monotonic() >= client.reconnect_deadline
+        ):
+            raise service_error(
+                "stale_client", "This Client reconnect grace period has expired.", retryable=True
+            )
         return client
 
-    async def _expire_client_later(self, client_id: str) -> None:
+    async def _expire_client_later(self, client_id: str, deadline: float) -> None:
         try:
-            await asyncio.sleep(self.reconnect_timeout)
+            await self._wait_until(deadline)
         except asyncio.CancelledError:
             return
         client = self._clients.get(client_id)
         if client is None or client.connected:
             return
-        for workspace in self._workspaces.values():
-            await workspace.expire_client(client_id)
-        client.claimed.clear()
+        client.expired = True
         self._client_by_reconnect.pop(client.reconnect_credential, None)
+        errors: list[Exception] = []
+        for workspace in self._workspaces.values():
+            try:
+                await workspace.expire_client(client_id)
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            self.state = "draining"
+            for workspace in self._workspaces.values():
+                try:
+                    await workspace.pause_schedule_admission()
+                except Exception:
+                    pass
+            await self.emit(
+                "service.cleanup_failed",
+                workspace_id=None,
+                session_id=None,
+                run_id=None,
+                payload={"reason": "client_expiry"},
+                target_client_ids=tuple(
+                    candidate.client_id
+                    for candidate in self._clients.values()
+                    if candidate.connected and candidate.client_id != client_id
+                ),
+            )
+            return
+        client.claimed.clear()
         self._clients.pop(client_id, None)
 
-    async def _stop_after_grace(self) -> None:
+    async def _stop_after_grace(self, deadline: float | None = None) -> None:
         try:
-            await asyncio.sleep(self.reconnect_timeout)
+            if deadline is None:
+                deadline = self._monotonic() + self.reconnect_timeout
+            await self._wait_until(deadline)
         except asyncio.CancelledError:
             return
         if not any(client.connected for client in self._clients.values()):
             self._global_reconnect_task = None
+            pending_expiry = tuple(
+                client.disconnect_task
+                for client in self._clients.values()
+                if client.disconnect_task is not None
+                and client.disconnect_task is not asyncio.current_task()
+            )
+            if pending_expiry:
+                await asyncio.gather(*pending_expiry, return_exceptions=True)
             await self.stop()
 
-    async def _replay(self, client: ClientState, last_seq: object) -> None:
-        if last_seq is None:
-            return
-        if isinstance(last_seq, bool) or not isinstance(last_seq, int) or last_seq < 0:
+    async def _wait_until(self, deadline: float) -> None:
+        while True:
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                return
+            await self._sleep(remaining)
+
+    async def _replay(
+        self, client: ClientState, last_seq: object, last_stream_id: object = None
+    ) -> None:
+        if last_seq is not None and (
+            isinstance(last_seq, bool) or not isinstance(last_seq, int) or last_seq < 0
+        ):
             raise service_error("validation_error", "last_seq is invalid.", status=422)
-        first_seq = int(cast(int, client.events[0]["seq"])) if client.events else 0
-        if not client.events or last_seq >= first_seq - 1:
+        if last_stream_id is not None and not isinstance(last_stream_id, str):
+            raise service_error("validation_error", "stream_id is invalid.", status=422)
+        async with client.delivery_lock:
+            client.subscribed = True
+            if client.resync_required:
+                await self._send_snapshot_required(client, reason="slow_consumer")
+                if client.connected:
+                    client.resync_required = False
+                return
+            if last_stream_id is not None and last_stream_id != client.stream_id:
+                await self._send_snapshot_required(client, reason="stream_changed")
+                return
+            if last_seq is None:
+                await self._send_snapshot_required(client, reason="initial_subscribe")
+                return
+            if last_seq > client.sequence:
+                await self._send_snapshot_required(client, reason="cursor_ahead")
+                return
+            first_seq = int(cast(int, client.events[0]["seq"])) if client.events else 0
+            if not client.events or last_seq < first_seq - 1:
+                await self._send_snapshot_required(client, reason="event_cache_exhausted")
+                return
             for event in tuple(client.events):
                 if int(cast(int, event["seq"])) > last_seq and client.sink is not None:
                     await self._send_event(client, event)
-            return
-        await self.emit(
-            "snapshot.required",
-            workspace_id=None,
-            session_id=None,
-            run_id=None,
-            payload={"reason": "event_cache_exhausted", "stream_id": client.stream_id},
-            target_client_ids=(client.client_id,),
-        )
+
+    async def _send_snapshot_required(self, client: ClientState, *, reason: str) -> None:
+        snapshots: list[dict[str, object]] = []
+        for workspace_id, session_id in tuple(client.claimed):
+            workspace = self._workspaces.get(workspace_id)
+            if workspace is None:
+                continue
+            try:
+                projection = workspace.projection(session_id)
+            except ServiceError:
+                continue
+            snapshots.append(
+                {
+                    "workspace_id": workspace_id,
+                    "snapshot": {
+                        "session_id": projection.session_id,
+                        "messages": list(projection.messages),
+                    },
+                }
+            )
+        client.sequence += 1
+        event = {
+            "protocol_version": self.protocol_version,
+            "service_instance_id": self.service_instance_id,
+            "stream_id": client.stream_id,
+            "seq": client.sequence,
+            "type": "snapshot.required",
+            "workspace_id": None,
+            "project_id": None,
+            "session_id": None,
+            "run_id": None,
+            "payload": {
+                "reason": reason,
+                "stream_id": client.stream_id,
+                "snapshot": {"sessions": snapshots},
+            },
+        }
+        client.events.append(event)
+        if client.connected and client.subscribed and client.sink is not None:
+            await self._send_event(client, event)
 
     async def _send_event(self, client: ClientState, event: dict[str, object]) -> None:
         sink = client.sink
@@ -1877,6 +2046,7 @@ class LocalService:
         try:
             await asyncio.wait_for(sink.send_event(event), timeout=1.0)
         except Exception:
+            client.resync_required = True
             await self.disconnect_client(client.client_id, sink=sink)
 
     @staticmethod

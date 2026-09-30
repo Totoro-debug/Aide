@@ -105,7 +105,9 @@ export default function App() {
   const bootstrapPromise = useRef<Promise<RegisteredClient> | null>(null);
   const eventStreamRef = useRef<ReturnType<typeof openEventStream> | null>(null);
   const eventListenersRef = useRef(new Set<ServiceEventListener>());
-  const eventCursorRef = useRef<{ streamId: string; seq: number } | null>(null);
+  const eventCursorRef = useRef<{
+    serviceInstanceId: string; clientId: string; streamId: string; seq: number;
+  } | null>(null);
   const pendingConfirmationRef = useRef<PendingConfirmation | null>(null);
   const confirmationTriggerRef = useRef<HTMLElement | null>(null);
   const resolvingConfirmationTokenRef = useRef<string | null>(null);
@@ -279,6 +281,13 @@ export default function App() {
         if (!active) {
           return;
         }
+        if (
+          eventCursorRef.current !== null
+          && (eventCursorRef.current.serviceInstanceId !== current.service_instance_id
+            || eventCursorRef.current.clientId !== client.client_id)
+        ) {
+          eventCursorRef.current = null;
+        }
         setServiceStatus(current);
         setRegisteredClient(client);
         setAuthState("ready");
@@ -288,6 +297,22 @@ export default function App() {
           () => {
             setConnectionState("online");
             setSessionEventVersion((version) => version + 1);
+            const activeConnection = eventStreamRef.current;
+            if (activeConnection !== null) {
+              void activeConnection.sendCommand({
+                request_id: createRequestId(),
+                type: "subscribe",
+                workspace_id: null,
+                session_id: null,
+                claim_version: null,
+                payload: {
+                  last_seq: eventCursorRef.current?.seq ?? null,
+                  stream_id: eventCursorRef.current?.streamId ?? null,
+                },
+              }).catch(() => {
+                activeConnection.close();
+              });
+            }
           },
           () => {
             pendingConfirmationRef.current = null;
@@ -298,18 +323,30 @@ export default function App() {
           },
           (event) => {
             const cursor = eventCursorRef.current;
+            const sameStream = cursor !== null
+              && cursor.serviceInstanceId === event.service_instance_id
+              && cursor.clientId === client.client_id
+              && cursor.streamId === event.stream_id;
             if (
-              cursor !== null
-              && cursor.streamId === event.stream_id
+              sameStream
               && event.seq <= cursor.seq
             ) {
               return;
             }
-            if (cursor !== null && cursor.streamId === event.stream_id && event.seq > cursor.seq + 1) {
+            if (
+              sameStream
+              && event.seq > cursor.seq + 1
+              && event.type !== "snapshot.required"
+            ) {
               const resync = { ...event, type: "snapshot.required", workspace_id: null, session_id: null, run_id: null };
               for (const listener of eventListenersRef.current) listener(resync);
             }
-            eventCursorRef.current = { streamId: event.stream_id, seq: event.seq };
+            eventCursorRef.current = {
+              serviceInstanceId: event.service_instance_id,
+              clientId: client.client_id,
+              streamId: event.stream_id,
+              seq: event.seq,
+            };
             for (const listener of eventListenersRef.current) listener(event);
             if (event.type === "session.claimed" || event.type === "session.released") {
               setSessionEventVersion((version) => version + 1);
@@ -1493,6 +1530,7 @@ function ProjectSessionsContent({
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const draftsBySessionRef = useRef<Record<string, string>>({});
   const pendingSubmissionsRef = useRef<PendingSubmission[]>([]);
+  const pendingClientIdRef = useRef<string | null>(null);
   const needsReclaimRef = useRef(false);
   const attemptedRestoreRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
@@ -1571,11 +1609,21 @@ function ProjectSessionsContent({
   }, [sendServiceCommand, updateLiveRuns]);
 
   useEffect(() => {
-    if (connectionState !== "online") return;
+    if (connectionState !== "online" || registeredClient === null) return;
+    const previousClientId = pendingClientIdRef.current;
+    pendingClientIdRef.current = registeredClient.client_id;
+    if (previousClientId !== null && previousClientId !== registeredClient.client_id) {
+      for (const pending of pendingSubmissionsRef.current) {
+        updateLiveRuns(pending.sessionId, (runs) => runs.map((run) => run.localId === pending.localId
+          ? { ...run, status: "failed", error: null } : run));
+      }
+      pendingSubmissionsRef.current = [];
+      return;
+    }
     for (const pending of [...pendingSubmissionsRef.current]) {
       void sendPendingSubmission(pending);
     }
-  }, [connectionState, sendPendingSubmission]);
+  }, [connectionState, registeredClient, sendPendingSubmission, updateLiveRuns]);
 
   const clearClaimState = useCallback(() => {
     const previous = claimRef.current;
@@ -1711,23 +1759,51 @@ function ProjectSessionsContent({
 
   const handleServiceEvent = useCallback((event: ServiceEvent) => {
     if (event.type === "snapshot.required") {
-      const currentClaim = claimRef.current;
-      if (currentClaim !== null) {
+      const restored = new Set<string>();
+      const snapshotPayload = event.payload.snapshot;
+      const sessions = typeof snapshotPayload === "object" && snapshotPayload !== null
+        ? (snapshotPayload as { sessions?: unknown }).sessions : null;
+      if (Array.isArray(sessions)) {
+        for (const item of sessions) {
+          if (typeof item !== "object" || item === null) continue;
+          const entry = item as { workspace_id?: unknown; snapshot?: unknown };
+          const nextSnapshot = entry.snapshot as Partial<SessionSnapshot> | null;
+          if (
+            typeof entry.workspace_id !== "string"
+            || typeof nextSnapshot !== "object" || nextSnapshot === null
+            || typeof nextSnapshot.session_id !== "string"
+            || !Array.isArray(nextSnapshot.messages)
+          ) continue;
+          const currentClaim = claimsBySessionRef.current[nextSnapshot.session_id];
+          if (currentClaim?.workspace_id !== entry.workspace_id) continue;
+          adoptSnapshot(nextSnapshot as SessionSnapshot);
+          restored.add(nextSnapshot.session_id);
+        }
+      }
+      for (const currentClaim of Object.values(claimsBySessionRef.current)) {
+        if (restored.has(currentClaim.session_id)) continue;
         void getProjectSession(
           projectId,
           currentClaim.session_id,
           currentClaim.claim_version,
           currentClaim.reconnect_credential,
         ).then((nextSnapshot) => {
-          if (mountedRef.current && claimRef.current === currentClaim) adoptSnapshot(nextSnapshot);
+          if (mountedRef.current && claimsBySessionRef.current[currentClaim.session_id] === currentClaim) {
+            adoptSnapshot(nextSnapshot);
+          }
         }).catch(() => {
-          // A reconnecting Claim is refreshed by the normal Claim recovery path.
+          // The normal Claim recovery path handles an expired Claim.
         });
       }
+      void refreshSessionsRef.current?.();
       return;
     }
     if (event.workspace_id !== workspaceIdRef.current || event.session_id === null) return;
     const sessionId = event.session_id;
+    if (event.type === "session.released") {
+      delete claimsBySessionRef.current[sessionId];
+      return;
+    }
     if (event.type === "input.accepted") {
       if (event.run_id === null) return;
       const acceptedText = typeof event.payload.text === "string" ? event.payload.text : "";

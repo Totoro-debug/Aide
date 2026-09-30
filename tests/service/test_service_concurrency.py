@@ -35,6 +35,7 @@ from myclaw.service.errors import ServiceError
 from myclaw.service.runtime import LocalService
 from myclaw.service.transport import create_app
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
+from tests.fixtures import FakeClock
 
 
 class _CollectingSink:
@@ -758,4 +759,402 @@ async def test_workspace_schedule_and_memory_are_shared_across_clients(
         if first is not None:
             await first.close()
         await server.close()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_expiry_keeps_claim_until_cancelled_run_cleanup_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ConcurrentProvider()
+    clock = FakeClock(datetime(2026, 9, 30, tzinfo=UTC))
+    wake_timer = asyncio.Event()
+
+    async def wait_for_timer(_seconds: float) -> None:
+        await wake_timer.wait()
+        wake_timer.clear()
+
+    async def advance(seconds: float) -> None:
+        clock.advance(seconds)
+        wake_timer.set()
+        for _ in range(4):
+            await asyncio.sleep(0)
+
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = LocalService(
+        home,
+        ConfigLoader(home).load_for_startup(),
+        reconnect_timeout=30,
+        monotonic_now=clock.monotonic,
+        sleep=wait_for_timer,
+    )
+    first_sink = _CollectingSink()
+    second_sink = _CollectingSink()
+    try:
+        await service.start()
+        first = await service.register_client("cli")
+        second = await service.register_client("cli")
+        workspace = await service.attach_workspace(first.client_id, workspace_path)
+        await service.attach_workspace(second.client_id, workspace_path)
+        await service.connect_client(first.client_id, first_sink)
+        await service.connect_client(second.client_id, second_sink)
+
+        session_id = await workspace.create_draft(first.client_id)
+        claimed = await service.claim(first.client_id, workspace.workspace_id, session_id)
+        claim_data = cast(dict[str, object], claimed["claim"])
+        claim_version = cast(int, claim_data["claim_version"])
+        await workspace.input(first.client_id, session_id, claim_version, "session-a", "run-a")
+        await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
+
+        await service.disconnect_client(first.client_id, sink=first_sink)
+        await advance(29)
+        assert workspace._claims[session_id].status == "reconnecting"
+        with pytest.raises(ServiceError) as still_owned:
+            await service.claim(second.client_id, workspace.workspace_id, session_id)
+        assert still_owned.value.code == "session_claimed"
+
+        reconnected_sink = _CollectingSink()
+        reconnect_credential = first.reconnect_credential
+        assert await service.register_client("cli", reconnect_credential) is first
+        with pytest.raises(ServiceError) as rotated_credential:
+            await service.register_client("cli", reconnect_credential)
+        assert rotated_credential.value.code == "stale_client"
+        await service.connect_client(first.client_id, reconnected_sink)
+        assert workspace._claims[session_id].status == "claimed"
+        await service.disconnect_client(first.client_id, sink=reconnected_sink)
+        await advance(29)
+        assert workspace._claims[session_id].status == "reconnecting"
+
+        cleanup_started = asyncio.Event()
+        cleanup_release = asyncio.Event()
+        close_loop = workspace._close_loop
+
+        async def delayed_close(selected_session_id: str, *, abort: bool = False) -> None:
+            cleanup_started.set()
+            await cleanup_release.wait()
+            await close_loop(selected_session_id, abort=abort)
+
+        monkeypatch.setattr(workspace, "_close_loop", delayed_close)
+        expiry_task = first.disconnect_task
+        assert expiry_task is not None
+        clock.advance(1)
+        with pytest.raises(ServiceError) as boundary_registration:
+            await service.register_client("cli", first.reconnect_credential)
+        assert boundary_registration.value.code == "stale_client"
+        with pytest.raises(ServiceError) as boundary_connection:
+            await service.connect_client(first.client_id, _CollectingSink())
+        assert boundary_connection.value.code == "stale_client"
+        await advance(0)
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        assert workspace._claims[session_id].status == "draining"
+        assert provider.session_a_cancelled.is_set()
+        with pytest.raises(ServiceError) as draining:
+            await workspace.input(first.client_id, session_id, claim_version, "late", "late-run")
+        assert draining.value.code == "stale_claim"
+        with pytest.raises(ServiceError) as cleanup_in_progress:
+            await service.claim(second.client_id, workspace.workspace_id, session_id)
+        assert cleanup_in_progress.value.code == "session_claimed"
+
+        cleanup_release.set()
+        await asyncio.wait_for(expiry_task, timeout=2)
+        history = Session.load(workspace.workspace_state, session_id)
+        assert any(message.get("role") == "user" for message in history.messages)
+        assert any(
+            message.get("role") == "assistant"
+            and message.get("status") == "interrupted"
+            and isinstance(message.get("error"), dict)
+            and message["error"].get("code") == "turn_cancelled"
+            for message in history.messages
+        )
+        with pytest.raises(ServiceError) as stale_input:
+            await workspace.input(first.client_id, session_id, claim_version, "expired", "expired")
+        assert stale_input.value.code == "stale_claim"
+        with pytest.raises(ServiceError) as expired_client:
+            await service.register_client("cli", first.reconnect_credential)
+        assert expired_client.value.code == "stale_client"
+        reacquired = await service.claim(second.client_id, workspace.workspace_id, session_id)
+        assert cast(dict[str, object], reacquired["claim"])["session_id"] == session_id
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_event_reconnect_replays_once_and_cache_overflow_requires_snapshot(
+    tmp_path: Path,
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    first_sink = _CollectingSink()
+    try:
+        await service.start()
+        client = await service.register_client("cli")
+        await service.attach_workspace(client.client_id, workspace_path)
+        await service.connect_client(client.client_id, first_sink)
+        await service.emit(
+            "test.event",
+            workspace_id=None,
+            session_id=None,
+            run_id=None,
+            payload={"marker": "before-disconnect"},
+        )
+        last_seq = client.sequence
+        await service.disconnect_client(client.client_id, sink=first_sink)
+        old_credential = client.reconnect_credential
+        assert await service.register_client("cli", old_credential) is client
+        with pytest.raises(ServiceError) as rotated:
+            await service.register_client("cli", old_credential)
+        assert rotated.value.code == "stale_client"
+        for marker in range(3):
+            await service.emit(
+                "test.event",
+                workspace_id=None,
+                session_id=None,
+                run_id=None,
+                payload={"marker": marker},
+            )
+
+        replay_sink = _CollectingSink()
+        await service.connect_client(client.client_id, replay_sink, wait_for_subscribe=True)
+        replay = await service.handle_command(
+            client.client_id,
+            {
+                "request_id": "replay",
+                "type": "subscribe",
+                "workspace_id": None,
+                "session_id": None,
+                "claim_version": None,
+                "payload": {"last_seq": last_seq},
+            },
+        )
+        assert replay["accepted"] is True
+        assert [event["seq"] for event in replay_sink.events] == list(
+            range(last_seq + 1, last_seq + 4)
+        )
+        assert [
+            cast(dict[str, object], event["payload"])["marker"]
+            for event in replay_sink.events
+        ] == [0, 1, 2]
+
+        await service.disconnect_client(client.client_id, sink=replay_sink)
+        replay_sink = _CollectingSink()
+        for marker in range(300):
+            await service.emit(
+                "test.event",
+                workspace_id=None,
+                session_id=None,
+                run_id=None,
+                payload={"marker": marker},
+            )
+        await service.connect_client(client.client_id, replay_sink, wait_for_subscribe=True)
+        snapshot = await service.handle_command(
+            client.client_id,
+            {
+                "request_id": "overflow",
+                "type": "subscribe",
+                "workspace_id": None,
+                "session_id": None,
+                "claim_version": None,
+                "payload": {"last_seq": last_seq},
+            },
+        )
+        assert snapshot["accepted"] is True
+        assert len(replay_sink.events) == 1
+        event = replay_sink.events[0]
+        assert event["type"] == "snapshot.required"
+        payload = cast(dict[str, object], event["payload"])
+        assert payload["reason"] == "event_cache_exhausted"
+        assert isinstance(payload["snapshot"], dict)
+        assert "credential" not in json.dumps(event)
+
+        await service.disconnect_client(client.client_id, sink=replay_sink)
+        replay_sink = _CollectingSink()
+        await service.connect_client(client.client_id, replay_sink, wait_for_subscribe=True)
+        await service.handle_command(
+            client.client_id,
+            {
+                "request_id": "different-stream",
+                "type": "subscribe",
+                "workspace_id": None,
+                "session_id": None,
+                "claim_version": None,
+                "payload": {"last_seq": client.sequence, "stream_id": "old-stream"},
+            },
+        )
+        assert replay_sink.events[0]["type"] == "snapshot.required"
+        assert cast(dict[str, object], replay_sink.events[0]["payload"])["reason"] == "stream_changed"
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_replay_holds_live_events_until_cached_events_are_sent(tmp_path: Path) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    first_sink = _CollectingSink()
+    try:
+        await service.start()
+        client = await service.register_client("web")
+        await service.connect_client(client.client_id, first_sink, wait_for_subscribe=True)
+        await service.emit(
+            "test.event", workspace_id=None, session_id=None, run_id=None,
+            payload={"marker": "before"},
+        )
+        last_seq = client.sequence
+        await service.disconnect_client(client.client_id, sink=first_sink)
+        for marker in ("cached-a", "cached-b"):
+            await service.emit(
+                "test.event", workspace_id=None, session_id=None, run_id=None,
+                payload={"marker": marker},
+            )
+
+        class PausingSink(_CollectingSink):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.resume = asyncio.Event()
+
+            async def send_event(self, event: dict[str, object]) -> None:
+                if event["seq"] == last_seq + 1:
+                    self.started.set()
+                    await self.resume.wait()
+                await super().send_event(event)
+
+        replay_sink = PausingSink()
+        await service.connect_client(client.client_id, replay_sink, wait_for_subscribe=True)
+        subscribe = asyncio.create_task(service.handle_command(
+            client.client_id,
+            {
+                "request_id": "ordered-replay",
+                "type": "subscribe",
+                "workspace_id": None,
+                "session_id": None,
+                "claim_version": None,
+                "payload": {"last_seq": last_seq},
+            },
+        ))
+        await asyncio.wait_for(replay_sink.started.wait(), timeout=1)
+        live = asyncio.create_task(service.emit(
+            "test.event", workspace_id=None, session_id=None, run_id=None,
+            payload={"marker": "live"},
+        ))
+        await asyncio.sleep(0)
+        assert not live.done()
+        replay_sink.resume.set()
+        await asyncio.wait_for(asyncio.gather(subscribe, live), timeout=2)
+        assert [event["seq"] for event in replay_sink.events] == [
+            last_seq + 1, last_seq + 2, last_seq + 3,
+        ]
+        assert [cast(dict[str, object], event["payload"])["marker"] for event in replay_sink.events] == [
+            "cached-a", "cached-b", "live",
+        ]
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_resync_includes_selected_and_switched_away_claims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ConcurrentProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    initial_sink = _CollectingSink()
+    try:
+        await service.start()
+        client = await service.register_client("web")
+        workspace = await service.attach_workspace(client.client_id, workspace_path)
+        await service.connect_client(client.client_id, initial_sink, wait_for_subscribe=True)
+        first_session = await workspace.create_draft(client.client_id)
+        first_claim = await service.claim(client.client_id, workspace.workspace_id, first_session)
+        await workspace.input(
+            client.client_id, first_session, _claim_version(first_claim), "session-a", "run-a"
+        )
+        await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
+        second_session = await workspace.create_draft(
+            client.client_id, reuse_startup_session=False
+        )
+        await service.claim(client.client_id, workspace.workspace_id, second_session)
+        assert set(client.claimed) == {
+            (workspace.workspace_id, first_session),
+            (workspace.workspace_id, second_session),
+        }
+        last_seq = client.sequence
+        await service.disconnect_client(client.client_id, sink=initial_sink)
+        for marker in range(257):
+            await service.emit(
+                "test.event", workspace_id=None, session_id=None, run_id=None,
+                payload={"marker": marker},
+            )
+        replay_sink = _CollectingSink()
+        await service.connect_client(client.client_id, replay_sink, wait_for_subscribe=True)
+        await service.handle_command(
+            client.client_id,
+            {
+                "request_id": "background-snapshot",
+                "type": "subscribe",
+                "workspace_id": None,
+                "session_id": None,
+                "claim_version": None,
+                "payload": {"last_seq": last_seq, "stream_id": client.stream_id},
+            },
+        )
+        assert len(replay_sink.events) == 1
+        event = replay_sink.events[0]
+        assert event["type"] == "snapshot.required"
+        payload = cast(dict[str, object], event["payload"])
+        snapshot = cast(dict[str, object], payload["snapshot"])
+        sessions = cast(list[dict[str, object]], snapshot["sessions"])
+        assert {cast(dict[str, object], item["snapshot"])["session_id"] for item in sessions} == {
+            first_session, second_session,
+        }
+        assert "credential" not in json.dumps(event)
+    finally:
+        provider.release_a.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_slow_consumer_reconnect_requires_snapshot(tmp_path: Path) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+
+    class StalledSink:
+        async def send_event(self, _event: dict[str, object]) -> None:
+            await asyncio.Event().wait()
+
+    try:
+        await service.start()
+        client = await service.register_client("web")
+        await service.connect_client(client.client_id, StalledSink())
+        await service.emit(
+            "test.event", workspace_id=None, session_id=None, run_id=None, payload={},
+        )
+        assert not client.connected
+        assert client.resync_required
+        replay_sink = _CollectingSink()
+        await service.connect_client(client.client_id, replay_sink, wait_for_subscribe=True)
+        await service.handle_command(
+            client.client_id,
+            {
+                "request_id": "slow-consumer-resync",
+                "type": "subscribe",
+                "workspace_id": None,
+                "session_id": None,
+                "claim_version": None,
+                "payload": {"last_seq": 0, "stream_id": client.stream_id},
+            },
+        )
+        assert [event["type"] for event in replay_sink.events] == ["snapshot.required"]
+        assert cast(dict[str, object], replay_sink.events[0]["payload"])["reason"] == "slow_consumer"
+        assert not client.resync_required
+        assert "credential" not in json.dumps(replay_sink.events)
+    finally:
         await service.stop()

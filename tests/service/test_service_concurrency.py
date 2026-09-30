@@ -66,6 +66,7 @@ class _ConcurrentProvider:
         self.session_a_cancelled = asyncio.Event()
         self.session_b_started = asyncio.Event()
         self.release_b = asyncio.Event()
+        self.session_b_cancelled = asyncio.Event()
         self.block_b = block_b
         self.early_a_delta = early_a_delta
 
@@ -128,7 +129,11 @@ class _ConcurrentProvider:
             else:
                 self.session_b_started.set()
                 if self.block_b:
-                    await self.release_b.wait()
+                    try:
+                        await self.release_b.wait()
+                    except asyncio.CancelledError:
+                        self.session_b_cancelled.set()
+                        raise
                 answer = "answer from session B"
             yield TextDelta(answer)
             yield ModelCompleted(_response(answer))
@@ -185,6 +190,83 @@ class _ScheduleProvider:
 
     async def close(self) -> None:
         return None
+
+
+class _RemovalProvider(_ConcurrentProvider):
+    def __init__(self) -> None:
+        super().__init__(block_b=True)
+        self.schedule_started = asyncio.Event()
+        self.schedule_cancelled = asyncio.Event()
+        self.release_schedule = asyncio.Event()
+
+    async def complete(
+        self,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        model: str,
+        max_output: int,
+        temperature: float,
+        reasoning_effort: object,
+        timeout: int,
+        continuation: object = None,
+    ) -> ModelResponse:
+        del model, max_output, temperature, reasoning_effort, timeout, continuation
+        if "scheduled removal job" in json.dumps(messages):
+            self.schedule_started.set()
+            try:
+                await self.release_schedule.wait()
+            except asyncio.CancelledError:
+                self.schedule_cancelled.set()
+                raise
+            return _response(
+                '{"action":"replace","task_goal":"answer the input",'
+                '"completion_boundary":"return one answer"}'
+            )
+        return await super().complete(
+            messages=messages,
+            tools=tools,
+            model="model",
+            max_output=1,
+            temperature=0.0,
+            reasoning_effort=None,
+            timeout=1,
+        )
+
+    def stream(
+        self,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        model: str,
+        max_output: int,
+        temperature: float,
+        reasoning_effort: object,
+        timeout: int,
+        continuation: object = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        if "scheduled removal job" not in json.dumps(messages):
+            return super().stream(
+                messages=messages,
+                tools=tools,
+                model=model,
+                max_output=max_output,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
+                timeout=timeout,
+                continuation=continuation,
+            )
+
+        async def emit() -> AsyncIterator[ModelStreamEvent]:
+            self.schedule_started.set()
+            try:
+                await self.release_schedule.wait()
+            except asyncio.CancelledError:
+                self.schedule_cancelled.set()
+                raise
+            yield ModelCompleted(_response("schedule completion"))
+
+        return emit()
 
 
 def _response(content: str) -> ModelResponse:
@@ -756,6 +838,79 @@ async def test_workspace_schedule_and_memory_are_shared_across_clients(
         assert current[0].state.last_status == "ok", current[0].state
         assert provider.started.is_set()
         assert provider.complete_calls == 1
+    finally:
+        if second is not None:
+            await second.close()
+        if first is not None:
+            await first.close()
+        await server.close()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_project_removal_cancels_foreground_and_schedule_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    record = ProjectCatalog(home).register(workspace_path)
+    provider = _RemovalProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    server, port = await _serve(service, home)
+    first: ServiceClient | None = None
+    second: ServiceClient | None = None
+    try:
+        first = await ServiceClient.connect_or_start(home, workspace_path, port=port)
+        second = await ServiceClient.connect_or_start(home, workspace_path, port=port)
+        workspace = service.workspace(first.workspace_id)
+        workspace_id = first.workspace_id
+
+        await first.submit_input("session-a")
+        await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
+        await second.submit_input("session-b")
+        await asyncio.wait_for(provider.session_b_started.wait(), timeout=2)
+
+        job = ScheduleJob(
+            job_id=str(uuid4()),
+            message="scheduled removal job",
+            schedule=JobSchedule.every(3600),
+            created_at_ms=1,
+            updated_at_ms=1,
+        )
+        await workspace.schedule_service.add_user_job(job)
+        await asyncio.wait_for(provider.schedule_started.wait(), timeout=2)
+        assert len(workspace.loops) == 3
+        assert len(workspace._schedule_loops) == 1
+        assert workspace.schedule_service.status_snapshot().to_dict()["active_job_count"] == 1
+
+        await service.remove_project(first.client_id, record.project_id)
+
+        await asyncio.wait_for(provider.session_a_cancelled.wait(), timeout=2)
+        await asyncio.wait_for(provider.session_b_cancelled.wait(), timeout=2)
+        await asyncio.wait_for(provider.schedule_cancelled.wait(), timeout=2)
+        assert not workspace.loops
+        assert not workspace._schedule_loops
+        assert workspace.schedule_service.status_snapshot().to_dict()["active_job_count"] == 0
+        assert not workspace._claims
+        assert workspace_id not in service.workspaces
+        saved_jobs = await WorkspaceScheduleStore(workspace.workspace_state).public_snapshot()
+        assert [saved.job_id for saved in saved_jobs] == [job.job_id]
+        assert workspace_path.is_dir()
+        for _ in range(100):
+            if first.workspace_id == second.workspace_id == "":
+                break
+            await asyncio.sleep(0.01)
+        assert first.workspace_id == second.workspace_id == ""
+        assert not first.control.foreground_input_admitted()
+        assert not second.control.foreground_input_admitted()
+        for cli_client in (first, second):
+            async with asyncio.timeout(2):
+                while True:
+                    output = await cli_client.bus.get_outbound()
+                    if "Project registration was removed; its work has stopped." in output.content:
+                        break
     finally:
         if second is not None:
             await second.close()

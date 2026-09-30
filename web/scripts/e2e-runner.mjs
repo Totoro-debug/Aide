@@ -87,6 +87,11 @@ try {
   await page.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
   await page.getByRole("status").first().getByText(/Online|在线/).waitFor();
   assert.match(page.url(), /\/status$/);
+  secondContext = await browser.newContext();
+  const secondPage = await secondContext.newPage();
+  await secondPage.goto(`${url}/#ticket=${encodeURIComponent(control.details.second_ticket)}`);
+  await secondPage.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
+  await secondPage.getByRole("status").first().getByText(/Online|在线/).waitFor();
   const replay = await browser.newContext();
   const reusedTicket = await replay.request.post(`${url}/api/v1/web/ticket`, {
     headers: { Origin: url },
@@ -438,10 +443,6 @@ try {
   } finally {
     await duplicatePage.close();
   }
-  secondContext = await browser.newContext();
-  const secondPage = await secondContext.newPage();
-  await secondPage.goto(`${url}/#ticket=${encodeURIComponent(control.details.second_ticket)}`);
-  await secondPage.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
   await secondPage.getByRole("link", { name: /Projects|项目/ }).click();
   await secondPage.getByRole("heading", { name: /^(Projects|项目)$/ }).waitFor();
   await secondPage.locator("aside").getByRole("link", { name: "project-one", exact: true }).click();
@@ -695,6 +696,24 @@ try {
   await resumeButton.click();
   await review.getByRole("button", { name: "Resume schedule" }).click();
   await page.locator('ul[aria-label="Projects"] > li').filter({ hasText: firstProject }).getByText("Schedule active").waitFor();
+
+  const removableProject = page.locator('ul[aria-label="Projects"] > li').filter({ hasText: firstProject });
+  await removableProject.getByRole("button", { name: "Remove registration" }).click();
+  const removalDialog = page.getByRole("dialog", { name: "Remove project registration?" });
+  await removalDialog.getByText("saved Schedule Jobs stay on disk").waitFor();
+  const removalResponsePromise = page.waitForResponse((response) => (
+    response.request().method() === "DELETE"
+    && response.url().includes("/api/v1/projects/")
+  ));
+  await removalDialog.getByRole("button", { name: "Remove registration" }).click();
+  const removalResponse = await removalResponsePromise;
+  assert.equal(removalResponse.status(), 200);
+  const removalOperation = await removalResponse.json();
+  assert.ok(removalOperation.operation_id);
+  await removalDialog.waitFor({ state: "hidden" });
+  await page.getByText("Project registration removed. The directory and saved work remain on disk.").waitFor();
+  await removableProject.waitFor({ state: "detached" });
+  await readdir(resolve(firstProject, ".myclaw"));
 
   await page.getByRole("navigation").getByRole("link", { name: "Status" }).click();
   await page.getByRole("heading", { name: "Service status", exact: true }).waitFor();

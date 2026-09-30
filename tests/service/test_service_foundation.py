@@ -18,6 +18,7 @@ from myclaw.agent.confirmation import (
     ForegroundConfirmationOwner,
 )
 from myclaw.agent.loop import AgentLoop
+from myclaw.agent.session.restore import RestoreManager, RestoreMode
 from myclaw.agent.session.session import Session
 from myclaw.agent.tools.tool_gateway import ConfirmationRequest
 from myclaw.agent.workspace_state import WorkspaceState
@@ -37,7 +38,7 @@ from myclaw.service.discovery import (
 )
 from myclaw.service.errors import ServiceError
 from myclaw.service.projects import ProjectCatalog, ProjectCatalogError
-from myclaw.service.runtime import LocalService
+from myclaw.service.runtime import LocalService, WorkspaceServiceRuntime
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
 
@@ -253,6 +254,203 @@ async def test_registered_projects_start_once_and_removal_releases_claims(tmp_pa
         assert not client.claimed
         assert ProjectCatalog(home).list() == ()
         assert project.is_dir()
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_project_removal_closes_admission_clears_claims_and_blocks_reentry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    client = await service.register_client("cli")
+    record, workspace, _jobs = await service.register_project(client.client_id, project)
+    session_id = await workspace.create_draft(client.client_id)
+    await service.claim(client.client_id, workspace.workspace_id, session_id)
+    reconnect_credential = client.reconnect_credential
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+    original_close = workspace.close
+
+    async def gated_close() -> None:
+        close_started.set()
+        await allow_close.wait()
+        await original_close()
+
+    monkeypatch.setattr(workspace, "close", gated_close)
+    try:
+        response = await service.start_project_removal(client.client_id, record.project_id)
+        assert response["status"] == "removing"
+        await asyncio.wait_for(close_started.wait(), timeout=1)
+        assert await service.project_removal_status(
+            client.client_id, record.project_id, cast(str, response["operation_id"])
+        ) == {
+            "project_id": record.project_id,
+            "operation_id": response["operation_id"],
+            "status": "removing",
+        }
+        with pytest.raises(ServiceError) as blocked:
+            await service.attach_workspace(client.client_id, project)
+        assert blocked.value.code == "admission_closed"
+
+        allow_close.set()
+        operation = service._project_removals[record.project_id]
+        assert operation.task is not None
+        await asyncio.wait_for(asyncio.shield(operation.task), timeout=2)
+        assert (
+            await service.project_removal_status(
+                client.client_id, record.project_id, operation.operation_id
+            )
+        )["status"] == "completed"
+
+        assert not workspace._claims
+        assert not client.claimed
+        event_types = [event["type"] for event in client.events]
+        assert event_types.index("project.removal.started") < event_types.index("project.removed")
+        assert event_types.index("project.removed") < event_types.index("project.removal.completed")
+        with pytest.raises(ServiceError) as reentry:
+            await service.register_client("cli", reconnect_credential=reconnect_credential)
+        assert reentry.value.code == "project_reentry_required"
+        reentered, _workspace, _saved_jobs = await service.register_project(
+            client.client_id, project
+        )
+        assert reentered.project_id != record.project_id
+        assert not client.reconnect_blocked
+        reconnected = await service.register_client(
+            "cli", reconnect_credential=client.reconnect_credential
+        )
+        assert reconnected is client
+        await service.remove_project(client.client_id, reentered.project_id)
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_project_removal_notifies_unattached_web_requester_without_blocking_reconnect(
+    tmp_path: Path,
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    record = ProjectCatalog(home).register(project)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    client = await service.register_client("web")
+    try:
+        assert not client.attached_workspaces
+        await service.remove_project(client.client_id, record.project_id)
+        assert [
+            event["type"] for event in client.events if event["type"].startswith("project.removal.")
+        ] == ["project.removal.started", "project.removal.completed"]
+        assert not client.reconnect_blocked
+        assert (
+            await service.register_client("web", reconnect_credential=client.reconnect_credential)
+            is client
+        )
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_project_removal_waits_for_restore_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    state = WorkspaceState(project)
+    state.initialize(agent_home_root=home.path)
+    session = Session.create(state)
+    session.commit_agent_run(
+        [{"role": "user", "content": "Restore this turn"}],
+        pending_last_compacted=session.last_compacted,
+        pending_action_summary="",
+        restore_before=session.capture_restore_before(),
+        restore_run_token=uuid4(),
+    )
+    await session.wait_for_pending_persist()
+    record = ProjectCatalog(home).register(project)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    client = await service.register_client("cli")
+    workspace = await service.attach_workspace(client.client_id, project)
+    await service.claim(client.client_id, workspace.workspace_id, session.session_id)
+    dispatcher = workspace.management_dispatcher(client.client_id, session.session_id)
+    listing = await dispatcher.dispatch("/restore")
+    assert listing.restore_listing is not None
+    inspected = await dispatcher.restore_inspect(1)
+    assert inspected.restore_plan is not None
+    restore_started = asyncio.Event()
+    release_restore = asyncio.Event()
+    original_execute = RestoreManager.execute
+
+    async def gated_execute(manager: RestoreManager, plan: Any, mode: RestoreMode | str) -> Any:
+        restore_started.set()
+        await release_restore.wait()
+        return await original_execute(manager, plan, mode)
+
+    monkeypatch.setattr(RestoreManager, "execute", gated_execute)
+    restore_task = asyncio.create_task(
+        dispatcher.restore_commit(inspected.restore_plan, RestoreMode.CONVERSATION_ONLY)
+    )
+    try:
+        await asyncio.wait_for(restore_started.wait(), timeout=2)
+        response = await service.start_project_removal(client.client_id, record.project_id)
+        await asyncio.sleep(0)
+        assert response["status"] == "removing"
+        assert ProjectCatalog(home).list()[0].schedule_state == "removing"
+        assert workspace.workspace_id in service.workspaces
+        assert not restore_task.done()
+        release_restore.set()
+        committed = await asyncio.wait_for(restore_task, timeout=2)
+        assert committed.restore_result is not None
+        await service.remove_project(client.client_id, record.project_id)
+        assert ProjectCatalog(home).list() == ()
+        assert Session.load(state, session.session_id).messages == []
+    finally:
+        release_restore.set()
+        await asyncio.gather(restore_task, return_exceptions=True)
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_project_removal_keeps_failed_loop_for_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    client = await service.register_client("cli")
+    record, workspace, _jobs = await service.register_project(client.client_id, project)
+    session_id = await workspace.create_draft(client.client_id)
+    await service.claim(client.client_id, workspace.workspace_id, session_id)
+    loop = workspace.loops[session_id].loop
+    original_abort = loop.abort
+    failed = False
+
+    async def abort_once() -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("injected cancellation failure")
+        await original_abort()
+
+    monkeypatch.setattr(loop, "abort", abort_once)
+    try:
+        with pytest.raises(ServiceError) as error:
+            await service.remove_project(client.client_id, record.project_id)
+        assert error.value.code == "project_removal_failed"
+        assert session_id in workspace.loops
+        assert session_id in workspace._claims
+        await service.remove_project(client.client_id, record.project_id)
+        assert not workspace.loops
+        assert not workspace._claims
     finally:
         await service.stop()
 
@@ -1021,6 +1219,202 @@ async def test_project_removal_failure_keeps_registration_blocked(
     assert retried.value.code == "project_removal_failed"
     assert ProjectCatalog(home).list()[0].schedule_state == "removing"
     with pytest.raises(ServiceError):
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_project_removal_completion_survives_event_delivery_failure(
+    tmp_path: Path,
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+
+    class FailingSink:
+        async def send_event(self, event: dict[str, object]) -> None:
+            if event["type"] in {"project.removed", "session.released"}:
+                raise RuntimeError("client disconnected during removal")
+
+    try:
+        client = await service.register_client("web")
+        await service.connect_client(client.client_id, FailingSink())
+        record, _workspace, _jobs = await service.register_project(client.client_id, project)
+
+        await service.remove_project(client.client_id, record.project_id)
+
+        assert ProjectCatalog(home).list() == ()
+        assert project.is_dir()
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_project_removal_admission_failure_is_persisted_and_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    client = await service.register_client("web")
+    record, _workspace, _jobs = await service.register_project(client.client_id, project)
+    original_reconcile = service._reconcile_schedule_admission
+    failed = False
+
+    async def fail_once() -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("injected admission failure")
+        await original_reconcile()
+
+    monkeypatch.setattr(service, "_reconcile_schedule_admission", fail_once)
+    try:
+        with pytest.raises(ServiceError) as first:
+            await service.start_project_removal(client.client_id, record.project_id)
+        assert first.value.code == "project_removal_failed"
+        blocked = ProjectCatalog(home).list()[0]
+        assert blocked.removal_operation_id
+        assert blocked.removal_error
+
+        monkeypatch.setattr(service, "_reconcile_schedule_admission", original_reconcile)
+        await service.remove_project(client.client_id, record.project_id)
+        assert ProjectCatalog(home).list() == ()
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_project_removal_failure_can_retry_same_persisted_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    client = await service.register_client("web")
+    record, workspace, _jobs = await service.register_project(client.client_id, project)
+    assert workspace.runtime is not None
+    original_close = workspace.runtime.close
+    failed = False
+
+    async def fail_once(
+        *, close_foreground: Any = None, drain_confirmation_aborts: bool = True
+    ) -> None:
+        nonlocal failed
+        await original_close(
+            close_foreground=close_foreground,
+            drain_confirmation_aborts=drain_confirmation_aborts,
+        )
+        if not failed:
+            failed = True
+            raise RuntimeError("injected cleanup failure")
+
+    monkeypatch.setattr(workspace.runtime, "close", fail_once)
+    with pytest.raises(ServiceError) as first:
+        await service.remove_project(client.client_id, record.project_id)
+    assert first.value.code == "project_removal_failed"
+    failed_record = ProjectCatalog(home).list()[0]
+    assert failed_record.schedule_state == "removing"
+    assert failed_record.removal_operation_id
+
+    monkeypatch.setattr(workspace.runtime, "close", original_close)
+    await service.remove_project(client.client_id, record.project_id)
+    assert ProjectCatalog(home).list() == ()
+    assert project.is_dir()
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_project_removal_stays_blocked_after_service_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    client = await service.register_client("cli")
+    record, workspace, _jobs = await service.register_project(client.client_id, project)
+    original_close = workspace.runtime.close if workspace.runtime is not None else None
+    assert original_close is not None
+
+    async def failing_close(
+        *, close_foreground: Any = None, drain_confirmation_aborts: bool = True
+    ) -> None:
+        await original_close(
+            close_foreground=close_foreground,
+            drain_confirmation_aborts=drain_confirmation_aborts,
+        )
+        raise RuntimeError("injected cleanup failure")
+
+    monkeypatch.setattr(workspace.runtime, "close", failing_close)
+    with pytest.raises(ServiceError) as failed:
+        await service.remove_project(client.client_id, record.project_id)
+    assert failed.value.code == "project_removal_failed"
+    monkeypatch.setattr(workspace.runtime, "close", original_close)
+    await service.stop()
+
+    persisted = ProjectCatalog(home).list()
+    assert len(persisted) == 1
+    assert persisted[0].project_id == record.project_id
+    assert persisted[0].schedule_state == "removing"
+    assert persisted[0].removal_operation_id
+
+    restarted = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await restarted.start()
+    restarted_client = await restarted.register_client("cli")
+    try:
+        assert not restarted.workspaces
+        with pytest.raises(ServiceError) as blocked:
+            await restarted.attach_workspace(restarted_client.client_id, project)
+        assert blocked.value.code == "admission_closed"
+        await restarted.remove_project(restarted_client.client_id, record.project_id)
+        assert ProjectCatalog(home).list() == ()
+        assert project.is_dir()
+    finally:
+        await restarted.stop()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_project_removal_is_retryable_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    record = ProjectCatalog(home).register(project)
+    started = ProjectCatalog(home).begin_removal(record.project_id)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    client = await service.register_client("web")
+    starts: list[Path] = []
+    original_start = WorkspaceServiceRuntime.start
+
+    async def record_start(runtime: WorkspaceServiceRuntime) -> None:
+        starts.append(runtime.workspace_path)
+        await original_start(runtime)
+
+    monkeypatch.setattr(WorkspaceServiceRuntime, "start", record_start)
+    try:
+        assert not service.workspaces
+        interrupted = ProjectCatalog(home).list()[0]
+        assert interrupted.schedule_state == "removing"
+        assert interrupted.removal_error is not None
+        assert interrupted.removal_operation_id == started.removal_operation_id
+        assert (
+            await service.project_removal_status(
+                client.client_id, record.project_id, cast(str, started.removal_operation_id)
+            )
+        )["status"] == "failed"
+        await service.remove_project(client.client_id, record.project_id)
+        assert starts == [project]
+        assert ProjectCatalog(home).list() == ()
+    finally:
         await service.stop()
 
 

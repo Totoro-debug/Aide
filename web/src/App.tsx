@@ -23,6 +23,7 @@ import {
   ShieldX,
   Square,
   Sun,
+  Trash2,
   TriangleAlert,
   X,
 } from "lucide-react";
@@ -38,6 +39,7 @@ import {
   createRequestId,
   createProjectSession,
   exchangeTicket,
+  getProjectRemoval,
   getProjectSession,
   getProjectSessions,
   getProjects,
@@ -46,6 +48,7 @@ import {
   releaseProjectSession,
   registerProject,
   registerWebClient,
+  removeProject,
   resumeProjectSchedule,
   restoreBrowserSession,
   ServiceCommandError,
@@ -528,6 +531,7 @@ export default function App() {
                   loadState={projectsLoadState}
                   onRefresh={refreshProjects}
                   projects={projects}
+                  subscribeServiceEvents={subscribeServiceEvents}
                 />
               }
             />
@@ -858,6 +862,7 @@ interface ProjectsViewProps {
   loadState: ProjectsLoadState;
   onRefresh: () => Promise<void>;
   projects: RegisteredProject[];
+  subscribeServiceEvents: (listener: ServiceEventListener) => () => void;
 }
 
 function ProjectsView({
@@ -866,6 +871,7 @@ function ProjectsView({
   loadState,
   onRefresh,
   projects,
+  subscribeServiceEvents,
 }: ProjectsViewProps) {
   const { i18n, t } = useTranslation();
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -877,9 +883,59 @@ function ProjectsView({
   const [resumingProjectId, setResumingProjectId] = useState<string | null>(null);
   const [reviewProjectId, setReviewProjectId] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [removalProjectId, setRemovalProjectId] = useState<string | null>(null);
+  const [removingProjectId, setRemovingProjectId] = useState<string | null>(null);
+  const [removalOperationId, setRemovalOperationId] = useState<string | null>(null);
+  const [activeRemoval, setActiveRemoval] = useState<{ projectId: string; operationId: string } | null>(null);
   const registrationTriggerRef = useRef<HTMLButtonElement | null>(null);
   const reviewTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const removalTriggerRef = useRef<HTMLButtonElement | null>(null);
   const reviewProject = projects.find((project) => project.project_id === reviewProjectId);
+  const removalProject = projects.find((project) => project.project_id === removalProjectId);
+
+  useEffect(() => {
+    return subscribeServiceEvents((event) => {
+      if (
+        event.type === "project.removal.started"
+        || event.type === "project.removal.failed"
+        || event.type === "project.removal.completed"
+        || event.type === "project.removed"
+      ) {
+        void onRefresh();
+      }
+      if (
+        activeRemoval !== null
+        && (event.type === "project.removal.completed" || event.type === "project.removal.failed")
+        && event.payload.project_id === activeRemoval.projectId
+        && event.payload.operation_id === activeRemoval.operationId
+      ) {
+        setNotice(event.type === "project.removal.completed"
+          ? "projects.removalCompletedNotice" : "projects.removalFailedError");
+        setActiveRemoval(null);
+      }
+    });
+  }, [activeRemoval, onRefresh, subscribeServiceEvents]);
+
+  useEffect(() => {
+    if (activeRemoval === null) return;
+    let active = true;
+    async function refreshRemovalStatus() {
+      if (activeRemoval === null) return;
+      try {
+        const result = await getProjectRemoval(activeRemoval.projectId, activeRemoval.operationId);
+        if (!active || result.status === "removing") return;
+        setNotice(result.status === "completed"
+          ? "projects.removalCompletedNotice" : "projects.removalFailedError");
+        setActiveRemoval(null);
+        void onRefresh();
+      } catch {
+        // The event stream or the next status check may still deliver the outcome.
+      }
+    }
+    void refreshRemovalStatus();
+    const timer = window.setInterval(() => void refreshRemovalStatus(), 2000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [activeRemoval, onRefresh]);
 
   function openRegistration(event: React.MouseEvent<HTMLButtonElement>) {
     registrationTriggerRef.current = event.currentTarget;
@@ -941,6 +997,42 @@ function ProjectsView({
     }
   }
 
+  function openRemoval(
+    project: RegisteredProject,
+    event: React.MouseEvent<HTMLButtonElement>,
+  ) {
+    removalTriggerRef.current = event.currentTarget;
+    setRemovalProjectId(project.project_id);
+    setActionError(null);
+    setNotice(null);
+    setRemovalOperationId(null);
+  }
+
+  async function handleRemoval() {
+    if (removalProject === undefined) return;
+    const projectId = removalProject.project_id;
+    setRemovingProjectId(projectId);
+    setActionError(null);
+    setNotice(null);
+    try {
+      const result = await removeProject(projectId);
+      setRemovalOperationId(result.operation_id);
+      await onRefresh();
+      setRemovalProjectId(null);
+      if (result.status === "completed" || result.status === "failed") {
+        setNotice(result.status === "completed"
+          ? "projects.removalCompletedNotice" : "projects.removalFailedError");
+      } else {
+        setActiveRemoval({ projectId, operationId: result.operation_id });
+        setNotice("projects.removalStartedNotice");
+      }
+    } catch (error) {
+      setActionError(projectErrorKey(error));
+    } finally {
+      setRemovingProjectId(null);
+    }
+  }
+
   const authUnavailable = authState !== "ready";
   return (
     <section className={styles.projectsPage} aria-labelledby="projects-heading">
@@ -976,7 +1068,7 @@ function ProjectsView({
       {notice !== null ? (
         <div className={styles.notice} role="status" aria-live="polite">
           <Check size={16} aria-hidden="true" />
-          {t(notice)}
+          {t(notice, { operationId: removalOperationId ?? undefined })}
         </div>
       ) : null}
       {actionError !== null ? (
@@ -1041,8 +1133,14 @@ function ProjectsView({
             </div>
           ) : null}
           <ul className={styles.projectList} aria-label={t("nav.projects")}>
-            {projects.map((project) => (
-              <li className={styles.projectItem} id={`project-${project.project_id}`} key={project.project_id}>
+            {projects.map((project) => {
+              const removalPending = project.schedule_state === "removing"
+                && project.removal_error === undefined;
+              const removalBlocked = project.schedule_state === "failed"
+                || project.removal_error !== undefined;
+              const admissionClosed = removalPending || removalBlocked;
+              return (
+                <li className={styles.projectItem} id={`project-${project.project_id}`} key={project.project_id}>
                 <div className={styles.projectItemHeader}>
                   <div className={styles.projectTitleBlock}>
                     <FolderOpen size={19} aria-hidden="true" />
@@ -1061,16 +1159,48 @@ function ProjectsView({
                   </span>
                 </div>
                 <div className={styles.projectDetails}>
-                  <Link className={styles.secondaryButton} to={`/projects/${project.project_id}`}>
-                    <MessageSquare size={15} aria-hidden="true" />
-                    {t("controls.openSessions")}
-                  </Link>
+                  <div className={styles.projectActionRow}>
+                    {admissionClosed ? (
+                      <button className={styles.secondaryButton} type="button" disabled>
+                        <MessageSquare size={15} aria-hidden="true" />
+                        {t("controls.openSessions")}
+                      </button>
+                    ) : (
+                      <Link className={styles.secondaryButton} to={`/projects/${project.project_id}`}>
+                        <MessageSquare size={15} aria-hidden="true" />
+                        {t("controls.openSessions")}
+                      </Link>
+                    )}
+                    <button
+                      className={styles.dangerButton}
+                      type="button"
+                      disabled={authUnavailable || removingProjectId !== null || removalPending}
+                      onClick={(event) => openRemoval(project, event)}
+                    >
+                      {removalBlocked ? (
+                        <RefreshCw size={15} aria-hidden="true" />
+                      ) : (
+                        <Trash2 size={15} aria-hidden="true" />
+                      )}
+                      {removingProjectId === project.project_id
+                        ? t("controls.removingProject")
+                        : removalBlocked
+                          ? t("controls.retryRemoval")
+                          : t("controls.removeProject")}
+                    </button>
+                  </div>
                   <span
                     className={styles.scheduleBadge}
                     data-paused={project.schedule_status?.admitted !== true}
                   >
                     {projectScheduleLabel(project, t)}
                   </span>
+                  {project.removal_error !== undefined ? (
+                    <div className={styles.projectRemovalError} role="alert">
+                      <CircleAlert size={16} aria-hidden="true" />
+                      <span>{t("projects.removalFailed", { message: project.removal_error })}</span>
+                    </div>
+                  ) : null}
                   {project.schedule_state === "awaiting_resume" ? (
                     <div className={styles.scheduleReview}>
                       <div>
@@ -1106,8 +1236,9 @@ function ProjectsView({
                     </div>
                   ) : null}
                 </div>
-              </li>
-            ))}
+                </li>
+              );
+            })}
           </ul>
         </>
       )}
@@ -1174,6 +1305,56 @@ function ProjectsView({
                 </button>
               </div>
             </form>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+      <Dialog.Root
+        open={removalProject !== undefined}
+        onOpenChange={(open) => { if (!open && removingProjectId === null) setRemovalProjectId(null); }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className={styles.dialogOverlay} />
+          <Dialog.Content
+            className={styles.dialogContent}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              if (removalTriggerRef.current?.isConnected) removalTriggerRef.current.focus();
+              else document.getElementById("projects-heading")?.focus();
+            }}
+          >
+            <div className={styles.dialogHeader}>
+              <div>
+                <Dialog.Title className={styles.dialogTitle}>{t("projects.removeTitle")}</Dialog.Title>
+                <Dialog.Description className={styles.dialogDescription}>
+                  {t("projects.removeDescription", { name: removalProject?.name })}
+                </Dialog.Description>
+              </div>
+              <Dialog.Close asChild>
+                <button className={styles.iconButton} type="button" aria-label={t("controls.close")}>
+                  <X size={17} aria-hidden="true" />
+                </button>
+              </Dialog.Close>
+            </div>
+            <div className={styles.removalWarning}>
+              <TriangleAlert size={18} aria-hidden="true" />
+              <p>{t("projects.removeDataNotice")}</p>
+            </div>
+            <div className={styles.dialogActions}>
+              <Dialog.Close asChild>
+                <button className={styles.secondaryButton} type="button" disabled={removingProjectId !== null}>
+                  {t("controls.cancel")}
+                </button>
+              </Dialog.Close>
+              <button
+                className={styles.dangerButton}
+                type="button"
+                disabled={removalProject === undefined || removingProjectId !== null}
+                onClick={() => void handleRemoval()}
+              >
+                <Trash2 size={15} aria-hidden="true" />
+                {removingProjectId !== null ? t("controls.removingProject") : t("controls.confirmRemoval")}
+              </button>
+            </div>
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
@@ -2444,6 +2625,9 @@ function projectErrorKey(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.body?.code === "stale_schedule_review") return "projects.staleReviewError";
     if (error.body?.code === "persistence_error") return "projects.persistenceError";
+    if (error.body?.code === "admission_closed") return "projects.removalInProgressError";
+    if (error.body?.code === "project_removal_failed") return "projects.removalFailedError";
+    if (error.body?.code === "project_removal_blocked") return "projects.removalFailedError";
   }
   return "projects.actionError";
 }

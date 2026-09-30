@@ -107,6 +107,8 @@ export interface RegisteredProject {
   available: boolean;
   saved_jobs: ProjectJob[];
   schedule_status: ProjectScheduleStatus | null;
+  removal_operation_id?: string;
+  removal_error?: string;
 }
 
 export interface ProjectListResponse {
@@ -125,6 +127,15 @@ export interface ProjectScheduleResume {
   request_id: string;
   schedule_state: ProjectScheduleState;
 }
+
+export interface ProjectRemoval {
+  request_id: string;
+  project_id: string;
+  operation_id: string;
+  status: "removing" | "completed" | "failed";
+}
+
+export type ProjectRemovalStatus = Omit<ProjectRemoval, "request_id">;
 
 export interface SessionSummary {
   id: string;

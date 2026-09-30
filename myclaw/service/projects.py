@@ -21,13 +21,20 @@ class ProjectRecord:
     project_id: str
     path: Path
     schedule_state: str = "available"
+    removal_operation_id: str | None = None
+    removal_error: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "project_id": self.project_id,
             "path": str(self.path),
             "schedule_state": self.schedule_state,
         }
+        if self.removal_operation_id is not None:
+            result["removal_operation_id"] = self.removal_operation_id
+        if self.removal_error is not None:
+            result["removal_error"] = self.removal_error
+        return result
 
 
 class ProjectCatalogError(ValueError):
@@ -94,7 +101,60 @@ class ProjectCatalog:
         record = self._records.get(project_id)
         if record is None:
             raise ProjectCatalogError("Project registration was not found")
-        updated = ProjectRecord(record.project_id, record.path, schedule_state)
+        updated = ProjectRecord(
+            record.project_id,
+            record.path,
+            schedule_state,
+            record.removal_operation_id,
+            record.removal_error,
+        )
+        self._records[project_id] = updated
+        try:
+            self._save()
+        except Exception:
+            self._records[project_id] = record
+            raise
+        return updated
+
+    def begin_removal(self, project_id: str, operation_id: str | None = None) -> ProjectRecord:
+        """Persist the admission barrier and return its stable operation identity."""
+        self._load()
+        assert self._records is not None
+        record = self._records.get(project_id)
+        if record is None:
+            raise ProjectCatalogError("Project registration was not found")
+        stable_operation_id = record.removal_operation_id or operation_id or str(uuid4())
+        updated = ProjectRecord(
+            record.project_id,
+            record.path,
+            "removing",
+            stable_operation_id,
+            None,
+        )
+        self._records[project_id] = updated
+        try:
+            self._save()
+        except Exception:
+            self._records[project_id] = record
+            raise
+        return updated
+
+    def record_removal_failure(self, project_id: str, message: str) -> ProjectRecord:
+        """Keep a failed removal registered but permanently closed to admission."""
+        if not message:
+            raise ValueError("Project removal failure message must be non-empty")
+        self._load()
+        assert self._records is not None
+        record = self._records.get(project_id)
+        if record is None:
+            raise ProjectCatalogError("Project registration was not found")
+        updated = ProjectRecord(
+            record.project_id,
+            record.path,
+            "removing",
+            record.removal_operation_id,
+            message,
+        )
         self._records[project_id] = updated
         try:
             self._save()
@@ -148,13 +208,32 @@ class ProjectCatalog:
                     "failed",
                 }:
                     raise ValueError("schedule state")
+                removal_operation_id = item.get("removal_operation_id")
+                removal_error = item.get("removal_error")
+                if removal_operation_id is not None and (
+                    not isinstance(removal_operation_id, str) or not removal_operation_id
+                ):
+                    raise ValueError("removal operation id")
+                if removal_error is not None or removal_operation_id is not None:
+                    if schedule_state not in {"removing", "failed"}:
+                        raise ValueError("removal metadata state")
+                    if removal_error is not None and (
+                        not isinstance(removal_error, str) or not removal_error
+                    ):
+                        raise ValueError("removal error")
                 identity = self._identity(path)
                 if identity in identities:
                     raise ValueError("duplicate path")
                 if project_id in records:
                     raise ValueError("duplicate project id")
                 identities.add(identity)
-                records[project_id] = ProjectRecord(project_id, path, schedule_state)
+                records[project_id] = ProjectRecord(
+                    project_id,
+                    path,
+                    schedule_state,
+                    removal_operation_id,
+                    removal_error,
+                )
         except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
             raise ProjectCatalogError("Project catalog entries are invalid") from error
         self._records = records

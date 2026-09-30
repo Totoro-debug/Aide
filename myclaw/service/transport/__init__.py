@@ -129,6 +129,10 @@ class LocalServiceTransport:
         app.router.add_get(f"{_API_PREFIX}/projects", self._list_projects)
         app.router.add_post(f"{_API_PREFIX}/projects", self._register_project)
         app.router.add_delete(f"{_API_PREFIX}/projects/{{project_id}}", self._remove_project)
+        app.router.add_get(
+            f"{_API_PREFIX}/projects/{{project_id}}/removal/{{operation_id}}",
+            self._project_removal_status,
+        )
         app.router.add_post(
             f"{_API_PREFIX}/projects/{{project_id}}/schedule-resume",
             self._resume_project_schedule,
@@ -437,17 +441,20 @@ class LocalServiceTransport:
             ) from error
         for record in records:
             saved_jobs, schedule_status = await self.service.project_schedule_snapshot(record)
-            projects.append(
-                {
-                    "project_id": record.project_id,
-                    "path": str(record.path),
-                    "name": record.path.name,
-                    "schedule_state": record.schedule_state,
-                    "available": record.path.is_dir(),
-                    "saved_jobs": [_project_job_summary(job) for job in saved_jobs],
-                    "schedule_status": schedule_status,
-                }
-            )
+            project = {
+                "project_id": record.project_id,
+                "path": str(record.path),
+                "name": record.path.name,
+                "schedule_state": record.schedule_state,
+                "available": record.path.is_dir(),
+                "saved_jobs": [_project_job_summary(job) for job in saved_jobs],
+                "schedule_status": schedule_status,
+            }
+            if record.removal_operation_id is not None:
+                project["removal_operation_id"] = record.removal_operation_id
+            if record.removal_error is not None:
+                project["removal_error"] = record.removal_error
+            projects.append(project)
         return web.json_response({"projects": projects})
 
     async def _register_project(self, request: web.Request) -> web.Response:
@@ -476,8 +483,20 @@ class LocalServiceTransport:
         client_id = _context_client_id(context)
         body = await _json_object(request)
         request_id = _require_request_id(body)
-        path = await self.service.remove_project(client_id, request.match_info["project_id"])
-        return web.json_response({"request_id": request_id, "removed": True, "path": str(path)})
+        result = await self.service.start_project_removal(
+            client_id,
+            request.match_info["project_id"],
+        )
+        return web.json_response({"request_id": request_id, **result})
+
+    async def _project_removal_status(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, client_required=True)
+        result = await self.service.project_removal_status(
+            _context_client_id(context),
+            request.match_info["project_id"],
+            request.match_info["operation_id"],
+        )
+        return web.json_response(result)
 
     async def _resume_project_schedule(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, mutation=True, client_required=True)

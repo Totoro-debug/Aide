@@ -327,6 +327,92 @@ async def test_project_http_contract_reports_path_errors_and_keeps_cli_workspace
 
 
 @pytest.mark.asyncio
+async def test_project_http_delete_returns_operation_and_preserves_directory(
+    tmp_path: Path,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    port = _free_port()
+    client: ServiceClient | None = None
+    try:
+        client = await ServiceClient.connect_or_start(home, project, port=port)
+        headers = {
+            "Authorization": f"Bearer {client.token}",
+            "X-MyClaw-CSRF": client.token,
+            "X-MyClaw-Client": client.client_id,
+        }
+        async with aiohttp.ClientSession() as http:
+            async with http.post(
+                f"{client.base_url}/api/v1/projects",
+                headers=headers,
+                json={"request_id": "register", "path": str(project)},
+            ) as response:
+                assert response.status == 200
+                project_id = (await response.json())["project_id"]
+
+            async with http.delete(
+                f"{client.base_url}/api/v1/projects/{project_id}",
+                headers=headers,
+                json={"request_id": "remove"},
+            ) as response:
+                assert response.status == 200
+                removal = await response.json()
+                assert removal["request_id"] == "remove"
+                assert removal["project_id"] == project_id
+                assert removal["operation_id"]
+                assert removal["status"] in {"removing", "completed"}
+
+            for _ in range(100):
+                async with http.get(
+                    f"{client.base_url}/api/v1/projects", headers=headers
+                ) as response:
+                    assert response.status == 200
+                    projects = (await response.json())["projects"]
+                if not projects:
+                    break
+                assert projects[0]["removal_operation_id"] == removal["operation_id"]
+                await asyncio.sleep(0.01)
+            else:
+                pytest.fail("project removal did not reach its terminal state")
+
+            for _ in range(100):
+                if client.workspace_id == "":
+                    break
+                await asyncio.sleep(0.01)
+            assert client.workspace_id == ""
+            assert not client.control.foreground_input_admitted()
+
+            async with http.get(
+                f"{client.base_url}/api/v1/projects/{project_id}/removal/{removal['operation_id']}",
+                headers=headers,
+            ) as response:
+                assert response.status == 200
+                status = await response.json()
+                assert status == {
+                    "project_id": project_id,
+                    "operation_id": removal["operation_id"],
+                    "status": "completed",
+                }
+
+            async with http.delete(
+                f"{client.base_url}/api/v1/projects/{project_id}",
+                headers=headers,
+                json={"request_id": "remove-retry"},
+            ) as response:
+                assert response.status == 200
+                retried = await response.json()
+                assert retried["project_id"] == project_id
+                assert retried["operation_id"] == removal["operation_id"]
+                assert retried["status"] == "completed"
+        assert project.is_dir()
+    finally:
+        if client is not None:
+            await client.close()
+        await ServiceClient.stop_existing(home, port=port)
+
+
+@pytest.mark.asyncio
 async def test_project_session_http_scope_claim_and_empty_draft_contract(
     tmp_path: Path,
 ) -> None:

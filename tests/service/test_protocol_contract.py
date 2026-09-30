@@ -126,8 +126,49 @@ def test_project_http_shapes_are_versioned_and_preserve_saved_job_review_data() 
     }
     projects_validator = _validator("projects_response")
     projects_validator.validate({"projects": [project]})
+    projects_validator.validate(
+        {
+            "projects": [
+                {
+                    **project,
+                    "schedule_state": "removing",
+                    "removal_operation_id": "operation-1",
+                    "removal_error": "Project work could not be stopped; retry removal.",
+                }
+            ]
+        }
+    )
     with pytest.raises(ValidationError):
         projects_validator.validate({"projects": [{**project, "credential": "secret"}]})
+
+    removal_validator = _validator("project_removal")
+    removal_validator.validate(
+        {
+            "request_id": "request-1",
+            "project_id": "project-1",
+            "operation_id": "operation-1",
+            "status": "removing",
+        }
+    )
+    with pytest.raises(ValidationError):
+        removal_validator.validate(
+            {
+                "request_id": "request-1",
+                "project_id": "project-1",
+                "operation_id": "operation-1",
+                "status": "removing",
+                "path": "must-not-be-returned",
+            }
+        )
+
+    status_validator = _validator("project_removal_status")
+    status_validator.validate(
+        {"project_id": "project-1", "operation_id": "operation-1", "status": "completed"}
+    )
+    with pytest.raises(ValidationError):
+        status_validator.validate(
+            {"project_id": "project-1", "operation_id": "operation-1", "status": "unknown"}
+        )
 
     registration_validator = _validator("project_registration")
     registration_validator.validate(

@@ -141,6 +141,7 @@ class WorkspaceRuntime:
         self._schedule_prepared = False
         self._started = False
         self._closed = False
+        self._close_failed = False
 
     @classmethod
     def acquire(
@@ -419,15 +420,22 @@ class WorkspaceRuntime:
     ) -> None:
         """Drain shared resources, optionally between Schedule and MCP cleanup."""
         async with self._lifecycle_lock:
-            if self._closed:
+            if self._closed and not self._close_failed:
                 return
             cleanup_errors = await self._close_owned_resources(
                 close_foreground=close_foreground,
                 drain_confirmation_aborts=drain_confirmation_aborts,
             )
-            self._mark_closed()
             if cleanup_errors:
+                self._close_failed = True
                 raise _cleanup_exception(cleanup_errors)
+            self._mark_closed()
+            self._close_failed = False
+
+    async def abort_dream(self) -> None:
+        """Cancel Dream work before a Workspace removal drains shared resources."""
+        if self._dream is not None and not self._closed:
+            await self._dream.abort_and_wait()
 
     async def _close_owned_resources(
         self,

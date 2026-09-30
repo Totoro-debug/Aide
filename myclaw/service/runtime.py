@@ -44,6 +44,7 @@ from myclaw.provider.factory import create_provider
 from myclaw.provider.model_router import ModelRouter
 from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.schedule.service import ScheduleOccurrence, ScheduleService
+from myclaw.schedule.store import WorkspaceScheduleStore
 from myclaw.service.errors import ServiceError, service_error
 from myclaw.service.projects import ProjectCatalog, ProjectCatalogError, ProjectRecord
 from myclaw.utils.time import local_now
@@ -51,6 +52,11 @@ from myclaw.utils.time import local_now
 
 class ServiceSink(Protocol):
     async def send_event(self, event: dict[str, object]) -> None: ...
+
+
+_PROJECT_REMOVAL_FAILURE_MESSAGE = (
+    "Project work could not be stopped; the registration remains blocked."
+)
 
 
 def _project_catalog_service_error(error: ProjectCatalogError) -> ServiceError:
@@ -111,6 +117,8 @@ class ClientState:
     subscribed: bool = True
     resync_required: bool = False
     expired: bool = False
+    reconnect_blocked: bool = False
+    blocked_workspace_keys: set[str] = field(default_factory=set)
 
 
 @dataclass(slots=True)
@@ -141,6 +149,21 @@ class _RestorePlanReference:
     """Wire-safe reference to the service-owned Restore plan."""
 
     anchor_id: int
+
+
+@dataclass(slots=True)
+class _ProjectRemoval:
+    """One persisted Project removal and its in-process completion task."""
+
+    project_id: str
+    operation_id: str
+    path: Path
+    status: str = "removing"
+    error: str | None = None
+    workspace_id: str | None = None
+    affected_client_ids: tuple[str, ...] = ()
+    notification_client_ids: tuple[str, ...] = ()
+    task: asyncio.Task[None] | None = None
 
 
 class ServiceConfirmationPresenter(ConfirmationPresenter):
@@ -311,6 +334,7 @@ class WorkspaceServiceRuntime:
         self._restore_loop: AgentLoop | None = None
         self._restore_schedule_paused = False
         self._restore_blocked = False
+        self._restore_commit_task: asyncio.Task[Any] | None = None
         self._schedule_permission = RuntimePermissionControl(configuration.runtime.permission_level)
         self._exec_host: ExecHost | None = None
         self._started = False
@@ -593,6 +617,19 @@ class WorkspaceServiceRuntime:
         if close_idle and loop_state is not None and not loop_state.loop.has_active_run:
             await self._close_loop(session_id)
 
+    def clear_claims_for_removal(self) -> tuple[SessionClaim, ...]:
+        """Drop all service-owned Claims after the Workspace has been drained."""
+        claims = tuple(self._claims.values())
+        self._claims.clear()
+        self._draft_clients.clear()
+        for claim in claims:
+            self.service.client_claim_released(
+                claim.client_id,
+                self.workspace_id,
+                claim.session_id,
+            )
+        return claims
+
     async def expire_client(self, client_id: str) -> None:
         if self._restore_owner == client_id:
             await self._release_restore_barrier(client_id)
@@ -832,6 +869,8 @@ class WorkspaceServiceRuntime:
                     )
                 )
             executed = False
+            restore_task = asyncio.current_task()
+            self._restore_commit_task = restore_task
             try:
                 manager = RestoreManager(self.workspace_state, stored.session_id, now=local_now)
                 manager.revalidate(stored)
@@ -852,7 +891,11 @@ class WorkspaceServiceRuntime:
                     self._restore_blocked = True
                 raise
             finally:
-                await self._release_restore_barrier(client_id)
+                try:
+                    await self._release_restore_barrier(client_id)
+                finally:
+                    if self._restore_commit_task is restore_task:
+                        self._restore_commit_task = None
 
         async def restore_result() -> Any:
             return self._restore_results.get((client_id, current_loop().session.session_id))
@@ -1080,7 +1123,7 @@ class WorkspaceServiceRuntime:
         await self.release(client_id, session_id)
 
     async def _close_loop(self, session_id: str, *, abort: bool = False) -> None:
-        state = self._loops.pop(session_id, None)
+        state = self._loops.get(session_id) if abort else self._loops.pop(session_id, None)
         if state is None:
             return
         if state.release_task is not None:
@@ -1095,31 +1138,37 @@ class WorkspaceServiceRuntime:
             if output_task is not asyncio.current_task():
                 output_task.cancel()
                 await asyncio.gather(output_task, return_exceptions=True)
-        try:
-            if abort:
-                await self.service.confirmation.cancel_generation(state.loop.generation_id)
-                await state.loop.abort()
-            else:
-                await state.loop.close()
-        finally:
-            for job_id, candidate in tuple(self._schedule_loops.items()):
-                if candidate is state:
-                    self._schedule_loops.pop(job_id, None)
+        if abort:
+            await self.service.confirmation.cancel_generation(state.loop.generation_id)
+            await state.loop.abort()
+        else:
+            await state.loop.close()
+        if abort:
+            self._loops.pop(session_id, None)
+        for job_id, candidate in tuple(self._schedule_loops.items()):
+            if candidate is state:
+                self._schedule_loops.pop(job_id, None)
 
     async def close(self) -> None:
         async with self._lock:
-            if self._closed:
-                if self._close_failed:
-                    raise service_error(
-                        "workspace_close_failed", "Workspace cleanup did not finish safely."
-                    )
+            if self._closed and not self._close_failed:
                 return
             self._closed = True
             self._schedule_admitted = False
             try:
+                restore_task = self._restore_commit_task
+                if restore_task is not None and restore_task is not asyncio.current_task():
+                    await asyncio.shield(asyncio.gather(restore_task, return_exceptions=True))
+                if self._restore_blocked:
+                    raise service_error(
+                        "restore_pending",
+                        "The active Restore transaction requires recovery before Project removal.",
+                        retryable=True,
+                    )
                 if self._restore_owner is not None:
                     await self._release_restore_barrier(self._restore_owner)
                 if self.runtime is not None:
+                    await self.runtime.abort_dream()
                     await self.runtime.close(
                         close_foreground=lambda: self._close_all_loops(),
                         drain_confirmation_aborts=True,
@@ -1129,6 +1178,8 @@ class WorkspaceServiceRuntime:
             except BaseException:
                 self._close_failed = True
                 raise
+            else:
+                self._close_failed = False
 
     async def _close_all_loops(self) -> None:
         for session_id in tuple(self._loops):
@@ -1168,6 +1219,7 @@ class LocalService:
         self._lock = asyncio.Lock()
         self._schedule_admission_lock = asyncio.Lock()
         self._project_lifecycle_lock = asyncio.Lock()
+        self._project_removals: dict[str, _ProjectRemoval] = {}
         self.projects = ProjectCatalog(agent_home)
 
     async def start(self) -> None:
@@ -1176,6 +1228,11 @@ class LocalService:
         self.agent_home.initialize()
         self.confirmation.bind_presenter(self._presenter)
         for record in self.projects.list():
+            if record.schedule_state == "removing" and record.removal_error is None:
+                self.projects.record_removal_failure(
+                    record.project_id,
+                    "Project removal was interrupted; retry to finish stopping its work.",
+                )
             if record.schedule_state == "available" and record.path.is_dir():
                 await self._get_or_create_workspace(record.path)
         self.state = "ready"
@@ -1214,6 +1271,11 @@ class LocalService:
                     retryable=True,
                 )
             client = self._require_client(client_id)
+            if client.reconnect_blocked:
+                raise service_error(
+                    "project_reentry_required",
+                    "This CLI must explicitly re-enter the Project after removal.",
+                )
             if client.kind != kind or client.connected:
                 raise service_error(
                     "client_already_connected",
@@ -1323,6 +1385,10 @@ class LocalService:
             await self._reconcile_schedule_admission()
 
     async def attach_workspace(self, client_id: str, path: Path) -> WorkspaceServiceRuntime:
+        async with self._project_lifecycle_lock:
+            return await self._attach_workspace(client_id, path)
+
+    async def _attach_workspace(self, client_id: str, path: Path) -> WorkspaceServiceRuntime:
         client = self._require_client(client_id)
         if self.state in {"draining", "stopped"}:
             raise service_error("admission_closed", "The local service is stopping.")
@@ -1336,9 +1402,30 @@ class LocalService:
             raise service_error(
                 "persistence_error", "Workspace directory could not be resolved"
             ) from error
+        workspace_key = os.path.normcase(str(normalized))
+        if workspace_key in client.blocked_workspace_keys:
+            raise service_error(
+                "project_reentry_required",
+                "This CLI must explicitly re-enter the Project after removal.",
+            )
+        registered = next(
+            (
+                record
+                for record in self.projects.list()
+                if os.path.normcase(str(record.path.resolve(strict=False))) == workspace_key
+            ),
+            None,
+        )
+        if registered is not None and registered.schedule_state in {"removing", "failed"}:
+            raise service_error(
+                "admission_closed",
+                "Project work is being removed and cannot be admitted.",
+                retryable=True,
+            )
         runtime = await self._get_or_create_workspace(normalized)
         client.attached_workspaces.add(runtime.workspace_id)
         await self._reconcile_schedule_admission()
+        client.reconnect_blocked = False
         return runtime
 
     async def _get_or_create_workspace(self, path: Path) -> WorkspaceServiceRuntime:
@@ -1382,39 +1469,63 @@ class LocalService:
     async def register_project(
         self, client_id: str, path: Path
     ) -> tuple[ProjectRecord, WorkspaceServiceRuntime, tuple[ScheduleJob, ...]]:
-        self._require_client(client_id)
-        try:
-            record = self.projects.register(path, schedule_state="awaiting_resume")
-        except ProjectCatalogError as error:
-            raise _project_catalog_service_error(error) from error
-        except OSError as error:
-            raise service_error(
-                "persistence_error", "The Project catalog could not be saved.", status=500
-            ) from error
-        if record.schedule_state == "awaiting_resume":
-            key = os.path.normcase(str(record.path.resolve(strict=False)))
-            workspace_id = self._workspace_keys.get(key)
-            if workspace_id is not None:
-                await self._workspaces[workspace_id].pause_schedule_admission()
-        workspace = await self.attach_workspace(client_id, record.path)
-        jobs = await workspace.schedule_service.public_snapshot()
-        if not jobs and record.schedule_state == "awaiting_resume":
-            record = self.projects.set_schedule_state(record.project_id, "available")
-            await self._reconcile_schedule_admission()
-        return record, workspace, jobs
+        async with self._project_lifecycle_lock:
+            self._require_client(client_id)
+            try:
+                record = self.projects.register(path, schedule_state="awaiting_resume")
+            except ProjectCatalogError as error:
+                raise _project_catalog_service_error(error) from error
+            except OSError as error:
+                raise service_error(
+                    "persistence_error", "The Project catalog could not be saved.", status=500
+                ) from error
+            if record.schedule_state in {"removing", "failed"}:
+                raise service_error(
+                    "project_removal_blocked",
+                    "Project removal has not completed; retry the removal before re-entering.",
+                    retryable=True,
+                )
+            client = self._require_client(client_id)
+            client.blocked_workspace_keys.discard(
+                os.path.normcase(str(record.path.resolve(strict=False)))
+            )
+            if record.schedule_state == "awaiting_resume":
+                key = os.path.normcase(str(record.path.resolve(strict=False)))
+                workspace_id = self._workspace_keys.get(key)
+                if workspace_id is not None:
+                    await self._workspaces[workspace_id].pause_schedule_admission()
+            workspace = await self._attach_workspace(client_id, record.path)
+            jobs = await workspace.schedule_service.public_snapshot()
+            if not jobs and record.schedule_state == "awaiting_resume":
+                record = self.projects.set_schedule_state(record.project_id, "available")
+                await self._reconcile_schedule_admission()
+            return record, workspace, jobs
 
     async def project_schedule_snapshot(
         self, record: ProjectRecord
     ) -> tuple[tuple[ScheduleJob, ...], dict[str, object] | None]:
         """Read one Project's Jobs and live status across the removal boundary."""
         async with self._project_lifecycle_lock:
-            if record not in self.projects.list() or not record.path.is_dir():
+            current = next(
+                (item for item in self.projects.list() if item.project_id == record.project_id),
+                None,
+            )
+            if current is None or not current.path.is_dir():
                 return (), None
+            record = current
             key = os.path.normcase(str(record.path.resolve(strict=False)))
             workspace_id = self._workspace_keys.get(key)
             if workspace_id is None:
                 if self.state in {"draining", "stopped"}:
                     return (), None
+                if record.schedule_state != "available":
+                    try:
+                        jobs = await WorkspaceScheduleStore(
+                            WorkspaceState(record.path)
+                        ).public_snapshot()
+                    except FileNotFoundError:
+                        jobs = ()
+                    return jobs, None
                 workspace = await self._get_or_create_workspace(record.path)
             else:
                 workspace = self._workspaces[workspace_id]
@@ -1424,12 +1535,24 @@ class LocalService:
     async def _project_workspace(
         self, client_id: str, project_id: str
     ) -> tuple[ProjectRecord, WorkspaceServiceRuntime]:
+        async with self._project_lifecycle_lock:
+            return await self._project_workspace_owned(client_id, project_id)
+
+    async def _project_workspace_owned(
+        self, client_id: str, project_id: str
+    ) -> tuple[ProjectRecord, WorkspaceServiceRuntime]:
         client = self._require_client(client_id)
         record = next(
             (item for item in self.projects.list() if item.project_id == project_id), None
         )
         if record is None:
             raise service_error("not_found", "Project registration was not found.", status=404)
+        if record.schedule_state in {"removing", "failed"}:
+            raise service_error(
+                "admission_closed",
+                "Project work is being removed and cannot be admitted.",
+                retryable=True,
+            )
         if not record.path.is_dir():
             raise service_error("not_found", "Project directory is unavailable.", status=404)
         workspace = await self._get_or_create_workspace(record.path)
@@ -1439,23 +1562,26 @@ class LocalService:
     async def list_project_sessions(
         self, client_id: str, project_id: str
     ) -> tuple[ProjectRecord, WorkspaceServiceRuntime, list[dict[str, object]]]:
-        record, workspace = await self._project_workspace(client_id, project_id)
-        return record, workspace, await workspace.list_sessions(client_id)
+        async with self._project_lifecycle_lock:
+            record, workspace = await self._project_workspace_owned(client_id, project_id)
+            return record, workspace, await workspace.list_sessions(client_id)
 
     async def create_project_session(self, client_id: str, project_id: str) -> dict[str, object]:
-        _record, workspace = await self._project_workspace(client_id, project_id)
-        session_id = await workspace.create_draft(client_id, reuse_startup_session=False)
-        return {
-            "project_id": project_id,
-            "workspace_id": workspace.workspace_id,
-            "session_id": session_id,
-        }
+        async with self._project_lifecycle_lock:
+            _record, workspace = await self._project_workspace_owned(client_id, project_id)
+            session_id = await workspace.create_draft(client_id, reuse_startup_session=False)
+            return {
+                "project_id": project_id,
+                "workspace_id": workspace.workspace_id,
+                "session_id": session_id,
+            }
 
     async def claim_project_session(
         self, client_id: str, project_id: str, session_id: str
     ) -> dict[str, object]:
-        _record, workspace = await self._project_workspace(client_id, project_id)
-        return await self.claim(client_id, workspace.workspace_id, session_id)
+        async with self._project_lifecycle_lock:
+            _record, workspace = await self._project_workspace_owned(client_id, project_id)
+            return await self.claim(client_id, workspace.workspace_id, session_id)
 
     async def get_project_session(
         self,
@@ -1465,19 +1591,20 @@ class LocalService:
         claim_version: int,
         claim_credential: str,
     ) -> dict[str, object]:
-        _record, workspace = await self._project_workspace(client_id, project_id)
-        claim = workspace.require_claim(client_id, session_id, claim_version, claim_credential)
-        projection = workspace.projection(session_id)
-        return {
-            "project_id": project_id,
-            "workspace_id": workspace.workspace_id,
-            "session_id": session_id,
-            "claim_version": claim.version,
-            "snapshot": {
-                "session_id": projection.session_id,
-                "messages": list(projection.messages),
-            },
-        }
+        async with self._project_lifecycle_lock:
+            _record, workspace = await self._project_workspace_owned(client_id, project_id)
+            claim = workspace.require_claim(client_id, session_id, claim_version, claim_credential)
+            projection = workspace.projection(session_id)
+            return {
+                "project_id": project_id,
+                "workspace_id": workspace.workspace_id,
+                "session_id": session_id,
+                "claim_version": claim.version,
+                "snapshot": {
+                    "session_id": projection.session_id,
+                    "messages": list(projection.messages),
+                },
+            }
 
     async def release_project_session(
         self,
@@ -1487,90 +1614,305 @@ class LocalService:
         claim_version: int,
         claim_credential: str,
     ) -> None:
-        _record, workspace = await self._project_workspace(client_id, project_id)
-        workspace.require_claim(client_id, session_id, claim_version, claim_credential)
-        await workspace.release(client_id, session_id)
+        async with self._project_lifecycle_lock:
+            _record, workspace = await self._project_workspace_owned(client_id, project_id)
+            workspace.require_claim(client_id, session_id, claim_version, claim_credential)
+            await workspace.release(client_id, session_id)
 
     async def resume_project_schedule(
         self, client_id: str, project_id: str, expected_job_ids: set[str]
     ) -> str:
-        self._require_client(client_id)
-        if not self._schedule_admission_open():
-            raise service_error("admission_closed", "Schedule admission is closed.")
-        record = next(
-            (item for item in self.projects.list() if item.project_id == project_id), None
-        )
-        if record is None:
-            raise service_error("not_found", "Project registration was not found.", status=404)
-        if record.schedule_state != "awaiting_resume":
-            return record.schedule_state
-        if not record.path.is_dir():
-            raise service_error("not_found", "Project directory is unavailable.", status=404)
-        workspace = await self._get_or_create_workspace(record.path)
-        jobs = await workspace.schedule_service.public_snapshot()
-        if {job.job_id for job in jobs} != expected_job_ids:
-            raise service_error(
-                "stale_schedule_review", "Saved Schedule Jobs changed; review them again."
-            )
-        self.projects.set_schedule_state(project_id, "available")
-        await self._reconcile_schedule_admission()
-        return "available"
-
-    async def remove_project(self, client_id: str, project_id: str) -> Path:
         async with self._project_lifecycle_lock:
-            return await self._remove_project_owned(client_id, project_id)
-
-    async def _remove_project_owned(self, client_id: str, project_id: str) -> Path:
-        self._require_client(client_id)
-        record = next(
-            (item for item in self.projects.list() if item.project_id == project_id), None
-        )
-        if record is None:
-            raise service_error("not_found", "Project registration was not found.", status=404)
-        self.projects.set_schedule_state(project_id, "removing")
-        key = os.path.normcase(str(record.path.resolve(strict=False)))
-        workspace_id = self._workspace_keys.get(key)
-        if workspace_id is not None:
-            workspace = self._workspaces[workspace_id]
-            affected = tuple(
-                client.client_id
-                for client in self._clients.values()
-                if client.current_workspace_id == workspace_id
-                or any(claimed_workspace == workspace_id for claimed_workspace, _ in client.claimed)
+            self._require_client(client_id)
+            if not self._schedule_admission_open():
+                raise service_error("admission_closed", "Schedule admission is closed.")
+            record = next(
+                (item for item in self.projects.list() if item.project_id == project_id), None
             )
-            try:
-                await workspace.close()
-            except Exception as error:
+            if record is None:
+                raise service_error("not_found", "Project registration was not found.", status=404)
+            if record.schedule_state != "awaiting_resume":
+                return record.schedule_state
+            if not record.path.is_dir():
+                raise service_error("not_found", "Project directory is unavailable.", status=404)
+            workspace = await self._get_or_create_workspace(record.path)
+            jobs = await workspace.schedule_service.public_snapshot()
+            if {job.job_id for job in jobs} != expected_job_ids:
                 raise service_error(
-                    "project_removal_failed",
-                    "Project work could not be stopped; the registration remains blocked.",
+                    "stale_schedule_review", "Saved Schedule Jobs changed; review them again."
+                )
+            self.projects.set_schedule_state(project_id, "available")
+            await self._reconcile_schedule_admission()
+            return "available"
+
+    async def start_project_removal(self, client_id: str, project_id: str) -> dict[str, object]:
+        """Persist and start one idempotent Project removal operation."""
+        self._require_client(client_id)
+        async with self._project_lifecycle_lock:
+            existing = self._project_removals.get(project_id)
+            if existing is not None:
+                if existing.task is not None and not existing.task.done():
+                    return self._project_removal_response(existing)
+                if existing.status == "completed":
+                    return self._project_removal_response(existing)
+            record = next(
+                (item for item in self.projects.list() if item.project_id == project_id), None
+            )
+            if record is None:
+                raise service_error(
+                    "not_found", "Project registration was not found.", status=404
+                )
+            try:
+                record = self.projects.begin_removal(
+                    project_id,
+                    record.removal_operation_id,
+                )
+            except (ProjectCatalogError, OSError) as error:
+                raise service_error(
+                    "persistence_error",
+                    "The Project removal barrier could not be saved.",
                     status=500,
                 ) from error
-            self._workspace_keys.pop(key, None)
-            self._workspaces.pop(workspace_id, None)
-            for affected_id in affected:
-                client = self._clients.get(affected_id)
-                if client is not None:
-                    client.claimed = {claim for claim in client.claimed if claim[0] != workspace_id}
+            try:
+                await self._reconcile_schedule_admission()
+            except asyncio.CancelledError:
+                self.projects.record_removal_failure(
+                    project_id,
+                    "Project removal was interrupted; retry to finish stopping its work.",
+                )
+                raise
+            except Exception as error:
+                try:
+                    self.projects.record_removal_failure(
+                        project_id,
+                        _PROJECT_REMOVAL_FAILURE_MESSAGE,
+                    )
+                except Exception:
+                    pass
+                raise service_error(
+                    "project_removal_failed",
+                    _PROJECT_REMOVAL_FAILURE_MESSAGE,
+                    status=500,
+                    retryable=True,
+                ) from error
+
+            key = os.path.normcase(str(record.path.resolve(strict=False)))
+            workspace_id = self._workspace_keys.get(key)
+            affected = self._workspace_clients(workspace_id)
+            operation = _ProjectRemoval(
+                project_id=project_id,
+                operation_id=record.removal_operation_id or str(uuid4()),
+                path=record.path,
+                workspace_id=workspace_id,
+                affected_client_ids=affected,
+                notification_client_ids=tuple(dict.fromkeys((*affected, client_id))),
+            )
+            self._project_removals[project_id] = operation
+            task = asyncio.create_task(self._run_project_removal(operation))
+            operation.task = task
+            task.add_done_callback(self._project_removal_finished)
+            try:
+                await self.emit(
+                    "project.removal.started",
+                    workspace_id=workspace_id,
+                    session_id=None,
+                    run_id=None,
+                    payload={"project_id": project_id, "operation_id": operation.operation_id},
+                    target_client_ids=operation.notification_client_ids,
+                )
+            except Exception:
+                # Event delivery must not orphan a persisted removal operation.
+                pass
+            return self._project_removal_response(operation)
+
+    async def project_removal_status(
+        self, client_id: str, project_id: str, operation_id: str
+    ) -> dict[str, object]:
+        """Read one removal's current or persisted state by operation identity."""
+        self._require_client(client_id)
+        async with self._project_lifecycle_lock:
+            operation = self._project_removals.get(project_id)
+            if operation is not None and operation.operation_id == operation_id:
+                return self._project_removal_response(operation)
+            record = next(
+                (item for item in self.projects.list() if item.project_id == project_id), None
+            )
+            if record is not None and record.removal_operation_id == operation_id:
+                return {
+                    "project_id": project_id,
+                    "operation_id": operation_id,
+                    "status": "failed" if record.removal_error is not None else "removing",
+                }
+            raise service_error("not_found", "Project removal was not found.", status=404)
+
+    async def remove_project(self, client_id: str, project_id: str) -> Path:
+        """Start a removal and wait for its terminal outcome for legacy callers."""
+        await self.start_project_removal(client_id, project_id)
+        operation = self._project_removals[project_id]
+        task = operation.task
+        if task is not None:
+            await asyncio.shield(task)
+        if operation.status != "completed":
+            raise service_error(
+                "project_removal_failed",
+                "Project work could not be stopped; the registration remains blocked.",
+                status=500,
+                retryable=True,
+            )
+        return operation.path
+
+    @staticmethod
+    def _project_removal_response(operation: _ProjectRemoval) -> dict[str, object]:
+        return {
+            "project_id": operation.project_id,
+            "operation_id": operation.operation_id,
+            "status": operation.status,
+        }
+
+    def _workspace_clients(self, workspace_id: str | None) -> tuple[str, ...]:
+        if workspace_id is None:
+            return ()
+        return tuple(
+            client.client_id
+            for client in self._clients.values()
+            if workspace_id in client.attached_workspaces
+            or client.current_workspace_id == workspace_id
+            or any(candidate_workspace == workspace_id for candidate_workspace, _ in client.claimed)
+        )
+
+    def _project_removal_finished(self, task: asyncio.Task[None]) -> None:
+        _consume_task_result(task)
+
+    async def _run_project_removal(self, operation: _ProjectRemoval) -> None:
+        try:
+            workspace = (
+                None
+                if operation.workspace_id is None
+                else self._workspaces.get(operation.workspace_id)
+            )
+            if workspace is None and operation.path.is_dir():
+                workspace = await self._get_or_create_workspace(operation.path)
+                operation.workspace_id = workspace.workspace_id
+            if workspace is not None:
+                workspace_id = operation.workspace_id
+                assert workspace_id is not None
+                await workspace.close()
+                claims = workspace.clear_claims_for_removal()
+                key = os.path.normcase(str(operation.path.resolve(strict=False)))
+                self._workspace_keys.pop(key, None)
+                self._workspaces.pop(workspace_id, None)
+                for affected_id in operation.affected_client_ids:
+                    client = self._clients.get(affected_id)
+                    if client is None:
+                        continue
+                    client.claimed = {
+                        claim
+                        for claim in client.claimed
+                        if claim[0] != workspace_id
+                    }
+                    client.attached_workspaces.discard(workspace_id)
+                    if client.kind == "cli":
+                        client.reconnect_blocked = True
+                    client.blocked_workspace_keys.add(key)
                     if client.current_workspace_id == workspace_id:
                         client.current_workspace_id = None
                         client.current_session_id = None
-            await self.emit(
-                "project.removed",
-                workspace_id=workspace_id,
-                session_id=None,
-                run_id=None,
-                payload={"project_id": project_id},
-                target_client_ids=affected,
-            )
-        self.projects.remove(project_id)
-        return record.path
+                for claim in claims:
+                    await self.emit(
+                        "session.released",
+                        workspace_id=workspace_id,
+                        session_id=claim.session_id,
+                        run_id=None,
+                        payload={},
+                        target_client_ids=operation.affected_client_ids,
+                    )
+                await self.emit(
+                    "project.removed",
+                    workspace_id=workspace_id,
+                    session_id=None,
+                    run_id=None,
+                    payload={
+                        "project_id": operation.project_id,
+                        "operation_id": operation.operation_id,
+                    },
+                    target_client_ids=operation.notification_client_ids,
+                )
+            self.projects.remove(operation.project_id)
+            operation.status = "completed"
+            try:
+                await self.emit(
+                    "project.removal.completed",
+                    workspace_id=operation.workspace_id,
+                    session_id=None,
+                    run_id=None,
+                    payload={
+                        "project_id": operation.project_id,
+                        "operation_id": operation.operation_id,
+                        "status": "completed",
+                    },
+                    target_client_ids=operation.notification_client_ids,
+                )
+            except Exception:
+                # Removal is complete even if a disconnected client misses the event.
+                pass
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            operation.status = "failed"
+            operation.error = _PROJECT_REMOVAL_FAILURE_MESSAGE
+            try:
+                self.projects.record_removal_failure(
+                    operation.project_id,
+                    operation.error,
+                )
+            except Exception:
+                pass
+            key = os.path.normcase(str(operation.path.resolve(strict=False)))
+            for affected_id in operation.affected_client_ids:
+                client = self._clients.get(affected_id)
+                if client is not None:
+                    if client.kind == "cli":
+                        client.reconnect_blocked = True
+                    client.blocked_workspace_keys.add(key)
+            try:
+                await self.emit(
+                    "project.removal.failed",
+                    workspace_id=operation.workspace_id,
+                    session_id=None,
+                    run_id=None,
+                    payload={
+                        "project_id": operation.project_id,
+                        "operation_id": operation.operation_id,
+                        "status": "failed",
+                        "message": operation.error,
+                    },
+                    target_client_ids=operation.notification_client_ids,
+                )
+            except Exception:
+                # The persisted failure remains retryable if notification delivery fails.
+                pass
 
     def workspace(self, workspace_id: str) -> WorkspaceServiceRuntime:
         try:
-            return self._workspaces[workspace_id]
+            workspace = self._workspaces[workspace_id]
         except KeyError as error:
             raise service_error("not_found", "Workspace was not found.", status=404) from error
+        key = os.path.normcase(str(workspace.workspace_path.resolve(strict=False)))
+        record = next(
+            (
+                item
+                for item in self.projects.list()
+                if os.path.normcase(str(item.path.resolve(strict=False))) == key
+            ),
+            None,
+        )
+        if record is not None and record.schedule_state in {"removing", "failed"}:
+            raise service_error(
+                "admission_closed",
+                "Project work is being removed and cannot be admitted.",
+                retryable=True,
+            )
+        return workspace
 
     async def create_session(self, client_id: str, workspace_id: str) -> dict[str, object]:
         self._require_client(client_id)
@@ -1842,7 +2184,12 @@ class LocalService:
                     ),
                     None,
                 )
-        if event_type == "project.removed" and isinstance(payload.get("project_id"), str):
+        if event_type in {
+            "project.removal.started",
+            "project.removal.failed",
+            "project.removal.completed",
+            "project.removed",
+        } and isinstance(payload.get("project_id"), str):
             project_id = cast(str, payload["project_id"])
         targets = (
             tuple(self._clients.values())
@@ -1904,6 +2251,13 @@ class LocalService:
         if self._global_reconnect_task is not None:
             self._global_reconnect_task.cancel()
         await self._reconcile_schedule_admission()
+        for operation in tuple(self._project_removals.values()):
+            task = operation.task
+            if task is not None and not task.done():
+                try:
+                    await asyncio.shield(task)
+                except Exception as error:
+                    errors.append(error)
         for client in self._clients.values():
             if client.disconnect_task is not None:
                 client.disconnect_task.cancel()

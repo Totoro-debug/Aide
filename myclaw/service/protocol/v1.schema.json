@@ -238,7 +238,9 @@
             {"$ref": "#/$defs/project_schedule_status"},
             {"type": "null"}
           ]
-        }
+        },
+        "removal_operation_id": {"$ref": "#/$defs/identifier"},
+        "removal_error": {"type": "string", "minLength": 1}
       }
     },
     "projects_response": {
@@ -261,6 +263,27 @@
           "enum": ["available", "unavailable", "awaiting_resume", "removing", "failed"]
         },
         "saved_jobs": {"type": "array", "items": {"$ref": "#/$defs/project_job"}}
+      }
+    },
+    "project_removal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "project_id", "operation_id", "status"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "project_id": {"$ref": "#/$defs/identifier"},
+        "operation_id": {"$ref": "#/$defs/identifier"},
+        "status": {"enum": ["removing", "completed", "failed"]}
+      }
+    },
+    "project_removal_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "operation_id", "status"],
+      "properties": {
+        "project_id": {"$ref": "#/$defs/identifier"},
+        "operation_id": {"$ref": "#/$defs/identifier"},
+        "status": {"enum": ["removing", "completed", "failed"]}
       }
     },
     "project_schedule_resume": {

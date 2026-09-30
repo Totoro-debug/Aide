@@ -612,6 +612,10 @@ class ServiceClient:
         elif event_type == "project.removed" and event.get("workspace_id") == self.workspace_id:
             self.control.set_admitted(False)
             self.control.clear_runs()
+            self.workspace_id = ""
+            self.session_id = ""
+            self.claim_version = 0
+            self.claim_credential = ""
             await self.bus.put_remote_output(
                 {
                     "type": "system_control",
@@ -619,6 +623,21 @@ class ServiceClient:
                     "metadata": {},
                 }
             )
+        elif (
+            event_type == "project.removal.failed"
+            and event.get("workspace_id") == self.workspace_id
+        ):
+            payload = event.get("payload")
+            if isinstance(payload, dict) and isinstance(payload.get("message"), str):
+                self.control.set_admitted(False)
+                self.control.clear_runs()
+                await self.bus.put_remote_output(
+                    {
+                        "type": "system_control",
+                        "content": payload["message"],
+                        "metadata": {},
+                    }
+                )
 
     async def _apply_snapshot(self, snapshot: Mapping[str, object]) -> None:
         projection = _projection(snapshot)

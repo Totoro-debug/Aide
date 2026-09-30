@@ -3,6 +3,8 @@ import type {
   BrowserTicketExchange,
   ClientCommand,
   ProjectListResponse,
+  ProjectRemoval,
+  ProjectRemovalStatus,
   ProjectRegistration,
   ProjectScheduleResume,
   RegisteredClient,
@@ -61,7 +63,7 @@ export function clearCsrfToken(): void {
 async function request<T>(
   path: string,
   options: {
-    method?: "GET" | "POST";
+    method?: "GET" | "POST" | "DELETE";
     body?: Record<string, unknown>;
     mutation?: boolean;
     extraHeaders?: Record<string, string>;
@@ -146,6 +148,20 @@ export function registerProject(path: string): Promise<ProjectRegistration> {
     mutation: true,
     body: { request_id: createRequestId(), path },
   });
+}
+
+export function removeProject(projectId: string): Promise<ProjectRemoval> {
+  return request<ProjectRemoval>(`/projects/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+    mutation: true,
+    body: { request_id: createRequestId() },
+  });
+}
+
+export function getProjectRemoval(projectId: string, operationId: string): Promise<ProjectRemovalStatus> {
+  return request<ProjectRemovalStatus>(
+    `/projects/${encodeURIComponent(projectId)}/removal/${encodeURIComponent(operationId)}`,
+  );
 }
 
 export function resumeProjectSchedule(

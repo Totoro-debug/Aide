@@ -590,6 +590,12 @@ h1 {
   font-weight: 650;
 }
 
+.scheduleReview button:focus-visible,
+.scheduleReviewDialog button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
 .jobList {
   display: grid;
   gap: 5px;

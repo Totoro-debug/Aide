@@ -172,9 +172,31 @@ try {
   await invalidDialog.getByRole("alert").waitFor();
   await invalidDialog.getByRole("button", { name: "Cancel" }).click();
 
+  await page.clock.install();
+  await page.clock.pauseAt(new Date());
   await registerProject(firstProject, "project-one");
+  const registrationNotice = page.getByText(
+    "Project registered. Saved Schedule Jobs remain paused until resumed.",
+    { exact: true },
+  );
+  await registrationNotice.waitFor();
+  await page.clock.runFor(9999);
+  assert.equal(await registrationNotice.count(), 1, "Registration feedback expired before 10 seconds");
+  const projectRefresh = page.waitForResponse((response) => (
+    response.request().method() === "GET"
+    && response.url().endsWith("/api/v1/projects")
+  ));
+  await page.getByRole("button", { name: "Refresh projects" }).click();
+  await projectRefresh;
+  await page.clock.runFor(1);
+  await registrationNotice.waitFor({ state: "hidden" });
   await page.getByText("E2E saved project job").waitFor();
   await page.getByText("Schedule paused for review").waitFor();
+  assert.ok(
+    await page.getByRole("button", { name: "Resume schedule" }).count() > 0,
+    "The explicit resume entry disappeared with the transient feedback",
+  );
+  await page.clock.resume();
 
   const firstProjectItem = projectItems.filter({ hasText: firstProject });
   await firstProjectItem.getByRole("link", { name: "Open sessions" }).click();
@@ -613,6 +635,7 @@ try {
   await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
   await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
 
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
   await registerProject(secondProject, "project-two");
   assert.equal(await projectItems.count(), 2);
   await projectItems.filter({ hasText: secondProject }).getByText("Schedule active").waitFor();
@@ -620,6 +643,10 @@ try {
   for (const language of ["en", "zh-CN"]) {
     await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
     await page.getByText(language === "en" ? "Project registered." : "项目已登记。", { exact: true }).waitFor();
+  }
+  await page.clock.resume();
+  for (const language of ["en", "zh-CN"]) {
+    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
     await page.locator("header").getByText(language === "en" ? "Projects" : "项目", { exact: true }).waitFor();
     for (const theme of ["light", "dark"]) {
       await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
@@ -684,16 +711,64 @@ try {
   await page.getByRole("heading", { name: "project-one" }).waitFor();
   await page.getByText("Schedule paused for review").waitFor();
   await page.locator('ul[aria-label="Projects"] > li').filter({ hasText: secondProject }).getByText("Unavailable", { exact: true }).waitFor();
+  for (const language of ["en", "zh-CN"]) {
+    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    const resumeLabel = language === "en" ? "Resume schedule" : "恢复调度";
+    for (const theme of ["light", "dark"]) {
+      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      for (const viewport of viewports) {
+        await page.setViewportSize(viewport);
+        const resumeButton = page.getByRole("button", { name: resumeLabel });
+        await resumeButton.focus();
+        await resumeButton.press("Enter");
+        const review = page.getByRole("dialog", {
+          name: language === "en" ? "Review Schedule Jobs" : "检查定时任务",
+        });
+        await review.getByText("E2E saved project job").waitFor();
+        await review.getByText(language === "en" ? "Upcoming" : "尚未到期", { exact: true }).waitFor();
+        for (const title of ["E2E overdue at job", "E2E overdue every job"]) {
+          const job = review.getByRole("listitem").filter({ hasText: title });
+          await job.getByText(language === "en"
+            ? "Overdue; may run when resumed" : "已到期，恢复后可能立即执行",
+          { exact: true }).waitFor();
+        }
+        await review.getByRole("listitem").filter({ hasText: "E2E next cron job" }).getByText(
+          language === "en" ? "Next matching time after resume" : "恢复后在下次匹配时间执行",
+          { exact: true },
+        ).waitFor();
+        const layout = await review.evaluate((element) => {
+          const bounds = element.getBoundingClientRect();
+          return {
+            left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom,
+            width: document.documentElement.scrollWidth,
+          };
+        });
+        assert.ok(layout.left >= 0 && layout.right <= viewport.width
+          && layout.top >= 0 && layout.bottom <= viewport.height && layout.width <= viewport.width,
+        `Schedule review overflow at ${language}/${theme}/${viewport.width}x${viewport.height}`);
+        await review.getByRole("button", { name: resumeLabel }).focus();
+        assert.equal(await review.getByRole("button", { name: resumeLabel }).evaluate(
+          (element) => element === document.activeElement,
+        ), true);
+        assert.equal(await review.getByRole("button", { name: resumeLabel }).evaluate(
+          (element) => window.getComputedStyle(element).outlineStyle,
+        ), "solid", "Schedule decision has no visible keyboard focus outline");
+        await page.screenshot({ path: resolve(output, `schedule-review-${language}-${theme}-${viewport.width}.png`) });
+        await page.keyboard.press("Escape");
+        await review.waitFor({ state: "hidden" });
+        await page.waitForFunction((label) => document.activeElement?.textContent?.includes(label), resumeLabel);
+        assert.equal(await resumeButton.evaluate((element) => element === document.activeElement), true);
+        assert.equal(await resumeButton.evaluate((element) => window.getComputedStyle(element).outlineStyle), "solid",
+          "The persistent resume entry has no visible keyboard focus outline");
+      }
+    }
+  }
+  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await page.getByRole("button", { name: "Refresh projects" }).click();
+  await page.getByText("Schedule paused for review").waitFor();
   const resumeButton = page.getByRole("button", { name: "Resume schedule" });
-  await resumeButton.focus();
-  await resumeButton.press("Enter");
-  const review = page.getByRole("dialog", { name: "Review Schedule Jobs" });
-  await review.getByText("E2E saved project job").waitFor();
-  await review.getByText("Upcoming").waitFor();
-  await page.keyboard.press("Escape");
-  await review.waitFor({ state: "hidden" });
-  assert.equal(await resumeButton.evaluate((element) => element === document.activeElement), true);
   await resumeButton.click();
+  const review = page.getByRole("dialog", { name: "Review Schedule Jobs" });
   await review.getByRole("button", { name: "Resume schedule" }).click();
   await page.locator('ul[aria-label="Projects"] > li').filter({ hasText: firstProject }).getByText("Schedule active").waitFor();
 
@@ -714,6 +789,17 @@ try {
   await page.getByText("Project registration removed. The directory and saved work remain on disk.").waitFor();
   await removableProject.waitFor({ state: "detached" });
   await readdir(resolve(firstProject, ".myclaw"));
+
+  await registerProject(firstProject, "project-one");
+  await page.getByText("Schedule paused for review").waitFor();
+  await page.getByRole("button", { name: "Resume schedule" }).click();
+  const savedReview = page.getByRole("dialog", { name: "Review Schedule Jobs" });
+  await savedReview.getByText("E2E saved project job").waitFor();
+  await page.keyboard.press("Escape");
+  await savedReview.waitFor({ state: "hidden" });
+  await page.reload();
+  await page.getByText("Schedule paused for review").waitFor();
+  await page.getByRole("button", { name: "Resume schedule" }).waitFor();
 
   await page.getByRole("navigation").getByRole("link", { name: "Status" }).click();
   await page.getByRole("heading", { name: "Service status", exact: true }).waitFor();

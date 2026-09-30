@@ -894,6 +894,12 @@ function ProjectsView({
   const removalProject = projects.find((project) => project.project_id === removalProjectId);
 
   useEffect(() => {
+    if (notice === null) return;
+    const timer = window.setTimeout(() => setNotice(null), 10000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  useEffect(() => {
     return subscribeServiceEvents((event) => {
       if (
         event.type === "project.removal.started"
@@ -1365,7 +1371,7 @@ function ProjectsView({
         <Dialog.Portal>
           <Dialog.Overlay className={styles.dialogOverlay} />
           <Dialog.Content
-            className={styles.dialogContent}
+            className={`${styles.dialogContent} ${styles.scheduleReviewDialog}`}
             onCloseAutoFocus={(event) => {
               event.preventDefault();
               if (reviewTriggerRef.current?.isConnected) reviewTriggerRef.current.focus();

@@ -259,6 +259,24 @@ async def _seed_schedule_job(home: AgentHome, workspace: Path) -> None:
     )
 
 
+async def _seed_overdue_review_jobs(workspace: Path) -> None:
+    store = WorkspaceScheduleStore(WorkspaceState(workspace))
+    for message, schedule in (
+        ("E2E overdue at job", JobSchedule.at("2020-01-01T00:00:00.000+00:00")),
+        ("E2E overdue every job", JobSchedule.every(3600)),
+        ("E2E next cron job", JobSchedule.cron("0 * * * *", "UTC")),
+    ):
+        await store.add_user_job(
+            ScheduleJob(
+                job_id=str(uuid4()),
+                message=message,
+                schedule=schedule,
+                created_at_ms=1,
+                updated_at_ms=1,
+            )
+        )
+
+
 async def _seed_session(
     home: AgentHome,
     workspace: Path,
@@ -369,6 +387,7 @@ async def _run_e2e(provider_base_url: str) -> None:
                 await project_client.close()
                 await client.close()
                 await _stop_service(home, port)
+                await _seed_overdue_review_jobs(first_project)
                 client = await ServiceClient.connect_or_start(home, cli_workspace, port=port)
                 project_client = await ServiceClient.connect_or_start(
                     home, first_project, port=port

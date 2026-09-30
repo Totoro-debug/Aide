@@ -18,6 +18,7 @@ import pytest
 from aiohttp import web
 from yarl import URL
 
+import myclaw.service.transport as service_transport
 import myclaw.terminal.cli as cli
 from myclaw.agent.session.restore import RestoreMode
 from myclaw.agent.session.session import Session
@@ -51,7 +52,29 @@ from myclaw.terminal.conversation import TerminalConversationApp, _ConversationI
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
 
-def test_project_job_review_distinguishes_overdue_and_next_cron_occurrence() -> None:
+def test_project_job_review_uses_controlled_time_for_at_every_and_cron(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frozen_now = datetime(2026, 9, 30, 13, 0, tzinfo=UTC)
+
+    class FrozenDateTime:
+        @staticmethod
+        def now(tz: timezone | None = None) -> datetime:
+            return frozen_now if tz is None else frozen_now.astimezone(tz)
+
+        @staticmethod
+        def fromtimestamp(timestamp: float, tz: timezone | None = None) -> datetime:
+            return datetime.fromtimestamp(timestamp, tz)
+
+    monkeypatch.setattr(service_transport, "datetime", FrozenDateTime)
+
+    at = ScheduleJob(
+        job_id=str(uuid4()),
+        message="Past at task",
+        schedule=JobSchedule.at("2026-09-30T12:00:00.000+00:00"),
+        created_at_ms=1_600_000_000_000,
+        updated_at_ms=1_600_000_000_000,
+    )
     overdue = ScheduleJob(
         job_id=str(uuid4()),
         message="Past due task",
@@ -67,6 +90,8 @@ def test_project_job_review_distinguishes_overdue_and_next_cron_occurrence() -> 
         updated_at_ms=1_600_000_000_000,
     )
 
+    assert _project_job_summary(at)["review_status"] == "overdue"
+    assert _project_job_summary(at)["due_at"] == "2026-09-30T12:00:00+00:00"
     assert _project_job_summary(overdue)["review_status"] == "overdue"
     assert _project_job_summary(overdue)["due_at"] is not None
     assert _project_job_summary(cron)["review_status"] == "next_on_resume"

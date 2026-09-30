@@ -5,12 +5,14 @@ import json
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
 import pytest
 
+import myclaw.service.runtime as service_runtime
 from myclaw.agent.confirmation import (
     BackgroundConfirmationOwner,
     ConfirmationAborted,
@@ -25,6 +27,7 @@ from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader
 from myclaw.schedule.model import JobSchedule, ScheduleJob
+from myclaw.schedule.service import ScheduleOccurrence, ScheduleService
 from myclaw.schedule.store import WorkspaceScheduleStore
 from myclaw.service.client import RemoteControl, ServiceClient
 from myclaw.service.discovery import (
@@ -40,6 +43,7 @@ from myclaw.service.errors import ServiceError
 from myclaw.service.projects import ProjectCatalog, ProjectCatalogError
 from myclaw.service.runtime import LocalService, WorkspaceServiceRuntime
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
+from tests.fixtures import FakeClock
 
 
 def test_discovery_file_has_no_credential_and_round_trips_atomically(tmp_path: Path) -> None:
@@ -344,7 +348,10 @@ async def test_project_removal_notifies_unattached_web_requester_without_blockin
         assert not client.attached_workspaces
         await service.remove_project(client.client_id, record.project_id)
         assert [
-            event["type"] for event in client.events if event["type"].startswith("project.removal.")
+            event_type
+            for event in client.events
+            if isinstance(event_type := event.get("type"), str)
+            and event_type.startswith("project.removal.")
         ] == ["project.removal.started", "project.removal.completed"]
         assert not client.reconnect_blocked
         assert (
@@ -524,6 +531,175 @@ async def test_project_schedule_stays_paused_across_service_restart_until_resume
             == "available"
         )
         assert second_workspace._schedule_admitted
+    finally:
+        await second_service.stop()
+
+
+@pytest.mark.asyncio
+async def test_removed_project_re_registration_keeps_saved_jobs_paused_until_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    state = WorkspaceState(project)
+    state.initialize(agent_home_root=home.path)
+    clock = FakeClock(datetime(2026, 9, 30, 13, 0, tzinfo=UTC))
+    wake_tick = asyncio.Event()
+    starts: list[str] = []
+    started = asyncio.Event()
+
+    async def wait_for_tick(_seconds: float) -> None:
+        await wake_tick.wait()
+        wake_tick.clear()
+
+    async def execute(occurrence: ScheduleOccurrence) -> None:
+        starts.append(occurrence.job.job_id)
+        started.set()
+
+    async def execute_dream() -> None:
+        return None
+
+    class RecordingScheduleService(ScheduleService):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(
+                **{
+                    **kwargs,
+                    "clock": clock,
+                    "execute_user_occurrence": execute,
+                    "execute_dream": execute_dream,
+                }
+            )
+
+    monkeypatch.setattr(clock, "sleep", wait_for_tick)
+    monkeypatch.setattr(service_runtime, "ScheduleService", RecordingScheduleService)
+
+    async def advance(seconds: float) -> None:
+        clock.advance(seconds)
+        wake_tick.set()
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    async def wait_for_starts(count: int, schedule: ScheduleService) -> None:
+        async with asyncio.timeout(2):
+            while len(starts) < count:
+                started.clear()
+                await started.wait()
+            while schedule.status_snapshot().active_job_count:
+                await asyncio.sleep(0)
+
+    jobs = (
+        ScheduleJob(
+            job_id=str(uuid4()),
+            message="saved at task",
+            schedule=JobSchedule.at("2026-09-30T12:00:00.000+00:00"),
+            created_at_ms=1_600_000_000_000,
+            updated_at_ms=1_600_000_000_000,
+        ),
+        ScheduleJob(
+            job_id=str(uuid4()),
+            message="saved every task",
+            schedule=JobSchedule.every(3600),
+            created_at_ms=1_600_000_000_000,
+            updated_at_ms=1_600_000_000_000,
+        ),
+        ScheduleJob(
+            job_id=str(uuid4()),
+            message="saved cron task",
+            schedule=JobSchedule.cron("0 * * * *", "UTC"),
+            created_at_ms=1_600_000_000_000,
+            updated_at_ms=1_600_000_000_000,
+        ),
+    )
+    store = WorkspaceScheduleStore(state)
+    for job in jobs:
+        await store.add_user_job(job)
+
+    class Sink:
+        async def send_event(self, event: dict[str, object]) -> None:
+            del event
+
+    first_service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await first_service.start()
+    first_client = await first_service.register_client("web")
+    await first_service.connect_client(first_client.client_id, Sink())
+    try:
+        first_record, first_workspace, saved = await first_service.register_project(
+            first_client.client_id, project
+        )
+        assert first_record.schedule_state == "awaiting_resume"
+        assert {job.job_id for job in saved} == {job.job_id for job in jobs}
+        assert not first_workspace.schedule_admitted
+        await advance(7200)
+        assert starts == []
+
+        await first_service.remove_project(first_client.client_id, first_record.project_id)
+        assert ProjectCatalog(home).list() == ()
+        assert {job.job_id for job in await store.public_snapshot()} == {job.job_id for job in jobs}
+        record, workspace, saved = await first_service.register_project(
+            first_client.client_id, project
+        )
+        assert record.schedule_state == "awaiting_resume"
+        assert {job.job_id for job in saved} == {job.job_id for job in jobs}
+        await advance(7200)
+        assert starts == []
+    finally:
+        await first_service.stop()
+
+    second_service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await second_service.start()
+    second_client = await second_service.register_client("web")
+    await second_service.connect_client(second_client.client_id, Sink())
+    try:
+        restarted_record, workspace, saved = await second_service.register_project(
+            second_client.client_id, project
+        )
+        assert restarted_record.project_id == record.project_id
+        assert restarted_record.schedule_state == "awaiting_resume"
+        assert ProjectCatalog(home).list()[0].schedule_state == "awaiting_resume"
+        assert {job.job_id for job in saved} == {job.job_id for job in jobs}
+        assert not workspace.schedule_admitted
+        await advance(7200)
+        assert starts == []
+        with pytest.raises(ServiceError) as stale:
+            await second_service.resume_project_schedule(
+                second_client.client_id, record.project_id, {jobs[0].job_id}
+            )
+        assert stale.value.code == "stale_schedule_review"
+        assert not workspace.schedule_admitted
+
+        other_client = await second_service.register_client("web")
+        await second_service.connect_client(other_client.client_id, Sink())
+        results = await asyncio.gather(
+            *(
+                second_service.resume_project_schedule(
+                    client.client_id, record.project_id, {job.job_id for job in jobs}
+                )
+                for client in (second_client, other_client)
+            )
+        )
+        assert results == ["available", "available"]
+        assert workspace.schedule_admitted
+        await wait_for_starts(2, workspace.schedule_service)
+        assert starts.count(jobs[0].job_id) == 1
+        assert starts.count(jobs[1].job_id) == 1
+        assert starts.count(jobs[2].job_id) == 0
+        assert (
+            await second_service.resume_project_schedule(
+                other_client.client_id, record.project_id, {job.job_id for job in jobs}
+            )
+            == "available"
+        )
+        assert len(starts) == 2
+
+        await advance(3600)
+        await wait_for_starts(4, workspace.schedule_service)
+        assert starts.count(jobs[0].job_id) == 1
+        assert starts.count(jobs[1].job_id) == 2
+        assert starts.count(jobs[2].job_id) == 1
+        saved = await WorkspaceScheduleStore(state).public_snapshot()
+        assert {job.job_id for job in saved} == {jobs[1].job_id, jobs[2].job_id}
+        assert all(job.state.last_status == "ok" for job in saved)
     finally:
         await second_service.stop()
 

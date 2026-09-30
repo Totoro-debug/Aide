@@ -52,6 +52,8 @@ import {
 } from "./api";
 import type {
   ClientCommand,
+  ConfirmationRequest,
+  ConfirmationOrigin,
   ProjectSessionsResponse,
   RegisteredProject,
   RegisteredClient,
@@ -70,6 +72,18 @@ type Theme = "system" | "light" | "dark";
 type ProjectsLoadState = "idle" | "loading" | "ready" | "error";
 type ServiceEventListener = (event: ServiceEvent) => void;
 
+interface PendingConfirmation {
+  token: string;
+  origin: ConfirmationOrigin;
+  request: ConfirmationRequest;
+  workspaceId: string;
+  projectId: string | null;
+  sessionId: string | null;
+  runId: string | null;
+  jobId: string | null;
+  title: string | null;
+}
+
 const THEME_KEY = "myclaw.theme";
 const initialLaunchTicket = readAndClearTicket();
 
@@ -86,10 +100,16 @@ export default function App() {
   const [theme, setTheme] = useState<Theme>(() => readThemePreference());
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [sessionEventVersion, setSessionEventVersion] = useState(0);
+  const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
+  const [confirmationNotice, setConfirmationNotice] = useState<string | null>(null);
   const bootstrapPromise = useRef<Promise<RegisteredClient> | null>(null);
   const eventStreamRef = useRef<ReturnType<typeof openEventStream> | null>(null);
   const eventListenersRef = useRef(new Set<ServiceEventListener>());
   const eventCursorRef = useRef<{ streamId: string; seq: number } | null>(null);
+  const pendingConfirmationRef = useRef<PendingConfirmation | null>(null);
+  const confirmationTriggerRef = useRef<HTMLElement | null>(null);
+  const resolvingConfirmationTokenRef = useRef<string | null>(null);
+  const confirmationNoticeTimerRef = useRef<number | null>(null);
   const consumeRegisteredClient = useCallback(() => setRegisteredClient(null), []);
   const subscribeServiceEvents = useCallback((listener: ServiceEventListener) => {
     eventListenersRef.current.add(listener);
@@ -105,6 +125,41 @@ export default function App() {
     },
     [],
   );
+
+  const showConfirmationNotice = useCallback((message: string) => {
+    if (pendingConfirmationRef.current !== null) return;
+    setConfirmationNotice(message);
+    if (confirmationNoticeTimerRef.current !== null) {
+      window.clearTimeout(confirmationNoticeTimerRef.current);
+    }
+    confirmationNoticeTimerRef.current = window.setTimeout(() => {
+      confirmationNoticeTimerRef.current = null;
+      setConfirmationNotice(null);
+    }, 4500);
+  }, []);
+
+  const decideConfirmation = useCallback((decision: "approved" | "declined") => {
+    const confirmation = pendingConfirmationRef.current;
+    if (confirmation === null) return;
+    resolvingConfirmationTokenRef.current = confirmation.token;
+    pendingConfirmationRef.current = null;
+    setPendingConfirmation(null);
+    void sendServiceCommand({
+      request_id: createRequestId(),
+      type: "confirmation_decide",
+      workspace_id: null,
+      session_id: null,
+      claim_version: null,
+      payload: { token: confirmation.token, decision },
+    }).catch((error: unknown) => {
+      resolvingConfirmationTokenRef.current = null;
+      if (error instanceof ServiceCommandError && error.body?.code === "confirmation_resolved") {
+        showConfirmationNotice("confirmation.resolvedElsewhere");
+        return;
+      }
+      showConfirmationNotice("confirmation.decisionFailed");
+    });
+  }, [sendServiceCommand, showConfirmationNotice]);
 
   const refreshProjects = useCallback(async () => {
     setProjectsLoadState("loading");
@@ -126,6 +181,58 @@ export default function App() {
   useEffect(() => {
     if (authState === "ready") void refreshProjects();
   }, [authState, refreshProjects]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeServiceEvents((event) => {
+      if (event.type === "confirmation.requested") {
+        const next = parseConfirmationEvent(event);
+        if (next === null || pendingConfirmationRef.current?.token === next.token) return;
+        if (confirmationNoticeTimerRef.current !== null) {
+          window.clearTimeout(confirmationNoticeTimerRef.current);
+          confirmationNoticeTimerRef.current = null;
+        }
+        setConfirmationNotice(null);
+        const activeElement = document.activeElement;
+        if (next.origin === "background") {
+          confirmationTriggerRef.current = null;
+        } else if (
+          activeElement instanceof HTMLElement
+          && activeElement !== document.body
+          && activeElement !== document.documentElement
+          && !activeElement.closest("[role='dialog']")
+          && (
+            confirmationTriggerRef.current === null
+            || !confirmationTriggerRef.current.isConnected
+          )
+        ) {
+          confirmationTriggerRef.current = activeElement;
+        }
+        pendingConfirmationRef.current = next;
+        setPendingConfirmation(next);
+        return;
+      }
+      if (event.type !== "confirmation.resolved") return;
+      const token = event.payload.token;
+      const current = pendingConfirmationRef.current;
+      if (typeof token !== "string" || current === null || current.token !== token) return;
+      const wasLocalDecision = resolvingConfirmationTokenRef.current === token;
+      resolvingConfirmationTokenRef.current = null;
+      pendingConfirmationRef.current = null;
+      setPendingConfirmation(null);
+      if (!wasLocalDecision) showConfirmationNotice("confirmation.resolvedElsewhere");
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [showConfirmationNotice, subscribeServiceEvents]);
+
+  useEffect(() => {
+    return () => {
+      if (confirmationNoticeTimerRef.current !== null) {
+        window.clearTimeout(confirmationNoticeTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     let retryTimer: number | null = null;
@@ -183,6 +290,9 @@ export default function App() {
             setSessionEventVersion((version) => version + 1);
           },
           () => {
+            pendingConfirmationRef.current = null;
+            resolvingConfirmationTokenRef.current = null;
+            setPendingConfirmation(null);
             setSessionEventVersion((version) => version + 1);
             scheduleReconnect(true);
           },
@@ -347,7 +457,7 @@ export default function App() {
           </div>
         </header>
 
-        <main id="main-content" className={styles.mainContent}>
+        <main id="main-content" className={styles.mainContent} tabIndex={-1}>
           <Routes>
             <Route
               path="/"
@@ -390,14 +500,185 @@ export default function App() {
                   refreshVersion={sessionEventVersion}
                   sendServiceCommand={sendServiceCommand}
                   subscribeServiceEvents={subscribeServiceEvents}
+                  confirmationTriggerRef={confirmationTriggerRef}
                 />
               }
             />
             <Route path="*" element={<Navigate replace to="/status" />} />
           </Routes>
         </main>
+        {confirmationNotice !== null && pendingConfirmation === null ? (
+          <div className={styles.confirmationNotice} role="status" aria-live="polite">
+            <CircleCheck size={16} aria-hidden="true" />
+            {t(confirmationNotice)}
+          </div>
+        ) : null}
       </div>
+      <ConfirmationDialog
+        confirmation={pendingConfirmation}
+        onOpenChange={(open) => { if (!open) decideConfirmation("declined"); }}
+        onDecide={decideConfirmation}
+        triggerRef={confirmationTriggerRef}
+        projects={projects}
+      />
     </div>
+  );
+}
+
+interface ConfirmationDialogProps {
+  confirmation: PendingConfirmation | null;
+  onOpenChange: (open: boolean) => void;
+  onDecide: (decision: "approved" | "declined") => void;
+  triggerRef: { current: HTMLElement | null };
+  projects: RegisteredProject[];
+}
+
+function ConfirmationDialog({
+  confirmation,
+  onOpenChange,
+  onDecide,
+  triggerRef,
+  projects,
+}: ConfirmationDialogProps) {
+  const { t } = useTranslation();
+  const declineRef = useRef<HTMLButtonElement | null>(null);
+  const project = confirmation?.projectId === null
+    ? undefined
+    : projects.find((item) => item.project_id === confirmation?.projectId);
+
+  function restoreFocus() {
+    const target = triggerRef.current ?? document.getElementById("main-content");
+    if (!(target instanceof HTMLElement) || !target.isConnected) return;
+    if (target instanceof HTMLTextAreaElement && target.disabled) {
+      document.getElementById("main-content")?.focus();
+      return;
+    }
+    target.focus();
+  }
+
+  const projectSource = confirmation === null
+    ? ""
+    : project === undefined
+      ? confirmation.projectId ?? confirmation.workspaceId
+      : `${project.name} · ${project.project_id}`;
+
+  return (
+    <Dialog.Root open={confirmation !== null} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className={styles.dialogOverlay} />
+        <Dialog.Content
+          className={styles.confirmationDialogContent}
+          data-confirmation-origin={confirmation?.origin}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            declineRef.current?.focus();
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            restoreFocus();
+          }}
+        >
+          {confirmation !== null ? (
+            <>
+              <div className={styles.dialogHeader}>
+                <div>
+                  <Dialog.Title className={styles.dialogTitle}>
+                    {confirmation.origin === "background"
+                      ? t("confirmation.backgroundTitle")
+                      : t("confirmation.title")}
+                  </Dialog.Title>
+                  <Dialog.Description className={styles.dialogDescription}>
+                    {t("confirmation.description")}
+                  </Dialog.Description>
+                </div>
+                <Dialog.Close asChild>
+                  <button className={styles.iconButton} type="button" aria-label={t("controls.close")}>
+                    <X size={17} aria-hidden="true" />
+                  </button>
+                </Dialog.Close>
+              </div>
+
+              <div className={styles.confirmationDialogBody}>
+                <dl className={styles.confirmationSource}>
+                  <div>
+                    <dt>{t("confirmation.project")}</dt>
+                    <dd>{projectSource}</dd>
+                  </div>
+                  {confirmation.origin === "background" ? (
+                    <div>
+                      <dt>{t("confirmation.job")}</dt>
+                      <dd>
+                        {confirmation.jobId ?? "-"}
+                        {confirmation.title ? ` · ${confirmation.title}` : ""}
+                      </dd>
+                    </div>
+                  ) : (
+                    <div>
+                      <dt>{t("confirmation.session")}</dt>
+                      <dd>{confirmation.sessionId ?? "-"}</dd>
+                    </div>
+                  )}
+                  {confirmation.runId !== null ? (
+                    <div>
+                      <dt>{t("confirmation.run")}</dt>
+                      <dd>{confirmation.runId}</dd>
+                    </div>
+                  ) : null}
+                </dl>
+
+                <section className={styles.confirmationCall} aria-labelledby="confirmation-call-heading">
+                  <h3 id="confirmation-call-heading">{t("confirmation.call")}</h3>
+                  <p className={styles.confirmationToolName}>{confirmation.request.tool_name}</p>
+                  <p className={styles.confirmationSummary}>{confirmation.request.summary}</p>
+                  {confirmation.request.reason ? (
+                    <p className={styles.confirmationReason}>
+                      <strong>{t("confirmation.reason")}:</strong> {confirmation.request.reason}
+                    </p>
+                  ) : null}
+                  <p className={styles.confirmationCallId}>
+                    <strong>{t("confirmation.callId")}:</strong> {confirmation.request.tool_call_id}
+                  </p>
+                </section>
+
+                {confirmation.request.warnings.length > 0 ? (
+                  <section className={styles.confirmationWarnings} aria-labelledby="confirmation-warnings-heading">
+                    <h3 id="confirmation-warnings-heading">{t("confirmation.warnings")}</h3>
+                    <ul>
+                      {confirmation.request.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+                    </ul>
+                  </section>
+                ) : null}
+
+                <section className={styles.confirmationDetails} aria-labelledby="confirmation-details-heading">
+                  <h3 id="confirmation-details-heading">{t("confirmation.parameters")}</h3>
+                  <pre>{formatConfirmationDetails(confirmation.request.details)}</pre>
+                </section>
+              </div>
+
+              <div className={styles.confirmationActions}>
+                <button
+                  ref={declineRef}
+                  className={styles.secondaryButton}
+                  type="button"
+                  onClick={() => onDecide("declined")}
+                >
+                  <ShieldX size={15} aria-hidden="true" />
+                  {t("confirmation.decline")}
+                </button>
+                <button
+                  className={styles.primaryButton}
+                  type="button"
+                  onClick={() => onDecide("approved")}
+                >
+                  <Check size={15} aria-hidden="true" />
+                  {t("confirmation.approve")}
+                </button>
+              </div>
+            </>
+          ) : null}
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
@@ -1143,6 +1424,7 @@ interface ProjectSessionsViewProps {
   refreshVersion: number;
   sendServiceCommand: (command: ClientCommand) => Promise<ServiceCommandResult>;
   subscribeServiceEvents: (listener: ServiceEventListener) => () => void;
+  confirmationTriggerRef: { current: HTMLElement | null };
 }
 
 function ProjectSessionsView({
@@ -1154,6 +1436,7 @@ function ProjectSessionsView({
   refreshVersion,
   sendServiceCommand,
   subscribeServiceEvents,
+  confirmationTriggerRef,
 }: ProjectSessionsViewProps) {
   const { projectId = "" } = useParams();
   return (
@@ -1167,6 +1450,7 @@ function ProjectSessionsView({
       refreshVersion={refreshVersion}
       sendServiceCommand={sendServiceCommand}
       subscribeServiceEvents={subscribeServiceEvents}
+      confirmationTriggerRef={confirmationTriggerRef}
       projectId={projectId}
     />
   );
@@ -1181,6 +1465,7 @@ function ProjectSessionsContent({
   refreshVersion,
   sendServiceCommand,
   subscribeServiceEvents,
+  confirmationTriggerRef,
   projectId,
 }: ProjectSessionsViewProps & { projectId: string }) {
   const { t, i18n } = useTranslation();
@@ -1648,6 +1933,7 @@ function ProjectSessionsContent({
     const activeRun = (liveRunsRef.current[sessionId] ?? []).some(isLiveRunActive);
     if (activeRun || connectionState !== "online") return;
     const localId = `local-${createRequestId()}`;
+    confirmationTriggerRef.current = inputRef.current;
     const pending: PendingSubmission = {
       localId,
       sessionId,
@@ -1705,6 +1991,13 @@ function ProjectSessionsContent({
   const selectedSummary = sessions?.sessions.find((item) => item.id === selectedSessionId);
   const selectedLiveRuns = selectedSessionId === null ? [] : liveRunsBySession[selectedSessionId] ?? [];
   const activeRun = selectedLiveRuns.find(isLiveRunActive) ?? null;
+  useEffect(() => {
+    if (activeRun !== null) return;
+    const target = confirmationTriggerRef.current;
+    if (target === null || !target.isConnected) return;
+    target.focus();
+    if (document.activeElement === target) confirmationTriggerRef.current = null;
+  }, [activeRun, confirmationTriggerRef]);
   const authUnavailable = authState !== "ready";
   return (
     <section className={styles.sessionsPage} aria-labelledby="sessions-heading">
@@ -1928,6 +2221,71 @@ function ProjectSessionsContent({
 function formatSessionTime(value: string, language: string): string {
   const parsed = new Date(value);
   return Number.isNaN(parsed.valueOf()) ? value : parsed.toLocaleString(language);
+}
+
+function parseConfirmationEvent(event: ServiceEvent): PendingConfirmation | null {
+  if (event.workspace_id === null || !isRecord(event.payload)) return null;
+  const payload = event.payload;
+  const token = readString(payload.token);
+  const origin = payload.origin === "foreground" || payload.origin === "background"
+    ? payload.origin
+    : null;
+  const requestValue = payload.request;
+  if (token === null || origin === null || !isRecord(requestValue)) return null;
+  const confirmationId = readString(requestValue.confirmation_id);
+  const toolCallId = readString(requestValue.tool_call_id);
+  const toolName = readString(requestValue.tool_name);
+  const reason = readString(requestValue.reason);
+  const summary = readString(requestValue.summary);
+  const details = requestValue.details;
+  const warnings = requestValue.warnings;
+  if (
+    confirmationId === null
+    || toolCallId === null
+    || toolName === null
+    || reason === null
+    || summary === null
+    || !isRecord(details)
+    || !Array.isArray(warnings)
+    || warnings.some((warning) => typeof warning !== "string")
+  ) {
+    return null;
+  }
+  return {
+    token,
+    origin,
+    workspaceId: event.workspace_id,
+    projectId: event.project_id,
+    sessionId: event.session_id,
+    runId: event.run_id,
+    jobId: readString(payload.job_id) ?? (isRecord(payload.owner) ? readString(payload.owner.job_id) : null),
+    title: readString(payload.title),
+    request: {
+      confirmation_id: confirmationId,
+      tool_call_id: toolCallId,
+      tool_name: toolName,
+      reason,
+      summary,
+      details,
+      warnings: warnings as string[],
+    },
+  };
+}
+
+function formatConfirmationDetails(details: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(details, null, 2) || "{}";
+  } catch {
+    return "{}";
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function historyRoleLabel(

@@ -11,7 +11,12 @@ from uuid import uuid4
 
 import pytest
 
-from myclaw.agent.confirmation import ConfirmationEnvelope, ForegroundConfirmationOwner
+from myclaw.agent.confirmation import (
+    BackgroundConfirmationOwner,
+    ConfirmationAborted,
+    ConfirmationEnvelope,
+    ForegroundConfirmationOwner,
+)
 from myclaw.agent.loop import AgentLoop
 from myclaw.agent.tools.tool_gateway import ConfirmationRequest
 from myclaw.agent.workspace_state import WorkspaceState
@@ -348,17 +353,20 @@ async def test_reacquired_claim_rejects_the_previous_version(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_foreground_confirmation_is_visible_and_decidable_only_by_claim_owner(
+async def test_foreground_confirmation_is_broadcast_to_workspace_clients_and_resolved_once(
     tmp_path: Path,
 ) -> None:
     home = _configured_home(tmp_path / "agent-home")
+    unrelated_workspace_path = tmp_path / "unrelated-workspace"
     workspace_path = tmp_path / "workspace"
+    unrelated_workspace_path.mkdir()
     workspace_path.mkdir()
     service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     try:
         owner = await service.register_client("cli")
         other = await service.register_client("cli")
+        await service.attach_workspace(owner.client_id, unrelated_workspace_path)
         workspace = await service.attach_workspace(owner.client_id, workspace_path)
         await service.attach_workspace(other.client_id, workspace_path)
         session_id = await workspace.create_draft(owner.client_id)
@@ -379,28 +387,358 @@ async def test_foreground_confirmation_is_visible_and_decidable_only_by_claim_ow
                 break
             await asyncio.sleep(0.01)
         assert len(requested) == 1
-        assert not any(event["type"] == "confirmation.requested" for event in other.events)
+        for _ in range(100):
+            if any(event["type"] == "confirmation.requested" for event in other.events):
+                break
+            await asyncio.sleep(0.01)
+        other_requested = [
+            event for event in other.events if event["type"] == "confirmation.requested"
+        ]
+        assert len(other_requested) == 1
         payload = cast(dict[str, object], requested[0]["payload"])
         wire_token = cast(str, payload["token"])
-        with pytest.raises(ServiceError) as rejected:
+        assert cast(dict[str, object], other_requested[0]["payload"])["token"] == wire_token
+        assert requested[0]["session_id"] == session_id
+        assert requested[0]["run_id"] is not None
+        assert payload["origin"] == "foreground"
+        assert cast(dict[str, object], payload["request"])["tool_name"] == "exec"
+        await service.handle_command(
+            other.client_id,
+            {
+                "request_id": "other-decision",
+                "type": "confirmation_decide",
+                "payload": {"token": wire_token, "decision": "approved"},
+            },
+        )
+        assert await asyncio.wait_for(pending, timeout=1) == "approved"
+        with pytest.raises(ServiceError) as resolved:
+            await service.handle_command(
+                owner.client_id,
+                {
+                    "request_id": "owner-decision",
+                    "type": "confirmation_decide",
+                    "payload": {"token": wire_token, "decision": "declined"},
+                },
+            )
+        assert resolved.value.code == "confirmation_resolved"
+        for client in (owner, other):
+            assert any(
+                event["type"] == "confirmation.resolved"
+                and cast(dict[str, object], event["payload"])["token"] == wire_token
+                for event in client.events
+            )
+        next_envelope = ConfirmationEnvelope(
+            request=ConfirmationRequest(uuid4(), "call-2", "exec", "Run another command", {}),
+            origin="foreground",
+            owner=ForegroundConfirmationOwner(
+                workspace.loops[session_id].loop.generation_id, uuid4()
+            ),
+        )
+        next_pending = asyncio.create_task(service.confirmation.request(next_envelope))
+        for _ in range(100):
+            next_events = [
+                event for event in owner.events if event["type"] == "confirmation.requested"
+            ]
+            if len(next_events) == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(next_events) == 2
+        next_token = cast(str, cast(dict[str, object], next_events[-1]["payload"])["token"])
+        assert next_token != wire_token
+        with pytest.raises(ServiceError) as stale:
             await service.handle_command(
                 other.client_id,
                 {
-                    "request_id": "other-decision",
+                    "request_id": "stale-decision",
                     "type": "confirmation_decide",
                     "payload": {"token": wire_token, "decision": "approved"},
                 },
             )
-        assert rejected.value.code == "forbidden"
+        assert stale.value.code == "confirmation_resolved"
+        assert not next_pending.done()
         await service.handle_command(
             owner.client_id,
             {
-                "request_id": "owner-decision",
+                "request_id": "next-decision",
                 "type": "confirmation_decide",
-                "payload": {"token": wire_token, "decision": "declined"},
+                "payload": {"token": next_token, "decision": "declined"},
+            },
+        )
+        assert await asyncio.wait_for(next_pending, timeout=1) == "declined"
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_confirmation_resolved_cannot_overtake_requested_for_another_client(
+    tmp_path: Path,
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    requested_started = asyncio.Event()
+    release_requested = asyncio.Event()
+
+    class SlowSink:
+        async def send_event(self, event: dict[str, object]) -> None:
+            if event["type"] == "confirmation.requested":
+                requested_started.set()
+                await release_requested.wait()
+
+    try:
+        first = await service.register_client("cli")
+        second = await service.register_client("cli")
+        workspace = await service.attach_workspace(first.client_id, workspace_path)
+        await service.attach_workspace(second.client_id, workspace_path)
+        session_id = await workspace.create_draft(first.client_id)
+        await service.claim(first.client_id, workspace.workspace_id, session_id)
+        await service.connect_client(first.client_id, SlowSink())
+        envelope = ConfirmationEnvelope(
+            request=ConfirmationRequest(uuid4(), "call-1", "exec", "Run command", {}),
+            origin="foreground",
+            owner=ForegroundConfirmationOwner(
+                workspace.loops[session_id].loop.generation_id, uuid4()
+            ),
+        )
+        pending = asyncio.create_task(service.confirmation.request(envelope))
+        await asyncio.wait_for(requested_started.wait(), timeout=1)
+        requested = next(
+            event for event in first.events if event["type"] == "confirmation.requested"
+        )
+        token = cast(str, cast(dict[str, object], requested["payload"])["token"])
+        await service.handle_command(
+            first.client_id,
+            {
+                "request_id": "early-decision",
+                "type": "confirmation_decide",
+                "payload": {"token": token, "decision": "declined"},
+            },
+        )
+        await asyncio.sleep(0)
+        assert not any(event["type"] == "confirmation.resolved" for event in second.events)
+        release_requested.set()
+        assert await asyncio.wait_for(pending, timeout=1) == "declined"
+        for _ in range(100):
+            events = [
+                event["type"]
+                for event in second.events
+                if event["type"] in {"confirmation.requested", "confirmation.resolved"}
+            ]
+            if len(events) == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert events == ["confirmation.requested", "confirmation.resolved"]
+    finally:
+        release_requested.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_background_confirmation_broadcast_has_job_source_without_session_scope(
+    tmp_path: Path,
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    unrelated_workspace_path = tmp_path / "unrelated-workspace"
+    workspace_path = tmp_path / "workspace"
+    unrelated_workspace_path.mkdir()
+    workspace_path.mkdir()
+    ProjectCatalog(home).register(workspace_path)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+
+    class Sink:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def send_event(self, event: dict[str, object]) -> None:
+            self.events.append(event)
+
+    status_sink = Sink()
+    unrelated_sink = Sink()
+    try:
+        first = await service.register_client("web")
+        second = await service.register_client("web")
+        status_page = await service.register_client("web")
+        unrelated_cli = await service.register_client("cli")
+        await service.attach_workspace(unrelated_cli.client_id, unrelated_workspace_path)
+        workspace = await service.attach_workspace(first.client_id, workspace_path)
+        await service.attach_workspace(second.client_id, workspace_path)
+        await service.connect_client(status_page.client_id, status_sink)
+        await service.connect_client(unrelated_cli.client_id, unrelated_sink)
+        schedule_loop = await workspace._get_schedule_loop("job-1")
+        envelope = ConfirmationEnvelope(
+            request=ConfirmationRequest(uuid4(), "call-1", "exec", "Run scheduled command", {}),
+            origin="background",
+            owner=BackgroundConfirmationOwner(
+                schedule_loop.loop.generation_id,
+                "job-1",
+                uuid4(),
+            ),
+            job_id="job-1",
+            title="Nightly maintenance",
+        )
+        pending = asyncio.create_task(service.confirmation.request(envelope))
+        for _ in range(100):
+            requested = [
+                event for event in first.events if event["type"] == "confirmation.requested"
+            ]
+            if requested:
+                break
+            await asyncio.sleep(0.01)
+        assert len(requested) == 1
+        assert any(event["type"] == "confirmation.requested" for event in second.events)
+        assert any(event["type"] == "confirmation.requested" for event in status_sink.events)
+        assert not any(event["type"] == "confirmation.requested" for event in unrelated_sink.events)
+        event = requested[0]
+        assert event["workspace_id"] == workspace.workspace_id
+        assert event["session_id"] is None
+        assert event["run_id"] is None
+        payload = cast(dict[str, object], event["payload"])
+        assert payload["origin"] == "background"
+        assert payload["job_id"] == "job-1"
+        assert payload["title"] == "Nightly maintenance"
+        assert not status_page.claimed
+        await service.handle_command(
+            second.client_id,
+            {
+                "request_id": "background-decision",
+                "type": "confirmation_decide",
+                "payload": {"token": payload["token"], "decision": "declined"},
             },
         )
         assert await asyncio.wait_for(pending, timeout=1) == "declined"
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_service_stop_aborts_confirmation_and_invalidates_token(tmp_path: Path) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        workspace = await service.attach_workspace(client.client_id, workspace_path)
+        session_id = await workspace.create_draft(client.client_id)
+        await service.claim(client.client_id, workspace.workspace_id, session_id)
+        envelope = ConfirmationEnvelope(
+            request=ConfirmationRequest(uuid4(), "call-1", "exec", "Run command", {}),
+            origin="foreground",
+            owner=ForegroundConfirmationOwner(
+                workspace.loops[session_id].loop.generation_id, uuid4()
+            ),
+        )
+        pending = asyncio.create_task(service.confirmation.request(envelope))
+        for _ in range(100):
+            requests = [
+                event for event in client.events if event["type"] == "confirmation.requested"
+            ]
+            if requests:
+                break
+            await asyncio.sleep(0.01)
+        assert len(requests) == 1
+        token = cast(str, cast(dict[str, object], requests[0]["payload"])["token"])
+        await service.stop()
+        with pytest.raises(ConfirmationAborted):
+            await asyncio.wait_for(pending, timeout=1)
+        assert any(event["type"] == "confirmation.resolved" for event in client.events)
+        with pytest.raises(ServiceError) as stale:
+            await service.handle_command(
+                client.client_id,
+                {
+                    "request_id": "late-approval",
+                    "type": "confirmation_decide",
+                    "payload": {"token": token, "decision": "approved"},
+                },
+            )
+        assert stale.value.code == "confirmation_resolved"
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_project_removal_aborts_pending_confirmation_and_resolves_clients(
+    tmp_path: Path,
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    record = ProjectCatalog(home).register(project)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    try:
+        owner = await service.register_client("cli")
+        other = await service.register_client("web")
+        workspace = await service.attach_workspace(owner.client_id, project)
+        await service.attach_workspace(other.client_id, project)
+        session_id = await workspace.create_draft(owner.client_id)
+        await service.claim(owner.client_id, workspace.workspace_id, session_id)
+        envelope = ConfirmationEnvelope(
+            request=ConfirmationRequest(uuid4(), "call-1", "exec", "Run command", {}),
+            origin="foreground",
+            owner=ForegroundConfirmationOwner(
+                workspace.loops[session_id].loop.generation_id, uuid4()
+            ),
+        )
+        pending = asyncio.create_task(service.confirmation.request(envelope))
+        for _ in range(100):
+            if any(event["type"] == "confirmation.requested" for event in owner.events):
+                break
+            await asyncio.sleep(0.01)
+        await service.remove_project(owner.client_id, record.project_id)
+        with pytest.raises(ConfirmationAborted):
+            await asyncio.wait_for(pending, timeout=1)
+        assert not service.workspaces
+        assert all(
+            any(event["type"] == "confirmation.resolved" for event in client.events)
+            for client in (owner, other)
+        )
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_disconnect_expiry_aborts_owned_confirmation(tmp_path: Path) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=0.05)
+    await service.start()
+
+    class Sink:
+        async def send_event(self, event: dict[str, object]) -> None:
+            del event
+
+    sink = Sink()
+    try:
+        owner = await service.register_client("cli")
+        other = await service.register_client("web")
+        workspace = await service.attach_workspace(owner.client_id, workspace_path)
+        await service.attach_workspace(other.client_id, workspace_path)
+        await service.connect_client(owner.client_id, sink)
+        await service.connect_client(other.client_id, sink)
+        session_id = await workspace.create_draft(owner.client_id)
+        await service.claim(owner.client_id, workspace.workspace_id, session_id)
+        envelope = ConfirmationEnvelope(
+            request=ConfirmationRequest(uuid4(), "call-1", "exec", "Run command", {}),
+            origin="foreground",
+            owner=ForegroundConfirmationOwner(
+                workspace.loops[session_id].loop.generation_id, uuid4()
+            ),
+        )
+        pending = asyncio.create_task(service.confirmation.request(envelope))
+        for _ in range(100):
+            if any(event["type"] == "confirmation.requested" for event in other.events):
+                break
+            await asyncio.sleep(0.01)
+        await service.disconnect_client(owner.client_id, sink=sink)
+        with pytest.raises(ConfirmationAborted):
+            await asyncio.wait_for(pending, timeout=1)
+        assert any(event["type"] == "confirmation.resolved" for event in other.events)
     finally:
         await service.stop()
 

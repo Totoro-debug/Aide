@@ -23,6 +23,8 @@ from myclaw.schedule.store import WorkspaceScheduleStore
 from myclaw.service.client import ServiceClient
 from myclaw.service.discovery import discovery_path
 
+CONFIRMATION_PATH: str | None = None
+
 
 def _config(base_url: str) -> str:
     return f"""[models.providers.primary]
@@ -86,25 +88,82 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
     messages = body.get("messages", []) if isinstance(body, dict) else []
     user_prompt = ""
     has_tool_result = False
+    last_user_index = -1
     if isinstance(messages, list):
-        for message in messages:
+        for index, message in enumerate(messages):
             if not isinstance(message, dict):
                 continue
             if message.get("role") == "user" and isinstance(message.get("content"), str):
                 user_prompt = message["content"]
+                last_user_index = index
             if message.get("role") == "tool":
                 has_tool_result = True
 
     request_id = f"fixture-{uuid4()}"
     chunks: list[dict[str, object]] = []
-    tool_states_request = "tool states" in user_prompt.lower()
+    normalized_prompt = user_prompt.lower()
+    tool_states_request = "tool states" in normalized_prompt
+    has_confirmation_result = any(
+        index > last_user_index
+        and isinstance(message, dict)
+        and message.get("role") == "tool"
+        and message.get("tool_call_id") == "call-confirmation"
+        for index, message in enumerate(messages)
+    )
+    confirmation_request = (
+        isinstance(body.get("tools"), list)
+        and "confirmation" in normalized_prompt
+        and not any(
+            marker in normalized_prompt
+            for marker in (
+                "tool states",
+                "streaming markdown",
+                "retry once",
+            )
+        )
+    )
     streaming_request = "streaming markdown" in user_prompt.lower()
     wait_command = (
-        "Start-Sleep -Seconds 120"
+        "Get-Content -LiteralPath .\\fixture.txt -Wait"
         if sys.platform == "win32"
-        else "python -c \"import time; time.sleep(120)\""
+        else "tail -f fixture.txt"
     )
-    if tool_states_request and not has_tool_result:
+    if confirmation_request and not has_confirmation_result:
+        if CONFIRMATION_PATH is None:
+            raise web.HTTPInternalServerError(text="Confirmation fixture path is not configured")
+        tool_calls = [
+            (
+                "call-confirmation",
+                "read_file",
+                {"path": CONFIRMATION_PATH},
+            )
+        ]
+        for index, (call_id, name, arguments) in enumerate(tool_calls):
+            chunks.append(
+                _chunk(
+                    request_id=request_id,
+                    delta={
+                        "tool_calls": [
+                            {
+                                "index": index,
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": json.dumps(arguments),
+                                },
+                            }
+                        ]
+                    },
+                )
+            )
+        chunks.append(_chunk(request_id=request_id, delta={}, finish_reason="tool_calls"))
+    elif confirmation_request and has_confirmation_result:
+        chunks.append(
+            _chunk(request_id=request_id, delta={"content": "Confirmation fixture completed."})
+        )
+        chunks.append(_chunk(request_id=request_id, delta={}, finish_reason="stop"))
+    elif tool_states_request and not has_tool_result:
         tool_calls = [
             ("call-completed", "read_file", {"path": "fixture.txt"}),
             ("call-failed", "read_file", {"path": "missing-fixture.txt"}),
@@ -233,8 +292,11 @@ async def _stop_service(home: AgentHome, port: int) -> None:
 
 
 async def _run_e2e(provider_base_url: str) -> None:
+    global CONFIRMATION_PATH
     with tempfile.TemporaryDirectory(prefix="myclaw-web-e2e-") as root:
         path = Path(root)
+        CONFIRMATION_PATH = str(path / "confirmation-outside.txt")
+        Path(CONFIRMATION_PATH).write_text("confirmation fixture content\n", encoding="utf-8")
         home = AgentHome(path / ".myclaw")
         home.initialize()
         (home.path / "config.toml").write_text(_config(provider_base_url), encoding="utf-8")
@@ -289,6 +351,7 @@ async def _run_e2e(provider_base_url: str) -> None:
                             "project_alias": str(project_alias),
                             "second_project": str(second_project),
                             "second_ticket": second_launch_url.split("#ticket=", 1)[1],
+                            "confirmation_path": CONFIRMATION_PATH,
                             "occupied_session_id": occupied_session_id,
                             "available_session_id": available_session_id,
                         }

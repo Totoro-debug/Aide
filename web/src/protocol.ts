@@ -13,6 +13,35 @@ export interface ServiceEvent {
   payload: Record<string, unknown>;
 }
 
+export type ConfirmationOrigin = "foreground" | "background";
+
+export interface ConfirmationRequest {
+  confirmation_id: string;
+  tool_call_id: string;
+  tool_name: string;
+  reason: string;
+  summary: string;
+  details: Record<string, unknown>;
+  warnings: string[];
+}
+
+export interface ConfirmationEventOwner {
+  kind: ConfirmationOrigin;
+  generation_id: string;
+  run_id?: string;
+  job_id?: string;
+  occurrence_id?: string;
+}
+
+export interface ConfirmationRequestedPayload {
+  token: string;
+  origin: ConfirmationOrigin;
+  request: ConfirmationRequest;
+  job_id?: string;
+  title?: string;
+  owner?: ConfirmationEventOwner;
+}
+
 export type ClientCommandType =
   | "claim"
   | "release"

@@ -145,6 +145,7 @@ class ServiceConfirmationPresenter(ConfirmationPresenter):
         self._service = service
         self._wire_tokens: dict[object, str] = {}
         self._wire_sources: dict[object, tuple[str | None, str | None, str | None]] = {}
+        self._wire_requests: dict[object, asyncio.Task[None]] = {}
 
     def present_confirmation(
         self,
@@ -188,6 +189,7 @@ class ServiceConfirmationPresenter(ConfirmationPresenter):
                 target_client_ids=self._audience(workspace_id, session_id),
             )
         )
+        self._wire_requests[token] = task
         task.add_done_callback(_consume_task_result)
 
     async def dismiss_confirmation(self, token: object) -> None:
@@ -195,6 +197,23 @@ class ServiceConfirmationPresenter(ConfirmationPresenter):
         if wire_token is None:
             return
         workspace_id, session_id, run_id = self._wire_sources.pop(token, (None, None, None))
+        await self._emit_resolved(
+            self._wire_requests.pop(token),
+            wire_token,
+            workspace_id,
+            session_id,
+            run_id,
+        )
+
+    async def _emit_resolved(
+        self,
+        requested: asyncio.Task[None],
+        wire_token: str,
+        workspace_id: str | None,
+        session_id: str | None,
+        run_id: str | None,
+    ) -> None:
+        await asyncio.gather(requested, return_exceptions=True)
         await self._service.emit(
             "confirmation.resolved",
             workspace_id=workspace_id,
@@ -207,16 +226,26 @@ class ServiceConfirmationPresenter(ConfirmationPresenter):
     def _audience(self, workspace_id: str | None, session_id: str | None) -> tuple[str, ...]:
         if workspace_id is None:
             return ()
-        if session_id is not None:
-            return tuple(
-                client.client_id
-                for client in self._service._clients.values()
-                if (workspace_id, session_id) in client.claimed
+        audience = set(self._service.workspace_audience(workspace_id))
+        workspace = self._service._workspaces.get(workspace_id)
+        if workspace is not None:
+            workspace_key = os.path.normcase(str(workspace.workspace_path))
+            registered = any(
+                os.path.normcase(str(record.path.resolve(strict=False))) == workspace_key
+                for record in self._service.projects.list()
             )
+            if registered:
+                # Web clients can inspect the account-global Project catalog, while
+                # CLI clients only receive confirmations for attached Workspaces.
+                audience.update(
+                    client.client_id
+                    for client in self._service._clients.values()
+                    if client.kind == "web"
+                )
         return tuple(
             client.client_id
             for client in self._service._clients.values()
-            if client.current_workspace_id == workspace_id
+            if client.client_id in audience
         )
 
     def decide(self, client_id: str, wire_token: str, decision: ConfirmationDecision) -> bool:
@@ -235,13 +264,12 @@ class ServiceConfirmationPresenter(ConfirmationPresenter):
                         (None, None, None),
                     )
                     task = asyncio.create_task(
-                        self._service.emit(
-                            "confirmation.resolved",
-                            workspace_id=workspace_id,
-                            session_id=session_id,
-                            run_id=run_id,
-                            payload={"token": wire_token},
-                            target_client_ids=self._audience(workspace_id, session_id),
+                        self._emit_resolved(
+                            self._wire_requests.pop(token),
+                            wire_token,
+                            workspace_id,
+                            session_id,
+                            run_id,
                         )
                     )
                     task.add_done_callback(_consume_task_result)
@@ -552,8 +580,13 @@ class WorkspaceServiceRuntime:
                 )
                 return self.workspace_id, session_id, run_id
         if isinstance(owner, BackgroundConfirmationOwner):
-            return self.workspace_id, None, None
-        return self.workspace_id, None, None
+            schedule_loop = self._schedule_loops.get(owner.job_id)
+            if (
+                schedule_loop is not None
+                and schedule_loop.loop.generation_id == owner.generation_id
+            ):
+                return self.workspace_id, None, None
+        return None, None, None
 
     def projection(self, session_id: str) -> ForegroundConversationProjection:
         loop = self._loops.get(session_id)
@@ -1001,6 +1034,7 @@ class WorkspaceServiceRuntime:
                 await asyncio.gather(output_task, return_exceptions=True)
         try:
             if abort:
+                await self.service.confirmation.cancel_generation(state.loop.generation_id)
                 await state.loop.abort()
             else:
                 await state.loop.close()

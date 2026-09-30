@@ -32,12 +32,26 @@ try {
     }
     throw new Error(`Timed out waiting for ${description}`);
   }
+  async function waitForConfirmationRunCompletion() {
+    let acceptedRun;
+    await waitForRecordedEvent((messages) => {
+      const accepted = [...messages].reverse().find((event) => (
+        event.type === "input.accepted" && event.payload?.text === "confirmation"
+      ));
+      acceptedRun = accepted;
+      return accepted !== undefined && messages.some((event) => (
+        event.type === "run.completed" && event.run_id === accepted.run_id
+      ));
+    }, "confirmation Run completion");
+    return acceptedRun;
+  }
   await page.addInitScript(() => {
     const OriginalWebSocket = window.WebSocket;
     window.__myclawTestMessages = [];
     window.WebSocket = class extends OriginalWebSocket {
       constructor(...args) {
         super(...args);
+        window.__myclawTestControlCredential = Array.isArray(args[1]) ? args[1][1] : null;
         window.__myclawTestSocket = this;
         this.addEventListener("message", (event) => {
           try {
@@ -213,8 +227,37 @@ try {
     && response.url().endsWith("/sessions")
   ));
   await page.getByRole("button", { name: "New session" }).click();
-  const conversationSessionId = (await (await newSessionResponsePromise).json()).session_id;
+  const newSession = await (await newSessionResponsePromise).json();
+  const conversationSessionId = newSession.session_id;
+  const conversationWorkspaceId = newSession.workspace_id;
+  assert.equal(typeof conversationSessionId, "string");
+  assert.equal(typeof conversationWorkspaceId, "string");
   await page.getByText("Empty draft", { exact: true }).waitFor();
+  const permissionChange = await page.evaluate(async ({ activeWorkspaceId, sessionId }) => {
+    const browserSession = await window.fetch("/api/v1/web/session", { credentials: "include" });
+    const { csrf_token: csrf } = await browserSession.json();
+    const control = window.__myclawTestControlCredential;
+    if (typeof control !== "string") throw new Error("The Web control credential was not captured");
+    const response = await window.fetch(
+      `/api/v1/workspaces/${activeWorkspaceId}/management/permission`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          "X-MyClaw-CSRF": csrf,
+          "X-MyClaw-Control": control,
+        },
+        body: JSON.stringify({
+          request_id: window.crypto.randomUUID(),
+          current_session_id: sessionId,
+          permission_level: "read-only",
+        }),
+      },
+    );
+    return { status: response.status, body: await response.text() };
+  }, { activeWorkspaceId: conversationWorkspaceId, sessionId: conversationSessionId });
+  assert.equal(permissionChange.status, 200, `Could not select read-only E2E permission: ${permissionChange.body}`);
   await page.getByLabel("Message input").fill("streaming markdown");
   await page.getByLabel("Message input").press("Shift+Enter");
   await page.getByLabel("Message input").type("second line");
@@ -416,10 +459,136 @@ try {
     0,
   );
 
+  const confirmationPath = control.details.confirmation_path;
+  assert.ok(confirmationPath.endsWith("confirmation-outside.txt"));
+  const confirmationCombinations = [];
+  const confirmationRuns = [];
+  for (const language of ["en", "zh-CN"]) {
+    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await secondPage.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    for (const theme of ["light", "dark"]) {
+      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      await secondPage.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      for (const viewport of viewports) {
+        await page.setViewportSize(viewport);
+        await secondPage.setViewportSize(viewport);
+        confirmationCombinations.push({ language, theme, viewport });
+        const primaryTitle = language === "en" ? "Tool Confirmation" : "工具确认";
+        const secondaryTitle = primaryTitle;
+        const primaryDialog = page.getByRole("dialog", { name: primaryTitle, exact: true });
+        const secondaryDialog = secondPage.getByRole("dialog", { name: secondaryTitle, exact: true });
+        const input = page.locator("textarea");
+        await input.fill("confirmation");
+        await input.press("Enter");
+        await primaryDialog.waitFor();
+        await secondaryDialog.waitFor();
+        assert.equal(await page.getByRole("status").filter({ hasText: /resolved by another client|其他客户端/ }).count(), 0,
+          "A previous confirmation notice overlaps the active dialog");
+
+        const primaryText = await primaryDialog.innerText();
+        const secondaryText = await secondaryDialog.innerText();
+        assert.equal(primaryText, secondaryText, "Clients received different confirmation facts");
+        assert.ok(primaryText.includes("read_file"), "Confirmation omitted the exact Tool name");
+        assert.ok(primaryText.includes("confirmation-outside.txt"), "Confirmation omitted exact parameters");
+        assert.ok(primaryText.includes(control.details.available_session_id), "Confirmation omitted its Session source");
+        assert.equal(
+          await primaryDialog.getByRole("button", { name: language === "en" ? "Decline" : "拒绝" }).evaluate(
+            (element) => element === document.activeElement,
+          ),
+          true,
+          "Confirmation did not place focus on the safe default",
+        );
+        const bounds = await primaryDialog.boundingBox();
+        const layout = await page.evaluate(() => ({
+          width: document.documentElement.scrollWidth,
+          height: document.documentElement.scrollHeight,
+        }));
+        assert.ok(bounds && bounds.x >= 0 && bounds.y >= 0
+          && bounds.x + bounds.width <= viewport.width + 1
+          && bounds.y + bounds.height <= viewport.height + 1,
+        `Confirmation dialog escaped the viewport at ${viewport.width}x${viewport.height}`);
+        assert.ok(layout.width <= viewport.width, `Confirmation overflow at ${viewport.width}x${viewport.height}`);
+        await page.screenshot({ path: resolve(output, `confirmation-${language}-${theme}-${viewport.width}.png`) });
+
+        const combinationIndex = confirmationCombinations.length - 1;
+        if (combinationIndex === 0) {
+          await secondaryDialog.getByRole("button", { name: language === "en" ? "Approve" : "批准" }).focus();
+          await secondPage.keyboard.press("Enter");
+        } else if (combinationIndex === 1) {
+          await primaryDialog.getByRole("button", { name: language === "en" ? "Close" : "关闭" }).click();
+        } else if (combinationIndex === 2) {
+          await page.keyboard.press("Escape");
+        } else if (combinationIndex === 3) {
+          await page.keyboard.press("Enter");
+        } else {
+          await primaryDialog.getByRole("button", { name: language === "en" ? "Decline" : "拒绝" }).click();
+        }
+        await primaryDialog.waitFor({ state: "hidden" });
+        await secondaryDialog.waitFor({ state: "hidden" });
+        const completedRun = await waitForConfirmationRunCompletion();
+        const expectedStatus = combinationIndex === 0 ? "success" : "refused";
+        const finishedStatuses = await page.evaluate((runId) => window.__myclawTestMessages
+          .filter((event) => event.type === "run.output" && event.run_id === runId
+            && event.payload?.message?.type === "tool_call"
+            && event.payload?.message?.metadata?.tool_call_id === "call-confirmation"
+            && typeof event.payload?.message?.metadata?.status === "string")
+          .map((event) => event.payload.message.metadata.status), completedRun.run_id);
+        assert.deepEqual(finishedStatuses, [expectedStatus],
+          `Unexpected Tool Gateway result for confirmation Run ${completedRun.run_id}`);
+        confirmationRuns.push({
+          runId: completedRun.run_id,
+          sessionId: completedRun.session_id,
+          expectedStatus,
+        });
+        let composerFocused = false;
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          composerFocused = await input.evaluate((element) => element === document.activeElement);
+          if (composerFocused) break;
+          await delay(50);
+        }
+        assert.equal(await input.evaluate((element) => element === document.activeElement), true,
+          "Confirmation did not restore focus to the triggering input");
+      }
+    }
+  }
+  const confirmationToolRuns = await page.evaluate(() => window.__myclawTestMessages
+    .filter((event) => event.type === "run.output"
+      && event.payload?.message?.type === "tool_call"
+      && event.payload?.message?.metadata?.tool_call_id === "call-confirmation")
+    .map((event) => event.run_id));
+  assert.equal(new Set(confirmationToolRuns).size, confirmationCombinations.length,
+    "Confirmation workflow executed more than once for a Run");
+  assert.equal(new Set(confirmationRuns.map((run) => run.runId)).size, confirmationCombinations.length);
+  let persistedConfirmationResults = [];
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    persistedConfirmationResults = [];
+    for (const sessionId of new Set(confirmationRuns.map((run) => run.sessionId))) {
+      const records = (await readFile(resolve(firstProject, ".myclaw", "sessions", `${sessionId}.jsonl`), "utf8"))
+        .trim().split("\n").map((line) => JSON.parse(line));
+      persistedConfirmationResults.push(...records.filter((record) => (
+        record.role === "tool" && record.tool_call_id === "call-confirmation"
+      )));
+    }
+    if (persistedConfirmationResults.length === confirmationRuns.length) break;
+    await delay(50);
+  }
+  assert.equal(persistedConfirmationResults.length, confirmationRuns.length,
+    "The real service did not persist exactly one Tool result per confirmed Run");
+  assert.deepEqual(persistedConfirmationResults.map((result) => result.status),
+    confirmationRuns.map((run) => run.expectedStatus));
+  assert.equal(persistedConfirmationResults.filter((result) => (
+    result.status === "success" && result.content.includes("confirmation fixture content")
+  )).length, 1, "The approved exact read did not execute exactly once");
+  assert.equal(persistedConfirmationResults.filter((result) => (
+    result.status === "refused" && result.content.includes("confirmation fixture content")
+  )).length, 0, "Declined confirmations exposed Tool output");
+
+  await page.getByRole("button", { name: "EN", exact: true }).click();
   const releaseResponsePromise = page.waitForResponse((response) => (
     response.request().method() === "POST" && response.url().includes("/release")
   ));
-  await page.getByRole("button", { name: "Release session" }).click();
+  const releaseButton = page.getByRole("button", { name: /Release session|释放会话/ });
+  await releaseButton.click();
   assert.equal((await releaseResponsePromise).status(), 200);
   const refreshResponsePromise = secondPage.waitForResponse((response) => (
     response.request().method() === "GET"

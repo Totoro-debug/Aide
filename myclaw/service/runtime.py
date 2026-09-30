@@ -31,6 +31,13 @@ from myclaw.agent.memory.dream import Dream
 from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.message_bus import InboundMessage, MessageBus
 from myclaw.agent.permission import RuntimePermissionControl
+from myclaw.agent.session.deletion import (
+    begin_session_deletion,
+    delete_session_data,
+    session_deletion_pending,
+    session_deletion_status,
+    session_restore_pending,
+)
 from myclaw.agent.session.restore import RestoreManager, RestoreRecoveryRequired, StaleRestorePlan
 from myclaw.agent.session.session import Session, SessionStoragePartition
 from myclaw.agent.tools.core.exec_host import ExecHost, create_exec_host, resolve_exec_shell
@@ -49,6 +56,7 @@ from myclaw.schedule.service import ScheduleOccurrence, ScheduleService
 from myclaw.schedule.store import WorkspaceScheduleStore
 from myclaw.service.errors import ServiceError, service_error
 from myclaw.service.projects import ProjectCatalog, ProjectCatalogError, ProjectRecord
+from myclaw.utils.host_filesystem import HOST_FILESYSTEM
 from myclaw.utils.time import local_now
 
 
@@ -154,6 +162,9 @@ class ClientState:
     rename_results: dict[str, tuple[tuple[object, ...], dict[str, object]]] = field(
         default_factory=dict
     )
+    session_delete_results: dict[str, tuple[tuple[object, ...], dict[str, object]]] = field(
+        default_factory=dict
+    )
     claimed: set[tuple[str, str]] = field(default_factory=set)
     attached_workspaces: set[str] = field(default_factory=set)
     current_workspace_id: str | None = None
@@ -166,6 +177,16 @@ class ClientState:
     expired: bool = False
     reconnect_blocked: bool = False
     blocked_workspace_keys: set[str] = field(default_factory=set)
+
+
+@dataclass(slots=True)
+class SessionDeletionClaim:
+    """A cleanup-only Claim never owns or reopens an Agent Loop."""
+
+    session_id: str
+    client_id: str
+    version: int
+    credential: str
 
 
 @dataclass(slots=True)
@@ -371,6 +392,7 @@ class WorkspaceServiceRuntime:
         self.workspace_state: Any = None
         self._loops: dict[str, _LoopState] = {}
         self._claims: dict[str, SessionClaim] = {}
+        self._deletion_claims: dict[str, SessionDeletionClaim] = {}
         self._claim_versions: dict[str, int] = {}
         self._draft_clients: dict[str, str] = {}
         self._schedule_loops: dict[str, _LoopState] = {}
@@ -523,10 +545,35 @@ class WorkspaceServiceRuntime:
             self._draft_clients[session_id] = client_id
         return session_id
 
+    def _ensure_session_available(self, session_id: str) -> None:
+        try:
+            Session._require_id(session_id, partition=SessionStoragePartition.FOREGROUND)
+            pending = session_deletion_pending(self.workspace_state, session_id)
+        except ValueError as error:
+            raise service_error(
+                "validation_error",
+                "Conversation Session ID is invalid.",
+                status=422,
+            ) from error
+        except OSError as error:
+            raise service_error(
+                "persistence_error",
+                "Conversation Session deletion state could not be read safely.",
+                status=500,
+                retryable=True,
+            ) from error
+        if pending:
+            raise service_error(
+                "session_deleting",
+                "Conversation Session deletion is already in progress; retry shortly.",
+                retryable=True,
+            )
+
     async def claim(self, client_id: str, session_id: str) -> SessionClaim:
         async with self._lock:
             if self._closed:
                 raise service_error("admission_closed", "Workspace admission is closed.")
+            self._ensure_session_available(session_id)
             existing = self._claims.get(session_id)
             if existing is not None:
                 if existing.client_id != client_id:
@@ -631,6 +678,12 @@ class WorkspaceServiceRuntime:
         return claim
 
     async def release(self, client_id: str, session_id: str, *, close_idle: bool = True) -> None:
+        async with self._lock:
+            await self._release_unlocked(client_id, session_id, close_idle=close_idle)
+
+    async def _release_unlocked(
+        self, client_id: str, session_id: str, *, close_idle: bool = True
+    ) -> None:
         if self._restore_owner == client_id and self._restore_session_id == session_id:
             await self._release_restore_barrier(client_id)
         claim = self._claims.get(session_id)
@@ -639,6 +692,12 @@ class WorkspaceServiceRuntime:
         if claim.client_id != client_id:
             raise service_error(
                 "stale_claim", "Conversation Session Claim is not owned by this client."
+            )
+        if session_deletion_pending(self.workspace_state, session_id):
+            raise service_error(
+                "session_deleting",
+                "Finish the pending Session deletion before releasing its Claim.",
+                retryable=True,
             )
         loop_state = self._loops.get(session_id)
         if loop_state is not None and (
@@ -668,6 +727,7 @@ class WorkspaceServiceRuntime:
         """Drop all service-owned Claims after the Workspace has been drained."""
         claims = tuple(self._claims.values())
         self._claims.clear()
+        self._deletion_claims.clear()
         self._draft_clients.clear()
         for claim in claims:
             self.service.client_claim_released(
@@ -678,6 +738,9 @@ class WorkspaceServiceRuntime:
         return claims
 
     async def expire_client(self, client_id: str) -> None:
+        for session_id, deletion_claim in tuple(self._deletion_claims.items()):
+            if deletion_claim.client_id == client_id:
+                self._deletion_claims.pop(session_id, None)
         if self._restore_owner == client_id:
             await self._release_restore_barrier(client_id)
         owned_claims = tuple(
@@ -736,6 +799,7 @@ class WorkspaceServiceRuntime:
         return None, None, None
 
     def projection(self, session_id: str) -> ForegroundConversationProjection:
+        self._ensure_session_available(session_id)
         loop = self._loops.get(session_id)
         if loop is None:
             raise service_error("not_found", "Conversation Session was not found.", status=404)
@@ -782,6 +846,11 @@ class WorkspaceServiceRuntime:
 
         entries: list[tuple[tuple[datetime, datetime, str], dict[str, object]]] = []
         for path in directory.glob("*.jsonl"):
+            try:
+                if session_deletion_pending(self.workspace_state, path.stem):
+                    continue
+            except (OSError, ValueError):
+                continue
             loop_state = self._loops.get(path.stem)
             session = None if loop_state is None else loop_state.loop.session
             if session is None:
@@ -837,6 +906,7 @@ class WorkspaceServiceRuntime:
         """Rename one claimed, already-persisted foreground Session."""
         async with self._lock:
             claim = self.require_claim(client_id, session_id, claim_version, claim_credential)
+            self._ensure_session_available(session_id)
             client = self.service.client(client_id)
             fingerprint = (self.workspace_id, session_id, title, expected_metadata_version)
             previous = client.rename_results.get(request_id)
@@ -857,6 +927,7 @@ class WorkspaceServiceRuntime:
                 )
             await session.wait_for_pending_persist()
             self.require_claim(client_id, session_id, claim_version, claim_credential)
+            self._ensure_session_available(session_id)
             directory = self.workspace_state.existing_sessions_directory()
             session_path = None if directory is None else directory / f"{session_id}.jsonl"
             if session_path is None or not session_path.is_file():
@@ -901,6 +972,162 @@ class WorkspaceServiceRuntime:
             )
             return summary
 
+    async def delete_session(
+        self,
+        client_id: str,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        """Fence, drain, and delete one claimed foreground Session atomically."""
+        async with self._lock:
+            client = self.service.client(client_id)
+            fingerprint = (self.workspace_id, session_id, claim_version, claim_credential)
+            previous = client.session_delete_results.get(request_id)
+            if previous is not None:
+                if previous[0] != fingerprint:
+                    raise service_error(
+                        "validation_error",
+                        "request_id was already used for another Session deletion.",
+                        status=422,
+                    )
+                return previous[1]
+
+            try:
+                Session._require_id(session_id, partition=SessionStoragePartition.FOREGROUND)
+                pending = session_deletion_pending(self.workspace_state, session_id)
+            except ValueError as error:
+                raise service_error(
+                    "validation_error",
+                    "Conversation Session ID is invalid.",
+                    status=422,
+                ) from error
+            except OSError as error:
+                raise service_error(
+                    "persistence_error",
+                    "Conversation Session deletion state could not be read safely.",
+                    status=500,
+                    retryable=True,
+                ) from error
+
+            claim = self._claims.get(session_id)
+            if claim is not None or not pending:
+                claim = self.require_claim(client_id, session_id, claim_version, claim_credential)
+            else:
+                cleanup_claim = self._deletion_claims.get(session_id)
+                if (
+                    cleanup_claim is None
+                    or cleanup_claim.client_id != client_id
+                    or cleanup_claim.version != claim_version
+                    or cleanup_claim.credential != claim_credential
+                ):
+                    raise service_error(
+                        "stale_claim", "Session deletion Claim is missing or stale."
+                    )
+            try:
+                restore_pending = session_restore_pending(self.workspace_state, session_id)
+            except OSError as error:
+                raise service_error(
+                    "persistence_error",
+                    "Session Restore state could not be read safely.",
+                    status=500,
+                    retryable=True,
+                ) from error
+            if (
+                self._restore_owner is not None
+                or self._restore_commit_task is not None
+                or self._restore_blocked
+                or restore_pending
+            ):
+                raise service_error(
+                    "restore_pending",
+                    "Finish or cancel the active Session Restore before deleting.",
+                    retryable=True,
+                )
+
+            loop_state = self._loops.get(session_id)
+            if loop_state is not None and (
+                loop_state.loop.has_active_run
+                or loop_state.run_ids
+                or await loop_state.bus.inbound_snapshot()
+            ):
+                raise service_error(
+                    "session_busy",
+                    "Conversation Session still has accepted work.",
+                    retryable=True,
+                )
+            if not pending and (claim is None or not claim.loop.session.messages):
+                try:
+                    directory = self.workspace_state.existing_sessions_directory()
+                    if directory is None or not HOST_FILESYSTEM.entry_exists(
+                        directory / f"{session_id}.jsonl"
+                    ):
+                        raise service_error(
+                            "session_not_persisted",
+                            "Conversation Session draft has no accepted input yet.",
+                            retryable=True,
+                        )
+                    HOST_FILESYSTEM.require_owned_regular_file(
+                        directory / f"{session_id}.jsonl", within=directory
+                    )
+                except OSError as error:
+                    raise service_error(
+                        "persistence_error",
+                        "Session history could not be read safely.",
+                        status=500,
+                        retryable=True,
+                    ) from error
+
+            try:
+                begin_session_deletion(self.workspace_state, session_id)
+                if loop_state is not None:
+                    await loop_state.loop.wait_for_restore_idle()
+                    if (
+                        loop_state.loop.has_active_run
+                        or loop_state.run_ids
+                        or await loop_state.bus.inbound_snapshot()
+                    ):
+                        raise service_error(
+                            "session_busy",
+                            "Conversation Session still has accepted work.",
+                            retryable=True,
+                        )
+                    await self._close_loop(session_id)
+                delete_session_data(self.workspace_state, session_id)
+            except ServiceError:
+                raise
+            except (OSError, RuntimeError, ValueError) as error:
+                raise service_error(
+                    "persistence_error",
+                    "Conversation Session data could not be deleted safely; retry the operation.",
+                    status=500,
+                    retryable=True,
+                ) from error
+
+            self._claims.pop(session_id, None)
+            self._deletion_claims.pop(session_id, None)
+            self._draft_clients.pop(session_id, None)
+            self.service.client_claim_released(client_id, self.workspace_id, session_id)
+            response = {
+                "workspace_id": self.workspace_id,
+                "session_id": session_id,
+                "deleted": True,
+            }
+            client.session_delete_results[request_id] = (fingerprint, response)
+            try:
+                await self.service.emit(
+                    "session.deleted",
+                    workspace_id=self.workspace_id,
+                    session_id=session_id,
+                    run_id=None,
+                    payload={"deleted": True},
+                    target_client_ids=self.service.workspace_audience(self.workspace_id),
+                )
+            except Exception:
+                pass
+            return response
+
     async def _release_restore_barrier(self, client_id: str) -> None:
         if self._restore_owner != client_id:
             return
@@ -915,8 +1142,15 @@ class WorkspaceServiceRuntime:
             await loop._release_replacement_barrier(resume_inbound=True)
         if self._restore_schedule_paused:
             self._restore_schedule_paused = False
-            if not self._closed and not self._restore_blocked:
-                await self.activate_schedule()
+            if (
+                not self._closed
+                and not self._restore_blocked
+                and self.service._schedule_admission_open()
+                and self.service._schedule_allowed(self)
+            ):
+                self._schedule_admitted = True
+                self.schedule_service.resume()
+                self.schedule_service.start()
 
     async def _rebuild_restored_session(self, client_id: str, session_id: str) -> SessionClaim:
         claim = self._claims.get(session_id)
@@ -978,22 +1212,23 @@ class WorkspaceServiceRuntime:
         async def restore_listing() -> RestoreListingReport:
             from myclaw.management.service import RestoreListingReport
 
-            loop = current_loop()
-            state = self._loops[loop.session.session_id]
-            if (
-                self._restore_owner is not None
-                or loop.has_active_run
-                or await state.bus.inbound_snapshot()
-            ):
-                raise ManagementError(
-                    ErrorInfo(
-                        "model_invalid_request",
-                        "Finish the active run and clear queued input before restoring.",
+            async with self._lock:
+                loop = current_loop()
+                state = self._loops[loop.session.session_id]
+                if (
+                    self._restore_owner is not None
+                    or loop.has_active_run
+                    or await state.bus.inbound_snapshot()
+                ):
+                    raise ManagementError(
+                        ErrorInfo(
+                            "model_invalid_request",
+                            "Finish the active run and clear queued input before restoring.",
+                        )
                     )
-                )
-            self._restore_owner = client_id
-            self._restore_session_id = loop.session.session_id
-            self._restore_loop = loop
+                self._restore_owner = client_id
+                self._restore_session_id = loop.session.session_id
+                self._restore_loop = loop
             try:
                 await loop._pause_for_replacement()
                 await loop.wait_for_restore_idle()
@@ -1130,23 +1365,25 @@ class WorkspaceServiceRuntime:
         text: str,
         run_id: str,
     ) -> SessionClaim:
-        self._require_admitted()
-        claim = self.require_claim(client_id, session_id, version)
-        if not text.strip():
-            raise service_error(
-                "validation_error",
-                "Conversation input must not be empty.",
-                status=422,
-                field_errors={"text": "must not be empty"},
-            )
-        if not claim.loop.foreground_input_admitted():
-            raise service_error(
-                "admission_closed", "Conversation input is temporarily unavailable."
-            )
-        state = self._loops[session_id]
-        state.run_ids.append(run_id)
-        await state.bus.put_inbound(InboundMessage(content=text))
-        return claim
+        async with self._lock:
+            self._require_admitted()
+            claim = self.require_claim(client_id, session_id, version)
+            self._ensure_session_available(session_id)
+            if not text.strip():
+                raise service_error(
+                    "validation_error",
+                    "Conversation input must not be empty.",
+                    status=422,
+                    field_errors={"text": "must not be empty"},
+                )
+            if not claim.loop.foreground_input_admitted():
+                raise service_error(
+                    "admission_closed", "Conversation input is temporarily unavailable."
+                )
+            state = self._loops[session_id]
+            state.run_ids.append(run_id)
+            await state.bus.put_inbound(InboundMessage(content=text))
+            return claim
 
     async def cancel(self, client_id: str, session_id: str, version: int, run_id: str) -> None:
         claim = self.require_claim(client_id, session_id, version)
@@ -1285,6 +1522,8 @@ class WorkspaceServiceRuntime:
         if state is None or claim is None or claim.client_id != client_id:
             return
         try:
+            if session_deletion_pending(self.workspace_state, session_id):
+                return
             if state.loop.has_active_run or state.run_ids or await state.bus.inbound_snapshot():
                 return
         except RuntimeError:
@@ -1292,7 +1531,7 @@ class WorkspaceServiceRuntime:
         await self.release(client_id, session_id)
 
     async def _close_loop(self, session_id: str, *, abort: bool = False) -> None:
-        state = self._loops.get(session_id) if abort else self._loops.pop(session_id, None)
+        state = self._loops.get(session_id)
         if state is None:
             return
         if state.release_task is not None:
@@ -1312,8 +1551,7 @@ class WorkspaceServiceRuntime:
             await state.loop.abort()
         else:
             await state.loop.close()
-        if abort:
-            self._loops.pop(session_id, None)
+        self._loops.pop(session_id, None)
         for job_id, candidate in tuple(self._schedule_loops.items()):
             if candidate is state:
                 self._schedule_loops.pop(job_id, None)
@@ -1781,6 +2019,106 @@ class LocalService:
                 request_id,
             )
 
+    async def delete_project_session(
+        self,
+        client_id: str,
+        project_id: str,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        async with self._project_lifecycle_lock:
+            record, workspace = await self._project_workspace_owned(client_id, project_id)
+            del record
+            result = await workspace.delete_session(
+                client_id,
+                session_id,
+                claim_version,
+                claim_credential,
+                request_id,
+            )
+            return {"project_id": project_id, **result}
+
+    async def project_session_deletion_status(
+        self, client_id: str, project_id: str, session_id: str
+    ) -> dict[str, object]:
+        async with self._project_lifecycle_lock:
+            _record, workspace = await self._project_workspace_owned(client_id, project_id)
+            async with workspace._lock:
+                try:
+                    state = session_deletion_status(workspace.workspace_state, session_id)
+                except ValueError as error:
+                    raise service_error(
+                        "validation_error", "Session ID is invalid.", status=422
+                    ) from error
+                except OSError as error:
+                    raise service_error(
+                        "persistence_error",
+                        "Session deletion status could not be read safely.",
+                        status=500,
+                        retryable=True,
+                    ) from error
+                if state == "deleted" and session_id in workspace._loops:
+                    state = "present"
+                return {
+                    "project_id": project_id,
+                    "workspace_id": workspace.workspace_id,
+                    "session_id": session_id,
+                    "state": state,
+                }
+
+    async def claim_project_session_deletion(
+        self, client_id: str, project_id: str, session_id: str
+    ) -> dict[str, object]:
+        async with self._project_lifecycle_lock:
+            _record, workspace = await self._project_workspace_owned(client_id, project_id)
+            async with workspace._lock:
+                if workspace._closed:
+                    raise service_error("admission_closed", "Workspace admission is closed.")
+                try:
+                    pending = session_deletion_pending(workspace.workspace_state, session_id)
+                except ValueError as error:
+                    raise service_error(
+                        "validation_error", "Session ID is invalid.", status=422
+                    ) from error
+                except OSError as error:
+                    raise service_error(
+                        "persistence_error",
+                        "Session deletion state could not be read safely.",
+                        status=500,
+                        retryable=True,
+                    ) from error
+                if not pending:
+                    raise service_error("not_found", "Session deletion is not pending.", status=404)
+                active = workspace._claims.get(session_id)
+                cleanup = workspace._deletion_claims.get(session_id)
+                if active is not None:
+                    active = workspace.require_claim(client_id, session_id, active.version)
+                    version, credential = active.version, active.credential
+                else:
+                    if cleanup is not None and cleanup.client_id != client_id:
+                        raise service_error(
+                            "session_claimed", "Session deletion is claimed by another client."
+                        )
+                    if cleanup is None:
+                        version = workspace._claim_versions.get(session_id, 0) + 1
+                        workspace._claim_versions[session_id] = version
+                        cleanup = SessionDeletionClaim(session_id, client_id, version, str(uuid4()))
+                        workspace._deletion_claims[session_id] = cleanup
+                    version, credential = cleanup.version, cleanup.credential
+                return {
+                    "project_id": project_id,
+                    "workspace_id": workspace.workspace_id,
+                    "session_id": session_id,
+                    "claim": {
+                        "workspace_id": workspace.workspace_id,
+                        "session_id": session_id,
+                        "claim_version": version,
+                        "reconnect_credential": credential,
+                    },
+                }
+
     async def create_project_session(self, client_id: str, project_id: str) -> dict[str, object]:
         async with self._project_lifecycle_lock:
             _record, workspace = await self._project_workspace_owned(client_id, project_id)
@@ -1809,6 +2147,7 @@ class LocalService:
         async with self._project_lifecycle_lock:
             _record, workspace = await self._project_workspace_owned(client_id, project_id)
             claim = workspace.require_claim(client_id, session_id, claim_version, claim_credential)
+            workspace._ensure_session_available(session_id)
             projection = workspace.projection(session_id)
             return {
                 "project_id": project_id,
@@ -2227,6 +2566,26 @@ class LocalService:
             claim_credential,
             title,
             expected_metadata_version,
+            request_id,
+        )
+
+    async def delete_session(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        client = self._require_client(client_id)
+        workspace = self.workspace(workspace_id)
+        client.attached_workspaces.add(workspace_id)
+        return await workspace.delete_session(
+            client_id,
+            session_id,
+            claim_version,
+            claim_credential,
             request_id,
         )
 

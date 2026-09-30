@@ -96,6 +96,20 @@ def test_config_patch_requires_explicit_secret_operation_and_revision() -> None:
         validator.validate({**patch, "secrets": {"key": {"action": "clear", "value": "old"}}})
 
 
+def test_session_deletion_response_is_explicit_and_does_not_publish_credentials() -> None:
+    deletion = {
+        "request_id": "delete-1",
+        "project_id": "project-1",
+        "workspace_id": "workspace-1",
+        "session_id": "session-1",
+        "deleted": True,
+    }
+    validator = _validator("session_deletion")
+    validator.validate(deletion)
+    with pytest.raises(ValidationError):
+        validator.validate({**deletion, "reconnect_credential": "secret"})
+
+
 def test_project_http_shapes_are_versioned_and_preserve_saved_job_review_data() -> None:
     project = {
         "project_id": "project-1",
@@ -210,3 +224,26 @@ def test_client_commands_require_claim_identity_and_typed_payloads() -> None:
         validator.validate(
             {**decision, "payload": {"token": "confirmation-1", "decision": "later"}}
         )
+
+
+def test_session_deletion_recovery_contract_never_contains_history_or_paths() -> None:
+    identity = {"project_id": "project-1", "workspace_id": "workspace-1", "session_id": "session-1"}
+    status = _validator("session_deletion_status")
+    for state in ("deleted", "deleting", "present"):
+        status.validate({**identity, "state": state})
+    with pytest.raises(ValidationError):
+        status.validate({**identity, "state": "deleted", "path": "user-file"})
+    cleanup = _validator("session_deletion_claim")
+    claim = {
+        **identity,
+        "request_id": "request-1",
+        "claim": {
+            "workspace_id": "workspace-1",
+            "session_id": "session-1",
+            "claim_version": 2,
+            "reconnect_credential": "credential-1",
+        },
+    }
+    cleanup.validate(claim)
+    with pytest.raises(ValidationError):
+        cleanup.validate({**claim, "snapshot": {"messages": []}})

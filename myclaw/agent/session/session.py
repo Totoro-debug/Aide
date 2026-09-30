@@ -212,6 +212,13 @@ class Session:
     ) -> Self:
         """Load one current-format Session synchronously from Workspace State."""
         resolved_partition = _resolve_partition(session_id, partition)
+        if resolved_partition is SessionStoragePartition.FOREGROUND:
+            from myclaw.agent.session.deletion import session_deletion_pending
+
+            if session_deletion_pending(workspace_state, session_id):
+                from myclaw.agent.session.deletion import SessionDeletionPending
+
+                raise SessionDeletionPending(session_id)
         sessions_directory = _existing_sessions_directory(workspace_state, resolved_partition)
         if sessions_directory is None:
             raise FileNotFoundError(_storage_directory(workspace_state, resolved_partition))

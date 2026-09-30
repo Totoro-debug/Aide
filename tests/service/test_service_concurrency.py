@@ -569,6 +569,315 @@ async def test_distinct_sessions_run_in_parallel_and_cancel_is_scoped(
 
 
 @pytest.mark.asyncio
+async def test_pending_delete_after_restart_claims_cleanup_without_reopening_session(
+    tmp_path: Path,
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    record = ProjectCatalog(home).register(workspace_path)
+    configuration = ConfigLoader(home).load_for_startup()
+    service = LocalService(home, configuration)
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        created = await service.create_project_session(client.client_id, record.project_id)
+        session_id = cast(str, created["session_id"])
+        await service.claim_project_session(client.client_id, record.project_id, session_id)
+        workspace = service.workspace(cast(str, created["workspace_id"]))
+        claim = workspace._claims[session_id]
+        session = claim.loop.session
+        session.commit_agent_run(
+            [{"role": "user", "content": "persisted target"}],
+            pending_last_compacted=session.last_compacted,
+            pending_action_summary="",
+            restore_before=session.capture_restore_before(),
+            restore_run_token=uuid4(),
+        )
+        await session.wait_for_pending_persist()
+        artifact = workspace.workspace_state.path / "artifacts" / session_id / "linked.txt"
+        artifact.parent.mkdir(parents=True)
+        external = tmp_path / "user-file"
+        external.write_text("keep user file", encoding="utf-8")
+        artifact.hardlink_to(external)
+        with pytest.raises(ServiceError) as failure:
+            await service.delete_project_session(
+                client.client_id,
+                record.project_id,
+                session_id,
+                claim.version,
+                claim.credential,
+                "delete-before-restart",
+            )
+        assert failure.value.code == "persistence_error"
+        status = await service.project_session_deletion_status(
+            client.client_id, record.project_id, session_id
+        )
+        assert status["state"] == "deleting"
+    finally:
+        await service.stop()
+
+    restarted = LocalService(home, configuration)
+    await restarted.start()
+    try:
+        replacement = await restarted.register_client("web")
+        cleanup = await restarted.claim_project_session_deletion(
+            replacement.client_id, record.project_id, session_id
+        )
+        cleanup_claim = cast(dict[str, object], cleanup["claim"])
+        workspace = restarted.workspace(cast(str, cleanup["workspace_id"]))
+        assert session_id not in workspace.loops
+        with pytest.raises(ServiceError) as reopen:
+            await restarted.claim_project_session(
+                replacement.client_id, record.project_id, session_id
+            )
+        assert reopen.value.code == "session_deleting"
+        other = await restarted.register_client("web")
+        with pytest.raises(ServiceError) as contested:
+            await restarted.claim_project_session_deletion(
+                other.client_id, record.project_id, session_id
+            )
+        assert contested.value.code == "session_claimed"
+        with pytest.raises(ServiceError) as input_error:
+            await workspace.input(
+                replacement.client_id,
+                session_id,
+                cast(int, cleanup_claim["claim_version"]),
+                "must not run",
+                "forbidden-run",
+            )
+        assert input_error.value.code == "stale_claim"
+        assert external.read_text(encoding="utf-8") == "keep user file"
+        artifact.unlink()
+        result = await restarted.delete_project_session(
+            replacement.client_id,
+            record.project_id,
+            session_id,
+            cast(int, cleanup_claim["claim_version"]),
+            cast(str, cleanup_claim["reconnect_credential"]),
+            "delete-after-restart",
+        )
+        assert result["deleted"] is True
+        assert (
+            await restarted.project_session_deletion_status(
+                replacement.client_id, record.project_id, session_id
+            )
+        )["state"] == "deleted"
+        assert external.read_text(encoding="utf-8") == "keep user file"
+        assert session_id not in workspace.loops
+    finally:
+        await restarted.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_delete_preserves_writer_fence_and_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        workspace = await service.attach_workspace(client.client_id, workspace_path)
+        session_id = await workspace.create_draft(client.client_id)
+        await service.claim(client.client_id, workspace.workspace_id, session_id)
+        claim = workspace._claims[session_id]
+        session = claim.loop.session
+        session.commit_agent_run(
+            [{"role": "user", "content": "persisted delete target"}],
+            pending_last_compacted=session.last_compacted,
+            pending_action_summary="",
+            restore_before=session.capture_restore_before(),
+            restore_run_token=uuid4(),
+        )
+        await session.wait_for_pending_persist()
+        original_close = claim.loop.close
+        closing = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def pause_close() -> None:
+            closing.set()
+            await finish.wait()
+            await original_close()
+
+        monkeypatch.setattr(claim.loop, "close", pause_close)
+        task = asyncio.create_task(
+            workspace.delete_session(
+                client.client_id, session_id, claim.version, claim.credential, "cancel-delete"
+            )
+        )
+        await asyncio.wait_for(closing.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert session_id in workspace.loops
+        with pytest.raises(ServiceError) as fenced:
+            await workspace.input(
+                client.client_id, session_id, claim.version, "late input", "late-run"
+            )
+        assert fenced.value.code == "session_deleting"
+        with pytest.raises(ServiceError) as release:
+            await workspace.release(client.client_id, session_id)
+        assert release.value.code == "session_deleting"
+        finish.set()
+        result = await workspace.delete_session(
+            client.client_id, session_id, claim.version, claim.credential, "cancel-delete"
+        )
+        assert result["deleted"] is True
+        session.update_automatic_title("late title")
+        session.persist()
+        await session.wait_for_pending_persist()
+        assert not (workspace.workspace_state.sessions_directory / f"{session_id}.jsonl").exists()
+        assert session_id not in workspace.loops
+        assert session_id not in workspace._claims
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_completed_restore_result_does_not_block_session_deletion(tmp_path: Path) -> None:
+    from myclaw.agent.session.restore import RestoreManager, RestoreMode
+
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        workspace = await service.attach_workspace(client.client_id, workspace_path)
+        session_id = await workspace.create_draft(client.client_id)
+        await service.claim(client.client_id, workspace.workspace_id, session_id)
+        claim = workspace._claims[session_id]
+        session = claim.loop.session
+        session.commit_agent_run(
+            [{"role": "user", "content": "restore this turn"}],
+            pending_last_compacted=session.last_compacted,
+            pending_action_summary="",
+            restore_before=session.capture_restore_before(),
+            restore_run_token=uuid4(),
+        )
+        await session.wait_for_pending_persist()
+        manager = RestoreManager(workspace.workspace_state, session_id)
+        await workspace._close_loop(session_id)
+        workspace._claims.pop(session_id)
+        persisted = Session.load(workspace.workspace_state, session_id)
+        plan = manager.inspect(persisted, persisted.restore_candidates()[0].anchor_id)
+        await manager.execute(plan, RestoreMode.CONVERSATION_ONLY)
+        assert (workspace.workspace_state.path / "restore" / session_id / "pending.json").exists()
+        assert not manager.has_pending_transaction()
+        await service.claim(client.client_id, workspace.workspace_id, session_id)
+        restored_claim = workspace._claims[session_id]
+        assert restored_claim.loop.session.messages == []
+        deleted = await workspace.delete_session(
+            client.client_id,
+            session_id,
+            restored_claim.version,
+            restored_claim.credential,
+            "delete-completed-restore",
+        )
+        assert deleted["deleted"] is True
+        assert not (workspace.workspace_state.path / "restore" / session_id).exists()
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_session_delete_rejects_active_work_and_restore_barriers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ConcurrentProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    sink = _CollectingSink()
+    try:
+        await service.start()
+        client = await service.register_client("cli")
+        workspace = await service.attach_workspace(client.client_id, workspace_path)
+        await service.connect_client(client.client_id, sink)
+        session_id = await workspace.create_draft(client.client_id)
+        claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
+        version = _claim_version(claim)
+        credential = cast(dict[str, object], claim["claim"])["reconnect_credential"]
+        assert isinstance(credential, str)
+        await workspace.input(client.client_id, session_id, version, "session-a", "run-a")
+        await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
+
+        with pytest.raises(ServiceError) as active:
+            await workspace.delete_session(
+                client.client_id, session_id, version, credential, "delete-active"
+            )
+        assert active.value.code == "session_busy"
+        assert not workspace.workspace_state.session_deletions_directory.exists()
+
+        await workspace.cancel(client.client_id, session_id, version, "run-a")
+        await asyncio.wait_for(sink.wait_for("run.completed", "run-a"), timeout=2)
+        deleted = await workspace.delete_session(
+            client.client_id, session_id, version, credential, "delete-after-cancel"
+        )
+        assert deleted["deleted"] is True
+
+        retained_id = await workspace.create_draft(client.client_id, reuse_startup_session=False)
+        retained_claim = await service.claim(client.client_id, workspace.workspace_id, retained_id)
+        retained_version = _claim_version(retained_claim)
+        retained_credential = cast(dict[str, object], retained_claim["claim"])[
+            "reconnect_credential"
+        ]
+        assert isinstance(retained_credential, str)
+        workspace._restore_owner = client.client_id
+        workspace._restore_session_id = retained_id
+        with pytest.raises(ServiceError) as restoring:
+            await workspace.delete_session(
+                client.client_id,
+                retained_id,
+                retained_version,
+                retained_credential,
+                "delete-during-restore",
+            )
+        assert restoring.value.code == "restore_pending"
+        workspace._restore_owner = None
+        workspace._restore_session_id = None
+        workspace._restore_blocked = True
+        with pytest.raises(ServiceError) as recovery:
+            await workspace.delete_session(
+                client.client_id,
+                retained_id,
+                retained_version,
+                retained_credential,
+                "delete-recovery-required",
+            )
+        assert recovery.value.code == "restore_pending"
+        assert not workspace.workspace_state.session_deletions_directory.joinpath(
+            f"{retained_id}.json"
+        ).exists()
+        workspace._restore_blocked = False
+        restore_root = workspace.workspace_state.path / "restore" / retained_id
+        restore_root.mkdir(parents=True)
+        pending_restore = restore_root / "pending.json"
+        pending_restore.write_text("unfinished restore safety state", encoding="utf-8")
+        with pytest.raises(ServiceError) as persisted_restore:
+            await workspace.delete_session(
+                client.client_id,
+                retained_id,
+                retained_version,
+                retained_credential,
+                "delete-persisted-restore",
+            )
+        assert persisted_restore.value.code == "restore_pending"
+        assert pending_restore.read_text(encoding="utf-8") == "unfinished restore safety state"
+        pending_restore.unlink()
+        await workspace.release(client.client_id, retained_id)
+    finally:
+        provider.release_a.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
 async def test_switch_keeps_active_claim_until_run_terminates_then_releases_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

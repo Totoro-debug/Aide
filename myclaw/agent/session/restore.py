@@ -216,6 +216,34 @@ class RestoreManager:
         self._session_id = session_id
         self._now = now
 
+    def has_pending_transaction(self) -> bool:
+        """Distinguish unfinished recovery from a retained completed Restore result."""
+        session_id = self._session_id
+        if session_id is None:
+            return _find_pending_session(self._workspace_state) is not None
+        Session._require_id(session_id)
+        workspace_root = HOST_FILESYSTEM.require_owned_directory(
+            self._workspace_state.workspace_path, within=self._workspace_state.workspace_path
+        )
+        state_root = HOST_FILESYSTEM.require_owned_directory(
+            self._workspace_state.path, within=workspace_root
+        )
+        restore_root = state_root / "restore"
+        if not HOST_FILESYSTEM.entry_exists(restore_root):
+            return False
+        owned_restore = HOST_FILESYSTEM.require_owned_directory(restore_root, within=state_root)
+        root = owned_restore / session_id
+        if not HOST_FILESYSTEM.entry_exists(root):
+            return False
+        owned_root = HOST_FILESYSTEM.require_owned_directory(root, within=owned_restore)
+        path = owned_root / "pending.json"
+        if not HOST_FILESYSTEM.entry_exists(path):
+            return False
+        pending = _read_pending(path)
+        if pending.session_id != session_id:
+            raise PendingRestoreError("pending restore belongs to a different Session")
+        return pending.phase is not _RestorePhase.COMPLETE or _failure_notification_pending(pending)
+
     def inspect(self, session: Session, anchor_id: int) -> RestorePlan:
         """Inspect persisted Session anchors and its active journal."""
         if not isinstance(session, Session):

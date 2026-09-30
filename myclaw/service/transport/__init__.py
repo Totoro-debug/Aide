@@ -161,6 +161,18 @@ class LocalServiceTransport:
             f"{_API_PREFIX}/projects/{{project_id}}/sessions/{{session_id}}",
             self._rename_project_session,
         )
+        app.router.add_delete(
+            f"{_API_PREFIX}/projects/{{project_id}}/sessions/{{session_id}}",
+            self._delete_project_session,
+        )
+        app.router.add_get(
+            f"{_API_PREFIX}/projects/{{project_id}}/sessions/{{session_id}}/deletion-status",
+            self._project_session_deletion_status,
+        )
+        app.router.add_post(
+            f"{_API_PREFIX}/projects/{{project_id}}/sessions/{{session_id}}/deletion-claim",
+            self._claim_project_session_deletion,
+        )
         app.router.add_get(
             f"{_API_PREFIX}/workspaces/{{workspace_id}}/sessions",
             self._list_sessions,
@@ -176,6 +188,10 @@ class LocalServiceTransport:
         app.router.add_patch(
             f"{_API_PREFIX}/workspaces/{{workspace_id}}/sessions/{{session_id}}",
             self._rename_session,
+        )
+        app.router.add_delete(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/sessions/{{session_id}}",
+            self._delete_session,
         )
         app.router.add_get(
             f"{_API_PREFIX}/workspaces/{{workspace_id}}/management/{{action:.*}}",
@@ -574,6 +590,26 @@ class LocalServiceTransport:
         )
         return web.json_response(result)
 
+    async def _project_session_deletion_status(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, client_required=True)
+        result = await self.service.project_session_deletion_status(
+            _context_client_id(context),
+            request.match_info["project_id"],
+            request.match_info["session_id"],
+        )
+        return web.json_response(result)
+
+    async def _claim_project_session_deletion(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        body = await _json_object(request)
+        request_id = _require_request_id(body)
+        result = await self.service.claim_project_session_deletion(
+            _context_client_id(context),
+            request.match_info["project_id"],
+            request.match_info["session_id"],
+        )
+        return web.json_response({"request_id": request_id, **result})
+
     async def _rename_project_session(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, mutation=True, client_required=True)
         client_id = _context_client_id(context)
@@ -619,6 +655,23 @@ class LocalServiceTransport:
         )
         return web.json_response({"request_id": request_id, "released": True})
 
+    async def _delete_project_session(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        client_id = _context_client_id(context)
+        body = await _json_object(request)
+        request_id = _require_request_id(body)
+        claim_version, confirm = _delete_fields(body)
+        result = await self.service.delete_project_session(
+            client_id,
+            request.match_info["project_id"],
+            request.match_info["session_id"],
+            claim_version,
+            _required_header(request, "X-MyClaw-Claim"),
+            request_id,
+        )
+        del confirm
+        return web.json_response({"request_id": request_id, **result})
+
     async def _list_sessions(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, client_required=True)
         client_id = _context_client_id(context)
@@ -651,6 +704,7 @@ class LocalServiceTransport:
         claim_credential = _required_header(request, "X-MyClaw-Claim")
         workspace = self.service.workspace(workspace_id)
         claim = workspace.require_claim(client_id, session_id, claim_version, claim_credential)
+        workspace._ensure_session_available(session_id)
         projection = workspace.projection(session_id)
         return web.json_response(
             {
@@ -688,6 +742,23 @@ class LocalServiceTransport:
                 "session": result,
             }
         )
+
+    async def _delete_session(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        client_id = _context_client_id(context)
+        body = await _json_object(request)
+        request_id = _require_request_id(body)
+        claim_version, confirm = _delete_fields(body)
+        result = await self.service.delete_session(
+            client_id,
+            request.match_info["workspace_id"],
+            request.match_info["session_id"],
+            claim_version,
+            _required_header(request, "X-MyClaw-Claim"),
+            request_id,
+        )
+        del confirm
+        return web.json_response({"request_id": request_id, **result})
 
     async def _management(self, request: web.Request) -> web.Response:
         context = self._authenticate(
@@ -985,6 +1056,20 @@ def _rename_fields(body: Mapping[str, object]) -> tuple[int, str, int]:
             status=422,
         )
     return claim_version, title, metadata_version
+
+
+def _delete_fields(body: Mapping[str, object]) -> tuple[int, bool]:
+    claim_version = body.get("claim_version")
+    if isinstance(claim_version, bool) or not isinstance(claim_version, int) or claim_version < 1:
+        raise service_error("validation_error", "claim_version is invalid.", status=422)
+    if body.get("confirm") is not True:
+        raise service_error(
+            "validation_error",
+            "Session deletion requires explicit confirmation.",
+            status=422,
+            field_errors={"confirm": "must be true"},
+        )
+    return claim_version, True
 
 
 def _context_client_id(context: _RequestContext) -> str:

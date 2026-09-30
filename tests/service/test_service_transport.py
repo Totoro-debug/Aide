@@ -901,6 +901,210 @@ async def test_workspace_session_rename_requires_claim_and_persists_metadata_ver
 
 
 @pytest.mark.asyncio
+async def test_workspace_session_delete_requires_confirmation_and_cleans_only_session_data(
+    tmp_path: Path,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target_id = await _persist_session(
+        workspace,
+        home=home,
+        title="Delete me",
+        created_at=datetime(2026, 3, 1, tzinfo=UTC),
+        content="target content",
+    )
+    other_id = await _persist_session(
+        workspace,
+        home=home,
+        title="Keep me",
+        created_at=datetime(2026, 3, 2, tzinfo=UTC),
+        content="other content",
+    )
+    state = WorkspaceState(workspace)
+    target_path = state.sessions_directory / f"{target_id}.jsonl"
+    other_path = state.sessions_directory / f"{other_id}.jsonl"
+    state.logs_directory.mkdir()
+    (state.logs_directory / f"{target_id}.log").write_text("target log", encoding="utf-8")
+    (state.logs_directory / f"{target_id}.1.log").write_text("rotated target log", encoding="utf-8")
+    (state.logs_directory / f"{other_id}.log").write_text("other log", encoding="utf-8")
+    artifact_root = state.path / "artifacts" / target_id
+    artifact_root.mkdir(parents=True)
+    (artifact_root / "tool.txt").write_text("target artifact", encoding="utf-8")
+    other_artifact = state.path / "artifacts" / other_id
+    other_artifact.mkdir(parents=True)
+    (other_artifact / "tool.txt").write_text("other artifact", encoding="utf-8")
+    restore_root = state.path / "restore" / target_id
+    restore_root.mkdir(parents=True)
+    (restore_root / "backup.bin").write_text("target restore backup", encoding="utf-8")
+    unrelated = workspace / "user-owned.txt"
+    unrelated.write_text("keep this file", encoding="utf-8")
+
+    port = _free_port()
+    client: ServiceClient | None = None
+    try:
+        client = await ServiceClient.connect_or_start(home, workspace, port=port)
+        await client.claim_session(target_id)
+        headers = {
+            "Authorization": f"Bearer {client.token}",
+            "X-MyClaw-CSRF": client.token,
+            "X-MyClaw-Client": client.client_id,
+            "X-MyClaw-Claim": client.claim_credential,
+        }
+        delete_url = (
+            f"{client.base_url}/api/v1/workspaces/{client.workspace_id}/sessions/{target_id}"
+        )
+        async with aiohttp.ClientSession() as http:
+            async with http.delete(
+                delete_url,
+                headers=headers,
+                json={
+                    "request_id": "delete-without-confirmation",
+                    "claim_version": client.claim_version,
+                    "confirm": False,
+                },
+            ) as response:
+                assert response.status == 422
+                body = await response.json()
+                assert body["code"] == "validation_error"
+                assert body["field_errors"]["confirm"] == "must be true"
+            assert target_path.exists()
+
+            delete_body = {
+                "request_id": "delete-target",
+                "claim_version": client.claim_version,
+                "confirm": True,
+            }
+            async with http.delete(delete_url, headers=headers, json=delete_body) as response:
+                assert response.status == 200
+                deleted = await response.json()
+            assert deleted == {
+                "request_id": "delete-target",
+                "workspace_id": client.workspace_id,
+                "session_id": target_id,
+                "deleted": True,
+            }
+            async with http.delete(delete_url, headers=headers, json=delete_body) as response:
+                assert response.status == 200
+                assert await response.json() == deleted
+
+        assert not target_path.exists()
+        assert other_path.exists()
+        assert not (state.logs_directory / f"{target_id}.log").exists()
+        assert not (state.logs_directory / f"{target_id}.1.log").exists()
+        assert (state.logs_directory / f"{other_id}.log").exists()
+        assert not artifact_root.exists()
+        assert (other_artifact / "tool.txt").exists()
+        assert not restore_root.exists()
+        assert unrelated.read_text(encoding="utf-8") == "keep this file"
+        assert target_id not in {item["id"] for item in await client.list_sessions()}
+        assert other_id in {item["id"] for item in await client.list_sessions()}
+    finally:
+        if client is not None:
+            await client.close()
+        await ServiceClient.stop_existing(home, port=port)
+
+
+@pytest.mark.asyncio
+async def test_project_session_delete_returns_project_identity(
+    tmp_path: Path,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    session_id = await _persist_session(
+        project,
+        home=home,
+        title="Project deletion",
+        created_at=datetime(2026, 3, 4, tzinfo=UTC),
+        content="project target",
+    )
+    project_id = ProjectCatalog(home).register(project).project_id
+    port = _free_port()
+    client: ServiceClient | None = None
+    try:
+        client = await ServiceClient.connect_or_start(home, project, port=port)
+        await client.claim_session(session_id)
+        headers = {
+            "Authorization": f"Bearer {client.token}",
+            "X-MyClaw-CSRF": client.token,
+            "X-MyClaw-Client": client.client_id,
+            "X-MyClaw-Claim": client.claim_credential,
+        }
+        async with aiohttp.ClientSession() as http:
+            async with http.delete(
+                f"{client.base_url}/api/v1/projects/{project_id}/sessions/{session_id}",
+                headers=headers,
+                json={
+                    "request_id": "delete-project-target",
+                    "claim_version": client.claim_version,
+                    "confirm": True,
+                },
+            ) as response:
+                assert response.status == 200
+                deleted = await response.json()
+        assert deleted == {
+            "request_id": "delete-project-target",
+            "project_id": project_id,
+            "workspace_id": client.workspace_id,
+            "session_id": session_id,
+            "deleted": True,
+        }
+    finally:
+        if client is not None:
+            await client.close()
+        await ServiceClient.stop_existing(home, port=port)
+
+
+@pytest.mark.asyncio
+async def test_session_delete_requires_the_current_client_claim(
+    tmp_path: Path,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session_id = await _persist_session(
+        workspace,
+        home=home,
+        title="Claimed target",
+        created_at=datetime(2026, 3, 5, tzinfo=UTC),
+        content="claimed content",
+    )
+    port = _free_port()
+    owner: ServiceClient | None = None
+    other: ServiceClient | None = None
+    try:
+        owner = await ServiceClient.connect_or_start(home, workspace, port=port)
+        other = await ServiceClient.connect_or_start(home, workspace, port=port)
+        await owner.claim_session(session_id)
+        headers = {
+            "Authorization": f"Bearer {other.token}",
+            "X-MyClaw-CSRF": other.token,
+            "X-MyClaw-Client": other.client_id,
+            "X-MyClaw-Claim": owner.claim_credential,
+        }
+        async with aiohttp.ClientSession() as http:
+            async with http.delete(
+                f"{other.base_url}/api/v1/workspaces/{other.workspace_id}/sessions/{session_id}",
+                headers=headers,
+                json={
+                    "request_id": "delete-foreign-claim",
+                    "claim_version": owner.claim_version,
+                    "confirm": True,
+                },
+            ) as response:
+                assert response.status == 409
+                assert (await response.json())["code"] == "stale_claim"
+        assert WorkspaceState(workspace).sessions_directory.joinpath(f"{session_id}.jsonl").exists()
+    finally:
+        if other is not None:
+            await other.close()
+        if owner is not None:
+            await owner.close()
+        await ServiceClient.stop_existing(home, port=port)
+
+
+@pytest.mark.asyncio
 async def test_web_draft_stays_empty_when_workspace_has_startup_restore(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

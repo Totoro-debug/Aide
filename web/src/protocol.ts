@@ -194,6 +194,29 @@ export interface SessionRelease {
   released: true;
 }
 
+export interface SessionDeletion {
+  request_id: string;
+  project_id: string;
+  workspace_id: string;
+  session_id: string;
+  deleted: true;
+}
+
+export interface SessionDeletionStatus {
+  project_id: string;
+  workspace_id: string;
+  session_id: string;
+  state: "deleted" | "deleting" | "present";
+}
+
+export interface SessionDeletionClaim {
+  request_id: string;
+  project_id: string;
+  workspace_id: string;
+  session_id: string;
+  claim: SessionClaim;
+}
+
 export interface BrowserSession {
   authenticated: true;
   csrf_token: string;

@@ -11,6 +11,9 @@ import type {
   ProjectSessionsResponse,
   SessionClaimResponse,
   SessionCreation,
+  SessionDeletion,
+  SessionDeletionStatus,
+  SessionDeletionClaim,
   SessionRenameResponse,
   SessionRelease,
   SessionSnapshot,
@@ -265,6 +268,41 @@ export function releaseProjectSession(
       body: { request_id: createRequestId(), claim_version: claimVersion },
       extraHeaders: { "X-MyClaw-Claim": claimCredential },
     },
+  );
+}
+
+export function deleteProjectSession(
+  projectId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+  requestId: string,
+): Promise<SessionDeletion> {
+  return request<SessionDeletion>(
+    `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: "DELETE",
+      mutation: true,
+      body: {
+        request_id: requestId,
+        claim_version: claimVersion,
+        confirm: true,
+      },
+      extraHeaders: { "X-MyClaw-Claim": claimCredential },
+    },
+  );
+}
+
+export function getProjectSessionDeletionStatus(projectId: string, sessionId: string): Promise<SessionDeletionStatus> {
+  return request<SessionDeletionStatus>(
+    `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/deletion-status`,
+  );
+}
+
+export function claimProjectSessionDeletion(projectId: string, sessionId: string): Promise<SessionDeletionClaim> {
+  return request<SessionDeletionClaim>(
+    `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/deletion-claim`,
+    { method: "POST", mutation: true, body: { request_id: createRequestId() } },
   );
 }
 

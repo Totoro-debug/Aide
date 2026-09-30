@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, readFile, readdir, rm } from "node:fs/promises";
+import { link, mkdir, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { URL } from "node:url";
-import { chromium } from "@playwright/test";
+import { chromium, expect } from "@playwright/test";
 
 import setup from "./e2e-setup.mjs";
 
@@ -25,13 +25,19 @@ try {
   });
   const primaryContext = await browser.newContext();
   const page = await primaryContext.newPage();
+  const browserErrors = [];
+  page.on("pageerror", (error) => browserErrors.push(error.message));
   async function waitForRecordedEvent(matches, description) {
     for (let attempt = 0; attempt < 200; attempt += 1) {
       const messages = await page.evaluate(() => window.__myclawTestMessages);
       if (matches(messages)) return;
       await delay(50);
     }
-    throw new Error(`Timed out waiting for ${description}`);
+    const events = await page.evaluate(() => window.__myclawTestMessages.slice(-12).map(
+      (event) => ({ type: event.type, text: event.payload?.text, code: event.error?.code }),
+    ));
+    const alerts = await page.getByRole("alert").allTextContents();
+    throw new Error(`Timed out waiting for ${description}: ${JSON.stringify({ events, alerts })}`);
   }
   async function waitForConfirmationRunCompletion() {
     let acceptedRun;
@@ -725,6 +731,15 @@ try {
   await renameDialog.getByLabel("Session title").waitFor();
   assert.equal(await renameDialog.getByLabel("Session title").inputValue(), "Renamed available history");
   await page.keyboard.press("Escape");
+  const deleteButton = page.getByRole("button", { name: "Delete session" });
+  await deleteButton.click();
+  const deleteDialog = page.getByRole("dialog");
+  await deleteDialog.getByText("Delete this Session permanently?", { exact: true }).waitFor();
+  await deleteDialog.getByText("The conversation JSONL, Session logs, tool Artifacts, and Restore backups will be removed.", { exact: false }).waitFor();
+  await page.keyboard.press("Escape");
+  await deleteDialog.waitFor({ state: "hidden" });
+  assert.equal(await deleteButton.evaluate((element) => element === document.activeElement), true,
+    "Delete dialog did not return focus to its trigger");
   let releaseRestoredClaim;
   let restoredClaimReceived;
   const restoredClaimReleased = new Promise((resolveRelease) => { releaseRestoredClaim = resolveRelease; });
@@ -750,6 +765,176 @@ try {
   await page.unroute(restoredClaimUrl, interceptRestoredClaim);
   await page.getByRole("button", { name: /Release session|释放会话/ }).click();
 
+  await page.getByLabel("Search by title").fill("");
+  for (const language of ["en", "zh-CN"]) {
+    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    for (const theme of ["light", "dark"]) {
+      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      for (const viewport of viewports) {
+        await page.setViewportSize(viewport);
+        const creation = page.waitForResponse((response) => response.request().method() === "POST"
+          && /\/projects\/[^/]+\/sessions$/.test(new URL(response.url()).pathname));
+        await page.getByRole("button", { name: language === "en" ? "New session" : "新建会话" }).click();
+        const { session_id: deleteId } = await (await creation).json();
+        await page.getByText(language === "en" ? "Empty draft" : "空白草稿", { exact: true }).waitFor();
+        await page.getByRole("button", { name: language === "en" ? "Release session" : "释放会话", exact: true }).waitFor();
+        const prompt = `retry once delete review ${language} ${theme} ${viewport.width}`;
+        await page.getByLabel(language === "en" ? "Message input" : "消息输入").fill(prompt);
+        await page.getByLabel(language === "en" ? "Message input" : "消息输入").press("Enter");
+        await waitForRecordedEvent((messages) => messages.some((completed) => completed.type === "run.completed"
+          && messages.some((accepted) => accepted.type === "input.accepted"
+            && accepted.payload?.text === prompt && accepted.run_id === completed.run_id)), "deletion fixture completion");
+        const deleteLabel = language === "en" ? "Delete session" : "删除会话";
+        const deleteDialog = page.getByRole("dialog", { name: language === "en"
+          ? "Delete this Session permanently?" : "永久删除此会话？" });
+        const deleteTrigger = page.getByRole("button", { name: deleteLabel, exact: true });
+        await deleteTrigger.waitFor();
+        const extendedCase = language === "en" && theme === "light" && viewport.width === 1440;
+        if (extendedCase) {
+          await page.getByRole("button", { name: "Rename session", exact: true }).click();
+          const titleDialog = page.getByRole("dialog");
+          await titleDialog.getByLabel("Session title").fill("A".repeat(128));
+          await titleDialog.getByRole("button", { name: "Save", exact: true }).click();
+          await page.getByRole("heading", { name: "A".repeat(60), exact: true }).waitFor();
+        }
+        const ownedRoot = resolve(firstProject, ".myclaw");
+        const artifactRoot = resolve(ownedRoot, "artifacts", deleteId);
+        const restoreRoot = resolve(ownedRoot, "restore", deleteId);
+        await mkdir(artifactRoot, { recursive: true });
+        await mkdir(restoreRoot, { recursive: true });
+        const protectedFile = resolve(firstProject, `delete-protected-${deleteId}.txt`);
+        await writeFile(protectedFile, "user data survives", "utf8");
+        const unsafeArtifact = resolve(artifactRoot, "linked.txt");
+        await writeFile(resolve(restoreRoot, "backup.bin"), "owned backup", "utf8");
+        const deleteUrl = `**/api/v1/projects/*/sessions/${deleteId}`;
+        const requestIds = [];
+        let mode = "conflict";
+        let releaseLostResponse;
+        let notifyLostResponse;
+        const lostResponseReady = new Promise((resolveReady) => { notifyLostResponse = resolveReady; });
+        const lostResponseRelease = new Promise((resolveRelease) => { releaseLostResponse = resolveRelease; });
+        await page.route(deleteUrl, async (route) => {
+          if (route.request().method() !== "DELETE") return route.continue();
+          requestIds.push(route.request().postDataJSON().request_id);
+          if (mode === "conflict") {
+            const headers = { ...route.request().headers(), "x-myclaw-claim": "invalid-claim" };
+            const rejected = await route.fetch({ headers });
+            assert.equal(rejected.status(), 409, "Invalid Claim deletion did not return a conflict");
+            mode = "failure";
+            return route.fulfill({ response: rejected });
+          }
+          if (mode === "lost-response") {
+            const success = await route.fetch();
+            assert.equal(success.status(), 200);
+            mode = "retry";
+            notifyLostResponse();
+            await lostResponseRelease;
+            return route.abort("failed");
+          }
+          return route.continue();
+        });
+        await deleteTrigger.click();
+        assert.equal(requestIds.length, 0, "Opening confirmation issued DELETE");
+        await page.keyboard.press("Escape");
+        await deleteDialog.waitFor({ state: "hidden" });
+        assert.equal(await deleteTrigger.evaluate((element) => element === document.activeElement), true);
+        await deleteTrigger.click();
+        if (extendedCase) {
+          await page.setViewportSize({ width: 375, height: 812 });
+          const mobileBounds = await deleteDialog.boundingBox();
+          assert.ok(mobileBounds && mobileBounds.x >= 0 && mobileBounds.y >= 0
+            && mobileBounds.x + mobileBounds.width <= 376 && mobileBounds.y + mobileBounds.height <= 813,
+          "Mobile deletion dialog is outside the viewport");
+          assert.equal(await deleteDialog.evaluate((element) => element.scrollWidth <= element.clientWidth), true,
+            "Long Session title overflows the delete dialog");
+          await page.screenshot({ path: resolve(output, "delete-en-light-375.png") });
+          await page.setViewportSize({ width: 812, height: 375 });
+          await deleteDialog.getByRole("button", { name: deleteLabel, exact: true }).scrollIntoViewIfNeeded();
+          const landscapeBounds = await deleteDialog.boundingBox();
+          assert.ok(landscapeBounds && landscapeBounds.y >= 0 && landscapeBounds.y + landscapeBounds.height <= 376,
+            "Landscape deletion dialog is outside the viewport");
+          await page.screenshot({ path: resolve(output, "delete-en-light-812-landscape.png") });
+          await page.setViewportSize(viewport);
+        }
+        await deleteDialog.getByRole("button", { name: deleteLabel, exact: true }).click();
+        await deleteDialog.getByRole("alert").waitFor();
+        assert.equal(await readFile(protectedFile, "utf8"), "user data survives");
+        await deleteDialog.getByRole("button", { name: language === "en" ? "Cancel" : "取消", exact: true }).click();
+        await deleteDialog.waitFor({ state: "hidden" });
+        assert.equal(await deleteTrigger.evaluate((element) => element === document.activeElement), true);
+        await expect(page.getByRole("button", { name: language === "en" ? "New session" : "新建会话" })).toBeEnabled();
+        await deleteTrigger.click();
+        await link(protectedFile, unsafeArtifact);
+        await deleteDialog.getByRole("button", { name: deleteLabel, exact: true }).click();
+        await deleteDialog.getByText(language === "en"
+          ? "Session deletion did not finish. Retry to continue cleanup."
+          : "会话删除尚未完成，请重试以继续清理。", { exact: true }).waitFor();
+        let otherPrompt = null;
+        if (extendedCase) {
+          await deleteDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+          await deleteDialog.waitFor({ state: "hidden" });
+          await page.getByRole("button", { name: "New session", exact: true }).click();
+          await page.getByRole("heading", { name: "New Session draft", exact: true }).waitFor();
+          otherPrompt = "retry once another session stays selected";
+          await page.getByLabel("Message input").fill(otherPrompt);
+          await page.getByLabel("Message input").press("Enter");
+          await waitForRecordedEvent((messages) => messages.some((completed) => completed.type === "run.completed"
+            && messages.some((accepted) => accepted.type === "input.accepted"
+              && accepted.payload?.text === otherPrompt && accepted.run_id === completed.run_id)), "unrelated Session completion");
+        }
+        await page.reload();
+        const deletionRetry = page.getByRole("button", { name: language === "en" ? "Retry" : "重试", exact: true });
+        await expect(deletionRetry).toBeEnabled();
+        await deletionRetry.click();
+        await deleteDialog.waitFor();
+        await page.keyboard.press("Escape");
+        await deleteDialog.waitFor({ state: "hidden" });
+        assert.equal(await deletionRetry.evaluate((element) => element === document.activeElement), true,
+          "Retry deletion dialog did not restore focus to Retry");
+        await deletionRetry.click();
+        if (otherPrompt !== null) {
+          await page.getByRole("log", { includeHidden: true }).getByText(otherPrompt, { exact: true }).waitFor({ state: "attached" });
+          await page.keyboard.press("Escape");
+          await page.getByLabel("Message input").fill("unsent input stays selected");
+          await deletionRetry.click();
+        }
+        const dialogBounds = await deleteDialog.boundingBox();
+        assert.ok(dialogBounds && dialogBounds.x >= 0 && dialogBounds.y >= 0
+          && dialogBounds.x + dialogBounds.width <= viewport.width + 1
+          && dialogBounds.y + dialogBounds.height <= viewport.height + 1, "Delete dialog overflow");
+        await page.screenshot({ path: resolve(output, `delete-${language}-${theme}-${viewport.width}.png`) });
+        await unlink(unsafeArtifact);
+        mode = "lost-response";
+        await deleteDialog.getByRole("button", { name: deleteLabel, exact: true }).click();
+        await lostResponseReady;
+        await page.keyboard.press("Escape");
+        assert.equal(await deleteDialog.isVisible(), true, "In-flight deletion closed on Escape");
+        assert.equal(await deleteDialog.getByRole("button", { name: deleteLabel, exact: true }).isDisabled(), true,
+          "In-flight deletion allowed a duplicate request");
+        releaseLostResponse();
+        await deleteDialog.getByRole("alert").waitFor();
+        await deleteDialog.getByRole("button", { name: deleteLabel, exact: true }).click();
+        await deleteDialog.waitFor({ state: "hidden" });
+        await page.unroute(deleteUrl);
+        assert.equal(new Set(requestIds.slice(1)).size, 1, "Deletion retry changed request_id");
+        const remaining = await readdir(resolve(ownedRoot, "sessions"));
+        assert.equal(remaining.includes(`${deleteId}.jsonl`), false);
+        assert.ok(remaining.includes(`${control.details.available_session_id}.jsonl`), "Another Session was deleted");
+        await assert.rejects(readFile(resolve(restoreRoot, "backup.bin")), { code: "ENOENT" });
+        await assert.rejects(readdir(artifactRoot), { code: "ENOENT" });
+        assert.equal(await readFile(protectedFile, "utf8"), "user data survives");
+        if (otherPrompt !== null) {
+          await page.getByRole("log").getByText(otherPrompt, { exact: true }).waitFor();
+          assert.equal(await page.getByLabel("Message input").inputValue(), "unsent input stays selected",
+            "Deleting another Session cleared the selected Session input");
+        }
+        assert.equal(await page.getByRole("heading", { name: "project-one", exact: true }).evaluate(
+          (element) => element === document.activeElement), true, "Deletion did not restore focus");
+        if (otherPrompt !== null) await page.getByRole("button", { name: "Release session", exact: true }).click();
+      }
+    }
+  }
+  await page.getByRole("button", { name: "EN", exact: true }).click();
   await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
   await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
 
@@ -927,7 +1112,8 @@ try {
   await page.getByRole("status").first().getByText(/Offline|离线/).waitFor({ timeout: 10000 });
   await page.unroute("**/api/v1/clients");
   await page.getByRole("status").first().getByText(/Online|在线/).waitFor({ timeout: 10000 });
-  console.log("Playwright production E2E: 4 locale/theme combinations x 3 viewports, ticket, refresh, focus, reconnect passed");
+  assert.deepEqual(browserErrors, [], "Browser JavaScript errors were reported");
+  console.log("Playwright production E2E: 4 locale/theme combinations x 3 viewports, session delete conflict/failure/refresh/lost-response retry, ticket, focus, reconnect passed");
 } finally {
   await secondContext?.close();
   await browser?.close();

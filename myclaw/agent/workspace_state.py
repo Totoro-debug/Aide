@@ -79,6 +79,11 @@ class WorkspaceState:
         return self.path / "logs"
 
     @property
+    def session_deletions_directory(self) -> Path:
+        """Durable fences for foreground Session deletion operations."""
+        return self.path / "session-deletions"
+
+    @property
     def schedule_path(self) -> Path:
         """Canonical Schedule Job state path."""
         return self.path / "schedule.json"

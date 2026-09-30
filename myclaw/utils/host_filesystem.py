@@ -83,6 +83,8 @@ class FilesystemAdapter(Protocol):
 
     def unlock(self, descriptor: int) -> None: ...
 
+    def remove_owned_entry(self, path: Path, *, root: Path, tree: bool) -> None: ...
+
 
 class WindowsFilesystemAdapter:
     """Windows native path behavior."""
@@ -94,6 +96,11 @@ class WindowsFilesystemAdapter:
         if native.startswith("\\\\"):
             return Path(f"\\\\?\\UNC\\{native.lstrip('\\')}")
         return Path(f"\\\\?\\{native}")
+
+    def remove_owned_entry(self, path: Path, *, root: Path, tree: bool) -> None:
+        from myclaw.utils._owned_deletion import remove_owned_windows
+
+        remove_owned_windows(path, root=root, tree=tree)
 
     def is_directory(self, status: stat_result) -> bool:
         attributes = getattr(status, "st_file_attributes", 0)
@@ -168,6 +175,11 @@ class PosixFilesystemAdapter:
 
     def path_for_io(self, path: Path) -> Path:
         return Path(path)
+
+    def remove_owned_entry(self, path: Path, *, root: Path, tree: bool) -> None:
+        from myclaw.utils._owned_deletion import remove_owned_posix
+
+        remove_owned_posix(path, root=root, tree=tree)
 
     def is_directory(self, status: stat_result) -> bool:
         return S_ISDIR(status.st_mode)
@@ -284,6 +296,16 @@ class HostFilesystem:
     def sync_file(self, descriptor: int) -> None:
         """Synchronize file content with host-appropriate compatibility behavior."""
         self._adapter.sync_file(descriptor)
+
+    def sync_parent_directory(self, path: Path) -> None:
+        """Synchronize a directory after removing or publishing an entry."""
+        self._adapter.sync_parent_directory(self.path_for_io(path))
+
+    def remove_owned_entry(self, path: Path, *, root: Path, tree: bool) -> None:
+        """Delete below a pinned root without following replacement directory aliases."""
+        self._adapter.remove_owned_entry(
+            self.path_for_io(path), root=self.path_for_io(root), tree=tree
+        )
 
     def restrict_private_directory(self, path: Path) -> None:
         """Narrow a private directory to host-appropriate owner access."""

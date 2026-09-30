@@ -40,6 +40,9 @@ import {
   claimProjectSession,
   createRequestId,
   createProjectSession,
+  deleteProjectSession,
+  getProjectSessionDeletionStatus,
+  claimProjectSessionDeletion,
   exchangeTicket,
   getProjectRemoval,
   getProjectSession,
@@ -361,7 +364,7 @@ export default function App() {
               seq: event.seq,
             };
             for (const listener of eventListenersRef.current) listener(event);
-            if (event.type === "session.claimed" || event.type === "session.released") {
+            if (event.type === "session.claimed" || event.type === "session.released" || event.type === "session.deleted") {
               setSessionEventVersion((version) => version + 1);
             }
             void refreshStatus();
@@ -1478,6 +1481,26 @@ interface PendingSubmission {
   command: ClientCommand;
 }
 
+interface PendingSessionDeletion {
+  claim: SessionClaim;
+  requestId: string;
+  attempted: boolean;
+  title?: string;
+}
+
+function readPendingDeletion(projectId: string): PendingSessionDeletion | null {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(`myclaw.session-delete.${projectId}`) ?? "null") as Partial<PendingSessionDeletion> | null;
+    if (value?.attempted !== true || typeof value.requestId !== "string"
+      || typeof value.claim?.session_id !== "string" || typeof value.claim.workspace_id !== "string"
+      || typeof value.claim.reconnect_credential !== "string"
+      || !Number.isInteger(value.claim.claim_version) || value.claim.claim_version < 1) return null;
+    return value as PendingSessionDeletion;
+  } catch {
+    return null;
+  }
+}
+
 function newLiveRun(
   localId: string,
   runId: string | null,
@@ -1735,6 +1758,12 @@ function ProjectSessionsContent({
   const [renameTitle, setRenameTitle] = useState("");
   const [renameBusy, setRenameBusy] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [pendingDeletion, setPendingDeletion] = useState<PendingSessionDeletion | null>(() => readPendingDeletion(projectId));
+  const pendingDeletionRef = useRef(pendingDeletion);
+  const deleteBusyRef = useRef(false);
   const [liveRunsBySession, setLiveRunsBySession] = useState<Record<string, LiveRun[]>>({});
   const [inputText, setInputText] = useState("");
   const [composerError, setComposerError] = useState<string | null>(null);
@@ -1749,12 +1778,27 @@ function ProjectSessionsContent({
   const refreshSessionsRef = useRef<((cursor?: string | null, append?: boolean) => Promise<void>) | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const renameTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
   const draftsBySessionRef = useRef<Record<string, string>>({});
   const pendingSubmissionsRef = useRef<PendingSubmission[]>([]);
   const pendingClientIdRef = useRef<string | null>(null);
   const needsReclaimRef = useRef(false);
   const attemptedRestoreRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
+
+  const clearPendingDeletion = useCallback(() => {
+    pendingDeletionRef.current = null;
+    setPendingDeletion(null);
+    try { sessionStorage.removeItem(`myclaw.session-delete.${projectId}`); } catch { /* Storage can be unavailable. */ }
+  }, [projectId]);
+
+  const rememberPendingDeletion = useCallback((operation: PendingSessionDeletion) => {
+    pendingDeletionRef.current = operation;
+    setPendingDeletion(operation);
+    try {
+      sessionStorage.setItem(`myclaw.session-delete.${projectId}`, JSON.stringify(operation));
+    } catch { /* In-memory retries remain available when browser storage is unavailable. */ }
+  }, [projectId]);
 
   const releaseOrphanClaim = useCallback((orphan: SessionClaim) => {
     void releaseProjectSession(
@@ -1768,6 +1812,7 @@ function ProjectSessionsContent({
   const releaseClaims = useCallback(() => {
     if (!projectId) return;
     for (const current of Object.values(claimsBySessionRef.current)) {
+      if (pendingDeletionRef.current?.attempted && pendingDeletionRef.current.claim.session_id === current.session_id) continue;
       void releaseProjectSession(
         projectId,
         current.session_id,
@@ -1896,11 +1941,32 @@ function ProjectSessionsContent({
       setSessionSummaries((current) => mergeSessionSummaries(current, response.sessions));
       workspaceIdRef.current = response.workspace_id;
       let restoreError: string | null = null;
+      const deletionOperation = pendingDeletionRef.current;
+      if (deletionOperation?.attempted && deletionOperation.claim.workspace_id !== response.workspace_id) {
+        const status = await getProjectSessionDeletionStatus(projectId, deletionOperation.claim.session_id);
+        if (!mountedRef.current || requestNumber !== sessionRequestRef.current) return;
+        if (status.state === "deleted" || status.state === "present") {
+          clearPendingDeletion();
+          setDeleteOpen(false);
+          if (claimRef.current?.session_id === deletionOperation.claim.session_id) clearClaimState();
+        } else {
+          const recovered = await claimProjectSessionDeletion(projectId, deletionOperation.claim.session_id);
+          if (!mountedRef.current || requestNumber !== sessionRequestRef.current) return;
+          rememberPendingDeletion({ ...deletionOperation, claim: recovered.claim });
+          setDeleteError("sessions.deletionInProgressError");
+        }
+      }
+      if (registeredClient !== null
+        && pendingDeletionRef.current?.claim.session_id === registeredClient.current_session_id) {
+        attemptedRestoreRef.current = registeredClient.web_control_credential;
+        onRestoreConsumed();
+      }
       if (
         registeredClient !== null &&
         attemptedRestoreRef.current !== registeredClient.web_control_credential &&
         registeredClient.current_workspace_id === response.workspace_id &&
         registeredClient.current_session_id !== null
+        && pendingDeletionRef.current?.claim.session_id !== registeredClient.current_session_id
       ) {
         attemptedRestoreRef.current = registeredClient.web_control_credential;
         onRestoreConsumed();
@@ -1932,7 +1998,8 @@ function ProjectSessionsContent({
       const shouldReclaim = connectionState === "online" && needsReclaimRef.current;
       if (shouldReclaim) needsReclaimRef.current = false;
       const currentClaim = claimRef.current;
-      if (currentClaim !== null && shouldReclaim) {
+      if (currentClaim !== null && shouldReclaim
+        && pendingDeletionRef.current?.claim.session_id !== currentClaim.session_id) {
         try {
           const restored = await claimProjectSession(projectId, currentClaim.session_id);
           if (!mountedRef.current) {
@@ -1967,7 +2034,7 @@ function ProjectSessionsContent({
       setLoadState("error");
       setActionError(sessionErrorKey(error));
     }
-  }, [authState, clearClaimState, connectionState, deferredSessionSearch, onRestoreConsumed, projectId, registeredClient, releaseOrphanClaim, rememberSession]);
+  }, [authState, clearClaimState, clearPendingDeletion, connectionState, deferredSessionSearch, onRestoreConsumed, projectId, registeredClient, releaseOrphanClaim, rememberPendingDeletion, rememberSession]);
 
   useEffect(() => {
     if (connectionState !== "online") needsReclaimRef.current = true;
@@ -2185,6 +2252,7 @@ function ProjectSessionsContent({
   }, [projectId, releaseClaims]);
 
   async function openSession(sessionId: string, isDraft: boolean, allowBusy = false) {
+    if (pendingDeletionRef.current?.attempted && pendingDeletionRef.current.claim.session_id === sessionId) return;
     if (busySessionId !== null && !allowBusy) return;
     const previousSessionId = claimRef.current?.session_id;
     setBusySessionId(sessionId);
@@ -2232,6 +2300,7 @@ function ProjectSessionsContent({
   async function releaseCurrent() {
     const current = claimRef.current;
     if (current === null) return;
+    if (pendingDeletionRef.current?.attempted && pendingDeletionRef.current.claim.session_id === current.session_id) return;
     setBusySessionId(current.session_id);
     setActionError(null);
     try {
@@ -2267,6 +2336,7 @@ function ProjectSessionsContent({
     const sessionId = selectedSessionRef.current;
     const text = inputText.trim();
     if (currentClaim === null || sessionId === null || !text) return;
+    if (pendingDeletionRef.current?.attempted && pendingDeletionRef.current.claim.session_id === sessionId) return;
     const activeRun = (liveRunsRef.current[sessionId] ?? []).some(isLiveRunActive);
     if (activeRun || connectionState !== "online") return;
     const localId = `local-${createRequestId()}`;
@@ -2376,6 +2446,103 @@ function ProjectSessionsContent({
     }
   }
 
+  function beginDelete(event: React.MouseEvent<HTMLButtonElement>) {
+    if (draft || claim === null || selectedSummary === undefined) return;
+    if (pendingDeletionRef.current?.attempted) return;
+    deleteTriggerRef.current = event.currentTarget;
+    if (pendingDeletionRef.current === null) {
+      const operation = { claim: { ...claim }, requestId: createRequestId(), attempted: false, title: selectedSummary.title };
+      pendingDeletionRef.current = operation;
+      setPendingDeletion(operation);
+    }
+    setDeleteError(null);
+    setDeleteOpen(true);
+  }
+
+  async function submitDelete(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const previousOperation = pendingDeletionRef.current;
+    if (previousOperation === null || deleteBusyRef.current) return;
+    const operation = { ...previousOperation, attempted: true };
+    rememberPendingDeletion(operation);
+    const currentClaim = operation.claim;
+    deleteBusyRef.current = true;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      try {
+        await deleteProjectSession(
+          projectId,
+          currentClaim.session_id,
+          currentClaim.claim_version,
+          currentClaim.reconnect_credential,
+          operation.requestId,
+        );
+      } catch (error) {
+        if (!(error instanceof ApiError) || !["stale_claim", "not_found", "stale_client", "session_busy", "restore_pending", "validation_error"].includes(error.body?.code ?? "")) throw error;
+        const status = await getProjectSessionDeletionStatus(projectId, currentClaim.session_id);
+        if (status.state === "deleting") {
+          if (["stale_claim", "not_found", "stale_client"].includes(error.body?.code ?? "")) {
+            const recovered = await claimProjectSessionDeletion(projectId, currentClaim.session_id);
+            rememberPendingDeletion({ ...operation, claim: recovered.claim });
+          }
+          setDeleteError("sessions.deletionInProgressError");
+          return;
+        }
+        if (status.state === "present") {
+          const rejectedOperation = { ...operation, attempted: false };
+          pendingDeletionRef.current = rejectedOperation;
+          setPendingDeletion(rejectedOperation);
+          try { sessionStorage.removeItem(`myclaw.session-delete.${projectId}`); } catch { /* Storage can be unavailable. */ }
+          throw error;
+        }
+      }
+      if (!mountedRef.current) return;
+      const sessionId = currentClaim.session_id;
+      clearPendingDeletion();
+      delete claimsBySessionRef.current[sessionId];
+      delete snapshotsBySessionRef.current[sessionId];
+      delete liveRunsRef.current[sessionId];
+      delete draftsBySessionRef.current[sessionId];
+      pendingSubmissionsRef.current = pendingSubmissionsRef.current.filter(
+        (item) => item.sessionId !== sessionId,
+      );
+      if (selectedSessionRef.current === sessionId) {
+        claimRef.current = null;
+        snapshotRef.current = null;
+        selectedSessionRef.current = null;
+        setClaim(null);
+        setSnapshot(null);
+        setSelectedSessionId(null);
+        setInputText("");
+        setDraft(false);
+        setComposerError(null);
+      }
+      setLiveRunsBySession((current) => {
+        const next = { ...current };
+        delete next[sessionId];
+        return next;
+      });
+      setSessionSummaries((current) => {
+        const next = { ...current };
+        delete next[sessionId];
+        return next;
+      });
+      setSessions((current) => current === null ? current : {
+        ...current,
+        sessions: current.sessions.filter((item) => item.id !== sessionId),
+      });
+      setDraftSessionIds((ids) => ids.filter((id) => id !== sessionId));
+      setDeleteOpen(false);
+      await refreshSessions();
+    } catch (error) {
+      if (mountedRef.current) setDeleteError(sessionDeleteErrorKey(error));
+    } finally {
+      deleteBusyRef.current = false;
+      if (mountedRef.current) setDeleteBusy(false);
+    }
+  }
+
   useEffect(() => {
     if (activeRun !== null) return;
     const target = confirmationTriggerRef.current;
@@ -2399,6 +2566,20 @@ function ProjectSessionsContent({
           {project !== undefined ? <p className={styles.pageDescription}>{project.path}</p> : null}
         </div>
         <div className={styles.pageActions}>
+          {pendingDeletion?.attempted ? (
+            <button
+              className={styles.dangerButton}
+              type="button"
+              disabled={deleteBusy || connectionState !== "online"}
+              onClick={(event) => {
+                deleteTriggerRef.current = event.currentTarget;
+                setDeleteOpen(true);
+              }}
+            >
+              <Trash2 size={15} aria-hidden="true" />
+              {t("controls.retry")}
+            </button>
+          ) : null}
           <button
             className={styles.iconButton}
             type="button"
@@ -2553,17 +2734,30 @@ function ProjectSessionsContent({
                   </div>
                   <div className={styles.sessionHeaderActions}>
                     {!draft && selectedSummary !== undefined ? (
-                      <button
-                        className={styles.iconButton}
-                        ref={renameTriggerRef}
-                        type="button"
-                        aria-label={t("controls.renameSession")}
-                        title={t("controls.renameSession")}
-                        disabled={busySessionId !== null || connectionState !== "online"}
-                        onClick={beginRename}
-                      >
-                        <Pencil size={15} aria-hidden="true" />
-                      </button>
+                      <>
+                        <button
+                          className={styles.iconButton}
+                          ref={renameTriggerRef}
+                          type="button"
+                          aria-label={t("controls.renameSession")}
+                          title={t("controls.renameSession")}
+                          disabled={busySessionId !== null || connectionState !== "online"}
+                          onClick={beginRename}
+                        >
+                          <Pencil size={15} aria-hidden="true" />
+                        </button>
+                        <button
+                          className={`${styles.iconButton} ${styles.dangerIconButton}`}
+                          ref={deleteTriggerRef}
+                          type="button"
+                          aria-label={t("controls.deleteSession")}
+                          title={t("controls.deleteSession")}
+                          disabled={busySessionId !== null || connectionState !== "online" || pendingDeletion?.attempted === true}
+                          onClick={beginDelete}
+                        >
+                          <Trash2 size={15} aria-hidden="true" />
+                        </button>
+                      </>
                     ) : null}
                     <button
                       className={styles.secondaryButton}
@@ -2639,6 +2833,77 @@ function ProjectSessionsContent({
           </section>
         </div>
       )}
+      <Dialog.Root
+        open={deleteOpen}
+        onOpenChange={(open) => {
+          if (!open && deleteBusyRef.current) return;
+          setDeleteOpen(open);
+          if (!open) {
+            setDeleteError(null);
+            if (!pendingDeletionRef.current?.attempted) {
+              pendingDeletionRef.current = null;
+              setPendingDeletion(null);
+            }
+          }
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className={styles.dialogOverlay} />
+          <Dialog.Content
+            className={`${styles.dialogContent} ${styles.sessionDeletionDialog}`}
+            onEscapeKeyDown={(event) => { if (deleteBusyRef.current) event.preventDefault(); }}
+            onPointerDownOutside={(event) => { if (deleteBusyRef.current) event.preventDefault(); }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              const trigger = deleteTriggerRef.current;
+              if (trigger?.isConnected && !trigger.disabled) trigger.focus();
+              else document.getElementById("sessions-heading")?.focus();
+            }}
+          >
+            <Dialog.Title className={styles.dialogTitle}>{t("sessions.deleteTitle")}</Dialog.Title>
+            <Dialog.Description className={styles.dialogDescription}>
+              {t("sessions.deleteDescription")}
+            </Dialog.Description>
+            {pendingDeletion?.title ? <p>{pendingDeletion.title}</p> : null}
+            <form className={styles.dialogForm} onSubmit={(event) => void submitDelete(event)}>
+              <p className={styles.dialogWarning}>
+                <TriangleAlert size={16} aria-hidden="true" />
+                {t("sessions.deleteDataNotice")}
+              </p>
+              {activeRun !== null ? (
+                <p className={styles.fieldError} role="alert">{t("sessions.busyError")}</p>
+              ) : null}
+              {deleteError !== null ? (
+                <p className={styles.fieldError} role="alert">{t(deleteError)}</p>
+              ) : null}
+              <div className={styles.dialogActions}>
+                <button
+                  className={styles.secondaryButton}
+                  type="button"
+                  disabled={deleteBusy}
+                  onClick={() => {
+                    setDeleteOpen(false);
+                    if (!pendingDeletionRef.current?.attempted) {
+                      pendingDeletionRef.current = null;
+                      setPendingDeletion(null);
+                    }
+                  }}
+                >
+                  {t("controls.cancel")}
+                </button>
+                <button
+                  className={styles.dangerButton}
+                  type="submit"
+                  disabled={deleteBusy || (activeRun !== null && pendingDeletion?.claim.session_id === selectedSessionId) || connectionState !== "online"}
+                >
+                  <Trash2 size={15} aria-hidden="true" />
+                  {t("controls.confirmDelete")}
+                </button>
+              </div>
+            </form>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
       <Dialog.Root
         open={renameOpen}
         onOpenChange={(open) => {
@@ -2800,10 +3065,20 @@ function sessionErrorKey(error: unknown): string {
       case "admission_closed": return "sessions.admissionClosedError";
       case "metadata_conflict": return "sessions.renameConflict";
       case "session_not_persisted": return "sessions.notPersistedError";
+      case "session_deleting": return "sessions.deletionInProgressError";
+      case "session_busy": return "sessions.busyError";
+      case "restore_pending": return "sessions.restorePendingError";
       case "validation_error": return "sessions.invalidTitle";
     }
   }
   return "sessions.actionError";
+}
+
+function sessionDeleteErrorKey(error: unknown): string {
+  if (error instanceof ApiError && error.body?.code === "persistence_error") {
+    return "sessions.deletePersistenceError";
+  }
+  return sessionErrorKey(error);
 }
 
 function scheduleText(job: RegisteredProject["saved_jobs"][number], t: (key: string, options?: Record<string, unknown>) => string): string {

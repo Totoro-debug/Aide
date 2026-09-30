@@ -380,6 +380,41 @@
         "request_id": {"$ref": "#/$defs/request_id"},
         "released": {"const": true}
       }
+    },
+    "session_deletion_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "workspace_id", "session_id", "state"],
+      "properties": {
+        "project_id": {"$ref": "#/$defs/identifier"},
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "session_id": {"$ref": "#/$defs/identifier"},
+        "state": {"enum": ["deleted", "deleting", "present"]}
+      }
+    },
+    "session_deletion_claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "project_id", "workspace_id", "session_id", "claim"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "project_id": {"$ref": "#/$defs/identifier"},
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "session_id": {"$ref": "#/$defs/identifier"},
+        "claim": {"$ref": "#/$defs/session_claim"}
+      }
+    },
+    "session_deletion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "project_id", "workspace_id", "session_id", "deleted"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "project_id": {"$ref": "#/$defs/identifier"},
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "session_id": {"$ref": "#/$defs/identifier"},
+        "deleted": {"const": true}
+      }
     }
   }
 }

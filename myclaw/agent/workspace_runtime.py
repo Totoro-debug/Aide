@@ -23,6 +23,7 @@ from myclaw.agent.permission import (
     ToolPermissionLevel,
     validate_permission_level,
 )
+from myclaw.agent.session.deletion import recover_session_deletions
 from myclaw.agent.session.restore import RestoreManager, RestoreResult
 from myclaw.agent.tools.mcp_keywords import MCPKeywordPreparer
 from myclaw.agent.tools.mcp_runtime import (
@@ -222,6 +223,13 @@ class WorkspaceRuntime:
                 state = cast(WorkspaceState, self._factories.workspace_state(self.workspace_path))
                 state.initialize(agent_home_root=self.agent_home.path)
                 self._workspace_state = state
+                if isinstance(state, WorkspaceState):
+                    try:
+                        recover_session_deletions(state)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as error:
+                        raise WorkspaceRuntimeRestoreError from error
 
                 if (
                     isinstance(state, WorkspaceState)

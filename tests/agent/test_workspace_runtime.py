@@ -8,12 +8,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
 from myclaw.agent.memory.manager import MemoryManager
+from myclaw.agent.session.deletion import begin_session_deletion
 from myclaw.agent.session.restore import RestoreResult
+from myclaw.agent.session.session import Session
 from myclaw.agent.tools.mcp_runtime import MCPStartupReport
 from myclaw.agent.workspace_runtime import WorkspaceRuntime, WorkspaceRuntimeFactories
 from myclaw.agent.workspace_state import WorkspaceState
@@ -221,6 +223,45 @@ async def test_workspace_runtime_shares_real_directory_owner_and_lifecycle(
     await replacement.start()
     assert _Restore.recoveries == 2
     await replacement.close()
+
+
+@pytest.mark.asyncio
+async def test_workspace_runtime_recovers_session_deletion_before_restore_start(
+    tmp_path: Path,
+) -> None:
+    _Restore.recoveries = 0
+    agent_home = AgentHome(tmp_path / "agent-home")
+    agent_home.initialize()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = WorkspaceState(workspace)
+    state.initialize(agent_home_root=agent_home.path)
+    session = Session.create(state, now=lambda: datetime(2026, 9, 30, tzinfo=UTC))
+    session.commit_agent_run(
+        [{"role": "user", "content": "remove at startup"}],
+        pending_last_compacted=session.last_compacted,
+        pending_action_summary="",
+        restore_before=session.capture_restore_before(),
+        restore_run_token=uuid4(),
+    )
+    await session.wait_for_pending_persist()
+    begin_session_deletion(state, session.session_id)
+
+    async def execute_job(_job: object) -> None:
+        return None
+
+    runtime = WorkspaceRuntime.acquire(
+        workspace=workspace,
+        agent_home=agent_home,
+        configuration=_configuration(),
+        execute_user_job=execute_job,
+        factories=_factories(),
+    )
+    await runtime.start()
+    assert not state.sessions_directory.joinpath(f"{session.session_id}.jsonl").exists()
+    assert not state.session_deletions_directory.joinpath(f"{session.session_id}.json").exists()
+    assert _Restore.recoveries == 1
+    await runtime.close()
 
 
 @pytest.mark.asyncio

@@ -221,6 +221,15 @@ class RestoreManager:
         session_id = self._session_id
         if session_id is None:
             return _find_pending_session(self._workspace_state) is not None
+        pending = self._existing_pending()
+        return pending is not None and (
+            pending.phase is not _RestorePhase.COMPLETE or _failure_notification_pending(pending)
+        )
+
+    def _existing_pending(self) -> _PendingTransaction | None:
+        session_id = self._session_id
+        if session_id is None:
+            return None
         Session._require_id(session_id)
         workspace_root = HOST_FILESYSTEM.require_owned_directory(
             self._workspace_state.workspace_path, within=self._workspace_state.workspace_path
@@ -230,19 +239,19 @@ class RestoreManager:
         )
         restore_root = state_root / "restore"
         if not HOST_FILESYSTEM.entry_exists(restore_root):
-            return False
+            return None
         owned_restore = HOST_FILESYSTEM.require_owned_directory(restore_root, within=state_root)
         root = owned_restore / session_id
         if not HOST_FILESYSTEM.entry_exists(root):
-            return False
+            return None
         owned_root = HOST_FILESYSTEM.require_owned_directory(root, within=owned_restore)
         path = owned_root / "pending.json"
         if not HOST_FILESYSTEM.entry_exists(path):
-            return False
+            return None
         pending = _read_pending(path)
         if pending.session_id != session_id:
             raise PendingRestoreError("pending restore belongs to a different Session")
-        return pending.phase is not _RestorePhase.COMPLETE or _failure_notification_pending(pending)
+        return pending
 
     def inspect(self, session: Session, anchor_id: int) -> RestorePlan:
         """Inspect persisted Session anchors and its active journal."""
@@ -459,6 +468,15 @@ class RestoreManager:
         if _failure_notification_pending(pending):
             pending.failure_notification_acknowledged = True
             _write_pending(self._workspace_state, pending)
+        return _result_from_pending(pending)
+
+    def completed_result(self) -> RestoreResult | None:
+        """Read durable feedback without advancing an unfinished transaction."""
+        pending = self._existing_pending()
+        if pending is None:
+            return None
+        if pending.phase is not _RestorePhase.COMPLETE:
+            raise PendingRestoreError("restore transaction is not complete")
         return _result_from_pending(pending)
 
     async def _continue_pending(self, pending: _PendingTransaction) -> RestoreResult:

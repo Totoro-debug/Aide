@@ -151,6 +151,71 @@ export interface SessionSummary {
 export interface SessionSnapshot {
   session_id: string;
   messages: Record<string, unknown>[];
+  restore_anchors: RestoreAnchor[];
+}
+
+export interface RestoreAnchor {
+  anchor_id: number;
+  run_token: string;
+  content: string;
+  timestamp: string;
+}
+
+export type RestoreMode = "conversation-only" | "files";
+
+export interface RestoreTarget {
+  canonical_target: string;
+  operation_id: number;
+  requested_targets: string[];
+  before_exists: boolean;
+  before_sha256: string | null;
+  latest_after_exists: boolean | null;
+  latest_after_sha256: string | null;
+  external: boolean;
+  session_owned: boolean;
+  backup_error: string | null;
+}
+
+export interface RestorePlan {
+  session_id: string;
+  anchor_id: number;
+  session_digest: string;
+  journal_revision: number;
+  removed_users: number;
+  removed_messages: number;
+  targets: RestoreTarget[];
+  external_target_count: number;
+  backup_gaps: Record<string, unknown>[];
+  integrity_issues: Record<string, unknown>[];
+  conflict_targets: string[];
+  discarded_run_tokens: string[];
+  available_modes: RestoreMode[];
+}
+
+export interface RestoreFileResult {
+  target: string;
+  operation_id: number;
+  status: "restored" | "unchanged" | "failed";
+  conflict: boolean;
+  error: string | null;
+}
+
+export interface RestoreResult {
+  session_id: string;
+  anchor_id: number;
+  mode: RestoreMode;
+  removed_users: number;
+  removed_messages: number;
+  file_results: RestoreFileResult[];
+  session_result: Record<string, unknown>;
+  failure_notification_acknowledged: boolean;
+}
+
+export interface ManagementResult {
+  handled: boolean;
+  output: string | null;
+  restore_plan?: RestorePlan;
+  restore_result?: RestoreResult | null;
 }
 
 export interface SessionClaim {

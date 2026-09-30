@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from aiohttp import web
 
+from myclaw.agent.session.backup_store import FileBackupStore
 from myclaw.agent.session.session import Session
 from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
@@ -300,6 +301,39 @@ async def _seed_session(
     return session.session_id
 
 
+async def _seed_restore_session(
+    home: AgentHome,
+    workspace: Path,
+    *,
+    title: str,
+    content: str,
+    created_at: datetime,
+    target_name: str,
+) -> tuple[str, Path]:
+    state = WorkspaceState(workspace)
+    state.initialize(agent_home_root=home.path)
+    session = Session.create(state, now=lambda: created_at)
+    session.update_metadata(title=title)
+    target = workspace / target_name
+    target.write_text("content before Restore\n", encoding="utf-8")
+    run_token = uuid4()
+    session.commit_agent_run(
+        [{"role": "user", "content": content}],
+        pending_last_compacted=session.last_compacted,
+        pending_action_summary="",
+        restore_before=session.capture_restore_before(),
+        restore_run_token=run_token,
+    )
+    store = FileBackupStore(state, session.session_id)
+    ticket = store.before_write(run_token, target)
+    if ticket is None:
+        raise RuntimeError("E2E Restore fixture could not create a file backup")
+    target.write_text("current branch\n", encoding="utf-8")
+    store.after_write(ticket)
+    await session.wait_for_pending_persist()
+    return session.session_id, target
+
+
 async def _stop_service(home: AgentHome, port: int) -> None:
     await ServiceClient.stop_existing(home, port=port)
     deadline = time.monotonic() + 15.0
@@ -349,6 +383,30 @@ async def _run_e2e(provider_base_url: str) -> None:
             content="Available history loaded after a successful Claim",
             created_at=datetime(2026, 9, 2, tzinfo=UTC),
         )
+        restore_session_id, restore_target = await _seed_restore_session(
+            home,
+            first_project,
+            title="Web restore history",
+            content="Restore branch should disappear from history",
+            created_at=datetime(2026, 9, 3, tzinfo=UTC),
+            target_name="restore-fixture.txt",
+        )
+        manual_restore_session_id, manual_restore_target = await _seed_restore_session(
+            home,
+            first_project,
+            title="Web manual restore history",
+            content="Manual Restore branch should disappear from history",
+            created_at=datetime(2026, 9, 4, tzinfo=UTC),
+            target_name="manual-restore-fixture.txt",
+        )
+        failure_restore_session_id, failure_restore_target = await _seed_restore_session(
+            home,
+            first_project,
+            title="Web failed restore history",
+            content="Failed Restore branch",
+            created_at=datetime(2026, 9, 5, tzinfo=UTC),
+            target_name="failed-restore-fixture.txt",
+        )
         port = _free_port()
         client = await ServiceClient.connect_or_start(home, cli_workspace, port=port)
         project_client = await ServiceClient.connect_or_start(home, first_project, port=port)
@@ -372,6 +430,12 @@ async def _run_e2e(provider_base_url: str) -> None:
                             "confirmation_path": CONFIRMATION_PATH,
                             "occupied_session_id": occupied_session_id,
                             "available_session_id": available_session_id,
+                            "restore_session_id": restore_session_id,
+                            "restore_target": str(restore_target),
+                            "manual_restore_session_id": manual_restore_session_id,
+                            "manual_restore_target": str(manual_restore_target),
+                            "failure_restore_session_id": failure_restore_session_id,
+                            "failure_restore_target": str(failure_restore_target),
                         }
                     ),
                     flush=True,

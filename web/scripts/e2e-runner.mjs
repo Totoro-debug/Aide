@@ -215,6 +215,133 @@ try {
   await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
   assert.equal(await page.getByText("schedule-only content", { exact: true }).count(), 0);
 
+  await sessionList.getByRole("button", { name: /Web restore history/ }).click();
+  await page.getByText("Restore branch should disappear from history", { exact: true }).waitFor();
+  const restoreTrigger = page.getByRole("button", { name: "Restore", exact: true });
+  let releaseInspection;
+  let inspectionReceived;
+  const inspectionReleased = new Promise((done) => { releaseInspection = done; });
+  const inspectionFetched = new Promise((done) => { inspectionReceived = done; });
+  const delayInspection = async (route) => {
+    const response = await route.fetch();
+    inspectionReceived();
+    await inspectionReleased;
+    await route.fulfill({ response });
+  };
+  await page.route("**/management/restore/inspect", delayInspection);
+  await restoreTrigger.click();
+  await page.getByRole("button", { name: "Inspect restore" }).click();
+  await inspectionFetched;
+  await page.getByRole("button", { name: /Web available history/, includeHidden: true }).evaluate((element) => element.click());
+  await page.getByRole("log", { includeHidden: true }).getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
+  releaseInspection();
+  await page.getByRole("dialog").waitFor({ state: "hidden" });
+  assert.equal(await page.getByText("Restore preview", { exact: true }).count(), 0);
+  await page.unroute("**/management/restore/inspect", delayInspection);
+  await sessionList.getByRole("button", { name: /Web restore history/ }).click();
+  await page.getByText("Restore branch should disappear from history", { exact: true }).waitFor();
+  for (const closeWithEscape of [true, false]) {
+    await restoreTrigger.click();
+    await page.getByRole("button", { name: "Inspect restore" }).click();
+    await page.getByText("Restore preview", { exact: true }).waitFor();
+    const cancelled = page.waitForResponse((response) => response.url().endsWith("/management/restore/cancel"));
+    if (closeWithEscape) await page.keyboard.press("Escape");
+    else await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+    assert.equal((await cancelled).status(), 200);
+    await page.getByRole("dialog").waitFor({ state: "hidden" });
+    await expect(restoreTrigger).toBeFocused();
+  }
+  await restoreTrigger.click();
+  await page.locator("#restore-anchor-select").selectOption("1");
+  await page.getByRole("button", { name: "Inspect restore" }).click();
+  await page.getByText("Restore preview", { exact: true }).waitFor();
+  await writeFile(resolve(control.details.restore_target), "changed by another Session\n", "utf8");
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+  await page.getByRole("button", { name: "Restore session" }).click();
+  const restoreNotice = page.getByRole("status").filter({ hasText: "Restore completed" });
+  await restoreNotice.waitFor();
+  await restoreNotice.getByText(control.details.restore_target, { exact: true }).waitFor();
+  assert.equal(
+    (await readFile(resolve(control.details.restore_target), "utf8")).replaceAll("\r\n", "\n"),
+    "content before Restore\n",
+  );
+  await expect(page.locator("#sessions-heading")).toBeFocused();
+  assert.equal(await page.getByText("Restore branch should disappear from history", { exact: true }).count(), 0);
+  await page.clock.runFor(9999);
+  assert.equal(await restoreNotice.count(), 1, "Restore feedback expired before 10 seconds");
+  await page.clock.runFor(1);
+  await restoreNotice.waitFor({ state: "hidden" });
+  await page.clock.resume();
+  const refreshResult = page.waitForResponse((response) => response.url().endsWith("/management/restore/result"));
+  await page.reload();
+  assert.equal((await refreshResult).status(), 200);
+  await restoreNotice.waitFor();
+  await restoreNotice.getByRole("button", { name: "Close" }).click();
+
+  await sessionList.getByRole("button", { name: /Web manual restore history/ }).click();
+  await page.getByText("Manual Restore branch should disappear from history", { exact: true }).waitFor();
+  const manualRestoreTrigger = page.getByRole("button", { name: "Restore", exact: true });
+  await manualRestoreTrigger.click();
+  await page.getByRole("button", { name: "Inspect restore" }).click();
+  await page.getByText("Restore preview", { exact: true }).waitFor();
+  await writeFile(resolve(control.details.manual_restore_target), "changed by another Session\n", "utf8");
+  let releaseExecution;
+  let executionReceived;
+  const executionReleased = new Promise((done) => { releaseExecution = done; });
+  const executionFetched = new Promise((done) => { executionReceived = done; });
+  const delayExecution = async (route) => {
+    const response = await route.fetch();
+    executionReceived();
+    await executionReleased;
+    await route.fulfill({ response });
+  };
+  await page.route("**/management/restore/execute", delayExecution);
+  await page.getByRole("button", { name: "Restore session" }).click();
+  await executionFetched;
+  await page.getByRole("button", { name: /Web available history/, includeHidden: true }).evaluate((element) => element.click());
+  await page.getByRole("log", { includeHidden: true }).getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
+  releaseExecution();
+  await page.getByRole("dialog").waitFor({ state: "hidden" });
+  assert.equal(await page.getByRole("status").filter({ hasText: "Restore completed" }).count(), 0);
+  await page.unroute("**/management/restore/execute", delayExecution);
+  await sessionList.getByRole("button", { name: /Web manual restore history/ }).click();
+  const manualRestoreNotice = page.getByRole("status").filter({ hasText: "Restore completed" });
+  await manualRestoreNotice.waitFor();
+  assert.equal(
+    (await readFile(resolve(control.details.manual_restore_target), "utf8")).replaceAll("\r\n", "\n"),
+    "content before Restore\n",
+  );
+  await manualRestoreNotice.getByRole("button", { name: "Close" }).click();
+  await manualRestoreNotice.waitFor({ state: "hidden" });
+
+  await sessionList.getByRole("button", { name: /Web failed restore history/ }).click();
+  await page.getByText("Failed Restore branch", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Restore", exact: true }).click();
+  await page.getByRole("button", { name: "Inspect restore" }).click();
+  await page.getByText("Restore preview", { exact: true }).waitFor();
+  await unlink(control.details.failure_restore_target);
+  await mkdir(control.details.failure_restore_target);
+  await page.getByRole("button", { name: "Restore session" }).click();
+  const failedRestoreNotice = page.getByRole("status").filter({ hasText: "Restore completed" });
+  await failedRestoreNotice.getByText("Failed", { exact: true }).waitFor();
+  await failedRestoreNotice.getByText(control.details.failure_restore_target, { exact: true }).waitFor();
+  await failedRestoreNotice.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("button", { name: "Review restore failure" }).click();
+  await failedRestoreNotice.getByRole("button", { name: "Acknowledge" }).waitFor();
+  const failureRefreshResult = page.waitForResponse((response) => response.url().endsWith("/management/restore/result"));
+  await page.reload();
+  assert.equal((await failureRefreshResult).status(), 200);
+  await failedRestoreNotice.getByRole("button", { name: "Acknowledge" }).waitFor();
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+  await page.clock.runFor(10_000);
+  await failedRestoreNotice.waitFor({ state: "hidden" });
+  await page.clock.resume();
+  await page.getByRole("button", { name: "Review restore failure" }).click();
+  await failedRestoreNotice.getByRole("button", { name: "Acknowledge" }).click();
+  await page.getByRole("button", { name: "Review restore failure" }).waitFor({ state: "hidden" });
+  const durableRestore = JSON.parse(await readFile(resolve(firstProject, ".myclaw", "restore", control.details.failure_restore_session_id, "pending.json"), "utf8"));
+  assert.equal(durableRestore.failure_notification_acknowledged, true);
+
   const draftResponsePromise = page.waitForResponse((response) => (
     response.request().method() === "POST"
     && response.url().includes("/api/v1/projects/")
@@ -987,6 +1114,20 @@ try {
         assert.ok(layout.width <= viewport.width, `Session horizontal overflow at ${viewport.width}x${viewport.height}`);
         assert.ok(layout.overlap < 1, `Session list overlaps history at ${viewport.width}x${viewport.height}`);
         await page.screenshot({ path: resolve(output, `sessions-${language}-${theme}-${viewport.width}.png`) });
+        const restore = page.getByRole("button", { name: "Restore", exact: true });
+        await restore.click();
+        await page.getByRole("button", { name: /Inspect restore|检查 Restore/ }).click();
+        await page.getByText(language === "en" ? "Restore preview" : "Restore 预览", { exact: true }).waitFor();
+        const restoreBounds = await page.getByRole("dialog").evaluate((element) => {
+          const rect = element.getBoundingClientRect();
+          return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+        });
+        assert.ok(restoreBounds.left >= 0 && restoreBounds.right <= viewport.width);
+        assert.ok(restoreBounds.top >= 0 && restoreBounds.bottom <= viewport.height);
+        await page.screenshot({ path: resolve(output, `restore-${language}-${theme}-${viewport.width}.png`) });
+        await page.keyboard.press("Escape");
+        await page.getByRole("dialog").waitFor({ state: "hidden" });
+        await expect(restore).toBeFocused();
       }
     }
   }
@@ -1113,7 +1254,7 @@ try {
   await page.unroute("**/api/v1/clients");
   await page.getByRole("status").first().getByText(/Online|在线/).waitFor({ timeout: 10000 });
   assert.deepEqual(browserErrors, [], "Browser JavaScript errors were reported");
-  console.log("Playwright production E2E: 4 locale/theme combinations x 3 viewports, session delete conflict/failure/refresh/lost-response retry, ticket, focus, reconnect passed");
+  console.log("Playwright production E2E: 4 locale/theme combinations x 3 viewports; Restore overwrite, cancel, stale responses, refresh, failure acknowledgement, 9999/10000ms feedback; delete, ticket, focus, reconnect passed");
 } finally {
   await secondContext?.close();
   await browser?.close();

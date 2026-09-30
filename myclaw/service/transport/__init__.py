@@ -705,16 +705,12 @@ class LocalServiceTransport:
         workspace = self.service.workspace(workspace_id)
         claim = workspace.require_claim(client_id, session_id, claim_version, claim_credential)
         workspace._ensure_session_available(session_id)
-        projection = workspace.projection(session_id)
         return web.json_response(
             {
                 "workspace_id": workspace_id,
                 "session_id": session_id,
                 "claim_version": claim.version,
-                "snapshot": {
-                    "session_id": projection.session_id,
-                    "messages": list(projection.messages),
-                },
+                "snapshot": workspace.session_snapshot(session_id),
             }
         )
 
@@ -771,18 +767,38 @@ class LocalServiceTransport:
             if request.method == "POST"
             else _request_id_from_request(request)
         )
-        session_value = body.get("current_session_id")
-        if not isinstance(session_value, str) or not session_value:
-            session_value = request.query.get("session_id") or _required_header(
-                request,
-                "X-MyClaw-Session",
+        raw_session_value = body.get("current_session_id")
+        session_value: str | None = (
+            raw_session_value if isinstance(raw_session_value, str) and raw_session_value else None
+        )
+        if session_value is None:
+            query_session = request.query.get("session_id")
+            if isinstance(query_session, str) and query_session:
+                session_value = query_session
+            else:
+                session_value = _required_header(request, "X-MyClaw-Session")
+        if request.method == "GET":
+            body["request_id"] = request_id
+            raw_query_claim_version = request.query.get("claim_version")
+            claim_version = (
+                _integer_query(request, "claim_version") if raw_query_claim_version else None
             )
+        else:
+            raw_body_claim_version = body.get("claim_version")
+            if isinstance(raw_body_claim_version, int) and not isinstance(
+                raw_body_claim_version, bool
+            ):
+                claim_version = raw_body_claim_version
+            else:
+                claim_version = None
         result = await self.service.handle_management(
             client_id,
             request.match_info["workspace_id"],
             session_value,
             request.match_info["action"],
             body,
+            claim_version=claim_version,
+            claim_credential=request.headers.get("X-MyClaw-Claim"),
         )
         return web.json_response({"request_id": request_id, "result": result})
 

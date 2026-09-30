@@ -318,10 +318,25 @@
     "session_snapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["session_id", "messages"],
+      "required": ["session_id", "messages", "restore_anchors"],
       "properties": {
         "session_id": {"$ref": "#/$defs/identifier"},
-        "messages": {"type": "array", "items": {"type": "object"}}
+        "messages": {"type": "array", "items": {"type": "object"}},
+        "restore_anchors": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/restore_anchor"}
+        }
+      }
+    },
+    "restore_anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["anchor_id", "run_token", "content", "timestamp"],
+      "properties": {
+        "anchor_id": {"type": "integer", "minimum": 1},
+        "run_token": {"$ref": "#/$defs/identifier"},
+        "content": {"type": "string"},
+        "timestamp": {"type": "string", "minLength": 1}
       }
     },
     "session_claim": {

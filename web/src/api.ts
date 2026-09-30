@@ -17,6 +17,11 @@ import type {
   SessionRenameResponse,
   SessionRelease,
   SessionSnapshot,
+  SessionClaim,
+  ManagementResult,
+  RestoreMode,
+  RestorePlan,
+  RestoreResult,
   ServiceCommandResult,
   ServiceErrorBody,
   ServiceEvent,
@@ -227,6 +232,129 @@ export function getProjectSession(
     `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}?claim_version=${claimVersion}`,
     { extraHeaders: { "X-MyClaw-Claim": claimCredential } },
   ).then((response) => response.snapshot);
+}
+
+function postRestoreManagement(
+  workspaceId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+  action: string,
+  payload: Record<string, unknown> = {},
+): Promise<ManagementResult> {
+  return request<{ request_id: string; result: ManagementResult }>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/management/${action}`,
+    {
+      method: "POST",
+      mutation: true,
+      body: {
+        request_id: createRequestId(),
+        current_session_id: sessionId,
+        claim_version: claimVersion,
+        ...payload,
+      },
+      extraHeaders: { "X-MyClaw-Claim": claimCredential },
+    },
+  ).then((response) => response.result);
+}
+
+export async function inspectRestore(
+  workspaceId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+  anchorId: number,
+): Promise<RestorePlan> {
+  const result = await postRestoreManagement(
+    workspaceId,
+    sessionId,
+    claimVersion,
+    claimCredential,
+    "restore/inspect",
+    { anchor_id: anchorId },
+  );
+  if (result.restore_plan === undefined) {
+    throw new ApiError(409, null);
+  }
+  return result.restore_plan;
+}
+
+export async function executeRestore(
+  workspaceId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+  plan: RestorePlan,
+  mode: RestoreMode,
+): Promise<{ result: RestoreResult; claimVersion: number; claimCredential: string }> {
+  const response = await request<{
+    request_id: string;
+    result: ManagementResult & { claim_version?: number; claim_credential?: string };
+  }>(`/workspaces/${encodeURIComponent(workspaceId)}/management/restore/execute`, {
+    method: "POST",
+    mutation: true,
+    body: {
+      request_id: createRequestId(),
+      current_session_id: sessionId,
+      claim_version: claimVersion,
+      plan: { anchor_id: plan.anchor_id },
+      mode,
+    },
+    extraHeaders: { "X-MyClaw-Claim": claimCredential },
+  });
+  const nextResult = response.result.restore_result;
+  const nextClaimVersion = response.result.claim_version;
+  const nextClaimCredential = response.result.claim_credential;
+  if (
+    nextResult === undefined ||
+    nextResult === null ||
+    typeof nextClaimVersion !== "number" ||
+    typeof nextClaimCredential !== "string"
+  ) {
+    throw new ApiError(409, null);
+  }
+  return {
+    result: nextResult,
+    claimVersion: nextClaimVersion,
+    claimCredential: nextClaimCredential,
+  };
+}
+
+export function getRestoreResult(
+  workspaceId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+): Promise<RestoreResult | null> {
+  return postRestoreManagement(
+    workspaceId,
+    sessionId,
+    claimVersion,
+    claimCredential,
+    "restore/result",
+  ).then((result) => result.restore_result ?? null);
+}
+
+export async function cancelRestore(claim: SessionClaim): Promise<void> {
+  await postRestoreManagement(
+    claim.workspace_id, claim.session_id, claim.claim_version,
+    claim.reconnect_credential, "restore/cancel",
+  );
+}
+
+export function acknowledgeRestore(
+  workspaceId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+): Promise<RestoreResult | null> {
+  return postRestoreManagement(
+    workspaceId,
+    sessionId,
+    claimVersion,
+    claimCredential,
+    "restore/acknowledge",
+  ).then((result) => result.restore_result ?? null);
 }
 
 export function createProjectSession(projectId: string): Promise<SessionCreation> {

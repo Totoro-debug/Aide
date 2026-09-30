@@ -20,6 +20,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   Send,
   ShieldX,
@@ -46,6 +47,7 @@ import {
   exchangeTicket,
   getProjectRemoval,
   getProjectSession,
+  getRestoreResult,
   getProjectSessions,
   getProjects,
   getServiceStatus,
@@ -56,6 +58,10 @@ import {
   renameProjectSession,
   removeProject,
   resumeProjectSchedule,
+  acknowledgeRestore,
+  cancelRestore,
+  executeRestore,
+  inspectRestore,
   restoreBrowserSession,
   ServiceCommandError,
 } from "./api";
@@ -73,6 +79,9 @@ import type {
   SessionClaim,
   SessionSnapshot,
   SessionSummary,
+  RestoreMode,
+  RestorePlan,
+  RestoreResult,
 } from "./protocol";
 import styles from "./App.module.css";
 
@@ -1761,6 +1770,14 @@ function ProjectSessionsContent({
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [restoreOpen, setRestoreOpen] = useState(false);
+  const [restoreAnchorId, setRestoreAnchorId] = useState<number | null>(null);
+  const [restorePlan, setRestorePlan] = useState<RestorePlan | null>(null);
+  const [restoreMode, setRestoreMode] = useState<RestoreMode>("conversation-only");
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [restoreNotice, setRestoreNotice] = useState<RestoreResult | null>(null);
+  const [pendingRestoreFailure, setPendingRestoreFailure] = useState<RestoreResult | null>(null);
   const [pendingDeletion, setPendingDeletion] = useState<PendingSessionDeletion | null>(() => readPendingDeletion(projectId));
   const pendingDeletionRef = useRef(pendingDeletion);
   const deleteBusyRef = useRef(false);
@@ -1779,6 +1796,11 @@ function ProjectSessionsContent({
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const renameTriggerRef = useRef<HTMLButtonElement | null>(null);
   const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const restoreTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const restoreBusyRef = useRef(false);
+  const restoreFocusPendingRef = useRef(false);
+  const restorePlanClaimRef = useRef<SessionClaim | null>(null);
+  const restoreCompletedClaimRef = useRef<SessionClaim | null>(null);
   const draftsBySessionRef = useRef<Record<string, string>>({});
   const pendingSubmissionsRef = useRef<PendingSubmission[]>([]);
   const pendingClientIdRef = useRef<string | null>(null);
@@ -1831,6 +1853,54 @@ function ProjectSessionsContent({
     snapshotRef.current = snapshot;
     if (snapshot !== null) snapshotsBySessionRef.current[snapshot.session_id] = snapshot;
   }, [snapshot]);
+
+  useEffect(() => {
+    if (connectionState !== "online" || claim === null || draft) return;
+    if (restoreCompletedClaimRef.current === claim) return;
+    let cancelled = false;
+    setRestoreNotice(null);
+    setPendingRestoreFailure(null);
+    void cancelRestore(claim).then(() => getRestoreResult(
+      claim.workspace_id,
+      claim.session_id,
+      claim.claim_version,
+      claim.reconnect_credential,
+    )).then((result) => {
+      if (!cancelled && mountedRef.current && claimRef.current === claim && result !== null) {
+        setRestoreNotice(result);
+        setPendingRestoreFailure(result.file_results.some((item) => item.status === "failed")
+          && !result.failure_notification_acknowledged ? result : null);
+      }
+    }).catch(() => {
+      // A missing result is normal; Claim recovery remains owned by the Session flow.
+    });
+    return () => { cancelled = true; };
+  }, [claim, connectionState, draft, projectId]);
+
+  useEffect(() => {
+    if (restorePlanClaimRef.current === null || restoreBusyRef.current) return;
+    if (connectionState !== "online" || restorePlanClaimRef.current !== claim) {
+      const previous = restorePlanClaimRef.current;
+      restorePlanClaimRef.current = null;
+      void cancelRestore(previous).catch(() => {});
+      setRestoreOpen(false);
+      setRestorePlan(null);
+    }
+  }, [claim, connectionState, restoreBusy]);
+
+  useEffect(() => {
+    if (restoreNotice === null) return;
+    const timer = window.setTimeout(() => setRestoreNotice(null), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [restoreNotice]);
+
+  useEffect(() => {
+    if (restoreOpen || !restoreFocusPendingRef.current) return;
+    restoreFocusPendingRef.current = false;
+    const trigger = restoreTriggerRef.current;
+    if (trigger?.isConnected && !trigger.disabled) trigger.focus();
+    else document.getElementById("sessions-heading")?.focus();
+  }, [restoreOpen]);
 
   useEffect(() => {
     selectedSessionRef.current = selectedSessionId;
@@ -1900,6 +1970,9 @@ function ProjectSessionsContent({
     setSnapshot(null);
     setSelectedSessionId(null);
     setDraft(false);
+    setRestoreOpen(false);
+    setRestorePlan(null);
+    setRestoreNotice(null);
   }, []);
 
   const adoptSnapshot = useCallback((nextSnapshot: SessionSnapshot) => {
@@ -2063,7 +2136,7 @@ function ProjectSessionsContent({
         currentClaim.claim_version,
         currentClaim.reconnect_credential,
       );
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || claimsBySessionRef.current[sessionId] !== currentClaim) return;
       adoptSnapshot(nextSnapshot);
       updateLiveRuns(sessionId, (runs) => runs.filter((run) => run.runId !== runId));
       void refreshSessionsRef.current?.();
@@ -2081,7 +2154,7 @@ function ProjectSessionsContent({
       if (Array.isArray(sessions)) {
         for (const item of sessions) {
           if (typeof item !== "object" || item === null) continue;
-          const entry = item as { workspace_id?: unknown; snapshot?: unknown };
+          const entry = item as { workspace_id?: unknown; claim_version?: unknown; snapshot?: unknown };
           const nextSnapshot = entry.snapshot as Partial<SessionSnapshot> | null;
           if (
             typeof entry.workspace_id !== "string"
@@ -2090,7 +2163,8 @@ function ProjectSessionsContent({
             || !Array.isArray(nextSnapshot.messages)
           ) continue;
           const currentClaim = claimsBySessionRef.current[nextSnapshot.session_id];
-          if (currentClaim?.workspace_id !== entry.workspace_id) continue;
+          if (currentClaim?.workspace_id !== entry.workspace_id
+            || currentClaim.claim_version !== entry.claim_version) continue;
           adoptSnapshot(nextSnapshot as SessionSnapshot);
           restored.add(nextSnapshot.session_id);
         }
@@ -2318,6 +2392,9 @@ function ProjectSessionsContent({
       setSnapshot(null);
       setSelectedSessionId(null);
       selectedSessionRef.current = null;
+      setRestoreOpen(false);
+      setRestorePlan(null);
+      setRestoreNotice(null);
       delete draftsBySessionRef.current[current.session_id];
       setInputText("");
       setDraft(false);
@@ -2398,6 +2475,165 @@ function ProjectSessionsContent({
   const selectedSummary = selectedSessionId === null ? undefined : sessionSummaries[selectedSessionId];
   const selectedLiveRuns = selectedSessionId === null ? [] : liveRunsBySession[selectedSessionId] ?? [];
   const activeRun = selectedLiveRuns.find(isLiveRunActive) ?? null;
+  const selectedRestoreAnchor = snapshot?.restore_anchors?.find(
+    (anchor) => anchor.anchor_id === restoreAnchorId,
+  );
+
+  function beginRestore(event: React.MouseEvent<HTMLButtonElement>) {
+    if (draft || claim === null || snapshot === null || activeRun !== null) return;
+    const anchors = snapshot.restore_anchors ?? [];
+    if (anchors.length === 0) return;
+    restoreTriggerRef.current = event.currentTarget;
+    setRestoreAnchorId(anchors[0].anchor_id);
+    setRestorePlan(null);
+    setRestoreMode("conversation-only");
+    setRestoreError(null);
+    setRestoreOpen(true);
+  }
+
+  async function closeRestore() {
+    if (restoreBusyRef.current) return;
+    const inspectedClaim = restorePlanClaimRef.current;
+    if (inspectedClaim !== null) {
+      restoreBusyRef.current = true;
+      setRestoreBusy(true);
+      try {
+        await cancelRestore(inspectedClaim);
+        restorePlanClaimRef.current = null;
+      } catch (error) {
+        if (mountedRef.current) setRestoreError(sessionErrorKey(error));
+        return;
+      } finally {
+        restoreBusyRef.current = false;
+        if (mountedRef.current) setRestoreBusy(false);
+      }
+    }
+    if (mountedRef.current) {
+      setRestoreOpen(false);
+      setRestorePlan(null);
+      setRestoreError(null);
+    }
+  }
+
+  async function inspectSelectedRestore() {
+    const currentClaim = claimRef.current;
+    if (currentClaim === null || restoreAnchorId === null || restoreBusyRef.current) return;
+    restoreBusyRef.current = true;
+    setRestoreBusy(true);
+    setRestoreError(null);
+    restorePlanClaimRef.current = currentClaim;
+    try {
+      const plan = await inspectRestore(
+        currentClaim.workspace_id,
+        currentClaim.session_id,
+        currentClaim.claim_version,
+        currentClaim.reconnect_credential,
+        restoreAnchorId,
+      );
+      if (!mountedRef.current || claimRef.current !== currentClaim) {
+        void cancelRestore(currentClaim).catch(() => {});
+        return;
+      }
+      setRestorePlan(plan);
+      setRestoreMode(plan.available_modes.includes("files") ? "files" : "conversation-only");
+    } catch (error) {
+      if (mountedRef.current && claimRef.current === currentClaim) {
+        setRestoreError(error instanceof ApiError && error.body?.code === "stale_claim"
+          ? "sessions.staleClaimError"
+          : "sessions.restoreError");
+      }
+    } finally {
+      restoreBusyRef.current = false;
+      if (mountedRef.current) setRestoreBusy(false);
+    }
+  }
+
+  async function submitRestore(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const currentClaim = claimRef.current;
+    const currentPlan = restorePlan;
+    if (currentClaim === null || currentPlan === null || restoreBusyRef.current
+      || currentPlan.session_id !== currentClaim.session_id
+      || restorePlanClaimRef.current !== currentClaim) return;
+    restoreBusyRef.current = true;
+    setRestoreBusy(true);
+    setRestoreError(null);
+    try {
+      const executed = await executeRestore(
+        currentClaim.workspace_id,
+        currentClaim.session_id,
+        currentClaim.claim_version,
+        currentClaim.reconnect_credential,
+        currentPlan,
+        restoreMode,
+      );
+      const nextClaim: SessionClaim = {
+        ...currentClaim,
+        claim_version: executed.claimVersion,
+        reconnect_credential: executed.claimCredential,
+      };
+      if (!mountedRef.current || claimRef.current !== currentClaim) return;
+      // Adopt the rotated credential before the snapshot fetch, which can be interrupted.
+      claimsBySessionRef.current[nextClaim.session_id] = nextClaim;
+      claimRef.current = nextClaim;
+      restoreCompletedClaimRef.current = nextClaim;
+      setClaim(nextClaim);
+      restorePlanClaimRef.current = null;
+      setRestoreNotice(executed.result);
+      setPendingRestoreFailure(executed.result.file_results.some((item) => item.status === "failed")
+        && !executed.result.failure_notification_acknowledged ? executed.result : null);
+      const nextSnapshot = await getProjectSession(
+        projectId,
+        nextClaim.session_id,
+        nextClaim.claim_version,
+        nextClaim.reconnect_credential,
+      );
+      if (!mountedRef.current || claimRef.current !== nextClaim) return;
+      rememberSession(nextClaim, nextSnapshot);
+      restoreFocusPendingRef.current = true;
+      setRestoreOpen(false);
+      setRestorePlan(null);
+      await refreshSessions();
+    } catch (error) {
+      if (mountedRef.current && claimRef.current?.session_id === currentClaim.session_id) {
+        if (restoreCompletedClaimRef.current === claimRef.current) {
+          setActionError(sessionErrorKey(error));
+          restoreFocusPendingRef.current = true;
+          setRestoreOpen(false);
+          setRestorePlan(null);
+        }
+        else setRestoreError(error instanceof ApiError && error.body?.code === "stale_claim"
+          ? "sessions.staleClaimError" : "sessions.restoreError");
+      }
+    } finally {
+      restoreBusyRef.current = false;
+      if (mountedRef.current) setRestoreBusy(false);
+    }
+  }
+
+  async function acknowledgeRestoreNotice() {
+    const currentClaim = claimRef.current;
+    if (currentClaim === null || restoreBusyRef.current) return;
+    restoreBusyRef.current = true;
+    setRestoreBusy(true);
+    try {
+      await acknowledgeRestore(
+        currentClaim.workspace_id,
+        currentClaim.session_id,
+        currentClaim.claim_version,
+        currentClaim.reconnect_credential,
+      );
+      if (mountedRef.current && claimRef.current === currentClaim) {
+        setRestoreNotice(null);
+        setPendingRestoreFailure(null);
+      }
+    } catch (error) {
+      if (mountedRef.current) setActionError(sessionErrorKey(error));
+    } finally {
+      restoreBusyRef.current = false;
+      if (mountedRef.current) setRestoreBusy(false);
+    }
+  }
 
   function beginRename() {
     if (draft || claim === null || selectedSummary === undefined) return;
@@ -2614,6 +2850,58 @@ function ProjectSessionsContent({
           <span>{t(actionError)}</span>
         </div>
       ) : null}
+      {restoreNotice !== null ? (
+        <div className={styles.restoreResultNotice} role="status" aria-live="polite">
+          <div className={styles.restoreResultContent}>
+            <CircleCheck size={18} aria-hidden="true" />
+            <div>
+              <strong>{t("sessions.restoreResultTitle")}</strong>
+              <p>{t("sessions.restoreResultConversation", { count: restoreNotice.removed_messages })}</p>
+              {restoreNotice.mode === "files" ? (
+                <p>{t("sessions.restoreResultFiles", { count: restoreNotice.file_results.length })}</p>
+              ) : null}
+              {restoreNotice.file_results.some((item) => item.status === "failed") ? (
+                <p className={styles.restoreResultFailure}>{t("sessions.restoreResultFailure")}</p>
+              ) : null}
+              {restoreNotice.file_results.some((item) => item.conflict) ? (
+                <p>{t("sessions.restoreResultConflict", {
+                  count: restoreNotice.file_results.filter((item) => item.conflict).length,
+                })}</p>
+              ) : null}
+              <ul className={styles.restoreTargetList}>
+                {restoreNotice.file_results.map((item) => (
+                  <li key={item.operation_id}>
+                    <code>{item.target}</code>
+                    <span>{t(`sessions.restoreFileStatus.${item.status}`)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+          <div className={styles.restoreResultActions}>
+            {restoreNotice.file_results.some((item) => item.status === "failed")
+              && !restoreNotice.failure_notification_acknowledged ? (
+              <button
+                className={styles.secondaryButton}
+                type="button"
+                disabled={restoreBusy}
+                onClick={() => void acknowledgeRestoreNotice()}
+              >
+                {t("controls.acknowledgeRestore")}
+              </button>
+            ) : null}
+            <button
+              className={styles.iconButton}
+              type="button"
+              aria-label={t("controls.close")}
+              title={t("controls.close")}
+              onClick={() => setRestoreNotice(null)}
+            >
+              <X size={16} aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {authUnavailable ? (
         <div className={styles.emptyState} role="status">
@@ -2757,6 +3045,30 @@ function ProjectSessionsContent({
                         >
                           <Trash2 size={15} aria-hidden="true" />
                         </button>
+                        {(snapshot.restore_anchors ?? []).length > 0 ? (
+                          <button
+                            className={styles.iconButton}
+                            ref={restoreTriggerRef}
+                            type="button"
+                            aria-label={t("controls.restoreSession")}
+                            title={t("controls.restoreSession")}
+                            disabled={busySessionId !== null || activeRun !== null || connectionState !== "online"}
+                            onClick={beginRestore}
+                          >
+                            <RotateCcw size={15} aria-hidden="true" />
+                          </button>
+                        ) : null}
+                        {pendingRestoreFailure?.session_id === claim.session_id ? (
+                          <button
+                            className={styles.iconButton}
+                            type="button"
+                            aria-label={t("controls.reviewRestoreFailure")}
+                            title={t("controls.reviewRestoreFailure")}
+                            onClick={() => setRestoreNotice(pendingRestoreFailure)}
+                          >
+                            <Info size={15} aria-hidden="true" />
+                          </button>
+                        ) : null}
                       </>
                     ) : null}
                     <button
@@ -2899,6 +3211,141 @@ function ProjectSessionsContent({
                   <Trash2 size={15} aria-hidden="true" />
                   {t("controls.confirmDelete")}
                 </button>
+              </div>
+            </form>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+      <Dialog.Root
+        open={restoreOpen}
+        onOpenChange={(open) => {
+          if (!open) void closeRestore();
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className={styles.dialogOverlay} />
+          <Dialog.Content
+            className={`${styles.dialogContent} ${styles.restoreDialog}`}
+            onEscapeKeyDown={(event) => { if (restoreBusyRef.current) event.preventDefault(); }}
+            onPointerDownOutside={(event) => { if (restoreBusyRef.current) event.preventDefault(); }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              const trigger = restoreTriggerRef.current;
+              if (trigger?.isConnected && !trigger.disabled) trigger.focus();
+              else document.getElementById("sessions-heading")?.focus();
+            }}
+          >
+            <Dialog.Title className={styles.dialogTitle}>{t("sessions.restoreTitle")}</Dialog.Title>
+            <Dialog.Description className={styles.dialogDescription}>
+              {t("sessions.restoreDescription")}
+            </Dialog.Description>
+            <form className={styles.dialogForm} onSubmit={(event) => void submitRestore(event)}>
+              <label className={styles.fieldLabel} htmlFor="restore-anchor-select">
+                {t("sessions.restoreAnchorLabel")}
+              </label>
+              {(snapshot?.restore_anchors ?? []).length > 0 ? (
+                <select
+                  id="restore-anchor-select"
+                  className={styles.textInput}
+                  value={restoreAnchorId ?? ""}
+                  disabled={restoreBusy || restorePlan !== null}
+                  onChange={(event) => {
+                    setRestoreAnchorId(Number(event.target.value));
+                    setRestorePlan(null);
+                    setRestoreError(null);
+                  }}
+                >
+                  <option value="" disabled>{t("sessions.restoreAnchorPlaceholder")}</option>
+                  {(snapshot?.restore_anchors ?? []).map((anchor) => (
+                    <option key={anchor.anchor_id} value={anchor.anchor_id}>
+                      #{anchor.anchor_id} · {formatSessionTime(anchor.timestamp, i18n.language)}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <p className={styles.dialogDescription}>{t("sessions.restoreAnchorEmpty")}</p>
+              )}
+              {selectedRestoreAnchor !== undefined && restorePlan === null ? (
+                <p className={styles.restoreAnchorPreview}>{selectedRestoreAnchor.content}</p>
+              ) : null}
+              {restorePlan !== null ? (
+                <div className={styles.restorePlan}>
+                  <p className={styles.restorePlanHeading}>{t("sessions.restorePreview")}</p>
+                  <p>{t("sessions.restoreRemoved", { count: restorePlan.removed_messages })}</p>
+                  <fieldset className={styles.restoreModeFieldset}>
+                    <legend className={styles.fieldLabel}>{t("sessions.restoreMode")}</legend>
+                    <label className={styles.restoreModeOption}>
+                      <input
+                        type="radio"
+                        name="restore-mode"
+                        value="conversation-only"
+                        checked={restoreMode === "conversation-only"}
+                        disabled={restoreBusy || !restorePlan.available_modes.includes("conversation-only")}
+                        onChange={() => setRestoreMode("conversation-only")}
+                      />
+                      {t("sessions.restoreConversationOnly")}
+                    </label>
+                    <label className={styles.restoreModeOption}>
+                      <input
+                        type="radio"
+                        name="restore-mode"
+                        value="files"
+                        checked={restoreMode === "files"}
+                        disabled={restoreBusy || !restorePlan.available_modes.includes("files")}
+                        onChange={() => setRestoreMode("files")}
+                      />
+                      {t("sessions.restoreFilesMode")}
+                    </label>
+                  </fieldset>
+                  <p className={styles.restorePlanHeading}>{t("sessions.restoreFiles")}</p>
+                  {restorePlan.targets.length === 0 ? (
+                    <p>{t("sessions.restoreNoFiles")}</p>
+                  ) : (
+                    <ul className={styles.restoreTargetList}>
+                      {restorePlan.targets.map((target) => (
+                        <li key={`${target.operation_id}-${target.canonical_target}`}>
+                          <code>{target.canonical_target}</code>
+                          {restorePlan.conflict_targets.includes(target.canonical_target) ? (
+                            <span className={styles.restoreConflict}>{t("sessions.restoreConflict")}</span>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ) : null}
+              {restoreError !== null ? (
+                <p className={styles.fieldError} role="alert">{t(restoreError)}</p>
+              ) : null}
+              <div className={styles.dialogActions}>
+                <button
+                  className={styles.secondaryButton}
+                  type="button"
+                  disabled={restoreBusy}
+                  onClick={() => void closeRestore()}
+                >
+                  {t("controls.cancel")}
+                </button>
+                {restorePlan === null ? (
+                  <button
+                    className={styles.primaryButton}
+                    type="button"
+                    disabled={restoreBusy || restoreAnchorId === null || connectionState !== "online"}
+                    onClick={() => void inspectSelectedRestore()}
+                  >
+                    <Info size={15} aria-hidden="true" />
+                    {restoreBusy ? t("controls.restoring") : t("controls.inspectRestore")}
+                  </button>
+                ) : (
+                  <button
+                    className={styles.dangerButton}
+                    type="submit"
+                    disabled={restoreBusy || connectionState !== "online"}
+                  >
+                    <RotateCcw size={15} aria-hidden="true" />
+                    {restoreBusy ? t("controls.restoring") : t("controls.executeRestore")}
+                  </button>
+                )}
               </div>
             </form>
           </Dialog.Content>

@@ -317,7 +317,7 @@ class RemoteManagementCommandDispatcher:
         return _management_result(await self.client.management("restore/cancel", {}))
 
     async def restore_acknowledge_failure(self) -> Any:
-        return _management_result(await self.client.management("restore/acknowledge-failure", {}))
+        return _management_result(await self.client.management("restore/acknowledge", {}))
 
 
 class ServiceClient:
@@ -785,15 +785,22 @@ class ServiceClient:
         )
 
     async def management(self, action: str, payload: dict[str, object]) -> dict[str, object]:
+        request_payload: dict[str, object] = {
+            "request_id": str(uuid4()),
+            "current_session_id": self.session_id,
+            **payload,
+        }
+        extra_headers: dict[str, str] = {}
+        if self.claim_version >= 1:
+            request_payload["claim_version"] = self.claim_version
+        if self.claim_credential:
+            extra_headers["X-MyClaw-Claim"] = self.claim_credential
         response = await self._http_request(
             "POST",
             f"/api/v1/workspaces/{self.workspace_id}/management/{action}",
-            payload={
-                "request_id": str(uuid4()),
-                "current_session_id": self.session_id,
-                **payload,
-            },
+            payload=request_payload,
             mutation=True,
+            extra_headers=extra_headers,
         )
         result = response.get("result")
         if not isinstance(result, dict):

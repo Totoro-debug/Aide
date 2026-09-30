@@ -165,6 +165,7 @@ class ClientState:
     session_delete_results: dict[str, tuple[tuple[object, ...], dict[str, object]]] = field(
         default_factory=dict
     )
+    management_results: dict[str, tuple[str, dict[str, object]]] = field(default_factory=dict)
     claimed: set[tuple[str, str]] = field(default_factory=set)
     attached_workspaces: set[str] = field(default_factory=set)
     current_workspace_id: str | None = None
@@ -172,6 +173,7 @@ class ClientState:
     disconnect_task: asyncio.Task[None] | None = None
     reconnect_deadline: float | None = None
     delivery_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    management_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     subscribed: bool = True
     resync_required: bool = False
     expired: bool = False
@@ -685,6 +687,8 @@ class WorkspaceServiceRuntime:
         self, client_id: str, session_id: str, *, close_idle: bool = True
     ) -> None:
         if self._restore_owner == client_id and self._restore_session_id == session_id:
+            await self._wait_restore_commit()
+        if self._restore_owner == client_id and self._restore_session_id == session_id:
             await self._release_restore_barrier(client_id)
         claim = self._claims.get(session_id)
         if claim is None:
@@ -738,6 +742,8 @@ class WorkspaceServiceRuntime:
         return claims
 
     async def expire_client(self, client_id: str) -> None:
+        if self._restore_owner == client_id:
+            await self._wait_restore_commit()
         for session_id, deletion_claim in tuple(self._deletion_claims.items()):
             if deletion_claim.client_id == client_id:
                 self._deletion_claims.pop(session_id, None)
@@ -804,6 +810,27 @@ class WorkspaceServiceRuntime:
         if loop is None:
             raise service_error("not_found", "Conversation Session was not found.", status=404)
         return loop.loop.project_foreground_conversation()
+
+    def session_snapshot(self, session_id: str) -> dict[str, object]:
+        """Return the claimed Session conversation plus presentation-safe Restore Anchors."""
+        self._ensure_session_available(session_id)
+        loop_state = self._loops.get(session_id)
+        if loop_state is None:
+            raise service_error("not_found", "Conversation Session was not found.", status=404)
+        projection = loop_state.loop.project_foreground_conversation()
+        return {
+            "session_id": projection.session_id,
+            "messages": list(projection.messages),
+            "restore_anchors": [
+                {
+                    "anchor_id": anchor.anchor_id,
+                    "run_token": str(anchor.run_token),
+                    "content": anchor.content,
+                    "timestamp": anchor.timestamp,
+                }
+                for anchor in loop_state.loop.session.restore_candidates()
+            ],
+        }
 
     def _session_summary(self, session: Session, client_id: str) -> dict[str, object]:
         claim = self._claims.get(session.session_id)
@@ -1152,6 +1179,11 @@ class WorkspaceServiceRuntime:
                 self.schedule_service.resume()
                 self.schedule_service.start()
 
+    async def _wait_restore_commit(self) -> None:
+        task = self._restore_commit_task
+        if task is not None and task is not asyncio.current_task():
+            await asyncio.shield(asyncio.gather(task, return_exceptions=True))
+
     async def _rebuild_restored_session(self, client_id: str, session_id: str) -> SessionClaim:
         claim = self._claims.get(session_id)
         if claim is None or claim.client_id != client_id:
@@ -1165,7 +1197,13 @@ class WorkspaceServiceRuntime:
         claim.credential = str(uuid4())
         return claim
 
-    def management_dispatcher(self, client_id: str, session_id: str) -> Any:
+    def management_dispatcher(
+        self,
+        client_id: str,
+        session_id: str,
+        claim_version: int | None = None,
+        claim_credential: str | None = None,
+    ) -> Any:
         """Build the existing typed Management dispatcher for one Claim."""
         from myclaw.management.commands import ManagementCommandDispatcher
         from myclaw.management.service import (
@@ -1174,18 +1212,27 @@ class WorkspaceServiceRuntime:
             RestoreListingReport,
         )
 
+        runtime = self.runtime
+        if runtime is None:
+            raise RuntimeError("Workspace service runtime is not ready")
         owned_claim = self._claims.get(session_id)
         if owned_claim is None:
             raise service_error("stale_claim", "Conversation Session Claim is missing or stale.")
-        initial_claim = self.require_claim(client_id, session_id, owned_claim.version)
+        initial_claim = self.require_claim(
+            client_id,
+            session_id,
+            owned_claim.version if claim_version is None else claim_version,
+            claim_credential,
+        )
+        initial_version = initial_claim.version
+        initial_credential = initial_claim.credential
 
         def current_loop() -> AgentLoop:
-            client = self.service.client(client_id)
-            selected_session = client.current_session_id or session_id
-            claim = self._claims.get(selected_session)
-            if claim is None or claim.client_id != client_id:
-                return initial_claim.loop
-            return claim.loop
+            self.service._require_client(client_id)
+            self._ensure_session_available(session_id)
+            return self.require_claim(
+                client_id, session_id, initial_version, initial_credential
+            ).loop
 
         async def prepare_resume(target_session_id: str) -> None:
             loop = current_loop()
@@ -1232,6 +1279,7 @@ class WorkspaceServiceRuntime:
             try:
                 await loop._pause_for_replacement()
                 await loop.wait_for_restore_idle()
+                current_loop()
                 anchors = loop.session.restore_candidates()
                 if not anchors:
                     await self._release_restore_barrier(client_id)
@@ -1245,13 +1293,20 @@ class WorkspaceServiceRuntime:
 
             loop = current_loop()
             if self._restore_owner != client_id or self._restore_loop is not loop:
-                raise ManagementError(
-                    ErrorInfo("model_invalid_request", "Session Restore is not active.")
-                )
+                if self._restore_owner is not None:
+                    raise ManagementError(
+                        ErrorInfo("model_invalid_request", "Session Restore is not active.")
+                    )
+                await restore_listing()
+                if self._restore_owner != client_id or self._restore_loop is not loop:
+                    raise ManagementError(
+                        ErrorInfo("model_invalid_request", "Session Restore is not active.")
+                    )
             try:
                 if not self._restore_schedule_paused:
                     self._restore_schedule_paused = True
                     await self.schedule_service.pause_and_wait_idle()
+                current_loop()
                 manager = RestoreManager(
                     self.workspace_state, loop.session.session_id, now=local_now
                 )
@@ -1264,8 +1319,14 @@ class WorkspaceServiceRuntime:
                 raise
 
         async def restore_commit(plan: Any, mode: Any) -> Any:
+            loop = current_loop()
             stored = self._restore_plans.get((client_id, plan.anchor_id))
-            if stored is None or self._restore_owner != client_id:
+            if (
+                stored is None
+                or stored.session_id != loop.session.session_id
+                or self._restore_owner != client_id
+                or self._restore_loop is not loop
+            ):
                 raise ManagementError(
                     ErrorInfo(
                         "model_invalid_request",
@@ -1302,14 +1363,19 @@ class WorkspaceServiceRuntime:
                         self._restore_commit_task = None
 
         async def restore_result() -> Any:
-            return self._restore_results.get((client_id, current_loop().session.session_id))
+            from myclaw.agent.session.restore import RestoreManager
+
+            session_id = current_loop().session.session_id
+            result = RestoreManager(
+                self.workspace_state, session_id, now=local_now
+            ).completed_result()
+            return result
 
         async def restore_acknowledge_failure() -> Any:
             from myclaw.agent.session.restore import RestoreManager
 
             session_id = current_loop().session.session_id
-            result = self._restore_results.get((client_id, session_id))
-            if result is None:
+            if await restore_result() is None:
                 return None
             acknowledged = RestoreManager(
                 self.workspace_state,
@@ -1321,11 +1387,10 @@ class WorkspaceServiceRuntime:
             return acknowledged
 
         async def restore_cancel() -> None:
-            await self._release_restore_barrier(client_id)
+            loop = current_loop()
+            if self._restore_session_id == loop.session.session_id:
+                await self._release_restore_barrier(client_id)
 
-        runtime = self.runtime
-        if runtime is None:
-            raise RuntimeError("Workspace service runtime is not ready")
         management = ManagementViewService(
             self.service.agent_home,
             current_agent_loop=current_loop,
@@ -2148,16 +2213,12 @@ class LocalService:
             _record, workspace = await self._project_workspace_owned(client_id, project_id)
             claim = workspace.require_claim(client_id, session_id, claim_version, claim_credential)
             workspace._ensure_session_available(session_id)
-            projection = workspace.projection(session_id)
             return {
                 "project_id": project_id,
                 "workspace_id": workspace.workspace_id,
                 "session_id": session_id,
                 "claim_version": claim.version,
-                "snapshot": {
-                    "session_id": projection.session_id,
-                    "messages": list(projection.messages),
-                },
+                "snapshot": workspace.session_snapshot(session_id),
             }
 
     async def release_project_session(
@@ -2506,7 +2567,6 @@ class LocalService:
             previous_workspace = self._workspaces.get(previous_workspace_id)
             if previous_workspace is not None:
                 await previous_workspace._release_if_idle(client_id, previous_session_id)
-        projection = workspace.projection(session_id)
         return {
             "claim": {
                 "workspace_id": workspace_id,
@@ -2514,10 +2574,7 @@ class LocalService:
                 "claim_version": claim.version,
                 "reconnect_credential": claim.credential,
             },
-            "snapshot": {
-                "session_id": projection.session_id,
-                "messages": list(projection.messages),
-            },
+            "snapshot": workspace.session_snapshot(session_id),
         }
 
     async def list_sessions(self, client_id: str, workspace_id: str) -> list[dict[str, object]]:
@@ -2596,10 +2653,105 @@ class LocalService:
         session_id: str,
         action: str,
         payload: Mapping[str, object],
+        *,
+        claim_version: int | None = None,
+        claim_credential: str | None = None,
+    ) -> dict[str, object]:
+        client = self._require_client(client_id)
+        request_id = payload.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            raise service_error("validation_error", "request_id is required.", status=422)
+        fingerprint_payload = {key: value for key, value in payload.items() if key != "request_id"}
+        try:
+            fingerprint = json.dumps(
+                {
+                    "workspace_id": workspace_id,
+                    "session_id": session_id,
+                    "action": action,
+                    "payload": fingerprint_payload,
+                    "claim_version": claim_version,
+                    "claim_credential": claim_credential,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as error:
+            raise service_error(
+                "validation_error", "Management payload is invalid.", status=422
+            ) from error
+        async with client.management_lock:
+            self._require_client(client_id)
+            previous = client.management_results.get(request_id)
+            if previous is not None:
+                if previous[0] != fingerprint:
+                    raise service_error(
+                        "request_reused",
+                        "request_id was already used for a different management request.",
+                        status=409,
+                    )
+                if action.startswith("restore/") or (
+                    action == "dispatch" and payload.get("command") == "/restore"
+                ):
+                    workspace = self.workspace(workspace_id)
+                    workspace._ensure_session_available(session_id)
+                    replay_version = previous[1].get("claim_version", claim_version)
+                    replay_credential = previous[1].get("claim_credential", claim_credential)
+                    if not isinstance(replay_version, int) or not isinstance(
+                        replay_credential, str
+                    ):
+                        raise service_error("stale_claim", "Conversation Session Claim is missing.")
+                    workspace.require_claim(
+                        client_id, session_id, replay_version, replay_credential
+                    )
+                return previous[1]
+            result = await self._handle_management_once(
+                client_id,
+                workspace_id,
+                session_id,
+                action,
+                payload,
+                claim_version=claim_version,
+                claim_credential=claim_credential,
+            )
+            client.management_results[request_id] = (fingerprint, result)
+            return result
+
+    async def _handle_management_once(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        action: str,
+        payload: Mapping[str, object],
+        *,
+        claim_version: int | None,
+        claim_credential: str | None,
     ) -> dict[str, object]:
         self._require_client(client_id)
         workspace = self.workspace(workspace_id)
-        dispatcher = workspace.management_dispatcher(client_id, session_id)
+        restore_actions = {
+            "restore/inspect",
+            "restore/execute",
+            "restore/result",
+            "restore/cancel",
+            "restore/acknowledge",
+            "restore/acknowledge-failure",
+        }
+        requires_restore_claim = action in restore_actions or (
+            action == "dispatch" and payload.get("command") == "/restore"
+        )
+        if requires_restore_claim and (claim_version is None or claim_credential is None):
+            raise service_error(
+                "stale_claim",
+                "Conversation Session Claim is missing or stale.",
+                retryable=True,
+            )
+        dispatcher = workspace.management_dispatcher(
+            client_id,
+            session_id,
+            claim_version if requires_restore_claim else None,
+            claim_credential if requires_restore_claim else None,
+        )
         if action == "dispatch":
             command = payload.get("command")
             if not isinstance(command, str):
@@ -2651,7 +2803,7 @@ class LocalService:
             result = await dispatcher.restore_result()
         elif action == "restore/cancel":
             result = await dispatcher.restore_cancel()
-        elif action == "restore/acknowledge-failure":
+        elif action in {"restore/acknowledge", "restore/acknowledge-failure"}:
             result = await dispatcher.restore_acknowledge_failure()
         else:
             raise service_error("validation_error", "Unsupported management action.", status=422)
@@ -3029,17 +3181,18 @@ class LocalService:
             workspace = self._workspaces.get(workspace_id)
             if workspace is None:
                 continue
+            claim = workspace._claims.get(session_id)
+            if claim is None or claim.client_id != client.client_id:
+                continue
             try:
-                projection = workspace.projection(session_id)
+                snapshot = workspace.session_snapshot(session_id)
             except ServiceError:
                 continue
             snapshots.append(
                 {
                     "workspace_id": workspace_id,
-                    "snapshot": {
-                        "session_id": projection.session_id,
-                        "messages": list(projection.messages),
-                    },
+                    "claim_version": claim.version,
+                    "snapshot": snapshot,
                 }
             )
         client.sequence += 1

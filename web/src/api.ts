@@ -1,6 +1,7 @@
 import type {
   BrowserSession,
   BrowserTicketExchange,
+  ClientCommand,
   ProjectListResponse,
   ProjectRegistration,
   ProjectScheduleResume,
@@ -9,6 +10,8 @@ import type {
   SessionClaimResponse,
   SessionCreation,
   SessionRelease,
+  SessionSnapshot,
+  ServiceCommandResult,
   ServiceErrorBody,
   ServiceEvent,
   ServiceStatus,
@@ -28,6 +31,23 @@ export class ApiError extends Error {
     this.status = status;
     this.body = body;
   }
+}
+
+export class ServiceCommandError extends Error {
+  readonly body: ServiceErrorBody | null;
+  readonly resultUnknown: boolean;
+
+  constructor(body: ServiceErrorBody | null, resultUnknown: boolean) {
+    super(body?.message ?? "The local service connection closed before the command was confirmed.");
+    this.name = "ServiceCommandError";
+    this.body = body;
+    this.resultUnknown = resultUnknown;
+  }
+}
+
+export interface EventStreamConnection {
+  close: () => void;
+  sendCommand: (command: ClientCommand) => Promise<ServiceCommandResult>;
 }
 
 export function setCsrfToken(value: string): void {
@@ -145,6 +165,18 @@ export function getProjectSessions(projectId: string): Promise<ProjectSessionsRe
   );
 }
 
+export function getProjectSession(
+  projectId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+): Promise<SessionSnapshot> {
+  return request<{ snapshot: SessionSnapshot }>(
+    `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}?claim_version=${claimVersion}`,
+    { extraHeaders: { "X-MyClaw-Claim": claimCredential } },
+  ).then((response) => response.snapshot);
+}
+
 export function createProjectSession(projectId: string): Promise<SessionCreation> {
   return request<SessionCreation>(
     `/projects/${encodeURIComponent(projectId)}/sessions`,
@@ -191,28 +223,63 @@ export function openEventStream(
   onOpen: () => void,
   onClose: () => void,
   onMessage: (value: ServiceEvent) => void,
-): WebSocket {
+): EventStreamConnection {
   if (webControlCredential === null) throw new ApiError(403, null);
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(
     `${protocol}//${window.location.host}${API_PREFIX}/events`,
     ["myclaw-v1", webControlCredential],
   );
+  const pending = new Map<
+    string,
+    { resolve: (result: ServiceCommandResult) => void; reject: (error: ServiceCommandError) => void }
+  >();
   socket.addEventListener("open", onOpen);
-  socket.addEventListener("close", onClose);
+  socket.addEventListener("close", () => {
+    for (const { reject } of pending.values()) reject(new ServiceCommandError(null, true));
+    pending.clear();
+    onClose();
+  });
   socket.addEventListener("error", onClose, { once: true });
   socket.addEventListener("message", (event) => {
     try {
       const value: unknown = JSON.parse(event.data as string);
+      if (isServiceCommandResponse(value)) {
+        const command = pending.get(value.request_id);
+        if (command === undefined) return;
+        pending.delete(value.request_id);
+        if (value.accepted === true && isServiceCommandResult(value.result)) {
+          command.resolve(value.result);
+        } else {
+          command.reject(new ServiceCommandError(isServiceError(value) ? value : null, false));
+        }
+        return;
+      }
       if (isServiceEvent(value)) onMessage(value);
     } catch {
       // Invalid events do not affect the authenticated connection state.
     }
   });
-  return socket;
+  return {
+    close: () => socket.close(),
+    sendCommand: (command) => {
+      if (socket.readyState !== WebSocket.OPEN) {
+        return Promise.reject(new ServiceCommandError(null, false));
+      }
+      return new Promise<ServiceCommandResult>((resolve, reject) => {
+        pending.set(command.request_id, { resolve, reject });
+        try {
+          socket.send(JSON.stringify(command));
+        } catch {
+          pending.delete(command.request_id);
+          reject(new ServiceCommandError(null, true));
+        }
+      });
+    },
+  };
 }
 
-function createRequestId(): string {
+export function createRequestId(): string {
   if (typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
@@ -227,6 +294,21 @@ function isServiceError(value: unknown): value is ServiceErrorBody {
   return typeof candidate.code === "string" && typeof candidate.message === "string";
 }
 
+function isServiceCommandResponse(
+  value: unknown,
+): value is { request_id: string; accepted?: boolean; result?: unknown } & Partial<ServiceErrorBody> {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as { request_id?: unknown; accepted?: unknown; code?: unknown };
+  return (
+    typeof candidate.request_id === "string"
+    && (candidate.accepted === true || typeof candidate.code === "string")
+  );
+}
+
+function isServiceCommandResult(value: unknown): value is ServiceCommandResult {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function isServiceEvent(value: unknown): value is ServiceEvent {
   if (typeof value !== "object" || value === null) return false;
   const event = value as Partial<ServiceEvent>;
@@ -236,7 +318,7 @@ function isServiceEvent(value: unknown): value is ServiceEvent {
     typeof event.stream_id === "string" &&
     typeof event.seq === "number" &&
     typeof event.type === "string" &&
-    typeof event.workspace_id === "string" &&
+    (event.workspace_id === null || typeof event.workspace_id === "string") &&
     (event.project_id === null || typeof event.project_id === "string") &&
     (event.session_id === null || typeof event.session_id === "string") &&
     (event.run_id === null || typeof event.run_id === "string") &&

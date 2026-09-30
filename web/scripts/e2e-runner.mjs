@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, readdir, rm } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "@playwright/test";
 
 import setup from "./e2e-setup.mjs";
@@ -23,12 +24,28 @@ try {
   });
   const primaryContext = await browser.newContext();
   const page = await primaryContext.newPage();
+  async function waitForRecordedEvent(matches, description) {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const messages = await page.evaluate(() => window.__myclawTestMessages);
+      if (matches(messages)) return;
+      await delay(50);
+    }
+    throw new Error(`Timed out waiting for ${description}`);
+  }
   await page.addInitScript(() => {
     const OriginalWebSocket = window.WebSocket;
+    window.__myclawTestMessages = [];
     window.WebSocket = class extends OriginalWebSocket {
       constructor(...args) {
         super(...args);
         window.__myclawTestSocket = this;
+        this.addEventListener("message", (event) => {
+          try {
+            window.__myclawTestMessages.push(JSON.parse(event.data));
+          } catch {
+            // Only JSON service messages are relevant to this test.
+          }
+        });
       }
     };
   });
@@ -65,7 +82,7 @@ try {
   await replay.close();
 
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文" }).click();
+    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
     assert.equal(await page.locator("html").getAttribute("lang"), language);
     await page.getByRole("heading", { name: language === "en" ? "Service status" : "服务状态" }).waitFor();
     for (const theme of ["light", "dark"]) {
@@ -108,7 +125,7 @@ try {
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
   await page.getByRole("status").first().getByText("在线").waitFor();
 
-  await page.getByRole("button", { name: "EN" }).click();
+  await page.getByRole("button", { name: "EN", exact: true }).click();
   await page.getByRole("link", { name: "Projects" }).click();
   await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
   await page.getByRole("heading", { name: "No projects registered" }).waitFor();
@@ -174,6 +191,190 @@ try {
 
   await sessionList.getByRole("button", { name: /Web available history/ }).click();
   await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
+
+  const composer = page.getByLabel("Message input");
+  await composer.fill("tool states");
+  await composer.press("Enter");
+  await waitForRecordedEvent((messages) => messages.some((event) => (
+    event.type === "input.accepted" && event.payload?.text === "tool states"
+  )), "Tool Run acceptance");
+  const toolGroup = page.locator("article[data-run-id] details").filter({ hasText: "Tool activity" }).first();
+  await toolGroup.locator("summary").first().waitFor();
+  assert.equal(await toolGroup.getAttribute("open"), null, "Tool activity should default to collapsed");
+  await toolGroup.locator("summary").first().click();
+  await toolGroup.getByText("Completed", { exact: true }).waitFor();
+  await toolGroup.getByText("Failed", { exact: true }).waitFor();
+  await toolGroup.getByText("Rejected", { exact: true }).waitFor();
+  await toolGroup.getByText("Running", { exact: true }).waitFor();
+
+  const newSessionResponsePromise = page.waitForResponse((response) => (
+    response.request().method() === "POST"
+    && response.url().includes("/api/v1/projects/")
+    && response.url().endsWith("/sessions")
+  ));
+  await page.getByRole("button", { name: "New session" }).click();
+  const conversationSessionId = (await (await newSessionResponsePromise).json()).session_id;
+  await page.getByText("Empty draft", { exact: true }).waitFor();
+  await page.getByLabel("Message input").fill("streaming markdown");
+  await page.getByLabel("Message input").press("Shift+Enter");
+  await page.getByLabel("Message input").type("second line");
+  const multilinePrompt = "streaming markdown\nsecond line";
+  assert.equal(await page.getByLabel("Message input").inputValue(), multilinePrompt);
+  await page.getByLabel("Message input").evaluate((element) => {
+    element.dispatchEvent(new element.ownerDocument.defaultView.KeyboardEvent("keydown", {
+      key: "Enter", bubbles: true, isComposing: true,
+    }));
+  });
+  assert.equal(await page.getByLabel("Message input").inputValue(), multilinePrompt, "IME Enter submitted the prompt");
+  await page.getByLabel("Message input").press("Enter");
+  await page.getByText("Streamed answer", { exact: true }).waitFor();
+  assert.equal(await page.getByText("The response arrived in multiple chunks.", { exact: true }).count(), 0,
+    "The complete answer appeared before its first streamed frame was observed");
+  await sessionList.getByRole("button", { name: /Web available history/ }).click();
+  const backgroundDraft = page.getByRole("button", { name: /New Session draft/ });
+  await backgroundDraft.getByText("Running", { exact: true }).waitFor();
+  await backgroundDraft.click();
+  await page.getByText("Persisted Markdown", { exact: true }).waitFor();
+  await waitForRecordedEvent((messages) => messages.some((event) => (
+    event.type === "run.completed" && messages.some((accepted) => (
+      accepted.type === "input.accepted" && accepted.payload?.text === multilinePrompt && accepted.run_id === event.run_id
+    ))
+  )), "multiline Run completion");
+  const acceptedConversation = await page.evaluate((prompt) => window.__myclawTestMessages.filter((event) => (
+    event.type === "input.accepted" && event.payload?.text === prompt
+  )), multilinePrompt);
+  assert.equal(acceptedConversation.length, 1, "Multiline prompt was accepted more than once");
+  const conversationRunId = acceptedConversation[0].run_id;
+  const frames = await page.evaluate((runId) => window.__myclawTestMessages.filter((event) => (
+    event.type === "run.output" && event.run_id === runId
+    && event.payload?.message?.metadata?._stream_delta === true
+  )), conversationRunId);
+  assert.ok(frames.length >= 3, `Expected progressive Markdown frames, received ${frames.length}`);
+  assert.equal(await page.locator('img[src="https://example.com/remote.png"]').count(), 0,
+    "Remote Markdown image was loaded");
+  assert.equal(await page.locator('a[href^="javascript:"]').count(), 0, "Unsafe Markdown link survived rendering");
+  const codeBlock = page.locator("pre").filter({ hasText: "x".repeat(100) }).first();
+  assert.equal(await codeBlock.evaluate((element) => element.scrollWidth > element.clientWidth), true,
+    "Long code block did not scroll locally");
+  let persistedConversation;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      const records = (await readFile(resolve(firstProject, ".myclaw", "sessions", `${conversationSessionId}.jsonl`), "utf8"))
+        .trim().split("\n").map((line) => JSON.parse(line));
+      if (records.some((record) => record.role === "assistant" && String(record.content).includes("Persisted Markdown"))) {
+        persistedConversation = records;
+        break;
+      }
+    } catch { /* Persistence may still be in progress. */ }
+    await delay(50);
+  }
+  assert.ok(persistedConversation, "Completed Session JSONL was not persisted");
+  assert.equal(persistedConversation.filter((record) => record.role === "user" && record.content === multilinePrompt).length, 1);
+  await page.getByText("Empty draft", { exact: true }).waitFor({ state: "detached" });
+
+  await page.evaluate(() => {
+    const socket = window.__myclawTestSocket;
+    window.__myclawRetrySocket = socket;
+    const send = socket.send.bind(socket);
+    socket.send = (value) => {
+      send(value);
+      if (JSON.parse(value).type === "input") socket.close();
+    };
+  });
+  await page.getByLabel("Message input").fill("retry once");
+  await page.getByLabel("Message input").press("Enter");
+  let reconnected = false;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    reconnected = await page.evaluate(() => window.__myclawRetrySocket.readyState === 3
+      && window.__myclawTestSocket !== window.__myclawRetrySocket
+      && window.__myclawTestSocket.readyState === 1);
+    if (reconnected) break;
+    await delay(50);
+  }
+  assert.equal(reconnected, true, "The browser did not reconnect after the input socket closed");
+  await waitForRecordedEvent((messages) => messages.some((event) => (
+    event.type === "input.accepted" && event.payload?.text === "retry once"
+  )), "retried Run acceptance");
+  await waitForRecordedEvent((messages) => messages.some((event) => (
+    event.type === "run.completed" && messages.some((accepted) => (
+      accepted.type === "input.accepted" && accepted.payload?.text === "retry once" && accepted.run_id === event.run_id
+    ))
+  )), "retried Run completion");
+  assert.equal(await page.evaluate(() => new Set(window.__myclawTestMessages.filter((event) => (
+    event.type === "input.accepted" && event.payload?.text === "retry once"
+  )).map((event) => event.run_id)).size), 1, "Reconnect accepted a duplicate Run");
+
+  for (const language of ["en", "zh-CN"]) {
+    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    for (const theme of ["light", "dark"]) {
+      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      for (const viewport of viewports) {
+        await page.setViewportSize(viewport);
+        const input = page.getByLabel(language === "en" ? "Message input" : "消息输入");
+        await input.scrollIntoViewIfNeeded();
+        const send = page.getByRole("button", { name: language === "en" ? "Send" : "发送" });
+        await send.scrollIntoViewIfNeeded();
+        const bounds = await page.evaluate(() => {
+          const input = document.querySelector("textarea").getBoundingClientRect();
+          const send = document.querySelector("form button[type='submit']").getBoundingClientRect();
+          return {
+            inputWidth: input.width,
+            sendWidth: send.width,
+            sendBottom: send.bottom,
+            width: document.documentElement.scrollWidth,
+          };
+        });
+        assert.ok(bounds.width <= viewport.width, `Conversation overflow at ${viewport.width}x${viewport.height}`);
+        assert.ok(bounds.inputWidth > 0 && bounds.sendWidth > 0 && bounds.sendBottom <= viewport.height + 1,
+          `Composer unreachable at ${viewport.width}x${viewport.height}`);
+        await page.screenshot({ path: resolve(output, `conversation-${language}-${theme}-${viewport.width}.png`) });
+      }
+    }
+  }
+
+  await page.getByRole("button", { name: /Web available history/ }).click();
+  for (const language of ["en", "zh-CN"]) {
+    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    for (const theme of ["light", "dark"]) {
+      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      for (const viewport of viewports) {
+        await page.setViewportSize(viewport);
+        const cancel = page.getByRole("button", { name: language === "en" ? "Cancel run" : "取消运行" });
+        await cancel.scrollIntoViewIfNeeded();
+        const box = await cancel.boundingBox();
+        assert.ok(box && box.width > 0 && box.y >= 0 && box.y + box.height <= viewport.height + 1,
+          `Cancel unreachable at ${viewport.width}x${viewport.height}`);
+        await page.screenshot({ path: resolve(output, `cancel-${language}-${theme}-${viewport.width}.png`) });
+      }
+    }
+  }
+  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await page.getByRole("button", { name: "Cancel run" }).click();
+  const canceledGroup = page.locator("article[data-run-id] details").filter({ hasText: /Tool activity|工具活动/ }).first();
+  await canceledGroup.locator("summary").first().click();
+  await canceledGroup.getByText("Canceled", { exact: true }).waitFor();
+  await page.screenshot({ path: resolve(output, "canceled-en-dark-768.png") });
+  await waitForRecordedEvent((messages) => messages.some((event) => event.type === "run.cancelled"),
+    "Tool Run cancellation");
+  const acceptedToolRuns = await page.evaluate(() => window.__myclawTestMessages.filter((event) => (
+    event.type === "input.accepted" && event.payload?.text === "tool states"
+  )));
+  assert.equal(new Set(acceptedToolRuns.map((event) => event.run_id)).size, 1,
+    "Tool prompt was accepted into more than one Run");
+  const canceledRunIds = await page.evaluate(() => window.__myclawTestMessages
+    .filter((event) => event.type === "run.cancelled").map((event) => event.run_id));
+  assert.ok(canceledRunIds.includes(acceptedToolRuns[0].run_id), "Cancel did not terminate the selected Run");
+  assert.equal(canceledRunIds.includes(conversationRunId), false, "Cancel affected the other Session");
+  await page.reload();
+  const canceledHistoryTool = page.locator('article[data-role="tool"]')
+    .filter({ hasText: "Tool call interrupted because the turn was cancelled." });
+  await canceledHistoryTool.waitFor();
+  await canceledHistoryTool.locator("summary").first().click();
+  await canceledHistoryTool.getByText("Canceled", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("log").getByText("tool states", { exact: true }).count(), 1,
+    "Reload duplicated the persisted Tool Run prompt");
+  await page.getByRole("button", { name: /New session/ }).waitFor();
+
   const duplicatePage = await page.context().newPage();
   try {
     await duplicatePage.goto(page.url());
@@ -246,7 +447,7 @@ try {
   assert.equal(await projectItems.count(), 2);
 
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文" }).click();
+    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
     await page.getByText(language === "en" ? "Project registered." : "项目已登记。", { exact: true }).waitFor();
     await page.locator("header").getByText(language === "en" ? "Projects" : "项目", { exact: true }).waitFor();
     for (const theme of ["light", "dark"]) {
@@ -270,14 +471,14 @@ try {
   await page.getByRole("button", { name: /Web available history/ }).click();
   await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文" }).click();
+    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
     for (const theme of ["light", "dark"]) {
       await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
         const layout = await page.evaluate(() => {
           const list = document.querySelector("main aside").getBoundingClientRect();
-          const content = document.querySelector("main section[aria-live='polite']").getBoundingClientRect();
+          const content = document.querySelector("main [role='log']").parentElement.getBoundingClientRect();
           const horizontal = Math.max(0, Math.min(list.right, content.right) - Math.max(list.left, content.left));
           const vertical = Math.max(0, Math.min(list.bottom, content.bottom) - Math.max(list.top, content.top));
           return { width: document.documentElement.scrollWidth, overlap: horizontal * vertical };
@@ -292,7 +493,7 @@ try {
   await page.getByRole("heading", { name: "project-two", exact: true }).waitFor();
   assert.equal(await page.getByText("Available history loaded after a successful Claim", { exact: true }).count(), 0);
   await page.getByRole("navigation").getByRole("link", { name: /Projects|项目/ }).click();
-  await page.getByRole("button", { name: "EN" }).click();
+  await page.getByRole("button", { name: "EN", exact: true }).click();
   await page.setViewportSize({ width: 768, height: 1024 });
 
   await registerProject(projectAlias, "project-one");

@@ -6,12 +6,31 @@ export interface ServiceEvent {
   stream_id: string;
   seq: number;
   type: string;
-  workspace_id: string;
+  workspace_id: string | null;
   project_id: string | null;
   session_id: string | null;
   run_id: string | null;
   payload: Record<string, unknown>;
 }
+
+export type ClientCommandType =
+  | "claim"
+  | "release"
+  | "input"
+  | "cancel"
+  | "confirmation_decide"
+  | "subscribe";
+
+export interface ClientCommand {
+  request_id: string;
+  type: ClientCommandType;
+  workspace_id: string | null;
+  session_id: string | null;
+  claim_version: number | null;
+  payload: Record<string, unknown>;
+}
+
+export type ServiceCommandResult = Record<string, unknown>;
 
 export interface ServiceStatus {
   service_instance_id: string;

@@ -778,6 +778,14 @@ h1 {
   border-bottom: 1px solid var(--border-subtle);
   border-left-color: var(--warning-text);
   background: var(--warning-surface);
+  cursor: pointer;
+  font: inherit;
+}
+
+.draftRow:hover,
+.draftRow:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
 }
 
 .sessionRowMain,
@@ -811,6 +819,15 @@ h1 {
   white-space: nowrap;
 }
 
+.sessionRunBadge {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 3px;
+  color: var(--accent-strong);
+  font-weight: 650;
+}
+
 .sessionMeta {
   padding-left: 22px;
   color: var(--warning-text);
@@ -839,38 +856,48 @@ h1 {
 }
 
 .sessionContentPanel {
-  min-height: 360px;
+  display: flex;
+  min-height: 520px;
+  flex-direction: column;
+  overflow: hidden;
   padding: 20px;
 }
 
-.sessionContentHeader {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  border-bottom: 1px solid var(--border-subtle);
-  padding-bottom: 15px;
+.conversationViewport {
+  min-height: 280px;
+  max-height: min(62vh, 640px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
-.sessionContentHeader h2 {
+.emptyConversation {
+  display: grid;
+  min-height: 260px;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.emptyConversation p {
+  max-width: 320px;
   margin: 0;
-  overflow-wrap: anywhere;
-  color: var(--text-primary);
-  font-size: 17px;
-  line-height: 1.35;
-}
-
-.sessionContentHeader .eyebrow {
-  margin-bottom: 5px;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .messageHistory {
   display: grid;
-  gap: 12px;
-  padding-top: 18px;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+  padding: 18px 2px 4px 0;
 }
 
 .historyMessage {
+  min-width: 0;
   border-left: 3px solid var(--border-strong);
   padding: 2px 0 2px 13px;
 }
@@ -892,13 +919,407 @@ h1 {
   text-transform: uppercase;
 }
 
-.historyMessage p {
-  margin: 0;
+.markdownContent {
+  min-width: 0;
   overflow-wrap: anywhere;
   color: var(--text-primary);
   font-size: 13px;
   line-height: 1.6;
+}
+
+.markdownContent > :first-child {
+  margin-top: 0;
+}
+
+.markdownContent > :last-child {
+  margin-bottom: 0;
+}
+
+.markdownContent p,
+.markdownContent ul,
+.markdownContent ol,
+.markdownContent blockquote,
+.markdownContent pre,
+.markdownContent table {
+  margin: 0 0 10px;
+}
+
+.markdownContent ul,
+.markdownContent ol {
+  padding-left: 22px;
+}
+
+.markdownContent h1,
+.markdownContent h2,
+.markdownContent h3,
+.markdownContent h4 {
+  margin: 0 0 8px;
+  color: var(--text-primary);
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.markdownContent h1 {
+  font-size: 18px;
+}
+
+.markdownContent h2 {
+  font-size: 16px;
+}
+
+.markdownContent a {
+  color: var(--accent-strong);
+}
+
+.markdownContent blockquote {
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-secondary);
+  padding-left: 12px;
+}
+
+.markdownContent code,
+.toolArguments pre {
+  border-radius: 4px;
+  background: var(--surface-hover);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+}
+
+.markdownContent :not(pre) > code {
+  padding: 2px 4px;
+}
+
+.markdownContent pre,
+.toolArguments pre {
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-x: auto;
+  padding: 10px;
+  white-space: pre;
+}
+
+.markdownContent table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.markdownContent th,
+.markdownContent td {
+  border: 1px solid var(--border-subtle);
+  padding: 5px 8px;
+  text-align: left;
+}
+
+.blockedMedia {
+  display: block;
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-muted);
+  padding-left: 8px;
+}
+
+.liveRun {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 9px;
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent-strong);
+  background: var(--surface-app);
+  padding: 12px 13px;
+}
+
+.liveRuncompleted {
+  border-left-color: var(--success-text);
+}
+
+.liveRunfailed {
+  border-left-color: var(--danger-text);
+}
+
+.liveRuncanceled {
+  border-left-color: var(--warning-text);
+}
+
+.liveRunHeader,
+.toolActivityHeader,
+.toolActivityItemHeader,
+.composerFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.liveRunHeader .historyMessageRole {
+  margin-bottom: 0;
+}
+
+.livePrompt {
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.5;
   white-space: pre-wrap;
+}
+
+.pendingAnswer,
+.runError {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.runError {
+  color: var(--danger-text);
+}
+
+.statusBadge {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 4px 6px;
+  white-space: nowrap;
+}
+
+.statussubmitting,
+.statusaccepted,
+.statusrunning {
+  border-color: var(--accent-strong);
+  color: var(--accent-strong);
+}
+
+.statuscompleted {
+  border-color: var(--success-border);
+  color: var(--success-text);
+}
+
+.statusfailed,
+.statusrejected {
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+
+.statuscanceled {
+  border-color: var(--warning-border);
+  color: var(--warning-text);
+}
+
+.toolActivity {
+  display: grid;
+  gap: 7px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 9px;
+}
+
+.toolActivityTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.toolActivityHeader {
+  cursor: pointer;
+  list-style: none;
+}
+
+.toolActivityHeader::-webkit-details-marker {
+  display: none;
+}
+
+.toolActivityHeader:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.toolActivityChevron {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+
+.toolActivity[open] .toolActivityChevron {
+  transform: rotate(180deg);
+}
+
+.toolActivityCount {
+  min-width: 18px;
+  border-radius: 4px;
+  background: var(--surface-hover);
+  color: var(--text-muted);
+  font-size: 10px;
+  padding: 2px 5px;
+  text-align: center;
+}
+
+.toolActivityList {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.toolActivityItem {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border-left: 2px solid var(--border-subtle);
+  padding-left: 9px;
+}
+
+.toolName {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolArguments {
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.toolArguments summary {
+  cursor: pointer;
+}
+
+.toolArguments pre {
+  margin: 6px 0 0;
+}
+
+.composer {
+  position: sticky;
+  z-index: 1;
+  bottom: 0;
+  display: grid;
+  gap: 8px;
+  margin: 16px -20px -20px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-panel);
+  padding: 14px 20px 20px;
+}
+
+.composerInput {
+  width: 100%;
+  min-height: 74px;
+  box-sizing: border-box;
+  resize: vertical;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface-app);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 10px 11px;
+}
+
+.composerInput:focus {
+  border-color: var(--accent-strong);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.composerInput:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.composerInput::placeholder {
+  color: var(--text-muted);
+}
+
+.composerHint,
+.composerError {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.composerHint {
+  color: var(--text-muted);
+}
+
+.composerError {
+  color: var(--danger-text);
+}
+
+.cancelRunButton {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--danger-border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--danger-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  padding: 6px 9px;
+}
+
+.cancelRunButton:hover,
+.cancelRunButton:focus-visible {
+  background: var(--danger-surface);
+  outline: none;
+}
+
+.cancelRunButton:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  clip-path: inset(50%);
+}
+
+.sessionContentHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 15px;
+}
+
+.sessionContentHeader h2 {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: 17px;
+  line-height: 1.35;
+}
+
+.sessionContentHeader .eyebrow {
+  margin-bottom: 5px;
 }
 
 .sessionPrompt {
@@ -1141,6 +1562,21 @@ h1 {
 
   .sessionContentHeader .secondaryButton {
     align-self: flex-end;
+  }
+
+  .conversationViewport {
+    max-height: min(52vh, 480px);
+  }
+
+  .composer {
+    margin-right: -16px;
+    margin-left: -16px;
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .composerFooter {
+    align-items: flex-end;
   }
 
   .metric:nth-child(3) {

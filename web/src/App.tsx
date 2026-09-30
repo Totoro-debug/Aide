@@ -2,8 +2,11 @@ import * as Dialog from "@radix-ui/react-dialog";
 import {
   ArrowLeft,
   Activity,
+  Ban,
   Check,
   CircleAlert,
+  CircleCheck,
+  ChevronDown,
   ChevronRight,
   FolderOpen,
   Info,
@@ -16,9 +19,15 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Send,
+  ShieldX,
+  Square,
   Sun,
+  TriangleAlert,
   X,
 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -26,8 +35,10 @@ import { useTranslation } from "react-i18next";
 import {
   ApiError,
   claimProjectSession,
+  createRequestId,
   createProjectSession,
   exchangeTicket,
+  getProjectSession,
   getProjectSessions,
   getProjects,
   getServiceStatus,
@@ -37,12 +48,16 @@ import {
   registerWebClient,
   resumeProjectSchedule,
   restoreBrowserSession,
+  ServiceCommandError,
 } from "./api";
 import type {
+  ClientCommand,
   ProjectSessionsResponse,
   RegisteredProject,
   RegisteredClient,
   ServiceState,
+  ServiceCommandResult,
+  ServiceEvent,
   ServiceStatus,
   SessionClaim,
   SessionSnapshot,
@@ -53,6 +68,7 @@ type AuthState = "checking" | "ready" | "required" | "error";
 type ConnectionState = "checking" | "online" | "offline" | "recovering";
 type Theme = "system" | "light" | "dark";
 type ProjectsLoadState = "idle" | "loading" | "ready" | "error";
+type ServiceEventListener = (event: ServiceEvent) => void;
 
 const THEME_KEY = "myclaw.theme";
 const initialLaunchTicket = readAndClearTicket();
@@ -71,7 +87,24 @@ export default function App() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [sessionEventVersion, setSessionEventVersion] = useState(0);
   const bootstrapPromise = useRef<Promise<RegisteredClient> | null>(null);
+  const eventStreamRef = useRef<ReturnType<typeof openEventStream> | null>(null);
+  const eventListenersRef = useRef(new Set<ServiceEventListener>());
+  const eventCursorRef = useRef<{ streamId: string; seq: number } | null>(null);
   const consumeRegisteredClient = useCallback(() => setRegisteredClient(null), []);
+  const subscribeServiceEvents = useCallback((listener: ServiceEventListener) => {
+    eventListenersRef.current.add(listener);
+    return () => eventListenersRef.current.delete(listener);
+  }, []);
+  const sendServiceCommand = useCallback(
+    (command: ClientCommand): Promise<ServiceCommandResult> => {
+      const connection = eventStreamRef.current;
+      if (connection === null) {
+        return Promise.reject(new ServiceCommandError(null, false));
+      }
+      return connection.sendCommand(command);
+    },
+    [],
+  );
 
   const refreshProjects = useCallback(async () => {
     setProjectsLoadState("loading");
@@ -95,7 +128,6 @@ export default function App() {
   }, [authState, refreshProjects]);
 
   useEffect(() => {
-    let socket: WebSocket | null = null;
     let retryTimer: number | null = null;
     let statusTimer: number | null = null;
     let active = true;
@@ -143,10 +175,9 @@ export default function App() {
         setServiceStatus(current);
         setRegisteredClient(client);
         setAuthState("ready");
-        setConnectionState("online");
         setSessionEventVersion((version) => version + 1);
         statusTimer ??= window.setInterval(() => void refreshStatus(), 5000);
-        socket = openEventStream(
+        const connection = openEventStream(
           () => {
             setConnectionState("online");
             setSessionEventVersion((version) => version + 1);
@@ -156,12 +187,27 @@ export default function App() {
             scheduleReconnect(true);
           },
           (event) => {
+            const cursor = eventCursorRef.current;
+            if (
+              cursor !== null
+              && cursor.streamId === event.stream_id
+              && event.seq <= cursor.seq
+            ) {
+              return;
+            }
+            if (cursor !== null && cursor.streamId === event.stream_id && event.seq > cursor.seq + 1) {
+              const resync = { ...event, type: "snapshot.required", workspace_id: null, session_id: null, run_id: null };
+              for (const listener of eventListenersRef.current) listener(resync);
+            }
+            eventCursorRef.current = { streamId: event.stream_id, seq: event.seq };
+            for (const listener of eventListenersRef.current) listener(event);
             if (event.type === "session.claimed" || event.type === "session.released") {
               setSessionEventVersion((version) => version + 1);
             }
             void refreshStatus();
           },
         );
+        eventStreamRef.current = connection;
       } catch (error) {
         if (!active) {
           return;
@@ -181,7 +227,8 @@ export default function App() {
       active = false;
       if (retryTimer !== null) window.clearTimeout(retryTimer);
       if (statusTimer !== null) window.clearInterval(statusTimer);
-      socket?.close();
+      eventStreamRef.current?.close();
+      eventStreamRef.current = null;
     };
   }, []);
 
@@ -341,6 +388,8 @@ export default function App() {
                   registeredClient={registeredClient}
                   onRestoreConsumed={consumeRegisteredClient}
                   refreshVersion={sessionEventVersion}
+                  sendServiceCommand={sendServiceCommand}
+                  subscribeServiceEvents={subscribeServiceEvents}
                 />
               }
             />
@@ -873,6 +922,218 @@ function ProjectsView({
 
 type SessionLoadState = "idle" | "loading" | "ready" | "error";
 
+type RunStatus = "submitting" | "accepted" | "running" | "completed" | "failed" | "canceled";
+type ToolStatus = "running" | "completed" | "failed" | "rejected" | "canceled";
+
+interface ToolActivity {
+  toolCallId: string;
+  name: string;
+  arguments: string;
+  status: ToolStatus;
+}
+
+interface LiveRun {
+  localId: string;
+  runId: string | null;
+  prompt: string;
+  assistantContent: string;
+  status: RunStatus;
+  tools: ToolActivity[];
+  error: string | null;
+  cancelRequested: boolean;
+}
+
+interface PendingSubmission {
+  localId: string;
+  sessionId: string;
+  command: ClientCommand;
+}
+
+function newLiveRun(
+  localId: string,
+  runId: string | null,
+  prompt: string,
+  status: RunStatus,
+): LiveRun {
+  return {
+    localId,
+    runId,
+    prompt,
+    assistantContent: "",
+    status,
+    tools: [],
+    error: null,
+    cancelRequested: false,
+  };
+}
+
+function isLiveRunActive(run: LiveRun): boolean {
+  return run.status === "submitting" || run.status === "accepted" || run.status === "running";
+}
+
+function statusIcon(status: RunStatus | ToolStatus, size = 14) {
+  if (status === "completed") return <CircleCheck size={size} aria-hidden="true" />;
+  if (status === "failed") return <TriangleAlert size={size} aria-hidden="true" />;
+  if (status === "rejected") return <ShieldX size={size} aria-hidden="true" />;
+  if (status === "canceled") return <Ban size={size} aria-hidden="true" />;
+  return <Activity size={size} aria-hidden="true" />;
+}
+
+function runStatusKey(status: RunStatus): string {
+  return `conversation.${status}`;
+}
+
+function toolStatusKey(status: ToolStatus): string {
+  return `conversation.tool${status[0].toUpperCase()}${status.slice(1)}`;
+}
+
+function safeMarkdownUrl(url: string): string {
+  try {
+    const parsed = new URL(url, window.location.origin);
+    if (["http:", "https:", "mailto:", "tel:"].includes(parsed.protocol)) return url;
+  } catch {
+    return "";
+  }
+  return "";
+}
+
+function MarkdownContent({ content }: { content: string }) {
+  return (
+    <div className={styles.markdownContent}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        urlTransform={safeMarkdownUrl}
+        components={{
+          img: ({ alt }) => alt ? <span className={styles.blockedMedia}>{alt}</span> : null,
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function ToolActivityGroup({
+  tools,
+  t,
+}: {
+  tools: ToolActivity[];
+  t: (key: string) => string;
+}) {
+  return (
+    <details className={styles.toolActivity}>
+      <summary className={styles.toolActivityHeader}>
+        <span className={styles.toolActivityTitle}>
+          <Activity size={14} aria-hidden="true" />
+          {t("conversation.toolActivity")}
+        </span>
+        <span className={styles.toolActivityCount}>{tools.length}</span>
+        <ChevronDown className={styles.toolActivityChevron} size={14} aria-hidden="true" />
+      </summary>
+      <ul className={styles.toolActivityList}>
+        {tools.map((tool) => (
+          <li className={styles.toolActivityItem} key={tool.toolCallId}>
+            <div className={styles.toolActivityItemHeader}>
+              <span className={styles.toolName}>{tool.name || t("conversation.unknownTool")}</span>
+              <span className={`${styles.statusBadge} ${styles[`status${tool.status}`]}`}>
+                {statusIcon(tool.status, 12)}
+                {t(toolStatusKey(tool.status))}
+              </span>
+            </div>
+            {tool.arguments ? (
+              <details className={styles.toolArguments}>
+                <summary>{t("conversation.toolArguments")}</summary>
+                <pre>{tool.arguments}</pre>
+              </details>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+function HistoryMessageView({
+  message,
+  index,
+  t,
+}: {
+  message: Record<string, unknown>;
+  index: number;
+  t: (key: string) => string;
+}) {
+  const role = message.role;
+  const messageStatus = message.status;
+  if (role === "tool") {
+    const rawStatus = typeof messageStatus === "string" ? messageStatus : "error";
+    const status: ToolStatus = rawStatus === "success"
+      ? "completed"
+      : rawStatus === "refused"
+        ? "rejected"
+        : rawStatus === "error" && message.content === "Tool call interrupted because the turn was cancelled."
+          ? "canceled"
+          : "failed";
+    const tool = {
+      toolCallId: typeof message.tool_call_id === "string" ? message.tool_call_id : `tool-${index}`,
+      name: typeof message.name === "string" ? message.name : t("conversation.unknownTool"),
+      arguments: "",
+      status,
+    } satisfies ToolActivity;
+    return (
+      <article className={styles.historyMessage} data-role="tool" key={`${index}-tool`}>
+        <div className={styles.historyMessageRole}>{historyRoleLabel(role, t)}</div>
+        <ToolActivityGroup tools={[tool]} t={t} />
+        <MarkdownContent content={historyMessageText(message.content)} />
+      </article>
+    );
+  }
+  return (
+    <article className={styles.historyMessage} data-role={typeof role === "string" ? role : "system"} key={`${index}-${String(role)}`}>
+      <div className={styles.historyMessageRole}>{historyRoleLabel(role, t)}</div>
+      <MarkdownContent content={historyMessageText(message.content)} />
+    </article>
+  );
+}
+
+function LiveRunView({
+  run,
+  t,
+  onCancel,
+}: {
+  run: LiveRun;
+  t: (key: string) => string;
+  onCancel: (run: LiveRun) => void;
+}) {
+  const active = isLiveRunActive(run);
+  return (
+    <article className={`${styles.liveRun} ${styles[`liveRun${run.status}`]}`} data-run-id={run.runId ?? run.localId}>
+      <div className={styles.liveRunHeader}>
+        <span className={styles.historyMessageRole}>{t("sessions.userMessage")}</span>
+        <span className={`${styles.statusBadge} ${styles[`status${run.status}`]}`} role="status" aria-live="polite">
+          {statusIcon(run.status)}
+          {t(runStatusKey(run.status))}
+        </span>
+      </div>
+      <div className={styles.livePrompt}>{run.prompt}</div>
+      {run.tools.length > 0 ? <ToolActivityGroup tools={run.tools} t={t} /> : null}
+      {run.assistantContent ? <MarkdownContent content={run.assistantContent} /> : active ? <p className={styles.pendingAnswer}>{t("conversation.assistantPending")}</p> : null}
+      {run.error ? <p className={styles.runError}>{run.error}</p> : null}
+      {active && run.runId !== null ? (
+        <button
+          className={styles.cancelRunButton}
+          type="button"
+          aria-label={t("controls.cancelRun")}
+          disabled={run.cancelRequested}
+          onClick={() => onCancel(run)}
+        >
+          <Square size={14} aria-hidden="true" />
+          {run.cancelRequested ? t("controls.cancelingRun") : t("controls.cancelRun")}
+        </button>
+      ) : null}
+    </article>
+  );
+}
+
 interface ProjectSessionsViewProps {
   authState: AuthState;
   connectionState: ConnectionState;
@@ -880,6 +1141,8 @@ interface ProjectSessionsViewProps {
   registeredClient: RegisteredClient | null;
   onRestoreConsumed: () => void;
   refreshVersion: number;
+  sendServiceCommand: (command: ClientCommand) => Promise<ServiceCommandResult>;
+  subscribeServiceEvents: (listener: ServiceEventListener) => () => void;
 }
 
 function ProjectSessionsView({
@@ -889,6 +1152,8 @@ function ProjectSessionsView({
   registeredClient,
   onRestoreConsumed,
   refreshVersion,
+  sendServiceCommand,
+  subscribeServiceEvents,
 }: ProjectSessionsViewProps) {
   const { projectId = "" } = useParams();
   return (
@@ -900,6 +1165,8 @@ function ProjectSessionsView({
       registeredClient={registeredClient}
       onRestoreConsumed={onRestoreConsumed}
       refreshVersion={refreshVersion}
+      sendServiceCommand={sendServiceCommand}
+      subscribeServiceEvents={subscribeServiceEvents}
       projectId={projectId}
     />
   );
@@ -912,6 +1179,8 @@ function ProjectSessionsContent({
   registeredClient,
   onRestoreConsumed,
   refreshVersion,
+  sendServiceCommand,
+  subscribeServiceEvents,
   projectId,
 }: ProjectSessionsViewProps & { projectId: string }) {
   const { t, i18n } = useTranslation();
@@ -922,10 +1191,23 @@ function ProjectSessionsContent({
   const [claim, setClaim] = useState<SessionClaim | null>(null);
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null);
   const [draft, setDraft] = useState(false);
+  const [draftSessionIds, setDraftSessionIds] = useState<string[]>([]);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [liveRunsBySession, setLiveRunsBySession] = useState<Record<string, LiveRun[]>>({});
+  const [inputText, setInputText] = useState("");
+  const [composerError, setComposerError] = useState<string | null>(null);
   const claimRef = useRef<SessionClaim | null>(null);
   const snapshotRef = useRef<SessionSnapshot | null>(null);
+  const claimsBySessionRef = useRef<Record<string, SessionClaim>>({});
+  const snapshotsBySessionRef = useRef<Record<string, SessionSnapshot>>({});
+  const liveRunsRef = useRef<Record<string, LiveRun[]>>({});
+  const selectedSessionRef = useRef<string | null>(null);
+  const workspaceIdRef = useRef<string | null>(null);
+  const refreshSessionsRef = useRef<(() => Promise<void>) | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const draftsBySessionRef = useRef<Record<string, string>>({});
+  const pendingSubmissionsRef = useRef<PendingSubmission[]>([]);
   const needsReclaimRef = useRef(false);
   const attemptedRestoreRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
@@ -939,15 +1221,80 @@ function ProjectSessionsContent({
     ).catch(() => {});
   }, [projectId]);
 
+  const releaseClaims = useCallback(() => {
+    if (!projectId) return;
+    for (const current of Object.values(claimsBySessionRef.current)) {
+      void releaseProjectSession(
+        projectId,
+        current.session_id,
+        current.claim_version,
+        current.reconnect_credential,
+      ).catch(() => {});
+    }
+  }, [projectId]);
+
   useEffect(() => {
     claimRef.current = claim;
+    if (claim !== null) claimsBySessionRef.current[claim.session_id] = claim;
   }, [claim]);
 
   useEffect(() => {
     snapshotRef.current = snapshot;
+    if (snapshot !== null) snapshotsBySessionRef.current[snapshot.session_id] = snapshot;
   }, [snapshot]);
 
+  useEffect(() => {
+    selectedSessionRef.current = selectedSessionId;
+  }, [selectedSessionId]);
+
+  const updateLiveRuns = useCallback(
+    (sessionId: string, update: (runs: LiveRun[]) => LiveRun[]) => {
+      const nextRuns = update(liveRunsRef.current[sessionId] ?? []);
+      const next = { ...liveRunsRef.current, [sessionId]: nextRuns };
+      liveRunsRef.current = next;
+      setLiveRunsBySession(next);
+    },
+    [],
+  );
+
+  const sendPendingSubmission = useCallback(async (pending: PendingSubmission) => {
+    try {
+      const result = await sendServiceCommand(pending.command);
+      const runId = result.run_id;
+      if (typeof runId !== "string" || !runId) throw new ServiceCommandError(null, false);
+      pendingSubmissionsRef.current = pendingSubmissionsRef.current.filter(
+        (item) => item.localId !== pending.localId,
+      );
+      updateLiveRuns(pending.sessionId, (runs) => runs.map((run) => run.localId === pending.localId
+        ? { ...run, runId, status: run.status === "submitting" ? "accepted" : run.status }
+        : run));
+    } catch (error) {
+      if (error instanceof ServiceCommandError && error.resultUnknown) return;
+      pendingSubmissionsRef.current = pendingSubmissionsRef.current.filter(
+        (item) => item.localId !== pending.localId,
+      );
+      const message = error instanceof ServiceCommandError && error.body !== null
+        ? error.body.message
+        : null;
+      updateLiveRuns(pending.sessionId, (runs) => runs.map((run) => run.localId === pending.localId
+        ? { ...run, status: "failed", error: message }
+        : run));
+      if (selectedSessionRef.current === pending.sessionId) {
+        setComposerError(message ?? "conversation.submitFailed");
+      }
+    }
+  }, [sendServiceCommand, updateLiveRuns]);
+
+  useEffect(() => {
+    if (connectionState !== "online") return;
+    for (const pending of [...pendingSubmissionsRef.current]) {
+      void sendPendingSubmission(pending);
+    }
+  }, [connectionState, sendPendingSubmission]);
+
   const clearClaimState = useCallback(() => {
+    const previous = claimRef.current;
+    if (previous !== null) delete claimsBySessionRef.current[previous.session_id];
     claimRef.current = null;
     snapshotRef.current = null;
     setClaim(null);
@@ -956,12 +1303,37 @@ function ProjectSessionsContent({
     setDraft(false);
   }, []);
 
+  const adoptSnapshot = useCallback((nextSnapshot: SessionSnapshot) => {
+    const sessionId = nextSnapshot.session_id;
+    const previousCount = snapshotsBySessionRef.current[sessionId]?.messages.length ?? 0;
+    const committedPrompts = new Set(nextSnapshot.messages.slice(previousCount)
+      .filter((message) => message.role === "user" && typeof message.content === "string")
+      .map((message) => message.content as string));
+    snapshotsBySessionRef.current[sessionId] = nextSnapshot;
+    if (selectedSessionRef.current === sessionId) {
+      snapshotRef.current = nextSnapshot;
+      setSnapshot(nextSnapshot);
+    }
+    if (committedPrompts.size > 0) {
+      updateLiveRuns(sessionId, (runs) => runs.filter((run) => !committedPrompts.has(run.prompt)));
+    }
+  }, [updateLiveRuns]);
+
+  const rememberSession = useCallback((nextClaim: SessionClaim, nextSnapshot: SessionSnapshot) => {
+    claimsBySessionRef.current[nextClaim.session_id] = nextClaim;
+    adoptSnapshot(nextSnapshot);
+    claimRef.current = nextClaim;
+    setClaim(nextClaim);
+    setSnapshot(nextSnapshot);
+  }, [adoptSnapshot]);
+
   const refreshSessions = useCallback(async () => {
     if (authState !== "ready" || !projectId) return;
     setLoadState((state) => (state === "ready" ? state : "loading"));
     try {
       const response = await getProjectSessions(projectId);
       if (!mountedRef.current) return;
+      workspaceIdRef.current = response.workspace_id;
       let restoreError: string | null = null;
       if (
         registeredClient !== null &&
@@ -978,12 +1350,15 @@ function ProjectSessionsContent({
               releaseOrphanClaim(restored.claim);
               return;
             }
-            claimRef.current = restored.claim;
-            snapshotRef.current = restored.snapshot;
-            setClaim(restored.claim);
-            setSnapshot(restored.snapshot);
+            rememberSession(restored.claim, restored.snapshot);
             setSelectedSessionId(restored.claim.session_id);
-            setDraft(!response.sessions.some((item) => item.id === restored.claim.session_id));
+            selectedSessionRef.current = restored.claim.session_id;
+            const restoredDraft = !response.sessions.some((item) => item.id === restored.claim.session_id);
+            setDraft(restoredDraft);
+            if (restoredDraft) {
+              setDraftSessionIds((ids) => ids.includes(restored.claim.session_id)
+                ? ids : [...ids, restored.claim.session_id]);
+            }
           } catch (error) {
             restoreError = sessionErrorKey(error);
           }
@@ -1000,10 +1375,7 @@ function ProjectSessionsContent({
             return;
           }
           if (claimRef.current === currentClaim) {
-            claimRef.current = restored.claim;
-            snapshotRef.current = restored.snapshot;
-            setClaim(restored.claim);
-            setSnapshot(restored.snapshot);
+            rememberSession(restored.claim, restored.snapshot);
           }
         } catch (error) {
           if (claimRef.current === currentClaim) clearClaimState();
@@ -1011,13 +1383,15 @@ function ProjectSessionsContent({
         }
       }
       setSessions(response);
+      setDraftSessionIds((ids) => ids.filter((id) => !response.sessions.some((item) => item.id === id)));
+      if (response.sessions.some((item) => item.id === selectedSessionRef.current)) setDraft(false);
       setLoadState("ready");
       setActionError(restoreError);
     } catch (error) {
       setLoadState("error");
       setActionError(sessionErrorKey(error));
     }
-  }, [authState, clearClaimState, connectionState, onRestoreConsumed, projectId, registeredClient, releaseOrphanClaim]);
+  }, [authState, clearClaimState, connectionState, onRestoreConsumed, projectId, registeredClient, releaseOrphanClaim, rememberSession]);
 
   useEffect(() => {
     if (connectionState !== "online") needsReclaimRef.current = true;
@@ -1028,23 +1402,169 @@ function ProjectSessionsContent({
   }, [refreshSessions, refreshVersion]);
 
   useEffect(() => {
+    refreshSessionsRef.current = refreshSessions;
+  }, [refreshSessions]);
+
+  const refreshRunSnapshot = useCallback(async (sessionId: string, runId: string) => {
+    const currentClaim = claimsBySessionRef.current[sessionId];
+    if (currentClaim === undefined) return;
+    try {
+      const nextSnapshot = await getProjectSession(
+        projectId,
+        sessionId,
+        currentClaim.claim_version,
+        currentClaim.reconnect_credential,
+      );
+      if (!mountedRef.current) return;
+      adoptSnapshot(nextSnapshot);
+      updateLiveRuns(sessionId, (runs) => runs.filter((run) => run.runId !== runId));
+      void refreshSessionsRef.current?.();
+    } catch {
+      // Keep the terminal live projection visible when persistence is still settling.
+    }
+  }, [adoptSnapshot, projectId, updateLiveRuns]);
+
+  const handleServiceEvent = useCallback((event: ServiceEvent) => {
+    if (event.type === "snapshot.required") {
+      const currentClaim = claimRef.current;
+      if (currentClaim !== null) {
+        void getProjectSession(
+          projectId,
+          currentClaim.session_id,
+          currentClaim.claim_version,
+          currentClaim.reconnect_credential,
+        ).then((nextSnapshot) => {
+          if (mountedRef.current && claimRef.current === currentClaim) adoptSnapshot(nextSnapshot);
+        }).catch(() => {
+          // A reconnecting Claim is refreshed by the normal Claim recovery path.
+        });
+      }
+      return;
+    }
+    if (event.workspace_id !== workspaceIdRef.current || event.session_id === null) return;
+    const sessionId = event.session_id;
+    if (event.type === "input.accepted") {
+      if (event.run_id === null) return;
+      const acceptedText = typeof event.payload.text === "string" ? event.payload.text : "";
+      updateLiveRuns(sessionId, (runs) => {
+        const directIndex = runs.findIndex((run) => run.runId === event.run_id);
+        if (directIndex >= 0) {
+          return runs.map((run, index) => index === directIndex
+            ? { ...run, status: run.status === "submitting" ? "accepted" : run.status }
+            : run);
+        }
+        const pendingIndex = runs.findIndex(
+          (run) => run.runId === null && run.status === "submitting" && run.prompt === acceptedText,
+        );
+        if (pendingIndex >= 0) {
+          const pendingLocalId = runs[pendingIndex].localId;
+          pendingSubmissionsRef.current = pendingSubmissionsRef.current.filter(
+            (item) => item.localId !== pendingLocalId,
+          );
+          return runs.map((run, index) => index === pendingIndex
+            ? { ...run, runId: event.run_id, status: "accepted" }
+            : run);
+        }
+        return [...runs, newLiveRun(`event-${event.run_id}`, event.run_id, acceptedText, "accepted")];
+      });
+      return;
+    }
+    if (event.run_id === null) return;
+    const runId = event.run_id;
+    if (event.type === "run.output") {
+      const message = event.payload.message;
+      if (typeof message !== "object" || message === null || Array.isArray(message)) return;
+      const messageValue = message as Record<string, unknown>;
+      const metadata = messageValue.metadata;
+      const metadataValue = typeof metadata === "object" && metadata !== null && !Array.isArray(metadata)
+        ? metadata as Record<string, unknown>
+        : {};
+      const messageType = messageValue.type;
+      const content = typeof messageValue.content === "string" ? messageValue.content : "";
+      updateLiveRuns(sessionId, (runs) => {
+        const index = runs.findIndex((run) => run.runId === runId);
+        const current = index >= 0 ? runs[index] : newLiveRun(`event-${runId}`, runId, "", "running");
+        const next = { ...current, status: current.status === "canceled" ? "canceled" : "running" as RunStatus };
+        if (messageType === "model_response" && metadataValue._stream_delta === true) {
+          next.assistantContent = `${next.assistantContent}${content}`;
+        } else if (messageType === "tool_call") {
+          const toolCallId = typeof metadataValue.tool_call_id === "string" ? metadataValue.tool_call_id : "";
+          if (!toolCallId) return runs;
+          const toolIndex = next.tools.findIndex((tool) => tool.toolCallId === toolCallId);
+          const rawStatus = metadataValue.status;
+          const mappedStatus = rawStatus === "success"
+            ? "completed"
+            : rawStatus === "error"
+              ? "failed"
+              : rawStatus === "refused"
+                ? "rejected"
+                : null;
+          if (toolIndex < 0 && mappedStatus === null) {
+            next.tools = [...next.tools, {
+              toolCallId,
+              name: content,
+              arguments: typeof metadataValue.arguments === "string" ? metadataValue.arguments : "",
+              status: "running",
+            }];
+          } else if (toolIndex >= 0 && mappedStatus !== null) {
+            next.tools = next.tools.map((tool, toolIndexValue) => toolIndexValue === toolIndex
+              ? { ...tool, status: mappedStatus }
+              : tool);
+          }
+        } else if (messageType === "system_control" && metadataValue._streamed === true) {
+          next.status = metadataValue.finish_reason === "cancelled" ? "canceled" : "failed";
+          next.error = content || null;
+          if (next.status === "canceled") {
+            next.tools = next.tools.map((tool) => tool.status === "running" ? { ...tool, status: "canceled" } : tool);
+          }
+        }
+        if (index < 0) return [...runs, next];
+        return runs.map((run, runIndex) => runIndex === index ? next : run);
+      });
+      return;
+    }
+    if (event.type === "run.cancelled" || event.type === "run.failed" || event.type === "run.completed") {
+      const finishReason = typeof event.payload.finish_reason === "string"
+        ? event.payload.finish_reason
+        : event.type === "run.cancelled" ? "cancelled" : event.type === "run.failed" ? "failed" : "completed";
+      updateLiveRuns(sessionId, (runs) => {
+        const index = runs.findIndex((run) => run.runId === runId);
+        const current = index >= 0 ? runs[index] : newLiveRun(`event-${runId}`, runId, "", "running");
+        const status: RunStatus = current.status === "canceled" || finishReason === "cancelled"
+          ? "canceled"
+          : finishReason === "completed" ? "completed" : "failed";
+        const next: LiveRun = {
+          ...current,
+          status,
+          error: status === "failed" && typeof event.payload.message === "string" ? event.payload.message : current.error,
+          tools: status === "canceled"
+            ? current.tools.map((tool) => tool.status !== "running"
+              ? tool
+              : { ...tool, status: "canceled" })
+            : current.tools,
+        };
+        if (index < 0) return [...runs, next];
+        return runs.map((run, runIndex) => runIndex === index ? next : run);
+      });
+      if (event.type !== "run.cancelled" && finishReason !== "cancelled") {
+        void refreshRunSnapshot(sessionId, runId);
+      }
+    }
+  }, [adoptSnapshot, projectId, refreshRunSnapshot, updateLiveRuns]);
+
+  useEffect(() => subscribeServiceEvents(handleServiceEvent), [handleServiceEvent, subscribeServiceEvents]);
+
+  useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      const current = claimRef.current;
-      if (current !== null && projectId) {
-        void releaseProjectSession(
-          projectId,
-          current.session_id,
-          current.claim_version,
-          current.reconnect_credential,
-        );
-      }
+      releaseClaims();
     };
-  }, [projectId]);
+  }, [projectId, releaseClaims]);
 
   async function openSession(sessionId: string, isDraft: boolean, allowBusy = false) {
     if (busySessionId !== null && !allowBusy) return;
+    const previousSessionId = claimRef.current?.session_id;
     setBusySessionId(sessionId);
     setActionError(null);
     try {
@@ -1053,12 +1573,16 @@ function ProjectSessionsContent({
         releaseOrphanClaim(response.claim);
         return;
       }
-      claimRef.current = response.claim;
-      snapshotRef.current = response.snapshot;
-      setClaim(response.claim);
-      setSnapshot(response.snapshot);
+      rememberSession(response.claim, response.snapshot);
       setSelectedSessionId(sessionId);
+      selectedSessionRef.current = sessionId;
+      setInputText(draftsBySessionRef.current[sessionId] ?? "");
+      setComposerError(null);
       setDraft(isDraft);
+      if (previousSessionId !== undefined && previousSessionId !== sessionId
+        && !(liveRunsRef.current[previousSessionId] ?? []).some(isLiveRunActive)) {
+        setDraftSessionIds((ids) => ids.filter((id) => id !== previousSessionId));
+      }
       await refreshSessions();
     } catch (error) {
       setActionError(sessionErrorKey(error));
@@ -1073,6 +1597,7 @@ function ProjectSessionsContent({
     setActionError(null);
     try {
       const created = await createProjectSession(projectId);
+      setDraftSessionIds((ids) => [...ids, created.session_id]);
       setBusySessionId(null);
       await openSession(created.session_id, true, true);
     } catch (error) {
@@ -1094,12 +1619,18 @@ function ProjectSessionsContent({
         current.claim_version,
         current.reconnect_credential,
       );
+      delete claimsBySessionRef.current[current.session_id];
+      delete snapshotsBySessionRef.current[current.session_id];
       claimRef.current = null;
       snapshotRef.current = null;
       setClaim(null);
       setSnapshot(null);
       setSelectedSessionId(null);
+      selectedSessionRef.current = null;
+      delete draftsBySessionRef.current[current.session_id];
+      setInputText("");
       setDraft(false);
+      setDraftSessionIds((ids) => ids.filter((id) => id !== current.session_id));
       await refreshSessions();
     } catch (error) {
       setActionError(sessionErrorKey(error));
@@ -1108,7 +1639,72 @@ function ProjectSessionsContent({
     }
   }
 
+  async function submitInput(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const currentClaim = claimRef.current;
+    const sessionId = selectedSessionRef.current;
+    const text = inputText.trim();
+    if (currentClaim === null || sessionId === null || !text) return;
+    const activeRun = (liveRunsRef.current[sessionId] ?? []).some(isLiveRunActive);
+    if (activeRun || connectionState !== "online") return;
+    const localId = `local-${createRequestId()}`;
+    const pending: PendingSubmission = {
+      localId,
+      sessionId,
+      command: {
+        request_id: createRequestId(),
+        type: "input",
+        workspace_id: currentClaim.workspace_id,
+        session_id: currentClaim.session_id,
+        claim_version: currentClaim.claim_version,
+        payload: { text },
+      },
+    };
+    pendingSubmissionsRef.current.push(pending);
+    updateLiveRuns(sessionId, (runs) => [
+      ...runs,
+      newLiveRun(localId, null, text, "submitting"),
+    ]);
+    setInputText("");
+    delete draftsBySessionRef.current[sessionId];
+    setComposerError(null);
+    inputRef.current?.focus();
+    await sendPendingSubmission(pending);
+  }
+
+  function handleInputKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
+  }
+
+  async function cancelRun(run: LiveRun) {
+    const currentClaim = claimRef.current;
+    if (currentClaim === null || run.runId === null || run.cancelRequested) return;
+    updateLiveRuns(currentClaim.session_id, (runs) => runs.map((candidate) => candidate.runId === run.runId
+      ? { ...candidate, cancelRequested: true }
+      : candidate));
+    try {
+      await sendServiceCommand({
+        request_id: createRequestId(),
+        type: "cancel",
+        workspace_id: currentClaim.workspace_id,
+        session_id: currentClaim.session_id,
+        claim_version: currentClaim.claim_version,
+        payload: { run_id: run.runId },
+      });
+    } catch (error) {
+      if (error instanceof ServiceCommandError && error.resultUnknown) return;
+      updateLiveRuns(currentClaim.session_id, (runs) => runs.map((candidate) => candidate.runId === run.runId
+        ? { ...candidate, cancelRequested: false }
+        : candidate));
+      setComposerError("conversation.cancelFailed");
+    }
+  }
+
   const selectedSummary = sessions?.sessions.find((item) => item.id === selectedSessionId);
+  const selectedLiveRuns = selectedSessionId === null ? [] : liveRunsBySession[selectedSessionId] ?? [];
+  const activeRun = selectedLiveRuns.find(isLiveRunActive) ?? null;
   const authUnavailable = authState !== "ready";
   return (
     <section className={styles.sessionsPage} aria-labelledby="sessions-heading">
@@ -1185,18 +1781,28 @@ function ProjectSessionsContent({
           <aside className={styles.sessionListPanel} aria-label={t("sessions.listLabel")}>
             <div className={styles.sessionListHeader}>
               <h2>{t("sessions.listTitle")}</h2>
-              <span>{sessions?.sessions.length ?? 0}</span>
+              <span>{(sessions?.sessions.length ?? 0) + draftSessionIds.length}</span>
             </div>
-            {draft && claim !== null ? (
-              <div className={styles.draftRow} aria-current="true">
-                <div className={styles.sessionRowMain}>
-                  <MessageSquare size={15} aria-hidden="true" />
-                  <strong>{t("sessions.draft")}</strong>
-                </div>
-                <span className={styles.sessionMeta}>{t("sessions.notPersisted")}</span>
-              </div>
-            ) : null}
-            {sessions?.sessions.length === 0 && !draft ? (
+            {draftSessionIds.map((draftId) => {
+              const running = (liveRunsBySession[draftId] ?? []).some(isLiveRunActive);
+              return (
+                <button
+                  className={styles.draftRow}
+                  type="button"
+                  key={draftId}
+                  aria-current={selectedSessionId === draftId ? "true" : undefined}
+                  disabled={busySessionId !== null}
+                  onClick={() => void openSession(draftId, true)}
+                >
+                  <span className={styles.sessionRowMain}>
+                    <MessageSquare size={15} aria-hidden="true" />
+                    <strong>{running ? t("sessions.draftTitle") : t("sessions.draft")}</strong>
+                  </span>
+                  <span className={styles.sessionMeta}>{running ? t("conversation.running") : t("sessions.notPersisted")}</span>
+                </button>
+              );
+            })}
+            {sessions?.sessions.length === 0 && draftSessionIds.length === 0 ? (
               <div className={styles.sessionListEmpty}>
                 <MessageSquare size={20} aria-hidden="true" />
                 <p>{t("sessions.empty")}</p>
@@ -1206,6 +1812,7 @@ function ProjectSessionsContent({
                 {sessions?.sessions.map((item) => {
                   const isSelected = item.id === selectedSessionId;
                   const occupiedByOther = item.occupied && item.occupied_by === "client";
+                  const hasActiveRun = (liveRunsBySession[item.id] ?? []).some(isLiveRunActive);
                   return (
                     <li key={item.id}>
                       <button
@@ -1223,6 +1830,7 @@ function ProjectSessionsContent({
                         <span className={styles.sessionRowMeta}>
                           <time dateTime={item.updated_at}>{formatSessionTime(item.updated_at, i18n.language)}</time>
                           {item.occupied ? <span className={styles.occupiedBadge}>{occupiedByOther ? t("sessions.occupied") : t("sessions.occupiedHere")}</span> : null}
+                          {hasActiveRun ? <span className={styles.sessionRunBadge}><Activity size={11} aria-hidden="true" />{t("conversation.running")}</span> : null}
                         </span>
                       </button>
                     </li>
@@ -1232,12 +1840,12 @@ function ProjectSessionsContent({
             )}
           </aside>
 
-          <section className={styles.sessionContentPanel} aria-live="polite">
+          <section className={styles.sessionContentPanel}>
             {claim !== null && snapshot !== null ? (
               <>
                 <div className={styles.sessionContentHeader}>
                   <div>
-                    <p className={styles.eyebrow}>{draft ? t("sessions.draft") : t("sessions.readOnly")}</p>
+                    <p className={styles.eyebrow}>{t("sessions.conversation")}</p>
                     <h2>{draft ? t("sessions.draftTitle") : selectedSummary?.title ?? t("sessions.title")}</h2>
                   </div>
                   <button
@@ -1250,23 +1858,58 @@ function ProjectSessionsContent({
                     {t("controls.releaseSession")}
                   </button>
                 </div>
-                {draft ? (
-                  <div className={styles.readOnlyNotice} role="status">
-                    <Info size={16} aria-hidden="true" />
-                    {t("sessions.draftNotice")}
+                <div className={styles.conversationViewport} role="log" aria-live="off" aria-label={t("sessions.historyLabel")}>
+                  {snapshot.messages.length === 0 && selectedLiveRuns.length === 0 ? (
+                    <div className={styles.emptyConversation} role="status">
+                      <MessageSquare size={20} aria-hidden="true" />
+                      <p>{draft ? t("conversation.emptyDraft") : t("sessions.noMessages")}</p>
+                    </div>
+                  ) : (
+                    <div className={styles.messageHistory}>
+                      {snapshot.messages.map((message, index) => (
+                        <HistoryMessageView key={`history-${index}-${String(message.role)}`} message={message} index={index} t={t} />
+                      ))}
+                      {selectedLiveRuns.map((run) => (
+                        <LiveRunView key={run.localId} run={run} t={t} onCancel={(candidate) => void cancelRun(candidate)} />
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <form className={styles.composer} onSubmit={(event) => void submitInput(event)}>
+                  <label className={styles.srOnly} htmlFor="conversation-input">{t("conversation.inputLabel")}</label>
+                  <textarea
+                    ref={inputRef}
+                    id="conversation-input"
+                    aria-label={t("conversation.inputLabel")}
+                    className={styles.composerInput}
+                    rows={3}
+                    value={inputText}
+                    disabled={activeRun !== null || connectionState !== "online"}
+                    placeholder={t("conversation.inputPlaceholder")}
+                    onChange={(event) => {
+                      draftsBySessionRef.current[claim.session_id] = event.target.value;
+                      setInputText(event.target.value);
+                    }}
+                    onKeyDown={handleInputKeyDown}
+                  />
+                  <div className={styles.composerFooter}>
+                    <p className={composerError !== null ? styles.composerError : styles.composerHint} role={composerError !== null ? "alert" : "status"}>
+                      {composerError !== null
+                        ? t(composerError)
+                        : activeRun !== null
+                          ? t("conversation.activeRun")
+                          : t("conversation.enterHint")}
+                    </p>
+                    <button
+                      className={styles.primaryButton}
+                      type="submit"
+                      disabled={!inputText.trim() || activeRun !== null || connectionState !== "online"}
+                    >
+                      <Send size={15} aria-hidden="true" />
+                      {t("controls.send")}
+                    </button>
                   </div>
-                ) : snapshot.messages.length === 0 ? (
-                  <div className={styles.emptyState}><div className={styles.emptyIcon} aria-hidden="true"><MessageSquare size={22} /></div><div><h2>{t("sessions.noMessages")}</h2></div></div>
-                ) : (
-                  <div className={styles.messageHistory} aria-label={t("sessions.historyLabel")}>
-                    {snapshot.messages.map((message, index) => (
-                      <article className={styles.historyMessage} data-role={typeof message.role === "string" ? message.role : "system"} key={`${index}-${String(message.role)}`}>
-                        <div className={styles.historyMessageRole}>{historyRoleLabel(message.role, t)}</div>
-                        <p>{historyMessageText(message.content)}</p>
-                      </article>
-                    ))}
-                  </div>
-                )}
+                </form>
               </>
             ) : (
               <div className={styles.sessionPrompt}>

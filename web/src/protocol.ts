@@ -93,6 +93,12 @@ export interface ProjectJob {
   review_status: "overdue" | "upcoming" | "next_on_resume" | "completed";
 }
 
+export interface ProjectScheduleStatus {
+  admitted: boolean;
+  status: "available" | "faulted";
+  active_job_count: number;
+}
+
 export interface RegisteredProject {
   project_id: string;
   path: string;
@@ -100,6 +106,7 @@ export interface RegisteredProject {
   schedule_state: ProjectScheduleState;
   available: boolean;
   saved_jobs: ProjectJob[];
+  schedule_status: ProjectScheduleStatus | null;
 }
 
 export interface ProjectListResponse {

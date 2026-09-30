@@ -18,6 +18,7 @@ from myclaw.agent.confirmation import (
     ForegroundConfirmationOwner,
 )
 from myclaw.agent.loop import AgentLoop
+from myclaw.agent.session.session import Session
 from myclaw.agent.tools.tool_gateway import ConfirmationRequest
 from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
@@ -327,6 +328,192 @@ async def test_project_schedule_stays_paused_across_service_restart_until_resume
         assert second_workspace._schedule_admitted
     finally:
         await second_service.stop()
+
+
+@pytest.mark.asyncio
+async def test_stopped_service_cannot_reopen_project_schedule_admission(tmp_path: Path) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    state = WorkspaceState(project)
+    state.initialize(agent_home_root=home.path)
+    job = ScheduleJob(
+        job_id=str(uuid4()),
+        message="must stay paused",
+        schedule=JobSchedule.every(3600),
+        created_at_ms=1,
+        updated_at_ms=1,
+    )
+    await WorkspaceScheduleStore(state).add_user_job(job)
+
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    client = await service.register_client("web")
+
+    class Sink:
+        async def send_event(self, event: dict[str, object]) -> None:
+            del event
+
+    try:
+        await service.connect_client(client.client_id, Sink())
+        record, workspace, saved_jobs = await service.register_project(client.client_id, project)
+        assert record.schedule_state == "awaiting_resume"
+        assert [saved.job_id for saved in saved_jobs] == [job.job_id]
+        assert not workspace.schedule_admitted
+
+        await service.stop()
+        with pytest.raises(ServiceError) as rejected:
+            await service.resume_project_schedule(client.client_id, record.project_id, {job.job_id})
+        assert rejected.value.code == "admission_closed"
+        assert ProjectCatalog(home).list()[0].schedule_state == "awaiting_resume"
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ["disconnect", "stop"])
+async def test_schedule_activation_rechecks_service_gate_after_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transition: str
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    for name in ("first", "second"):
+        project = tmp_path / name
+        project.mkdir()
+        ProjectCatalog(home).register(project)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    client = await service.register_client("web")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    first = next(iter(service.workspaces.values()))
+    original_activate = first.activate_schedule
+    observed: list[tuple[str, bool]] = []
+
+    async def delayed_activate() -> None:
+        entered.set()
+        await release.wait()
+        await original_activate()
+        observed.append((service.state, first._schedule_admitted))
+
+    class Sink:
+        async def send_event(self, event: dict[str, object]) -> None:
+            del event
+
+    monkeypatch.setattr(first, "activate_schedule", delayed_activate)
+    try:
+        connecting = asyncio.create_task(service.connect_client(client.client_id, Sink()))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        changing = asyncio.create_task(
+            service.disconnect_client(client.client_id)
+            if transition == "disconnect"
+            else service.stop()
+        )
+        expected_state = "reconnecting" if transition == "disconnect" else "draining"
+        for _ in range(10):
+            if service.state == expected_state:
+                break
+            await asyncio.sleep(0)
+        assert service.state == expected_state
+        release.set()
+        await asyncio.gather(connecting, changing)
+        assert observed == [(expected_state, False)]
+        assert all(not workspace.schedule_admitted for workspace in service.workspaces.values())
+    finally:
+        release.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_other_client_disconnect_preserves_restore_schedule_pause(tmp_path: Path) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    state = WorkspaceState(project)
+    state.initialize(agent_home_root=home.path)
+    session = Session.create(state)
+    session.commit_agent_run(
+        [{"role": "user", "content": "Restore this turn"}],
+        pending_last_compacted=session.last_compacted,
+        pending_action_summary="",
+        restore_before=session.capture_restore_before(),
+        restore_run_token=uuid4(),
+    )
+    await session.wait_for_pending_persist()
+    ProjectCatalog(home).register(project)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+
+    class Sink:
+        async def send_event(self, event: dict[str, object]) -> None:
+            del event
+
+    try:
+        owner = await service.register_client("cli")
+        other = await service.register_client("web")
+        await service.connect_client(owner.client_id, Sink())
+        await service.connect_client(other.client_id, Sink())
+        workspace = await service.attach_workspace(owner.client_id, project)
+        await service.attach_workspace(other.client_id, project)
+        await service.claim(owner.client_id, workspace.workspace_id, session.session_id)
+        dispatcher = workspace.management_dispatcher(owner.client_id, session.session_id)
+        assert (await dispatcher.dispatch("/restore")).restore_listing is not None
+        assert (await dispatcher.restore_inspect(1)).restore_plan is not None
+        assert workspace.schedule_service.admission_paused
+        assert workspace.schedule_status()["admitted"] is False
+
+        await service.disconnect_client(other.client_id)
+        assert workspace.schedule_service.admission_paused
+        assert workspace.schedule_status()["admitted"] is False
+        await service.disconnect_client(owner.client_id)
+        assert service.state == "reconnecting"
+        await service.connect_client(owner.client_id, Sink())
+        assert workspace.schedule_service.admission_paused
+        await dispatcher.restore_cancel()
+        assert workspace.schedule_admitted
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_project_snapshot_cannot_recreate_a_removed_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+
+    class Sink:
+        async def send_event(self, event: dict[str, object]) -> None:
+            del event
+
+    try:
+        client = await service.register_client("web")
+        await service.connect_client(client.client_id, Sink())
+        record, workspace, _jobs = await service.register_project(client.client_id, project)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_snapshot = workspace.schedule_service.public_snapshot
+
+        async def delayed_snapshot() -> tuple[ScheduleJob, ...]:
+            entered.set()
+            await release.wait()
+            return await original_snapshot()
+
+        monkeypatch.setattr(workspace.schedule_service, "public_snapshot", delayed_snapshot)
+        snapshot = asyncio.create_task(service.project_schedule_snapshot(record))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        removing = asyncio.create_task(service.remove_project(client.client_id, record.project_id))
+        await asyncio.sleep(0)
+        assert not removing.done()
+        release.set()
+        await snapshot
+        await removing
+        assert not service.workspaces
+        assert await service.project_schedule_snapshot(record) == ((), None)
+    finally:
+        await service.stop()
 
 
 @pytest.mark.asyncio

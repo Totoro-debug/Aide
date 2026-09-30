@@ -443,7 +443,7 @@ try {
   await secondPage.goto(`${url}/#ticket=${encodeURIComponent(control.details.second_ticket)}`);
   await secondPage.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
   await secondPage.getByRole("link", { name: /Projects|项目/ }).click();
-  await secondPage.getByRole("heading", { name: /Projects|项目/, exact: true }).waitFor();
+  await secondPage.getByRole("heading", { name: /^(Projects|项目)$/ }).waitFor();
   await secondPage.locator("aside").getByRole("link", { name: "project-one", exact: true }).click();
   await secondPage.getByRole("heading", { name: "project-one", exact: true }).waitFor();
   const secondSessionList = secondPage.getByRole("list", { name: /Conversation Sessions|对话会话/ });
@@ -614,6 +614,7 @@ try {
 
   await registerProject(secondProject, "project-two");
   assert.equal(await projectItems.count(), 2);
+  await projectItems.filter({ hasText: secondProject }).getByText("Schedule active").waitFor();
 
   for (const language of ["en", "zh-CN"]) {
     await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();

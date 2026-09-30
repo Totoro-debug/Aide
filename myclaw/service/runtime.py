@@ -371,6 +371,7 @@ class WorkspaceServiceRuntime:
                 ),
             )
             await self.runtime.start()
+            self.runtime.schedule_service.set_admission_guard(lambda: self.schedule_admitted)
             self.workspace_state = self.runtime.workspace_state
             await self.runtime.prepare_schedule(
                 JobSchedule.from_cron_input(
@@ -392,11 +393,39 @@ class WorkspaceServiceRuntime:
 
     async def activate_schedule(self) -> None:
         await self.start()
-        if self._closed:
+        if (
+            self._closed
+            or self._restore_schedule_paused
+            or self._restore_blocked
+            or not self.service._schedule_admission_open()
+            or not self.service._schedule_allowed(self)
+        ):
             return
         self._schedule_admitted = True
         self.schedule_service.resume()
         self.schedule_service.start()
+
+    @property
+    def schedule_admitted(self) -> bool:
+        """Return whether this Workspace may admit new Schedule occurrences."""
+        return (
+            self._schedule_admitted
+            and not self._closed
+            and not self._restore_schedule_paused
+            and not self._restore_blocked
+            and not self.schedule_service.admission_paused
+            and self.service._schedule_admission_open()
+            and self.service._schedule_allowed(self)
+        )
+
+    def schedule_status(self) -> dict[str, object]:
+        """Return the live Schedule projection for this Workspace."""
+        status = self.schedule_service.status_snapshot().to_dict()
+        return {
+            "admitted": self.schedule_admitted,
+            "status": status["status"],
+            "active_job_count": status["active_job_count"],
+        }
 
     async def pause_schedule_admission(self) -> None:
         if not self._started or self._closed:
@@ -680,8 +709,8 @@ class WorkspaceServiceRuntime:
             await loop._release_replacement_barrier(resume_inbound=True)
         if self._restore_schedule_paused:
             self._restore_schedule_paused = False
-            if not self._closed and not self._restore_blocked and self.service.state == "ready":
-                self.schedule_service.resume()
+            if not self._closed and not self._restore_blocked:
+                await self.activate_schedule()
 
     async def _rebuild_restored_session(self, client_id: str, session_id: str) -> SessionClaim:
         claim = self._claims.get(session_id)
@@ -780,8 +809,8 @@ class WorkspaceServiceRuntime:
                 )
             try:
                 if not self._restore_schedule_paused:
-                    await self.schedule_service.pause_and_wait_idle()
                     self._restore_schedule_paused = True
+                    await self.schedule_service.pause_and_wait_idle()
                 manager = RestoreManager(
                     self.workspace_state, loop.session.session_id, now=local_now
                 )
@@ -1137,6 +1166,8 @@ class LocalService:
         self._stop_failed = False
         self._closed = asyncio.Event()
         self._lock = asyncio.Lock()
+        self._schedule_admission_lock = asyncio.Lock()
+        self._project_lifecycle_lock = asyncio.Lock()
         self.projects = ProjectCatalog(agent_home)
 
     async def start(self) -> None:
@@ -1148,6 +1179,7 @@ class LocalService:
             if record.schedule_state == "available" and record.path.is_dir():
                 await self._get_or_create_workspace(record.path)
         self.state = "ready"
+        await self._reconcile_schedule_admission()
         self._global_reconnect_task = asyncio.create_task(self._stop_after_grace())
 
     @property
@@ -1232,6 +1264,8 @@ class LocalService:
         wait_for_subscribe: bool = False,
     ) -> None:
         client = self._require_client(client_id)
+        if self.state in {"draining", "stopped"}:
+            raise service_error("admission_closed", "The local service is stopping.")
         if client.connected:
             raise service_error("client_already_connected", "This Client already has a connection.")
         client.connected = True
@@ -1249,10 +1283,7 @@ class LocalService:
             self.state = "ready"
         for workspace in self._workspaces.values():
             workspace.set_client_connection(client_id, connected=True)
-        if self.state == "ready":
-            for workspace in self._workspaces.values():
-                if self._schedule_allowed(workspace):
-                    await workspace.activate_schedule()
+        await self._reconcile_schedule_admission()
         if not wait_for_subscribe:
             async with client.delivery_lock:
                 client.subscribed = True
@@ -1283,11 +1314,13 @@ class LocalService:
         if not any(candidate.connected for candidate in self._clients.values()):
             if self.state == "ready":
                 self.state = "reconnecting"
-                for workspace in self._workspaces.values():
-                    await workspace.pause_schedule_admission()
+            await self._reconcile_schedule_admission()
+            if self.state == "reconnecting":
                 self._global_reconnect_task = asyncio.create_task(
                     self._stop_after_grace(expiry_deadline)
                 )
+        else:
+            await self._reconcile_schedule_admission()
 
     async def attach_workspace(self, client_id: str, path: Path) -> WorkspaceServiceRuntime:
         client = self._require_client(client_id)
@@ -1305,10 +1338,7 @@ class LocalService:
             ) from error
         runtime = await self._get_or_create_workspace(normalized)
         client.attached_workspaces.add(runtime.workspace_id)
-        if any(client.connected for client in self._clients.values()) and self._schedule_allowed(
-            runtime
-        ):
-            await runtime.activate_schedule()
+        await self._reconcile_schedule_admission()
         return runtime
 
     async def _get_or_create_workspace(self, path: Path) -> WorkspaceServiceRuntime:
@@ -1337,6 +1367,18 @@ class LocalService:
                 return record.schedule_state == "available"
         return True
 
+    def _schedule_admission_open(self) -> bool:
+        return self.state == "ready" and any(client.connected for client in self._clients.values())
+
+    async def _reconcile_schedule_admission(self) -> None:
+        """Apply the single service-wide Schedule admission gate to every Workspace."""
+        async with self._schedule_admission_lock:
+            for workspace in tuple(self._workspaces.values()):
+                if self._schedule_admission_open() and self._schedule_allowed(workspace):
+                    await workspace.activate_schedule()
+                else:
+                    await workspace.pause_schedule_admission()
+
     async def register_project(
         self, client_id: str, path: Path
     ) -> tuple[ProjectRecord, WorkspaceServiceRuntime, tuple[ScheduleJob, ...]]:
@@ -1358,21 +1400,26 @@ class LocalService:
         jobs = await workspace.schedule_service.public_snapshot()
         if not jobs and record.schedule_state == "awaiting_resume":
             record = self.projects.set_schedule_state(record.project_id, "available")
-            if any(client.connected for client in self._clients.values()):
-                await workspace.activate_schedule()
+            await self._reconcile_schedule_admission()
         return record, workspace, jobs
 
-    async def project_schedule_jobs(self, record: ProjectRecord) -> tuple[ScheduleJob, ...]:
-        """Read saved user Jobs without admitting Schedule execution."""
-        if not record.path.is_dir():
-            return ()
-        key = os.path.normcase(str(record.path.resolve(strict=False)))
-        workspace_id = self._workspace_keys.get(key)
-        if workspace_id is None:
-            workspace = await self._get_or_create_workspace(record.path)
-        else:
-            workspace = self._workspaces[workspace_id]
-        return await workspace.schedule_service.public_snapshot()
+    async def project_schedule_snapshot(
+        self, record: ProjectRecord
+    ) -> tuple[tuple[ScheduleJob, ...], dict[str, object] | None]:
+        """Read one Project's Jobs and live status across the removal boundary."""
+        async with self._project_lifecycle_lock:
+            if record not in self.projects.list() or not record.path.is_dir():
+                return (), None
+            key = os.path.normcase(str(record.path.resolve(strict=False)))
+            workspace_id = self._workspace_keys.get(key)
+            if workspace_id is None:
+                if self.state in {"draining", "stopped"}:
+                    return (), None
+                workspace = await self._get_or_create_workspace(record.path)
+            else:
+                workspace = self._workspaces[workspace_id]
+            jobs = await workspace.schedule_service.public_snapshot()
+            return jobs, workspace.schedule_status()
 
     async def _project_workspace(
         self, client_id: str, project_id: str
@@ -1448,6 +1495,8 @@ class LocalService:
         self, client_id: str, project_id: str, expected_job_ids: set[str]
     ) -> str:
         self._require_client(client_id)
+        if not self._schedule_admission_open():
+            raise service_error("admission_closed", "Schedule admission is closed.")
         record = next(
             (item for item in self.projects.list() if item.project_id == project_id), None
         )
@@ -1464,11 +1513,14 @@ class LocalService:
                 "stale_schedule_review", "Saved Schedule Jobs changed; review them again."
             )
         self.projects.set_schedule_state(project_id, "available")
-        if any(client.connected for client in self._clients.values()):
-            await workspace.activate_schedule()
+        await self._reconcile_schedule_admission()
         return "available"
 
     async def remove_project(self, client_id: str, project_id: str) -> Path:
+        async with self._project_lifecycle_lock:
+            return await self._remove_project_owned(client_id, project_id)
+
+    async def _remove_project_owned(self, client_id: str, project_id: str) -> Path:
         self._require_client(client_id)
         record = next(
             (item for item in self.projects.list() if item.project_id == project_id), None
@@ -1851,6 +1903,7 @@ class LocalService:
         errors: list[Exception] = []
         if self._global_reconnect_task is not None:
             self._global_reconnect_task.cancel()
+        await self._reconcile_schedule_admission()
         for client in self._clients.values():
             if client.disconnect_task is not None:
                 client.disconnect_task.cancel()

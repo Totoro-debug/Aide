@@ -118,6 +118,11 @@ def test_project_http_shapes_are_versioned_and_preserve_saved_job_review_data() 
                 "review_status": "upcoming",
             }
         ],
+        "schedule_status": {
+            "admitted": False,
+            "status": "available",
+            "active_job_count": 0,
+        },
     }
     projects_validator = _validator("projects_response")
     projects_validator.validate({"projects": [project]})

@@ -142,6 +142,7 @@ class ScheduleService:
             execute_user_job if execute_user_job is not None else _unavailable_user_job
         )
         self._execute_user_occurrence = execute_user_occurrence
+        self._admission_guard: Callable[[], bool] = lambda: True
         self._permission_snapshot_factory = permission_snapshot_factory
         self._cancel_confirmation_owner = cancel_confirmation_owner
         self._execute_dream = execute_dream
@@ -313,6 +314,14 @@ class ScheduleService:
             "faulted" if self._faulted or self._store.health == "faulted" else "available"
         )
         return ScheduleServiceStatus(status=health, active_job_count=len(self._active_job_ids))
+
+    @property
+    def admission_paused(self) -> bool:
+        return self._paused
+
+    def set_admission_guard(self, guard: Callable[[], bool]) -> None:
+        """Check an external admission boundary before reserving an occurrence."""
+        self._admission_guard = guard
 
     def cancellation_requested(self) -> bool:
         """Return whether Runtime shutdown has requested Schedule execution cancellation."""
@@ -718,12 +727,12 @@ class ScheduleService:
     async def _dispatch(self) -> None:
         revision = self._store.revision
         try:
-            while not self._closing.is_set() and not self._paused:
+            while not self._closing.is_set() and not self._paused and self._admission_guard():
                 if self._faulted or self._store.health == "faulted":
                     self._latch_fault()
                     return
                 jobs = await self._store.snapshot()
-                if self._closing.is_set() or self._paused:
+                if self._closing.is_set() or self._paused or not self._admission_guard():
                     return
                 current = self._clock.now()
                 current_monotonic = self._clock.monotonic()
@@ -748,12 +757,14 @@ class ScheduleService:
                     key=lambda job: job.job_id,
                 )
                 if due:
-                    if self._closing.is_set() or self._paused:
+                    if self._closing.is_set() or self._paused or not self._admission_guard():
                         return
                     async with self._reservation_gate:
-                        if self._closing.is_set() or self._paused:
+                        if self._closing.is_set() or self._paused or not self._admission_guard():
                             return
                         reserved = await self._store.reserve_due(tuple(due))
+                        if not self._admission_guard():
+                            return
                         for job in reserved:
                             self._reserve(job, current_monotonic=current_monotonic)
                     revision = self._store.revision
@@ -787,7 +798,7 @@ class ScheduleService:
         *,
         current_monotonic: float,
     ) -> None:
-        if self._faulted or self._closing.is_set() or self._paused:
+        if self._faulted or self._closing.is_set() or self._paused or not self._admission_guard():
             return
         lane = self._execution_lane(job)
         if job.job_id in self._active_job_ids:

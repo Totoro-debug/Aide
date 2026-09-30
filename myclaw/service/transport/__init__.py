@@ -436,7 +436,7 @@ class LocalServiceTransport:
                 "persistence_error", "The Project catalog could not be read safely.", status=500
             ) from error
         for record in records:
-            saved_jobs = await self.service.project_schedule_jobs(record)
+            saved_jobs, schedule_status = await self.service.project_schedule_snapshot(record)
             projects.append(
                 {
                     "project_id": record.project_id,
@@ -445,6 +445,7 @@ class LocalServiceTransport:
                     "schedule_state": record.schedule_state,
                     "available": record.path.is_dir(),
                     "saved_jobs": [_project_job_summary(job) for job in saved_jobs],
+                    "schedule_status": schedule_status,
                 }
             )
         return web.json_response({"projects": projects})

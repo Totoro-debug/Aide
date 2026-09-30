@@ -291,6 +291,18 @@ async def test_project_http_contract_reports_path_errors_and_keeps_cli_workspace
                 assert response.status == 200
                 assert (await response.json())["project_id"] == project_id
 
+            async with aiohttp.ClientSession() as status_http:
+                async with status_http.get(
+                    f"{client.base_url}/api/v1/projects", headers=headers
+                ) as response:
+                    assert response.status == 200
+                    active_project = (await response.json())["projects"][0]
+                    assert active_project["schedule_status"] == {
+                        "admitted": True,
+                        "status": "available",
+                        "active_job_count": 0,
+                    }
+
             shutil.rmtree(project)
             async with http.get(f"{client.base_url}/api/v1/projects", headers=headers) as response:
                 assert response.status == 200
@@ -303,6 +315,7 @@ async def test_project_http_contract_reports_path_errors_and_keeps_cli_workspace
                         "schedule_state": "available",
                         "available": False,
                         "saved_jobs": [],
+                        "schedule_status": None,
                     }
                 ]
     finally:

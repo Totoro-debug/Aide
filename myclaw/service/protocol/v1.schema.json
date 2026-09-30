@@ -204,11 +204,22 @@
         "review_status": {"enum": ["overdue", "upcoming", "next_on_resume", "completed"]}
       }
     },
+    "project_schedule_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["admitted", "status", "active_job_count"],
+      "properties": {
+        "admitted": {"type": "boolean"},
+        "status": {"enum": ["available", "faulted"]},
+        "active_job_count": {"type": "integer", "minimum": 0}
+      }
+    },
     "project": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "project_id", "path", "name", "schedule_state", "available", "saved_jobs"
+        "project_id", "path", "name", "schedule_state", "available", "saved_jobs",
+        "schedule_status"
       ],
       "properties": {
         "project_id": {"$ref": "#/$defs/identifier"},
@@ -221,6 +232,12 @@
         "saved_jobs": {
           "type": "array",
           "items": {"$ref": "#/$defs/project_job"}
+        },
+        "schedule_status": {
+          "anyOf": [
+            {"$ref": "#/$defs/project_schedule_status"},
+            {"type": "null"}
+          ]
         }
       }
     },

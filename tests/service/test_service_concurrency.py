@@ -17,6 +17,7 @@ from aiohttp.test_utils import TestServer
 import myclaw.service.runtime as service_runtime
 from myclaw.agent.memory.manager import MemoryManager
 from myclaw.agent.session.session import Session
+from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader, ProviderConfiguration
 from myclaw.provider.models import (
@@ -29,9 +30,11 @@ from myclaw.provider.models import (
     TextDelta,
 )
 from myclaw.schedule.model import JobSchedule, ScheduleJob
+from myclaw.schedule.store import WorkspaceScheduleStore
 from myclaw.service.client import ServiceClient
 from myclaw.service.discovery import ServiceDiscovery, create_credential, write_discovery
 from myclaw.service.errors import ServiceError
+from myclaw.service.projects import ProjectCatalog
 from myclaw.service.runtime import LocalService
 from myclaw.service.transport import create_app
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
@@ -758,6 +761,76 @@ async def test_workspace_schedule_and_memory_are_shared_across_clients(
             await second.close()
         if first is not None:
             await first.close()
+        await server.close()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_due_job_runs_once_in_unselected_registered_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    selected_project = tmp_path / "selected-project"
+    unselected_project = tmp_path / "unselected-project"
+    selected_project.mkdir()
+    unselected_project.mkdir()
+
+    ProjectCatalog(home).register(selected_project)
+    ProjectCatalog(home).register(unselected_project)
+    unselected_state = WorkspaceState(unselected_project)
+    unselected_state.initialize(agent_home_root=home.path)
+    job = ScheduleJob(
+        job_id=str(uuid4()),
+        message="run from an unselected project",
+        schedule=JobSchedule.every(3600),
+        created_at_ms=1,
+        updated_at_ms=1,
+    )
+    await WorkspaceScheduleStore(unselected_state).add_user_job(job)
+
+    provider = _ScheduleProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    server, port = await _serve(service, home)
+    client: ServiceClient | None = None
+    try:
+        web_client = await service.register_client("web")
+
+        class Sink:
+            async def send_event(self, event: dict[str, object]) -> None:
+                del event
+
+        await service.connect_client(web_client.client_id, Sink())
+        selected_workspace = await service.attach_workspace(web_client.client_id, selected_project)
+        client = await ServiceClient.connect_or_start(home, selected_project, port=port)
+        assert service.workspace(client.workspace_id) is selected_workspace
+        assert service.workspace(client.workspace_id).schedule_service is selected_workspace.schedule_service
+        runtime = selected_workspace.runtime
+        assert runtime is not None
+        cli_runtime = service.workspace(client.workspace_id).runtime
+        assert cli_runtime is runtime
+        assert cli_runtime.memory_manager is runtime.memory_manager
+        assert len(service.workspaces) == 2
+        unselected_workspace = next(
+            workspace
+            for workspace in service.workspaces.values()
+            if workspace.workspace_path == unselected_project.resolve()
+        )
+        await asyncio.wait_for(provider.started.wait(), timeout=2)
+        for _ in range(100):
+            current = await unselected_workspace.schedule_service.public_snapshot()
+            if current and current[0].state.last_status is not None:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("the unselected Project Job did not reach a terminal state")
+
+        assert current[0].state.last_status == "ok", current[0].state
+        assert provider.complete_calls == 1
+        assert unselected_workspace.schedule_admitted
+    finally:
+        if client is not None:
+            await client.close()
         await server.close()
         await service.stop()
 

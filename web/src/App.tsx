@@ -185,6 +185,12 @@ export default function App() {
   }, [authState, refreshProjects]);
 
   useEffect(() => {
+    if (authState !== "ready") return;
+    const projectsTimer = window.setInterval(() => void refreshProjects(), 5000);
+    return () => window.clearInterval(projectsTimer);
+  }, [authState, refreshProjects]);
+
+  useEffect(() => {
     const unsubscribe = subscribeServiceEvents((event) => {
       if (event.type === "confirmation.requested") {
         const next = parseConfirmationEvent(event);
@@ -1061,11 +1067,9 @@ function ProjectsView({
                   </Link>
                   <span
                     className={styles.scheduleBadge}
-                    data-paused={project.schedule_state === "awaiting_resume"}
+                    data-paused={project.schedule_status?.admitted !== true}
                   >
-                    {!project.available
-                      ? t("projects.scheduleUnavailable")
-                      : t(`projects.scheduleState.${project.schedule_state}`)}
+                    {projectScheduleLabel(project, t)}
                   </span>
                   {project.schedule_state === "awaiting_resume" ? (
                     <div className={styles.scheduleReview}>
@@ -2402,6 +2406,28 @@ function scheduleText(job: RegisteredProject["saved_jobs"][number], t: (key: str
     return t("projects.cronSchedule", { expression: job.schedule.cron_expr, timezone: job.schedule.timezone });
   }
   return t("projects.atSchedule", { time: job.schedule.at_time });
+}
+
+function projectScheduleLabel(
+  project: RegisteredProject,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  if (!project.available) {
+    return t("projects.scheduleUnavailable");
+  }
+  if (project.schedule_state !== "available") {
+    return t(`projects.scheduleState.${project.schedule_state}`);
+  }
+  if (project.schedule_status === null) {
+    return t("projects.scheduleUnavailable");
+  }
+  if (project.schedule_status.status === "faulted") {
+    return t("projects.scheduleUnavailable");
+  }
+  if (!project.schedule_status.admitted) return t("projects.schedulePaused");
+  return project.schedule_status.active_job_count > 0
+    ? t("projects.scheduleRunning", { count: project.schedule_status.active_job_count })
+    : t("projects.scheduleState.available");
 }
 
 function projectPathError(error: unknown): string | null {

@@ -64,7 +64,8 @@ const resources = {
         unavailable: "Unavailable",
         available: "Available",
         scheduleReady: "Schedule active",
-        schedulePaused: "Schedule paused for review",
+        schedulePaused: "Schedule paused",
+        scheduleRunning: "Schedule running ({{count}} active)",
         scheduleUnavailable: "Schedule unavailable",
         scheduleState: {
           available: "Schedule active",
@@ -237,7 +238,8 @@ const resources = {
         unavailable: "不可用",
         available: "可用",
         scheduleReady: "调度已启用",
-        schedulePaused: "调度已暂停，等待确认",
+        schedulePaused: "调度已暂停",
+        scheduleRunning: "调度运行中（{{count}} 个任务）",
         scheduleUnavailable: "调度不可用",
         scheduleState: {
           available: "调度已启用",

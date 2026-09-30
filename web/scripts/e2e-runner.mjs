@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { chromium } from "@playwright/test";
 
@@ -14,13 +14,15 @@ const viewports = [
 const output = resolve("test-results");
 let control;
 let browser;
+let secondContext;
 
 try {
   control = await setup();
   browser = await chromium.launch({
     channel: process.env.MYCLAW_E2E_BROWSER_CHANNEL ?? (process.platform === "win32" ? "msedge" : undefined),
   });
-  const page = await browser.newPage();
+  const primaryContext = await browser.newContext();
+  const page = await primaryContext.newPage();
   await page.addInitScript(() => {
     const OriginalWebSocket = window.WebSocket;
     window.WebSocket = class extends OriginalWebSocket {
@@ -137,6 +139,109 @@ try {
   await registerProject(firstProject, "project-one");
   await page.getByText("E2E saved project job").waitFor();
   await page.getByText("Schedule paused for review").waitFor();
+
+  const firstProjectItem = projectItems.filter({ hasText: firstProject });
+  await firstProjectItem.getByRole("link", { name: "Open sessions" }).click();
+  await page.getByRole("heading", { name: "project-one", exact: true }).waitFor();
+  const sessionList = page.getByRole("list", { name: "Conversation Sessions" });
+  await sessionList.getByRole("button", { name: /Web available history/ }).click();
+  await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
+  await page.reload();
+  await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
+  assert.equal(await page.getByText("schedule-only content", { exact: true }).count(), 0);
+
+  const draftResponsePromise = page.waitForResponse((response) => (
+    response.request().method() === "POST"
+    && response.url().includes("/api/v1/projects/")
+    && response.url().endsWith("/sessions")
+  ));
+  await page.getByRole("button", { name: "New session" }).click();
+  const draftResponse = await draftResponsePromise;
+  const draftId = (await draftResponse.json()).session_id;
+  assert.equal(typeof draftId, "string");
+  const sessionPanel = page.locator('aside[aria-label="Conversation Sessions"]');
+  await sessionPanel.getByText("Empty draft", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Release session" }).click();
+  await sessionPanel.getByText("Empty draft", { exact: true }).waitFor({ state: "detached" });
+  const sessionFiles = await readdir(resolve(firstProject, ".myclaw", "sessions"));
+  assert.equal(sessionFiles.includes(`${draftId}.jsonl`), false, "Released empty draft was persisted");
+
+  await sessionList.getByRole("button", { name: /Web available history/ }).click();
+  await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
+  await sessionList.getByRole("button", { name: /CLI occupied history/ }).click();
+  await page.getByRole("alert").filter({ hasText: "occupied" }).waitFor();
+  assert.equal(await page.getByText("CLI-only history must remain private", { exact: true }).count(), 0);
+
+  await sessionList.getByRole("button", { name: /Web available history/ }).click();
+  await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
+  const duplicatePage = await page.context().newPage();
+  try {
+    await duplicatePage.goto(page.url());
+    const duplicateResult = await duplicatePage.evaluate(async (sessionId) => {
+      const browserSession = await window.fetch("/api/v1/web/session", { credentials: "include" });
+      const { csrf_token: csrf } = await browserSession.json();
+      const projectId = window.location.pathname.split("/").at(-1);
+      const response = await window.fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}/claim`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", "X-MyClaw-CSRF": csrf },
+        body: JSON.stringify({ request_id: window.crypto.randomUUID() }),
+      });
+      return { status: response.status, body: await response.text() };
+    }, control.details.available_session_id);
+    assert.equal(duplicateResult.status, 403, "Copied tab loaded the active Claim");
+    assert.equal(duplicateResult.body.includes("Available history loaded after a successful Claim"), false);
+  } finally {
+    await duplicatePage.close();
+  }
+  secondContext = await browser.newContext();
+  const secondPage = await secondContext.newPage();
+  await secondPage.goto(`${url}/#ticket=${encodeURIComponent(control.details.second_ticket)}`);
+  await secondPage.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
+  await secondPage.getByRole("link", { name: /Projects|项目/ }).click();
+  await secondPage.getByRole("heading", { name: /Projects|项目/, exact: true }).waitFor();
+  await secondPage.locator("aside").getByRole("link", { name: "project-one", exact: true }).click();
+  await secondPage.getByRole("heading", { name: "project-one", exact: true }).waitFor();
+  const secondSessionList = secondPage.getByRole("list", { name: /Conversation Sessions|对话会话/ });
+  await secondSessionList.getByRole("button", { name: /CLI occupied history/ }).waitFor();
+  await secondSessionList
+    .getByRole("button", { name: /CLI occupied history/ })
+    .getByText(/Occupied|已占用/, { exact: true })
+    .waitFor();
+  await secondSessionList.getByRole("button", { name: /Web available history/ }).click();
+  await secondPage.getByRole("alert").filter({ hasText: /occupied|占用/ }).waitFor();
+  assert.equal(
+    await secondPage.getByText("Available history loaded after a successful Claim", { exact: true }).count(),
+    0,
+  );
+
+  const releaseResponsePromise = page.waitForResponse((response) => (
+    response.request().method() === "POST" && response.url().includes("/release")
+  ));
+  await page.getByRole("button", { name: "Release session" }).click();
+  assert.equal((await releaseResponsePromise).status(), 200);
+  const refreshResponsePromise = secondPage.waitForResponse((response) => (
+    response.request().method() === "GET"
+    && response.url().includes("/api/v1/projects/")
+    && response.url().endsWith("/sessions")
+  ));
+  await secondPage.getByRole("button", { name: /Refresh sessions|刷新会话/ }).click();
+  assert.equal((await refreshResponsePromise).status(), 200);
+  const releasedSession = secondSessionList.getByRole("button", { name: /Web available history/ });
+  await releasedSession.getByText(/Occupied|已占用/, { exact: true }).waitFor({ state: "detached" });
+  const handoffClaimPromise = secondPage.waitForResponse((response) => (
+    response.request().method() === "POST" && response.url().includes("/claim")
+  ));
+  await releasedSession.click();
+  assert.equal((await handoffClaimPromise).status(), 200);
+  await secondPage.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
+  await secondPage.getByRole("button", { name: /Release session|释放会话/ }).click();
+  await secondPage.getByRole("button", { name: /Release session|释放会话/ }).waitFor({ state: "detached" });
+  await secondContext.close();
+  secondContext = undefined;
+  await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
+  await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
+
   await registerProject(secondProject, "project-two");
   assert.equal(await projectItems.count(), 2);
 
@@ -161,6 +266,32 @@ try {
       }
     }
   }
+  await page.locator("aside").getByRole("link", { name: "project-one", exact: true }).click();
+  await page.getByRole("button", { name: /Web available history/ }).click();
+  await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
+  for (const language of ["en", "zh-CN"]) {
+    await page.getByRole("button", { name: language === "en" ? "EN" : "中文" }).click();
+    for (const theme of ["light", "dark"]) {
+      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      for (const viewport of viewports) {
+        await page.setViewportSize(viewport);
+        const layout = await page.evaluate(() => {
+          const list = document.querySelector("main aside").getBoundingClientRect();
+          const content = document.querySelector("main section[aria-live='polite']").getBoundingClientRect();
+          const horizontal = Math.max(0, Math.min(list.right, content.right) - Math.max(list.left, content.left));
+          const vertical = Math.max(0, Math.min(list.bottom, content.bottom) - Math.max(list.top, content.top));
+          return { width: document.documentElement.scrollWidth, overlap: horizontal * vertical };
+        });
+        assert.ok(layout.width <= viewport.width, `Session horizontal overflow at ${viewport.width}x${viewport.height}`);
+        assert.ok(layout.overlap < 1, `Session list overlaps history at ${viewport.width}x${viewport.height}`);
+        await page.screenshot({ path: resolve(output, `sessions-${language}-${theme}-${viewport.width}.png`) });
+      }
+    }
+  }
+  await page.locator("aside").getByRole("link", { name: "project-two", exact: true }).click();
+  await page.getByRole("heading", { name: "project-two", exact: true }).waitFor();
+  assert.equal(await page.getByText("Available history loaded after a successful Claim", { exact: true }).count(), 0);
+  await page.getByRole("navigation").getByRole("link", { name: /Projects|项目/ }).click();
   await page.getByRole("button", { name: "EN" }).click();
   await page.setViewportSize({ width: 768, height: 1024 });
 
@@ -204,6 +335,7 @@ try {
   await page.getByRole("status").first().getByText(/Online|在线/).waitFor({ timeout: 10000 });
   console.log("Playwright production E2E: 4 locale/theme combinations x 3 viewports, ticket, refresh, focus, reconnect passed");
 } finally {
+  await secondContext?.close();
   await browser?.close();
   await control?.shutdown();
 }

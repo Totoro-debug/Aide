@@ -7,6 +7,7 @@ import json
 import shutil
 import socket
 import sys
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
@@ -20,8 +21,10 @@ from yarl import URL
 import myclaw.terminal.cli as cli
 from myclaw.agent.session.restore import RestoreMode
 from myclaw.agent.session.session import Session
+from myclaw.agent.workspace_runtime import WorkspaceRuntime
 from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
+from myclaw.config.config import ConfigLoader
 from myclaw.management.commands import ManagementCommandDispatcher
 from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.service.client import (
@@ -41,6 +44,7 @@ from myclaw.service.discovery import (
     write_discovery,
 )
 from myclaw.service.errors import ServiceError
+from myclaw.service.projects import ProjectCatalog
 from myclaw.service.runtime import LocalService
 from myclaw.service.transport import _project_job_summary
 from myclaw.terminal.conversation import TerminalConversationApp, _ConversationInput
@@ -80,6 +84,29 @@ def _prepare_agent_home(path: Path) -> AgentHome:
     home.initialize()
     (home.path / "config.toml").write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
     return home
+
+
+async def _persist_session(
+    workspace: Path,
+    *,
+    home: AgentHome,
+    title: str,
+    created_at: datetime,
+    content: str,
+) -> str:
+    state = WorkspaceState(workspace)
+    state.initialize(agent_home_root=home.path)
+    session = Session.create(state, now=lambda: created_at)
+    session.update_metadata(title=title)
+    session.commit_agent_run(
+        [{"role": "user", "content": content}],
+        pending_last_compacted=session.last_compacted,
+        pending_action_summary="",
+        restore_before=session.capture_restore_before(),
+        restore_run_token=uuid4(),
+    )
+    await session.wait_for_pending_persist()
+    return session.session_id
 
 
 @pytest.mark.asyncio
@@ -284,6 +311,222 @@ async def test_project_http_contract_reports_path_errors_and_keeps_cli_workspace
         if client is not None:
             await client.close()
         await ServiceClient.stop_existing(home, port=port)
+
+
+@pytest.mark.asyncio
+async def test_project_session_http_scope_claim_and_empty_draft_contract(
+    tmp_path: Path,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    other_project = tmp_path / "other-project"
+    project.mkdir()
+    other_project.mkdir()
+    older_id = await _persist_session(
+        project,
+        home=home,
+        title="Older project session",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        content="project-only older content",
+    )
+    newer_id = await _persist_session(
+        project,
+        home=home,
+        title="Newer project session",
+        created_at=datetime(2026, 2, 1, 9, tzinfo=UTC),
+        content="project-only newer content",
+    )
+    offset_id = await _persist_session(
+        project,
+        home=home,
+        title="Offset project session",
+        created_at=datetime(2026, 2, 1, 10, tzinfo=timezone(timedelta(hours=8))),
+        content="project-only offset content",
+    )
+    other_id = await _persist_session(
+        other_project,
+        home=home,
+        title="Other project session",
+        created_at=datetime(2026, 3, 1, tzinfo=UTC),
+        content="other-project content",
+    )
+    project_state = WorkspaceState(project)
+    project_state.initialize(agent_home_root=home.path)
+    schedule = Session.create_schedule(project_state, uuid4(), title="Schedule only")
+    schedule.commit_agent_run(
+        [{"role": "user", "content": "schedule-only content"}],
+        pending_last_compacted=schedule.last_compacted,
+        pending_action_summary="",
+    )
+    await schedule.wait_for_pending_persist()
+
+    port = _free_port()
+    first: ServiceClient | None = None
+    second: ServiceClient | None = None
+    try:
+        first = await ServiceClient.connect_or_start(home, project, port=port)
+        second = await ServiceClient.connect_or_start(home, other_project, port=port)
+        headers = {
+            "Authorization": f"Bearer {first.token}",
+            "X-MyClaw-CSRF": first.token,
+            "X-MyClaw-Client": first.client_id,
+        }
+        async with aiohttp.ClientSession() as http:
+            async with http.post(
+                f"{first.base_url}/api/v1/projects",
+                headers=headers,
+                json={"request_id": "register-project", "path": str(project)},
+            ) as response:
+                assert response.status == 200
+                registration = await response.json()
+            project_id = cast(str, registration["project_id"])
+
+            async with http.get(
+                f"{first.base_url}/api/v1/projects/{project_id}/sessions",
+                headers=headers,
+            ) as response:
+                assert response.status == 200
+                listing = await response.json()
+            assert [item["id"] for item in listing["sessions"]] == [newer_id, offset_id, older_id]
+            assert all(item["occupied"] is False for item in listing["sessions"])
+            assert other_id not in json.dumps(listing)
+            assert "schedule-only content" not in json.dumps(listing)
+            assert "reconnect_credential" not in json.dumps(listing)
+
+            async with http.post(
+                f"{first.base_url}/api/v1/projects/{project_id}/sessions",
+                headers=headers,
+                json={"request_id": "create-empty-draft"},
+            ) as response:
+                assert response.status == 200
+                draft = await response.json()
+            draft_id = cast(str, draft["session_id"])
+            assert draft_id not in {newer_id, offset_id, older_id}
+
+            async with http.post(
+                f"{first.base_url}/api/v1/projects/{project_id}/sessions/{newer_id}/claim",
+                headers=headers,
+                json={"request_id": "claim-newer"},
+            ) as response:
+                assert response.status == 200
+                claim = await response.json()
+            claim_data = cast(dict[str, object], claim["claim"])
+            assert claim["snapshot"]["messages"]
+
+            second_headers = {
+                "Authorization": f"Bearer {second.token}",
+                "X-MyClaw-CSRF": second.token,
+                "X-MyClaw-Client": second.client_id,
+            }
+            async with http.post(
+                f"{second.base_url}/api/v1/projects/{project_id}/sessions/{newer_id}/claim",
+                headers=second_headers,
+                json={"request_id": "claim-contested"},
+            ) as response:
+                assert response.status == 409
+                assert (await response.json())["code"] == "session_claimed"
+            async with http.get(
+                (
+                    f"{second.base_url}/api/v1/projects/{project_id}/sessions/{newer_id}"
+                    f"?claim_version={claim_data['claim_version']}"
+                ),
+                headers={
+                    **second_headers,
+                    "X-MyClaw-Claim": cast(str, claim_data["reconnect_credential"]),
+                },
+            ) as response:
+                assert response.status == 409
+                assert (await response.json())["code"] == "stale_claim"
+
+            async with http.post(
+                f"{first.base_url}/api/v1/projects/{project_id}/sessions/{newer_id}/release",
+                headers={
+                    **headers,
+                    "X-MyClaw-Claim": cast(str, claim_data["reconnect_credential"]),
+                },
+                json={
+                    "request_id": "release-newer",
+                    "claim_version": claim_data["claim_version"],
+                },
+            ) as response:
+                assert response.status == 200
+
+            async with http.post(
+                f"{first.base_url}/api/v1/projects/{project_id}/sessions/{draft_id}/claim",
+                headers=headers,
+                json={"request_id": "claim-empty-draft"},
+            ) as response:
+                assert response.status == 200
+                empty_claim = await response.json()
+            empty_claim_data = cast(dict[str, object], empty_claim["claim"])
+            async with http.post(
+                f"{first.base_url}/api/v1/projects/{project_id}/sessions/{draft_id}/release",
+                headers={
+                    **headers,
+                    "X-MyClaw-Claim": cast(str, empty_claim_data["reconnect_credential"]),
+                },
+                json={
+                    "request_id": "release-empty-draft",
+                    "claim_version": empty_claim_data["claim_version"],
+                },
+            ) as response:
+                assert response.status == 200
+
+            assert not (project_state.sessions_directory / f"{draft_id}.jsonl").exists()
+            async with http.get(
+                f"{first.base_url}/api/v1/projects/{project_id}/sessions",
+                headers=headers,
+            ) as response:
+                assert response.status == 200
+                final_listing = await response.json()
+            assert draft_id not in {item["id"] for item in final_listing["sessions"]}
+    finally:
+        if second is not None:
+            await second.close()
+        if first is not None:
+            await first.close()
+        await ServiceClient.stop_existing(home, port=port)
+
+
+@pytest.mark.asyncio
+async def test_web_draft_stays_empty_when_workspace_has_startup_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    project.mkdir()
+    restored_id = await _persist_session(
+        project,
+        home=home,
+        title="Restored history",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        content="Old history",
+    )
+    record = ProjectCatalog(home).register(project)
+    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        monkeypatch.setattr(
+            WorkspaceRuntime, "startup_session_id", property(lambda _runtime: restored_id)
+        )
+        created = await service.create_project_session(client.client_id, record.project_id)
+        draft_id = cast(str, created["session_id"])
+        assert draft_id != restored_id
+        claim = await service.claim_project_session(client.client_id, record.project_id, draft_id)
+        assert cast(dict[str, object], claim["snapshot"])["messages"] == []
+        claim_data = cast(dict[str, object], claim["claim"])
+        await service.release_project_session(
+            client.client_id,
+            record.project_id,
+            draft_id,
+            cast(int, claim_data["claim_version"]),
+            cast(str, claim_data["reconnect_credential"]),
+        )
+        assert not (WorkspaceState(project).sessions_directory / f"{draft_id}.jsonl").exists()
+        assert (WorkspaceState(project).sessions_directory / f"{restored_id}.jsonl").exists()
+    finally:
+        await service.stop()
 
 
 @pytest.mark.asyncio
@@ -548,6 +791,13 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
     home = _prepare_agent_home(tmp_path / "agent-home")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    session_id = await _persist_session(
+        workspace,
+        home=home,
+        title="Private history",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        content="Private conversation body",
+    )
     port = _free_port()
     client: ServiceClient | None = None
     try:
@@ -616,6 +866,73 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
                 assert response.status == 200
                 web_client = await response.json()
                 assert web_client["client_id"]
+                control = web_client["web_control_credential"]
+                assert isinstance(control, str)
+
+            web_headers = {
+                "Origin": client.base_url,
+                "X-MyClaw-CSRF": csrf,
+                "X-MyClaw-Control": control,
+            }
+            async with browser.post(
+                f"{client.base_url}/api/v1/projects",
+                headers=web_headers,
+                json={"request_id": "browser-project", "path": str(workspace)},
+            ) as response:
+                assert response.status == 200
+                project_id = (await response.json())["project_id"]
+
+            socket = await browser.ws_connect(
+                f"{client.base_url}/api/v1/events",
+                headers={"Origin": client.base_url},
+                protocols=("myclaw-v1", control),
+            )
+            try:
+                async with browser.post(
+                    f"{client.base_url}/api/v1/projects/{project_id}/sessions/{session_id}/claim",
+                    headers=web_headers,
+                    json={"request_id": "owner-claim"},
+                ) as response:
+                    assert response.status == 200
+                    owned = await response.json()
+                    assert "Private conversation body" in json.dumps(owned)
+
+                async with browser.post(
+                    f"{client.base_url}/api/v1/projects/{project_id}/sessions/{session_id}/claim",
+                    headers={"Origin": client.base_url, "X-MyClaw-CSRF": csrf},
+                    json={"request_id": "copied-tab-claim"},
+                ) as response:
+                    assert response.status == 403
+                    assert "Private conversation body" not in await response.text()
+
+                claim_data = owned["claim"]
+                async with browser.get(
+                    (
+                        f"{client.base_url}/api/v1/projects/{project_id}/sessions/{session_id}"
+                        f"?claim_version={claim_data['claim_version']}"
+                    ),
+                    headers={
+                        "Origin": client.base_url,
+                        "X-MyClaw-Claim": claim_data["reconnect_credential"],
+                    },
+                ) as response:
+                    assert response.status == 403
+                    assert "Private conversation body" not in await response.text()
+
+                with pytest.raises(aiohttp.WSServerHandshakeError) as handshake:
+                    await browser.ws_connect(
+                        f"{client.base_url}/api/v1/events",
+                        headers={"Origin": client.base_url},
+                    )
+                assert handshake.value.status == 403
+                async with browser.post(
+                    f"{client.base_url}/api/v1/clients",
+                    headers={"Origin": client.base_url, "X-MyClaw-CSRF": csrf},
+                    json={"request_id": "copied-tab-register", "kind": "web"},
+                ) as response:
+                    assert response.status == 409
+            finally:
+                await socket.close()
 
             async with browser.get(
                 f"{client.base_url}/api/v1/service",

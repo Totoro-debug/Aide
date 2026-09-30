@@ -711,6 +711,39 @@ class ServiceClient:
         await self._apply_snapshot(snapshot)
         return result
 
+    async def list_sessions(self, workspace_id: str | None = None) -> list[dict[str, object]]:
+        """Return foreground Session metadata without loading any Session body."""
+        selected_workspace = self.workspace_id if workspace_id is None else workspace_id
+        response = await self._http_request(
+            "GET", f"/api/v1/workspaces/{selected_workspace}/sessions"
+        )
+        sessions = response.get("sessions")
+        if not isinstance(sessions, list) or any(not isinstance(item, dict) for item in sessions):
+            raise ServiceStartupError("service_protocol_error", "Session listing is invalid.")
+        return cast(list[dict[str, object]], sessions)
+
+    async def create_session(self, workspace_id: str | None = None) -> dict[str, object]:
+        """Create a transient foreground Session draft."""
+        selected_workspace = self.workspace_id if workspace_id is None else workspace_id
+        return await self._http_request(
+            "POST",
+            f"/api/v1/workspaces/{selected_workspace}/sessions",
+            payload={"request_id": str(uuid4())},
+            mutation=True,
+        )
+
+    async def release_session(self) -> None:
+        """Release the current idle Session Claim through the event channel."""
+        await self._command(
+            "release",
+            workspace_id=self.workspace_id,
+            session_id=self.session_id,
+            claim_version=self.claim_version,
+            payload={},
+        )
+        self.claim_version = 0
+        self.claim_credential = ""
+
     async def switch_session(self, session_id: str) -> None:
         await self.claim_session(session_id)
 

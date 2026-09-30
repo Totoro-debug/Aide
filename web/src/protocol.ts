@@ -71,6 +71,55 @@ export interface ProjectScheduleResume {
   schedule_state: ProjectScheduleState;
 }
 
+export interface SessionSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+  occupied: boolean;
+  occupied_by: string | null;
+}
+
+export interface SessionSnapshot {
+  session_id: string;
+  messages: Record<string, unknown>[];
+}
+
+export interface SessionClaim {
+  workspace_id: string;
+  session_id: string;
+  claim_version: number;
+  reconnect_credential: string;
+}
+
+export interface ProjectSessionsResponse {
+  project_id: string;
+  workspace_id: string;
+  sessions: SessionSummary[];
+}
+
+export interface SessionCreation {
+  request_id: string;
+  project_id: string;
+  workspace_id: string;
+  session_id: string;
+}
+
+export interface SessionClaimResponse {
+  request_id: string;
+  project_id: string;
+  workspace_id: string;
+  session_id: string;
+  claim: SessionClaim;
+  snapshot: SessionSnapshot;
+}
+
+export interface SessionRelease {
+  request_id: string;
+  released: true;
+}
+
 export interface BrowserSession {
   authenticated: true;
   csrf_token: string;
@@ -86,6 +135,7 @@ export interface RegisteredClient {
   request_id: string;
   client_id: string;
   reconnect_credential: string;
+  web_control_credential: string;
   permission_level: string;
   current_workspace_id: string | null;
   current_session_id: string | null;

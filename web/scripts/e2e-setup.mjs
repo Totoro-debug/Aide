@@ -72,7 +72,10 @@ export default async function setup() {
       typeof details.cli_workspace !== "string" ||
       typeof details.first_project !== "string" ||
       typeof details.project_alias !== "string" ||
-      typeof details.second_project !== "string"
+      typeof details.second_project !== "string" ||
+      typeof details.second_ticket !== "string" ||
+      typeof details.occupied_session_id !== "string" ||
+      typeof details.available_session_id !== "string"
     ) {
       throw new Error("E2E service returned invalid startup details.");
     }
@@ -87,6 +90,9 @@ export default async function setup() {
     process.env.MYCLAW_E2E_FIRST_PROJECT = details.first_project;
     process.env.MYCLAW_E2E_PROJECT_ALIAS = details.project_alias;
     process.env.MYCLAW_E2E_SECOND_PROJECT = details.second_project;
+    process.env.MYCLAW_E2E_SECOND_TICKET = details.second_ticket;
+    process.env.MYCLAW_E2E_OCCUPIED_SESSION = details.occupied_session_id;
+    process.env.MYCLAW_E2E_AVAILABLE_SESSION = details.available_session_id;
     return details;
   }
 

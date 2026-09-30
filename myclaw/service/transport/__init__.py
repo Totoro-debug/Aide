@@ -27,6 +27,7 @@ _API_PREFIX = "/api/v1"
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 _CSRF_HEADER = "X-MyClaw-CSRF"
 _CLIENT_HEADER = "X-MyClaw-Client"
+_WEB_CONTROL_HEADER = "X-MyClaw-Control"
 _WEB_SESSION_COOKIE = "myclaw_session"
 _WEB_TICKET_TTL_SECONDS = 25.0
 _WEB_SESSION_MAX_AGE_SECONDS = 24 * 60 * 60
@@ -131,6 +132,26 @@ class LocalServiceTransport:
         app.router.add_post(
             f"{_API_PREFIX}/projects/{{project_id}}/schedule-resume",
             self._resume_project_schedule,
+        )
+        app.router.add_get(
+            f"{_API_PREFIX}/projects/{{project_id}}/sessions",
+            self._list_project_sessions,
+        )
+        app.router.add_post(
+            f"{_API_PREFIX}/projects/{{project_id}}/sessions",
+            self._create_project_session,
+        )
+        app.router.add_post(
+            f"{_API_PREFIX}/projects/{{project_id}}/sessions/{{session_id}}/claim",
+            self._claim_project_session,
+        )
+        app.router.add_post(
+            f"{_API_PREFIX}/projects/{{project_id}}/sessions/{{session_id}}/release",
+            self._release_project_session,
+        )
+        app.router.add_get(
+            f"{_API_PREFIX}/projects/{{project_id}}/sessions/{{session_id}}",
+            self._get_project_session,
         )
         app.router.add_get(
             f"{_API_PREFIX}/workspaces/{{workspace_id}}/sessions",
@@ -370,6 +391,11 @@ class LocalServiceTransport:
                 "request_id": request_id,
                 "client_id": client.client_id,
                 "reconnect_credential": client.reconnect_credential,
+                **(
+                    {"web_control_credential": client.web_control_credential}
+                    if kind == "web"
+                    else {}
+                ),
                 "permission_level": client.permission_control.current(),
                 "current_workspace_id": client.current_workspace_id,
                 "current_session_id": client.current_session_id,
@@ -465,6 +491,78 @@ class LocalServiceTransport:
         )
         return web.json_response({"request_id": request_id, "schedule_state": state})
 
+    async def _list_project_sessions(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, client_required=True)
+        client_id = _context_client_id(context)
+        project_id = request.match_info["project_id"]
+        record, workspace, sessions = await self.service.list_project_sessions(
+            client_id, project_id
+        )
+        return web.json_response(
+            {
+                "project_id": record.project_id,
+                "workspace_id": workspace.workspace_id,
+                "sessions": sessions,
+            }
+        )
+
+    async def _create_project_session(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        client_id = _context_client_id(context)
+        body = await _json_object(request)
+        request_id = _require_request_id(body)
+        result = await self.service.create_project_session(
+            client_id, request.match_info["project_id"]
+        )
+        return web.json_response({"request_id": request_id, **result})
+
+    async def _claim_project_session(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        client_id = _context_client_id(context)
+        body = await _json_object(request)
+        request_id = _require_request_id(body)
+        result = await self.service.claim_project_session(
+            client_id,
+            request.match_info["project_id"],
+            request.match_info["session_id"],
+        )
+        return web.json_response(
+            {"request_id": request_id, "project_id": request.match_info["project_id"], **result}
+        )
+
+    async def _get_project_session(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, client_required=True)
+        client_id = _context_client_id(context)
+        result = await self.service.get_project_session(
+            client_id,
+            request.match_info["project_id"],
+            request.match_info["session_id"],
+            _integer_query(request, "claim_version"),
+            _required_header(request, "X-MyClaw-Claim"),
+        )
+        return web.json_response(result)
+
+    async def _release_project_session(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        client_id = _context_client_id(context)
+        body = await _json_object(request)
+        request_id = _require_request_id(body)
+        claim_version = body.get("claim_version")
+        if (
+            isinstance(claim_version, bool)
+            or not isinstance(claim_version, int)
+            or claim_version < 1
+        ):
+            raise service_error("validation_error", "claim_version is invalid.", status=422)
+        await self.service.release_project_session(
+            client_id,
+            request.match_info["project_id"],
+            request.match_info["session_id"],
+            claim_version,
+            _required_header(request, "X-MyClaw-Claim"),
+        )
+        return web.json_response({"request_id": request_id, "released": True})
+
     async def _list_sessions(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, client_required=True)
         client_id = _context_client_id(context)
@@ -549,7 +647,7 @@ class LocalServiceTransport:
         client_id = _context_client_id(context)
         if self.service.client(client_id).connected:
             raise service_error("client_already_connected", "This Client already has a connection.")
-        socket = web.WebSocketResponse(heartbeat=20.0, autoping=True)
+        socket = web.WebSocketResponse(heartbeat=20.0, autoping=True, protocols=("myclaw-v1",))
         await socket.prepare(request)
         sink = _WebSocketSink(socket)
         try:
@@ -633,7 +731,24 @@ class LocalServiceTransport:
                 raise service_error(
                     "unauthenticated", "Client authentication is required.", status=401
                 )
-            self.service.client(client_id)
+            client = self.service.client(client_id)
+            if web_session is not None:
+                control = client.web_control_credential
+                offered = tuple(
+                    protocol.strip()
+                    for protocol in request.headers.get("Sec-WebSocket-Protocol", "").split(",")
+                )
+                supplied = (
+                    control in offered
+                    if websocket
+                    else request.headers.get(_WEB_CONTROL_HEADER) == control
+                )
+                if control is None or not supplied:
+                    raise service_error(
+                        "forbidden",
+                        "This Web Client does not own the active control connection.",
+                        status=403,
+                    )
         return _RequestContext(request, token, client_id, web_session)
 
     @staticmethod

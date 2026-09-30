@@ -7,6 +7,7 @@ import os
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields, is_dataclass
+from datetime import datetime
 from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol, cast
@@ -92,6 +93,7 @@ class ClientState:
     kind: str
     reconnect_credential: str
     permission_control: RuntimePermissionControl
+    web_control_credential: str | None = None
     connected: bool = False
     sink: ServiceSink | None = None
     stream_id: str = field(default_factory=lambda: str(uuid4()))
@@ -100,6 +102,7 @@ class ClientState:
     results: dict[str, dict[str, object]] = field(default_factory=dict)
     inflight: dict[str, asyncio.Task[dict[str, object]]] = field(default_factory=dict)
     claimed: set[tuple[str, str]] = field(default_factory=set)
+    attached_workspaces: set[str] = field(default_factory=set)
     current_workspace_id: str | None = None
     current_session_id: str | None = None
     disconnect_task: asyncio.Task[None] | None = None
@@ -368,16 +371,22 @@ class WorkspaceServiceRuntime:
         self._schedule_admitted = False
         await self.schedule_service.pause_admission()
 
-    async def create_draft(self, client_id: str) -> str:
+    async def create_draft(self, client_id: str, *, reuse_startup_session: bool = True) -> str:
         if self._closed:
             raise service_error("admission_closed", "Workspace admission is closed.")
         startup_session_id = None if self.runtime is None else self.runtime.startup_session_id
-        if startup_session_id is not None and startup_session_id not in self._loops:
+        if (
+            reuse_startup_session
+            and startup_session_id is not None
+            and startup_session_id not in self._loops
+        ):
             loop_state = await self._create_loop(startup_session_id, client_id=client_id)
+            is_draft = False
         else:
             loop_state = await self._create_loop(None, client_id=client_id)
+            is_draft = True
         session_id = loop_state.loop.session.session_id
-        if startup_session_id is None:
+        if is_draft:
             self._draft_clients[session_id] = client_id
         return session_id
 
@@ -403,6 +412,23 @@ class WorkspaceServiceRuntime:
                 )
             loop_state = self._loops.get(session_id)
             if loop_state is None:
+                try:
+                    Session.load(
+                        self.workspace_state,
+                        session_id,
+                        partition=SessionStoragePartition.FOREGROUND,
+                        now=local_now,
+                    )
+                except FileNotFoundError as error:
+                    raise service_error(
+                        "not_found", "Conversation Session was not found.", status=404
+                    ) from error
+                except (OSError, UnicodeError, ValueError) as error:
+                    raise service_error(
+                        "persistence_error",
+                        "Conversation Session could not be loaded safely.",
+                        status=500,
+                    ) from error
                 loop_state = await self._create_loop(session_id, client_id=client_id)
             elif loop_state.owner_client_id not in {None, client_id}:
                 raise service_error(
@@ -473,6 +499,14 @@ class WorkspaceServiceRuntime:
             )
         self._claims.pop(session_id, None)
         self.service.client_claim_released(client_id, self.workspace_id, session_id)
+        await self.service.emit(
+            "session.released",
+            workspace_id=self.workspace_id,
+            session_id=session_id,
+            run_id=None,
+            payload={},
+            target_client_ids=self.service.workspace_audience(self.workspace_id),
+        )
         if loop_state is not None and loop_state.owner_client_id == client_id:
             loop_state.owner_client_id = None
         if close_idle and loop_state is not None and not loop_state.loop.has_active_run:
@@ -495,6 +529,14 @@ class WorkspaceServiceRuntime:
             finally:
                 self._claims.pop(session_id, None)
                 self.service.client_claim_released(client_id, self.workspace_id, session_id)
+                await self.service.emit(
+                    "session.released",
+                    workspace_id=self.workspace_id,
+                    session_id=session_id,
+                    run_id=None,
+                    payload={},
+                    target_client_ids=self.service.workspace_audience(self.workspace_id),
+                )
         for session_id, owner in tuple(self._draft_clients.items()):
             if owner == client_id:
                 self._draft_clients.pop(session_id, None)
@@ -518,6 +560,44 @@ class WorkspaceServiceRuntime:
         if loop is None:
             raise service_error("not_found", "Conversation Session was not found.", status=404)
         return loop.loop.project_foreground_conversation()
+
+    async def list_sessions(self, client_id: str) -> list[dict[str, object]]:
+        """Return only durable foreground Sessions owned by this Workspace."""
+        directory = self.workspace_state.existing_sessions_directory()
+        if directory is None:
+            return []
+        entries: list[tuple[datetime, datetime, dict[str, object]]] = []
+        for path in directory.glob("*.jsonl"):
+            try:
+                session = Session.load(
+                    self.workspace_state,
+                    path.stem,
+                    partition=SessionStoragePartition.FOREGROUND,
+                    now=local_now,
+                )
+            except (OSError, UnicodeError, ValueError):
+                continue
+            claim = self._claims.get(session.session_id)
+            title = session.metadata.get("title", "Untitled session")
+            entries.append(
+                (
+                    session.updated_at,
+                    session.created_at,
+                    {
+                        "id": session.session_id,
+                        "title": title if isinstance(title, str) else "Untitled session",
+                        "created_at": session.created_at.isoformat(),
+                        "updated_at": session.updated_at.isoformat(),
+                        "message_count": len(session.messages),
+                        "occupied": claim is not None,
+                        "occupied_by": None
+                        if claim is None or claim.client_id == client_id
+                        else "client",
+                    },
+                )
+            )
+        entries.sort(key=lambda item: (item[0], item[1], str(item[2]["id"])), reverse=True)
+        return [item[2] for item in entries]
 
     async def _release_restore_barrier(self, client_id: str) -> None:
         if self._restore_owner != client_id:
@@ -1007,6 +1087,16 @@ class LocalService:
     def client(self, client_id: str) -> ClientState:
         return self._require_client(client_id)
 
+    def workspace_audience(self, workspace_id: str) -> tuple[str, ...]:
+        """Return clients that may receive Workspace-scoped metadata events."""
+        return tuple(
+            client.client_id
+            for client in self._clients.values()
+            if workspace_id in client.attached_workspaces
+            or any(candidate_workspace == workspace_id for candidate_workspace, _ in client.claimed)
+            or client.current_workspace_id == workspace_id
+        )
+
     async def register_client(
         self,
         kind: str,
@@ -1028,12 +1118,15 @@ class LocalService:
                     client.disconnect_task = None
                 self._client_by_reconnect.pop(client.reconnect_credential, None)
                 client.reconnect_credential = str(uuid4())
+                client.web_control_credential = str(uuid4()) if kind == "web" else None
                 self._client_by_reconnect[client.reconnect_credential] = client_id
                 return client
         permission = (
             self.configuration.runtime.permission_level if self.configuration else "workspace-write"
         )
         client = ClientState(str(uuid4()), kind, str(uuid4()), RuntimePermissionControl(permission))
+        if kind == "web":
+            client.web_control_credential = str(uuid4())
         self._clients[client.client_id] = client
         self._client_by_reconnect[client.reconnect_credential] = client.client_id
         return client
@@ -1098,7 +1191,7 @@ class LocalService:
                 self._global_reconnect_task = asyncio.create_task(self._stop_after_grace())
 
     async def attach_workspace(self, client_id: str, path: Path) -> WorkspaceServiceRuntime:
-        self._require_client(client_id)
+        client = self._require_client(client_id)
         if self.state in {"draining", "stopped"}:
             raise service_error("admission_closed", "The local service is stopping.")
         if not path.is_absolute():
@@ -1112,6 +1205,7 @@ class LocalService:
                 "persistence_error", "Workspace directory could not be resolved"
             ) from error
         runtime = await self._get_or_create_workspace(normalized)
+        client.attached_workspaces.add(runtime.workspace_id)
         if any(client.connected for client in self._clients.values()) and self._schedule_allowed(
             runtime
         ):
@@ -1180,6 +1274,76 @@ class LocalService:
         else:
             workspace = self._workspaces[workspace_id]
         return await workspace.schedule_service.public_snapshot()
+
+    async def _project_workspace(
+        self, client_id: str, project_id: str
+    ) -> tuple[ProjectRecord, WorkspaceServiceRuntime]:
+        client = self._require_client(client_id)
+        record = next(
+            (item for item in self.projects.list() if item.project_id == project_id), None
+        )
+        if record is None:
+            raise service_error("not_found", "Project registration was not found.", status=404)
+        if not record.path.is_dir():
+            raise service_error("not_found", "Project directory is unavailable.", status=404)
+        workspace = await self._get_or_create_workspace(record.path)
+        client.attached_workspaces.add(workspace.workspace_id)
+        return record, workspace
+
+    async def list_project_sessions(
+        self, client_id: str, project_id: str
+    ) -> tuple[ProjectRecord, WorkspaceServiceRuntime, list[dict[str, object]]]:
+        record, workspace = await self._project_workspace(client_id, project_id)
+        return record, workspace, await workspace.list_sessions(client_id)
+
+    async def create_project_session(self, client_id: str, project_id: str) -> dict[str, object]:
+        _record, workspace = await self._project_workspace(client_id, project_id)
+        session_id = await workspace.create_draft(client_id, reuse_startup_session=False)
+        return {
+            "project_id": project_id,
+            "workspace_id": workspace.workspace_id,
+            "session_id": session_id,
+        }
+
+    async def claim_project_session(
+        self, client_id: str, project_id: str, session_id: str
+    ) -> dict[str, object]:
+        _record, workspace = await self._project_workspace(client_id, project_id)
+        return await self.claim(client_id, workspace.workspace_id, session_id)
+
+    async def get_project_session(
+        self,
+        client_id: str,
+        project_id: str,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+    ) -> dict[str, object]:
+        _record, workspace = await self._project_workspace(client_id, project_id)
+        claim = workspace.require_claim(client_id, session_id, claim_version, claim_credential)
+        projection = workspace.projection(session_id)
+        return {
+            "project_id": project_id,
+            "workspace_id": workspace.workspace_id,
+            "session_id": session_id,
+            "claim_version": claim.version,
+            "snapshot": {
+                "session_id": projection.session_id,
+                "messages": list(projection.messages),
+            },
+        }
+
+    async def release_project_session(
+        self,
+        client_id: str,
+        project_id: str,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+    ) -> None:
+        _record, workspace = await self._project_workspace(client_id, project_id)
+        workspace.require_claim(client_id, session_id, claim_version, claim_credential)
+        await workspace.release(client_id, session_id)
 
     async def resume_project_schedule(
         self, client_id: str, project_id: str, expected_job_ids: set[str]
@@ -1273,10 +1437,20 @@ class LocalService:
         workspace = self.workspace(workspace_id)
         previous_workspace_id = client.current_workspace_id
         previous_session_id = client.current_session_id
+        already_claimed = (workspace_id, session_id) in client.claimed
         claim = await workspace.claim(client_id, session_id)
         client.claimed.add((workspace_id, session_id))
         client.current_workspace_id = workspace_id
         client.current_session_id = session_id
+        if not already_claimed:
+            await self.emit(
+                "session.claimed",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                run_id=None,
+                payload={"occupied": True},
+                target_client_ids=self.workspace_audience(workspace_id),
+            )
         if (
             previous_workspace_id is not None
             and previous_session_id is not None
@@ -1302,36 +1476,8 @@ class LocalService:
     async def list_sessions(self, client_id: str, workspace_id: str) -> list[dict[str, object]]:
         client = self._require_client(client_id)
         workspace = self.workspace(workspace_id)
-        directory = workspace.workspace_state.existing_sessions_directory()
-        if directory is None:
-            return []
-        entries: list[dict[str, object]] = []
-        for path in directory.glob("*.jsonl"):
-            try:
-                session = Session.load(
-                    workspace.workspace_state,
-                    path.stem,
-                    partition=SessionStoragePartition.FOREGROUND,
-                    now=local_now,
-                )
-            except (OSError, ValueError, UnicodeError):
-                continue
-            claim = workspace._claims.get(session.session_id)
-            entries.append(
-                {
-                    "id": session.session_id,
-                    "title": session.metadata.get("title", "Untitled session"),
-                    "created_at": session.created_at.isoformat(),
-                    "updated_at": session.updated_at.isoformat(),
-                    "message_count": len(session.messages),
-                    "occupied": claim is not None,
-                    "occupied_by": None
-                    if claim is None or claim.client_id == client.client_id
-                    else "client",
-                }
-            )
-        entries.sort(key=lambda item: (str(item["updated_at"]), str(item["id"])), reverse=True)
-        return entries
+        client.attached_workspaces.add(workspace_id)
+        return await workspace.list_sessions(client_id)
 
     async def handle_management(
         self,

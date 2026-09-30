@@ -256,6 +256,87 @@
           "enum": ["available", "unavailable", "awaiting_resume", "removing", "failed"]
         }
       }
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "title", "created_at", "updated_at", "message_count", "occupied", "occupied_by"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "title": {"type": "string", "minLength": 1},
+        "created_at": {"type": "string", "minLength": 1},
+        "updated_at": {"type": "string", "minLength": 1},
+        "message_count": {"type": "integer", "minimum": 0},
+        "occupied": {"type": "boolean"},
+        "occupied_by": {"type": ["string", "null"]}
+      }
+    },
+    "session_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "messages"],
+      "properties": {
+        "session_id": {"$ref": "#/$defs/identifier"},
+        "messages": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "session_claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace_id", "session_id", "claim_version", "reconnect_credential"],
+      "properties": {
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "session_id": {"$ref": "#/$defs/identifier"},
+        "claim_version": {"$ref": "#/$defs/claim_version"},
+        "reconnect_credential": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "project_sessions_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "workspace_id", "sessions"],
+      "properties": {
+        "project_id": {"$ref": "#/$defs/identifier"},
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "sessions": {"type": "array", "items": {"$ref": "#/$defs/session"}}
+      }
+    },
+    "session_creation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "project_id", "workspace_id", "session_id"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "project_id": {"$ref": "#/$defs/identifier"},
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "session_id": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "session_claim_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id", "project_id", "workspace_id", "session_id", "claim", "snapshot"
+      ],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "project_id": {"$ref": "#/$defs/identifier"},
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "session_id": {"$ref": "#/$defs/identifier"},
+        "claim": {"$ref": "#/$defs/session_claim"},
+        "snapshot": {"$ref": "#/$defs/session_snapshot"}
+      }
+    },
+    "session_release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "released"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "released": {"const": true}
+      }
     }
   }
 }

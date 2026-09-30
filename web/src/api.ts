@@ -5,6 +5,10 @@ import type {
   ProjectRegistration,
   ProjectScheduleResume,
   RegisteredClient,
+  ProjectSessionsResponse,
+  SessionClaimResponse,
+  SessionCreation,
+  SessionRelease,
   ServiceErrorBody,
   ServiceEvent,
   ServiceStatus,
@@ -12,6 +16,7 @@ import type {
 
 const API_PREFIX = "/api/v1";
 let csrfToken: string | null = null;
+let webControlCredential: string | null = null;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -39,6 +44,7 @@ async function request<T>(
     method?: "GET" | "POST";
     body?: Record<string, unknown>;
     mutation?: boolean;
+    extraHeaders?: Record<string, string>;
   } = {},
 ): Promise<T> {
   const headers = new Headers({ Accept: "application/json" });
@@ -50,6 +56,14 @@ async function request<T>(
       throw new ApiError(403, null);
     }
     headers.set("X-MyClaw-CSRF", csrfToken);
+  }
+  if (options.extraHeaders !== undefined) {
+    for (const [name, value] of Object.entries(options.extraHeaders)) {
+      headers.set(name, value);
+    }
+  }
+  if (webControlCredential !== null) {
+    headers.set("X-MyClaw-Control", webControlCredential);
   }
   const response = await fetch(`${API_PREFIX}${path}`, {
     method: options.method ?? "GET",
@@ -88,12 +102,14 @@ export async function restoreBrowserSession(): Promise<BrowserSession | null> {
   }
 }
 
-export function registerWebClient(): Promise<RegisteredClient> {
-  return request<RegisteredClient>("/clients", {
+export async function registerWebClient(): Promise<RegisteredClient> {
+  const client = await request<RegisteredClient>("/clients", {
     method: "POST",
     mutation: true,
     body: { request_id: createRequestId(), kind: "web" },
   });
+  webControlCredential = client.web_control_credential;
+  return client;
 }
 
 export function getServiceStatus(): Promise<ServiceStatus> {
@@ -123,13 +139,65 @@ export function resumeProjectSchedule(
   });
 }
 
+export function getProjectSessions(projectId: string): Promise<ProjectSessionsResponse> {
+  return request<ProjectSessionsResponse>(
+    `/projects/${encodeURIComponent(projectId)}/sessions`,
+  );
+}
+
+export function createProjectSession(projectId: string): Promise<SessionCreation> {
+  return request<SessionCreation>(
+    `/projects/${encodeURIComponent(projectId)}/sessions`,
+    {
+      method: "POST",
+      mutation: true,
+      body: { request_id: createRequestId() },
+    },
+  );
+}
+
+export function claimProjectSession(
+  projectId: string,
+  sessionId: string,
+): Promise<SessionClaimResponse> {
+  return request<SessionClaimResponse>(
+    `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/claim`,
+    {
+      method: "POST",
+      mutation: true,
+      body: { request_id: createRequestId() },
+    },
+  );
+}
+
+export function releaseProjectSession(
+  projectId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+): Promise<SessionRelease> {
+  return request<SessionRelease>(
+    `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/release`,
+    {
+      method: "POST",
+      mutation: true,
+      body: { request_id: createRequestId(), claim_version: claimVersion },
+      extraHeaders: { "X-MyClaw-Claim": claimCredential },
+    },
+  );
+}
+
 export function openEventStream(
   onOpen: () => void,
   onClose: () => void,
   onMessage: (value: ServiceEvent) => void,
 ): WebSocket {
+  if (webControlCredential === null) throw new ApiError(403, null);
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(`${protocol}//${window.location.host}${API_PREFIX}/events`);
+  const socket = new WebSocket(
+    `${protocol}//${window.location.host}${API_PREFIX}/events`,
+    ["myclaw-v1", webControlCredential],
+  );
   socket.addEventListener("open", onOpen);
   socket.addEventListener("close", onClose);
   socket.addEventListener("error", onClose, { once: true });

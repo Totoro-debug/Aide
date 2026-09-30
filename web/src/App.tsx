@@ -16,9 +16,11 @@ import {
   MessageSquare,
   Moon,
   Monitor,
+  Pencil,
   Play,
   Plus,
   RefreshCw,
+  Search,
   Send,
   ShieldX,
   Square,
@@ -29,7 +31,7 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
@@ -48,6 +50,7 @@ import {
   releaseProjectSession,
   registerProject,
   registerWebClient,
+  renameProjectSession,
   removeProject,
   resumeProjectSchedule,
   restoreBrowserSession,
@@ -66,6 +69,7 @@ import type {
   ServiceStatus,
   SessionClaim,
   SessionSnapshot,
+  SessionSummary,
 } from "./protocol";
 import styles from "./App.module.css";
 
@@ -1431,6 +1435,22 @@ function ProjectsView({
 
 type SessionLoadState = "idle" | "loading" | "ready" | "error";
 
+function mergeSessionSummaries(
+  current: Record<string, SessionSummary>,
+  summaries: SessionSummary[],
+): Record<string, SessionSummary> {
+  const next = { ...current };
+  for (const summary of summaries) {
+    const previous = next[summary.id];
+    if (previous === undefined || summary.metadata_version > previous.metadata_version
+      || (summary.metadata_version === previous.metadata_version
+        && Date.parse(summary.updated_at) >= Date.parse(previous.updated_at))) {
+      next[summary.id] = summary;
+    }
+  }
+  return next;
+}
+
 type RunStatus = "submitting" | "accepted" | "running" | "completed" | "failed" | "canceled";
 type ToolStatus = "running" | "completed" | "failed" | "rejected" | "canceled";
 
@@ -1699,6 +1719,10 @@ function ProjectSessionsContent({
   const { t, i18n } = useTranslation();
   const project = projects.find((item) => item.project_id === projectId);
   const [sessions, setSessions] = useState<ProjectSessionsResponse | null>(null);
+  const [sessionSummaries, setSessionSummaries] = useState<Record<string, SessionSummary>>({});
+  const [sessionSearch, setSessionSearch] = useState("");
+  const deferredSessionSearch = useDeferredValue(sessionSearch);
+  const [sessionNextCursor, setSessionNextCursor] = useState<string | null>(null);
   const [loadState, setLoadState] = useState<SessionLoadState>("idle");
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [claim, setClaim] = useState<SessionClaim | null>(null);
@@ -1707,6 +1731,10 @@ function ProjectSessionsContent({
   const [draftSessionIds, setDraftSessionIds] = useState<string[]>([]);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameTitle, setRenameTitle] = useState("");
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
   const [liveRunsBySession, setLiveRunsBySession] = useState<Record<string, LiveRun[]>>({});
   const [inputText, setInputText] = useState("");
   const [composerError, setComposerError] = useState<string | null>(null);
@@ -1717,8 +1745,10 @@ function ProjectSessionsContent({
   const liveRunsRef = useRef<Record<string, LiveRun[]>>({});
   const selectedSessionRef = useRef<string | null>(null);
   const workspaceIdRef = useRef<string | null>(null);
-  const refreshSessionsRef = useRef<(() => Promise<void>) | null>(null);
+  const sessionRequestRef = useRef(0);
+  const refreshSessionsRef = useRef<((cursor?: string | null, append?: boolean) => Promise<void>) | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const renameTriggerRef = useRef<HTMLButtonElement | null>(null);
   const draftsBySessionRef = useRef<Record<string, string>>({});
   const pendingSubmissionsRef = useRef<PendingSubmission[]>([]);
   const pendingClientIdRef = useRef<string | null>(null);
@@ -1851,12 +1881,19 @@ function ProjectSessionsContent({
     setSnapshot(nextSnapshot);
   }, [adoptSnapshot]);
 
-  const refreshSessions = useCallback(async () => {
+  const refreshSessions = useCallback(async (cursor: string | null = null, append = false) => {
     if (authState !== "ready" || !projectId) return;
-    setLoadState((state) => (state === "ready" ? state : "loading"));
+    const requestNumber = sessionRequestRef.current + 1;
+    sessionRequestRef.current = requestNumber;
+    setLoadState("loading");
     try {
-      const response = await getProjectSessions(projectId);
-      if (!mountedRef.current) return;
+      const response = await getProjectSessions(projectId, {
+        title: deferredSessionSearch.trim() || undefined,
+        cursor: cursor ?? undefined,
+        limit: 100,
+      });
+      if (!mountedRef.current || requestNumber !== sessionRequestRef.current) return;
+      setSessionSummaries((current) => mergeSessionSummaries(current, response.sessions));
       workspaceIdRef.current = response.workspace_id;
       let restoreError: string | null = null;
       if (
@@ -1877,11 +1914,15 @@ function ProjectSessionsContent({
             rememberSession(restored.claim, restored.snapshot);
             setSelectedSessionId(restored.claim.session_id);
             selectedSessionRef.current = restored.claim.session_id;
-            const restoredDraft = !response.sessions.some((item) => item.id === restored.claim.session_id);
+            const restoredDraft = restored.snapshot.messages.length === 0;
             setDraft(restoredDraft);
             if (restoredDraft) {
               setDraftSessionIds((ids) => ids.includes(restored.claim.session_id)
                 ? ids : [...ids, restored.claim.session_id]);
+            } else if (!response.sessions.some((item) => item.id === restored.claim.session_id)) {
+              const metadata = await getProjectSessions(projectId);
+              if (!mountedRef.current) return;
+              setSessionSummaries((current) => mergeSessionSummaries(current, metadata.sessions));
             }
           } catch (error) {
             restoreError = sessionErrorKey(error);
@@ -1906,16 +1947,27 @@ function ProjectSessionsContent({
           throw error;
         }
       }
-      setSessions(response);
+      if (!mountedRef.current || requestNumber !== sessionRequestRef.current) return;
+      setSessions((current) => {
+        if (!append || current === null || current.workspace_id !== response.workspace_id) {
+          return response;
+        }
+        return {
+          ...response,
+          sessions: [...current.sessions, ...response.sessions],
+        };
+      });
+      setSessionNextCursor(response.next_cursor);
       setDraftSessionIds((ids) => ids.filter((id) => !response.sessions.some((item) => item.id === id)));
       if (response.sessions.some((item) => item.id === selectedSessionRef.current)) setDraft(false);
       setLoadState("ready");
       setActionError(restoreError);
     } catch (error) {
+      if (!mountedRef.current || requestNumber !== sessionRequestRef.current) return;
       setLoadState("error");
       setActionError(sessionErrorKey(error));
     }
-  }, [authState, clearClaimState, connectionState, onRestoreConsumed, projectId, registeredClient, releaseOrphanClaim, rememberSession]);
+  }, [authState, clearClaimState, connectionState, deferredSessionSearch, onRestoreConsumed, projectId, registeredClient, releaseOrphanClaim, rememberSession]);
 
   useEffect(() => {
     if (connectionState !== "online") needsReclaimRef.current = true;
@@ -1928,6 +1980,11 @@ function ProjectSessionsContent({
   useEffect(() => {
     refreshSessionsRef.current = refreshSessions;
   }, [refreshSessions]);
+
+  const loadMoreSessions = useCallback(() => {
+    if (sessionNextCursor === null || loadState === "loading") return;
+    void refreshSessions(sessionNextCursor, true);
+  }, [loadState, refreshSessions, sessionNextCursor]);
 
   const refreshRunSnapshot = useCallback(async (sessionId: string, runId: string) => {
     const currentClaim = claimsBySessionRef.current[sessionId];
@@ -1993,6 +2050,19 @@ function ProjectSessionsContent({
     const sessionId = event.session_id;
     if (event.type === "session.released") {
       delete claimsBySessionRef.current[sessionId];
+      return;
+    }
+    if (event.type === "session.metadata_updated") {
+      const title = event.payload.title;
+      const version = event.payload.metadata_version;
+      if (typeof title === "string" && typeof version === "number") {
+        setSessionSummaries((current) => current[sessionId] === undefined
+          || current[sessionId].metadata_version > version ? current : {
+          ...current,
+          [sessionId]: { ...current[sessionId], title, metadata_version: version },
+        });
+      }
+      void refreshSessionsRef.current?.();
       return;
     }
     if (event.type === "input.accepted") {
@@ -2255,9 +2325,57 @@ function ProjectSessionsContent({
     }
   }
 
-  const selectedSummary = sessions?.sessions.find((item) => item.id === selectedSessionId);
+  const selectedSummary = selectedSessionId === null ? undefined : sessionSummaries[selectedSessionId];
   const selectedLiveRuns = selectedSessionId === null ? [] : liveRunsBySession[selectedSessionId] ?? [];
   const activeRun = selectedLiveRuns.find(isLiveRunActive) ?? null;
+
+  function beginRename() {
+    if (draft || claim === null || selectedSummary === undefined) return;
+    setRenameTitle(selectedSummary.title);
+    setRenameError(null);
+    setRenameOpen(true);
+  }
+
+  async function submitRename(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const currentClaim = claimRef.current;
+    const currentSummary = currentClaim === null ? undefined : sessionSummaries[currentClaim.session_id];
+    const nextTitle = renameTitle.trim();
+    if (currentClaim === null || currentSummary === undefined || !nextTitle) return;
+    setRenameBusy(true);
+    setRenameError(null);
+    try {
+      const response = await renameProjectSession(
+        projectId,
+        currentClaim.session_id,
+        currentClaim.claim_version,
+        currentClaim.reconnect_credential,
+        nextTitle,
+        currentSummary.metadata_version,
+      );
+      if (!mountedRef.current) return;
+      setSessionSummaries((current) => mergeSessionSummaries(current, [response.session]));
+      setSessions((current) => current === null ? current : {
+        ...current,
+        sessions: current.sessions.map((item) => item.id === response.session.id ? response.session : item),
+      });
+      setRenameOpen(false);
+      await refreshSessions();
+    } catch (error) {
+      if (!mountedRef.current) return;
+      setRenameError(sessionErrorKey(error));
+      if (error instanceof ApiError && error.body?.code === "metadata_conflict") {
+        await refreshSessions();
+        if (!mountedRef.current) return;
+        const metadata = await getProjectSessions(projectId);
+        if (!mountedRef.current) return;
+        setSessionSummaries((current) => mergeSessionSummaries(current, metadata.sessions));
+      }
+    } finally {
+      if (mountedRef.current) setRenameBusy(false);
+    }
+  }
+
   useEffect(() => {
     if (activeRun !== null) return;
     const target = confirmationTriggerRef.current;
@@ -2343,6 +2461,20 @@ function ProjectSessionsContent({
               <h2>{t("sessions.listTitle")}</h2>
               <span>{(sessions?.sessions.length ?? 0) + draftSessionIds.length}</span>
             </div>
+            <label className={styles.sessionSearch} htmlFor="session-search">
+              <span className={styles.sessionSearchLabel}>{t("sessions.searchLabel")}</span>
+              <span className={styles.sessionSearchControl}>
+                <Search size={14} aria-hidden="true" />
+                <input
+                  id="session-search"
+                  className={styles.sessionSearchInput}
+                  type="search"
+                  value={sessionSearch}
+                  placeholder={t("sessions.searchPlaceholder")}
+                  onChange={(event) => setSessionSearch(event.target.value)}
+                />
+              </span>
+            </label>
             {draftSessionIds.map((draftId) => {
               const running = (liveRunsBySession[draftId] ?? []).some(isLiveRunActive);
               return (
@@ -2365,7 +2497,7 @@ function ProjectSessionsContent({
             {sessions?.sessions.length === 0 && draftSessionIds.length === 0 ? (
               <div className={styles.sessionListEmpty}>
                 <MessageSquare size={20} aria-hidden="true" />
-                <p>{t("sessions.empty")}</p>
+                <p>{sessionSearch.trim() ? t("sessions.noSearchResults") : t("sessions.empty")}</p>
               </div>
             ) : (
               <ul className={styles.sessionList} aria-label={t("sessions.listLabel")}>
@@ -2398,6 +2530,17 @@ function ProjectSessionsContent({
                 })}
               </ul>
             )}
+            {sessionNextCursor !== null ? (
+              <button
+                className={styles.sessionListMore}
+                type="button"
+                disabled={loadState === "loading"}
+                onClick={loadMoreSessions}
+              >
+                <ChevronDown size={14} aria-hidden="true" />
+                {t("sessions.loadMore")}
+              </button>
+            ) : null}
           </aside>
 
           <section className={styles.sessionContentPanel}>
@@ -2408,15 +2551,30 @@ function ProjectSessionsContent({
                     <p className={styles.eyebrow}>{t("sessions.conversation")}</p>
                     <h2>{draft ? t("sessions.draftTitle") : selectedSummary?.title ?? t("sessions.title")}</h2>
                   </div>
-                  <button
-                    className={styles.secondaryButton}
-                    type="button"
-                    disabled={busySessionId !== null}
-                    onClick={() => void releaseCurrent()}
-                  >
-                    <LogOut size={15} aria-hidden="true" />
-                    {t("controls.releaseSession")}
-                  </button>
+                  <div className={styles.sessionHeaderActions}>
+                    {!draft && selectedSummary !== undefined ? (
+                      <button
+                        className={styles.iconButton}
+                        ref={renameTriggerRef}
+                        type="button"
+                        aria-label={t("controls.renameSession")}
+                        title={t("controls.renameSession")}
+                        disabled={busySessionId !== null || connectionState !== "online"}
+                        onClick={beginRename}
+                      >
+                        <Pencil size={15} aria-hidden="true" />
+                      </button>
+                    ) : null}
+                    <button
+                      className={styles.secondaryButton}
+                      type="button"
+                      disabled={busySessionId !== null}
+                      onClick={() => void releaseCurrent()}
+                    >
+                      <LogOut size={15} aria-hidden="true" />
+                      {t("controls.releaseSession")}
+                    </button>
+                  </div>
                 </div>
                 <div className={styles.conversationViewport} role="log" aria-live="off" aria-label={t("sessions.historyLabel")}>
                   {snapshot.messages.length === 0 && selectedLiveRuns.length === 0 ? (
@@ -2481,6 +2639,64 @@ function ProjectSessionsContent({
           </section>
         </div>
       )}
+      <Dialog.Root
+        open={renameOpen}
+        onOpenChange={(open) => {
+          setRenameOpen(open);
+          if (!open) setRenameError(null);
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className={styles.dialogOverlay} />
+          <Dialog.Content
+            className={styles.dialogContent}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              renameTriggerRef.current?.focus();
+            }}
+          >
+            <Dialog.Title className={styles.dialogTitle}>{t("sessions.renameTitle")}</Dialog.Title>
+            <Dialog.Description className={styles.dialogDescription}>
+              {t("sessions.renameDescription")}
+            </Dialog.Description>
+            <form className={styles.dialogForm} onSubmit={(event) => void submitRename(event)}>
+              <label className={styles.fieldLabel} htmlFor="session-rename-title">
+                {t("sessions.titleLabel")}
+              </label>
+              <input
+                id="session-rename-title"
+                className={styles.textInput}
+                type="text"
+                value={renameTitle}
+                maxLength={160}
+                autoFocus
+                onChange={(event) => setRenameTitle(event.target.value)}
+              />
+              {renameError !== null ? (
+                <p className={styles.fieldError} role="alert">{t(renameError)}</p>
+              ) : null}
+              <div className={styles.dialogActions}>
+                <button
+                  className={styles.secondaryButton}
+                  type="button"
+                  disabled={renameBusy}
+                  onClick={() => setRenameOpen(false)}
+                >
+                  {t("controls.cancel")}
+                </button>
+                <button
+                  className={styles.primaryButton}
+                  type="submit"
+                  disabled={renameBusy || !renameTitle.trim() || connectionState !== "online"}
+                >
+                  <Check size={15} aria-hidden="true" />
+                  {t("controls.save")}
+                </button>
+              </div>
+            </form>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </section>
   );
 }
@@ -2582,6 +2798,9 @@ function sessionErrorKey(error: unknown): string {
       case "stale_claim": return "sessions.claimExpiredError";
       case "not_found": return "sessions.notFoundError";
       case "admission_closed": return "sessions.admissionClosedError";
+      case "metadata_conflict": return "sessions.renameConflict";
+      case "session_not_persisted": return "sessions.notPersistedError";
+      case "validation_error": return "sessions.invalidTitle";
     }
   }
   return "sessions.actionError";

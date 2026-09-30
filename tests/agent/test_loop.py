@@ -4315,6 +4315,36 @@ async def test_foreground_commit_preserves_staged_framing_until_slow_title_finis
 
 
 @pytest.mark.asyncio
+async def test_manual_title_wins_over_a_late_automatic_title(tmp_path: Path) -> None:
+    router = _TitleBehaviorRouter(
+        (_response("First response."),),
+        title=_response("Generated late title"),
+        delay_title=True,
+    )
+    loop, session, _bus = _runtime(tmp_path, router, title_prompt="Generate a title")
+
+    await loop.start()
+    try:
+        await collect_foreground_outbound(_bus, "First input.")
+        await router.title_started.wait()
+        await session.rename("Manual title", expected_metadata_version=0)
+        assert session.metadata["title"] == "Manual title"
+        assert session.metadata_version == 1
+
+        router.release_title.set()
+        await loop.wait_for_restore_idle()
+        assert session.metadata["title"] == "Manual title"
+        await session.wait_for_pending_persist()
+    finally:
+        router.release_title.set()
+        await loop.close()
+
+    reloaded = Session.load(session.workspace_state, session.session_id)
+    assert reloaded.metadata["title"] == "Manual title"
+    assert reloaded.metadata_version == 1
+
+
+@pytest.mark.asyncio
 async def test_late_title_is_persisted_by_the_next_completed_turn(tmp_path: Path) -> None:
     router = _TitleBehaviorRouter(
         (_response("First response."), _response("Second response.")),

@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { URL } from "node:url";
 import { chromium } from "@playwright/test";
 
 import setup from "./e2e-setup.mjs";
@@ -616,7 +617,7 @@ try {
   const refreshResponsePromise = secondPage.waitForResponse((response) => (
     response.request().method() === "GET"
     && response.url().includes("/api/v1/projects/")
-    && response.url().endsWith("/sessions")
+    && new URL(response.url()).pathname.endsWith("/sessions")
   ));
   await secondPage.getByRole("button", { name: /Refresh sessions|刷新会话/ }).click();
   assert.equal((await refreshResponsePromise).status(), 200);
@@ -632,6 +633,123 @@ try {
   await secondPage.getByRole("button", { name: /Release session|释放会话/ }).waitFor({ state: "detached" });
   await secondContext.close();
   secondContext = undefined;
+
+  const sessionSearch = page.getByLabel("Search by title");
+  await sessionSearch.fill("Web available");
+  await sessionList.getByRole("button", { name: /Web available history/ }).waitFor();
+  await sessionSearch.fill("no matching session");
+  await page.getByText("No Sessions match this title.", { exact: true }).waitFor();
+  for (const failOldRequest of [false, true]) {
+    let releaseOldRequest;
+    let oldRequestReceived;
+    const released = new Promise((resolveRelease) => { releaseOldRequest = resolveRelease; });
+    const received = new Promise((resolveReceived) => { oldRequestReceived = resolveReceived; });
+    const oldTitle = failOldRequest ? "stale failure" : "Web available";
+    const interceptSearch = async (route) => {
+      if (new URL(route.request().url()).searchParams.get("title") !== oldTitle) {
+        await route.continue();
+        return;
+      }
+      const response = await route.fetch();
+      oldRequestReceived();
+      await released;
+      if (failOldRequest) await route.fulfill({ status: 503, json: {} });
+      else await route.fulfill({ response });
+    };
+    await page.route("**/api/v1/projects/*/sessions?*", interceptSearch);
+    await sessionSearch.fill(oldTitle);
+    await received;
+    const currentSearchResponse = page.waitForResponse((response) => new URL(response.url()).searchParams.get("title") === "no matching session");
+    await sessionSearch.fill("no matching session");
+    await currentSearchResponse;
+    const oldSearchResponse = page.waitForResponse((response) => new URL(response.url()).searchParams.get("title") === oldTitle);
+    releaseOldRequest();
+    await oldSearchResponse;
+    await page.evaluate(() => new Promise((resolveFrame) => window.requestAnimationFrame(() => window.requestAnimationFrame(resolveFrame))));
+    await page.getByText("No Sessions match this title.", { exact: true }).waitFor();
+    assert.equal(await page.getByRole("alert").count(), 0, "An obsolete search failure replaced the current results");
+    await page.unroute("**/api/v1/projects/*/sessions?*", interceptSearch);
+  }
+  await sessionSearch.fill("");
+  const renameTarget = sessionList.getByRole("button", { name: /Web available history/ });
+  await renameTarget.click();
+  await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
+  await sessionSearch.fill("Web available");
+  await sessionList.getByRole("button", { name: /Web available history/ }).waitFor();
+  const renameButton = page.getByRole("button", { name: "Rename session" });
+  const renameDialog = page.getByRole("dialog");
+  for (const closeWithEscape of [true, false]) {
+    await renameButton.click();
+    await renameDialog.getByLabel("Session title").waitFor();
+    if (closeWithEscape) await page.keyboard.press("Escape");
+    else await renameDialog.getByRole("button", { name: "Cancel" }).click();
+    await renameDialog.waitFor({ state: "hidden" });
+    assert.equal(await renameButton.evaluate((element) => element === document.activeElement), true,
+      "Rename dialog did not return focus to its trigger");
+  }
+  await renameButton.click();
+  await renameDialog.getByLabel("Session title").fill("Renamed available history");
+  const interceptRenameConflict = async (route) => {
+    if (route.request().method() !== "PATCH") {
+      await route.continue();
+      return;
+    }
+    const body = route.request().postDataJSON();
+    const concurrent = await route.fetch({
+      postData: JSON.stringify({ ...body, request_id: `${body.request_id}-concurrent`, title: "Concurrent renamed history" }),
+    });
+    assert.equal(concurrent.status(), 200);
+    const conflict = await route.fetch();
+    assert.equal(conflict.status(), 409);
+    await route.fulfill({ response: conflict });
+  };
+  await page.route("**/api/v1/projects/*/sessions/*", interceptRenameConflict);
+  await renameDialog.getByRole("button", { name: "Save" }).click();
+  await renameDialog.getByText("This Session changed elsewhere. Reload it and try again.", { exact: true }).waitFor();
+  await renameDialog.getByRole("button", { name: "Save" }).waitFor({ state: "visible" });
+  await page.waitForFunction(() => !document.querySelector("[role='dialog'] button[type='submit']")?.disabled);
+  assert.equal(await renameDialog.getByLabel("Session title").inputValue(), "Renamed available history",
+    "A metadata conflict discarded the user's title");
+  await page.unroute("**/api/v1/projects/*/sessions/*", interceptRenameConflict);
+  const renameResponse = page.waitForResponse((response) => (
+    response.request().method() === "PATCH"
+    && response.url().includes("/sessions/")
+  ));
+  await renameDialog.getByRole("button", { name: "Save" }).click();
+  assert.equal((await renameResponse).status(), 200);
+  await page.getByRole("heading", { name: "Renamed available history", exact: true }).waitFor();
+  await page.getByText("No Sessions match this title.", { exact: true }).waitFor();
+  assert.equal(await renameButton.evaluate((element) => element === document.activeElement), true,
+    "Saving a title outside the filter lost the selected Session or its trigger focus");
+  await renameButton.click();
+  await renameDialog.getByLabel("Session title").waitFor();
+  assert.equal(await renameDialog.getByLabel("Session title").inputValue(), "Renamed available history");
+  await page.keyboard.press("Escape");
+  let releaseRestoredClaim;
+  let restoredClaimReceived;
+  const restoredClaimReleased = new Promise((resolveRelease) => { releaseRestoredClaim = resolveRelease; });
+  const restoredClaimStarted = new Promise((resolveReceived) => { restoredClaimReceived = resolveReceived; });
+  const interceptRestoredClaim = async (route) => {
+    const response = await route.fetch();
+    restoredClaimReceived();
+    await restoredClaimReleased;
+    await route.fulfill({ response });
+  };
+  const restoredClaimUrl = `**/api/v1/projects/*/sessions/${control.details.available_session_id}/claim`;
+  await page.route(restoredClaimUrl, interceptRestoredClaim);
+  await page.reload();
+  await restoredClaimStarted;
+  const restoredSearchResponse = page.waitForResponse((response) => new URL(response.url()).searchParams.get("title") === "no matching session");
+  await page.getByLabel("Search by title").fill("no matching session");
+  await restoredSearchResponse;
+  await page.getByText("No Sessions match this title.", { exact: true }).waitFor();
+  releaseRestoredClaim();
+  await page.getByRole("heading", { name: "Renamed available history", exact: true }).waitFor();
+  await page.evaluate(() => new Promise((resolveFrame) => window.requestAnimationFrame(() => window.requestAnimationFrame(resolveFrame))));
+  await page.getByText("No Sessions match this title.", { exact: true }).waitFor();
+  await page.unroute(restoredClaimUrl, interceptRestoredClaim);
+  await page.getByRole("button", { name: /Release session|释放会话/ }).click();
+
   await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
   await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
 
@@ -666,7 +784,7 @@ try {
     }
   }
   await page.locator("aside").getByRole("link", { name: "project-one", exact: true }).click();
-  await page.getByRole("button", { name: /Web available history/ }).click();
+  await page.getByRole("button", { name: /Renamed available history/ }).click();
   await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
   for (const language of ["en", "zh-CN"]) {
     await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import os
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
@@ -57,6 +59,48 @@ class ServiceSink(Protocol):
 _PROJECT_REMOVAL_FAILURE_MESSAGE = (
     "Project work could not be stopped; the registration remains blocked."
 )
+_MAX_SESSION_PAGE_SIZE = 100
+
+
+def _encode_session_cursor(
+    key: tuple[datetime, datetime, str], workspace_id: str, title_filter: str
+) -> str:
+    payload = json.dumps(
+        {
+            "workspace_id": workspace_id,
+            "title_filter": title_filter,
+            "updated_at": key[0].isoformat(),
+            "created_at": key[1].isoformat(),
+            "id": key[2],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_session_cursor(
+    value: str, workspace_id: str, title_filter: str
+) -> tuple[datetime, datetime, str]:
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        payload = json.loads(
+            base64.b64decode(padded, altchars=b"-_", validate=True).decode("utf-8")
+        )
+        if payload["workspace_id"] != workspace_id or payload["title_filter"] != title_filter:
+            raise ValueError("cursor scope does not match")
+        updated_at = datetime.fromisoformat(payload["updated_at"])
+        created_at = datetime.fromisoformat(payload["created_at"])
+        session_id = payload["id"]
+    except (KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError) as error:
+        raise service_error("validation_error", "cursor is invalid.", status=422) from error
+    if (
+        updated_at.tzinfo is None
+        or created_at.tzinfo is None
+        or not isinstance(session_id, str)
+        or not session_id
+    ):
+        raise service_error("validation_error", "cursor is invalid.", status=422)
+    return updated_at, created_at, session_id
 
 
 def _project_catalog_service_error(error: ProjectCatalogError) -> ServiceError:
@@ -107,6 +151,9 @@ class ClientState:
     events: deque[dict[str, object]] = field(default_factory=lambda: deque(maxlen=256))
     results: dict[str, dict[str, object]] = field(default_factory=dict)
     inflight: dict[str, asyncio.Task[dict[str, object]]] = field(default_factory=dict)
+    rename_results: dict[str, tuple[tuple[object, ...], dict[str, object]]] = field(
+        default_factory=dict
+    )
     claimed: set[tuple[str, str]] = field(default_factory=set)
     attached_workspaces: set[str] = field(default_factory=set)
     current_workspace_id: str | None = None
@@ -694,43 +741,165 @@ class WorkspaceServiceRuntime:
             raise service_error("not_found", "Conversation Session was not found.", status=404)
         return loop.loop.project_foreground_conversation()
 
-    async def list_sessions(self, client_id: str) -> list[dict[str, object]]:
-        """Return only durable foreground Sessions owned by this Workspace."""
+    def _session_summary(self, session: Session, client_id: str) -> dict[str, object]:
+        claim = self._claims.get(session.session_id)
+        title = session.metadata.get("title", "Untitled session")
+        return {
+            "id": session.session_id,
+            "title": title if isinstance(title, str) else "Untitled session",
+            "created_at": session.created_at.isoformat(),
+            "updated_at": session.updated_at.isoformat(),
+            "message_count": len(session.messages),
+            "occupied": claim is not None,
+            "occupied_by": None if claim is None or claim.client_id == client_id else "client",
+            "metadata_version": session.metadata_version,
+        }
+
+    async def list_sessions_page(
+        self,
+        client_id: str,
+        *,
+        title: str | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, object]:
+        """Return a filtered page of durable foreground Session metadata."""
+        if limit is not None and (limit < 1 or limit > _MAX_SESSION_PAGE_SIZE):
+            raise service_error(
+                "validation_error",
+                f"limit must be between 1 and {_MAX_SESSION_PAGE_SIZE}.",
+                status=422,
+            )
+        title_filter = "" if title is None else title.strip().casefold()
+        cursor_key = (
+            None
+            if cursor is None
+            else _decode_session_cursor(cursor, self.workspace_id, title_filter)
+        )
         directory = self.workspace_state.existing_sessions_directory()
         if directory is None:
-            return []
-        entries: list[tuple[datetime, datetime, dict[str, object]]] = []
+            return {"sessions": [], "next_cursor": None}
+
+        entries: list[tuple[tuple[datetime, datetime, str], dict[str, object]]] = []
         for path in directory.glob("*.jsonl"):
-            try:
-                session = Session.load(
-                    self.workspace_state,
-                    path.stem,
-                    partition=SessionStoragePartition.FOREGROUND,
-                    now=local_now,
-                )
-            except (OSError, UnicodeError, ValueError):
+            loop_state = self._loops.get(path.stem)
+            session = None if loop_state is None else loop_state.loop.session
+            if session is None:
+                try:
+                    session = Session.load(
+                        self.workspace_state,
+                        path.stem,
+                        partition=SessionStoragePartition.FOREGROUND,
+                        now=local_now,
+                    )
+                except (OSError, UnicodeError, ValueError):
+                    continue
+            summary = self._session_summary(session, client_id)
+            session_title = cast(str, summary["title"])
+            if title_filter and title_filter not in session_title.casefold():
                 continue
-            claim = self._claims.get(session.session_id)
-            title = session.metadata.get("title", "Untitled session")
-            entries.append(
-                (
-                    session.updated_at,
-                    session.created_at,
-                    {
-                        "id": session.session_id,
-                        "title": title if isinstance(title, str) else "Untitled session",
-                        "created_at": session.created_at.isoformat(),
-                        "updated_at": session.updated_at.isoformat(),
-                        "message_count": len(session.messages),
-                        "occupied": claim is not None,
-                        "occupied_by": None
-                        if claim is None or claim.client_id == client_id
-                        else "client",
-                    },
-                )
+            key = (session.updated_at, session.created_at, session.session_id)
+            if cursor_key is not None and key >= cursor_key:
+                continue
+            entries.append((key, summary))
+
+        entries.sort(key=lambda item: item[0], reverse=True)
+        if limit is None:
+            page = entries
+            next_cursor = None
+        else:
+            page = entries[:limit]
+            next_cursor = (
+                _encode_session_cursor(page[-1][0], self.workspace_id, title_filter)
+                if len(page) < len(entries) and page
+                else None
             )
-        entries.sort(key=lambda item: (item[0], item[1], str(item[2]["id"])), reverse=True)
-        return [item[2] for item in entries]
+        return {
+            "sessions": [summary for _, summary in page],
+            "next_cursor": next_cursor,
+        }
+
+    async def list_sessions(self, client_id: str) -> list[dict[str, object]]:
+        """Return all durable foreground Sessions owned by this Workspace."""
+        page = await self.list_sessions_page(client_id)
+        return cast(list[dict[str, object]], page["sessions"])
+
+    async def rename_session(
+        self,
+        client_id: str,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+        title: str,
+        expected_metadata_version: int,
+        request_id: str,
+    ) -> dict[str, object]:
+        """Rename one claimed, already-persisted foreground Session."""
+        async with self._lock:
+            claim = self.require_claim(client_id, session_id, claim_version, claim_credential)
+            client = self.service.client(client_id)
+            fingerprint = (self.workspace_id, session_id, title, expected_metadata_version)
+            previous = client.rename_results.get(request_id)
+            if previous is not None:
+                if previous[0] != fingerprint:
+                    raise service_error(
+                        "validation_error",
+                        "request_id was already used for another rename.",
+                        status=422,
+                    )
+                return previous[1]
+            session = claim.loop.session
+            if not session.messages:
+                raise service_error(
+                    "session_not_persisted",
+                    "Conversation Session draft has no accepted input yet.",
+                    retryable=True,
+                )
+            await session.wait_for_pending_persist()
+            self.require_claim(client_id, session_id, claim_version, claim_credential)
+            directory = self.workspace_state.existing_sessions_directory()
+            session_path = None if directory is None else directory / f"{session_id}.jsonl"
+            if session_path is None or not session_path.is_file():
+                raise service_error(
+                    "session_not_persisted",
+                    "Conversation Session is not persisted yet.",
+                    retryable=True,
+                )
+            try:
+                session.rename_durably(
+                    title,
+                    expected_metadata_version=expected_metadata_version,
+                )
+            except OSError as error:
+                raise service_error(
+                    "persistence_error",
+                    "Conversation Session title could not be saved.",
+                    status=500,
+                    retryable=True,
+                ) from error
+            except ValueError as error:
+                message = str(error)
+                if "stale" in message:
+                    raise service_error(
+                        "metadata_conflict",
+                        "Conversation Session metadata changed; reload before renaming.",
+                        retryable=True,
+                    ) from error
+                raise service_error("validation_error", message, status=422) from error
+            summary = self._session_summary(session, client_id)
+            client.rename_results[request_id] = (fingerprint, summary)
+            await self.service.emit(
+                "session.metadata_updated",
+                workspace_id=self.workspace_id,
+                session_id=session_id,
+                run_id=None,
+                payload={
+                    "title": summary["title"],
+                    "metadata_version": summary["metadata_version"],
+                },
+                target_client_ids=self.service.workspace_audience(self.workspace_id),
+            )
+            return summary
 
     async def _release_restore_barrier(self, client_id: str) -> None:
         if self._restore_owner != client_id:
@@ -1566,6 +1735,52 @@ class LocalService:
             record, workspace = await self._project_workspace_owned(client_id, project_id)
             return record, workspace, await workspace.list_sessions(client_id)
 
+    async def list_project_sessions_page(
+        self,
+        client_id: str,
+        project_id: str,
+        *,
+        title: str | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+    ) -> tuple[ProjectRecord, WorkspaceServiceRuntime, dict[str, object]]:
+        async with self._project_lifecycle_lock:
+            record, workspace = await self._project_workspace_owned(client_id, project_id)
+            return (
+                record,
+                workspace,
+                await workspace.list_sessions_page(
+                    client_id,
+                    title=title,
+                    cursor=cursor,
+                    limit=limit,
+                ),
+            )
+
+    async def rename_project_session(
+        self,
+        client_id: str,
+        project_id: str,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+        title: str,
+        expected_metadata_version: int,
+        request_id: str,
+    ) -> dict[str, object]:
+        async with self._project_lifecycle_lock:
+            record, workspace = await self._project_workspace_owned(client_id, project_id)
+            del record
+            return await workspace.rename_session(
+                client_id,
+                session_id,
+                claim_version,
+                claim_credential,
+                title,
+                expected_metadata_version,
+                request_id,
+            )
+
     async def create_project_session(self, client_id: str, project_id: str) -> dict[str, object]:
         async with self._project_lifecycle_lock:
             _record, workspace = await self._project_workspace_owned(client_id, project_id)
@@ -1971,6 +2186,49 @@ class LocalService:
         workspace = self.workspace(workspace_id)
         client.attached_workspaces.add(workspace_id)
         return await workspace.list_sessions(client_id)
+
+    async def list_sessions_page(
+        self,
+        client_id: str,
+        workspace_id: str,
+        *,
+        title: str | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, object]:
+        client = self._require_client(client_id)
+        workspace = self.workspace(workspace_id)
+        client.attached_workspaces.add(workspace_id)
+        return await workspace.list_sessions_page(
+            client_id,
+            title=title,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    async def rename_session(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+        title: str,
+        expected_metadata_version: int,
+        request_id: str,
+    ) -> dict[str, object]:
+        client = self._require_client(client_id)
+        workspace = self.workspace(workspace_id)
+        client.attached_workspaces.add(workspace_id)
+        return await workspace.rename_session(
+            client_id,
+            session_id,
+            claim_version,
+            claim_credential,
+            title,
+            expected_metadata_version,
+            request_id,
+        )
 
     async def handle_management(
         self,

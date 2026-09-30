@@ -1738,6 +1738,7 @@ class AgentLoop:
             or self._aborted
             or not content.strip()
             or session.metadata.get("title") != "Untitled session"
+            or session.has_manual_title
             or session.session_id in self._title_work
         ):
             return None
@@ -1791,17 +1792,19 @@ class AgentLoop:
                 title, usage_delta = await self._resolve_title(content)
                 if (
                     await coordination.prepared
+                    and not session.has_manual_title
                     and session.metadata.get("title") == "Untitled session"
                 ):
-                    session.update_metadata(title=title, usage_delta=usage_delta)
+                    session.update_automatic_title(title, usage_delta=usage_delta)
             except asyncio.CancelledError:
                 if (
                     not self._aborted
                     and coordination.prepared.done()
                     and coordination.prepared.result()
+                    and not session.has_manual_title
                     and session.metadata.get("title") == "Untitled session"
                 ):
-                    session.update_metadata(title=normalize_title(content))
+                    session.update_automatic_title(normalize_title(content))
                 raise
             finally:
                 await coordination.wait_until_foreground_idle()

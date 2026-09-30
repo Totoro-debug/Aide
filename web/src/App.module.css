@@ -704,6 +704,12 @@ h1 {
   margin-top: 12px;
 }
 
+.dialogForm {
+  display: grid;
+  gap: 8px;
+  margin-top: 20px;
+}
+
 .backLink {
   display: inline-flex;
   align-items: center;
@@ -781,6 +787,53 @@ h1 {
   font-size: 11px;
   padding: 3px 6px;
   text-align: center;
+}
+
+.sessionSearch {
+  display: grid;
+  gap: 6px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 10px 13px 12px;
+}
+
+.sessionSearchLabel {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.sessionSearchControl {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface-app);
+  color: var(--text-muted);
+  padding: 0 9px;
+}
+
+.sessionSearchControl:focus-within {
+  border-color: var(--accent-strong);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.sessionSearchInput {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.sessionSearchInput::-webkit-search-cancel-button {
+  cursor: pointer;
 }
 
 .sessionList,
@@ -909,6 +962,35 @@ h1 {
   margin: 0;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.sessionListMore {
+  display: inline-flex;
+  width: calc(100% - 26px);
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 10px 13px 13px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.sessionListMore:hover,
+.sessionListMore:focus-visible {
+  border-color: var(--accent-strong);
+  color: var(--accent-strong);
+  outline: none;
+}
+
+.sessionListMore:disabled {
+  cursor: wait;
+  opacity: 0.6;
 }
 
 .sessionContentPanel {
@@ -1378,6 +1460,12 @@ h1 {
   margin-bottom: 5px;
 }
 
+.sessionHeaderActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .sessionPrompt {
   display: grid;
   min-height: 320px;
@@ -1827,6 +1915,10 @@ h1 {
   }
 
   .sessionContentHeader .secondaryButton {
+    align-self: flex-end;
+  }
+
+  .sessionContentHeader .sessionHeaderActions {
     align-self: flex-end;
   }
 

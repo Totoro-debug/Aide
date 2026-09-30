@@ -157,6 +157,10 @@ class LocalServiceTransport:
             f"{_API_PREFIX}/projects/{{project_id}}/sessions/{{session_id}}",
             self._get_project_session,
         )
+        app.router.add_patch(
+            f"{_API_PREFIX}/projects/{{project_id}}/sessions/{{session_id}}",
+            self._rename_project_session,
+        )
         app.router.add_get(
             f"{_API_PREFIX}/workspaces/{{workspace_id}}/sessions",
             self._list_sessions,
@@ -168,6 +172,10 @@ class LocalServiceTransport:
         app.router.add_get(
             f"{_API_PREFIX}/workspaces/{{workspace_id}}/sessions/{{session_id}}",
             self._get_session,
+        )
+        app.router.add_patch(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/sessions/{{session_id}}",
+            self._rename_session,
         )
         app.router.add_get(
             f"{_API_PREFIX}/workspaces/{{workspace_id}}/management/{{action:.*}}",
@@ -515,14 +523,18 @@ class LocalServiceTransport:
         context = self._authenticate(request, client_required=True)
         client_id = _context_client_id(context)
         project_id = request.match_info["project_id"]
-        record, workspace, sessions = await self.service.list_project_sessions(
-            client_id, project_id
+        record, workspace, page = await self.service.list_project_sessions_page(
+            client_id,
+            project_id,
+            title=request.query.get("title"),
+            cursor=request.query.get("cursor"),
+            limit=_session_page_limit(request),
         )
         return web.json_response(
             {
                 "project_id": record.project_id,
                 "workspace_id": workspace.workspace_id,
-                "sessions": sessions,
+                **page,
             }
         )
 
@@ -562,6 +574,30 @@ class LocalServiceTransport:
         )
         return web.json_response(result)
 
+    async def _rename_project_session(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        client_id = _context_client_id(context)
+        body = await _json_object(request)
+        request_id = _require_request_id(body)
+        claim_version, title, expected_metadata_version = _rename_fields(body)
+        result = await self.service.rename_project_session(
+            client_id,
+            request.match_info["project_id"],
+            request.match_info["session_id"],
+            claim_version,
+            _required_header(request, "X-MyClaw-Claim"),
+            title,
+            expected_metadata_version,
+            request_id,
+        )
+        return web.json_response(
+            {
+                "request_id": request_id,
+                "project_id": request.match_info["project_id"],
+                "session": result,
+            }
+        )
+
     async def _release_project_session(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, mutation=True, client_required=True)
         client_id = _context_client_id(context)
@@ -586,11 +622,14 @@ class LocalServiceTransport:
     async def _list_sessions(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, client_required=True)
         client_id = _context_client_id(context)
-        sessions = await self.service.list_sessions(
+        page = await self.service.list_sessions_page(
             client_id,
             request.match_info["workspace_id"],
+            title=request.query.get("title"),
+            cursor=request.query.get("cursor"),
+            limit=_session_page_limit(request),
         )
-        return web.json_response({"sessions": sessions})
+        return web.json_response(page)
 
     async def _create_session(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, mutation=True, client_required=True)
@@ -622,6 +661,31 @@ class LocalServiceTransport:
                     "session_id": projection.session_id,
                     "messages": list(projection.messages),
                 },
+            }
+        )
+
+    async def _rename_session(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        client_id = _context_client_id(context)
+        body = await _json_object(request)
+        request_id = _require_request_id(body)
+        claim_version, title, expected_metadata_version = _rename_fields(body)
+        result = await self.service.rename_session(
+            client_id,
+            request.match_info["workspace_id"],
+            request.match_info["session_id"],
+            claim_version,
+            _required_header(request, "X-MyClaw-Claim"),
+            title,
+            expected_metadata_version,
+            request_id,
+        )
+        return web.json_response(
+            {
+                "request_id": request_id,
+                "workspace_id": request.match_info["workspace_id"],
+                "session_id": request.match_info["session_id"],
+                "session": result,
             }
         )
 
@@ -890,6 +954,37 @@ def _integer_query(request: web.Request, name: str) -> int:
     if value < 1:
         raise service_error("validation_error", f"{name} is invalid.", status=422)
     return value
+
+
+def _session_page_limit(request: web.Request) -> int | None:
+    raw = request.query.get("limit")
+    if raw is None:
+        return None
+    return _integer_query(request, "limit")
+
+
+def _rename_fields(body: Mapping[str, object]) -> tuple[int, str, int]:
+    claim_version = body.get("claim_version")
+    if isinstance(claim_version, bool) or not isinstance(claim_version, int) or claim_version < 1:
+        raise service_error("validation_error", "claim_version is invalid.", status=422)
+    title = body.get("title")
+    if not isinstance(title, str):
+        raise service_error("validation_error", "title is required.", status=422)
+    version_key = (
+        "expected_metadata_version" if "expected_metadata_version" in body else "metadata_version"
+    )
+    metadata_version = body.get(version_key)
+    if (
+        isinstance(metadata_version, bool)
+        or not isinstance(metadata_version, int)
+        or metadata_version < 0
+    ):
+        raise service_error(
+            "validation_error",
+            "expected metadata version is invalid.",
+            status=422,
+        )
+    return claim_version, title, metadata_version
 
 
 def _context_client_id(context: _RequestContext) -> str:

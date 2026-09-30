@@ -49,6 +49,9 @@ class SessionStoragePartition(StrEnum):
 
 _HEADER_FIELDS = frozenset({"session_id", "created_at", "updated_at", "last_compacted", "metadata"})
 _TOKEN_USAGE_PATCH_KEYS = frozenset({"token_usage", "token_usage_delta", "usage_delta"})
+_TITLE_SOURCE = "_title_source"
+_TITLE_VERSION = "_title_version"
+_MANUAL_TITLE_SOURCE = "manual"
 _RESTORE_MESSAGE_FIELDS = frozenset({"restore_anchor_id", "restore_run_token", "restore_before"})
 _RESTORE_BEFORE_FIELDS = frozenset({"metadata", "last_compacted"})
 _RESTORE_NEXT_ANCHOR_ID = "restore_next_anchor_id"
@@ -255,6 +258,19 @@ class Session:
     @property
     def updated_at(self) -> datetime:
         return self._updated_at
+
+    @property
+    def metadata_version(self) -> int:
+        """Return the durable optimistic-concurrency version for Session metadata."""
+        value = self.metadata.get(_TITLE_VERSION, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("Session metadata title version is malformed")
+        return cast(int, value)
+
+    @property
+    def has_manual_title(self) -> bool:
+        """Return whether the title was explicitly chosen by a user."""
+        return self.metadata.get(_TITLE_SOURCE) == _MANUAL_TITLE_SOURCE
 
     def capture_restore_before(self) -> SessionRestoreBefore:
         """Capture detached Session state before a foreground User input."""
@@ -501,6 +517,58 @@ class Session:
         self.metadata.update(copied_patch)
         if updated_usage is not None:
             self.metadata["token_usage"] = updated_usage
+
+    def update_automatic_title(self, title: str, **updates: Any) -> None:
+        """Publish an automatic title only while no manual title owns the metadata."""
+        if self.has_manual_title:
+            return
+        self.update_metadata(title=title, **updates, _title_version=self.metadata_version + 1)
+
+    async def rename(self, title: str, *, expected_metadata_version: int) -> None:
+        """Drain pending saves before strictly renaming this Session."""
+        await self.wait_for_pending_persist()
+        self.rename_durably(title, expected_metadata_version=expected_metadata_version)
+
+    def rename_durably(self, title: str, *, expected_metadata_version: int) -> None:
+        """Persist a user title after checking its optimistic metadata version."""
+        self._ensure_not_abandoned()
+        if any(not task.done() for task in self._persist_tasks):
+            raise RuntimeError("Pending Session snapshots must finish before rename")
+        if not self.messages:
+            raise ValueError("Cannot rename a Session draft before it is persisted")
+        if (
+            isinstance(expected_metadata_version, bool)
+            or not isinstance(expected_metadata_version, int)
+            or expected_metadata_version < 0
+        ):
+            raise ValueError("expected metadata version is invalid")
+        if self._closed:
+            raise RuntimeError("Session is closed")
+        if not self._persisted_restore_messages():
+            raise ValueError("Cannot rename a Session draft before it is persisted")
+        if self.metadata_version != expected_metadata_version:
+            raise ValueError("Session metadata version is stale")
+        normalized = _normalize_title(title, fallback="")
+        if not normalized:
+            raise ValueError("Session title must not be empty")
+        candidate_metadata = copy.deepcopy(self.metadata)
+        candidate_metadata.update(
+            title=normalized,
+            _title_source=_MANUAL_TITLE_SOURCE,
+            _title_version=expected_metadata_version + 1,
+        )
+        renamed_at = self._clock_now()
+        content = _serialize_session_state(
+            session_id=self._session_id,
+            created_at=self._created_at,
+            updated_at=renamed_at,
+            last_compacted=self.last_compacted,
+            metadata=candidate_metadata,
+            messages=self.messages,
+        )
+        self._write_content(content)
+        self.metadata = candidate_metadata
+        self._updated_at = renamed_at
 
     def persist(self) -> None:
         """Schedule a silent, ordered write of the current complete Session snapshot."""
@@ -839,6 +907,12 @@ def _validate_metadata(metadata: dict[str, Any]) -> None:
         raise ValueError("metadata.title is not normalized")
     _validate_token_usage(metadata.get("token_usage"), field="metadata.token_usage")
     _validate_action_summary(metadata.get("summary", ""), field="metadata.summary")
+    title_version = metadata.get(_TITLE_VERSION, 0)
+    if isinstance(title_version, bool) or not isinstance(title_version, int) or title_version < 0:
+        raise ValueError("metadata._title_version must be a non-negative integer")
+    title_source = metadata.get(_TITLE_SOURCE)
+    if title_source is not None and title_source != _MANUAL_TITLE_SOURCE:
+        raise ValueError("metadata._title_source is invalid")
     if _RESTORE_NEXT_ANCHOR_ID in metadata:
         _validate_restore_next_anchor_id(metadata[_RESTORE_NEXT_ANCHOR_ID])
     _normalize_blackboard_metadata(metadata, invalid_is_absent=False)

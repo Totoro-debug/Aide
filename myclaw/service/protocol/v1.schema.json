@@ -301,7 +301,8 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "id", "title", "created_at", "updated_at", "message_count", "occupied", "occupied_by"
+        "id", "title", "created_at", "updated_at", "message_count", "occupied", "occupied_by",
+        "metadata_version"
       ],
       "properties": {
         "id": {"$ref": "#/$defs/identifier"},
@@ -310,7 +311,8 @@
         "updated_at": {"type": "string", "minLength": 1},
         "message_count": {"type": "integer", "minimum": 0},
         "occupied": {"type": "boolean"},
-        "occupied_by": {"type": ["string", "null"]}
+        "occupied_by": {"type": ["string", "null"]},
+        "metadata_version": {"type": "integer", "minimum": 0}
       }
     },
     "session_snapshot": {
@@ -336,11 +338,12 @@
     "project_sessions_response": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["project_id", "workspace_id", "sessions"],
+      "required": ["project_id", "workspace_id", "sessions", "next_cursor"],
       "properties": {
         "project_id": {"$ref": "#/$defs/identifier"},
         "workspace_id": {"$ref": "#/$defs/identifier"},
-        "sessions": {"type": "array", "items": {"$ref": "#/$defs/session"}}
+        "sessions": {"type": "array", "items": {"$ref": "#/$defs/session"}},
+        "next_cursor": {"type": ["string", "null"]}
       }
     },
     "session_creation": {

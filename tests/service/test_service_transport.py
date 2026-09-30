@@ -537,6 +537,25 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
             claim_data = cast(dict[str, object], claim["claim"])
             assert claim["snapshot"]["messages"]
 
+            async with http.patch(
+                f"{first.base_url}/api/v1/projects/{project_id}/sessions/{newer_id}",
+                headers={
+                    **headers,
+                    "X-MyClaw-Claim": cast(str, claim_data["reconnect_credential"]),
+                },
+                json={
+                    "request_id": "rename-project-session",
+                    "claim_version": claim_data["claim_version"],
+                    "metadata_version": 0,
+                    "title": "Renamed project session",
+                },
+            ) as response:
+                assert response.status == 200
+                renamed = await response.json()
+            assert renamed["project_id"] == project_id
+            assert renamed["session"]["title"] == "Renamed project session"
+            assert renamed["session"]["metadata_version"] == 1
+
             second_headers = {
                 "Authorization": f"Bearer {second.token}",
                 "X-MyClaw-CSRF": second.token,
@@ -609,6 +628,275 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
             await second.close()
         if first is not None:
             await first.close()
+        await ServiceClient.stop_existing(home, port=port)
+
+
+@pytest.mark.asyncio
+async def test_workspace_session_listing_filters_titles_and_pages_without_history(
+    tmp_path: Path,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    project = tmp_path / "project"
+    other_project = tmp_path / "other-project"
+    project.mkdir()
+    other_project.mkdir()
+    first_id = await _persist_session(
+        project,
+        home=home,
+        title="Build API",
+        created_at=datetime(2026, 2, 1, tzinfo=UTC),
+        content="secret first project body",
+    )
+    second_id = await _persist_session(
+        project,
+        home=home,
+        title="build api",
+        created_at=datetime(2026, 2, 2, tzinfo=UTC),
+        content="secret second project body",
+    )
+    third_id = await _persist_session(
+        project,
+        home=home,
+        title="Build worker",
+        created_at=datetime(2026, 2, 3, tzinfo=UTC),
+        content="secret third project body",
+    )
+    other_id = await _persist_session(
+        other_project,
+        home=home,
+        title="Build API",
+        created_at=datetime(2026, 2, 4, tzinfo=UTC),
+        content="secret other project body",
+    )
+    port = _free_port()
+    first: ServiceClient | None = None
+    other: ServiceClient | None = None
+    try:
+        first = await ServiceClient.connect_or_start(home, project, port=port)
+        other = await ServiceClient.connect_or_start(home, other_project, port=port)
+        headers = {
+            "Authorization": f"Bearer {first.token}",
+            "X-MyClaw-Client": first.client_id,
+        }
+        async with aiohttp.ClientSession() as http:
+            async with http.get(
+                f"{first.base_url}/api/v1/workspaces/{first.workspace_id}/sessions",
+                headers=headers,
+                params={"title": "BUILD API", "limit": "1"},
+            ) as response:
+                assert response.status == 200
+                first_page = await response.json()
+
+            assert [item["id"] for item in first_page["sessions"]] == [second_id]
+            assert first_page["sessions"][0]["metadata_version"] == 0
+            assert first_page["next_cursor"]
+            for params in (
+                {"title": "worker", "cursor": first_page["next_cursor"]},
+                {"title": "BUILD API", "cursor": "not-a-cursor"},
+                {"title": "BUILD API", "limit": "0"},
+                {"title": "BUILD API", "limit": "101"},
+            ):
+                async with http.get(
+                    f"{first.base_url}/api/v1/workspaces/{first.workspace_id}/sessions",
+                    headers=headers,
+                    params=params,
+                ) as response:
+                    assert response.status == 422
+                    assert (await response.json())["code"] == "validation_error"
+            async with http.get(
+                f"{other.base_url}/api/v1/workspaces/{other.workspace_id}/sessions",
+                headers={
+                    "Authorization": f"Bearer {other.token}",
+                    "X-MyClaw-Client": other.client_id,
+                },
+                params={"title": "BUILD API", "cursor": first_page["next_cursor"]},
+            ) as response:
+                assert response.status == 422
+            first_body = json.dumps(first_page)
+            assert first_id not in first_body
+            assert third_id not in first_body
+            assert other_id not in first_body
+            assert "secret" not in first_body
+
+            async with http.get(
+                f"{first.base_url}/api/v1/workspaces/{first.workspace_id}/sessions",
+                headers=headers,
+                params={"title": "build api", "cursor": first_page["next_cursor"]},
+            ) as response:
+                assert response.status == 200
+                second_page = await response.json()
+
+            assert [item["id"] for item in second_page["sessions"]] == [first_id]
+            assert second_page["next_cursor"] is None
+
+            async with http.get(
+                f"{other.base_url}/api/v1/workspaces/{other.workspace_id}/sessions",
+                headers={
+                    "Authorization": f"Bearer {other.token}",
+                    "X-MyClaw-Client": other.client_id,
+                },
+                params={"title": "build"},
+            ) as response:
+                assert response.status == 200
+                other_listing = await response.json()
+
+            assert [item["id"] for item in other_listing["sessions"]] == [other_id]
+    finally:
+        if other is not None:
+            await other.close()
+        if first is not None:
+            await first.close()
+        await ServiceClient.stop_existing(home, port=port)
+
+
+@pytest.mark.asyncio
+async def test_workspace_session_rename_requires_claim_and_persists_metadata_version(
+    tmp_path: Path,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session_id = await _persist_session(
+        workspace,
+        home=home,
+        title="Generated title",
+        created_at=datetime(2026, 2, 1, tzinfo=UTC),
+        content="rename me",
+    )
+    port = _free_port()
+    client: ServiceClient | None = None
+    restarted: ServiceClient | None = None
+    try:
+        client = await ServiceClient.connect_or_start(home, workspace, port=port)
+        headers = {
+            "Authorization": f"Bearer {client.token}",
+            "X-MyClaw-CSRF": client.token,
+            "X-MyClaw-Client": client.client_id,
+        }
+        async with aiohttp.ClientSession() as http:
+            await client.claim_session(session_id)
+            claim_version = client.claim_version
+            claim_credential = client.claim_credential
+            claim_headers = {
+                **headers,
+                "X-MyClaw-Claim": claim_credential,
+            }
+
+            async with http.patch(
+                f"{client.base_url}/api/v1/workspaces/{client.workspace_id}/sessions/{session_id}",
+                headers=claim_headers,
+                json={
+                    "request_id": "rename-session",
+                    "claim_version": claim_version,
+                    "metadata_version": 0,
+                    "title": "Manual title",
+                },
+            ) as response:
+                assert response.status == 200
+                renamed = await response.json()
+            assert renamed["session"]["title"] == "Manual title"
+            assert renamed["session"]["metadata_version"] == 1
+
+            rename_url = (
+                f"{client.base_url}/api/v1/workspaces/{client.workspace_id}/sessions/{session_id}"
+            )
+
+            async def repeat_rename() -> object:
+                async with http.patch(
+                    rename_url,
+                    headers=claim_headers,
+                    json={
+                        "request_id": "rename-session",
+                        "claim_version": claim_version,
+                        "metadata_version": 0,
+                        "title": "Manual title",
+                    },
+                ) as response:
+                    assert response.status == 200
+                    return await response.json()
+
+            assert tuple(await asyncio.gather(repeat_rename(), repeat_rename())) == (
+                renamed,
+                renamed,
+            )
+            async with http.patch(
+                f"{client.base_url}/api/v1/workspaces/{client.workspace_id}/sessions/{session_id}",
+                headers=claim_headers,
+                json={
+                    "request_id": "rename-session",
+                    "claim_version": claim_version,
+                    "metadata_version": 1,
+                    "title": "Reused ID must not write",
+                },
+            ) as response:
+                assert response.status == 422
+            async with http.patch(
+                f"{client.base_url}/api/v1/workspaces/{client.workspace_id}/sessions/{session_id}",
+                headers={**claim_headers, "X-MyClaw-Claim": "invalid-claim"},
+                json={
+                    "request_id": "rename-session",
+                    "claim_version": claim_version,
+                    "metadata_version": 0,
+                    "title": "Manual title",
+                },
+            ) as response:
+                assert response.status == 409
+                assert (await response.json())["code"] == "stale_claim"
+
+            async with http.patch(
+                f"{client.base_url}/api/v1/workspaces/{client.workspace_id}/sessions/{session_id}",
+                headers=claim_headers,
+                json={
+                    "request_id": "rename-stale-version",
+                    "claim_version": claim_version,
+                    "metadata_version": 0,
+                    "title": "Should conflict",
+                },
+            ) as response:
+                assert response.status == 409
+                assert (await response.json())["code"] == "metadata_conflict"
+
+            async with http.post(
+                f"{client.base_url}/api/v1/workspaces/{client.workspace_id}/sessions",
+                headers=headers,
+                json={"request_id": "rename-draft-create"},
+            ) as response:
+                assert response.status == 200
+                draft = await response.json()
+            draft_id = cast(str, draft["session_id"])
+            await client.claim_session(draft_id)
+            draft_claim_version = client.claim_version
+            draft_claim_credential = client.claim_credential
+            async with http.patch(
+                f"{client.base_url}/api/v1/workspaces/{client.workspace_id}/sessions/{draft_id}",
+                headers={
+                    **headers,
+                    "X-MyClaw-Claim": draft_claim_credential,
+                },
+                json={
+                    "request_id": "rename-draft",
+                    "claim_version": draft_claim_version,
+                    "metadata_version": 0,
+                    "title": "Must not persist",
+                },
+            ) as response:
+                assert response.status == 409
+                assert (await response.json())["code"] == "session_not_persisted"
+            await client.release_session()
+            assert not (WorkspaceState(workspace).sessions_directory / f"{draft_id}.jsonl").exists()
+        await client.close()
+        client = None
+        await ServiceClient.stop_existing(home, port=port)
+        restarted = await ServiceClient.connect_or_start(home, workspace, port=port)
+        listing = await restarted.list_sessions()
+        persisted = next(item for item in listing if item["id"] == session_id)
+        assert persisted["title"] == "Manual title"
+        assert persisted["metadata_version"] == 1
+    finally:
+        if restarted is not None:
+            await restarted.close()
+        if client is not None:
+            await client.close()
         await ServiceClient.stop_existing(home, port=port)
 
 

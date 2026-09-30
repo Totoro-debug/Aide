@@ -145,6 +145,7 @@ export interface SessionSummary {
   message_count: number;
   occupied: boolean;
   occupied_by: string | null;
+  metadata_version: number;
 }
 
 export interface SessionSnapshot {
@@ -163,6 +164,13 @@ export interface ProjectSessionsResponse {
   project_id: string;
   workspace_id: string;
   sessions: SessionSummary[];
+  next_cursor: string | null;
+}
+
+export interface SessionRenameResponse {
+  request_id: string;
+  project_id: string;
+  session: SessionSummary;
 }
 
 export interface SessionCreation {

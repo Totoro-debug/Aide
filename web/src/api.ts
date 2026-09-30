@@ -11,6 +11,7 @@ import type {
   ProjectSessionsResponse,
   SessionClaimResponse,
   SessionCreation,
+  SessionRenameResponse,
   SessionRelease,
   SessionSnapshot,
   ServiceCommandResult,
@@ -63,7 +64,7 @@ export function clearCsrfToken(): void {
 async function request<T>(
   path: string,
   options: {
-    method?: "GET" | "POST" | "DELETE";
+    method?: "GET" | "POST" | "PATCH" | "DELETE";
     body?: Record<string, unknown>;
     mutation?: boolean;
     extraHeaders?: Record<string, string>;
@@ -175,9 +176,41 @@ export function resumeProjectSchedule(
   });
 }
 
-export function getProjectSessions(projectId: string): Promise<ProjectSessionsResponse> {
+export function getProjectSessions(
+  projectId: string,
+  options: { title?: string; cursor?: string; limit?: number } = {},
+): Promise<ProjectSessionsResponse> {
+  const query = new URLSearchParams();
+  if (options.title !== undefined) query.set("title", options.title);
+  if (options.cursor !== undefined) query.set("cursor", options.cursor);
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  const queryString = query.toString();
   return request<ProjectSessionsResponse>(
-    `/projects/${encodeURIComponent(projectId)}/sessions`,
+    `/projects/${encodeURIComponent(projectId)}/sessions${queryString ? `?${queryString}` : ""}`,
+  );
+}
+
+export function renameProjectSession(
+  projectId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+  title: string,
+  metadataVersion: number,
+): Promise<SessionRenameResponse> {
+  return request<SessionRenameResponse>(
+    `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: "PATCH",
+      mutation: true,
+      body: {
+        request_id: createRequestId(),
+        claim_version: claimVersion,
+        metadata_version: metadataVersion,
+        title,
+      },
+      extraHeaders: { "X-MyClaw-Claim": claimCredential },
+    },
   );
 }
 

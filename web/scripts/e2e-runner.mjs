@@ -394,31 +394,109 @@ try {
   assert.equal(typeof conversationSessionId, "string");
   assert.equal(typeof conversationWorkspaceId, "string");
   await page.getByText("Empty draft", { exact: true }).waitFor();
-  const permissionChange = await page.evaluate(async ({ activeWorkspaceId, sessionId }) => {
-    const browserSession = await window.fetch("/api/v1/web/session", { credentials: "include" });
-    const { csrf_token: csrf } = await browserSession.json();
-    const control = window.__myclawTestControlCredential;
-    if (typeof control !== "string") throw new Error("The Web control credential was not captured");
-    const response = await window.fetch(
-      `/api/v1/workspaces/${activeWorkspaceId}/management/permission`,
-      {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-          "X-MyClaw-CSRF": csrf,
-          "X-MyClaw-Control": control,
-        },
-        body: JSON.stringify({
-          request_id: window.crypto.randomUUID(),
-          current_session_id: sessionId,
-          permission_level: "read-only",
-        }),
-      },
-    );
-    return { status: response.status, body: await response.text() };
-  }, { activeWorkspaceId: conversationWorkspaceId, sessionId: conversationSessionId });
-  assert.equal(permissionChange.status, 200, `Could not select read-only E2E permission: ${permissionChange.body}`);
+  const managementTrigger = page.getByRole("button", { name: "Runtime status and controls", exact: true });
+  await managementTrigger.click();
+  const managementDialog = page.getByRole("dialog", { name: "Runtime status", exact: true });
+  await managementDialog.getByText("primary/small-model", { exact: true }).waitFor();
+  await managementDialog.getByText("Next request context", { exact: true }).waitFor();
+  await managementDialog.getByText("Client permission", { exact: true }).waitFor();
+  await managementDialog.getByText("Active work", { exact: true }).waitFor();
+  const permissionControl = managementDialog.getByLabel("Tool permission level");
+  await permissionControl.selectOption("read-only");
+  await permissionControl.locator("xpath=..")
+    .getByRole("button", { name: "Save", exact: true }).click();
+  await managementDialog.getByRole("status").getByText("Client permission updated.", { exact: true }).waitFor();
+  const effortControl = managementDialog.getByLabel("Chat reasoning effort");
+  await effortControl.selectOption("high");
+  await effortControl.locator("xpath=..")
+    .getByRole("button", { name: "Save", exact: true }).click();
+  await managementDialog.getByRole("status").getByText("Reasoning effort updated.", { exact: true }).waitFor();
+  await managementDialog.getByRole("button", { name: "Close", exact: true }).click();
+  await managementDialog.waitFor({ state: "hidden" });
+  await expect(managementTrigger).toBeFocused();
+
+  await managementTrigger.press("Enter");
+  await expect(permissionControl).toHaveValue("read-only");
+  for (const [action, label, value] of [
+    ["permission", "Tool permission level", "full-access"],
+    ["effort", "Chat reasoning effort", "max"],
+  ]) {
+    const actionUrl = `**/management/${action}`;
+    await page.route(actionUrl, (route) => route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ request_id: "failed", result: {
+        handled: true, output: "config_invalid: invalid selection",
+        published_permission_level: null, published_effort: null,
+      } }),
+    }));
+    const select = managementDialog.getByLabel(label);
+    await select.selectOption(value);
+    const save = select.locator("xpath=..").getByRole("button", { name: "Save", exact: true });
+    await save.focus();
+    await save.press("Enter");
+    await managementDialog.getByRole("alert").waitFor();
+    await expect(select).toHaveValue(value);
+    await expect(managementDialog.getByText(/updated\./)).toHaveCount(0);
+    await page.unroute(actionUrl);
+  }
+  await managementDialog.press("Escape");
+  await expect(managementTrigger).toBeFocused();
+
+  let releaseOldSave;
+  const oldSaveGate = new Promise((resolveGate) => { releaseOldSave = resolveGate; });
+  let oldSaveArrived;
+  const oldSaveArrival = new Promise((resolveGate) => { oldSaveArrived = resolveGate; });
+  const delayManagementSave = async (route) => {
+    const response = await route.fetch();
+    oldSaveArrived();
+    await oldSaveGate;
+    await route.fulfill({ response });
+  };
+  await page.route("**/management/permission", delayManagementSave);
+  await managementTrigger.click();
+  await expect(permissionControl).toHaveValue("read-only");
+  await permissionControl.selectOption("full-access");
+  await permissionControl.locator("xpath=..").getByRole("button", { name: "Save", exact: true }).click();
+  await oldSaveArrival;
+  await managementDialog.press("Escape");
+  await managementTrigger.click();
+  await expect(permissionControl).toHaveValue("full-access");
+  await permissionControl.selectOption("workspace-write");
+  releaseOldSave();
+  await page.unroute("**/management/permission", delayManagementSave);
+  await expect(permissionControl).toHaveValue("workspace-write");
+  await expect(managementDialog.getByText("Client permission updated.", { exact: true })).toHaveCount(0);
+  await permissionControl.locator("xpath=..").getByRole("button", { name: "Save", exact: true }).click();
+  await managementDialog.getByText("Client permission updated.", { exact: true }).waitFor();
+  await managementDialog.press("Escape");
+
+  for (const language of ["en", "zh-CN"]) {
+    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    for (const theme of ["light", "dark"]) {
+      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      for (const viewport of [...viewports, { width: 375, height: 812 }, { width: 812, height: 375 }]) {
+        await page.setViewportSize(viewport);
+        const trigger = page.getByRole("button", { name: language === "en" ? "Runtime status and controls" : "运行状态与控制", exact: true });
+        await trigger.focus();
+        await trigger.press("Enter");
+        const dialog = page.getByRole("dialog", { name: language === "en" ? "Runtime status" : "运行状态", exact: true });
+        await dialog.getByText("primary/small-model", { exact: true }).waitFor();
+        const bounds = await dialog.boundingBox();
+        assert.ok(bounds && bounds.x >= 0 && bounds.y >= 0
+          && bounds.x + bounds.width <= viewport.width + 1
+          && bounds.y + bounds.height <= viewport.height + 1, "Runtime dialog escaped viewport");
+        const select = dialog.getByLabel(language === "en" ? "Chat reasoning effort" : "聊天推理强度");
+        await select.focus();
+        await expect(select).toBeFocused();
+        await page.screenshot({ path: resolve(output, `runtime-${language}-${theme}-${viewport.width}x${viewport.height}.png`) });
+        await dialog.press("Escape");
+        await expect(trigger).toBeFocused();
+      }
+    }
+  }
+  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await page.setViewportSize(viewports.at(-1));
   await page.getByLabel("Message input").fill("streaming markdown");
   await page.getByLabel("Message input").press("Shift+Enter");
   await page.getByLabel("Message input").type("second line");
@@ -537,6 +615,10 @@ try {
   }
 
   await page.getByRole("button", { name: /Web available history/ }).click();
+  await page.getByRole("button", { name: /Runtime status and controls|运行状态与控制/, exact: true }).click();
+  const activeRuntimeDialog = page.getByRole("dialog", { name: /Runtime status|运行状态/, exact: true });
+  await activeRuntimeDialog.getByText(/1 active|1 个运行中/, { exact: true }).waitFor();
+  await activeRuntimeDialog.press("Escape");
   for (const language of ["en", "zh-CN"]) {
     await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
     for (const theme of ["light", "dark"]) {
@@ -1016,8 +1098,7 @@ try {
         await deleteDialog.waitFor();
         await page.keyboard.press("Escape");
         await deleteDialog.waitFor({ state: "hidden" });
-        assert.equal(await deletionRetry.evaluate((element) => element === document.activeElement), true,
-          "Retry deletion dialog did not restore focus to Retry");
+        await expect(deletionRetry, "Retry deletion dialog did not restore focus to Retry").toBeFocused();
         await deletionRetry.click();
         if (otherPrompt !== null) {
           await page.getByRole("log", { includeHidden: true }).getByText(otherPrompt, { exact: true }).waitFor({ state: "attached" });

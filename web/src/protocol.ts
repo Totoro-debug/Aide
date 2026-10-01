@@ -68,6 +68,33 @@ export interface ServiceStatus {
   active_workspace_count: number;
 }
 
+export type ToolPermissionLevel = "read-only" | "workspace-write" | "full-access";
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+export interface RuntimeStatus {
+  version: string;
+  chat_model: string;
+  chat_reasoning_effort: ReasoningEffort;
+  uptime_seconds: number;
+  context_window: number;
+  max_output: number;
+  available_context: number;
+  compact_ratio: number;
+  compact_context_window: number;
+  projected_next_request_tokens: number;
+  projection_source: "estimated" | "reported_delta";
+  input_budget_used_percent: number;
+  session_message_count: number;
+  last_compacted: number;
+  cumulative_usage: Record<string, number>;
+  configured_permission_level: ToolPermissionLevel;
+  current_permission_level: ToolPermissionLevel;
+  schedule?: {
+    status?: string;
+    active_job_count?: number;
+  };
+}
+
 export type ProjectScheduleState =
   | "available"
   | "unavailable"
@@ -214,8 +241,18 @@ export interface RestoreResult {
 export interface ManagementResult {
   handled: boolean;
   output: string | null;
+  status_view?: RuntimeStatus;
+  effort_selection?: ReasoningEffort | null;
+  permission_selection?: ToolPermissionLevel | null;
+  published_effort?: ReasoningEffort | null;
+  published_permission_level?: ToolPermissionLevel | null;
   restore_plan?: RestorePlan;
   restore_result?: RestoreResult | null;
+}
+
+export interface ManagementResponse {
+  request_id: string;
+  result: ManagementResult;
 }
 
 export interface SessionClaim {
@@ -298,7 +335,7 @@ export interface RegisteredClient {
   client_id: string;
   reconnect_credential: string;
   web_control_credential: string;
-  permission_level: string;
+  permission_level: ToolPermissionLevel;
   current_workspace_id: string | null;
   current_session_id: string | null;
 }

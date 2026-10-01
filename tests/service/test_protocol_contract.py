@@ -9,6 +9,11 @@ from typing import Any, cast
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
 
+from myclaw.management.commands import ManagementCommandResult
+from myclaw.management.service import RuntimeStatus
+from myclaw.service.client import _management_result
+from myclaw.service.runtime import _encode_management_result
+
 
 def _schema() -> dict[str, Any]:
     schema_path = resources.files("myclaw.service.protocol").joinpath("v1.schema.json")
@@ -19,6 +24,108 @@ def _validator(definition: str) -> Draft202012Validator:
     schema = _schema()
     schema["$ref"] = f"#/$defs/{definition}"
     return Draft202012Validator(schema)
+
+
+@pytest.mark.parametrize(
+    ("definition", "selection"),
+    [
+        ("runtime_status_request", {}),
+        ("runtime_permission_request", {"permission_level": "read-only"}),
+        ("runtime_effort_request", {"effort": "high"}),
+    ],
+)
+def test_typed_runtime_requests_require_claim_and_reject_slash_commands(
+    definition: str, selection: dict[str, str]
+) -> None:
+    request = {
+        "request_id": "runtime-1",
+        "current_session_id": "session-1",
+        "claim_version": 1,
+        **selection,
+    }
+    validator = _validator(definition)
+    validator.validate(request)
+    for field in request:
+        with pytest.raises(ValidationError):
+            validator.validate({key: value for key, value in request.items() if key != field})
+    with pytest.raises(ValidationError):
+        validator.validate({**request, "command": "/status"})
+    with pytest.raises(ValidationError):
+        validator.validate({**request, "claim_version": 0})
+    for field in selection:
+        with pytest.raises(ValidationError):
+            validator.validate({**request, field: "unsupported"})
+
+
+def test_runtime_management_wire_results_validate_and_remote_decode_nullable_selections() -> None:
+    status = RuntimeStatus(
+        version="test",
+        chat_model="primary/small-model",
+        chat_reasoning_effort="high",
+        uptime_seconds=2,
+        context_window=1000,
+        max_output=100,
+        available_context=900,
+        compact_ratio=0.8,
+        compact_context_window=720,
+        projected_next_request_tokens=300,
+        projection_source="reported_delta",
+        input_budget_used_percent=300 / 900 * 100,
+        session_message_count=4,
+        last_compacted=0,
+        cumulative_usage={"input_tokens": 300, "output_tokens": 10},
+        current_permission_level="read-only",
+        schedule={"status": "available", "active_job_count": 1},
+    )
+    results = (
+        ManagementCommandResult(handled=True, output=None, status_view=status),
+        ManagementCommandResult(handled=True, output=None, effort_selection="high"),
+        ManagementCommandResult(handled=True, output=None, permission_selection="read-only"),
+        ManagementCommandResult(
+            handled=True, output="Chat reasoning effort: max", published_effort="max"
+        ),
+        ManagementCommandResult(
+            handled=True,
+            output="Foreground permission level: full-access",
+            published_permission_level="full-access",
+        ),
+        ManagementCommandResult(handled=True, output="config_invalid: Selection is invalid."),
+    )
+    validator = _validator("management_response")
+    for result in results:
+        encoded = _encode_management_result(result)
+        validator.validate({"request_id": "runtime-1", "result": encoded})
+        decoded = _management_result(encoded)
+        assert decoded.handled == result.handled
+        assert decoded.output == result.output
+        assert decoded.status_view == result.status_view
+        assert decoded.effort_selection == result.effort_selection
+        assert decoded.permission_selection == result.permission_selection
+        assert decoded.published_effort == result.published_effort
+        assert decoded.published_permission_level == result.published_permission_level
+    encoded_status = _encode_management_result(results[0])
+    for invalid in ("unsupported", True, 1):
+        with pytest.raises(ValidationError):
+            validator.validate(
+                {
+                    "request_id": "runtime-1",
+                    "result": {**encoded_status, "published_effort": invalid},
+                }
+            )
+    with pytest.raises(ValidationError):
+        validator.validate(
+            {"request_id": "runtime-1", "result": {**encoded_status, "credential": "secret"}}
+        )
+    with pytest.raises(ValidationError):
+        validator.validate(
+            {
+                "request_id": "runtime-1",
+                "result": {
+                    **encoded_status,
+                    "status_view": {**status.to_dict(), "messages": ["private"]},
+                },
+            }
+        )
 
 
 def test_versioned_protocol_schema_is_packaged_and_keeps_secrets_write_only() -> None:

@@ -56,4 +56,87 @@ for (const command of ["claim", "release", "input", "cancel", "confirmation_deci
 if ("value" in definitions.redacted_secret.properties) {
   throw new Error("Redacted secrets must remain write-only");
 }
+
+function interfaceDeclaration(name) {
+  const declaration = protocolSource.statements.find(
+    (statement) => ts.isInterfaceDeclaration(statement) && statement.name.text === name,
+  );
+  if (!declaration) throw new Error(`The Web client is missing ${name}`);
+  return declaration;
+}
+
+const referenceTypes = {
+  identifier: "string",
+  request_id: "string",
+  tool_permission_level: "ToolPermissionLevel",
+  reasoning_effort: "ReasoningEffort",
+  runtime_status: "RuntimeStatus",
+  management_result: "ManagementResult",
+};
+
+function schemaType(definition) {
+  if (definition.$ref) {
+    const name = definition.$ref.split("/").at(-1);
+    const type = referenceTypes[name];
+    if (!type) throw new Error(`No Web type mapping for ${name}`);
+    return type;
+  }
+  if (definition.anyOf) return definition.anyOf.map(schemaType).sort().join("|");
+  if (definition.enum) return definition.enum.map((value) => JSON.stringify(value)).sort().join("|");
+  if (Array.isArray(definition.type)) {
+    return definition.type.map((type) => schemaType({ type })).sort().join("|");
+  }
+  if (definition.type === "integer") return "number";
+  if (definition.type === "object" && definition.additionalProperties) {
+    return `Record<string,${schemaType(definition.additionalProperties)}>`;
+  }
+  return definition.type;
+}
+
+function webType(node) {
+  if (ts.isUnionTypeNode(node)) return node.types.map(webType).sort().join("|");
+  return node.getText(protocolSource).replace(/\s+/g, "");
+}
+
+function checkMembers(name, members, definition, exact = true) {
+  const expected = Object.entries(definition.properties);
+  const actual = new Map(members.map((member) => [member.name?.getText(protocolSource), member]));
+  if (exact && actual.size !== expected.length) {
+    throw new Error(`${name} fields differ from the protocol schema`);
+  }
+  for (const [field, property] of expected) {
+    const member = actual.get(field);
+    if (!member?.type) throw new Error(`${name} is missing ${field}`);
+    if (exact && Boolean(member.questionToken) === (definition.required ?? []).includes(field)) {
+      throw new Error(`${name}.${field} optionality differs from the protocol schema`);
+    }
+    if (property.type === "object" && property.properties) {
+      if (!ts.isTypeLiteralNode(member.type)) throw new Error(`${name}.${field} must be an object`);
+      checkMembers(`${name}.${field}`, member.type.members, property);
+    } else if (webType(member.type) !== schemaType(property)) {
+      throw new Error(`${name}.${field} type differs from the protocol schema`);
+    }
+  }
+}
+
+for (const [name, definition] of [
+  ["ToolPermissionLevel", "tool_permission_level"],
+  ["ReasoningEffort", "reasoning_effort"],
+]) {
+  const declaration = protocolSource.statements.find(
+    (statement) => ts.isTypeAliasDeclaration(statement) && statement.name.text === name,
+  );
+  if (!declaration || webType(declaration.type) !== schemaType(definitions[definition])) {
+    throw new Error(`${name} values differ from the protocol schema`);
+  }
+}
+checkMembers("RuntimeStatus", interfaceDeclaration("RuntimeStatus").members, definitions.runtime_status);
+checkMembers("ManagementResponse", interfaceDeclaration("ManagementResponse").members, definitions.management_response);
+const managementFields = [
+  "handled", "output", "status_view", "effort_selection", "permission_selection",
+  "published_effort", "published_permission_level",
+];
+checkMembers("ManagementResult", interfaceDeclaration("ManagementResult").members, {
+  properties: Object.fromEntries(managementFields.map((field) => [field, definitions.management_result.properties[field]])),
+}, false);
 console.log("Protocol schema compatibility: passed");

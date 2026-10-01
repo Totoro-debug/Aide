@@ -6,6 +6,112 @@
     "identifier": {"type": "string", "minLength": 1},
     "request_id": {"$ref": "#/$defs/identifier"},
     "claim_version": {"type": "integer", "minimum": 1},
+    "tool_permission_level": {"enum": ["read-only", "workspace-write", "full-access"]},
+    "reasoning_effort": {"enum": ["low", "medium", "high", "xhigh", "max"]},
+    "runtime_status_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "current_session_id", "claim_version"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "current_session_id": {"$ref": "#/$defs/identifier"},
+        "claim_version": {"$ref": "#/$defs/claim_version"}
+      }
+    },
+    "runtime_permission_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "current_session_id", "claim_version", "permission_level"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "current_session_id": {"$ref": "#/$defs/identifier"},
+        "claim_version": {"$ref": "#/$defs/claim_version"},
+        "permission_level": {"$ref": "#/$defs/tool_permission_level"}
+      }
+    },
+    "runtime_effort_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "current_session_id", "claim_version", "effort"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "current_session_id": {"$ref": "#/$defs/identifier"},
+        "claim_version": {"$ref": "#/$defs/claim_version"},
+        "effort": {"$ref": "#/$defs/reasoning_effort"}
+      }
+    },
+    "runtime_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version", "chat_model", "chat_reasoning_effort", "uptime_seconds", "context_window",
+        "max_output", "available_context", "compact_ratio", "compact_context_window",
+        "projected_next_request_tokens", "projection_source", "input_budget_used_percent",
+        "session_message_count", "last_compacted", "cumulative_usage",
+        "configured_permission_level", "current_permission_level"
+      ],
+      "properties": {
+        "version": {"type": "string"},
+        "chat_model": {"type": "string"},
+        "chat_reasoning_effort": {"$ref": "#/$defs/reasoning_effort"},
+        "uptime_seconds": {"type": "integer", "minimum": 0},
+        "context_window": {"type": "integer", "minimum": 1},
+        "max_output": {"type": "integer", "minimum": 0},
+        "available_context": {"type": "integer", "minimum": 1},
+        "compact_ratio": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "compact_context_window": {"type": "integer", "minimum": 1},
+        "projected_next_request_tokens": {"type": "integer", "minimum": 0},
+        "projection_source": {"enum": ["estimated", "reported_delta"]},
+        "input_budget_used_percent": {"type": "number", "minimum": 0},
+        "session_message_count": {"type": "integer", "minimum": 0},
+        "last_compacted": {"type": "integer", "minimum": 0},
+        "cumulative_usage": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "configured_permission_level": {"$ref": "#/$defs/tool_permission_level"},
+        "current_permission_level": {"$ref": "#/$defs/tool_permission_level"},
+        "schedule": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "status": {"type": "string"},
+            "active_job_count": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "management_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "handled", "output", "effort_selection", "permission_selection", "published_effort",
+        "published_permission_level", "resumed_session_id", "resume_skipped_count"
+      ],
+      "properties": {
+        "handled": {"type": "boolean"},
+        "output": {"type": ["string", "null"]},
+        "status_view": {"$ref": "#/$defs/runtime_status"},
+        "effort_selection": {"anyOf": [{"$ref": "#/$defs/reasoning_effort"}, {"type": "null"}]},
+        "permission_selection": {"anyOf": [{"$ref": "#/$defs/tool_permission_level"}, {"type": "null"}]},
+        "published_effort": {"anyOf": [{"$ref": "#/$defs/reasoning_effort"}, {"type": "null"}]},
+        "published_permission_level": {"anyOf": [{"$ref": "#/$defs/tool_permission_level"}, {"type": "null"}]},
+        "resumed_session_id": {"type": ["string", "null"]},
+        "resume_skipped_count": {"type": "integer", "minimum": 0},
+        "resume_sessions": {"type": "array", "items": {"type": "object"}},
+        "skill_metadata": {"type": "array", "items": {"type": "object"}},
+        "restore_listing": {"type": "object"},
+        "restore_plan": {"type": "object"},
+        "restore_result": {"type": ["object", "null"]},
+        "claim_version": {"$ref": "#/$defs/claim_version"},
+        "claim_credential": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "management_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "result"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "result": {"$ref": "#/$defs/management_result"}
+      }
+    },
     "error": {
       "type": "object",
       "additionalProperties": false,

@@ -2689,8 +2689,10 @@ class LocalService:
                         "request_id was already used for a different management request.",
                         status=409,
                     )
-                if action.startswith("restore/") or (
-                    action == "dispatch" and payload.get("command") == "/restore"
+                if (
+                    action in {"status", "permission", "effort"}
+                    or action.startswith("restore/")
+                    or (action == "dispatch" and payload.get("command") == "/restore")
                 ):
                     workspace = self.workspace(workspace_id)
                     workspace._ensure_session_available(session_id)
@@ -2740,7 +2742,9 @@ class LocalService:
         requires_restore_claim = action in restore_actions or (
             action == "dispatch" and payload.get("command") == "/restore"
         )
-        if requires_restore_claim and (claim_version is None or claim_credential is None):
+        requires_typed_management_claim = action in {"status", "permission", "effort"}
+        requires_claim = requires_restore_claim or requires_typed_management_claim
+        if requires_claim and (claim_version is None or claim_credential is None):
             raise service_error(
                 "stale_claim",
                 "Conversation Session Claim is missing or stale.",
@@ -2749,8 +2753,8 @@ class LocalService:
         dispatcher = workspace.management_dispatcher(
             client_id,
             session_id,
-            claim_version if requires_restore_claim else None,
-            claim_credential if requires_restore_claim else None,
+            claim_version if requires_claim else None,
+            claim_credential if requires_claim else None,
         )
         if action == "dispatch":
             command = payload.get("command")
@@ -2759,6 +2763,8 @@ class LocalService:
                     "validation_error", "Management command is required.", status=422
                 )
             result = await dispatcher.dispatch(command)
+        elif action == "status":
+            result = await dispatcher.status()
         elif action == "effort":
             effort = payload.get("effort")
             if not isinstance(effort, str):
@@ -3258,6 +3264,8 @@ def _encode_management_result(result: object) -> dict[str, object]:
         "output": result.output,
         "effort_selection": result.effort_selection,
         "permission_selection": result.permission_selection,
+        "published_effort": result.published_effort,
+        "published_permission_level": result.published_permission_level,
         "resumed_session_id": result.resumed_session_id,
         "resume_skipped_count": result.resume_skipped_count,
     }

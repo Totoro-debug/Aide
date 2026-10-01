@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronRight,
   FolderOpen,
+  Gauge,
   Info,
   LockKeyhole,
   Languages,
@@ -50,6 +51,7 @@ import {
   getRestoreResult,
   getProjectSessions,
   getProjects,
+  getRuntimeStatus,
   getServiceStatus,
   openEventStream,
   releaseProjectSession,
@@ -64,6 +66,8 @@ import {
   inspectRestore,
   restoreBrowserSession,
   ServiceCommandError,
+  updateRuntimeEffort,
+  updateRuntimePermission,
 } from "./api";
 import type {
   ClientCommand,
@@ -72,6 +76,8 @@ import type {
   ProjectSessionsResponse,
   RegisteredProject,
   RegisteredClient,
+  ReasoningEffort,
+  RuntimeStatus,
   ServiceState,
   ServiceCommandResult,
   ServiceEvent,
@@ -79,6 +85,7 @@ import type {
   SessionClaim,
   SessionSnapshot,
   SessionSummary,
+  ToolPermissionLevel,
   RestoreMode,
   RestorePlan,
   RestoreResult,
@@ -105,6 +112,8 @@ interface PendingConfirmation {
 
 const THEME_KEY = "myclaw.theme";
 const initialLaunchTicket = readAndClearTicket();
+const PERMISSION_LEVELS: ToolPermissionLevel[] = ["read-only", "workspace-write", "full-access"];
+const REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
 
 export default function App() {
   const { i18n, t } = useTranslation();
@@ -870,6 +879,290 @@ function StatusMetric({
       </div>
     </div>
   );
+}
+
+interface RuntimeManagementDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  claim: SessionClaim;
+  sessionTitle: string;
+  activeRuns: LiveRun[];
+  connectionState: ConnectionState;
+  triggerRef: { current: HTMLButtonElement | null };
+}
+
+function RuntimeManagementDialog({
+  open,
+  onOpenChange,
+  claim,
+  sessionTitle,
+  activeRuns,
+  connectionState,
+  triggerRef,
+}: RuntimeManagementDialogProps) {
+  const { i18n, t } = useTranslation();
+  const [status, setStatus] = useState<RuntimeStatus | null>(null);
+  const [permission, setPermission] = useState<ToolPermissionLevel>("workspace-write");
+  const [effort, setEffort] = useState<ReasoningEffort>("medium");
+  const [loadState, setLoadState] = useState<"idle" | "loading" | "ready">("idle");
+  const [saving, setSaving] = useState<"permission" | "effort" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const requestEpoch = useRef(0);
+
+  useEffect(() => {
+    requestEpoch.current += 1;
+    setSaving(null);
+    if (!open || connectionState !== "online") return;
+    let active = true;
+    setLoadState("loading");
+    setStatus(null);
+    setError(null);
+    setNotice(null);
+    void getRuntimeStatus(
+      claim.workspace_id,
+      claim.session_id,
+      claim.claim_version,
+      claim.reconnect_credential,
+    ).then((result) => {
+      if (!active) return;
+      if (result.status_view === undefined) {
+        setError("management.invalidStatus");
+        setLoadState("ready");
+        return;
+      }
+      setStatus(result.status_view);
+      setPermission(result.status_view.current_permission_level);
+      setEffort(result.status_view.chat_reasoning_effort);
+      setLoadState("ready");
+    }).catch((reason: unknown) => {
+      if (!active) return;
+      setError(managementErrorKey(reason));
+      setLoadState("ready");
+    });
+    return () => { active = false; requestEpoch.current += 1; };
+  }, [claim, open, connectionState]);
+
+  async function savePermission(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (status === null || saving !== null || connectionState !== "online") return;
+    const epoch = requestEpoch.current;
+    setSaving("permission");
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await updateRuntimePermission(
+        claim.workspace_id,
+        claim.session_id,
+        claim.claim_version,
+        claim.reconnect_credential,
+        permission,
+      );
+      if (epoch !== requestEpoch.current) return;
+      const published = result.published_permission_level;
+      if (published == null || !PERMISSION_LEVELS.includes(published)) {
+        setError("management.invalidSelection");
+        return;
+      }
+      setPermission(published);
+      setStatus((current) => current === null ? current : {
+        ...current,
+        current_permission_level: published,
+      });
+      setNotice("management.permissionSaved");
+    } catch (reason: unknown) {
+      if (epoch !== requestEpoch.current) return;
+      setError(managementErrorKey(reason));
+    } finally {
+      if (epoch === requestEpoch.current) setSaving(null);
+    }
+  }
+
+  async function saveEffort(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (status === null || saving !== null || connectionState !== "online") return;
+    const epoch = requestEpoch.current;
+    setSaving("effort");
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await updateRuntimeEffort(
+        claim.workspace_id,
+        claim.session_id,
+        claim.claim_version,
+        claim.reconnect_credential,
+        effort,
+      );
+      if (epoch !== requestEpoch.current) return;
+      const published = result.published_effort;
+      if (published == null || !REASONING_EFFORTS.includes(published)) {
+        setError("management.invalidSelection");
+        return;
+      }
+      setEffort(published);
+      setStatus((current) => current === null ? current : {
+        ...current,
+        chat_reasoning_effort: published,
+      });
+      setNotice("management.effortSaved");
+    } catch (reason: unknown) {
+      if (epoch !== requestEpoch.current) return;
+      setError(managementErrorKey(reason));
+    } finally {
+      if (epoch === requestEpoch.current) setSaving(null);
+    }
+  }
+
+  const activeWorkCount = activeRuns.filter(isLiveRunActive).length;
+  const numberFormat = new Intl.NumberFormat(i18n.language);
+  const usedTokens = status?.projected_next_request_tokens ?? 0;
+  const availableTokens = status?.available_context ?? 0;
+  const usedPercent = status === null ? 0 : Math.max(0, status.input_budget_used_percent);
+
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className={styles.dialogOverlay} />
+        <Dialog.Content
+          className={`${styles.dialogContent} ${styles.managementDialog}`}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            const trigger = triggerRef.current;
+            if (trigger?.isConnected && !trigger.disabled) trigger.focus();
+          }}
+        >
+          <div className={styles.dialogHeader}>
+            <div>
+              <Dialog.Title className={styles.dialogTitle}>{t("management.title")}</Dialog.Title>
+              <Dialog.Description className={styles.dialogDescription}>
+                {t("management.scope", { session: sessionTitle })}
+              </Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <button className={styles.iconButton} type="button" aria-label={t("controls.close")}>
+                <X size={17} aria-hidden="true" />
+              </button>
+            </Dialog.Close>
+          </div>
+
+          {loadState === "loading" ? (
+            <div className={styles.managementLoading} role="status" aria-live="polite">
+              <RefreshCw size={16} className={styles.spin} aria-hidden="true" />
+              {t("management.loading")}
+            </div>
+          ) : null}
+          {error !== null ? (
+            <div className={styles.errorBanner} role="alert">
+              <CircleAlert size={16} aria-hidden="true" />
+              <span>{t(error)}</span>
+            </div>
+          ) : null}
+          {notice !== null ? (
+            <div className={styles.notice} role="status" aria-live="polite">
+              <Check size={16} aria-hidden="true" />
+              {t(notice)}
+            </div>
+          ) : null}
+
+          {status !== null ? (
+            <>
+              <dl className={styles.managementStatusGrid} aria-label={t("management.statusTitle")}>
+                <div className={styles.managementMetric}>
+                  <dt>{t("management.model")}</dt>
+                  <dd>{status.chat_model || "-"}</dd>
+                </div>
+                <div className={styles.managementMetric}>
+                  <dt>{t("management.context")}</dt>
+                  <dd>
+                    {numberFormat.format(usedTokens)} / {numberFormat.format(availableTokens)}
+                    <span>{Math.round(usedPercent)}%</span>
+                  </dd>
+                </div>
+                <div className={styles.managementMetric}>
+                  <dt>{t("management.activeWork")}</dt>
+                  <dd>{activeWorkCount > 0 ? t("management.activeWorkCount", { count: activeWorkCount }) : t("management.idle")}</dd>
+                </div>
+                <div className={styles.managementMetric}>
+                  <dt>{t("management.permission")}</dt>
+                  <dd>{t(`management.permissionLevels.${status.current_permission_level}`)}</dd>
+                </div>
+                <div className={styles.managementMetric}>
+                  <dt>{t("management.effort")}</dt>
+                  <dd>{t(`management.effortLevels.${status.chat_reasoning_effort}`)}</dd>
+                </div>
+                <div className={styles.managementMetric}>
+                  <dt>{t("management.messages")}</dt>
+                  <dd>{numberFormat.format(status.session_message_count)}</dd>
+                </div>
+              </dl>
+
+              <div className={styles.managementControls}>
+                <form className={styles.managementControl} onSubmit={(event) => void savePermission(event)}>
+                  <label className={styles.fieldLabel} htmlFor="runtime-permission">
+                    {t("management.permissionLabel")}
+                  </label>
+                  <select
+                    id="runtime-permission"
+                    className={styles.textInput}
+                    value={permission}
+                    disabled={saving !== null || connectionState !== "online"}
+                    onChange={(event) => setPermission(event.target.value as ToolPermissionLevel)}
+                  >
+                    {PERMISSION_LEVELS.map((level) => (
+                      <option key={level} value={level}>{t(`management.permissionLevels.${level}`)}</option>
+                    ))}
+                  </select>
+                  <button className={styles.secondaryButton} type="submit" disabled={saving !== null || connectionState !== "online"}>
+                    <Check size={15} aria-hidden="true" />
+                    {saving === "permission" ? t("management.saving") : t("controls.save")}
+                  </button>
+                </form>
+                <form className={styles.managementControl} onSubmit={(event) => void saveEffort(event)}>
+                  <label className={styles.fieldLabel} htmlFor="runtime-effort">
+                    {t("management.effortLabel")}
+                  </label>
+                  <select
+                    id="runtime-effort"
+                    className={styles.textInput}
+                    value={effort}
+                    disabled={saving !== null || connectionState !== "online"}
+                    onChange={(event) => setEffort(event.target.value as ReasoningEffort)}
+                  >
+                    {REASONING_EFFORTS.map((level) => (
+                      <option key={level} value={level}>{t(`management.effortLevels.${level}`)}</option>
+                    ))}
+                  </select>
+                  <button className={styles.secondaryButton} type="submit" disabled={saving !== null || connectionState !== "online"}>
+                    <Check size={15} aria-hidden="true" />
+                    {saving === "effort" ? t("management.saving") : t("controls.save")}
+                  </button>
+                </form>
+              </div>
+            </>
+          ) : null}
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+function managementErrorKey(error: unknown): string {
+  if (error instanceof ApiError) {
+    switch (error.body?.code) {
+      case "stale_claim":
+      case "session_claimed":
+        return "sessions.staleClaimError";
+      case "admission_closed":
+        return "sessions.admissionClosedError";
+      case "validation_error":
+      case "config_invalid":
+        return "management.invalidSelection";
+      default:
+        return "management.actionError";
+    }
+  }
+  return "management.actionError";
 }
 
 interface ProjectsViewProps {
@@ -1778,6 +2071,7 @@ function ProjectSessionsContent({
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [restoreNotice, setRestoreNotice] = useState<RestoreResult | null>(null);
   const [pendingRestoreFailure, setPendingRestoreFailure] = useState<RestoreResult | null>(null);
+  const [managementOpen, setManagementOpen] = useState(false);
   const [pendingDeletion, setPendingDeletion] = useState<PendingSessionDeletion | null>(() => readPendingDeletion(projectId));
   const pendingDeletionRef = useRef(pendingDeletion);
   const deleteBusyRef = useRef(false);
@@ -1797,6 +2091,7 @@ function ProjectSessionsContent({
   const renameTriggerRef = useRef<HTMLButtonElement | null>(null);
   const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
   const restoreTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const managementTriggerRef = useRef<HTMLButtonElement | null>(null);
   const restoreBusyRef = useRef(false);
   const restoreFocusPendingRef = useRef(false);
   const restorePlanClaimRef = useRef<SessionClaim | null>(null);
@@ -2328,6 +2623,7 @@ function ProjectSessionsContent({
   async function openSession(sessionId: string, isDraft: boolean, allowBusy = false) {
     if (pendingDeletionRef.current?.attempted && pendingDeletionRef.current.claim.session_id === sessionId) return;
     if (busySessionId !== null && !allowBusy) return;
+    setManagementOpen(false);
     const previousSessionId = claimRef.current?.session_id;
     setBusySessionId(sessionId);
     setActionError(null);
@@ -2375,6 +2671,7 @@ function ProjectSessionsContent({
     const current = claimRef.current;
     if (current === null) return;
     if (pendingDeletionRef.current?.attempted && pendingDeletionRef.current.claim.session_id === current.session_id) return;
+    setManagementOpen(false);
     setBusySessionId(current.session_id);
     setActionError(null);
     try {
@@ -3021,6 +3318,19 @@ function ProjectSessionsContent({
                     <h2>{draft ? t("sessions.draftTitle") : selectedSummary?.title ?? t("sessions.title")}</h2>
                   </div>
                   <div className={styles.sessionHeaderActions}>
+                    {claim !== null ? (
+                      <button
+                        className={styles.iconButton}
+                        ref={managementTriggerRef}
+                        type="button"
+                        aria-label={t("controls.runtimeStatus")}
+                        title={t("controls.runtimeStatus")}
+                        disabled={connectionState !== "online" || busySessionId !== null}
+                        onClick={() => setManagementOpen(true)}
+                      >
+                        <Gauge size={15} aria-hidden="true" />
+                      </button>
+                    ) : null}
                     {!draft && selectedSummary !== undefined ? (
                       <>
                         <button
@@ -3145,6 +3455,18 @@ function ProjectSessionsContent({
           </section>
         </div>
       )}
+      {managementOpen && claim !== null && connectionState === "online" ? (
+        <RuntimeManagementDialog
+          key={`${claim.workspace_id}:${claim.session_id}:${claim.claim_version}:${claim.reconnect_credential}`}
+          open={managementOpen}
+          onOpenChange={setManagementOpen}
+          claim={claim}
+          sessionTitle={draft ? t("sessions.draftTitle") : selectedSummary?.title ?? t("sessions.title")}
+          activeRuns={selectedLiveRuns}
+          connectionState={connectionState}
+          triggerRef={managementTriggerRef}
+        />
+      ) : null}
       <Dialog.Root
         open={deleteOpen}
         onOpenChange={(open) => {

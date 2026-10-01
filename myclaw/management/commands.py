@@ -120,6 +120,8 @@ class ManagementCommandResult:
     output: str | None
     effort_selection: ReasoningEffort | None = None
     permission_selection: ToolPermissionLevel | None = None
+    published_effort: ReasoningEffort | None = None
+    published_permission_level: ToolPermissionLevel | None = None
     resume_sessions: tuple[SessionListingEntry, ...] | None = None
     resumed_session_id: str | None = None
     resume_skipped_count: int = 0
@@ -315,7 +317,44 @@ class ManagementCommandDispatcher:
             return ManagementCommandResult(
                 handled=True,
                 output=f"Chat reasoning effort: {published}",
+                published_effort=published,
             )
+
+    async def status(self) -> ManagementCommandResult:
+        """Return the typed Runtime Status projection for protocol clients."""
+        with without_session_log():
+            try:
+                status = await self._management.status()
+            except ManagementError as management_error:
+                return ManagementCommandResult(
+                    handled=True,
+                    output=f"{management_error.error.code}: {management_error.error.message}",
+                )
+            return ManagementCommandResult(handled=True, output=None, status_view=status)
+
+    async def reasoning_effort(self) -> ManagementCommandResult:
+        """Return the typed current Reasoning Effort projection."""
+        with without_session_log():
+            try:
+                effort = await self._management.reasoning_effort()
+            except ManagementError as management_error:
+                return ManagementCommandResult(
+                    handled=True,
+                    output=f"{management_error.error.code}: {management_error.error.message}",
+                )
+            return ManagementCommandResult(handled=True, output=None, effort_selection=effort)
+
+    async def permission_level(self) -> ManagementCommandResult:
+        """Return the typed current client Permission Level projection."""
+        with without_session_log():
+            try:
+                level = await self._management.permission_level()
+            except ManagementError as management_error:
+                return ManagementCommandResult(
+                    handled=True,
+                    output=f"{management_error.error.code}: {management_error.error.message}",
+                )
+            return ManagementCommandResult(handled=True, output=None, permission_selection=level)
 
     async def update_permission_level(
         self,
@@ -333,6 +372,7 @@ class ManagementCommandDispatcher:
             return ManagementCommandResult(
                 handled=True,
                 output=f"Foreground permission level: {published}",
+                published_permission_level=published,
             )
 
     async def resume(self, session_id: str, *, force: bool = False) -> ManagementCommandResult:

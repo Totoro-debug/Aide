@@ -772,6 +772,79 @@ h1 {
   margin-top: 20px;
 }
 
+.managementDialog {
+  width: min(680px, calc(100vw - 32px));
+  max-height: min(720px, calc(100dvh - 32px));
+  overflow-y: auto;
+}
+
+.managementLoading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 22px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.managementStatusGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin: 22px 0 0;
+  border: 1px solid var(--border-subtle);
+  background: var(--border-subtle);
+}
+
+.managementMetric {
+  min-width: 0;
+  background: var(--surface-app);
+  padding: 13px;
+}
+
+.managementMetric dt {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.managementMetric dd {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin: 7px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.managementMetric dd span {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.managementControls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 18px;
+}
+
+.managementControl {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.managementControl .secondaryButton {
+  justify-self: start;
+}
+
 .backLink {
   display: inline-flex;
   align-items: center;
@@ -1962,6 +2035,11 @@ h1 {
 }
 
 @media (max-width: 680px) {
+  .managementStatusGrid,
+  .managementControls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .restoreResultNotice {
     flex-direction: column;
   }

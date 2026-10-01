@@ -132,6 +132,39 @@ class _EffortManagement:
         return effort
 
 
+class _TypedManagement(_EffortManagement):
+    def __init__(self, effort: str = "medium", permission: str = "workspace-write") -> None:
+        super().__init__(effort)
+        self.permission = permission
+
+    async def status(self) -> Any:
+        return "typed-status"
+
+    async def permission_level(self) -> str:
+        return self.permission
+
+    async def update_permission_level(self, level: str) -> str:
+        self.permission = level
+        return level
+
+
+@pytest.mark.asyncio
+async def test_typed_management_projections_do_not_parse_slash_commands() -> None:
+    management = _TypedManagement(effort="high", permission="read-only")
+    dispatcher = ManagementCommandDispatcher(cast(Any, management))
+
+    status = await dispatcher.status()
+    permission = await dispatcher.permission_level()
+    effort = await dispatcher.reasoning_effort()
+
+    assert status.handled is True
+    assert cast(Any, status.status_view) == "typed-status"
+    assert permission.handled is True
+    assert permission.permission_selection == "read-only"
+    assert effort.handled is True
+    assert effort.effort_selection == "high"
+
+
 @pytest.mark.asyncio
 async def test_effort_command_returns_current_selection_and_commits_a_neutral_result() -> None:
     management = _EffortManagement("high")

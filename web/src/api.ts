@@ -19,6 +19,9 @@ import type {
   SessionSnapshot,
   SessionClaim,
   ManagementResult,
+  ManagementResponse,
+  ToolPermissionLevel,
+  ReasoningEffort,
   RestoreMode,
   RestorePlan,
   RestoreResult,
@@ -145,6 +148,76 @@ export async function registerWebClient(): Promise<RegisteredClient> {
 
 export function getServiceStatus(): Promise<ServiceStatus> {
   return request<ServiceStatus>("/service");
+}
+
+export async function getRuntimeStatus(
+  workspaceId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+): Promise<ManagementResult> {
+  const response = await request<ManagementResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/management/status`,
+    {
+      method: "POST",
+      mutation: true,
+      body: {
+        request_id: createRequestId(),
+        current_session_id: sessionId,
+        claim_version: claimVersion,
+      },
+      extraHeaders: { "X-MyClaw-Claim": claimCredential },
+    },
+  );
+  return response.result;
+}
+
+export async function updateRuntimePermission(
+  workspaceId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+  permissionLevel: ToolPermissionLevel,
+): Promise<ManagementResult> {
+  const response = await request<ManagementResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/management/permission`,
+    {
+      method: "POST",
+      mutation: true,
+      body: {
+        request_id: createRequestId(),
+        current_session_id: sessionId,
+        claim_version: claimVersion,
+        permission_level: permissionLevel,
+      },
+      extraHeaders: { "X-MyClaw-Claim": claimCredential },
+    },
+  );
+  return response.result;
+}
+
+export async function updateRuntimeEffort(
+  workspaceId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+  effort: ReasoningEffort,
+): Promise<ManagementResult> {
+  const response = await request<ManagementResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/management/effort`,
+    {
+      method: "POST",
+      mutation: true,
+      body: {
+        request_id: createRequestId(),
+        current_session_id: sessionId,
+        claim_version: claimVersion,
+        effort,
+      },
+      extraHeaders: { "X-MyClaw-Claim": claimCredential },
+    },
+  );
+  return response.result;
 }
 
 export function getProjects(): Promise<ProjectListResponse> {

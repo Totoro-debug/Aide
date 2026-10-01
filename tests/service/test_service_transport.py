@@ -151,6 +151,114 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
         assert read_discovery(home) is not None
         assert read_credential(home)
 
+        status_response = await first._http_request(
+            "GET",
+            (
+                f"/api/v1/workspaces/{first.workspace_id}/management/status"
+                f"?session_id={first.session_id}&claim_version={first.claim_version}"
+            ),
+            extra_headers={"X-MyClaw-Claim": first.claim_credential},
+        )
+        status_view = cast(
+            dict[str, object], cast(dict[str, object], status_response["result"])["status_view"]
+        )
+        assert status_view["chat_model"]
+        assert status_view["context_window"]
+        assert status_view["current_permission_level"] == "workspace-write"
+        assert "chat_reasoning_effort" in status_view
+        assert first.token not in json.dumps(status_response)
+
+        typed_permission = await first._http_request(
+            "POST",
+            f"/api/v1/workspaces/{first.workspace_id}/management/permission",
+            payload={
+                "request_id": "typed-permission",
+                "current_session_id": first.session_id,
+                "claim_version": first.claim_version,
+                "permission_level": "read-only",
+            },
+            mutation=True,
+            extra_headers={"X-MyClaw-Claim": first.claim_credential},
+        )
+        typed_permission_result = cast(dict[str, object], typed_permission["result"])
+        assert typed_permission_result["published_permission_level"] == "read-only"
+
+        replay = await first._http_request(
+            "POST",
+            f"/api/v1/workspaces/{first.workspace_id}/management/permission",
+            payload={
+                "request_id": "typed-permission",
+                "current_session_id": first.session_id,
+                "claim_version": first.claim_version,
+                "permission_level": "read-only",
+            },
+            mutation=True,
+            extra_headers={"X-MyClaw-Claim": first.claim_credential},
+        )
+        assert replay == typed_permission
+
+        first_status_after_permission = await first._http_request(
+            "POST",
+            f"/api/v1/workspaces/{first.workspace_id}/management/status",
+            payload={
+                "request_id": "typed-status-after-permission",
+                "current_session_id": first.session_id,
+                "claim_version": first.claim_version,
+            },
+            mutation=True,
+            extra_headers={"X-MyClaw-Claim": first.claim_credential},
+        )
+        first_status_view = cast(
+            dict[str, object],
+            cast(dict[str, object], first_status_after_permission["result"])["status_view"],
+        )
+        assert first_status_view["current_permission_level"] == "read-only"
+
+        second_status = await second._http_request(
+            "POST",
+            f"/api/v1/workspaces/{second.workspace_id}/management/status",
+            payload={
+                "request_id": "second-client-status",
+                "current_session_id": second.session_id,
+                "claim_version": second.claim_version,
+            },
+            mutation=True,
+            extra_headers={"X-MyClaw-Claim": second.claim_credential},
+        )
+        second_status_view = cast(
+            dict[str, object], cast(dict[str, object], second_status["result"])["status_view"]
+        )
+        assert second_status_view["current_permission_level"] == "workspace-write"
+
+        typed_effort = await first._http_request(
+            "POST",
+            f"/api/v1/workspaces/{first.workspace_id}/management/effort",
+            payload={
+                "request_id": "typed-effort",
+                "current_session_id": first.session_id,
+                "claim_version": first.claim_version,
+                "effort": "high",
+            },
+            mutation=True,
+            extra_headers={"X-MyClaw-Claim": first.claim_credential},
+        )
+        typed_effort_result = cast(dict[str, object], typed_effort["result"])
+        assert typed_effort_result["published_effort"] == "high"
+
+        with pytest.raises(ServiceError) as stale:
+            await first._http_request(
+                "GET",
+                (
+                    f"/api/v1/workspaces/{first.workspace_id}/management/status"
+                    f"?session_id={first.session_id}&claim_version={first.claim_version}"
+                ),
+                extra_headers={
+                    "X-MyClaw-Claim": "wrong-claim",
+                    "X-MyClaw-Request": "stale-status",
+                },
+            )
+        assert stale.value.code == "stale_claim"
+
         status = await first.management_dispatcher.dispatch("/status")
         assert status.handled is True
         assert status.status_view is not None
@@ -159,8 +267,10 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
         assert config.output is not None
         permission = await first.management_dispatcher.update_permission_level("read-only")
         assert permission.output == "Foreground permission level: read-only"
+        assert permission.published_permission_level == "read-only"
         effort = await first.management_dispatcher.update_reasoning_effort("high")
         assert effort.output == "Chat reasoning effort: high"
+        assert effort.published_effort == "high"
 
         with pytest.raises(ServiceError) as raised:
             await second.claim_session(first.session_id)

@@ -1147,6 +1147,12 @@ def _management_result(value: Mapping[str, object]) -> Any:
         permission_selection=cast(Any, value.get("permission_selection"))
         if isinstance(value.get("permission_selection"), str)
         else None,
+        published_effort=cast(Any, value.get("published_effort"))
+        if isinstance(value.get("published_effort"), str)
+        else None,
+        published_permission_level=cast(Any, value.get("published_permission_level"))
+        if isinstance(value.get("published_permission_level"), str)
+        else None,
         status_view=_status_view(value.get("status_view")),
         resume_sessions=_session_entries(value.get("resume_sessions")),
         resumed_session_id=resumed_value if isinstance(resumed_value, str) else None,

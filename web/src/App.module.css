@@ -1237,7 +1237,114 @@ h1 {
 
 .scheduleJobActions {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   justify-content: flex-end;
+}
+
+.scheduleHistorySummary,
+.scheduleHistoryPanel {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--surface-panel);
+  padding: 18px;
+}
+
+.scheduleHistoryPanel {
+  padding-bottom: 8px;
+}
+
+.scheduleHistoryList {
+  display: grid;
+  min-width: 0;
+}
+
+.scheduleHistoryGroup {
+  min-width: 0;
+  border-top: 1px solid var(--border-subtle);
+  padding: 16px 0;
+}
+
+.scheduleHistoryGroup[data-state="success"] {
+  border-top-color: var(--success-border);
+}
+
+.scheduleHistoryGroup[data-state="failure"] {
+  border-top-color: var(--danger-border);
+}
+
+.scheduleHistoryGroup[data-state="canceled"],
+.scheduleHistoryGroup[data-state="unknown"] {
+  border-top-color: var(--warning-border);
+}
+
+.scheduleHistoryGroupHeader {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.scheduleHistoryGroupHeader .eyebrow {
+  margin-bottom: 5px;
+}
+
+.scheduleHistoryTimes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px 8px;
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.scheduleHistoryTimes span {
+  color: var(--text-muted);
+}
+
+.scheduleHistoryState {
+  display: inline-flex;
+  min-height: 27px;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  padding: 0 8px;
+}
+
+.scheduleHistoryState[data-state="success"] {
+  border-color: var(--success-border);
+  color: var(--success-text);
+}
+
+.scheduleHistoryState[data-state="failure"] {
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+
+.scheduleHistoryState[data-state="canceled"],
+.scheduleHistoryState[data-state="unknown"] {
+  border-color: var(--warning-border);
+  color: var(--warning-text);
+}
+
+.scheduleHistoryGroup .messageHistory {
+  padding-top: 15px;
+}
+
+.scheduleHistoryMore {
+  display: flex;
+  justify-content: center;
+  border-top: 1px solid var(--border-subtle);
+  padding: 16px 0 8px;
 }
 
 .scheduleJobError {
@@ -2579,7 +2686,16 @@ h1 {
     flex-direction: column;
   }
 
+  .scheduleHistoryGroupHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .scheduleJobStatus {
+    align-self: flex-start;
+  }
+
+  .scheduleHistoryState {
     align-self: flex-start;
   }
 

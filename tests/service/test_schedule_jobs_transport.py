@@ -6,7 +6,7 @@ import asyncio
 import json
 import socket
 from collections.abc import AsyncIterator
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -282,6 +282,146 @@ async def test_schedule_jobs_http_crud_validates_all_kinds_and_is_cross_client_i
         if first is not None:
             await first.close()
         await ServiceClient.stop_existing(home, port=port)
+
+
+@pytest.mark.asyncio
+async def test_schedule_job_history_groups_existing_schedule_session_and_paginates(
+    schedule_http: tuple[LocalService, TestServer, str, dict[str, str]],
+) -> None:
+    service, server, jobs_url, headers = schedule_http
+    workspace = next(iter(service.workspaces.values()))
+    async with aiohttp.ClientSession() as http:
+        async with http.post(
+            jobs_url,
+            headers=headers,
+            json={
+                "request_id": "history-create",
+                "message": "Run the scheduled history task",
+                "title": "History task",
+                "at_time": "2099-01-01T00:00:00Z",
+            },
+        ) as response:
+            assert response.status == 200
+            created = cast(dict[str, object], await response.json())
+
+        job = cast(dict[str, object], created["job"])
+        job_id = cast(str, job["job_id"])
+        session_id = cast(str, job["session_id"])
+        first_at = datetime(2026, 10, 1, 8, 0, tzinfo=UTC)
+        second_at = first_at + timedelta(minutes=5)
+        first_session = Session.create_schedule(
+            workspace.workspace_state,
+            job_id,
+            now=lambda: first_at,
+            title="History task",
+        )
+        first_session.commit_agent_run(
+            [
+                {"role": "user", "content": "first run"},
+                {
+                    "role": "assistant",
+                    "content": "first result",
+                    "tool_calls": [],
+                    "status": "completed",
+                    "error": None,
+                    "token_usage": {
+                        "model_calls": 1,
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                },
+            ],
+            pending_last_compacted=0,
+            pending_action_summary=None,
+        )
+        first_session.close()
+        second_session = Session.load(
+            workspace.workspace_state,
+            session_id,
+            partition=SessionStoragePartition.SCHEDULE,
+            now=lambda: second_at,
+        )
+        second_session.commit_agent_run(
+            [
+                {"role": "user", "content": "second run"},
+                {
+                    "role": "assistant",
+                    "content": "second result",
+                    "tool_calls": [],
+                    "status": "completed",
+                    "error": None,
+                    "token_usage": {
+                        "model_calls": 1,
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                },
+            ],
+            pending_last_compacted=0,
+            pending_action_summary=None,
+        )
+        second_session.close()
+
+        history_url = f"{jobs_url}/{job_id}/history"
+        async with http.get(f"{history_url}?limit=1", headers=headers) as response:
+            assert response.status == 200
+            first_page = cast(dict[str, object], await response.json())
+        assert first_page["workspace_id"] == workspace.workspace_id
+        assert first_page["job_id"] == job_id
+        assert first_page["session_id"] == session_id
+        first_groups = cast(list[dict[str, object]], first_page["groups"])
+        assert len(first_groups) == 1
+        assert first_groups[0]["result_state"] == "success"
+        assert (
+            cast(list[dict[str, object]], first_groups[0]["messages"])[0]["content"] == "first run"
+        )
+        assert "occurrence_id" not in first_groups[0]
+        assert "session_id" not in first_groups[0]
+        cursor = cast(str, first_page["next_cursor"])
+
+        async with http.get(
+            history_url,
+            params={"limit": "1", "cursor": cursor},
+            headers=headers,
+        ) as response:
+            assert response.status == 200
+            second_page = cast(dict[str, object], await response.json())
+        second_groups = cast(list[dict[str, object]], second_page["groups"])
+        assert len(second_groups) == 1
+        assert second_groups[0]["result_state"] == "success"
+        assert (
+            cast(list[dict[str, object]], second_groups[0]["messages"])[0]["content"]
+            == "second run"
+        )
+        assert second_page["next_cursor"] is None
+
+        async with http.get(
+            f"{server.make_url(f'/api/v1/workspaces/{workspace.workspace_id}/sessions')}",
+            headers=headers,
+        ) as response:
+            assert response.status == 200
+            conversation_sessions = cast(dict[str, object], await response.json())
+        assert all(
+            summary["id"] != session_id
+            for summary in cast(list[dict[str, object]], conversation_sessions["sessions"])
+        )
+
+        async with http.get(
+            history_url,
+            params={"cursor": "not-a-valid-history-cursor"},
+            headers=headers,
+        ) as response:
+            assert response.status == 422
+            assert (await response.json())["code"] == "validation_error"
+
+        async with http.get(
+            f"{jobs_url}/00000000-0000-4000-8000-000000000000/history",
+            headers=headers,
+        ) as response:
+            assert response.status == 404
+            assert (await response.json())["code"] == "not_found"
 
 
 @pytest.mark.asyncio

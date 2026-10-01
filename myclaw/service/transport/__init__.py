@@ -205,6 +205,10 @@ class LocalServiceTransport:
             f"{_API_PREFIX}/workspaces/{{workspace_id}}/schedule/jobs/{{job_id}}",
             self._get_schedule_job,
         )
+        app.router.add_get(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/schedule/jobs/{{job_id}}/history",
+            self._get_schedule_job_history,
+        )
         app.router.add_delete(
             f"{_API_PREFIX}/workspaces/{{workspace_id}}/schedule/jobs/{{job_id}}",
             self._delete_schedule_job,
@@ -801,6 +805,17 @@ class LocalServiceTransport:
         )
         return web.json_response(result)
 
+    async def _get_schedule_job_history(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, client_required=True)
+        result = await self.service.get_schedule_job_history(
+            _context_client_id(context),
+            request.match_info["workspace_id"],
+            request.match_info["job_id"],
+            cursor=request.query.get("cursor"),
+            limit=_schedule_history_page_limit(request),
+        )
+        return web.json_response(result)
+
     async def _delete_schedule_job(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, mutation=True, client_required=True)
         body = await _json_object(request)
@@ -1105,6 +1120,13 @@ def _integer_query(request: web.Request, name: str) -> int:
 
 
 def _session_page_limit(request: web.Request) -> int | None:
+    raw = request.query.get("limit")
+    if raw is None:
+        return None
+    return _integer_query(request, "limit")
+
+
+def _schedule_history_page_limit(request: web.Request) -> int | None:
     raw = request.query.get("limit")
     if raw is None:
         return None

@@ -8,6 +8,7 @@ import type {
   ProjectRegistration,
   ProjectScheduleResume,
   ScheduleJobInput,
+  ScheduleJobHistoryResponse,
   ScheduleJobResponse,
   ScheduleJobsResponse,
   RegisteredClient,
@@ -337,6 +338,20 @@ export function getScheduleJob(
 ): Promise<ScheduleJobResponse> {
   return request<ScheduleJobResponse>(
     `/workspaces/${encodeURIComponent(workspaceId)}/schedule/jobs/${encodeURIComponent(jobId)}`,
+  );
+}
+
+export function getScheduleJobHistory(
+  workspaceId: string,
+  jobId: string,
+  options: { cursor?: string; limit?: number } = {},
+): Promise<ScheduleJobHistoryResponse> {
+  const query = new URLSearchParams();
+  if (options.cursor !== undefined) query.set("cursor", options.cursor);
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  const queryString = query.toString();
+  return request<ScheduleJobHistoryResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/schedule/jobs/${encodeURIComponent(jobId)}/history${queryString ? `?${queryString}` : ""}`,
   );
 }
 

@@ -176,6 +176,26 @@ export interface ScheduleJobResponse {
   canceled?: boolean;
 }
 
+export type ScheduleHistoryResultState = "success" | "failure" | "canceled" | "unknown";
+
+export interface ScheduleHistoryGroup {
+  started_at: string | null;
+  finished_at: string | null;
+  result_state: ScheduleHistoryResultState;
+  complete: boolean;
+  messages: Record<string, unknown>[];
+}
+
+export interface ScheduleJobHistoryResponse {
+  workspace_id: string;
+  job_id: string;
+  session_id: string;
+  job: ScheduleJob;
+  status: ScheduleStatus;
+  groups: ScheduleHistoryGroup[];
+  next_cursor: string | null;
+}
+
 export interface ScheduleJobInput {
   message: string;
   title?: string;

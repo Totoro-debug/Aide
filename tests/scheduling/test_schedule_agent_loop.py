@@ -40,6 +40,7 @@ from myclaw.provider.models import (
     ModelUsage,
     ReasoningEffort,
 )
+from myclaw.schedule.history import read_schedule_history
 from myclaw.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
 from myclaw.schedule.service import ScheduleClock, ScheduleService
 from myclaw.schedule.store import WorkspaceScheduleStore
@@ -753,6 +754,61 @@ async def test_schedule_tool_loop_persists_each_message_from_awaitable_run(
         "assistant",
     ]
     assert session.messages[-1]["content"] == "The memory template was read."
+    history = read_schedule_history(WorkspaceState(workspace), str(JOB_UUID))
+    groups = cast(list[dict[str, Any]], history["groups"])
+    assert len(groups) == 1
+    assert groups[0]["result_state"] == "success"
+    assert groups[0]["messages"] == session.messages
+    assert groups[0]["messages"][2]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_two_schedule_executions_group_after_fresh_history_load(
+    agent_home: Path,
+    workspace: Path,
+) -> None:
+    provider = _ScheduleProvider(
+        schedule_responses=(
+            _response("First persisted result."),
+            _response("Second persisted result."),
+        ),
+    )
+    loop, router, schedule, dream, _dispatcher, _bus = _agent_loop(
+        agent_home,
+        workspace,
+        provider,
+        schedule_clock=_BlockingClock(NOW),
+    )
+    await loop.start()
+    try:
+        await loop.run_schedule_job(_due_job(message="First scheduled input."))
+        await loop.run_schedule_job(_due_job(message="Second scheduled input."))
+    finally:
+        await _close_components(loop, router, schedule, dream)
+
+    fresh_state = WorkspaceState(workspace)
+    history = read_schedule_history(
+        fresh_state,
+        str(JOB_UUID),
+        workspace_id="workspace-under-test",
+    )
+    groups = history["groups"]
+    assert isinstance(groups, list)
+    assert [group["result_state"] for group in groups] == ["success", "success"]
+    assert [group["messages"][0]["content"] for group in groups] == [
+        "First scheduled input.",
+        "Second scheduled input.",
+    ]
+    assert [
+        [(message["role"], message["content"]) for message in group["messages"]] for group in groups
+    ] == [
+        [("user", "First scheduled input."), ("assistant", "First persisted result.")],
+        [("user", "Second scheduled input."), ("assistant", "Second persisted result.")],
+    ]
+    assert all(group["complete"] is True for group in groups)
+    assert list(fresh_state.schedule_sessions_directory.glob("*.jsonl")) == [
+        fresh_state.schedule_sessions_directory / f"schedule_{JOB_UUID}.jsonl"
+    ]
 
 
 @pytest.mark.asyncio
@@ -1538,6 +1594,13 @@ async def test_schedule_shutdown_during_model_persists_user_and_keeps_job_pendin
     assert [(message["role"], message["content"]) for message in schedule_session.messages] == [
         ("user", job.message)
     ]
+    history = read_schedule_history(WorkspaceState(workspace), job.job_id)
+    groups = cast(list[dict[str, Any]], history["groups"])
+    assert len(groups) == 1
+    assert groups[0]["result_state"] == "unknown"
+    assert groups[0]["complete"] is False
+    assert groups[0]["finished_at"] is None
+    assert groups[0]["messages"] == schedule_session.messages
 
 
 @pytest.mark.asyncio
@@ -1588,6 +1651,13 @@ async def test_schedule_shutdown_during_preparation_persists_user(
     assert [(message["role"], message["content"]) for message in schedule_session.messages] == [
         ("user", job.message)
     ]
+    history = read_schedule_history(WorkspaceState(workspace), job.job_id)
+    groups = cast(list[dict[str, Any]], history["groups"])
+    assert len(groups) == 1
+    assert groups[0]["result_state"] == "unknown"
+    assert groups[0]["complete"] is False
+    assert groups[0]["finished_at"] is None
+    assert groups[0]["messages"] == schedule_session.messages
 
 
 @pytest.mark.asyncio
@@ -1639,3 +1709,11 @@ async def test_schedule_failure_logs_one_safe_session_warning(
     assert session_log_text.count("Schedule Job failed") == 1
     assert "code=model_failed" in session_log_text
     assert "PRIVATE_SCHEDULE_PREPARATION_BODY" not in session_log_text
+    history = read_schedule_history(WorkspaceState(workspace), job.job_id)
+    groups = cast(list[dict[str, Any]], history["groups"])
+    assert len(groups) == 1
+    assert groups[0]["result_state"] == "failure"
+    assert groups[0]["complete"] is True
+    assert groups[0]["messages"][0]["content"] == job.message
+    assert groups[0]["messages"][-1]["error"]["code"] == "model_failed"
+    assert "PRIVATE_SCHEDULE_PREPARATION_BODY" not in json.dumps(history)

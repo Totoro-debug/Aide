@@ -90,6 +90,13 @@ try {
   assert.equal(launch.status, 0, `myclaw web failed: ${launch.stderr}`);
   const launchUrl = launch.stdout.match(/http:\/\/127\.0\.0\.1:\d+\/#ticket=[\w-]+/)?.[0];
   assert.ok(launchUrl?.startsWith(`${url}/#ticket=`), "myclaw web did not attach to the isolated service");
+  const documentResponse = await primaryContext.request.get(url);
+  assert.equal(documentResponse.status(), 200, "The production document did not load");
+  assert.match(
+    documentResponse.headers()["content-security-policy"] ?? "",
+    /default-src 'self'/,
+    "The production document did not include the expected CSP",
+  );
   await page.goto(launchUrl);
   await page.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
   await page.getByRole("status").first().getByText(/Online|在线/).waitFor();
@@ -222,6 +229,188 @@ try {
   await expect(scheduleStatus).toContainText("Available");
   await expect(scheduleStatus).toContainText("Active Jobs");
   await expect(scheduleStatus).not.toContainText("{{");
+
+  const historyJobTitle = "E2E schedule history job";
+  const historyJobItem = page.getByRole("listitem").filter({ hasText: historyJobTitle });
+  const historyResponsePromise = page.waitForResponse((response) => (
+    response.request().method() === "GET" && /\/schedule\/jobs\/[^/]+\/history(?:\?|$)/.test(response.url())
+  ));
+  await historyJobItem.getByRole("link", { name: "History", exact: true }).click();
+  const historyResponse = await historyResponsePromise;
+  assert.equal(historyResponse.status(), 200, "Schedule history did not load from the real service");
+  const historyPayload = await historyResponse.json();
+  assert.equal(historyPayload.groups.length, 20, "History did not honor the first page limit");
+  assert.equal(typeof historyPayload.next_cursor, "string", "History did not return a cursor");
+  assert.equal(historyPayload.job.state.last_status, null, "History reused the latest Job state");
+  assert.equal(historyPayload.groups[0].result_state, "success");
+  assert.equal(historyPayload.groups.some((group) => "occurrence_id" in group), false);
+  await page.getByRole("heading", { name: historyJobTitle, exact: true }).first().waitFor();
+  await page.getByText("Historical execution 1", { exact: true }).waitFor();
+  await expect(page.getByText("Historical execution without a terminal result", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("textbox")).toHaveCount(0);
+
+  const failHistoryLoad = (route) => route.fulfill({
+    status: 500,
+    json: { code: "persistence_error", message: "Schedule history could not be loaded safely." },
+  });
+  await page.route("**/schedule/jobs/*/history*", failHistoryLoad);
+  const loadMoreHistory = page.getByRole("button", { name: "Load more executions", exact: true });
+  await loadMoreHistory.focus();
+  await loadMoreHistory.press("Enter");
+  const historyLoadError = page.getByRole("alert").filter({ hasText: "Schedule history" });
+  await historyLoadError.waitFor();
+  await expect(page.getByText("Historical execution 1", { exact: true })).toBeVisible();
+  await expect(loadMoreHistory).toBeFocused();
+  await page.unroute("**/schedule/jobs/*/history*", failHistoryLoad);
+
+  const moreHistoryResponsePromise = page.waitForResponse((response) => (
+    response.request().method() === "GET" && response.url().includes("/history?")
+  ));
+  await historyLoadError.getByRole("button", { name: "Retry", exact: true }).click();
+  const moreHistoryResponse = await moreHistoryResponsePromise;
+  assert.equal(moreHistoryResponse.status(), 200, "Schedule history pagination failed");
+  await page.getByText("Historical execution without a terminal result", { exact: true }).waitFor();
+  await page.getByText("Outcome unknown", { exact: true }).waitFor();
+
+  const refreshHistoryButton = page.getByRole("button", { name: "Refresh Schedule history", exact: true });
+  await page.route("**/schedule/jobs/*/history*", failHistoryLoad);
+  await refreshHistoryButton.click();
+  await historyLoadError.waitFor();
+  await expect(page.getByText("Historical execution without a terminal result", { exact: true })).toBeVisible();
+  await page.unroute("**/schedule/jobs/*/history*", failHistoryLoad);
+  await historyLoadError.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(historyLoadError).toHaveCount(0);
+  await expect(page.getByText("Historical execution without a terminal result", { exact: true })).toHaveCount(0);
+  await expect(refreshHistoryButton).toBeFocused();
+
+  const renderHistoryTools = async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.groups[0].messages.splice(1, 0,
+      { role: "assistant", content: "", status: "completed", tool_calls: [
+        { id: "history-failed-tool", name: "read_file", arguments: "<img src=x onerror=alert(1)>" },
+      ] },
+      { role: "tool", name: "read_file", tool_call_id: "history-failed-tool", status: "error", content: "Recorded tool failure" },
+      { role: "tool", name: "legacy_tool", tool_call_id: "legacy-tool", content: "Legacy tool without a result state" },
+    );
+    body.groups[0].messages.at(-1).content += `\n\n[Unsafe link](javascript:alert(1))\n\n![Remote image](https://example.com/history.png)\n\n<img src=x onerror=alert(1)>\n\n\`\`\`text\n${"long-history-code ".repeat(200)}\n\`\`\``;
+    await route.fulfill({ response, json: body });
+  };
+  await page.route("**/schedule/jobs/*/history*", renderHistoryTools);
+  await refreshHistoryButton.click();
+  const failedHistoryTool = page.locator('article[data-role="tool"]').filter({ hasText: "Recorded tool failure" });
+  await failedHistoryTool.locator("summary").first().click();
+  await expect(failedHistoryTool.getByText("Failed", { exact: true })).toBeVisible();
+  const unknownHistoryTool = page.locator('article[data-role="tool"]').filter({ hasText: "Legacy tool without a result state" });
+  await unknownHistoryTool.locator("summary").first().click();
+  await expect(unknownHistoryTool.getByText("Outcome unknown", { exact: true })).toBeVisible();
+  const historyToolRequest = page.locator('article[data-role="assistant"]').filter({ has: page.getByText("Arguments", { exact: true }) });
+  await historyToolRequest.locator("summary").first().click();
+  await expect(historyToolRequest.getByText("Completed", { exact: true })).toHaveCount(0);
+  await historyToolRequest.getByText("Arguments", { exact: true }).click();
+  await expect(historyToolRequest.locator("pre")).toHaveText("<img src=x onerror=alert(1)>");
+  await expect(page.locator('img[src="https://example.com/history.png"], a[href^="javascript:"]')).toHaveCount(0);
+  await page.unroute("**/schedule/jobs/*/history*", renderHistoryTools);
+  await refreshHistoryButton.focus();
+  const refreshHistoryResponsePromise = page.waitForResponse((response) => (
+    response.request().method() === "GET" && /\/schedule\/jobs\/[^/]+\/history(?:\?|$)/.test(response.url())
+  ));
+  await refreshHistoryButton.press("Enter");
+  assert.equal((await refreshHistoryResponsePromise).status(), 200, "History refresh failed");
+  await expect(refreshHistoryButton).toBeFocused();
+
+  for (const language of ["en", "zh-CN"]) {
+    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await page.getByRole("heading", { name: historyJobTitle, exact: true }).first().waitFor();
+    const listTitle = language === "en" ? "Recorded executions" : "已记录的执行";
+    await page.getByRole("heading", { name: listTitle, exact: true }).waitFor();
+    for (const theme of ["light", "dark"]) {
+      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      for (const viewport of viewports) {
+        await page.setViewportSize(viewport);
+        assert.ok(
+          await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+          `History horizontal overflow at ${language}/${theme}/${viewport.width}x${viewport.height}`,
+        );
+        await page.screenshot({ path: resolve(output, `schedule-history-${language}-${theme}-${viewport.width}.png`) });
+      }
+    }
+  }
+  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await page.getByRole("link", { name: "Back to Schedule Jobs", exact: true }).first().click();
+  await page.getByRole("heading", { name: "Schedule Jobs", exact: true }).waitFor();
+
+  let releaseHistoryLoad;
+  let historyLoadArrived;
+  const historyLoadGate = new Promise((done) => { releaseHistoryLoad = done; });
+  const historyLoadArrival = new Promise((done) => { historyLoadArrived = done; });
+  const delayHistoryLoad = async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.job.title = "STALE Schedule history response";
+    historyLoadArrived();
+    await historyLoadGate;
+    await route.fulfill({ response, json: body });
+  };
+  await page.route("**/schedule/jobs/*/history*", delayHistoryLoad);
+  await historyJobItem.getByRole("link", { name: "History", exact: true }).click();
+  await historyLoadArrival;
+  await page.getByRole("link", { name: "Back to Schedule Jobs", exact: true }).first().click();
+  releaseHistoryLoad();
+  await expect(page.getByText("STALE Schedule history response", { exact: true })).toHaveCount(0);
+  await page.unroute("**/schedule/jobs/*/history*", delayHistoryLoad);
+
+  async function assertHistoryScopeChange(scopeChange) {
+    let releaseScopedHistory;
+    let notifyScopedHistory;
+    let heldScopedHistory = false;
+    const scopedHistoryGate = new Promise((done) => { releaseScopedHistory = done; });
+    const scopedHistoryArrived = new Promise((done) => { notifyScopedHistory = done; });
+    const delayScopedHistory = async (route) => {
+      if (heldScopedHistory) return route.continue();
+      heldScopedHistory = true;
+      const response = await route.fetch();
+      const body = await response.json();
+      body.job.title = `STALE history after ${scopeChange}`;
+      notifyScopedHistory();
+      await scopedHistoryGate;
+      await route.fulfill({ response, json: body });
+    };
+    await page.route("**/schedule/jobs/*/history*", delayScopedHistory);
+    await historyJobItem.getByRole("link", { name: "History", exact: true }).click();
+    await scopedHistoryArrived;
+    if (scopeChange === "job") {
+      await page.getByRole("link", { name: "Back to Schedule Jobs", exact: true }).first().click();
+      await page.getByRole("listitem").filter({ hasText: "E2E saved project job" })
+        .getByRole("link", { name: "History", exact: true }).click();
+      await page.getByRole("heading", { name: "E2E saved project job", exact: true }).first().waitFor();
+    } else if (scopeChange === "project") {
+      await page.locator("aside").getByRole("link", { name: "project-two", exact: true }).click();
+      await page.getByRole("heading", { name: "project-two", exact: true }).waitFor();
+    } else {
+      await page.route("**/api/v1/clients", (route) => route.abort());
+      await page.evaluate(() => window.__myclawTestSocket.close());
+      await page.getByRole("status").filter({ hasText: "Showing the last received Job status." }).waitFor();
+      await expect(page.getByRole("button", { name: "Refresh Schedule history", exact: true })).toBeDisabled();
+    }
+    const scopedHistoryResponse = page.waitForResponse((response) => response.url().includes(`/schedule/jobs/${historyPayload.job_id}/history`));
+    releaseScopedHistory();
+    await scopedHistoryResponse;
+    await expect(page.getByText(`STALE history after ${scopeChange}`, { exact: true })).toHaveCount(0);
+    await page.unroute("**/schedule/jobs/*/history*", delayScopedHistory);
+    if (scopeChange === "disconnect") {
+      await page.unroute("**/api/v1/clients");
+      await expect(page.getByRole("button", { name: "Refresh Schedule history", exact: true })).toBeEnabled({ timeout: 10000 });
+      await page.getByRole("heading", { name: historyJobTitle, exact: true }).first().waitFor();
+    }
+    await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
+    await firstProjectItem.getByRole("link", { name: "Open schedule" }).click();
+    await page.getByRole("heading", { name: "Schedule Jobs", exact: true }).waitFor();
+    await expect(page.getByRole("button", { name: "Refresh schedule", exact: true })).toBeEnabled();
+    await historyJobItem.getByRole("link", { name: "History", exact: true }).waitFor();
+  }
+  for (const scopeChange of ["job", "disconnect"]) await assertHistoryScopeChange(scopeChange);
+
   const scheduleCreate = page.getByRole("button", { name: "Create Job", exact: true });
   await expect(scheduleCreate).toBeEnabled();
   await scheduleCreate.click();
@@ -1664,6 +1853,7 @@ try {
   await page.getByRole("button", { name: "EN", exact: true }).click();
   await firstProjectItem.getByRole("link", { name: "Open schedule" }).click();
   await page.getByRole("heading", { name: "E2E saved project job", exact: true }).waitFor();
+  await assertHistoryScopeChange("project");
   let notifySwitchingScheduleLoad;
   let releaseSwitchingScheduleLoad;
   const switchingScheduleLoadArrived = new Promise((done) => { notifySwitchingScheduleLoad = done; });
@@ -1782,7 +1972,10 @@ try {
           name: language === "en" ? "Review Schedule Jobs" : "检查定时任务",
         });
         await review.getByText("E2E saved project job").waitFor();
-        await review.getByText(language === "en" ? "Upcoming" : "尚未到期", { exact: true }).waitFor();
+        await review.getByRole("listitem").filter({ hasText: "E2E saved project job" }).getByText(
+          language === "en" ? "Upcoming" : "尚未到期",
+          { exact: true },
+        ).waitFor();
         for (const title of ["E2E overdue at job", "E2E overdue every job"]) {
           const job = review.getByRole("listitem").filter({ hasText: title });
           await job.getByText(language === "en"

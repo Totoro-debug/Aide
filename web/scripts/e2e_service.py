@@ -132,14 +132,14 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
     if confirmation_request and not has_confirmation_result:
         if CONFIRMATION_PATH is None:
             raise web.HTTPInternalServerError(text="Confirmation fixture path is not configured")
-        tool_calls = [
+        tool_state_calls: list[tuple[str, str, dict[str, object]]] = [
             (
                 "call-confirmation",
                 "read_file",
                 {"path": CONFIRMATION_PATH},
             )
         ]
-        for index, (call_id, name, arguments) in enumerate(tool_calls):
+        for index, (call_id, name, arguments) in enumerate(tool_state_calls):
             chunks.append(
                 _chunk(
                     request_id=request_id,
@@ -165,7 +165,7 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
         )
         chunks.append(_chunk(request_id=request_id, delta={}, finish_reason="stop"))
     elif tool_states_request and not has_tool_result:
-        tool_calls = [
+        tool_calls: list[tuple[str, str, dict[str, object]]] = [
             ("call-completed", "read_file", {"path": "fixture.txt"}),
             ("call-failed", "read_file", {"path": "missing-fixture.txt"}),
             (
@@ -237,7 +237,7 @@ async def _start_fixture_provider() -> tuple[web.AppRunner, str]:
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
-    sockets = site._server.sockets if site._server is not None else None
+    sockets = getattr(site._server, "sockets", None) if site._server is not None else None
     if not sockets:
         await runner.cleanup()
         raise RuntimeError("E2E fixture provider did not bind a socket.")
@@ -258,6 +258,60 @@ async def _seed_schedule_job(home: AgentHome, workspace: Path) -> None:
             updated_at_ms=now_ms,
         )
     )
+
+
+async def _seed_schedule_history(home: AgentHome, workspace: Path) -> None:
+    state = WorkspaceState(workspace)
+    state.initialize(agent_home_root=home.path)
+    job_id = str(uuid4())
+    created_at_ms = int(time.time() * 1000)
+    await WorkspaceScheduleStore(state).add_user_job(
+        ScheduleJob(
+            job_id=job_id,
+            message="E2E history task",
+            title="E2E schedule history job",
+            schedule=JobSchedule.every(3600),
+            created_at_ms=created_at_ms,
+            updated_at_ms=created_at_ms,
+        )
+    )
+    created_at = datetime(2026, 9, 6, tzinfo=UTC)
+    session = Session.create_schedule(
+        state,
+        job_id,
+        now=lambda: created_at,
+        title="E2E schedule history job",
+    )
+    usage = {"model_calls": 1, "input_tokens": 2, "output_tokens": 3, "total_tokens": 5}
+    for index in range(21):
+        session.commit_agent_run(
+            [
+                {"role": "user", "content": f"Historical execution {index + 1}"},
+                {
+                    "role": "assistant",
+                    "content": (
+                        "# Persisted schedule result\n\n"
+                        "```text\n"
+                        "A long enough result for the production history view.\n"
+                        "```"
+                        if index == 0
+                        else f"Historical result {index + 1}"
+                    ),
+                    "tool_calls": [],
+                    "status": "completed",
+                    "error": None,
+                    "token_usage": usage,
+                },
+            ],
+            pending_last_compacted=session.last_compacted,
+            pending_action_summary=None,
+        )
+    session.commit_agent_run(
+        [{"role": "user", "content": "Historical execution without a terminal result"}],
+        pending_last_compacted=session.last_compacted,
+        pending_action_summary=None,
+    )
+    session.close()
 
 
 async def _seed_overdue_review_jobs(workspace: Path) -> None:
@@ -369,6 +423,7 @@ async def _run_e2e(provider_base_url: str) -> None:
         else:
             project_alias.symlink_to(first_project, target_is_directory=True)
         await _seed_schedule_job(home, first_project)
+        await _seed_schedule_history(home, first_project)
         occupied_session_id = await _seed_session(
             home,
             first_project,

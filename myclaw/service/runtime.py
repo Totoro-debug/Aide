@@ -51,6 +51,11 @@ from myclaw.config.config import UserConfiguration
 from myclaw.errors import ErrorInfo
 from myclaw.provider.factory import create_provider
 from myclaw.provider.model_router import ModelRouter
+from myclaw.schedule.history import (
+    ScheduleHistoryPersistenceError,
+    ScheduleHistoryRequestError,
+    read_schedule_history,
+)
 from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.schedule.service import ScheduleOccurrence, ScheduleService, ScheduleStaleRemovalError
 from myclaw.schedule.store import (
@@ -2223,6 +2228,48 @@ class LocalService:
                 active=workspace.schedule_service.is_job_active(job.job_id),
             ),
             "status": workspace.schedule_status(),
+        }
+
+    async def get_schedule_job_history(
+        self,
+        client_id: str,
+        workspace_id: str,
+        job_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, object]:
+        workspace = self._schedule_workspace(client_id, workspace_id)
+        jobs = await workspace.schedule_service.public_snapshot()
+        job = next((candidate for candidate in jobs if candidate.job_id == job_id), None)
+        if job is None:
+            raise service_error("not_found", "Schedule Job was not found.", status=404)
+        try:
+            history = read_schedule_history(
+                workspace.workspace_state,
+                job.job_id,
+                workspace_id=workspace_id,
+                cursor=cursor,
+                limit=limit,
+            )
+        except ScheduleHistoryRequestError as error:
+            raise service_error("validation_error", str(error), status=422) from error
+        except (OSError, ScheduleHistoryPersistenceError) as error:
+            raise service_error(
+                "persistence_error",
+                "Schedule history could not be loaded safely.",
+                status=500,
+            ) from error
+        return {
+            "workspace_id": workspace_id,
+            "job_id": job.job_id,
+            "session_id": job.session_id,
+            "job": _schedule_job_projection(
+                job,
+                active=workspace.schedule_service.is_job_active(job.job_id),
+            ),
+            "status": workspace.schedule_status(),
+            **history,
         }
 
     async def create_schedule_job(

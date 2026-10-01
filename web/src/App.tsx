@@ -74,6 +74,7 @@ import {
   executeRestore,
   getScheduleJobs,
   getScheduleJob,
+  getScheduleJobHistory,
   inspectRestore,
   restoreBrowserSession,
   ServiceCommandError,
@@ -105,7 +106,10 @@ import type {
   RestoreResult,
   ProjectScheduleKind,
   ScheduleJob,
+  ScheduleHistoryGroup,
+  ScheduleHistoryResultState,
   ScheduleJobInput,
+  ScheduleJobHistoryResponse,
   ScheduleJobStatus,
   ScheduleJobsResponse,
   ScheduleStatus,
@@ -492,7 +496,7 @@ export default function App() {
             </span>
             <span>
               {location.pathname.startsWith("/projects/")
-                ? location.pathname.endsWith("/schedule")
+                ? location.pathname.includes("/schedule")
                   ? t("nav.schedule")
                   : t("nav.sessions")
                 : t(location.pathname === "/projects" ? "nav.projects" : "nav.status")}
@@ -602,6 +606,16 @@ export default function App() {
               path="/projects/:projectId/schedule"
               element={
                 <ScheduleJobsView
+                  authState={authState}
+                  connectionState={connectionState}
+                  projects={projects}
+                />
+              }
+            />
+            <Route
+              path="/projects/:projectId/schedule/jobs/:jobId/history"
+              element={
+                <ScheduleJobHistoryView
                   authState={authState}
                   connectionState={connectionState}
                   projects={projects}
@@ -2587,6 +2601,13 @@ function ScheduleJobsContent({
                       </dl>
                       {job.state.last_error !== null ? <p className={styles.scheduleJobError}>{job.state.last_error}</p> : null}
                       <div className={styles.scheduleJobActions}>
+                        <Link
+                          className={styles.secondaryButton}
+                          to={`/projects/${projectId}/schedule/jobs/${job.job_id}/history`}
+                        >
+                          <BookOpen size={15} aria-hidden="true" />
+                          {t("schedule.history")}
+                        </Link>
                         <button
                           className={styles.secondaryButton}
                           type="button"
@@ -2717,6 +2738,15 @@ function ScheduleJobsContent({
               </dl>
             ) : null}
             <div className={styles.dialogActions}>
+              {detailJob !== null ? (
+                <Link
+                  className={styles.secondaryButton}
+                  to={`/projects/${projectId}/schedule/jobs/${detailJob.job_id}/history`}
+                >
+                  <BookOpen size={15} aria-hidden="true" />
+                  {t("schedule.history")}
+                </Link>
+              ) : null}
               <Dialog.Close asChild>
                 <button className={styles.secondaryButton} type="button">{t("controls.close")}</button>
               </Dialog.Close>
@@ -2740,6 +2770,410 @@ function scheduleErrorKey(error: unknown, fallback: string): string {
     }
   }
   return fallback;
+}
+
+type ScheduleHistoryLoadState = "idle" | "loading" | "ready" | "error";
+
+function ScheduleJobHistoryView({
+  authState,
+  connectionState,
+  projects,
+}: ScheduleJobsViewProps) {
+  const { projectId = "", jobId = "" } = useParams();
+  return (
+    <ScheduleJobHistoryContent
+      key={`${projectId}:${jobId}`}
+      authState={authState}
+      connectionState={connectionState}
+      projects={projects}
+      projectId={projectId}
+      jobId={jobId}
+    />
+  );
+}
+
+function ScheduleJobHistoryContent({
+  authState,
+  connectionState,
+  projects,
+  projectId,
+  jobId,
+}: ScheduleJobsViewProps & { projectId: string; jobId: string }) {
+  const { i18n, t } = useTranslation();
+  const project = projects.find((item) => item.project_id === projectId);
+  const projectAvailable = project?.available === true;
+  const [job, setJob] = useState<ScheduleJob | null>(null);
+  const [scheduleStatus, setScheduleStatus] = useState<ScheduleStatus | null>(null);
+  const [groups, setGroups] = useState<ScheduleHistoryGroup[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadState, setLoadState] = useState<ScheduleHistoryLoadState>("idle");
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const failedPageRef = useRef<{ cursor: string | null; append: boolean } | null>(null);
+  const scopeVersionRef = useRef(0);
+  const requestVersionRef = useRef(0);
+  const loadPendingRef = useRef(false);
+  const workspaceIdRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
+  const refreshButtonRef = useRef<HTMLButtonElement | null>(null);
+  const restoreRefreshFocusRef = useRef(false);
+  const loadMoreButtonRef = useRef<HTMLButtonElement | null>(null);
+  const restoreMoreFocusRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      scopeVersionRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!restoreRefreshFocusRef.current || !["ready", "error"].includes(loadState)) return;
+    restoreRefreshFocusRef.current = false;
+    refreshButtonRef.current?.focus();
+  }, [loadState]);
+
+  useEffect(() => {
+    if (!restoreMoreFocusRef.current || loadingMore) return;
+    restoreMoreFocusRef.current = false;
+    (loadMoreButtonRef.current ?? refreshButtonRef.current)?.focus();
+  }, [loadingMore]);
+
+  const loadHistory = useCallback(async (cursor: string | null, append: boolean) => {
+    if (
+      authState !== "ready"
+      || connectionState !== "online"
+      || !projectId
+      || !jobId
+      || !projectAvailable
+      || loadPendingRef.current
+    ) return;
+    loadPendingRef.current = true;
+    failedPageRef.current = null;
+    setLoadError(null);
+    const scopeVersion = scopeVersionRef.current;
+    const requestVersion = requestVersionRef.current + 1;
+    requestVersionRef.current = requestVersion;
+    if (append) {
+      setLoadingMore(true);
+    } else {
+      setLoadState("loading");
+      setLoadError(null);
+    }
+    try {
+      let nextWorkspaceId = workspaceIdRef.current;
+      if (nextWorkspaceId === null) {
+        const sessions = await getProjectSessions(projectId, { limit: 1 });
+        if (
+          !mountedRef.current
+          || scopeVersionRef.current !== scopeVersion
+          || requestVersionRef.current !== requestVersion
+        ) return;
+        nextWorkspaceId = sessions.workspace_id;
+        workspaceIdRef.current = nextWorkspaceId;
+      }
+      const response: ScheduleJobHistoryResponse = await getScheduleJobHistory(
+        nextWorkspaceId,
+        jobId,
+        { limit: 20, ...(cursor === null ? {} : { cursor }) },
+      );
+      if (
+        !mountedRef.current
+        || scopeVersionRef.current !== scopeVersion
+        || requestVersionRef.current !== requestVersion
+        || workspaceIdRef.current !== response.workspace_id
+      ) return;
+      setJob(response.job);
+      setScheduleStatus(response.status);
+      setGroups((current) => append ? [...current, ...response.groups] : response.groups);
+      setNextCursor(response.next_cursor);
+      setLoadState("ready");
+    } catch (error) {
+      if (
+        !mountedRef.current
+        || scopeVersionRef.current !== scopeVersion
+        || requestVersionRef.current !== requestVersion
+      ) return;
+      setLoadState("error");
+      failedPageRef.current = { cursor, append };
+      setLoadError(scheduleErrorKey(error, "schedule.historyLoadError"));
+    } finally {
+      if (
+        mountedRef.current
+        && scopeVersionRef.current === scopeVersion
+        && requestVersionRef.current === requestVersion
+      ) {
+        loadPendingRef.current = false;
+        setLoadingMore(false);
+      }
+    }
+  }, [authState, connectionState, jobId, projectAvailable, projectId]);
+
+  useEffect(() => {
+    scopeVersionRef.current += 1;
+    requestVersionRef.current += 1;
+    loadPendingRef.current = false;
+    workspaceIdRef.current = null;
+    setJob(null);
+    setScheduleStatus(null);
+    setGroups([]);
+    setNextCursor(null);
+    setLoadError(null);
+    setLoadingMore(false);
+    setLoadState("idle");
+    if (
+      authState !== "ready"
+      || connectionState !== "online"
+      || !projectId
+      || !jobId
+      || !projectAvailable
+    ) return;
+    void loadHistory(null, false);
+  }, [
+    authState,
+    connectionState,
+    jobId,
+    loadHistory,
+    projectAvailable,
+    projectId,
+  ]);
+
+  const authUnavailable = authState !== "ready";
+  const heading = job?.title || t("schedule.historyTitle");
+  return (
+    <section className={styles.schedulePage} aria-labelledby="schedule-history-heading">
+      <div className={styles.pageHeading}>
+        <div>
+          <Link className={styles.backLink} to={`/projects/${projectId}/schedule`}>
+            <ArrowLeft size={15} aria-hidden="true" />
+            {t("schedule.backToJobs")}
+          </Link>
+          <p className={styles.eyebrow}>{t("schedule.historyEyebrow")}</p>
+          <h1 id="schedule-history-heading" tabIndex={-1}>{heading}</h1>
+          <p className={styles.pageDescription}>
+            {project?.name || t("schedule.historyTitle")}
+            {project !== undefined ? ` · ${project.path}` : ""}
+          </p>
+        </div>
+        <div className={styles.pageActions}>
+          <Link className={styles.secondaryButton} to={`/projects/${projectId}/schedule`}>
+            <CalendarClock size={15} aria-hidden="true" />
+            {t("schedule.backToJobs")}
+          </Link>
+          <button
+            ref={refreshButtonRef}
+            className={styles.iconButton}
+            type="button"
+            aria-label={t("controls.refreshScheduleHistory")}
+            title={t("controls.refreshScheduleHistory")}
+            disabled={authUnavailable || connectionState !== "online" || loadState === "loading" || loadingMore || !projectAvailable}
+            onClick={() => {
+              restoreRefreshFocusRef.current = document.activeElement === refreshButtonRef.current;
+              void loadHistory(null, false);
+            }}
+          >
+            <RefreshCw size={16} className={loadState === "loading" ? styles.spin : undefined} aria-hidden="true" />
+          </button>
+        </div>
+      </div>
+
+      {!authUnavailable && connectionState !== "online" ? (
+        <div className={styles.actionError} role="status">
+          <CircleAlert size={16} aria-hidden="true" />
+          <span>{t("schedule.disconnected")}</span>
+        </div>
+      ) : null}
+
+      {authUnavailable ? (
+        <div className={styles.emptyState} role="status">
+          <div className={styles.emptyIcon} aria-hidden="true"><Info size={22} /></div>
+          <div><h2>{t("schedule.authenticationRequired")}</h2><p>{t("status.unavailable")}</p></div>
+        </div>
+      ) : project === undefined ? (
+        <div className={styles.emptyState} role="alert">
+          <div className={styles.emptyIcon} aria-hidden="true"><CircleAlert size={22} /></div>
+          <div><h2>{t("schedule.notFound")}</h2><Link className={styles.secondaryButton} to="/projects">{t("controls.backToProjects")}</Link></div>
+        </div>
+      ) : !projectAvailable ? (
+        <div className={styles.emptyState} role="status">
+          <div className={styles.emptyIcon} aria-hidden="true"><FolderOpen size={22} /></div>
+          <div><h2>{t("schedule.projectUnavailable")}</h2><p>{project.path}</p></div>
+        </div>
+      ) : (
+        <>
+          {job !== null ? (
+            <section className={styles.scheduleHistorySummary} aria-labelledby="schedule-history-job-heading">
+              <div className={styles.schedulePanelHeader}>
+                <div>
+                  <p className={styles.eyebrow}>{t("schedule.historyJobEyebrow")}</p>
+                  <h2 id="schedule-history-job-heading">{job.title}</h2>
+                </div>
+                <span className={styles.scheduleJobStatus} data-state={job.status} role="status">
+                  {scheduleJobStatusIcon(job.status)}
+                  {t(`schedule.jobStatus.${job.status}`)}
+                </span>
+              </div>
+              <dl className={styles.scheduleJobDetails}>
+                <div><dt>{t("schedule.fields.message")}</dt><dd>{job.message}</dd></div>
+                <div><dt>{t("schedule.fields.kind")}</dt><dd>{scheduleJobRule(job.schedule, t)}</dd></div>
+                <div><dt>{t("schedule.fields.session")}</dt><dd>{job.session_id}</dd></div>
+              </dl>
+            </section>
+          ) : null}
+
+          {scheduleStatus !== null ? (
+            <dl className={styles.scheduleStatusGrid} aria-label={t("schedule.statusTitle")}>
+              <div className={styles.scheduleStatusMetric}>
+                <dt>{t("schedule.admission")}</dt>
+                <dd data-state={scheduleStatus.admitted ? "active" : "paused"}>
+                  <span className={styles.statusDot} aria-hidden="true" />
+                  {scheduleStatus.admitted ? t("schedule.admitted") : t("schedule.paused")}
+                </dd>
+              </div>
+              <div className={styles.scheduleStatusMetric}>
+                <dt>{t("schedule.activeJobCount")}</dt>
+                <dd>{scheduleStatus.active_job_count}</dd>
+              </div>
+              <div className={styles.scheduleStatusMetric}>
+                <dt>{t("schedule.historyGroups")}</dt>
+                <dd>{groups.length}</dd>
+              </div>
+            </dl>
+          ) : null}
+
+          <section className={styles.scheduleHistoryPanel} aria-labelledby="schedule-history-list-heading">
+            <div className={styles.schedulePanelHeader}>
+              <div>
+                <p className={styles.eyebrow}>{t("schedule.historyEyebrow")}</p>
+                <h2 id="schedule-history-list-heading">{t("schedule.historyListTitle")}</h2>
+              </div>
+              <span className={styles.scheduleCount}>{groups.length}</span>
+            </div>
+            {loadState === "error" && groups.length > 0 ? (
+              <div className={styles.actionError} role="alert">
+                <CircleAlert size={16} aria-hidden="true" />
+                <span>{t(loadError ?? "schedule.historyLoadError")}</span>
+                <button className={styles.secondaryButton} type="button" onClick={() => {
+                  const failed = failedPageRef.current;
+                  if (failed !== null) {
+                    restoreRefreshFocusRef.current = !failed.append;
+                    restoreMoreFocusRef.current = failed.append;
+                    void loadHistory(failed.cursor, failed.append);
+                  }
+                }}>
+                  {t("controls.retry")}
+                </button>
+              </div>
+            ) : null}
+            {loadState === "loading" && groups.length === 0 ? (
+              <div className={styles.scheduleEmptyState} role="status">
+                <RefreshCw size={18} className={styles.spin} aria-hidden="true" />
+                {t("schedule.historyLoading")}
+              </div>
+            ) : loadState === "error" && groups.length === 0 ? (
+              <div className={styles.scheduleEmptyState} role="alert">
+                <CircleAlert size={18} aria-hidden="true" />
+                <span>{t(loadError ?? "schedule.historyLoadError")}</span>
+                <button className={styles.secondaryButton} type="button" onClick={() => {
+                  restoreRefreshFocusRef.current = true;
+                  void loadHistory(null, false);
+                }}>
+                  {t("controls.retry")}
+                </button>
+              </div>
+            ) : groups.length === 0 ? (
+              <div className={styles.scheduleEmptyState} role="status">
+                <Clock3 size={18} aria-hidden="true" />
+                <span>{t("schedule.historyEmpty")}</span>
+              </div>
+            ) : (
+              <div className={styles.scheduleHistoryList}>
+                {groups.map((group, index) => (
+                  <article
+                    className={styles.scheduleHistoryGroup}
+                    data-state={group.result_state}
+                    key={scheduleHistoryGroupKey(group, index)}
+                  >
+                    <header className={styles.scheduleHistoryGroupHeader}>
+                      <div>
+                        <p className={styles.eyebrow}>{t("schedule.historyRun", { count: index + 1 })}</p>
+                        <div className={styles.scheduleHistoryTimes}>
+                          <time dateTime={group.started_at ?? undefined}>
+                            {scheduleHistoryTime(group.started_at, i18n.language, t)}
+                          </time>
+                          <span aria-hidden="true">→</span>
+                          <time dateTime={group.finished_at ?? undefined}>
+                            {scheduleHistoryTime(group.finished_at, i18n.language, t)}
+                          </time>
+                        </div>
+                      </div>
+                      <span className={styles.scheduleHistoryState} data-state={group.result_state} role="status">
+                        {scheduleHistoryStateIcon(group.result_state)}
+                        {t(`schedule.historyState.${group.result_state}`)}
+                      </span>
+                    </header>
+                    <div className={styles.messageHistory} role="log" aria-label={t("schedule.historyMessages")}>
+                      {group.messages.map((message, messageIndex) => (
+                        <HistoryMessageView
+                          key={`${scheduleHistoryGroupKey(group, index)}-${messageIndex}`}
+                          message={message}
+                          index={messageIndex}
+                          t={t}
+                          scheduleHistory
+                        />
+                      ))}
+                    </div>
+                  </article>
+                ))}
+                {nextCursor !== null ? (
+                  <div className={styles.scheduleHistoryMore}>
+                    <button
+                      ref={loadMoreButtonRef}
+                      className={styles.secondaryButton}
+                      type="button"
+                      disabled={loadingMore || loadState === "loading" || connectionState !== "online"}
+                      onClick={() => {
+                        restoreMoreFocusRef.current = document.activeElement === loadMoreButtonRef.current;
+                        void loadHistory(nextCursor, true);
+                      }}
+                    >
+                      {loadingMore ? t("schedule.historyLoadingMore") : t("schedule.historyLoadMore")}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            )}
+          </section>
+        </>
+      )}
+    </section>
+  );
+}
+
+function scheduleHistoryGroupKey(group: ScheduleHistoryGroup, index: number): string {
+  const firstMessage = group.messages[0];
+  const timestamp = typeof firstMessage?.timestamp === "string" ? firstMessage.timestamp : "unknown";
+  return `${group.started_at ?? "unknown"}-${timestamp}-${index}`;
+}
+
+function scheduleHistoryTime(
+  value: string | null,
+  language: string,
+  t: (key: string) => string,
+): string {
+  if (value === null) return t("schedule.historyUnknownTime");
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? t("schedule.historyUnknownTime")
+    : parsed.toLocaleString(language);
+}
+
+function scheduleHistoryStateIcon(state: ScheduleHistoryResultState) {
+  if (state === "success") return <CircleCheck size={14} aria-hidden="true" />;
+  if (state === "failure") return <CircleAlert size={14} aria-hidden="true" />;
+  if (state === "canceled") return <Ban size={14} aria-hidden="true" />;
+  return <Info size={14} aria-hidden="true" />;
 }
 
 function scheduleJobRule(
@@ -2787,7 +3221,7 @@ function mergeSessionSummaries(
 }
 
 type RunStatus = "submitting" | "accepted" | "running" | "completed" | "failed" | "canceled";
-type ToolStatus = "running" | "completed" | "failed" | "rejected" | "canceled";
+type ToolStatus = "running" | "completed" | "failed" | "rejected" | "canceled" | "unknown";
 
 interface ToolActivity {
   toolCallId: string;
@@ -2856,6 +3290,7 @@ function isLiveRunActive(run: LiveRun): boolean {
 }
 
 function statusIcon(status: RunStatus | ToolStatus, size = 14) {
+  if (status === "unknown") return <Info size={size} aria-hidden="true" />;
   if (status === "completed") return <CircleCheck size={size} aria-hidden="true" />;
   if (status === "failed") return <TriangleAlert size={size} aria-hidden="true" />;
   if (status === "rejected") return <ShieldX size={size} aria-hidden="true" />;
@@ -2900,9 +3335,11 @@ function MarkdownContent({ content }: { content: string }) {
 function ToolActivityGroup({
   tools,
   t,
+  showStatus = true,
 }: {
   tools: ToolActivity[];
   t: (key: string) => string;
+  showStatus?: boolean;
 }) {
   return (
     <details className={styles.toolActivity}>
@@ -2919,10 +3356,10 @@ function ToolActivityGroup({
           <li className={styles.toolActivityItem} key={tool.toolCallId}>
             <div className={styles.toolActivityItemHeader}>
               <span className={styles.toolName}>{tool.name || t("conversation.unknownTool")}</span>
-              <span className={`${styles.statusBadge} ${styles[`status${tool.status}`]}`}>
+              {showStatus ? <span className={`${styles.statusBadge} ${styles[`status${tool.status}`]}`}>
                 {statusIcon(tool.status, 12)}
                 {t(toolStatusKey(tool.status))}
-              </span>
+              </span> : null}
             </div>
             {tool.arguments ? (
               <details className={styles.toolArguments}>
@@ -2941,16 +3378,20 @@ function HistoryMessageView({
   message,
   index,
   t,
+  scheduleHistory = false,
 }: {
   message: Record<string, unknown>;
   index: number;
   t: (key: string) => string;
+  scheduleHistory?: boolean;
 }) {
   const role = message.role;
   const messageStatus = message.status;
   if (role === "tool") {
     const rawStatus = typeof messageStatus === "string" ? messageStatus : "error";
-    const status: ToolStatus = rawStatus === "success"
+    const status: ToolStatus = scheduleHistory && !["success", "refused", "error"].includes(String(messageStatus))
+      ? "unknown"
+      : rawStatus === "success"
       ? "completed"
       : rawStatus === "refused"
         ? "rejected"
@@ -2971,12 +3412,39 @@ function HistoryMessageView({
       </article>
     );
   }
+  const toolActivities = scheduleHistory && role === "assistant" ? historyToolActivities(message) : [];
   return (
     <article className={styles.historyMessage} data-role={typeof role === "string" ? role : "system"} key={`${index}-${String(role)}`}>
       <div className={styles.historyMessageRole}>{historyRoleLabel(role, t)}</div>
+      {toolActivities.length > 0 ? <ToolActivityGroup tools={toolActivities} t={t} showStatus={false} /> : null}
       <MarkdownContent content={historyMessageText(message.content)} />
     </article>
   );
+}
+
+function historyToolActivities(message: Record<string, unknown>): ToolActivity[] {
+  if (!Array.isArray(message.tool_calls)) return [];
+  return message.tool_calls.flatMap((candidate, index) => {
+    if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) return [];
+    const toolCall = candidate as Record<string, unknown>;
+    const rawArguments = toolCall.arguments;
+    let argumentsText = "";
+    if (typeof rawArguments === "string") {
+      argumentsText = rawArguments;
+    } else if (rawArguments !== undefined) {
+      try {
+        argumentsText = JSON.stringify(rawArguments) ?? "";
+      } catch {
+        argumentsText = "";
+      }
+    }
+    return [{
+      toolCallId: typeof toolCall.id === "string" ? toolCall.id : `tool-call-${index}`,
+      name: typeof toolCall.name === "string" ? toolCall.name : "",
+      arguments: argumentsText,
+      status: "unknown" as const,
+    }];
+  });
 }
 
 function LiveRunView({

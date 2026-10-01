@@ -7,6 +7,7 @@ import { URL } from "node:url";
 import { chromium, expect } from "@playwright/test";
 
 import setup from "./e2e-setup.mjs";
+import settingsAcceptance, { settingsConfirmationAcceptance } from "./settings-e2e.mjs";
 
 const viewports = [
   { width: 1440, height: 900 },
@@ -113,6 +114,9 @@ try {
   });
   assert.equal(reusedTicket.status(), 401, "A consumed browser ticket was accepted again");
   await replay.close();
+
+  await settingsAcceptance({ page, secondPage, control, output, viewports });
+  await page.getByRole("navigation").getByRole("link", { name: "Status", exact: true }).click();
 
   for (const language of ["en", "zh-CN"]) {
     await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
@@ -1394,6 +1398,11 @@ try {
 
   const confirmationPath = control.details.confirmation_path;
   assert.ok(confirmationPath.endsWith("confirmation-outside.txt"));
+  const settingsConfirmationRunId = await settingsConfirmationAcceptance({ page, control });
+  await page.locator("aside").getByRole("link", { name: "project-one", exact: true }).click();
+  await page.getByRole("list", { name: "Conversation Sessions", exact: true })
+    .getByRole("button", { name: /Web available history/ }).click();
+  await page.locator("textarea").waitFor();
   const confirmationCombinations = [];
   const confirmationRuns = [];
   for (const language of ["en", "zh-CN"]) {
@@ -1484,11 +1493,12 @@ try {
       }
     }
   }
-  const confirmationToolRuns = await page.evaluate(() => window.__myclawTestMessages
+  const confirmationToolRuns = await page.evaluate((settingsRunId) => window.__myclawTestMessages
     .filter((event) => event.type === "run.output"
+      && event.run_id !== settingsRunId
       && event.payload?.message?.type === "tool_call"
       && event.payload?.message?.metadata?.tool_call_id === "call-confirmation")
-    .map((event) => event.run_id));
+    .map((event) => event.run_id), settingsConfirmationRunId);
   assert.equal(new Set(confirmationToolRuns).size, confirmationCombinations.length,
     "Confirmation workflow executed more than once for a Run");
   assert.equal(new Set(confirmationRuns.map((run) => run.runId)).size, confirmationCombinations.length);

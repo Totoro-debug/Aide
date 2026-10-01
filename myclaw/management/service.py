@@ -280,12 +280,24 @@ class ManagementViewService:
         self._ensure_management_mutation_allowed = (
             ensure_management_mutation_allowed or _allow_management_mutation
         )
+        self._ensure_runtime_admission = self._ensure_management_mutation_allowed
+        self._persist_reasoning_effort: Callable[[ReasoningEffort], Awaitable[None]] | None = None
         self._aborted = False
+
+    def bind_runtime_admission(self, callback: Callable[[], None]) -> None:
+        """Bind the generation-wide admission gate after construction."""
+        self._ensure_runtime_admission = callback
+
+    def bind_reasoning_effort_persistence(
+        self, callback: Callable[[ReasoningEffort], Awaitable[None]]
+    ) -> None:
+        """Bind service-coordinated persistence for the legacy effort control."""
+        self._persist_reasoning_effort = callback
 
     async def reload_skill(self) -> tuple[SkillMetadata, ...]:
         """Reload the current Agent Loop Skill state and return published metadata."""
         self._ensure_active()
-        self._ensure_management_mutation_allowed()
+        self._ensure_runtime_admission()
         try:
             current_agent_loop = self._current_agent_loop()
             metadata = current_agent_loop.reload_skill()
@@ -346,7 +358,7 @@ class ManagementViewService:
     async def dream(self) -> DreamResult:
         """Run one foreground Memory Task and return its safe summary."""
         self._ensure_active()
-        self._ensure_management_mutation_allowed()
+        self._ensure_runtime_admission()
         self._ensure_current_generation()
         return await self._dream.run()
 
@@ -370,10 +382,13 @@ class ManagementViewService:
             )
         self._reasoning_effort_control.set_reasoning_effort(effort)
         try:
-            self._config.update_reasoning_effort(effort)
+            if self._persist_reasoning_effort is None:
+                self._config.update_reasoning_effort(effort)
+            else:
+                await self._persist_reasoning_effort(effort)
         except Exception as error:
             logger.warning("Reasoning Effort persistence failed type={}", type(error).__name__)
-        return await self.reasoning_effort()
+        return effort
 
     async def permission_level(self) -> ToolPermissionLevel:
         """Return the current process-local foreground Tool Permission Level."""
@@ -390,8 +405,7 @@ class ManagementViewService:
             raise ManagementError(
                 ErrorInfo("config_invalid", "Foreground Tool Permission Level is invalid.")
             ) from error
-        if self._permission_control.current() != validated:
-            self._permission_control.select(validated)
+        self._permission_control.select(validated)
         return self._permission_control.current()
 
     async def status(self) -> RuntimeStatus:

@@ -68,6 +68,42 @@ export interface ServiceStatus {
   active_workspace_count: number;
 }
 
+export interface ConfigFields {
+  runtime: {
+    max_tool_result_chars: number;
+    max_iterations: number;
+    enable_skill_always_load: boolean;
+    compact_ratio: number;
+    permission_level: ToolPermissionLevel;
+    exec_shell: "auto" | "powershell" | "pwsh";
+  };
+  memory: {
+    batch_size: number;
+    schedule: string;
+  };
+}
+
+export type ConfigApplicationStatus = "active" | "pending" | "failed-to-apply";
+
+export interface ConfigApplication {
+  status: ConfigApplicationStatus;
+  saved_revision: string;
+  active_revision: string | null;
+  pending_revision: string | null;
+  waiting_for: string[];
+  error: { code: string; message: string } | null;
+}
+
+export interface ConfigResponse {
+  revision: string;
+  fields: ConfigFields;
+  application: ConfigApplication;
+}
+
+export interface ConfigPatchResponse extends ConfigResponse {
+  request_id: string;
+}
+
 export type ToolPermissionLevel = "read-only" | "workspace-write" | "full-access";
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 

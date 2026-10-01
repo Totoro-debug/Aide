@@ -116,6 +116,11 @@ export default async function setup() {
 
   return {
     details,
+    async command(command) {
+      const response = readLine();
+      child.stdin.write(`${command}\n`);
+      return JSON.parse(await response);
+    },
     async restart() {
       child.stdin.write("restart\n");
       details = publish(parseDetails(await readLine()));

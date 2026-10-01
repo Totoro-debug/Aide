@@ -33,6 +33,9 @@ import type {
   ServiceErrorBody,
   ServiceEvent,
   ServiceStatus,
+  ConfigPatchResponse,
+  ConfigResponse,
+  ConfigFields,
 } from "./protocol";
 
 const API_PREFIX = "/api/v1";
@@ -152,6 +155,33 @@ export async function registerWebClient(): Promise<RegisteredClient> {
 
 export function getServiceStatus(): Promise<ServiceStatus> {
   return request<ServiceStatus>("/service");
+}
+
+export function getConfig(): Promise<ConfigResponse> {
+  return request<ConfigResponse>("/config");
+}
+
+export function patchConfig(
+  revision: string,
+  fields: ConfigFields,
+  requestId: string = createRequestId(),
+): Promise<ConfigPatchResponse> {
+  return request<ConfigPatchResponse>("/config", {
+    method: "PATCH",
+    mutation: true,
+    body: { request_id: requestId, revision, fields },
+  });
+}
+
+export function retryConfig(
+  revision: string,
+  requestId: string = createRequestId(),
+): Promise<ConfigPatchResponse> {
+  return request<ConfigPatchResponse>("/config/retry", {
+    method: "POST",
+    mutation: true,
+    body: { request_id: requestId, revision },
+  });
 }
 
 export async function getRuntimeStatus(

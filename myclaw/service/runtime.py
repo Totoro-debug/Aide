@@ -8,10 +8,11 @@ import json
 import os
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
+from types import MappingProxyType
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
@@ -47,7 +48,14 @@ from myclaw.agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES
 from myclaw.agent.workspace_runtime import WorkspaceRuntime, WorkspaceRuntimeFactories
 from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import UserConfiguration
+from myclaw.config.config import (
+    ConfigError,
+    ConfigFieldError,
+    ConfigLoader,
+    ConfigRevisionConflict,
+    ReasoningEffort,
+    UserConfiguration,
+)
 from myclaw.errors import ErrorInfo
 from myclaw.provider.factory import create_provider
 from myclaw.provider.model_router import ModelRouter
@@ -388,6 +396,28 @@ class _LoopState:
     schedule: bool = False
 
 
+@dataclass(slots=True)
+class _PreparedWorkspaceGeneration:
+    """Generation resources prepared before a Workspace pointer is switched."""
+
+    configuration: UserConfiguration
+    previous: WorkspaceRuntime
+    runtime: WorkspaceRuntime
+    exec_host: ExecHost
+    schedule_permission: RuntimePermissionControl
+    schedule: JobSchedule
+    schedule_jobs: tuple[ScheduleJob, ...] = field(init=False)
+    source_loops: tuple[tuple[str, _LoopState, AgentLoop, str | None], ...]
+    loops: list[tuple[_LoopState, AgentLoop, MessageBus]]
+    schedule_loops: list[tuple[str, _LoopState, AgentLoop, MessageBus]]
+
+
+@dataclass(slots=True)
+class _RetiredWorkspaceGeneration:
+    runtime: WorkspaceRuntime
+    loops: tuple[_LoopState, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class _RestorePlanReference:
     """Wire-safe reference to the service-owned Restore plan."""
@@ -572,6 +602,7 @@ class WorkspaceServiceRuntime:
         self._claim_versions: dict[str, int] = {}
         self._draft_clients: dict[str, str] = {}
         self._schedule_loops: dict[str, _LoopState] = {}
+        self._retired_generations: list[_RetiredWorkspaceGeneration] = []
         self._restore_plans: dict[tuple[str, int], Any] = {}
         self._restore_results: dict[tuple[str, str], Any] = {}
         self._restore_owner: str | None = None
@@ -598,20 +629,11 @@ class WorkspaceServiceRuntime:
             self._exec_host = create_exec_host(resolved_shell)
 
             async def execute_user_job(job: ScheduleJob) -> None:
-                if not self._schedule_admitted:
-                    raise ServiceError(
-                        "admission_closed",
-                        "Schedule admission is closed while the local service is reconnecting.",
-                    )
+                # Admission was checked at reservation; accepted occurrences must drain.
                 loop = await self._get_schedule_loop(job.job_id)
                 await loop.loop.run_schedule_job(job)
 
             async def execute_user_occurrence(occurrence: ScheduleOccurrence) -> None:
-                if not self._schedule_admitted:
-                    raise ServiceError(
-                        "admission_closed",
-                        "Schedule admission is closed while the local service is reconnecting.",
-                    )
                 loop = await self._get_schedule_loop(occurrence.job.job_id)
                 await loop.loop.run_schedule_job(occurrence.job, occurrence)
 
@@ -682,6 +704,7 @@ class WorkspaceServiceRuntime:
             and not self._closed
             and not self._restore_schedule_paused
             and not self._restore_blocked
+            and not self.service.configuration_transition_active
             and not self.schedule_service.admission_paused
             and self.service._schedule_admission_open()
             and self.service._schedule_allowed(self)
@@ -703,7 +726,7 @@ class WorkspaceServiceRuntime:
         await self.schedule_service.pause_admission()
 
     async def create_draft(self, client_id: str, *, reuse_startup_session: bool = True) -> str:
-        if self._closed:
+        if self._closed or self.service.configuration_transition_active:
             raise service_error("admission_closed", "Workspace admission is closed.")
         startup_session_id = None if self.runtime is None else self.runtime.startup_session_id
         if (
@@ -747,7 +770,7 @@ class WorkspaceServiceRuntime:
 
     async def claim(self, client_id: str, session_id: str) -> SessionClaim:
         async with self._lock:
-            if self._closed:
+            if self._closed or self.service.configuration_transition_active:
                 raise service_error("admission_closed", "Workspace admission is closed.")
             self._ensure_session_available(session_id)
             existing = self._claims.get(session_id)
@@ -1434,6 +1457,7 @@ class WorkspaceServiceRuntime:
             from myclaw.management.service import RestoreListingReport
 
             async with self._lock:
+                self._require_admitted()
                 loop = current_loop()
                 state = self._loops[loop.session.session_id]
                 if (
@@ -1583,16 +1607,21 @@ class WorkspaceServiceRuntime:
             restore_commit=restore_commit,
             restore_result=restore_result,
             restore_cancel=restore_cancel,
-            ensure_management_mutation_allowed=lambda: self._require_admitted(),
+            ensure_management_mutation_allowed=lambda: self._require_admitted(
+                allow_configuration=True
+            ),
         )
+        management.bind_runtime_admission(lambda: self._require_admitted())
+        management.bind_reasoning_effort_persistence(self.service.persist_reasoning_effort)
         management.bind_restore_acknowledge_failure(restore_acknowledge_failure)
         return ManagementCommandDispatcher(management)
 
-    def _require_admitted(self) -> None:
+    def _require_admitted(self, *, allow_configuration: bool = False) -> None:
         if (
             self._closed
             or self._restore_blocked
             or (not self._schedule_admitted and self.service.state in {"draining", "stopped"})
+            or (self.service.configuration_transition_active and not allow_configuration)
         ):
             raise ServiceError("admission_closed", "Workspace admission is closed.")
 
@@ -1649,33 +1678,61 @@ class WorkspaceServiceRuntime:
             if client_id is not None
             else self._schedule_permission
         )
-        bus = MessageBus()
-        loop = AgentLoop(
-            workspace_path=self.workspace_path,
-            workspace_state=self.workspace_state,
-            agent_home=self.service.agent_home,
+        loop, bus = await self._create_agent_loop(
+            runtime=self.runtime,
             configuration=self.configuration,
-            bus=bus,
             schedule_service=self.schedule_service,
-            model_router=self.runtime.router,
-            memory_manager=self.runtime.memory_manager,
-            session_id=session_id,
-            now=local_now,
-            new_uuid=uuid4,
-            monotonic_now=monotonic,
-            mcp_tools=self.runtime.mcp_snapshot,
-            mcp_keywords=self.runtime.mcp_keywords,
             exec_host=self._exec_host,
+            session_id=session_id,
             permission_control=permission_control,
         )
-        loop.bind_confirmation_requester(self.service.confirmation.request)
-        loop.preflight()
-        await loop.start()
         state = _LoopState(loop=loop, bus=bus, owner_client_id=client_id)
         self._loops[loop.session.session_id] = state
         if client_id is not None:
             state.output_task = asyncio.create_task(self._forward_output(state))
         return state
+
+    async def _create_agent_loop(
+        self,
+        *,
+        runtime: WorkspaceRuntime,
+        configuration: UserConfiguration,
+        schedule_service: ScheduleService,
+        exec_host: ExecHost,
+        session_id: str | None,
+        permission_control: RuntimePermissionControl,
+        session: Session | None = None,
+        bus: MessageBus | None = None,
+    ) -> tuple[AgentLoop, MessageBus]:
+        selected_bus = MessageBus() if bus is None else bus
+        loop_kwargs: dict[str, Any] = {
+            "workspace_path": self.workspace_path,
+            "workspace_state": self.workspace_state,
+            "agent_home": self.service.agent_home,
+            "configuration": configuration,
+            "bus": selected_bus,
+            "schedule_service": schedule_service,
+            "model_router": runtime.router,
+            "memory_manager": runtime.memory_manager,
+            "session_id": session_id,
+            "now": local_now,
+            "new_uuid": uuid4,
+            "monotonic_now": monotonic,
+            "mcp_tools": runtime.mcp_snapshot,
+            "mcp_keywords": runtime.mcp_keywords,
+            "exec_host": exec_host,
+            "permission_control": permission_control,
+            "configured_schedule_level": configuration.runtime.permission_level,
+        }
+        loop = (
+            AgentLoop.with_session(session, **loop_kwargs)
+            if session is not None
+            else AgentLoop(**loop_kwargs)
+        )
+        loop.bind_confirmation_requester(self.service.confirmation.request)
+        loop.preflight()
+        await loop.start()
+        return loop, selected_bus
 
     async def _get_schedule_loop(self, job_id: str) -> _LoopState:
         state = self._schedule_loops.get(job_id)
@@ -1685,6 +1742,218 @@ class WorkspaceServiceRuntime:
         state.schedule = True
         self._schedule_loops[job_id] = state
         return state
+
+    async def wait_for_generation_idle(self) -> None:
+        """Pause new work and wait for active foreground, Schedule, and Dream work."""
+        if not self._started or self._closed or self.runtime is None:
+            return
+        await self.schedule_service.pause_and_wait_idle()
+        await self.runtime.dream.wait_until_idle()
+        while True:
+            active = self._restore_owner is not None or self._restore_commit_task is not None
+            if self._closed:
+                return
+            for state in tuple(self._loops.values()):
+                try:
+                    owner = self.service._clients.get(state.owner_client_id or "")
+                    active = (
+                        active
+                        or (state.owner_client_id is not None and (owner is None or owner.expired))
+                        or state.loop.has_active_run
+                        or bool(state.run_ids)
+                        or bool(await state.bus.inbound_snapshot())
+                    )
+                    await state.loop.wait_for_restore_idle()
+                except RuntimeError:
+                    continue
+            if not active:
+                return
+            await asyncio.sleep(0.01)
+
+    async def prepare_configuration(
+        self, configuration: UserConfiguration
+    ) -> _PreparedWorkspaceGeneration:
+        """Prepare a complete replacement generation without publishing it."""
+        if self.runtime is None or self.workspace_state is None or self._exec_host is None:
+            raise RuntimeError("Workspace service runtime is not ready")
+        await self.wait_for_generation_idle()
+        # Late automatic titles update memory after the last Run snapshot was saved.
+        for state in tuple(self._loops.values()):
+            await state.loop.session.persist_pending_automatic_title()
+        previous = self.runtime
+        source_loops = tuple(
+            (session_id, state, state.loop, state.owner_client_id)
+            for session_id, state in self._loops.items()
+        )
+        candidate = previous.create_replacement(configuration)
+        schedule = JobSchedule.from_cron_input(configuration.memory.schedule, get_localzone_name())
+        staged: list[tuple[_LoopState, AgentLoop, MessageBus]] = []
+        schedule_job_states = list(self._schedule_loops.items())
+        staged_schedule_loops: list[tuple[str, _LoopState, AgentLoop, MessageBus]] = []
+        try:
+            await candidate.start_replacement(previous)
+            candidate.schedule_service.set_admission_guard(lambda: self.schedule_admitted)
+            candidate.prepare_replacement_schedule()
+            candidate_exec_host = create_exec_host(
+                resolve_exec_shell(configuration.runtime.exec_shell)
+            )
+            candidate_schedule_permission = RuntimePermissionControl(
+                configuration.runtime.permission_level
+            )
+            for state in tuple(self._loops.values()):
+                if state.schedule:
+                    continue
+                permission = (
+                    self.service.client_permission(state.owner_client_id)
+                    if state.owner_client_id is not None
+                    else candidate_schedule_permission
+                )
+                loop, bus = await self._create_agent_loop(
+                    runtime=candidate,
+                    configuration=configuration,
+                    schedule_service=candidate.schedule_service,
+                    exec_host=candidate_exec_host,
+                    session_id=state.loop.session.session_id,
+                    permission_control=permission,
+                    session=state.loop.session.clone(),
+                )
+                staged.append((state, loop, bus))
+            for job_id, state in schedule_job_states:
+                loop, bus = await self._create_agent_loop(
+                    runtime=candidate,
+                    configuration=configuration,
+                    schedule_service=candidate.schedule_service,
+                    exec_host=candidate_exec_host,
+                    session_id=state.loop.session.session_id,
+                    permission_control=candidate_schedule_permission,
+                    session=state.loop.session.clone(),
+                )
+                staged_schedule_loops.append((job_id, state, loop, bus))
+            return _PreparedWorkspaceGeneration(
+                configuration=configuration,
+                previous=previous,
+                runtime=candidate,
+                exec_host=candidate_exec_host,
+                schedule_permission=candidate_schedule_permission,
+                schedule=schedule,
+                source_loops=source_loops,
+                loops=staged,
+                schedule_loops=staged_schedule_loops,
+            )
+        except BaseException:
+            await self._discard_configuration_resources(
+                candidate,
+                tuple(_LoopState(loop, bus, None) for _, loop, bus in staged)
+                + tuple(_LoopState(loop, bus, None) for _, _, loop, bus in staged_schedule_loops),
+            )
+            raise
+
+    async def discard_prepared_configuration(self, prepared: _PreparedWorkspaceGeneration) -> None:
+        await self._discard_configuration_resources(
+            prepared.runtime,
+            tuple(_LoopState(loop, bus, None) for _, loop, bus in prepared.loops)
+            + tuple(_LoopState(loop, bus, None) for _, _, loop, bus in prepared.schedule_loops),
+        )
+
+    async def _discard_configuration_resources(
+        self, runtime: WorkspaceRuntime, loops: tuple[_LoopState, ...]
+    ) -> None:
+        retired = _RetiredWorkspaceGeneration(runtime, loops)
+        self._retired_generations.append(retired)
+        try:
+            await self.retire_configuration(retired)
+        except Exception:
+            # Failed cleanup remains owned and is retried by Workspace shutdown.
+            pass
+
+    def prepared_configuration_is_current(self, prepared: _PreparedWorkspaceGeneration) -> bool:
+        if (
+            self._closed
+            or self.runtime is not prepared.previous
+            or self._lock.locked()
+            or self._restore_owner is not None
+            or self._restore_commit_task is not None
+        ):
+            return False
+        if tuple(self._loops) != tuple(item[0] for item in prepared.source_loops):
+            return False
+        candidates = {state.loop.session.session_id: loop for state, loop, _bus in prepared.loops}
+        candidates.update(
+            {
+                state.loop.session.session_id: loop
+                for _job, state, loop, _bus in prepared.schedule_loops
+            }
+        )
+        for session_id, state, loop, owner in prepared.source_loops:
+            if self._loops.get(session_id) is not state or state.loop is not loop:
+                return False
+            if state.owner_client_id != owner:
+                return False
+            client = self.service._clients.get(owner or "")
+            if owner is not None and (client is None or client.expired):
+                return False
+            candidate = candidates.get(session_id)
+            if candidate is None or (
+                candidate.session.messages != loop.session.messages
+                or candidate.session.metadata != loop.session.metadata
+                or candidate.session.updated_at != loop.session.updated_at
+            ):
+                return False
+        return True
+
+    def activate_configuration(
+        self, prepared: _PreparedWorkspaceGeneration
+    ) -> _RetiredWorkspaceGeneration:
+        """Publish a prepared generation after every Workspace has passed preflight."""
+        old_loops = tuple(prepared.loops)
+        old_schedule_loops = tuple(prepared.schedule_loops)
+        claims_by_session = {claim.session_id: claim for claim in self._claims.values()}
+        retired = _RetiredWorkspaceGeneration(prepared.previous, tuple(self._loops.values()))
+        self._retired_generations.append(retired)
+        prepared.runtime.schedule_service.inherit_generation_state(
+            prepared.previous.schedule_service,
+            jobs=prepared.schedule_jobs,
+        )
+        for state in retired.loops:
+            if state.output_task is not None:
+                state.output_task.cancel()
+            if state.release_task is not None:
+                state.release_task.cancel()
+        self.runtime = prepared.runtime
+        self.configuration = prepared.configuration
+        self._schedule_permission = prepared.schedule_permission
+        self._exec_host = prepared.exec_host
+        self._loops.clear()
+        self._schedule_loops.clear()
+        for old_state, new_loop, new_bus in old_loops:
+            session_id = new_loop.session.session_id
+            state = _LoopState(new_loop, new_bus, old_state.owner_client_id)
+            self._loops[session_id] = state
+            claim = claims_by_session.get(session_id)
+            if claim is not None:
+                claim.loop = new_loop
+            if state.owner_client_id is not None:
+                state.output_task = asyncio.create_task(self._forward_output(state))
+        for job_id, _old_state, new_loop, new_bus in old_schedule_loops:
+            state = _LoopState(new_loop, new_bus, None, schedule=True)
+            self._loops[state.loop.session.session_id] = state
+            self._schedule_loops[job_id] = state
+        return retired
+
+    async def retire_configuration(self, retired: _RetiredWorkspaceGeneration) -> None:
+        errors: list[Exception] = []
+        for state in retired.loops:
+            try:
+                await self._close_loop_state(state, abort=True)
+            except Exception as error:
+                errors.append(error)
+        try:
+            await retired.runtime.close()
+        except Exception as error:
+            errors.append(error)
+        if errors:
+            raise ExceptionGroup("Runtime generation retirement failed", errors)
+        self._retired_generations.remove(retired)
 
     async def _forward_output(self, state: _LoopState) -> None:
         session_id = state.loop.session.session_id
@@ -1769,10 +2038,7 @@ class WorkspaceServiceRuntime:
             return
         await self.release(client_id, session_id)
 
-    async def _close_loop(self, session_id: str, *, abort: bool = False) -> None:
-        state = self._loops.get(session_id)
-        if state is None:
-            return
+    async def _close_loop_state(self, state: _LoopState, *, abort: bool = False) -> None:
         if state.release_task is not None:
             release_task = state.release_task
             state.release_task = None
@@ -1790,10 +2056,27 @@ class WorkspaceServiceRuntime:
             await state.loop.abort()
         else:
             await state.loop.close()
+
+    async def _close_loop(self, session_id: str, *, abort: bool = False) -> None:
+        state = self._loops.get(session_id)
+        if state is None:
+            return
+        await self._close_loop_state(state, abort=abort)
         self._loops.pop(session_id, None)
         for job_id, candidate in tuple(self._schedule_loops.items()):
             if candidate is state:
                 self._schedule_loops.pop(job_id, None)
+
+    async def _close_schedule_loop(
+        self, job_id: str, *, expected: _LoopState | None = None, abort: bool = False
+    ) -> None:
+        state = self._schedule_loops.get(job_id)
+        if state is None or (expected is not None and state is not expected):
+            return
+        await self._close_loop_state(state, abort=abort)
+        if self._loops.get(state.loop.session.session_id) is state:
+            self._loops.pop(state.loop.session.session_id, None)
+        self._schedule_loops.pop(job_id, None)
 
     async def close(self) -> None:
         async with self._lock:
@@ -1821,6 +2104,8 @@ class WorkspaceServiceRuntime:
                     )
                 else:
                     await self._close_all_loops()
+                for retired in tuple(self._retired_generations):
+                    await self.retire_configuration(retired)
             except BaseException:
                 self._close_failed = True
                 raise
@@ -1830,6 +2115,8 @@ class WorkspaceServiceRuntime:
     async def _close_all_loops(self) -> None:
         for session_id in tuple(self._loops):
             await self._close_loop(session_id, abort=True)
+        for job_id in tuple(self._schedule_loops):
+            await self._close_schedule_loop(job_id, abort=True)
 
 
 class LocalService:
@@ -1869,12 +2156,33 @@ class LocalService:
         self._schedule_removal_jobs: dict[tuple[str, str], tuple[ScheduleJob, bool]] = {}
         self._project_lifecycle_lock = asyncio.Lock()
         self._project_removals: dict[str, _ProjectRemoval] = {}
+        self._config_loader = ConfigLoader(agent_home)
+        self._config_lock = asyncio.Lock()
+        self._config_request_results: dict[str, dict[str, object]] = {}
+        self._config_request_fingerprints: dict[str, str] = {}
+        self._config_saved_configuration = configuration
+        self._config_saved_revision: str | None = None
+        self._config_active_revision: str | None = None
+        self._config_pending_revision: str | None = None
+        self._config_fields: dict[str, dict[str, object]] | None = None
+        self._config_status = "active"
+        self._config_waiting_for: tuple[str, ...] = ()
+        self._config_error: dict[str, str] | None = None
+        self._config_apply_task: asyncio.Task[None] | None = None
+        self._configuration_transition_active = False
         self.projects = ProjectCatalog(agent_home)
 
     async def start(self) -> None:
         if self.state != "starting":
             return
         self.agent_home.initialize()
+        if self.configuration is not None:
+            snapshot = self._config_loader.editable_snapshot()
+            self._config_saved_revision = snapshot.revision
+            self._config_active_revision = snapshot.revision
+            self._config_fields = {
+                section: dict(values) for section, values in snapshot.fields.items()
+            }
         self.confirmation.bind_presenter(self._presenter)
         for record in self.projects.list():
             if record.schedule_state == "removing" and record.removal_error is None:
@@ -1891,6 +2199,434 @@ class LocalService:
     @property
     def workspaces(self) -> Mapping[str, WorkspaceServiceRuntime]:
         return self._workspaces
+
+    @property
+    def configuration_transition_active(self) -> bool:
+        return self._configuration_transition_active
+
+    def config_view(self) -> dict[str, object]:
+        """Return the safe persisted projection and active-generation status."""
+        snapshot = self._config_loader.editable_snapshot()
+        if self._config_saved_revision is None:
+            self._config_saved_revision = snapshot.revision
+        elif snapshot.revision != self._config_saved_revision:
+            self._config_saved_revision = snapshot.revision
+            self._config_saved_configuration = snapshot.configuration
+            self._config_pending_revision = snapshot.revision
+            self._config_status = "pending"
+            self._config_error = None
+            self._config_waiting_for = tuple(self._workspaces)
+            self._configuration_transition_active = True
+            try:
+                snapshot.require_valid_candidate()
+            except ConfigError:
+                self._config_status = "failed-to-apply"
+                self._config_error = {
+                    "code": "config_invalid",
+                    "message": "The saved User Configuration contains invalid fields.",
+                }
+                self._configuration_transition_active = False
+            else:
+                self._start_configuration_application()
+        if self._config_fields is None or snapshot.revision == self._config_saved_revision:
+            self._config_fields = {
+                section: dict(values) for section, values in snapshot.fields.items()
+            }
+        return self._config_response()
+
+    def _start_configuration_application(self) -> None:
+        if self.state in {"draining", "stopped"}:
+            return
+        if self._config_apply_task is None or self._config_apply_task.done():
+            self._config_apply_task = asyncio.create_task(self._apply_configuration_loop())
+            self._config_apply_task.add_done_callback(_consume_task_result)
+
+    def _configuration_request_result(
+        self, request_id: str, fingerprint: str
+    ) -> dict[str, object] | None:
+        previous = self._config_request_fingerprints.get(request_id)
+        if previous is not None and previous != fingerprint:
+            raise service_error(
+                "request_conflict",
+                "Request ID was already used for a different operation.",
+                status=409,
+            )
+        return self._config_request_results.get(request_id)
+
+    def _config_response(self) -> dict[str, object]:
+        if self._config_saved_revision is None or self._config_fields is None:
+            raise service_error("config_invalid", "User Configuration is unavailable.", status=422)
+        return {
+            "revision": self._config_saved_revision,
+            "fields": {section: dict(values) for section, values in self._config_fields.items()},
+            "application": {
+                "status": self._config_status,
+                "saved_revision": self._config_saved_revision,
+                "active_revision": self._config_active_revision,
+                "pending_revision": self._config_pending_revision,
+                "waiting_for": self._configuration_waiting_reasons(),
+                "error": None if self._config_error is None else dict(self._config_error),
+            },
+        }
+
+    def _configuration_waiting_reasons(self) -> list[str]:
+        if self._config_status != "pending":
+            return []
+        reasons: set[str] = set()
+        for workspace in self._workspaces.values():
+            if workspace.runtime is None:
+                continue
+            if workspace.schedule_service.has_pending_work:
+                reasons.add("schedule")
+            if workspace.runtime.dream.is_running:
+                reasons.add("dream")
+            if workspace._restore_owner is not None or workspace._restore_commit_task is not None:
+                reasons.add("restore")
+            for state in workspace.loops.values():
+                try:
+                    active_run = state.loop.has_active_run
+                except RuntimeError:
+                    active_run = False
+                if active_run or state.run_ids:
+                    reasons.add("schedule" if state.schedule else "foreground")
+                if state.loop.has_pending_title:
+                    reasons.add("title")
+                if state.bus.has_pending_input:
+                    reasons.add("queued-input")
+                client = self._clients.get(state.owner_client_id or "")
+                if state.owner_client_id is not None and (client is None or client.expired):
+                    reasons.add("client-cleanup")
+        return sorted(reasons) if reasons else ["preparing"]
+
+    async def update_configuration(
+        self,
+        request_id: str,
+        expected_revision: str,
+        fields: Mapping[str, object],
+        *,
+        client_id: str | None = None,
+    ) -> dict[str, object]:
+        """Persist one safe configuration patch and queue generation application."""
+        if not request_id:
+            raise service_error("validation_error", "Request ID is required.", status=422)
+        if client_id is not None:
+            self._require_client(client_id)
+        if self.state in {"draining", "stopped"}:
+            raise service_error("admission_closed", "The local service is stopping.")
+        fingerprint = json.dumps([client_id, "patch", expected_revision, fields], sort_keys=True)
+        async with self._config_lock:
+            existing = self._configuration_request_result(request_id, fingerprint)
+            if existing is not None:
+                return existing
+            try:
+                result = self._config_loader.patch_editable_fields(expected_revision, fields)
+            except ConfigRevisionConflict as error:
+                raise service_error(
+                    "config_revision_conflict",
+                    error.error.message,
+                    status=409,
+                    retryable=True,
+                ) from error
+            except ConfigFieldError as error:
+                raise service_error(
+                    error.error.code,
+                    error.error.message,
+                    status=422,
+                    field_errors=error.field_errors,
+                ) from error
+            except ConfigError as error:
+                raise service_error(
+                    error.error.code, "The complete User Configuration is invalid.", status=422
+                ) from error
+            except OSError as error:
+                raise service_error(
+                    "persistence_error",
+                    "User Configuration could not be written.",
+                    status=500,
+                    retryable=True,
+                ) from error
+
+            self._config_saved_configuration = result.configuration
+            self._config_saved_revision = result.revision
+            self._config_fields = {
+                section: dict(values) for section, values in result.fields.items()
+            }
+            self._config_pending_revision = (
+                None if result.revision == self._config_active_revision else result.revision
+            )
+            self._config_status = "active" if self._config_pending_revision is None else "pending"
+            self._config_error = None
+            self._config_waiting_for = tuple(self._workspaces)
+            self._configuration_transition_active = self._config_status == "pending"
+            response = self._config_response()
+            self._config_request_results[request_id] = response
+            self._config_request_fingerprints[request_id] = fingerprint
+            if len(self._config_request_results) > 256:
+                oldest = next(iter(self._config_request_results))
+                self._config_request_results.pop(oldest, None)
+                self._config_request_fingerprints.pop(oldest, None)
+            if self._config_pending_revision is not None and (
+                self._config_apply_task is None or self._config_apply_task.done()
+            ):
+                self._config_apply_task = asyncio.create_task(self._apply_configuration_loop())
+                self._config_apply_task.add_done_callback(_consume_task_result)
+        await self._reconcile_schedule_admission()
+        await self._emit_configuration_event()
+        return response
+
+    async def retry_configuration(
+        self, request_id: str, revision: str, *, client_id: str | None = None
+    ) -> dict[str, object]:
+        """Retry the latest saved candidate after a failed generation application."""
+        if not request_id:
+            raise service_error("validation_error", "Request ID is required.", status=422)
+        if client_id is not None:
+            self._require_client(client_id)
+        if self.state in {"draining", "stopped"}:
+            raise service_error("admission_closed", "The local service is stopping.")
+        fingerprint = json.dumps([client_id, "retry", revision])
+        async with self._config_lock:
+            existing = self._configuration_request_result(request_id, fingerprint)
+            if existing is not None:
+                return existing
+            self.config_view()
+            if revision != self._config_saved_revision:
+                raise service_error(
+                    "config_revision_conflict",
+                    "The saved User Configuration revision is no longer current.",
+                    status=409,
+                    retryable=True,
+                )
+            if self._config_saved_configuration is None:
+                raise service_error(
+                    "config_invalid", "User Configuration is unavailable.", status=422
+                )
+            try:
+                self._config_loader.editable_snapshot().require_valid_candidate()
+            except ConfigError as error:
+                raise service_error(
+                    "config_invalid", "The complete User Configuration is invalid.", status=422
+                ) from error
+            self._config_status = "pending"
+            self._config_pending_revision = revision
+            self._config_error = None
+            self._configuration_transition_active = True
+            self._config_waiting_for = tuple(self._workspaces)
+            response = self._config_response()
+            self._config_request_results[request_id] = response
+            self._config_request_fingerprints[request_id] = fingerprint
+            if len(self._config_request_results) > 256:
+                oldest = next(iter(self._config_request_results))
+                self._config_request_results.pop(oldest, None)
+                self._config_request_fingerprints.pop(oldest, None)
+            if self._config_apply_task is None or self._config_apply_task.done():
+                self._config_apply_task = asyncio.create_task(self._apply_configuration_loop())
+                self._config_apply_task.add_done_callback(_consume_task_result)
+        await self._reconcile_schedule_admission()
+        await self._emit_configuration_event()
+        return response
+
+    async def persist_reasoning_effort(self, effort: ReasoningEffort) -> None:
+        """Persist the legacy chat-effort control through the global config revision."""
+        async with self._config_lock:
+            was_pending = self._configuration_transition_active or self._config_status in {
+                "pending",
+                "failed-to-apply",
+            }
+            self._config_loader.update_reasoning_effort(effort)
+            snapshot = self._config_loader.editable_snapshot()
+            saved = snapshot.configuration
+            if self.configuration is not None:
+                active_routes = {
+                    name: replace(route, reasoning_effort=effort)
+                    if name in {"default", "chat"}
+                    else route
+                    for name, route in self.configuration.models.routes.items()
+                }
+                effort_only_configuration = replace(
+                    self.configuration,
+                    models=replace(
+                        self.configuration.models, routes=MappingProxyType(active_routes)
+                    ),
+                )
+                was_pending = was_pending or saved != effort_only_configuration
+            self._config_saved_configuration = saved
+            self._config_saved_revision = snapshot.revision
+            self._config_fields = {
+                section: dict(values) for section, values in snapshot.fields.items()
+            }
+            try:
+                snapshot.require_valid_candidate()
+            except ConfigError:
+                candidate_valid = False
+            else:
+                candidate_valid = True
+            if not candidate_valid:
+                self._config_status = "failed-to-apply"
+                self._config_pending_revision = snapshot.revision
+                self._config_error = {
+                    "code": "config_invalid",
+                    "message": "The saved User Configuration contains invalid fields.",
+                }
+                self._configuration_transition_active = False
+            elif not was_pending:
+                self._config_status = "active"
+                self._config_pending_revision = None
+                self._configuration_transition_active = False
+            else:
+                self._config_status = "pending"
+                self._config_pending_revision = self._config_saved_revision
+                self._config_waiting_for = tuple(self._workspaces)
+                self._configuration_transition_active = True
+                if self._config_apply_task is None or self._config_apply_task.done():
+                    self._config_apply_task = asyncio.create_task(self._apply_configuration_loop())
+                    self._config_apply_task.add_done_callback(_consume_task_result)
+            if self._config_status == "active":
+                self._config_active_revision = self._config_saved_revision
+        await self._reconcile_schedule_admission()
+        await self._emit_configuration_event()
+
+    async def _apply_configuration_loop(self) -> None:
+        current_task = asyncio.current_task()
+        try:
+            while True:
+                async with self._config_lock:
+                    target = self._config_saved_configuration
+                    target_revision = self._config_saved_revision
+                    active_revision = self._config_active_revision
+                if target is None or target_revision is None or target_revision == active_revision:
+                    async with self._config_lock:
+                        self._config_status = "active"
+                        self._config_pending_revision = None
+                        self._configuration_transition_active = False
+                        self._config_waiting_for = ()
+                    await self._reconcile_schedule_admission()
+                    await self._emit_configuration_event()
+                    if self._config_status == "pending":
+                        continue
+                    return
+
+                workspaces = tuple(self._workspaces.values())
+                prepared: list[tuple[WorkspaceServiceRuntime, _PreparedWorkspaceGeneration]] = []
+                committed = False
+                try:
+                    snapshot = self._config_loader.editable_snapshot()
+                    if snapshot.revision != target_revision:
+                        self.config_view()
+                        continue
+                    snapshot.require_valid_candidate()
+                    for workspace in workspaces:
+                        prepared.append((workspace, await workspace.prepare_configuration(target)))
+                    async with self._config_lock:
+                        self.config_view()
+                        if (
+                            target_revision != self._config_saved_revision
+                            or workspaces != tuple(self._workspaces.values())
+                            or not all(
+                                workspace.prepared_configuration_is_current(candidate)
+                                for workspace, candidate in prepared
+                            )
+                        ):
+                            latest = True
+                        else:
+                            latest = False
+                            if self.state in {"draining", "stopped"}:
+                                raise asyncio.CancelledError
+                            for _workspace, candidate in prepared:
+                                candidate.schedule_jobs = (
+                                    candidate.runtime.schedule_service.prepare_generation_state(
+                                        candidate.previous.schedule_service,
+                                        schedule=candidate.schedule,
+                                    )
+                                )
+                            WorkspaceRuntime.publish_replacements(
+                                tuple(
+                                    (candidate.previous, candidate.runtime)
+                                    for _, candidate in prepared
+                                )
+                            )
+                            retired = [
+                                (workspace, workspace.activate_configuration(candidate))
+                                for workspace, candidate in prepared
+                            ]
+                            committed = True
+                            self.configuration = target
+                            for client in self._clients.values():
+                                client.permission_control.reconfigure(
+                                    target.runtime.permission_level
+                                )
+                            self._config_active_revision = target_revision
+                            self._config_status = "active"
+                            self._config_pending_revision = None
+                            self._config_error = None
+                            self._config_waiting_for = ()
+                    if latest:
+                        for workspace, candidate in prepared:
+                            await workspace.discard_prepared_configuration(candidate)
+                        continue
+                    # Cleanup cannot roll back the already published generation.
+                    for workspace, generation in retired:
+                        try:
+                            await workspace.retire_configuration(generation)
+                        except Exception:
+                            # Retain ownership for a later cleanup attempt and service stop.
+                            pass
+                    async with self._config_lock:
+                        if target_revision != self._config_saved_revision:
+                            continue
+                        self._configuration_transition_active = False
+                    await self._reconcile_schedule_admission()
+                    await self._emit_configuration_event()
+                    if self._config_status == "pending":
+                        continue
+                    return
+                except BaseException as error:
+                    if not committed:
+                        await asyncio.gather(
+                            *(
+                                workspace.discard_prepared_configuration(candidate)
+                                for workspace, candidate in prepared
+                            ),
+                            return_exceptions=True,
+                        )
+                    if isinstance(error, asyncio.CancelledError):
+                        raise
+                    async with self._config_lock:
+                        if (
+                            target_revision != self._config_saved_revision
+                            or workspaces != tuple(self._workspaces.values())
+                            or any(workspace._closed for workspace in workspaces)
+                        ):
+                            continue
+                        self._config_status = "failed-to-apply"
+                        self._config_pending_revision = target_revision
+                        self._config_waiting_for = tuple(self._workspaces)
+                        self._config_error = {
+                            "code": "runtime_generation_failed",
+                            "message": "The saved configuration could not be applied.",
+                        }
+                        self._configuration_transition_active = False
+                    await self._reconcile_schedule_admission()
+                    await self._emit_configuration_event()
+                    if self._config_status == "pending":
+                        continue
+                    return
+        finally:
+            if self._config_apply_task is current_task:
+                self._config_apply_task = None
+
+    async def _emit_configuration_event(self) -> None:
+        if self._config_saved_revision is None:
+            return
+        application = cast(dict[str, object], self._config_response()["application"])
+        await self.emit(
+            "config.application",
+            workspace_id=None,
+            session_id=None,
+            run_id=None,
+            payload=application,
+            target_client_ids=tuple(self._clients),
+        )
 
     def client(self, client_id: str) -> ClientState:
         return self._require_client(client_id)
@@ -2104,7 +2840,11 @@ class LocalService:
         return True
 
     def _schedule_admission_open(self) -> bool:
-        return self.state == "ready" and any(client.connected for client in self._clients.values())
+        return (
+            self.state == "ready"
+            and not self._configuration_transition_active
+            and any(client.connected for client in self._clients.values())
+        )
 
     async def _reconcile_schedule_admission(self) -> None:
         """Apply the single service-wide Schedule admission gate to every Workspace."""
@@ -3447,6 +4187,10 @@ class LocalService:
             return
         self.state = "draining"
         errors: list[Exception] = []
+        config_task = self._config_apply_task
+        if config_task is not None and config_task is not asyncio.current_task():
+            config_task.cancel()
+            await asyncio.gather(config_task, return_exceptions=True)
         if self._global_reconnect_task is not None:
             self._global_reconnect_task.cancel()
         await self._reconcile_schedule_admission()

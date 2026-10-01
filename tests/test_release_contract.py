@@ -577,7 +577,11 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
         node.name
         for node in message_bus.body
         if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
-    } == {"set_inbound_changed_callback", "unbind_inbound_changed_callback"}
+    } == {
+        "has_pending_input",
+        "set_inbound_changed_callback",
+        "unbind_inbound_changed_callback",
+    }
 
     memory_manager = _source_class(
         _source_ast(ROOT / "myclaw" / "agent" / "memory" / "manager.py"),
@@ -609,6 +613,7 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
         "wait_until_idle",
         "abort",
         "abort_and_wait",
+        "is_running",
     }
 
     schedule_tree = _source_ast(ROOT / "myclaw" / "schedule" / "service.py")

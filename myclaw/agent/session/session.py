@@ -266,6 +266,21 @@ class Session:
     def updated_at(self) -> datetime:
         return self._updated_at
 
+    def clone(self) -> Self:
+        """Return an unpublished in-memory copy with the same durable identity."""
+        self._ensure_not_abandoned()
+        return self._from_state(
+            workspace_state=self._workspace_state,
+            session_id=self._session_id,
+            created_at=self._created_at,
+            updated_at=self._updated_at,
+            messages=copy.deepcopy(self.messages),
+            metadata=copy.deepcopy(self.metadata),
+            last_compacted=self.last_compacted,
+            partition=self._storage_partition,
+            now=self._now,
+        )
+
     @property
     def metadata_version(self) -> int:
         """Return the durable optimistic-concurrency version for Session metadata."""
@@ -594,6 +609,23 @@ class Session:
             pending.add_done_callback(self._persist_task_finished)
         except Exception:
             return
+
+    async def persist_pending_automatic_title(self) -> None:
+        """Save an unsaved automatic title without changing the last Run timestamp."""
+        await self.wait_for_pending_persist()
+        if self._closed or not self.messages or self.has_manual_title or self.metadata_version == 0:
+            return
+        try:
+            persisted = self.load(
+                self._workspace_state,
+                self._session_id,
+                partition=self._storage_partition,
+            )
+        except FileNotFoundError:
+            persisted = None
+        if persisted is not None and persisted.metadata_version >= self.metadata_version:
+            return
+        self._write_content(self._serialized_state())
 
     async def wait_for_pending_persist(self) -> None:
         """Wait for every already-scheduled ordered snapshot without starting a new save."""

@@ -38,7 +38,11 @@ from myclaw.agent.message_bus import (
     OutboundMessage,
     OutboundMessageType,
 )
-from myclaw.agent.permission import PermissionSnapshot, RuntimePermissionControl
+from myclaw.agent.permission import (
+    PermissionSnapshot,
+    RuntimePermissionControl,
+    ToolPermissionLevel,
+)
 from myclaw.agent.run_errors import CommittableAgentRunError
 from myclaw.agent.runner import (
     AgentRunner,
@@ -223,6 +227,7 @@ class AgentLoop:
         monotonic_now: Callable[[], float],
         exec_host: ExecHost,
         permission_control: RuntimePermissionControl,
+        configured_schedule_level: ToolPermissionLevel | None = None,
         mcp_tools: Sequence[BaseTool] = (),
         mcp_keywords: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
@@ -253,7 +258,11 @@ class AgentLoop:
             exec_host=exec_host,
             permission_context=PermissionContext(
                 workspace_root=workspace_path,
-                configured_schedule_level=permission_control.configured(),
+                configured_schedule_level=(
+                    permission_control.configured()
+                    if configured_schedule_level is None
+                    else configured_schedule_level
+                ),
             ),
         )
         selected_mcp_keywords = {} if mcp_keywords is None else dict(mcp_keywords)
@@ -317,6 +326,14 @@ class AgentLoop:
         self._preflight_error: Exception | None = None
         self._session_closed = False
         self._session_abandoned = False
+
+    @classmethod
+    def with_session(cls, session: Session, **kwargs: Any) -> AgentLoop:
+        """Compose a generation around an already detached Session state."""
+        kwargs.pop("session_id", None)
+        loop = cls(session_id=None, **kwargs)
+        loop._session = session
+        return loop
 
     @property
     def control(self) -> TerminalAgentLoopControl:
@@ -389,6 +406,10 @@ class AgentLoop:
             await self._session.wait_for_pending_persist()
             if not any(not work.task.done() for work in self._title_work.values()):
                 return
+
+    @property
+    def has_pending_title(self) -> bool:
+        return any(not work.task.done() for work in self._title_work.values())
 
     def project_foreground_conversation(self) -> ForegroundConversationProjection:
         """Return presentation data without exposing the owned Session."""

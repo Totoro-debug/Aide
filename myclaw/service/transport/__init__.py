@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import WSMsgType, web
 
+from ...config.config import ConfigError
 from ...schedule.model import ScheduleJob
 from ..discovery import identity_proof
 from ..errors import ServiceError, service_error
@@ -124,6 +125,9 @@ class LocalServiceTransport:
         app.router.add_get(f"{_API_PREFIX}/web/session", self._web_session_info)
         app.router.add_get(f"{_API_PREFIX}/service/identity", self._service_identity)
         app.router.add_get(f"{_API_PREFIX}/service", self._service_info)
+        app.router.add_get(f"{_API_PREFIX}/config", self._config)
+        app.router.add_patch(f"{_API_PREFIX}/config", self._patch_config)
+        app.router.add_post(f"{_API_PREFIX}/config/retry", self._retry_config)
         app.router.add_post(f"{_API_PREFIX}/clients", self._register_client)
         app.router.add_post(f"{_API_PREFIX}/workspaces/attach", self._attach_workspace)
         app.router.add_get(f"{_API_PREFIX}/projects", self._list_projects)
@@ -238,6 +242,9 @@ class LocalServiceTransport:
         except ServiceError as error:
             request_id = _request_id_from_request(request)
             return web.json_response(error.to_dict(request_id), status=error.status)
+        except ConfigError:
+            failure = service_error("config_invalid", "User Configuration is invalid.", status=422)
+            return web.json_response(failure.to_dict(_request_id_from_request(request)), status=422)
         except web.HTTPException:
             raise
         except (OSError, ValueError, TypeError):
@@ -378,6 +385,60 @@ class LocalServiceTransport:
                 "active_workspace_count": len(self.service.workspaces),
             }
         )
+
+    async def _config(self, request: web.Request) -> web.Response:
+        self._authenticate(request, client_required=True)
+        return web.json_response(self.service.config_view())
+
+    async def _patch_config(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        body = await _json_object(request)
+        if set(body) != {"request_id", "revision", "fields"}:
+            raise service_error(
+                "validation_error", "Configuration request fields are invalid.", status=422
+            )
+        request_id = _require_request_id(body)
+        revision = body.get("revision")
+        fields = body.get("fields")
+        if not isinstance(revision, str) or not revision:
+            raise service_error(
+                "validation_error",
+                "Configuration revision is required.",
+                status=422,
+                field_errors={"revision": "must be a nonempty string"},
+            )
+        if not isinstance(fields, Mapping):
+            raise service_error(
+                "validation_error",
+                "Configuration fields must be an object.",
+                status=422,
+                field_errors={"fields": "must be an object"},
+            )
+        result = await self.service.update_configuration(
+            request_id, revision, fields, client_id=context.client_id
+        )
+        return web.json_response({"request_id": request_id, **result})
+
+    async def _retry_config(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        body = await _json_object(request)
+        if set(body) != {"request_id", "revision"}:
+            raise service_error(
+                "validation_error", "Configuration retry fields are invalid.", status=422
+            )
+        request_id = _require_request_id(body)
+        revision = body.get("revision")
+        if not isinstance(revision, str) or not revision:
+            raise service_error(
+                "validation_error",
+                "Configuration revision is required.",
+                status=422,
+                field_errors={"revision": "must be a nonempty string"},
+            )
+        result = await self.service.retry_configuration(
+            request_id, revision, client_id=context.client_id
+        )
+        return web.json_response({"request_id": request_id, **result})
 
     async def _service_identity(self, request: web.Request) -> web.Response:
         self._check_host_origin(request, websocket=False)

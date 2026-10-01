@@ -191,6 +191,10 @@ class Dream:
             return
         await asyncio.shield(task)
 
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
     def abort(self) -> None:
         if self._aborted:
             return

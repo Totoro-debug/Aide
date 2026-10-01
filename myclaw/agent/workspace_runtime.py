@@ -243,76 +243,7 @@ class WorkspaceRuntime:
                     except Exception as error:
                         raise WorkspaceRuntimeRestoreError from error
 
-                manager = cast(
-                    MCPRuntimeManager,
-                    self._factories.mcp_runtime(
-                        self.workspace_path,
-                        built_in_names=self._built_in_names,
-                    ),
-                )
-                self._mcp_manager = manager
-                startup_report = await manager.start(self.configuration.mcp)
-                self._mcp_startup_report = startup_report
-                self._mcp_snapshot = startup_report.snapshot
-                if after_mcp_start is not None:
-                    after_mcp_start()
-
-                router = cast(
-                    ModelRouter,
-                    self._factories.router(
-                        configuration=self.configuration,
-                        provider_factory=self._provider_factory,
-                    ),
-                )
-                self._router = router
-                keyword_preparer = cast(
-                    MCPKeywordPreparer,
-                    self._factories.mcp_keyword_preparer(
-                        model_router=router,
-                        config_loader=ConfigLoader(self.agent_home),
-                    ),
-                )
-                self._mcp_keyword_preparer = keyword_preparer
-                self._mcp_keywords = await keyword_preparer.prepare(
-                    self._mcp_snapshot,
-                    self.configuration.mcp,
-                )
-
-                memory_manager = cast(
-                    MemoryManager,
-                    self._factories.memory_manager(state),
-                )
-                self._memory_manager = memory_manager
-                dream = cast(
-                    Dream,
-                    self._factories.dream(
-                        memory_manager=memory_manager,
-                        model_router=router,
-                        batch_size=self.configuration.memory.batch_size,
-                        memory_route_status=router.route_status("memory"),
-                    ),
-                )
-                self._dream = dream
-
-                schedule = cast(
-                    ScheduleService,
-                    self._factories.schedule_service(
-                        workspace_state=state,
-                        clock=(
-                            AsyncioSchedulerClock(now=self._now)
-                            if self._schedule_clock is None
-                            else self._schedule_clock
-                        ),
-                        execute_user_job=self._execute_user_job,
-                        execute_user_occurrence=self._execute_user_occurrence,
-                        permission_snapshot_factory=self._capture_schedule_permission_snapshot,
-                        cancel_confirmation_owner=self._cancel_confirmation_owner,
-                        execute_dream=dream.run,
-                        timezone_name=self._timezone_name,
-                    ),
-                )
-                self._schedule_service = schedule
-                self._started = True
+                await self._start_resources(after_mcp_start=after_mcp_start)
                 return self
             except BaseException as error:
                 cleanup_errors = await self._close_owned_resources()
@@ -320,6 +251,136 @@ class WorkspaceRuntime:
                 if cleanup_errors:
                     raise error from _cleanup_exception(cleanup_errors)
                 raise
+
+    async def _start_resources(self, *, after_mcp_start: Callable[[], None] | None = None) -> None:
+        """Start generation-owned resources against an already selected Workspace state."""
+        state = self.workspace_state
+        manager = cast(
+            MCPRuntimeManager,
+            self._factories.mcp_runtime(
+                self.workspace_path,
+                built_in_names=self._built_in_names,
+            ),
+        )
+        self._mcp_manager = manager
+        startup_report = await manager.start(self.configuration.mcp)
+        self._mcp_startup_report = startup_report
+        self._mcp_snapshot = startup_report.snapshot
+        if after_mcp_start is not None:
+            after_mcp_start()
+
+        router = cast(
+            ModelRouter,
+            self._factories.router(
+                configuration=self.configuration,
+                provider_factory=self._provider_factory,
+            ),
+        )
+        self._router = router
+        keyword_preparer = cast(
+            MCPKeywordPreparer,
+            self._factories.mcp_keyword_preparer(
+                model_router=router,
+                config_loader=ConfigLoader(self.agent_home),
+            ),
+        )
+        self._mcp_keyword_preparer = keyword_preparer
+        self._mcp_keywords = await keyword_preparer.prepare(
+            self._mcp_snapshot,
+            self.configuration.mcp,
+        )
+
+        memory_manager = cast(MemoryManager, self._factories.memory_manager(state))
+        self._memory_manager = memory_manager
+        dream = cast(
+            Dream,
+            self._factories.dream(
+                memory_manager=memory_manager,
+                model_router=router,
+                batch_size=self.configuration.memory.batch_size,
+                memory_route_status=router.route_status("memory"),
+            ),
+        )
+        self._dream = dream
+
+        schedule = cast(
+            ScheduleService,
+            self._factories.schedule_service(
+                workspace_state=state,
+                clock=(
+                    AsyncioSchedulerClock(now=self._now)
+                    if self._schedule_clock is None
+                    else self._schedule_clock
+                ),
+                execute_user_job=self._execute_user_job,
+                execute_user_occurrence=self._execute_user_occurrence,
+                permission_snapshot_factory=self._capture_schedule_permission_snapshot,
+                cancel_confirmation_owner=self._cancel_confirmation_owner,
+                execute_dream=dream.run,
+                timezone_name=self._timezone_name,
+            ),
+        )
+        self._schedule_service = schedule
+        self._started = True
+
+    def create_replacement(self, configuration: UserConfiguration) -> Self:
+        """Build an unregistered Runtime generation sharing this Workspace state."""
+        from myclaw.agent.tools.core.exec_host import resolve_exec_shell
+
+        return type(self)(
+            workspace_path=self.workspace_path,
+            agent_home=self.agent_home,
+            configuration=configuration,
+            execute_user_job=self._execute_user_job,
+            execute_user_occurrence=self._execute_user_occurrence,
+            cancel_confirmation_owner=self._cancel_confirmation_owner,
+            configured_schedule_level=configuration.runtime.permission_level,
+            resolved_exec_shell=resolve_exec_shell(configuration.runtime.exec_shell),
+            now=self._now,
+            timezone_name=self._timezone_name,
+            provider_factory=self._provider_factory,
+            built_in_names=self._built_in_names,
+            schedule_clock=self._schedule_clock,
+            factories=self._factories,
+        )
+
+    async def start_replacement(self, previous: WorkspaceRuntime) -> Self:
+        """Start a replacement without reinitializing Workspace state or registry ownership."""
+        if previous.workspace_path != self.workspace_path:
+            raise WorkspaceRuntimeError("Workspace Runtime replacement path does not match")
+        async with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("Workspace Runtime is closed")
+            if self._started:
+                return self
+            self._workspace_state = previous.workspace_state
+            self._restore_result = previous.startup_restore_result
+            try:
+                await self._start_resources()
+            except BaseException as error:
+                cleanup_errors = await self._close_owned_resources()
+                self._mark_closed()
+                if cleanup_errors:
+                    raise error from _cleanup_exception(cleanup_errors)
+                raise
+            return self
+
+    def publish_replacement(self, previous: WorkspaceRuntime) -> None:
+        """Publish this prepared generation as the process-local Workspace owner."""
+        self.publish_replacements(((previous, self),))
+
+    @classmethod
+    def publish_replacements(
+        cls, replacements: tuple[tuple[WorkspaceRuntime, WorkspaceRuntime], ...]
+    ) -> None:
+        """Validate all owners before publishing any generation."""
+        with cls._registry_lock:
+            for previous, candidate in replacements:
+                key = _workspace_key(candidate.workspace_path)
+                if cls._registry.get(key) is not previous or previous._closed or candidate._closed:
+                    raise WorkspaceRuntimeError("Workspace Runtime replacement owner is stale")
+            for _previous, candidate in replacements:
+                cls._registry[_workspace_key(candidate.workspace_path)] = candidate
 
     async def prepare_schedule(self, schedule: JobSchedule) -> None:
         """Prepare the single Schedule dispatcher and register Dream once."""
@@ -336,6 +397,11 @@ class WorkspaceRuntime:
             schedule_service._prepare_start()
             await schedule_service.register_dream_job(schedule=schedule)
             self._schedule_prepared = True
+
+    def prepare_replacement_schedule(self) -> None:
+        """Preflight a replacement dispatcher without changing persistent Job state."""
+        self.schedule_service._prepare_start()
+        self._schedule_prepared = True
 
     async def prepare_mcp_generation(
         self,

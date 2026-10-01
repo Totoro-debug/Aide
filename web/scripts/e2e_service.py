@@ -25,6 +25,8 @@ from myclaw.service.client import ServiceClient
 from myclaw.service.discovery import discovery_path
 
 CONFIRMATION_PATH: str | None = None
+SETTINGS_ENTERED = asyncio.Event()
+SETTINGS_RELEASE = asyncio.Event()
 
 
 def _config(base_url: str) -> str:
@@ -103,6 +105,9 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
     request_id = f"fixture-{uuid4()}"
     chunks: list[dict[str, object]] = []
     normalized_prompt = user_prompt.lower()
+    if "settings generation barrier" in normalized_prompt and isinstance(body.get("tools"), list):
+        SETTINGS_ENTERED.set()
+        await SETTINGS_RELEASE.wait()
     tool_states_request = "tool states" in normalized_prompt
     has_confirmation_result = any(
         index > last_user_index
@@ -501,6 +506,26 @@ async def _run_e2e(provider_base_url: str) -> None:
                 command = await asyncio.to_thread(sys.stdin.readline)
                 if not command or command.strip() == "stop":
                     break
+                if command.strip() == "settings-arm":
+                    SETTINGS_ENTERED.clear()
+                    SETTINGS_RELEASE.clear()
+                    print(json.dumps({"armed": True}), flush=True)
+                    continue
+                if command.strip() == "settings-wait":
+                    await asyncio.wait_for(SETTINGS_ENTERED.wait(), timeout=15)
+                    print(json.dumps({"holding": True}), flush=True)
+                    continue
+                if command.strip() == "settings-hold":
+                    SETTINGS_ENTERED.clear()
+                    SETTINGS_RELEASE.clear()
+                    await client.submit_input("settings generation barrier")
+                    await asyncio.wait_for(SETTINGS_ENTERED.wait(), timeout=15)
+                    print(json.dumps({"holding": True, "pid": client.discovery.pid}), flush=True)
+                    continue
+                if command.strip() == "settings-release":
+                    SETTINGS_RELEASE.set()
+                    print(json.dumps({"released": True, "pid": client.discovery.pid}), flush=True)
+                    continue
                 if command.strip() != "restart":
                     continue
                 await project_client.close()

@@ -359,6 +359,7 @@ def test_agent_loop_constructor_is_the_generation_composition_boundary() -> None
         "monotonic_now",
         "exec_host",
         "permission_control",
+        "configured_schedule_level",
         "mcp_tools",
         "mcp_keywords",
     )

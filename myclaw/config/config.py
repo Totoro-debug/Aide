@@ -4,6 +4,7 @@ import re
 import tomllib
 from collections.abc import Callable, Mapping, MutableMapping, MutableSequence, Sequence
 from dataclasses import dataclass, field
+from hashlib import sha256
 from math import isfinite
 from pathlib import Path
 from types import MappingProxyType
@@ -322,12 +323,57 @@ class ConfigView:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ConfigEditableSnapshot:
+    """Safe Runtime and Memory values exposed to an authenticated editor."""
+
+    revision: str
+    fields: Mapping[str, Mapping[str, object]]
+    configuration: UserConfiguration
+    diagnostics: tuple[ConfigurationDiagnosticValue, ...] = ()
+
+    def require_valid_candidate(self) -> None:
+        """Reject startup fallbacks when publishing a runtime generation."""
+        _require_complete_candidate(self.configuration, self.diagnostics)
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigEditResult:
+    """The validated result of one compare-and-swap configuration edit."""
+
+    revision: str
+    fields: Mapping[str, Mapping[str, object]]
+    configuration: UserConfiguration
+
+
 class ConfigError(Exception):
     """A safe User Configuration error suitable for a CLI or Management view."""
 
     def __init__(self, error: ErrorInfo) -> None:
         self.error = error
         super().__init__(error.message)
+
+
+class ConfigRevisionConflict(ConfigError):
+    """Raised when a configuration edit was based on an older file revision."""
+
+    def __init__(self, expected_revision: str, current_revision: str) -> None:
+        self.expected_revision = expected_revision
+        self.current_revision = current_revision
+        super().__init__(
+            ErrorInfo(
+                "config_invalid",
+                "User Configuration changed before this edit was applied.",
+            )
+        )
+
+
+class ConfigFieldError(ConfigError):
+    """A validation failure for a known editable field without its supplied value."""
+
+    def __init__(self, field_name: str, rule: str) -> None:
+        self.field_errors = {field_name: rule}
+        super().__init__(ErrorInfo("config_invalid", "Review the highlighted settings."))
 
 
 def _invalid(field: str, rule: str) -> NoReturn:
@@ -1034,6 +1080,100 @@ def _parse_configuration(
     )
 
 
+def _configuration_revision(content: bytes) -> str:
+    return f"sha256:{sha256(content).hexdigest()}"
+
+
+def _editable_configuration_fields(
+    configuration: UserConfiguration,
+) -> Mapping[str, Mapping[str, object]]:
+    return {
+        "runtime": {
+            "max_tool_result_chars": configuration.runtime.max_tool_result_chars,
+            "max_iterations": configuration.runtime.max_iterations,
+            "enable_skill_always_load": configuration.runtime.enable_skill_always_load,
+            "compact_ratio": configuration.runtime.compact_ratio,
+            "permission_level": configuration.runtime.permission_level,
+            "exec_shell": configuration.runtime.exec_shell,
+        },
+        "memory": {
+            "batch_size": configuration.memory.batch_size,
+            "schedule": configuration.memory.schedule,
+        },
+    }
+
+
+def _editable_field_value(section: str, field: str, value: object) -> object:
+    name = f"{section}.{field}"
+    if section == "runtime":
+        if field == "max_tool_result_chars":
+            if _parse_default_integer(value, 1000, 1_000_000) is None:
+                raise ConfigFieldError(name, "must be an integer from 1000 to 1000000")
+            return value
+        if field == "max_iterations":
+            if _parse_default_integer(value, 50, None) is None:
+                raise ConfigFieldError(name, "must be an integer at least 50")
+            return value
+        if field == "enable_skill_always_load":
+            if _parse_default_boolean(value) is None:
+                raise ConfigFieldError(name, "must be a boolean")
+            return value
+        if field == "compact_ratio":
+            parsed = _parse_default_compact_ratio(value)
+            if parsed is None:
+                raise ConfigFieldError(name, "must be a number from 0.5 to 0.95")
+            return parsed
+        if field == "permission_level":
+            if _parse_default_permission_level(value) is None:
+                raise ConfigFieldError(name, "must be read-only, workspace-write, or full-access")
+            return value
+        if field == "exec_shell":
+            if _parse_default_exec_shell(value) is None:
+                raise ConfigFieldError(name, "must be auto, powershell, or pwsh")
+            return value
+    elif section == "memory":
+        if field == "batch_size":
+            if _parse_default_integer(value, 1, 1000) is None:
+                raise ConfigFieldError(name, "must be an integer from 1 to 1000")
+            return value
+        if field == "schedule":
+            if _parse_default_schedule(value) is None:
+                raise ConfigFieldError(name, "must be a valid five-field cron expression")
+            return value
+    _invalid("config.fields", "contains a field that is not editable")
+
+
+def _validate_editable_fields(fields: Mapping[str, object]) -> dict[str, dict[str, object]]:
+    if not isinstance(fields, Mapping):
+        _invalid("config.fields", "must be a table")
+    normalized: dict[str, dict[str, object]] = {}
+    for section, raw_values in fields.items():
+        if section not in {"runtime", "memory"}:
+            _invalid("config.fields", "contains a section that is not editable")
+        if not isinstance(raw_values, Mapping):
+            _invalid(f"config.fields.{section}", "must be a table")
+        section_values: dict[str, object] = {}
+        for field_name, value in raw_values.items():
+            if not isinstance(field_name, str):
+                _invalid(f"config.fields.{section}", "contains an invalid field name")
+            section_values[field_name] = _editable_field_value(section, field_name, value)
+        normalized[section] = section_values
+    return normalized
+
+
+def _require_complete_candidate(
+    configuration: UserConfiguration,
+    diagnostics: tuple[ConfigurationDiagnosticValue, ...] | list[ConfigurationDiagnosticValue],
+) -> None:
+    if "default" not in configuration.models.routes:
+        raise _missing_default_route_error()
+    configuration.resolve_route("chat")
+    if diagnostics:
+        raise ConfigError(
+            ErrorInfo("config_invalid", "The complete User Configuration contains invalid fields.")
+        )
+
+
 class ConfigLoader:
     """Access User Configuration beneath an injected fixed Agent Home."""
 
@@ -1055,6 +1195,103 @@ class ConfigLoader:
         self._diagnostics = ()
         self.agent_home.initialize()
         return HOST_FILESYSTEM.atomic_create_text(self.path, DEFAULT_CONFIG_TEMPLATE)
+
+    @staticmethod
+    def revision_from_bytes(content: bytes) -> str:
+        """Return the opaque revision used by compare-and-swap edits."""
+        return _configuration_revision(content)
+
+    def revision(self) -> str:
+        """Return the current raw-file revision without exposing its contents."""
+        return _configuration_revision(self.path.read_bytes())
+
+    def editable_snapshot(self) -> ConfigEditableSnapshot:
+        """Read the safe Runtime and Memory projection for a Web editor."""
+        try:
+            content = self.path.read_bytes()
+            document = _table(tomllib.loads(content.decode("utf-8")), "configuration")
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+            if isinstance(error, OSError):
+                raise
+            raise ConfigError(
+                ErrorInfo(
+                    "config_parse_error",
+                    "User Configuration TOML could not be parsed.",
+                )
+            ) from error
+        diagnostics: list[ConfigurationDiagnosticValue] = []
+        configuration = _parse_configuration(document, diagnostics=diagnostics)
+        self._diagnostics = tuple(diagnostics)
+        return ConfigEditableSnapshot(
+            revision=_configuration_revision(content),
+            fields=_editable_configuration_fields(configuration),
+            configuration=configuration,
+            diagnostics=tuple(diagnostics),
+        )
+
+    def patch_editable_fields(
+        self,
+        expected_revision: str,
+        fields: Mapping[str, object],
+    ) -> ConfigEditResult:
+        """Atomically apply safe fields when the caller still has the latest revision."""
+        if not isinstance(expected_revision, str) or not expected_revision:
+            _invalid("config.revision", "must be a nonempty string")
+        normalized = _validate_editable_fields(fields)
+        lock_path = self.path.with_name(f".{self.path.name}.lock")
+        with HOST_FILESYSTEM.exclusive_lock(lock_path):
+            original_content = self.path.read_bytes()
+            current_revision = _configuration_revision(original_content)
+            if current_revision != expected_revision:
+                raise ConfigRevisionConflict(expected_revision, current_revision)
+            try:
+                source_document = tomlkit.parse(original_content.decode("utf-8"))
+            except (tomlkit.exceptions.ParseError, UnicodeDecodeError) as error:
+                raise ConfigError(
+                    ErrorInfo(
+                        "config_parse_error",
+                        "User Configuration TOML could not be parsed.",
+                    )
+                ) from error
+
+            for section, section_values in normalized.items():
+                table = source_document.get(section)
+                if table is None:
+                    table = tomlkit.table()
+                    source_document[section] = table
+                if not isinstance(table, MutableMapping):
+                    _invalid(section, "must be a table")
+                for field_name, value in section_values.items():
+                    table[field_name] = value
+
+            candidate_content = tomlkit.dumps(source_document)
+            try:
+                candidate = tomllib.loads(candidate_content)
+            except tomllib.TOMLDecodeError as error:
+                raise ConfigError(
+                    ErrorInfo(
+                        "config_parse_error",
+                        "User Configuration TOML could not be parsed.",
+                    )
+                ) from error
+            candidate_diagnostics: list[ConfigurationDiagnosticValue] = []
+            configuration = _parse_configuration(
+                _table(candidate, "configuration"),
+                diagnostics=candidate_diagnostics,
+            )
+            _require_complete_candidate(configuration, candidate_diagnostics)
+
+            latest_content = self.path.read_bytes()
+            latest_revision = _configuration_revision(latest_content)
+            if latest_revision != current_revision:
+                raise ConfigRevisionConflict(expected_revision, latest_revision)
+            HOST_FILESYSTEM.atomic_replace_text(self.path, candidate_content)
+            self._diagnostics = tuple(candidate_diagnostics)
+            return ConfigEditResult(
+                revision=_configuration_revision(candidate_content.encode("utf-8")),
+                fields=_editable_configuration_fields(configuration),
+                configuration=configuration,
+            )
 
     def load(self) -> UserConfiguration:
         """Load User Configuration as immutable typed values."""

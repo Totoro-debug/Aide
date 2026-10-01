@@ -8,6 +8,94 @@
     "claim_version": {"type": "integer", "minimum": 1},
     "tool_permission_level": {"enum": ["read-only", "workspace-write", "full-access"]},
     "reasoning_effort": {"enum": ["low", "medium", "high", "xhigh", "max"]},
+    "config_runtime_fields": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "max_tool_result_chars": {"type": "integer", "minimum": 1000, "maximum": 1000000},
+        "max_iterations": {"type": "integer", "minimum": 50},
+        "enable_skill_always_load": {"type": "boolean"},
+        "compact_ratio": {"type": "number", "minimum": 0.5, "maximum": 0.95},
+        "permission_level": {"$ref": "#/$defs/tool_permission_level"},
+        "exec_shell": {"enum": ["auto", "powershell", "pwsh"]}
+      }
+    },
+    "config_memory_fields": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "batch_size": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "schedule": {"type": "string", "minLength": 1}
+      }
+    },
+    "runtime_memory_config_patch": {
+      "type": "object", "additionalProperties": false,
+      "required": ["request_id", "revision", "fields"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "revision": {"$ref": "#/$defs/identifier"},
+        "fields": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "runtime": {"$ref": "#/$defs/config_runtime_fields"},
+            "memory": {"$ref": "#/$defs/config_memory_fields"}
+          }
+        }
+      }
+    },
+    "config_retry_request": {
+      "type": "object", "additionalProperties": false,
+      "required": ["request_id", "revision"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "revision": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "config_fields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["runtime", "memory"],
+      "properties": {
+        "runtime": {
+          "$ref": "#/$defs/config_runtime_fields",
+          "required": ["max_tool_result_chars", "max_iterations", "enable_skill_always_load", "compact_ratio", "permission_level", "exec_shell"]
+        },
+        "memory": {"$ref": "#/$defs/config_memory_fields", "required": ["batch_size", "schedule"]}
+      }
+    },
+    "config_application_status": {"enum": ["active", "pending", "failed-to-apply"]},
+    "config_application": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "saved_revision", "active_revision", "pending_revision", "waiting_for", "error"],
+      "properties": {
+        "status": {"$ref": "#/$defs/config_application_status"},
+        "saved_revision": {"type": "string"},
+        "active_revision": {"type": ["string", "null"]},
+        "pending_revision": {"type": ["string", "null"]},
+        "waiting_for": {"type": "array", "items": {"type": "string"}},
+        "error": {"anyOf": [
+          {"type": "null"},
+          {"type": "object", "additionalProperties": false, "required": ["code", "message"],
+            "properties": {"code": {"type": "string"}, "message": {"type": "string"}}}
+        ]}
+      }
+    },
+    "config_response": {
+      "type": "object", "additionalProperties": false,
+      "required": ["revision", "fields", "application"],
+      "properties": {
+        "revision": {"type": "string"},
+        "fields": {"$ref": "#/$defs/config_fields"},
+        "application": {"$ref": "#/$defs/config_application"}
+      }
+    },
+    "config_mutation_response": {
+      "type": "object", "additionalProperties": false,
+      "required": ["request_id", "revision", "fields", "application"],
+      "properties": {
+        "request_id": {"type": "string"},
+        "revision": {"type": "string"},
+        "fields": {"$ref": "#/$defs/config_fields"},
+        "application": {"$ref": "#/$defs/config_application"}
+      }
+    },
     "runtime_status_request": {
       "type": "object",
       "additionalProperties": false,

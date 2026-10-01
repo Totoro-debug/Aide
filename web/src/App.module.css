@@ -2536,6 +2536,163 @@ h1 {
   outline-offset: 2px;
 }
 
+.settingsPage {
+  display: grid;
+  gap: 24px;
+}
+
+.settingsStatus {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  padding: 0 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.settingsStatus[data-state="active"] {
+  border-color: var(--success-border);
+  color: var(--success-text);
+}
+
+.settingsStatus[data-state="pending"] {
+  border-color: var(--warning-border);
+  color: var(--warning-text);
+}
+
+.settingsStatus[data-state="failed-to-apply"] {
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+
+.settingsForm {
+  display: grid;
+  gap: 16px;
+}
+
+.settingsSection {
+  padding: 12px 0;
+}
+
+.settingsVersions {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.settingsVersions > div {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.settingsVersions dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.settingsField > .fieldError {
+  min-height: 18px;
+}
+
+.settingsSectionHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 14px;
+  color: var(--accent-strong);
+}
+
+.settingsSectionHeader .eyebrow {
+  margin-bottom: 4px;
+}
+
+.settingsSectionHeader h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 16px;
+}
+
+.settingsFieldGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 20px;
+  padding-top: 20px;
+}
+
+.settingsField {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 7px;
+}
+
+.selectInput {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface-app);
+  color: var(--text-primary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  padding: 0 10px;
+}
+
+.selectInput:focus {
+  border-color: var(--accent-strong);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.settingsToggle {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 10px;
+  align-self: end;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  background: var(--surface-app);
+  color: var(--text-primary);
+  cursor: pointer;
+  padding: 9px 11px;
+}
+
+.settingsToggle input {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--accent-strong);
+}
+
+.settingsToggle span {
+  display: grid;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.settingsToggle small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.settingsActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 @media (max-width: 900px) {
   .appShell {
     grid-template-columns: 196px minmax(0, 1fr);
@@ -2553,6 +2710,22 @@ h1 {
 }
 
 @media (max-width: 680px) {
+  .settingsFieldGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settingsSection {
+    padding: 16px;
+  }
+
+  .settingsSectionHeader {
+    align-items: stretch;
+  }
+
+  .settingsStatus {
+    max-width: 100%;
+  }
+
   .managementStatusGrid,
   .managementControls {
     grid-template-columns: minmax(0, 1fr);

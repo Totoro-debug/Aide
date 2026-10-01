@@ -29,6 +29,8 @@ import {
   RotateCcw,
   Search,
   Send,
+  Settings2,
+  Save,
   ShieldX,
   Square,
   Sun,
@@ -59,6 +61,7 @@ import {
   getRuntimeMemory,
   getRuntimeStatus,
   getServiceStatus,
+  getConfig,
   openEventStream,
   releaseProjectSession,
   registerProject,
@@ -79,6 +82,8 @@ import {
   restoreBrowserSession,
   ServiceCommandError,
   triggerRuntimeDream,
+  patchConfig,
+  retryConfig,
   updateRuntimeEffort,
   updateRuntimePermission,
 } from "./api";
@@ -96,6 +101,8 @@ import type {
   ServiceCommandResult,
   ServiceEvent,
   ServiceStatus,
+  ConfigFields,
+  ConfigResponse,
   SessionClaim,
   SessionSnapshot,
   SessionSummary,
@@ -469,6 +476,10 @@ export default function App() {
             <FolderOpen size={16} aria-hidden="true" />
             <span>{t("nav.projects")}</span>
           </NavLink>
+          <NavLink className={({ isActive }) => isActive ? `${styles.navLink} ${styles.navLinkActive}` : styles.navLink} to="/settings">
+            <Settings2 size={16} aria-hidden="true" />
+            <span>{t("nav.settings")}</span>
+          </NavLink>
         </nav>
         {authState === "ready" && projects.length > 0 ? (
           <div className={styles.projectNavigation} aria-label={t("nav.projects")}>
@@ -495,7 +506,9 @@ export default function App() {
               /
             </span>
             <span>
-              {location.pathname.startsWith("/projects/")
+              {location.pathname === "/settings"
+                ? t("nav.settings")
+                : location.pathname.startsWith("/projects/")
                 ? location.pathname.includes("/schedule")
                   ? t("nav.schedule")
                   : t("nav.sessions")
@@ -570,6 +583,15 @@ export default function App() {
                   detailsOpen={detailsOpen}
                   onDetailsOpenChange={setDetailsOpen}
                   serviceStatus={serviceStatus}
+                />
+              }
+            />
+            <Route
+              path="/settings"
+              element={
+                <SettingsView
+                  authState={authState}
+                  connectionState={connectionState}
                 />
               }
             />
@@ -797,6 +819,602 @@ function ConfirmationDialog({
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
+  );
+}
+
+interface SettingsForm {
+  runtime: {
+    max_tool_result_chars: string;
+    max_iterations: string;
+    enable_skill_always_load: boolean;
+    compact_ratio: string;
+    permission_level: ToolPermissionLevel;
+    exec_shell: "auto" | "powershell" | "pwsh";
+  };
+  memory: {
+    batch_size: string;
+    schedule: string;
+  };
+}
+
+function formFromConfig(fields: ConfigFields): SettingsForm {
+  return {
+    runtime: {
+      max_tool_result_chars: String(fields.runtime.max_tool_result_chars),
+      max_iterations: String(fields.runtime.max_iterations),
+      enable_skill_always_load: fields.runtime.enable_skill_always_load,
+      compact_ratio: String(fields.runtime.compact_ratio),
+      permission_level: fields.runtime.permission_level,
+      exec_shell: fields.runtime.exec_shell,
+    },
+    memory: {
+      batch_size: String(fields.memory.batch_size),
+      schedule: fields.memory.schedule,
+    },
+  };
+}
+
+function configFromForm(form: SettingsForm): ConfigFields {
+  return {
+    runtime: {
+      max_tool_result_chars: Number(form.runtime.max_tool_result_chars),
+      max_iterations: Number(form.runtime.max_iterations),
+      enable_skill_always_load: form.runtime.enable_skill_always_load,
+      compact_ratio: Number(form.runtime.compact_ratio),
+      permission_level: form.runtime.permission_level,
+      exec_shell: form.runtime.exec_shell,
+    },
+    memory: {
+      batch_size: Number(form.memory.batch_size),
+      schedule: form.memory.schedule.trim(),
+    },
+  };
+}
+
+type SettingsFieldError = Record<string, string>;
+
+interface SettingsViewProps {
+  authState: AuthState;
+  connectionState: ConnectionState;
+}
+
+function SettingsView({ authState, connectionState }: SettingsViewProps) {
+  const { t } = useTranslation();
+  const [response, setResponse] = useState<ConfigResponse | null>(null);
+  const [draft, setDraft] = useState<SettingsForm | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<SettingsFieldError>({});
+  const [notice, setNotice] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
+  const [draftRevision, setDraftRevision] = useState<string | null>(null);
+  const dirtyRef = useRef(false);
+  const draftRef = useRef<SettingsForm | null>(null);
+  const requestSequence = useRef(0);
+  const mutationInFlight = useRef(false);
+  const errorSummaryRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (submitError === null) return;
+    const timer = window.setTimeout(() => errorSummaryRef.current?.focus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [submitError]);
+
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
+
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+
+  const applyResponse = useCallback((next: ConfigResponse) => {
+    setResponse(next);
+    if (!dirtyRef.current || draftRef.current === null) {
+      setDraft(formFromConfig(next.fields));
+      setDraftRevision(next.revision);
+      setDirty(false);
+    }
+    setLoading(false);
+  }, []);
+
+  const loadSettings = useCallback(async () => {
+    if (mutationInFlight.current || connectionState !== "online") return;
+    const sequence = requestSequence.current + 1;
+    requestSequence.current = sequence;
+    try {
+      const next = await getConfig();
+      if (requestSequence.current !== sequence) return;
+      applyResponse(next);
+      setLoadError(null);
+    } catch (error) {
+      if (requestSequence.current !== sequence) return;
+      if (!dirtyRef.current) setLoading(false);
+      setLoadError(error instanceof ApiError ? error.message : t("settings.unavailable"));
+    }
+  }, [applyResponse, connectionState, t]);
+
+  useEffect(() => {
+    if (authState !== "ready") {
+      setLoading(false);
+      return;
+    }
+    let active = true;
+    mutationInFlight.current = false;
+    setSaving(false);
+    void loadSettings();
+    const timer = window.setInterval(() => {
+      if (active) void loadSettings();
+    }, 2500);
+    return () => {
+      active = false;
+      requestSequence.current += 1;
+      window.clearInterval(timer);
+    };
+  }, [authState, loadSettings]);
+
+  const validateField = useCallback((path: string, value: string | boolean): string | null => {
+    const integerFields: Record<string, [number, number]> = {
+      "runtime.max_tool_result_chars": [1000, 1_000_000],
+      "runtime.max_iterations": [50, Number.MAX_SAFE_INTEGER],
+      "memory.batch_size": [1, 1000],
+    };
+    const integerRange = integerFields[path];
+    if (integerRange !== undefined) {
+      const numeric = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+      if (!Number.isSafeInteger(numeric) || numeric < integerRange[0] || numeric > integerRange[1]) {
+        return t("settings.invalidInteger");
+      }
+    }
+    if (path === "runtime.compact_ratio") {
+      const numeric = typeof value === "string" ? Number(value) : NaN;
+      if (!Number.isFinite(numeric) || numeric < 0.5 || numeric > 0.95) {
+        return t("settings.invalidRatio");
+      }
+    }
+    if (path === "memory.schedule") {
+      if (typeof value !== "string" || value.trim().split(/\s+/).length !== 5) {
+        return t("settings.invalidSchedule");
+      }
+    }
+    return null;
+  }, [t]);
+
+  const updateField = useCallback((path: string, value: string | boolean) => {
+    dirtyRef.current = true;
+    setDraft((current) => {
+      if (current === null) return current;
+      const [section, field] = path.split(".");
+      if (section !== "runtime" && section !== "memory") return current;
+      return {
+        ...current,
+        [section]: { ...current[section], [field]: value },
+      } as SettingsForm;
+    });
+    setDirty(true);
+    setNotice(null);
+    setSubmitError(null);
+  }, []);
+
+  const validateAll = useCallback((current: SettingsForm): SettingsFieldError => {
+    const values: Record<string, string | boolean> = {
+      "runtime.max_tool_result_chars": current.runtime.max_tool_result_chars,
+      "runtime.max_iterations": current.runtime.max_iterations,
+      "runtime.enable_skill_always_load": current.runtime.enable_skill_always_load,
+      "runtime.compact_ratio": current.runtime.compact_ratio,
+      "runtime.permission_level": current.runtime.permission_level,
+      "runtime.exec_shell": current.runtime.exec_shell,
+      "memory.batch_size": current.memory.batch_size,
+      "memory.schedule": current.memory.schedule,
+    };
+    const errors: SettingsFieldError = {};
+    for (const [path, value] of Object.entries(values)) {
+      const error = validateField(path, value);
+      if (error !== null) errors[path] = error;
+    }
+    return errors;
+  }, [validateField]);
+
+  const blurField = useCallback((path: string, value: string | boolean) => {
+    const error = validateField(path, value);
+    setFieldErrors((current) => {
+      const next = { ...current };
+      if (error === null) delete next[path];
+      else next[path] = error;
+      return next;
+    });
+  }, [validateField]);
+
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (draft === null || draftRevision === null || saving || connectionState !== "online") return;
+    const errors = validateAll(draft);
+    setFieldErrors(errors);
+    if (Object.keys(errors).length > 0) {
+      setSubmitError(t("settings.validationSummary"));
+      return;
+    }
+    setSaving(true);
+    mutationInFlight.current = true;
+    const sequence = ++requestSequence.current;
+    setSubmitError(null);
+    setNotice(null);
+    try {
+      const next = await patchConfig(draftRevision, configFromForm(draft));
+      if (requestSequence.current !== sequence) return;
+      dirtyRef.current = false;
+      applyResponse(next);
+      setDirty(false);
+      setFieldErrors({});
+      setConflict(false);
+      setNotice(next.application.status === "pending" ? t("settings.pending") : t("settings.saved"));
+    } catch (error) {
+      if (requestSequence.current !== sequence) return;
+      if (error instanceof ApiError && error.body?.code === "config_revision_conflict") {
+        setConflict(true);
+        setSubmitError(t("settings.conflict"));
+      } else if (error instanceof ApiError && error.body !== null) {
+        setFieldErrors(Object.fromEntries(Object.keys(error.body.field_errors).map((path) => [
+          path,
+          t(path === "memory.schedule" ? "settings.invalidSchedule"
+            : path === "runtime.compact_ratio" ? "settings.invalidRatio" : "settings.invalidInteger"),
+        ])));
+        setSubmitError(error.body.code === "config_invalid" ? t("settings.validationSummary") : error.body.message);
+      } else {
+        setSubmitError(t("settings.unavailable"));
+      }
+    } finally {
+      if (requestSequence.current === sequence) {
+        mutationInFlight.current = false;
+        setSaving(false);
+      }
+    }
+  };
+
+  const reloadSaved = async () => {
+    if (saving || connectionState !== "online") return;
+    const sequence = ++requestSequence.current;
+    setSaving(true);
+    mutationInFlight.current = true;
+    try {
+      const next = await getConfig();
+      if (requestSequence.current !== sequence) return;
+      dirtyRef.current = false;
+      applyResponse(next);
+      setFieldErrors({});
+      setSubmitError(null);
+      setConflict(false);
+      setNotice(null);
+    } catch (error) {
+      if (requestSequence.current === sequence) {
+        setSubmitError(error instanceof ApiError ? error.message : t("settings.unavailable"));
+      }
+    } finally {
+      if (requestSequence.current === sequence) {
+        mutationInFlight.current = false;
+        setSaving(false);
+      }
+    }
+  };
+
+  const retryApplication = async () => {
+    if (response === null || saving || connectionState !== "online") return;
+    setSaving(true);
+    mutationInFlight.current = true;
+    const sequence = ++requestSequence.current;
+    setSubmitError(null);
+    try {
+      const next = await retryConfig(response.revision);
+      if (requestSequence.current !== sequence) return;
+      applyResponse(next);
+      setNotice(t("settings.pending"));
+    } catch (error) {
+      if (requestSequence.current !== sequence) return;
+      setSubmitError(error instanceof ApiError ? error.message : t("settings.unavailable"));
+    } finally {
+      if (requestSequence.current === sequence) {
+        mutationInFlight.current = false;
+        setSaving(false);
+      }
+    }
+  };
+
+  const errorEntries = Object.entries(fieldErrors);
+  const controlDisabled = draft === null || loading || saving || connectionState !== "online";
+  const labelFor = (path: string): string => {
+    const labels: Record<string, string> = {
+      "runtime.max_tool_result_chars": t("settings.maxToolResultChars"),
+      "runtime.max_iterations": t("settings.maxIterations"),
+      "runtime.enable_skill_always_load": t("settings.enableSkillAlwaysLoad"),
+      "runtime.compact_ratio": t("settings.compactRatio"),
+      "runtime.permission_level": t("settings.permissionLevel"),
+      "runtime.exec_shell": t("settings.execShell"),
+      "memory.batch_size": t("settings.batchSize"),
+      "memory.schedule": t("settings.schedule"),
+    };
+    return labels[path] ?? path;
+  };
+  const fieldId = (path: string) => `settings-${path.replaceAll(".", "-")}`;
+  const fieldError = (path: string) => fieldErrors[path];
+
+  if (authState !== "ready") {
+    return (
+      <section className={styles.settingsPage} aria-labelledby="settings-title">
+        <div className={styles.pageHeading}>
+          <div>
+            <p className={styles.eyebrow}>{t("nav.settings")}</p>
+            <h1 id="settings-title">{t("settings.title")}</h1>
+          </div>
+        </div>
+        <div className={styles.errorBanner} role="status">
+          <CircleAlert size={17} aria-hidden="true" />
+          <span>{t("settings.authenticationRequired")}</span>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className={styles.settingsPage} aria-labelledby="settings-title">
+      <div className={styles.pageHeading}>
+        <div>
+          <p className={styles.eyebrow}>{t("nav.settings")}</p>
+          <h1 id="settings-title">{t("settings.title")}</h1>
+          <p className={styles.pageDescription}>{t("settings.description")}</p>
+        </div>
+        {response !== null ? (
+          <div className={styles.settingsStatus} data-state={response.application.status} role="status" aria-live="polite">
+            {response.application.status === "active" ? <CircleCheck size={15} aria-hidden="true" /> : <Clock3 size={15} aria-hidden="true" />}
+            <span>
+              {saving
+                ? t("settings.saving")
+                : response.application.status === "pending"
+                  ? t("settings.pending")
+                  : response.application.status === "failed-to-apply"
+                    ? t("settings.failed")
+                    : t("settings.active")}
+            </span>
+          </div>
+        ) : null}
+      </div>
+
+      {response !== null ? (
+        <dl className={styles.settingsVersions} aria-label={t("settings.versions")}>
+          <div><dt>{t("settings.savedVersion")}</dt><dd>{response.application.saved_revision}</dd></div>
+          <div><dt>{t("settings.activeVersion")}</dt><dd>{response.application.active_revision ?? "-"}</dd></div>
+          {response.application.pending_revision !== null ? (
+            <div><dt>{t("settings.pendingVersion")}</dt><dd>{response.application.pending_revision}</dd></div>
+          ) : null}
+          {response.application.status === "pending" && response.application.waiting_for.length > 0 ? (
+            <div><dt>{t("settings.waitingFor")}</dt><dd>{response.application.waiting_for.map((reason) => t(`settings.waitingReasons.${reason}`, { defaultValue: reason })).join(", ")}</dd></div>
+          ) : null}
+        </dl>
+      ) : null}
+
+      {loadError !== null && response === null ? (
+        <div className={styles.errorBanner} role="alert">
+          <CircleAlert size={17} aria-hidden="true" />
+          <span>{loadError}</span>
+          <button className={styles.secondaryButton} type="button" onClick={() => void loadSettings()}>
+            <RefreshCw size={14} aria-hidden="true" />
+            {t("controls.retry")}
+          </button>
+        </div>
+      ) : null}
+
+      {response?.application.status === "failed-to-apply" ? (
+        <div className={styles.errorBanner} role="alert">
+          <TriangleAlert size={17} aria-hidden="true" />
+          <span>{t("settings.failed")}{response.application.error !== null ? ` (${response.application.error.code})` : ""}</span>
+          <button className={styles.secondaryButton} type="button" disabled={controlDisabled} onClick={() => void retryApplication()}>
+            <RefreshCw size={14} aria-hidden="true" />
+            {t("settings.retry")}
+          </button>
+        </div>
+      ) : null}
+
+      {submitError !== null ? (
+        <div
+          className={styles.errorSummary}
+          ref={errorSummaryRef}
+          tabIndex={-1}
+          role="alert"
+          aria-labelledby="settings-error-title"
+        >
+          <strong id="settings-error-title">{t("settings.errorSummary")}</strong>
+          {submitError !== null ? <p>{submitError}</p> : null}
+          {errorEntries.length > 0 ? (
+            <ul>
+              {errorEntries.map(([path, message]) => (
+                <li key={path}>
+                  <a href={`#${fieldId(path)}`} onClick={(event) => {
+                    event.preventDefault();
+                    document.getElementById(fieldId(path))?.focus();
+                  }}>{labelFor(path)}: {message}</a>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+
+      {draft !== null ? (
+        <form className={styles.settingsForm} onSubmit={(event) => void submit(event)} noValidate>
+          <div className={styles.settingsSection}>
+            <div className={styles.settingsSectionHeader}>
+              <div>
+                <p className={styles.eyebrow}>{t("settings.runtime")}</p>
+                <h2>{t("settings.runtime")}</h2>
+              </div>
+              <Settings2 size={20} aria-hidden="true" />
+            </div>
+            <div className={styles.settingsFieldGrid}>
+              <SettingsNumberField
+                id={fieldId("runtime.max_tool_result_chars")}
+                label={t("settings.maxToolResultChars")}
+                value={draft.runtime.max_tool_result_chars}
+                error={fieldError("runtime.max_tool_result_chars")}
+                disabled={controlDisabled}
+                onChange={(value) => updateField("runtime.max_tool_result_chars", value)}
+                onBlur={() => blurField("runtime.max_tool_result_chars", draft.runtime.max_tool_result_chars)}
+              />
+              <SettingsNumberField
+                id={fieldId("runtime.max_iterations")}
+                label={t("settings.maxIterations")}
+                value={draft.runtime.max_iterations}
+                error={fieldError("runtime.max_iterations")}
+                disabled={controlDisabled}
+                onChange={(value) => updateField("runtime.max_iterations", value)}
+                onBlur={() => blurField("runtime.max_iterations", draft.runtime.max_iterations)}
+              />
+              <SettingsNumberField
+                id={fieldId("runtime.compact_ratio")}
+                label={t("settings.compactRatio")}
+                value={draft.runtime.compact_ratio}
+                error={fieldError("runtime.compact_ratio")}
+                disabled={controlDisabled}
+                step="0.01"
+                onChange={(value) => updateField("runtime.compact_ratio", value)}
+                onBlur={() => blurField("runtime.compact_ratio", draft.runtime.compact_ratio)}
+              />
+              <label className={styles.settingsField} htmlFor={fieldId("runtime.permission_level")}>
+                <span className={styles.fieldLabel}>{t("settings.permissionLevel")}</span>
+                <select
+                  className={styles.selectInput}
+                  id={fieldId("runtime.permission_level")}
+                  value={draft.runtime.permission_level}
+                  disabled={controlDisabled}
+                  onChange={(event) => updateField("runtime.permission_level", event.currentTarget.value)}
+                >
+                  {(["read-only", "workspace-write", "full-access"] as ToolPermissionLevel[]).map((level) => (
+                    <option key={level} value={level}>{t(`settings.permissionLevels.${level}`)}</option>
+                  ))}
+                </select>
+              </label>
+              <label className={styles.settingsField} htmlFor={fieldId("runtime.exec_shell")}>
+                <span className={styles.fieldLabel}>{t("settings.execShell")}</span>
+                <select
+                  className={styles.selectInput}
+                  id={fieldId("runtime.exec_shell")}
+                  value={draft.runtime.exec_shell}
+                  disabled={controlDisabled}
+                  onChange={(event) => updateField("runtime.exec_shell", event.currentTarget.value)}
+                >
+                  {(["auto", "powershell", "pwsh"] as const).map((shell) => (
+                    <option key={shell} value={shell}>{t(`settings.shells.${shell}`)}</option>
+                  ))}
+                </select>
+              </label>
+              <label className={styles.settingsToggle} htmlFor={fieldId("runtime.enable_skill_always_load")}>
+                <input
+                  id={fieldId("runtime.enable_skill_always_load")}
+                  type="checkbox"
+                  checked={draft.runtime.enable_skill_always_load}
+                  disabled={controlDisabled}
+                  onChange={(event) => updateField("runtime.enable_skill_always_load", event.currentTarget.checked)}
+                />
+                <span>
+                  <strong>{t("settings.enableSkillAlwaysLoad")}</strong>
+                  <small>{draft.runtime.enable_skill_always_load ? t("settings.yes") : t("settings.no")}</small>
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <div className={styles.settingsSection}>
+            <div className={styles.settingsSectionHeader}>
+              <div>
+                <p className={styles.eyebrow}>{t("settings.memory")}</p>
+                <h2>{t("settings.memory")}</h2>
+              </div>
+              <Brain size={20} aria-hidden="true" />
+            </div>
+            <div className={styles.settingsFieldGrid}>
+              <SettingsNumberField
+                id={fieldId("memory.batch_size")}
+                label={t("settings.batchSize")}
+                value={draft.memory.batch_size}
+                error={fieldError("memory.batch_size")}
+                disabled={controlDisabled}
+                onChange={(value) => updateField("memory.batch_size", value)}
+                onBlur={() => blurField("memory.batch_size", draft.memory.batch_size)}
+              />
+              <label className={styles.settingsField} htmlFor={fieldId("memory.schedule")}>
+                <span className={styles.fieldLabel} id={`${fieldId("memory.schedule")}-label`}>{t("settings.schedule")}</span>
+                <input
+                  className={styles.textInput}
+                  id={fieldId("memory.schedule")}
+                  aria-labelledby={`${fieldId("memory.schedule")}-label`}
+                  value={draft.memory.schedule}
+                  disabled={controlDisabled}
+                  aria-invalid={fieldError("memory.schedule") !== undefined}
+                  aria-describedby={fieldError("memory.schedule") !== undefined ? `${fieldId("memory.schedule")}-error` : undefined}
+                  onChange={(event) => updateField("memory.schedule", event.currentTarget.value)}
+                  onBlur={() => blurField("memory.schedule", draft.memory.schedule)}
+                />
+                <span className={styles.fieldError} id={`${fieldId("memory.schedule")}-error`}>{fieldError("memory.schedule") ?? ""}</span>
+              </label>
+            </div>
+          </div>
+
+          <div className={styles.settingsActions}>
+            {conflict ? (
+              <button className={styles.secondaryButton} type="button" onClick={() => void reloadSaved()} disabled={controlDisabled}>
+                <RotateCcw size={14} aria-hidden="true" />
+                {t("settings.reload")}
+              </button>
+            ) : null}
+            <button className={styles.primaryButton} type="submit" disabled={controlDisabled || !dirty}>
+              <Save size={15} aria-hidden="true" />
+              {saving ? t("settings.saving") : t("settings.save")}
+            </button>
+          </div>
+          {notice !== null ? (
+            <div className={styles.notice} role="status" aria-live="polite">
+              <CircleCheck size={16} aria-hidden="true" />
+              <span>{notice}</span>
+            </div>
+          ) : null}
+        </form>
+      ) : null}
+    </section>
+  );
+}
+
+interface SettingsNumberFieldProps {
+  id: string;
+  label: string;
+  value: string;
+  error: string | undefined;
+  disabled: boolean;
+  step?: string;
+  onChange: (value: string) => void;
+  onBlur: () => void;
+}
+
+function SettingsNumberField({ id, label, value, error, disabled, step, onChange, onBlur }: SettingsNumberFieldProps) {
+  return (
+    <label className={styles.settingsField} htmlFor={id}>
+      <span className={styles.fieldLabel} id={`${id}-label`}>{label}</span>
+      <input
+        className={styles.textInput}
+        id={id}
+        aria-labelledby={`${id}-label`}
+        type="number"
+        inputMode="decimal"
+        step={step}
+        value={value}
+        disabled={disabled}
+        aria-invalid={error !== undefined}
+        aria-describedby={error !== undefined ? `${id}-error` : undefined}
+        onChange={(event) => onChange(event.currentTarget.value)}
+        onBlur={onBlur}
+      />
+      <span className={styles.fieldError} id={`${id}-error`}>{error ?? ""}</span>
+    </label>
   );
 }
 

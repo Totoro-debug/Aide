@@ -845,6 +845,101 @@ h1 {
   justify-self: start;
 }
 
+.managementTools {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 18px;
+}
+
+.managementTool {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  background: var(--surface-app);
+  padding: 14px;
+}
+
+.managementToolHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.managementToolHeader h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.managementMemory {
+  min-width: 0;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 12px;
+}
+
+.managementMemory h4 {
+  margin: 0 0 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.managementMemory pre {
+  max-height: min(340px, 36vh);
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  padding: 11px;
+  white-space: pre-wrap;
+}
+
+.managementOperationStatus {
+  display: grid;
+  gap: 5px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 11px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.managementOperationStatus strong {
+  color: var(--text-primary);
+}
+
+.managementOperationStatus ul {
+  display: grid;
+  gap: 5px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.managementOperationStatus li {
+  display: grid;
+  gap: 2px;
+  border-left: 2px solid var(--accent-strong);
+  padding-left: 9px;
+}
+
+.managementOperationStatus li span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 .backLink {
   display: inline-flex;
   align-items: center;
@@ -2038,6 +2133,15 @@ h1 {
   .managementStatusGrid,
   .managementControls {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .managementToolHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .managementToolHeader .secondaryButton {
+    align-self: flex-start;
   }
 
   .restoreResultNotice {

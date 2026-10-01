@@ -411,12 +411,128 @@ try {
   await effortControl.locator("xpath=..")
     .getByRole("button", { name: "Save", exact: true }).click();
   await managementDialog.getByRole("status").getByText("Reasoning effort updated.", { exact: true }).waitFor();
+  await managementDialog.getByRole("button", { name: "View Memory", exact: true }).click();
+  const memoryRegion = managementDialog.getByRole("region", { name: "Long-term Memory", exact: true });
+  await memoryRegion.getByRole("heading", { level: 4, name: "Long-term Memory", exact: true }).waitFor();
+  await managementDialog.getByRole("button", { name: "Run Dream", exact: true }).click();
+  await managementDialog.getByRole("region", { name: "Dream", exact: true })
+    .getByRole("status").getByText("No pending summaries.", { exact: true }).waitFor();
+  let releaseDream;
+  const dreamGate = new Promise((resolveGate) => { releaseDream = resolveGate; });
+  let dreamArrived;
+  const dreamArrival = new Promise((resolveGate) => { dreamArrived = resolveGate; });
+  const delayDreamResponse = async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    dreamArrived();
+    await dreamGate;
+    await route.fulfill({
+      status: response.status(), contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+  };
+  await page.route("**/management/dream", delayDreamResponse);
+  await managementDialog.getByRole("button", { name: "Run Dream", exact: true }).click();
+  await dreamArrival;
+  await managementDialog.press("Escape");
+  await expect(managementTrigger).toBeFocused();
+  await managementTrigger.press("Enter");
+  await expect(managementDialog.getByRole("button", { name: "Running Dream...", exact: true })).toBeDisabled();
+  releaseDream();
+  await managementDialog.getByRole("region", { name: "Dream", exact: true })
+    .getByRole("status").getByText("No pending summaries.", { exact: true }).waitFor();
+  await page.unroute("**/management/dream", delayDreamResponse);
+  for (const [code, message, notice] of [
+    ["memory_task_running", "A Memory Task is already running.", "Dream is already running for this Workspace."],
+    ["persistence_error", "Long-term Memory could not be written.", "Dream failed."],
+  ]) {
+    const failDream = async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.result.dream_result.error = { code, message, retryable: false, retry_after_seconds: null };
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+    };
+    await page.route("**/management/dream", failDream);
+    await managementDialog.getByRole("button", { name: "Run Dream", exact: true }).click();
+    const result = managementDialog.getByRole("region", { name: "Dream", exact: true }).getByRole("status");
+    await result.getByText(notice, { exact: true }).waitFor();
+    await result.getByText(`${code}: ${message}`, { exact: true }).waitFor();
+    await page.unroute("**/management/dream", failDream);
+  }
+  await managementDialog.getByRole("button", { name: "Run Dream", exact: true }).click();
+  await managementDialog.getByRole("region", { name: "Dream", exact: true })
+    .getByRole("status").getByText("No pending summaries.", { exact: true }).waitFor();
+  await managementDialog.getByRole("button", { name: "Reload Skills", exact: true }).click();
+  await managementDialog.getByRole("status").getByText("Skills reloaded: 0.", { exact: true }).waitFor();
   await managementDialog.getByRole("button", { name: "Close", exact: true }).click();
   await managementDialog.waitFor({ state: "hidden" });
   await expect(managementTrigger).toBeFocused();
 
   await managementTrigger.press("Enter");
   await expect(permissionControl).toHaveValue("read-only");
+  const failSkillReload = async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    await route.fulfill({
+      status: response.status(),
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...body,
+        result: {
+          ...body.result,
+          skill_metadata: null,
+          management_error: {
+            code: "skill_reload_failed",
+            message: "Skill reload failed.",
+            retryable: false,
+            retry_after_seconds: null,
+          },
+        },
+      }),
+    });
+  };
+  await page.route("**/management/skills/reload", failSkillReload);
+  await managementDialog.getByRole("button", { name: "Reload Skills", exact: true }).click();
+  await managementDialog.getByRole("alert").getByText("Skills could not be reloaded.", { exact: true }).waitFor();
+  await page.unroute("**/management/skills/reload", failSkillReload);
+
+  let releaseOldMemory;
+  const oldMemoryGate = new Promise((resolveGate) => { releaseOldMemory = resolveGate; });
+  let oldMemoryArrived;
+  const oldMemoryArrival = new Promise((resolveGate) => { oldMemoryArrived = resolveGate; });
+  let delayFirstMemory = true;
+  const delayFirstMemoryResponse = async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    if (delayFirstMemory) {
+      delayFirstMemory = false;
+      oldMemoryArrived();
+      await oldMemoryGate;
+    }
+    await route.fulfill({
+      status: response.status(),
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...body,
+        result: { ...body.result, memory_content: "STALE_MEMORY_RESPONSE" },
+      }),
+    });
+  };
+  await managementDialog.press("Escape");
+  await expect(managementTrigger).toBeFocused();
+  await page.route("**/management/memory", delayFirstMemoryResponse);
+  await managementTrigger.click();
+  await expect(permissionControl).toHaveValue("read-only");
+  await managementDialog.getByRole("button", { name: "View Memory", exact: true }).click();
+  await oldMemoryArrival;
+  await managementDialog.press("Escape");
+  await expect(managementTrigger).toBeFocused();
+  await managementTrigger.click();
+  await expect(permissionControl).toHaveValue("read-only");
+  releaseOldMemory();
+  await page.unroute("**/management/memory", delayFirstMemoryResponse);
+  await expect(managementDialog.getByText("STALE_MEMORY_RESPONSE", { exact: true })).toHaveCount(0);
+
   for (const [action, label, value] of [
     ["permission", "Tool permission level", "full-access"],
     ["effort", "Chat reasoning effort", "max"],
@@ -471,6 +587,18 @@ try {
   await managementDialog.getByText("Client permission updated.", { exact: true }).waitFor();
   await managementDialog.press("Escape");
 
+  const memoryPath = resolve(firstProject, ".myclaw", "memory", "memory.md");
+  const originalMemory = await readFile(memoryPath, "utf8");
+  const longMemory = `# Inspected memory\n<script>window.__unsafeMemory = true</script>\n${"unbroken-memory".repeat(1500)}\n`;
+  await writeFile(memoryPath, longMemory, "utf8");
+  const skillRoot = resolve(control.details.home_root, ".myclaw", "skills");
+  for (const [directory, document] of [
+    ["web-review", "---\nname: web-review\ndescription: Browser reload metadata\n---\nPrivate instructions excluded from metadata.\n"],
+    ["invalid", "---\nname: INVALID\ndescription: PRIVATE_BAD_SKILL_SECRET\n---\nPrivate bad document.\n"],
+  ]) {
+    await mkdir(resolve(skillRoot, directory), { recursive: true });
+    await writeFile(resolve(skillRoot, directory, "SKILL.md"), document, "utf8");
+  }
   for (const language of ["en", "zh-CN"]) {
     await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
     for (const theme of ["light", "dark"]) {
@@ -489,12 +617,38 @@ try {
         const select = dialog.getByLabel(language === "en" ? "Chat reasoning effort" : "聊天推理强度");
         await select.focus();
         await expect(select).toBeFocused();
+        for (const [label, result] of language === "en" ? [
+          ["View Memory", "Long-term Memory loaded."],
+          ["Run Dream", "No pending summaries."],
+          ["Reload Skills", "Skills reloaded: 1."],
+        ] : [
+          ["查看记忆", "长期记忆已加载。"],
+          ["运行 Dream", "没有待处理的摘要。"],
+          ["重新加载 Skills", "Skills 已重新加载：1 个。"],
+        ]) {
+          const button = dialog.getByRole("button", { name: label, exact: true });
+          await button.focus();
+          await expect(button).toBeFocused();
+          await button.press("Enter");
+          await dialog.getByRole("status").getByText(result, { exact: true }).first().waitFor();
+        }
+        const memory = dialog.getByRole("region", { name: language === "en" ? "Long-term Memory" : "长期记忆", exact: true }).locator("pre");
+        await expect(memory).toHaveText(longMemory);
+        assert.equal(await page.evaluate(() => window.__unsafeMemory), undefined, "Memory executed HTML");
+        await dialog.getByText("Browser reload metadata", { exact: true }).waitFor();
+        await expect(dialog.getByText("PRIVATE_BAD_SKILL_SECRET", { exact: true })).toHaveCount(0);
+        await dialog.evaluate((element) => {
+          if (element.scrollWidth > element.clientWidth + 1) throw new Error("Runtime content overflows horizontally");
+        });
         await page.screenshot({ path: resolve(output, `runtime-${language}-${theme}-${viewport.width}x${viewport.height}.png`) });
         await dialog.press("Escape");
         await expect(trigger).toBeFocused();
       }
     }
   }
+  await writeFile(memoryPath, originalMemory, "utf8");
+  await rm(resolve(skillRoot, "web-review"), { recursive: true });
+  await rm(resolve(skillRoot, "invalid"), { recursive: true });
   await page.getByRole("button", { name: "EN", exact: true }).click();
   await page.setViewportSize(viewports.at(-1));
   await page.getByLabel("Message input").fill("streaming markdown");

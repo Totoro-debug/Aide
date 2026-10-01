@@ -757,6 +757,9 @@ class LocalServiceTransport:
         return web.json_response({"request_id": request_id, **result})
 
     async def _management(self, request: web.Request) -> web.Response:
+        if request.match_info["action"] in {"memory", "dream", "skills/reload"}:
+            if request.method != "POST":
+                raise web.HTTPMethodNotAllowed(request.method, ["POST"])
         context = self._authenticate(
             request, mutation=request.method == "POST", client_required=True
         )

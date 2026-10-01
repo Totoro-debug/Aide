@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,14 +18,18 @@ import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
 from myclaw.agent.loop import AgentLoop
+from myclaw.agent.memory.dream import DreamResult
 from myclaw.agent.tools.permission import PermissionContext
+from myclaw.agent.tools.tool_gateway import ModelToolCall
 from myclaw.config.config import ConfigLoader
+from myclaw.provider.models import ModelCompleted, ModelStreamEvent
 from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.service.discovery import create_credential
 from myclaw.service.errors import ServiceError
 from myclaw.service.runtime import ClientState, LocalService, SessionClaim, WorkspaceServiceRuntime
 from myclaw.service.transport import create_app
 from tests.fixtures import FakeClock
+from tests.memory.test_dream import _response
 from tests.service.test_protocol_contract import _validator
 from tests.service.test_service_concurrency import _CollectingSink, _ConcurrentProvider
 from tests.service.test_service_transport import _persist_session, _prepare_agent_home
@@ -231,7 +236,10 @@ def _action_payload(action: str) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["status", "permission", "effort"])
+@pytest.mark.parametrize(
+    "action",
+    ["status", "permission", "effort", "memory", "dream", "skills/reload"],
+)
 async def test_typed_cached_response_rejects_released_and_replaced_claim(
     management_case: ManagementCase,
     action: str,
@@ -248,7 +256,10 @@ async def test_typed_cached_response_rejects_released_and_replaced_claim(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["status", "permission", "effort"])
+@pytest.mark.parametrize(
+    "action",
+    ["status", "permission", "effort", "memory", "dream", "skills/reload"],
+)
 async def test_management_revalidates_claim_after_waiting_for_client_lock(
     management_case: ManagementCase,
     action: str,
@@ -269,6 +280,80 @@ async def test_management_revalidates_claim_after_waiting_for_client_lock(
     assert case.service.client_permission(case.first.client_id).current() == "workspace-write"
     assert case.workspace.runtime is not None
     assert case.workspace.runtime.router.reasoning_effort == "medium"
+
+
+@pytest.mark.asyncio
+async def test_typed_memory_dream_and_skill_projections_return_real_safe_results(
+    management_case: ManagementCase,
+) -> None:
+    case = management_case
+    case.workspace.workspace_state.long_term_memory_path.write_text(
+        "# Shared memory\n\nA readable entry.\n",
+        encoding="utf-8",
+    )
+
+    memory = await _request(case, "memory", request_id="memory-result")
+    dream = await _request(case, "dream", request_id="dream-result")
+    skills = await _request(case, "skills/reload", request_id="skills-result")
+
+    assert memory["memory_content"] == "# Shared memory\n\nA readable entry.\n"
+    dream_result = cast(dict[str, object], dream["dream_result"])
+    assert dream_result["status"] == "No pending summaries"
+    assert dream_result["processed_count"] == 0
+    assert dream_result["memory_updated"] is False
+    assert dream_result["error"] is None
+    assert skills["skill_metadata"] == []
+
+
+@pytest.mark.asyncio
+async def test_workspace_dream_is_single_instance_across_clients_and_reopens_after_completion(
+    management_case: ManagementCase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = management_case
+    runtime = case.workspace.runtime
+    assert runtime is not None
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def controlled_run() -> DreamResult:
+        started.set()
+        await release.wait()
+        return DreamResult(
+            status="Controlled Dream complete.",
+            processed_count=1,
+            memory_updated=True,
+            cursor=1,
+        )
+
+    monkeypatch.setattr(runtime.dream, "_run_once", controlled_run)
+    first_task = asyncio.create_task(_request(case, "dream", request_id="dream-first"))
+    await asyncio.wait_for(started.wait(), timeout=2)
+
+    overlapping = await _request(
+        case,
+        "dream",
+        client=case.second,
+        claim=case.other_claim,
+        request_id="dream-overlap",
+    )
+    overlap_result = cast(dict[str, object], overlapping["dream_result"])
+    overlap_error = cast(dict[str, object], overlap_result["error"])
+    assert overlap_error["code"] == "memory_task_running"
+
+    release.set()
+    completed = await asyncio.wait_for(first_task, timeout=2)
+    assert cast(dict[str, object], completed["dream_result"])["memory_updated"] is True
+
+    after = await _request(
+        case,
+        "dream",
+        client=case.second,
+        claim=case.other_claim,
+        request_id="dream-after",
+    )
+    after_result = cast(dict[str, object], after["dream_result"])
+    assert after_result["error"] is None
 
 
 @pytest.mark.asyncio
@@ -490,7 +575,10 @@ async def test_schedule_run_uses_configured_permission_snapshot_after_client_ove
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["status", "permission", "effort"])
+@pytest.mark.parametrize(
+    "action",
+    ["status", "permission", "effort", "memory", "dream", "skills/reload"],
+)
 async def test_typed_http_actions_require_auth_csrf_and_matching_client_identity(
     management_case: ManagementCase,
     action: str,
@@ -536,3 +624,240 @@ async def test_typed_http_actions_require_auth_csrf_and_matching_client_identity
         async with http.post(url, headers=headers, json=body) as response:
             assert response.status == 200
             _validator("management_response").validate(await response.json())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["memory", "dream", "skills/reload"])
+async def test_new_management_http_actions_reject_get_and_head_without_execution(
+    management_case: ManagementCase,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    case = management_case
+    token = create_credential(case.service.agent_home)
+    calls: list[str] = []
+
+    def unexpected_dispatcher(*args: object, **kwargs: object) -> None:
+        calls.append(action)
+        raise AssertionError("A read request executed management work")
+
+    monkeypatch.setattr(case.workspace, "management_dispatcher", unexpected_dispatcher)
+    async with TestServer(create_app(case.service)) as server, aiohttp.ClientSession() as http:
+        url = server.make_url(
+            f"/api/v1/workspaces/{case.workspace.workspace_id}/management/{action}"
+        )
+        for method in ("GET", "HEAD"):
+            async with http.request(
+                method,
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "X-MyClaw-Client": case.second.client_id,
+                    "X-MyClaw-Claim": case.other_claim.credential,
+                    "X-MyClaw-Request": "read-cannot-mutate",
+                },
+                params={
+                    "session_id": case.other_claim.session_id,
+                    "claim_version": case.other_claim.version,
+                },
+            ) as response:
+                assert response.status == 405
+                assert response.headers["Allow"] == "POST"
+        assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_http_reload_preserves_active_run_snapshot_resources_and_next_run_skills(
+    management_case: ManagementCase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = management_case
+    instruction = case.service.agent_home.skills_directory / "planner" / "SKILL.md"
+    instruction.parent.mkdir(parents=True)
+    instruction.write_text(
+        "---\nname: planner\ndescription: Original catalog\n---\nOLD_SKILL_BODY\n",
+        encoding="utf-8",
+    )
+    (case.workspace.workspace_path / "fixture.txt").write_text(
+        "resource survived", encoding="utf-8"
+    )
+    requests: list[list[dict[str, Any]]] = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+    original_stream = case.provider.stream
+    closed: list[bool] = []
+
+    async def close() -> None:
+        closed.append(True)
+
+    def stream(**kwargs: Any) -> AsyncIterator[ModelStreamEvent]:
+        messages = kwargs["messages"]
+        if str(messages[0].get("content", "")).startswith("Generate a concise title"):
+            return original_stream(**kwargs)
+        requests.append(deepcopy(list(messages)))
+        first = len(requests) == 1
+
+        async def emit() -> AsyncIterator[ModelStreamEvent]:
+            if first:
+                started.set()
+                await release.wait()
+                yield ModelCompleted(
+                    _response(
+                        "",
+                        tool_calls=(
+                            ModelToolCall("read-resource", "read_file", '{"path":"fixture.txt"}'),
+                        ),
+                    )
+                )
+            else:
+                yield ModelCompleted(_response("snapshot run completed"))
+
+        return emit()
+
+    monkeypatch.setattr(case.provider, "stream", stream)
+    monkeypatch.setattr(case.provider, "close", close)
+    token = create_credential(case.service.agent_home)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-MyClaw-CSRF": token,
+        "X-MyClaw-Client": case.second.client_id,
+        "X-MyClaw-Claim": case.other_claim.credential,
+    }
+    sink = cast(_CollectingSink, case.second.sink)
+    loop = case.other_claim.loop
+    runtime = case.workspace.runtime
+    gateway = loop._tool_gateway
+    session = loop.session
+    async with TestServer(create_app(case.service)) as server, aiohttp.ClientSession() as http:
+        url = server.make_url(
+            f"/api/v1/workspaces/{case.workspace.workspace_id}/management/skills/reload"
+        )
+
+        async def reload(request_id: str) -> dict[str, Any]:
+            async with http.post(
+                url,
+                headers=headers,
+                json={
+                    "request_id": request_id,
+                    "current_session_id": case.other_claim.session_id,
+                    "claim_version": case.other_claim.version,
+                },
+            ) as response:
+                assert response.status == 200
+                body = await response.json()
+                _validator("management_response").validate(body)
+                return cast(dict[str, Any], body["result"])
+
+        assert (await reload("seed-skills"))["skill_metadata"][0]["name"] == "planner"
+        await case.workspace.input(
+            case.second.client_id,
+            case.other_claim.session_id,
+            case.other_claim.version,
+            "/planner first request",
+            "old-snapshot",
+        )
+        await asyncio.wait_for(started.wait(), timeout=2)
+        try:
+            instruction.write_text(
+                "---\nname: reviewer\ndescription: Updated catalog\n---\nNEW_SKILL_BODY\n",
+                encoding="utf-8",
+            )
+            result = await reload("reload-during-run")
+            assert result["skill_metadata"][0]["name"] == "reviewer"
+            assert loop.has_active_run
+            assert case.other_claim.loop is loop
+            assert case.workspace.runtime is runtime
+            assert loop._tool_gateway is gateway and loop.session is session
+            assert closed == []
+        finally:
+            release.set()
+        await asyncio.wait_for(sink.wait_for("run.completed", "old-snapshot"), timeout=3)
+        assert len(requests) == 2
+        for request in requests:
+            assert '"name":"planner"' in str(request[0]["content"])
+            assert '"name":"reviewer"' not in str(request[0]["content"])
+            assert "OLD_SKILL_BODY" in json.dumps(request)
+            assert "NEW_SKILL_BODY" not in json.dumps(request)
+        assert "resource survived" in json.dumps(requests[1])
+        await case.workspace.input(
+            case.second.client_id,
+            case.other_claim.session_id,
+            case.other_claim.version,
+            "/reviewer next request",
+            "new-snapshot",
+        )
+        await asyncio.wait_for(sink.wait_for("run.completed", "new-snapshot"), timeout=3)
+        assert len(requests) == 3
+        assert '"name":"reviewer"' in str(requests[2][0]["content"])
+        assert '"name":"planner"' not in str(requests[2][0]["content"])
+        assert "NEW_SKILL_BODY" in str(requests[2][-1]["content"])
+        assert closed == []
+
+
+@pytest.mark.asyncio
+async def test_http_dream_updates_memory_and_replay_does_not_repeat_model_work(
+    management_case: ManagementCase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = management_case
+    runtime = case.workspace.runtime
+    assert runtime is not None
+    manager = runtime.memory_manager
+    await manager.append_summary("The user prefers concise reports.", case.clock.now())
+    calls: list[bool] = []
+
+    async def complete(**kwargs: Any) -> Any:
+        calls.append(True)
+        return _response(
+            "",
+            tool_calls=(
+                ModelToolCall(
+                    "edit-memory",
+                    "edit_file",
+                    json.dumps(
+                        {
+                            "path": str(manager.long_term_path),
+                            "old_text": "## User Preference\n",
+                            "new_text": "## User Preference\n\nPrefers concise reports.\n",
+                        }
+                    ),
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(case.provider, "complete", complete)
+    token = create_credential(case.service.agent_home)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-MyClaw-CSRF": token,
+        "X-MyClaw-Client": case.first.client_id,
+        "X-MyClaw-Claim": case.claim.credential,
+    }
+    async with TestServer(create_app(case.service)) as server, aiohttp.ClientSession() as http:
+        base = f"/api/v1/workspaces/{case.workspace.workspace_id}/management"
+        body = {
+            "request_id": "real-dream",
+            "current_session_id": case.claim.session_id,
+            "claim_version": case.claim.version,
+        }
+        results: list[dict[str, Any]] = []
+        for _ in range(2):
+            async with http.post(
+                server.make_url(f"{base}/dream"), headers=headers, json=body
+            ) as response:
+                assert response.status == 200
+                value = await response.json()
+                _validator("management_response").validate(value)
+                results.append(value["result"])
+        assert results[0] == results[1]
+        assert results[0]["dream_result"]["processed_count"] == 1
+        assert results[0]["dream_result"]["memory_updated"] is True
+        assert results[0]["dream_result"]["error"] is None
+        assert len(calls) == 1
+        async with http.post(
+            server.make_url(f"{base}/memory"),
+            headers=headers,
+            json={**body, "request_id": "inspect-updated-memory"},
+        ) as response:
+            assert response.status == 200
+            assert "Prefers concise reports." in (await response.json())["result"]["memory_content"]

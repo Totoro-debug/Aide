@@ -12,6 +12,7 @@ from myclaw.agent.memory.dream import DreamResult
 from myclaw.agent.permission import ToolPermissionLevel
 from myclaw.agent.session.restore import RestoreMode, RestorePlan, RestoreResult
 from myclaw.config.config import ConfigView
+from myclaw.errors import ErrorInfo
 from myclaw.logging.session import without_session_log
 from myclaw.management.service import (
     FatalManagementError,
@@ -118,6 +119,9 @@ class ManagementCommandResult:
 
     handled: bool
     output: str | None
+    memory_content: str | None = None
+    dream_result: DreamResult | None = None
+    management_error: ErrorInfo | None = None
     effort_selection: ReasoningEffort | None = None
     permission_selection: ToolPermissionLevel | None = None
     published_effort: ReasoningEffort | None = None
@@ -331,6 +335,67 @@ class ManagementCommandDispatcher:
                     output=f"{management_error.error.code}: {management_error.error.message}",
                 )
             return ManagementCommandResult(handled=True, output=None, status_view=status)
+
+    async def memory_view(self) -> ManagementCommandResult:
+        """Return the typed Long-term Memory projection for protocol clients."""
+        with without_session_log():
+            try:
+                content = await self._management.memory_view()
+            except ManagementError as management_error:
+                return ManagementCommandResult(
+                    handled=True,
+                    output=None,
+                    management_error=management_error.error,
+                )
+            return ManagementCommandResult(
+                handled=True,
+                output=None,
+                memory_content=content,
+            )
+
+    async def dream(self) -> ManagementCommandResult:
+        """Run Dream and return its complete typed terminal result."""
+        with without_session_log():
+            try:
+                result = await self._management.dream()
+            except ManagementError as management_error:
+                return ManagementCommandResult(
+                    handled=True,
+                    output=None,
+                    management_error=management_error.error,
+                )
+            return ManagementCommandResult(
+                handled=True,
+                output=None,
+                dream_result=result,
+            )
+
+    async def reload_skill(self) -> ManagementCommandResult:
+        """Reload Skills and return only safe published metadata."""
+        with without_session_log():
+            try:
+                metadata = await self._management.reload_skill()
+            except ManagementError as management_error:
+                return ManagementCommandResult(
+                    handled=True,
+                    output=None,
+                    management_error=management_error.error,
+                )
+            except Exception as error:
+                logger.warning(
+                    "Typed Skill reload failed type={}",
+                    type(error).__name__,
+                )
+                return ManagementCommandResult(
+                    handled=True,
+                    output=None,
+                    management_error=ErrorInfo("skill_reload_failed", "Skill reload failed."),
+                )
+            return ManagementCommandResult(
+                handled=True,
+                output=None,
+                skill_metadata=metadata,
+            )
 
     async def reasoning_effort(self) -> ManagementCommandResult:
         """Return the typed current Reasoning Effort projection."""

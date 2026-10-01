@@ -71,6 +71,9 @@ const referenceTypes = {
   tool_permission_level: "ToolPermissionLevel",
   reasoning_effort: "ReasoningEffort",
   runtime_status: "RuntimeStatus",
+  management_error: "ManagementError",
+  dream_result: "DreamResult",
+  skill_metadata: "SkillMetadata",
   management_result: "ManagementResult",
 };
 
@@ -87,6 +90,7 @@ function schemaType(definition) {
     return definition.type.map((type) => schemaType({ type })).sort().join("|");
   }
   if (definition.type === "integer") return "number";
+  if (definition.type === "array" && definition.items) return `${schemaType(definition.items)}[]`;
   if (definition.type === "object" && definition.additionalProperties) {
     return `Record<string,${schemaType(definition.additionalProperties)}>`;
   }
@@ -130,11 +134,19 @@ for (const [name, definition] of [
     throw new Error(`${name} values differ from the protocol schema`);
   }
 }
+for (const [name, definitionName] of [
+  ["ManagementError", "management_error"],
+  ["DreamResult", "dream_result"],
+  ["SkillMetadata", "skill_metadata"],
+]) {
+  checkMembers(name, interfaceDeclaration(name).members, definitions[definitionName]);
+}
 checkMembers("RuntimeStatus", interfaceDeclaration("RuntimeStatus").members, definitions.runtime_status);
 checkMembers("ManagementResponse", interfaceDeclaration("ManagementResponse").members, definitions.management_response);
 const managementFields = [
   "handled", "output", "status_view", "effort_selection", "permission_selection",
-  "published_effort", "published_permission_level",
+  "published_effort", "published_permission_level", "memory_content", "dream_result",
+  "management_error", "skill_metadata",
 ];
 checkMembers("ManagementResult", interfaceDeclaration("ManagementResult").members, {
   properties: Object.fromEntries(managementFields.map((field) => [field, definitions.management_result.properties[field]])),

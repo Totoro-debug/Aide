@@ -71,6 +71,27 @@ export interface ServiceStatus {
 export type ToolPermissionLevel = "read-only" | "workspace-write" | "full-access";
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
+export interface ManagementError {
+  code: string;
+  message: string;
+  retryable: boolean;
+  retry_after_seconds: number | null;
+}
+
+export interface DreamResult {
+  status: string;
+  processed_count: number;
+  memory_updated: boolean;
+  cursor: number;
+  error: ManagementError | null;
+}
+
+export interface SkillMetadata {
+  name: string;
+  description: string;
+  path: string;
+}
+
 export interface RuntimeStatus {
   version: string;
   chat_model: string;
@@ -241,11 +262,15 @@ export interface RestoreResult {
 export interface ManagementResult {
   handled: boolean;
   output: string | null;
+  memory_content?: string | null;
+  dream_result?: DreamResult;
+  management_error?: ManagementError;
   status_view?: RuntimeStatus;
   effort_selection?: ReasoningEffort | null;
   permission_selection?: ToolPermissionLevel | null;
   published_effort?: ReasoningEffort | null;
   published_permission_level?: ToolPermissionLevel | null;
+  skill_metadata?: SkillMetadata[];
   restore_plan?: RestorePlan;
   restore_result?: RestoreResult | null;
 }

@@ -220,6 +220,56 @@ export async function updateRuntimeEffort(
   return response.result;
 }
 
+async function postRuntimeManagement(
+  workspaceId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+  action: "memory" | "dream" | "skills/reload",
+): Promise<ManagementResult> {
+  const response = await request<ManagementResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/management/${action}`,
+    {
+      method: "POST",
+      mutation: true,
+      body: {
+        request_id: createRequestId(),
+        current_session_id: sessionId,
+        claim_version: claimVersion,
+      },
+      extraHeaders: { "X-MyClaw-Claim": claimCredential },
+    },
+  );
+  return response.result;
+}
+
+export function getRuntimeMemory(
+  workspaceId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+): Promise<ManagementResult> {
+  return postRuntimeManagement(workspaceId, sessionId, claimVersion, claimCredential, "memory");
+}
+
+export function triggerRuntimeDream(
+  workspaceId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+): Promise<ManagementResult> {
+  return postRuntimeManagement(workspaceId, sessionId, claimVersion, claimCredential, "dream");
+}
+
+export function reloadRuntimeSkills(
+  workspaceId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+): Promise<ManagementResult> {
+  return postRuntimeManagement(workspaceId, sessionId, claimVersion, claimCredential, "skills/reload");
+}
+
 export function getProjects(): Promise<ProjectListResponse> {
   return request<ProjectListResponse>("/projects");
 }

@@ -1136,11 +1136,15 @@ def _management_result(value: Mapping[str, object]) -> Any:
     from myclaw.management.commands import ManagementCommandResult
 
     output_value = value.get("output")
+    memory_value = value.get("memory_content")
     resumed_value = value.get("resumed_session_id")
     skipped_value = value.get("resume_skipped_count")
     return ManagementCommandResult(
         handled=value.get("handled") is True,
         output=output_value if isinstance(output_value, str) else None,
+        memory_content=memory_value if isinstance(memory_value, str) else None,
+        dream_result=_dream_result(value.get("dream_result")),
+        management_error=_management_error(value.get("management_error")),
         effort_selection=cast(Any, value.get("effort_selection"))
         if isinstance(value.get("effort_selection"), str)
         else None,
@@ -1162,6 +1166,69 @@ def _management_result(value: Mapping[str, object]) -> Any:
         restore_plan=_restore_plan(value.get("restore_plan")),
         restore_result=_restore_result(value.get("restore_result")),
     )
+
+
+def _dream_result(value: object) -> Any:
+    from myclaw.agent.memory.dream import DreamResult
+
+    if not isinstance(value, dict):
+        return None
+    status = value.get("status")
+    processed_count = value.get("processed_count")
+    memory_updated = value.get("memory_updated")
+    cursor = value.get("cursor")
+    if (
+        not isinstance(status, str)
+        or isinstance(processed_count, bool)
+        or not isinstance(processed_count, int)
+        or not isinstance(memory_updated, bool)
+        or isinstance(cursor, bool)
+        or not isinstance(cursor, int)
+    ):
+        return None
+    try:
+        return DreamResult(
+            status=status,
+            processed_count=processed_count,
+            memory_updated=memory_updated,
+            cursor=cursor,
+            error=_management_error(value.get("error")),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _management_error(value: object) -> Any:
+    from myclaw.errors import ErrorCode, ErrorInfo
+
+    if not isinstance(value, dict):
+        return None
+    code = value.get("code")
+    message = value.get("message")
+    retryable = value.get("retryable")
+    retry_after_seconds = value.get("retry_after_seconds")
+    if (
+        not isinstance(code, str)
+        or not isinstance(message, str)
+        or not isinstance(retryable, bool)
+        or (
+            retry_after_seconds is not None
+            and (
+                isinstance(retry_after_seconds, bool)
+                or not isinstance(retry_after_seconds, (int, float))
+            )
+        )
+    ):
+        return None
+    try:
+        return ErrorInfo(
+            code=cast(ErrorCode, code),
+            message=message,
+            retryable=retryable,
+            retry_after_seconds=retry_after_seconds,
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 def _status_view(value: object) -> Any:

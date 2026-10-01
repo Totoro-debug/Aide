@@ -2690,7 +2690,7 @@ class LocalService:
                         status=409,
                     )
                 if (
-                    action in {"status", "permission", "effort"}
+                    action in {"status", "permission", "effort", "memory", "dream", "skills/reload"}
                     or action.startswith("restore/")
                     or (action == "dispatch" and payload.get("command") == "/restore")
                 ):
@@ -2742,7 +2742,14 @@ class LocalService:
         requires_restore_claim = action in restore_actions or (
             action == "dispatch" and payload.get("command") == "/restore"
         )
-        requires_typed_management_claim = action in {"status", "permission", "effort"}
+        requires_typed_management_claim = action in {
+            "status",
+            "permission",
+            "effort",
+            "memory",
+            "dream",
+            "skills/reload",
+        }
         requires_claim = requires_restore_claim or requires_typed_management_claim
         if requires_claim and (claim_version is None or claim_credential is None):
             raise service_error(
@@ -2775,6 +2782,12 @@ class LocalService:
             if not isinstance(permission, str):
                 raise service_error("validation_error", "Permission level is required.", status=422)
             result = await dispatcher.update_permission_level(cast(Any, permission))
+        elif action == "memory":
+            result = await dispatcher.memory_view()
+        elif action == "dream":
+            result = await dispatcher.dream()
+        elif action == "skills/reload":
+            result = await dispatcher.reload_skill()
         elif action == "resume":
             resume_id = payload.get("session_id")
             if not isinstance(resume_id, str):
@@ -3262,6 +3275,7 @@ def _encode_management_result(result: object) -> dict[str, object]:
     encoded: dict[str, object] = {
         "handled": result.handled,
         "output": result.output,
+        "memory_content": result.memory_content,
         "effort_selection": result.effort_selection,
         "permission_selection": result.permission_selection,
         "published_effort": result.published_effort,
@@ -3269,6 +3283,10 @@ def _encode_management_result(result: object) -> dict[str, object]:
         "resumed_session_id": result.resumed_session_id,
         "resume_skipped_count": result.resume_skipped_count,
     }
+    if result.dream_result is not None:
+        encoded["dream_result"] = _safe_wire_value(result.dream_result)
+    if result.management_error is not None:
+        encoded["management_error"] = _safe_wire_value(result.management_error)
     if result.status_view is not None:
         encoded["status_view"] = result.status_view.to_dict()
     if result.resume_sessions is not None:

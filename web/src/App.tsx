@@ -3,6 +3,8 @@ import {
   ArrowLeft,
   Activity,
   Ban,
+  BookOpen,
+  Brain,
   Check,
   CircleAlert,
   CircleCheck,
@@ -51,12 +53,14 @@ import {
   getRestoreResult,
   getProjectSessions,
   getProjects,
+  getRuntimeMemory,
   getRuntimeStatus,
   getServiceStatus,
   openEventStream,
   releaseProjectSession,
   registerProject,
   registerWebClient,
+  reloadRuntimeSkills,
   renameProjectSession,
   removeProject,
   resumeProjectSchedule,
@@ -66,6 +70,7 @@ import {
   inspectRestore,
   restoreBrowserSession,
   ServiceCommandError,
+  triggerRuntimeDream,
   updateRuntimeEffort,
   updateRuntimePermission,
 } from "./api";
@@ -73,6 +78,7 @@ import type {
   ClientCommand,
   ConfirmationRequest,
   ConfirmationOrigin,
+  DreamResult,
   ProjectSessionsResponse,
   RegisteredProject,
   RegisteredClient,
@@ -85,6 +91,7 @@ import type {
   SessionClaim,
   SessionSnapshot,
   SessionSummary,
+  SkillMetadata,
   ToolPermissionLevel,
   RestoreMode,
   RestorePlan,
@@ -906,15 +913,32 @@ function RuntimeManagementDialog({
   const [effort, setEffort] = useState<ReasoningEffort>("medium");
   const [loadState, setLoadState] = useState<"idle" | "loading" | "ready">("idle");
   const [saving, setSaving] = useState<"permission" | "effort" | null>(null);
+  const [operation, setOperation] = useState<"memory" | "dream" | "skills" | null>(null);
+  const [memoryContent, setMemoryContent] = useState<string | null>(null);
+  const [dreamResult, setDreamResult] = useState<DreamResult | null>(null);
+  const [skillMetadata, setSkillMetadata] = useState<SkillMetadata[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const requestEpoch = useRef(0);
+  const dreamEpoch = useRef(0);
+  const dreamInFlight = useRef(false);
+
+  useEffect(() => {
+    dreamEpoch.current += 1;
+    dreamInFlight.current = false;
+    setDreamResult(null);
+    return () => { dreamEpoch.current += 1; };
+  }, [claim, connectionState]);
 
   useEffect(() => {
     requestEpoch.current += 1;
     setSaving(null);
+    setOperation(dreamInFlight.current ? "dream" : null);
+    setMemoryContent(null);
+    setSkillMetadata(null);
     if (!open || connectionState !== "online") return;
+    if (dreamInFlight.current) return;
     let active = true;
     setLoadState("loading");
     setStatus(null);
@@ -1011,6 +1035,101 @@ function RuntimeManagementDialog({
       setError(managementErrorKey(reason));
     } finally {
       if (epoch === requestEpoch.current) setSaving(null);
+    }
+  }
+
+  async function viewMemory() {
+    if (operation !== null || connectionState !== "online") return;
+    const epoch = requestEpoch.current;
+    setOperation("memory");
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await getRuntimeMemory(
+        claim.workspace_id,
+        claim.session_id,
+        claim.claim_version,
+        claim.reconnect_credential,
+      );
+      if (epoch !== requestEpoch.current) return;
+      if (result.management_error !== undefined || typeof result.memory_content !== "string") {
+        setError("management.memoryError");
+        return;
+      }
+      setMemoryContent(result.memory_content);
+      setNotice("management.memoryLoaded");
+    } catch (reason: unknown) {
+      if (epoch !== requestEpoch.current) return;
+      setError(managementErrorKey(reason));
+    } finally {
+      if (epoch === requestEpoch.current) setOperation(null);
+    }
+  }
+
+  async function runDream() {
+    if (operation !== null || connectionState !== "online") return;
+    const epoch = dreamEpoch.current;
+    dreamInFlight.current = true;
+    setOperation("dream");
+    setDreamResult(null);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await triggerRuntimeDream(
+        claim.workspace_id,
+        claim.session_id,
+        claim.claim_version,
+        claim.reconnect_credential,
+      );
+      if (epoch !== dreamEpoch.current) return;
+      if (result.management_error !== undefined || result.dream_result === undefined) {
+        setError("management.dreamError");
+        return;
+      }
+      const nextDream = result.dream_result;
+      setDreamResult(nextDream);
+      setNotice(nextDream.error === null
+        ? nextDream.status === "No pending summaries"
+          ? "management.dreamNoPending"
+          : "management.dreamCompleted"
+        : nextDream.error.code === "memory_task_running"
+          ? "management.dreamAlreadyRunning"
+          : "management.dreamFailed");
+    } catch (reason: unknown) {
+      if (epoch !== dreamEpoch.current) return;
+      setError(managementErrorKey(reason));
+    } finally {
+      if (epoch === dreamEpoch.current) {
+        dreamInFlight.current = false;
+        setOperation(null);
+      }
+    }
+  }
+
+  async function reloadSkills() {
+    if (operation !== null || connectionState !== "online") return;
+    const epoch = requestEpoch.current;
+    setOperation("skills");
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await reloadRuntimeSkills(
+        claim.workspace_id,
+        claim.session_id,
+        claim.claim_version,
+        claim.reconnect_credential,
+      );
+      if (epoch !== requestEpoch.current) return;
+      if (result.management_error !== undefined || !Array.isArray(result.skill_metadata)) {
+        setError("management.skillsError");
+        return;
+      }
+      setSkillMetadata(result.skill_metadata);
+    } catch (reason: unknown) {
+      if (epoch !== requestEpoch.current) return;
+      setError(managementErrorKey(reason));
+    } finally {
+      if (epoch === requestEpoch.current) setOperation(null);
     }
   }
 
@@ -1138,6 +1257,98 @@ function RuntimeManagementDialog({
                     {saving === "effort" ? t("management.saving") : t("controls.save")}
                   </button>
                 </form>
+              </div>
+
+              <div className={styles.managementTools}>
+                <section className={styles.managementTool} aria-labelledby="management-memory-title">
+                  <div className={styles.managementToolHeader}>
+                    <div>
+                      <h3 id="management-memory-title">{t("management.memoryTitle")}</h3>
+                    </div>
+                    <button
+                      className={styles.secondaryButton}
+                      type="button"
+                      disabled={operation !== null || connectionState !== "online"}
+                      onClick={() => void viewMemory()}
+                    >
+                      <BookOpen size={15} aria-hidden="true" />
+                      {operation === "memory" ? t("management.loading") : t("management.viewMemory")}
+                    </button>
+                  </div>
+                  {memoryContent !== null ? (
+                    <div className={styles.managementMemory} role="region" aria-label={t("management.memoryRegion")}>
+                      <h4>{t("management.memoryRegion")}</h4>
+                      <pre>{memoryContent || t("management.memoryEmpty")}</pre>
+                    </div>
+                  ) : null}
+                </section>
+
+                <section className={styles.managementTool} aria-labelledby="management-dream-title">
+                  <div className={styles.managementToolHeader}>
+                    <div>
+                      <h3 id="management-dream-title">{t("management.dreamTitle")}</h3>
+                    </div>
+                    <button
+                      className={styles.secondaryButton}
+                      type="button"
+                      disabled={operation !== null || connectionState !== "online"}
+                      onClick={() => void runDream()}
+                    >
+                      <Brain size={15} aria-hidden="true" />
+                      {operation === "dream" ? t("management.dreamRunning") : t("management.runDream")}
+                    </button>
+                  </div>
+                  {dreamResult !== null ? (
+                    <div className={styles.managementOperationStatus} role="status" aria-live="polite">
+                      <strong>
+                        {dreamResult.error !== null
+                          ? t(dreamResult.error.code === "memory_task_running"
+                            ? "management.dreamAlreadyRunning" : "management.dreamFailed")
+                          : dreamResult.status === "No pending summaries"
+                            ? t("management.dreamNoPending")
+                            : t("management.dreamCompleted")}
+                      </strong>
+                      <span>{t("management.dreamProcessed", { count: dreamResult.processed_count })}</span>
+                      <span>{dreamResult.memory_updated ? t("management.dreamUpdated") : t("management.dreamUnchanged")}</span>
+                      <span>{t("management.dreamCursor", { cursor: dreamResult.cursor })}</span>
+                      {dreamResult.error !== null ? (
+                        <span>{dreamResult.error.code}: {dreamResult.error.message}</span>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </section>
+
+                <section className={styles.managementTool} aria-labelledby="management-skills-title">
+                  <div className={styles.managementToolHeader}>
+                    <div>
+                      <h3 id="management-skills-title">{t("management.skillsTitle")}</h3>
+                    </div>
+                    <button
+                      className={styles.secondaryButton}
+                      type="button"
+                      disabled={operation !== null || connectionState !== "online"}
+                      onClick={() => void reloadSkills()}
+                    >
+                      <RefreshCw size={15} aria-hidden="true" />
+                      {operation === "skills" ? t("management.skillsReloading") : t("management.reloadSkills")}
+                    </button>
+                  </div>
+                  {skillMetadata !== null ? (
+                    <div className={styles.managementOperationStatus} role="status" aria-live="polite">
+                      <strong>{t("management.skillsReloaded", { count: skillMetadata.length })}</strong>
+                      {skillMetadata.length > 0 ? (
+                        <ul aria-label={t("management.skillsList")}>
+                          {skillMetadata.map((skill) => (
+                            <li key={skill.name}>
+                              <strong>{skill.name}</strong>
+                              <span>{skill.description}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : <span>{t("management.skillsEmpty")}</span>}
+                    </div>
+                  ) : null}
+                </section>
               </div>
             </>
           ) : null}
@@ -3455,7 +3666,7 @@ function ProjectSessionsContent({
           </section>
         </div>
       )}
-      {managementOpen && claim !== null && connectionState === "online" ? (
+      {claim !== null && connectionState === "online" ? (
         <RuntimeManagementDialog
           key={`${claim.workspace_id}:${claim.session_id}:${claim.claim_version}:${claim.reconnect_credential}`}
           open={managementOpen}

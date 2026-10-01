@@ -9,6 +9,8 @@ from typing import Any, cast
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
 
+from myclaw.agent.memory.dream import DreamResult
+from myclaw.errors import ErrorInfo
 from myclaw.management.commands import ManagementCommandResult
 from myclaw.management.service import RuntimeStatus
 from myclaw.service.client import _management_result
@@ -57,6 +59,31 @@ def test_typed_runtime_requests_require_claim_and_reject_slash_commands(
             validator.validate({**request, field: "unsupported"})
 
 
+@pytest.mark.parametrize(
+    ("definition", "action"),
+    [
+        ("runtime_memory_request", "memory"),
+        ("runtime_dream_request", "dream"),
+        ("runtime_skills_reload_request", "skills/reload"),
+    ],
+)
+def test_web_memory_dream_and_skill_requests_are_typed_and_claim_scoped(
+    definition: str,
+    action: str,
+) -> None:
+    request = {
+        "request_id": "management-1",
+        "current_session_id": "session-1",
+        "claim_version": 1,
+    }
+    validator = _validator(definition)
+    validator.validate(request)
+    with pytest.raises(ValidationError):
+        validator.validate({**request, "command": f"/{action}"})
+    with pytest.raises(ValidationError):
+        validator.validate({key: value for key, value in request.items() if key != "claim_version"})
+
+
 def test_runtime_management_wire_results_validate_and_remote_decode_nullable_selections() -> None:
     status = RuntimeStatus(
         version="test",
@@ -89,6 +116,27 @@ def test_runtime_management_wire_results_validate_and_remote_decode_nullable_sel
             output="Foreground permission level: full-access",
             published_permission_level="full-access",
         ),
+        ManagementCommandResult(
+            handled=True,
+            output=None,
+            memory_content="# Current memory\n",
+        ),
+        ManagementCommandResult(
+            handled=True,
+            output=None,
+            dream_result=DreamResult(
+                status="Memory Task complete.",
+                processed_count=2,
+                memory_updated=True,
+                cursor=4,
+            ),
+        ),
+        ManagementCommandResult(
+            handled=True,
+            output=None,
+            skill_metadata=(),
+            management_error=ErrorInfo("skill_reload_failed", "Skill reload failed."),
+        ),
         ManagementCommandResult(handled=True, output="config_invalid: Selection is invalid."),
     )
     validator = _validator("management_response")
@@ -103,6 +151,10 @@ def test_runtime_management_wire_results_validate_and_remote_decode_nullable_sel
         assert decoded.permission_selection == result.permission_selection
         assert decoded.published_effort == result.published_effort
         assert decoded.published_permission_level == result.published_permission_level
+        assert decoded.memory_content == result.memory_content
+        assert decoded.dream_result == result.dream_result
+        assert decoded.skill_metadata == result.skill_metadata
+        assert decoded.management_error == result.management_error
     encoded_status = _encode_management_result(results[0])
     for invalid in ("unsupported", True, 1):
         with pytest.raises(ValidationError):

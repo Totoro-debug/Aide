@@ -153,6 +153,9 @@ class ScheduleService:
         self._reservation_gate = asyncio.Lock()
         self._active_job_ids: set[str] = set()
         self._active_runs: dict[str, _ActiveScheduleRun] = {}
+        self._pending_user_removals: dict[
+            str, tuple[_ActiveScheduleRun, BackgroundConfirmationOwner | None]
+        ] = {}
         self._cancelled_confirmation_generations: set[UUID] = set()
         self._consumed_at_jobs: set[str] = set()
         self._retry_at_jobs_after_resume: set[str] = set()
@@ -315,6 +318,10 @@ class ScheduleService:
         )
         return ScheduleServiceStatus(status=health, active_job_count=len(self._active_job_ids))
 
+    def is_job_active(self, job_id: str) -> bool:
+        """Return whether a public Job currently owns an execution reservation."""
+        return job_id in self._active_job_ids
+
     @property
     def admission_paused(self) -> bool:
         return self._paused
@@ -326,6 +333,10 @@ class ScheduleService:
     def cancellation_requested(self) -> bool:
         """Return whether Runtime shutdown has requested Schedule execution cancellation."""
         return self._closing.is_set()
+
+    def job_cancellation_requested(self, job_id: str) -> bool:
+        """Include deletion of the exact Job in its Runner cancellation boundary."""
+        return self.cancellation_requested() or job_id in self._pending_user_removals
 
     def current_time(self) -> datetime:
         """Return the wall-clock value used for Schedule Session projections."""
@@ -370,6 +381,18 @@ class ScheduleService:
             raise RuntimeError("Schedule Service is no longer active")
         return await self._store.add_user_job(job)
 
+    def validate_job_schedule(self, job: ScheduleJob) -> None:
+        """Preflight a management request through the dispatcher's due-time rules."""
+        if job.schedule.kind == "every":
+            _every_due_at(job, _every_anchor_ms(job))
+        elif job.schedule.kind == "cron":
+            _new_cron_cursor(
+                cast(str, job.schedule.cron_expr),
+                cast(str, job.schedule.timezone),
+                self._clock.now(),
+                created_at_ms=job.created_at_ms,
+            )
+
     async def public_snapshot(self) -> tuple[ScheduleJob, ...]:
         """Return the public user-owned Job snapshot."""
         if self._aborted:
@@ -386,22 +409,26 @@ class ScheduleService:
         if self._aborted:
             raise RuntimeError("Schedule Service is no longer active")
         removed = await self._store.remove_user_job(job_id, expected=expected)
-        if not removed:
+        pending = self._pending_user_removals.get(job_id)
+        active = pending[0] if pending is not None else self._active_runs.get(job_id)
+        if not removed and job_id not in self._pending_user_removals:
             return False
-        active = self._active_runs.get(job_id)
         if active is None:
             return True
+        owner = pending[1] if pending is not None else active.owner
+        self._pending_user_removals[job_id] = (active, owner)
         if not active.task.done():
             active.task.cancel()
         cancellation_error: BaseException | None = None
-        if active.owner is not None and self._cancel_confirmation_owner is not None:
+        if owner is not None and self._cancel_confirmation_owner is not None:
             try:
-                await self._cancel_confirmation_owner(active.owner)
+                await self._cancel_confirmation_owner(owner)
             except BaseException as error:
                 cancellation_error = error
         await self._drain_confirmation_runs((active,), require_terminal=False)
         if cancellation_error is not None:
             raise cancellation_error
+        self._pending_user_removals.pop(job_id, None)
         return True
 
     def bind_occurrence_owner(

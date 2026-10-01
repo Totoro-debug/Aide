@@ -52,11 +52,16 @@ from myclaw.errors import ErrorInfo
 from myclaw.provider.factory import create_provider
 from myclaw.provider.model_router import ModelRouter
 from myclaw.schedule.model import JobSchedule, ScheduleJob
-from myclaw.schedule.service import ScheduleOccurrence, ScheduleService
-from myclaw.schedule.store import WorkspaceScheduleStore
+from myclaw.schedule.service import ScheduleOccurrence, ScheduleService, ScheduleStaleRemovalError
+from myclaw.schedule.store import (
+    ScheduleStateError,
+    ScheduleStoreFaultedError,
+    WorkspaceScheduleStore,
+)
 from myclaw.service.errors import ServiceError, service_error
 from myclaw.service.projects import ProjectCatalog, ProjectCatalogError, ProjectRecord
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
+from myclaw.utils.text import normalize_title_candidate
 from myclaw.utils.time import local_now
 
 
@@ -68,6 +73,170 @@ _PROJECT_REMOVAL_FAILURE_MESSAGE = (
     "Project work could not be stopped; the registration remains blocked."
 )
 _MAX_SESSION_PAGE_SIZE = 100
+_MISSING = object()
+
+
+def _schedule_job_projection(
+    job: ScheduleJob,
+    *,
+    active: bool,
+    status: str | None = None,
+) -> dict[str, object]:
+    """Return the public Job shape without exposing the Schedule store."""
+    projection = job.to_dict()
+    projection["session_id"] = job.session_id
+    projection["active"] = active
+    projection["status"] = status or ("running" if active else job.state.last_status or "scheduled")
+    return projection
+
+
+def _schedule_request_fingerprint(
+    workspace_id: str,
+    action: str,
+    payload: Mapping[str, object],
+) -> str:
+    try:
+        return json.dumps(
+            {
+                "workspace_id": workspace_id,
+                "action": action,
+                "payload": {key: value for key, value in payload.items() if key != "request_id"},
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError) as error:
+        raise service_error(
+            "validation_error", "Schedule Job input is not valid JSON.", status=422
+        ) from error
+
+
+def _schedule_job_input(payload: Mapping[str, object]) -> tuple[str, str, JobSchedule]:
+    """Normalize the existing Schedule Tool input shape for the HTTP boundary."""
+    field_errors: dict[str, str] = {}
+    message = payload.get("message")
+    if not isinstance(message, str):
+        normalized_message = ""
+        field_errors["message"] = "must be a string"
+    else:
+        normalized_message = message.strip()
+        if not normalized_message:
+            field_errors["message"] = "must not be empty"
+        elif len(normalized_message) > 20_000:
+            field_errors["message"] = "must not exceed 20000 characters"
+
+    title_value = payload.get("title", _MISSING)
+    if title_value is _MISSING:
+        normalized_title = normalize_title_candidate(normalized_message)
+    elif not isinstance(title_value, str):
+        normalized_title = ""
+        field_errors["title"] = "must be a string"
+    else:
+        normalized_title = normalize_title_candidate(title_value)
+        if not normalized_title:
+            field_errors["title"] = "must not be empty"
+
+    nested_schedule = payload.get("schedule")
+    if nested_schedule is not None and not isinstance(nested_schedule, Mapping):
+        field_errors["schedule"] = "must be an object"
+        nested: Mapping[str, object] = {}
+    else:
+        nested = nested_schedule if isinstance(nested_schedule, Mapping) else {}
+
+    def schedule_value(name: str) -> object:
+        if name in payload:
+            return payload[name]
+        return nested.get(name)
+
+    kind_value = payload.get("kind", nested.get("kind"))
+    at_time = schedule_value("at_time")
+    every_seconds = schedule_value("every_seconds")
+    cron_expr = schedule_value("cron_expr")
+    timezone = schedule_value("timezone")
+    selected = [
+        name
+        for name, value in (
+            ("at", at_time),
+            ("every", every_seconds),
+            ("cron", cron_expr),
+        )
+        if value is not None
+    ]
+
+    selected_kind: str | None = None
+    if kind_value is not None:
+        if not isinstance(kind_value, str) or kind_value not in {"at", "every", "cron"}:
+            field_errors["kind"] = "must be at, every, or cron"
+        else:
+            selected_kind = kind_value
+            if selected != [kind_value]:
+                field_errors["schedule"] = "must select exactly one matching schedule kind"
+    elif len(selected) != 1:
+        field_errors["schedule"] = "must select exactly one of at_time, every_seconds, or cron_expr"
+    else:
+        selected_kind = selected[0]
+
+    schedule: JobSchedule | None = None
+    if selected_kind == "at" and "schedule" not in field_errors:
+        if timezone is not None:
+            field_errors["timezone"] = "is only valid for cron schedules"
+        if not isinstance(at_time, str):
+            field_errors["at_time"] = "must be a timezone-aware ISO time"
+        else:
+            try:
+                schedule = JobSchedule.from_at_input(at_time)
+            except (TypeError, ValueError):
+                field_errors["at_time"] = "must be a valid timezone-aware ISO time"
+    elif selected_kind == "every" and "schedule" not in field_errors:
+        if timezone is not None:
+            field_errors["timezone"] = "is only valid for cron schedules"
+        if isinstance(every_seconds, bool) or not isinstance(every_seconds, int):
+            field_errors["every_seconds"] = "must be a positive integer"
+        else:
+            try:
+                schedule = JobSchedule.every(every_seconds)
+            except (TypeError, ValueError):
+                field_errors["every_seconds"] = "must be a positive integer"
+    elif selected_kind == "cron" and "schedule" not in field_errors:
+        if not isinstance(cron_expr, str):
+            field_errors["cron_expr"] = "must be a valid five-field cron expression"
+        if timezone is not None and not isinstance(timezone, str):
+            field_errors["timezone"] = "must be a valid IANA timezone"
+        if isinstance(cron_expr, str):
+            try:
+                schedule = JobSchedule.from_cron_input(cron_expr)
+            except (TypeError, ValueError):
+                field_errors["cron_expr"] = "must be a valid five-field cron expression"
+        if isinstance(timezone, str):
+            try:
+                validated_timezone = JobSchedule.from_cron_input("* * * * *", timezone)
+            except (TypeError, ValueError):
+                field_errors["timezone"] = "must be a valid IANA timezone"
+            else:
+                if schedule is not None:
+                    schedule = JobSchedule.cron(
+                        schedule.cron_expr or "", validated_timezone.timezone or "UTC"
+                    )
+
+    if field_errors:
+        raise service_error(
+            "validation_error",
+            "Schedule Job input is invalid.",
+            status=400,
+            field_errors=field_errors,
+        )
+    assert schedule is not None
+    return normalized_message, normalized_title, schedule
+
+
+def _schedule_epoch_milliseconds(value: datetime) -> int:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise service_error("schedule_unavailable", "Schedule time is unavailable.", retryable=True)
+    milliseconds = int(value.timestamp() * 1000)
+    if milliseconds < 0:
+        raise service_error("schedule_unavailable", "Schedule time is unavailable.", retryable=True)
+    return milliseconds
 
 
 def _encode_session_cursor(
@@ -1690,6 +1859,9 @@ class LocalService:
         self._closed = asyncio.Event()
         self._lock = asyncio.Lock()
         self._schedule_admission_lock = asyncio.Lock()
+        self._schedule_mutation_lock = asyncio.Lock()
+        self._schedule_mutation_results: dict[str, tuple[str, dict[str, object]]] = {}
+        self._schedule_removal_jobs: dict[tuple[str, str], tuple[ScheduleJob, bool]] = {}
         self._project_lifecycle_lock = asyncio.Lock()
         self._project_removals: dict[str, _ProjectRemoval] = {}
         self.projects = ProjectCatalog(agent_home)
@@ -2003,6 +2175,198 @@ class LocalService:
                 workspace = self._workspaces[workspace_id]
             jobs = await workspace.schedule_service.public_snapshot()
             return jobs, workspace.schedule_status()
+
+    def _schedule_workspace(self, client_id: str, workspace_id: str) -> WorkspaceServiceRuntime:
+        client = self._require_client(client_id)
+        workspace = self.workspace(workspace_id)
+        if (
+            workspace_id not in client.attached_workspaces
+            and client.current_workspace_id != workspace_id
+            and not any(
+                candidate_workspace == workspace_id for candidate_workspace, _ in client.claimed
+            )
+        ):
+            raise service_error(
+                "forbidden",
+                "This Client is not attached to the requested Workspace.",
+                status=403,
+            )
+        return workspace
+
+    async def list_schedule_jobs(self, client_id: str, workspace_id: str) -> dict[str, object]:
+        workspace = self._schedule_workspace(client_id, workspace_id)
+        jobs = await workspace.schedule_service.public_snapshot()
+        return {
+            "workspace_id": workspace_id,
+            "jobs": [
+                _schedule_job_projection(
+                    job,
+                    active=workspace.schedule_service.is_job_active(job.job_id),
+                )
+                for job in jobs
+            ],
+            "status": workspace.schedule_status(),
+        }
+
+    async def get_schedule_job(
+        self, client_id: str, workspace_id: str, job_id: str
+    ) -> dict[str, object]:
+        workspace = self._schedule_workspace(client_id, workspace_id)
+        jobs = await workspace.schedule_service.public_snapshot()
+        job = next((candidate for candidate in jobs if candidate.job_id == job_id), None)
+        if job is None:
+            raise service_error("not_found", "Schedule Job was not found.", status=404)
+        return {
+            "workspace_id": workspace_id,
+            "job": _schedule_job_projection(
+                job,
+                active=workspace.schedule_service.is_job_active(job.job_id),
+            ),
+            "status": workspace.schedule_status(),
+        }
+
+    async def create_schedule_job(
+        self,
+        client_id: str,
+        workspace_id: str,
+        payload: Mapping[str, object],
+        request_id: str,
+    ) -> dict[str, object]:
+        workspace = self._schedule_workspace(client_id, workspace_id)
+        fingerprint = _schedule_request_fingerprint(workspace_id, "create", payload)
+        async with self._schedule_mutation_lock, self._project_lifecycle_lock:
+            workspace = self._schedule_workspace(client_id, workspace_id)
+            previous = self._schedule_mutation_results.get(request_id)
+            if previous is not None:
+                if previous[0] != fingerprint:
+                    raise service_error(
+                        "request_reused",
+                        "request_id was already used for a different Schedule request.",
+                        status=409,
+                    )
+                return previous[1]
+            message, title, schedule = _schedule_job_input(payload)
+            timestamp = _schedule_epoch_milliseconds(workspace.schedule_service.current_time())
+            job = ScheduleJob(
+                job_id=str(uuid4()),
+                message=message,
+                title=title,
+                schedule=schedule,
+                created_at_ms=timestamp,
+                updated_at_ms=timestamp,
+            )
+            try:
+                workspace.schedule_service.validate_job_schedule(job)
+            except (ValueError, OverflowError) as error:
+                field_name = "every_seconds" if schedule.kind == "every" else "cron_expr"
+                raise service_error(
+                    "validation_error",
+                    "Schedule Job input is invalid.",
+                    status=400,
+                    field_errors={field_name: "must define a representable next occurrence"},
+                ) from error
+            try:
+                await workspace.schedule_service.add_user_job(job)
+            except ScheduleStoreFaultedError as error:
+                raise service_error(
+                    "schedule_unavailable",
+                    "Schedule state is unavailable; retry after it is repaired.",
+                    retryable=True,
+                ) from error
+            except (ScheduleStateError, OSError, RuntimeError) as error:
+                raise service_error(
+                    "schedule_update_failed",
+                    "Schedule Job could not be created.",
+                    retryable=True,
+                ) from error
+            except ValueError as error:
+                raise service_error("validation_error", str(error), status=400) from error
+            result: dict[str, object] = {
+                "request_id": request_id,
+                "workspace_id": workspace_id,
+                "job": _schedule_job_projection(job, active=False),
+                "status": workspace.schedule_status(),
+            }
+            self._schedule_mutation_results[request_id] = (fingerprint, result)
+            return result
+
+    async def delete_schedule_job(
+        self,
+        client_id: str,
+        workspace_id: str,
+        job_id: str,
+        request_id: str,
+        payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        workspace = self._schedule_workspace(client_id, workspace_id)
+        fingerprint = _schedule_request_fingerprint(
+            workspace_id,
+            "delete",
+            {**payload, "job_id": job_id},
+        )
+        async with self._schedule_mutation_lock, self._project_lifecycle_lock:
+            workspace = self._schedule_workspace(client_id, workspace_id)
+            previous = self._schedule_mutation_results.get(request_id)
+            if previous is not None:
+                if previous[0] != fingerprint:
+                    raise service_error(
+                        "request_reused",
+                        "request_id was already used for a different Schedule request.",
+                        status=409,
+                    )
+                return previous[1]
+            jobs = await workspace.schedule_service.public_snapshot()
+            job = next((candidate for candidate in jobs if candidate.job_id == job_id), None)
+            removal_key = (workspace_id, job_id)
+            pending = self._schedule_removal_jobs.get(removal_key)
+            if job is None and pending is not None:
+                job = pending[0]
+            if job is None:
+                raise service_error("not_found", "Schedule Job was not found.", status=404)
+            was_active = (
+                pending[1]
+                if pending is not None
+                else workspace.schedule_service.is_job_active(job_id)
+            )
+            self._schedule_removal_jobs[removal_key] = (job, was_active)
+            try:
+                removed = await workspace.schedule_service.remove_user_job(job_id, expected=job)
+            except ScheduleStaleRemovalError as error:
+                raise service_error(
+                    "schedule_changed",
+                    "Schedule Job changed before removal; reload and try again.",
+                    retryable=True,
+                ) from error
+            except ScheduleStoreFaultedError as error:
+                raise service_error(
+                    "schedule_unavailable",
+                    "Schedule state is unavailable; retry after it is repaired.",
+                    retryable=True,
+                ) from error
+            except (ScheduleStateError, OSError, RuntimeError) as error:
+                raise service_error(
+                    "schedule_update_failed",
+                    "Schedule Job could not be deleted.",
+                    retryable=True,
+                ) from error
+            if not removed:
+                raise service_error(
+                    "schedule_changed",
+                    "Schedule Job changed before removal; reload and try again.",
+                    retryable=True,
+                )
+            result: dict[str, object] = {
+                "request_id": request_id,
+                "workspace_id": workspace_id,
+                "job_id": job_id,
+                "deleted": True,
+                "canceled": was_active,
+                "job": _schedule_job_projection(job, active=False, status="deleted"),
+                "status": workspace.schedule_status(),
+            }
+            self._schedule_mutation_results[request_id] = (fingerprint, result)
+            self._schedule_removal_jobs.pop(removal_key, None)
+            return result
 
     async def _project_workspace(
         self, client_id: str, project_id: str

@@ -133,6 +133,59 @@ export interface ProjectSchedule {
   timezone: string | null;
 }
 
+export interface ScheduleJobState {
+  last_finished_at_ms: number | null;
+  last_status: "ok" | "error" | null;
+  last_error: string | null;
+}
+
+export type ScheduleJobStatus = "scheduled" | "running" | "ok" | "error" | "deleted";
+
+export interface ScheduleJob {
+  job_id: string;
+  source: "user" | "system";
+  message: string;
+  title: string;
+  schedule: ProjectSchedule;
+  state: ScheduleJobState;
+  created_at_ms: number;
+  updated_at_ms: number;
+  session_id: string;
+  active: boolean;
+  status: ScheduleJobStatus;
+}
+
+export interface ScheduleStatus {
+  admitted: boolean;
+  status: "available" | "faulted";
+  active_job_count: number;
+}
+
+export interface ScheduleJobsResponse {
+  workspace_id: string;
+  jobs: ScheduleJob[];
+  status: ScheduleStatus;
+}
+
+export interface ScheduleJobResponse {
+  request_id?: string;
+  workspace_id: string;
+  job: ScheduleJob;
+  status: ScheduleStatus;
+  deleted?: boolean;
+  canceled?: boolean;
+}
+
+export interface ScheduleJobInput {
+  message: string;
+  title?: string;
+  kind?: ProjectScheduleKind;
+  at_time?: string;
+  every_seconds?: number;
+  cron_expr?: string;
+  timezone?: string;
+}
+
 export interface ProjectJob {
   job_id: string;
   title: string;

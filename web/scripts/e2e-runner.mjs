@@ -143,7 +143,7 @@ try {
   await details.press("Enter");
   await page.getByRole("dialog").waitFor();
   await page.keyboard.press("Escape");
-  await page.waitForFunction(() => document.activeElement?.textContent?.includes("连接详情"));
+  await expect(details).toBeFocused();
   assert.equal(await details.evaluate((element) => element === document.activeElement), true);
 
   await page.reload();
@@ -206,7 +206,358 @@ try {
   await page.clock.resume();
 
   const firstProjectItem = projectItems.filter({ hasText: firstProject });
-  await firstProjectItem.getByRole("link", { name: "Open sessions" }).click();
+  const scheduleResponsePromise = page.waitForResponse((response) => (
+    response.request().method() === "GET"
+    && response.url().endsWith("/schedule/jobs")
+  ));
+  await firstProjectItem.getByRole("link", { name: "Open schedule" }).click();
+  const scheduleResponse = await scheduleResponsePromise;
+  assert.equal(scheduleResponse.status(), 200, "Schedule page did not load its real job response");
+  const schedulePayload = await scheduleResponse.json();
+  assert.equal(schedulePayload.status.admitted, false, "Schedule page reported a false paused state");
+  assert.equal(schedulePayload.status.status, "available", "Schedule page reported a false health state");
+  await page.getByRole("heading", { name: "Schedule Jobs", exact: true }).waitFor();
+  const scheduleStatus = page.locator('dl[aria-label="Schedule status"]');
+  await expect(scheduleStatus).toContainText("Paused");
+  await expect(scheduleStatus).toContainText("Available");
+  await expect(scheduleStatus).toContainText("Active Jobs");
+  await expect(scheduleStatus).not.toContainText("{{");
+  const scheduleCreate = page.getByRole("button", { name: "Create Job", exact: true });
+  await expect(scheduleCreate).toBeEnabled();
+  await scheduleCreate.click();
+  const scheduleValidation = page.getByRole("alert").filter({ hasText: "Review the highlighted fields." });
+  await scheduleValidation.waitFor();
+  await expect(scheduleValidation.getByRole("link", { name: "Message", exact: true })).toBeVisible();
+  await expect(scheduleValidation.getByRole("link", { name: "Run at", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Message")).toHaveAttribute("aria-invalid", "true");
+  await expect(scheduleValidation).toBeFocused();
+
+  async function createBrowserScheduleJob({
+    title,
+    message,
+    kind,
+    value,
+  }) {
+    await page.getByLabel("Message").fill(message);
+    await page.getByLabel("Title").fill(title);
+    await page.getByRole("button", { name: kind, exact: true }).click();
+    if (kind === "At") await page.getByLabel("Run at").fill(value);
+    if (kind === "Every") await page.getByLabel("Interval (seconds)").fill(value);
+    if (kind === "Cron") {
+      await page.getByLabel("Cron expression").fill(value);
+      await page.getByLabel("Timezone").fill("UTC");
+    }
+    const createResponse = page.waitForResponse((response) => (
+      response.request().method() === "POST"
+      && response.url().endsWith("/schedule/jobs")
+    ));
+    await scheduleCreate.click();
+    const response = await createResponse;
+    assert.equal(response.status(), 200, `${kind} Schedule Job creation failed`);
+    await page.getByText("Schedule Job created.", { exact: true }).waitFor();
+    await page.getByRole("heading", { name: title, exact: true }).waitFor();
+  }
+
+  const browserAtTitle = "E2E browser at job";
+  const browserEveryTitle = "E2E browser every job";
+  const browserCronTitle = "E2E browser cron job";
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+  await createBrowserScheduleJob({
+    title: browserAtTitle,
+    message: "E2E browser at message",
+    kind: "At",
+    value: "2099-01-01T00:00:00Z",
+  });
+  const createdScheduleNotice = page.getByRole("status").filter({ hasText: "Schedule Job created." });
+  await page.clock.runFor(9999);
+  await expect(createdScheduleNotice).toBeVisible();
+  await page.clock.runFor(1);
+  await expect(createdScheduleNotice).toHaveCount(0);
+  await page.clock.resume();
+  await createBrowserScheduleJob({
+    title: browserEveryTitle,
+    message: "E2E browser every message",
+    kind: "Every",
+    value: "60",
+  });
+  await createdScheduleNotice.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(createdScheduleNotice).toHaveCount(0);
+  await createBrowserScheduleJob({
+    title: browserCronTitle,
+    message: "E2E browser cron message",
+    kind: "Cron",
+    value: "0 0 * * *",
+  });
+
+  const retryScheduleTitle = "E2E accepted Schedule create retry";
+  const acceptedCreateRequests = [];
+  let acceptedCreateHeaders;
+  let acceptedScheduleJob;
+  let notifyAcceptedCreate;
+  let releaseAcceptedCreate;
+  const acceptedCreateArrived = new Promise((done) => { notifyAcceptedCreate = done; });
+  const acceptedCreateGate = new Promise((done) => { releaseAcceptedCreate = done; });
+  const loseAcceptedCreateResponse = async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    acceptedCreateRequests.push(route.request().postDataJSON());
+    acceptedCreateHeaders = await route.request().allHeaders();
+    const response = await route.fetch();
+    assert.equal(response.status(), 200, "The create retry fixture must first be accepted by the real service");
+    acceptedScheduleJob = (await response.json()).job;
+    if (acceptedCreateRequests.length === 1) {
+      notifyAcceptedCreate();
+      await acceptedCreateGate;
+      return route.abort("failed");
+    }
+    return route.fulfill({ response });
+  };
+  await page.route("**/schedule/jobs", loseAcceptedCreateResponse);
+  await page.getByLabel("Message", { exact: true }).fill("E2E accepted retry message");
+  await page.getByLabel("Title", { exact: true }).fill(retryScheduleTitle);
+  await page.getByRole("button", { name: "At", exact: true }).click();
+  await page.getByLabel("Run at", { exact: true }).fill("2099-02-01T00:00:00Z");
+  await scheduleCreate.click();
+  await acceptedCreateArrived;
+  for (const label of ["Message", "Title", "Run at"]) {
+    await expect(page.getByLabel(label, { exact: true })).toBeDisabled();
+  }
+  await expect(page.getByRole("button", { name: "Every", exact: true })).toBeDisabled();
+  releaseAcceptedCreate();
+  await page.getByRole("alert").filter({ hasText: "The request may have completed, but its result is unknown." }).waitFor();
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("E2E accepted retry message");
+  await expect(page.getByLabel("Message", { exact: true })).toBeDisabled();
+  const retryAcceptedResponse = page.waitForResponse((response) => (
+    response.request().method() === "POST" && response.url().endsWith("/schedule/jobs")
+  ));
+  await page.getByRole("button", { name: "Retry create", exact: true }).click();
+  assert.equal((await retryAcceptedResponse).status(), 200);
+  await page.getByRole("heading", { name: retryScheduleTitle, exact: true }).waitFor();
+  assert.equal(acceptedCreateRequests.length, 2);
+  assert.deepEqual(acceptedCreateRequests[1], acceptedCreateRequests[0], "Unknown create retry changed request_id or payload");
+  delete acceptedCreateHeaders["content-length"];
+  const acceptedListResponse = await primaryContext.request.get(scheduleResponse.url(), { headers: acceptedCreateHeaders });
+  assert.equal(acceptedListResponse.status(), 200);
+  const acceptedList = await acceptedListResponse.json();
+  assert.equal(acceptedList.jobs.filter((job) => job.title === retryScheduleTitle).length, 1,
+    "The two accepted create requests persisted more than one Job");
+  assert.equal(acceptedList.jobs.find((job) => job.title === retryScheduleTitle).job_id, acceptedScheduleJob.job_id);
+  await expect(page.getByLabel("Message", { exact: true })).toBeEnabled();
+  await page.unroute("**/schedule/jobs", loseAcceptedCreateResponse);
+
+  const browserAtItem = page.getByRole("listitem").filter({ hasText: browserAtTitle });
+  await expect(browserAtItem.getByRole("status")).toHaveText("Scheduled");
+  const detailResponsePromise = page.waitForResponse((response) => (
+    response.request().method() === "GET"
+    && /\/schedule\/jobs\/[^/]+$/.test(response.url())
+  ));
+  await browserAtItem.getByRole("button", { name: "Inspect", exact: true }).click();
+  const detailResponse = await detailResponsePromise;
+  assert.equal(detailResponse.status(), 200, "Schedule detail did not load the authoritative response");
+  const detailPayload = await detailResponse.json();
+  assert.equal(detailPayload.job.schedule.kind, "at", "Schedule detail returned the wrong rule kind");
+  const scheduleDetail = page.getByRole("dialog", { name: "Schedule Job details" });
+  await scheduleDetail.getByText("E2E browser at message", { exact: true }).waitFor();
+  await scheduleDetail.getByText(`At ${detailPayload.job.schedule.at_time}`, { exact: true }).waitFor();
+  await scheduleDetail.getByText("Scheduled", { exact: true }).waitFor();
+  await scheduleDetail.getByRole("button", { name: "Close", exact: true }).last().click();
+  await scheduleDetail.waitFor({ state: "hidden" });
+
+  let notifyDelayedDetail;
+  let releaseDelayedDetail;
+  const delayedDetailArrived = new Promise((done) => { notifyDelayedDetail = done; });
+  const delayedDetailGate = new Promise((done) => { releaseDelayedDetail = done; });
+  const delayScheduleDetail = async (route) => {
+    const response = await route.fetch();
+    notifyDelayedDetail();
+    await delayedDetailGate;
+    await route.fulfill({ response });
+  };
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+  await page.route("**/schedule/jobs/*", delayScheduleDetail);
+  const inspectScheduleTrigger = browserAtItem.getByRole("button", { name: "Inspect", exact: true });
+  await inspectScheduleTrigger.focus();
+  await inspectScheduleTrigger.press("Enter");
+  await delayedDetailArrived;
+  await scheduleDetail.getByText("Loading Job details", { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await expect(scheduleDetail).toHaveCount(0);
+  await page.clock.runFor(32);
+  await expect(inspectScheduleTrigger).toBeFocused();
+  const delayedDetailResponse = page.waitForResponse((response) => response.url() === detailResponse.url());
+  releaseDelayedDetail();
+  await delayedDetailResponse;
+  await page.clock.runFor(32);
+  await expect(scheduleDetail).toHaveCount(0);
+  await expect(inspectScheduleTrigger).toBeFocused();
+  await page.unroute("**/schedule/jobs/*", delayScheduleDetail);
+
+  // Only the HTTP status projection is simulated here; CRUD and persistence above use the real service.
+  let projectedScheduleStatus = "running";
+  const projectScheduleStatus = async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    const response = await route.fetch();
+    const body = await response.json();
+    body.jobs = body.jobs.map((job) => job.job_id === detailPayload.job.job_id ? {
+      ...job,
+      active: projectedScheduleStatus === "running",
+      status: projectedScheduleStatus,
+      state: projectedScheduleStatus === "ok" ? {
+        last_finished_at_ms: Date.now(), last_status: "ok", last_error: null,
+      } : job.state,
+    } : job);
+    await route.fulfill({ response, json: body });
+  };
+  await page.route("**/schedule/jobs", projectScheduleStatus);
+  await inspectScheduleTrigger.click();
+  await scheduleDetail.getByText("Scheduled", { exact: true }).waitFor();
+  await page.clock.runFor(5000);
+  await scheduleDetail.getByText("Running", { exact: true }).waitFor();
+  projectedScheduleStatus = "ok";
+  await page.clock.runFor(5000);
+  await scheduleDetail.getByText("Succeeded", { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await expect(scheduleDetail).toHaveCount(0);
+  await page.clock.runFor(32);
+  await expect(inspectScheduleTrigger).toBeFocused();
+  await page.unroute("**/schedule/jobs", projectScheduleStatus);
+  await page.clock.resume();
+
+  for (const language of ["en", "zh-CN"]) {
+    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    const labels = language === "en" ? {
+      heading: "Schedule Jobs", create: "Create Job", message: "Message", at: "Run at",
+      summary: "Review the highlighted fields.", inspect: "Inspect", delete: "Delete",
+    } : {
+      heading: "Schedule Job", create: "创建 Job", message: "消息", at: "执行时间",
+      summary: "请检查标记出的字段。", inspect: "查看详情", delete: "删除",
+    };
+    for (const theme of ["light", "dark"]) {
+      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      for (const viewport of viewports) {
+        await page.setViewportSize(viewport);
+        const createTrigger = page.getByRole("button", { name: labels.create, exact: true });
+        await expect(page.getByRole("main")).not.toContainText("{{");
+        await createTrigger.focus();
+        await createTrigger.press("Enter");
+        const summary = page.getByRole("alert").filter({ hasText: labels.summary });
+        await expect(summary).toBeFocused();
+        await summary.getByRole("link", { name: labels.message, exact: true }).focus();
+        await page.keyboard.press("Enter");
+        await expect(page.getByLabel(labels.message, { exact: true })).toBeFocused();
+        await expect(page.getByLabel(labels.at, { exact: true })).toHaveAttribute("aria-invalid", "true");
+        for (const target of [createTrigger, browserAtItem.getByRole("button", { name: labels.inspect, exact: true }),
+          browserAtItem.getByRole("button", { name: labels.delete, exact: true })]) {
+          await target.scrollIntoViewIfNeeded();
+          await expect(target).toBeVisible();
+          const bounds = await target.boundingBox();
+          assert.ok(bounds && bounds.x >= 0 && bounds.y >= 0
+            && bounds.x + bounds.width <= viewport.width + 1 && bounds.y + bounds.height <= viewport.height + 1,
+          `Schedule action unreachable at ${language}/${theme}/${viewport.width}x${viewport.height}`);
+        }
+        assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+          `Schedule horizontal overflow at ${language}/${theme}/${viewport.width}x${viewport.height}`);
+        await page.getByRole("heading", { name: labels.heading, exact: true }).scrollIntoViewIfNeeded();
+        await page.screenshot({ path: resolve(output, `schedule-jobs-${language}-${theme}-${viewport.width}.png`) });
+      }
+    }
+  }
+  await page.getByRole("button", { name: "EN", exact: true }).click();
+
+  let notifyOldScheduleLoad;
+  let releaseOldScheduleLoad;
+  const oldScheduleLoadArrived = new Promise((done) => { notifyOldScheduleLoad = done; });
+  const oldScheduleLoadGate = new Promise((done) => { releaseOldScheduleLoad = done; });
+  const delayOldScheduleLoad = async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.jobs[0] = { ...body.jobs[0], title: "STALE Schedule page response" };
+    notifyOldScheduleLoad();
+    await oldScheduleLoadGate;
+    await route.fulfill({ response, json: body });
+  };
+  await page.route("**/schedule/jobs", delayOldScheduleLoad);
+  await page.getByRole("button", { name: "Refresh schedule", exact: true }).click();
+  await oldScheduleLoadArrived;
+  await page.getByRole("link", { name: "Open sessions", exact: true }).click();
+  await page.getByRole("heading", { name: "project-one", exact: true }).waitFor();
+  const oldScheduleLoadResponse = page.waitForResponse((response) => response.url() === scheduleResponse.url());
+  releaseOldScheduleLoad();
+  await oldScheduleLoadResponse;
+  await expect(page.getByText("STALE Schedule page response", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Schedule Jobs", exact: true })).toHaveCount(0);
+  await page.unroute("**/schedule/jobs", delayOldScheduleLoad);
+  await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
+  await firstProjectItem.getByRole("link", { name: "Open schedule" }).click();
+  await page.getByRole("heading", { name: browserAtTitle, exact: true }).waitFor();
+
+  let notifyDisconnectedLoad;
+  let releaseDisconnectedLoad;
+  let heldDisconnectedLoad = false;
+  const disconnectedLoadArrived = new Promise((done) => { notifyDisconnectedLoad = done; });
+  const disconnectedLoadGate = new Promise((done) => { releaseDisconnectedLoad = done; });
+  const delayDisconnectedLoad = async (route) => {
+    if (heldDisconnectedLoad || route.request().method() !== "GET") return route.continue();
+    heldDisconnectedLoad = true;
+    const response = await route.fetch();
+    const body = await response.json();
+    body.jobs[0] = { ...body.jobs[0], title: "STALE disconnected Schedule response" };
+    notifyDisconnectedLoad();
+    await disconnectedLoadGate;
+    await route.fulfill({ response, json: body });
+  };
+  await page.route("**/schedule/jobs", delayDisconnectedLoad);
+  await page.getByRole("button", { name: "Refresh schedule", exact: true }).click();
+  await disconnectedLoadArrived;
+  await page.route("**/api/v1/clients", (route) => route.abort());
+  await page.evaluate(() => window.__myclawTestSocket.close());
+  const scheduleDisconnected = page.getByRole("status").filter({ hasText: "Showing the last received Job status." });
+  await scheduleDisconnected.waitFor();
+  await expect(page.getByRole("button", { name: "Create Job", exact: true })).toBeDisabled();
+  await expect(page.getByRole("heading", { name: browserAtTitle, exact: true })).toBeVisible();
+  const disconnectedLoadResponse = page.waitForResponse((response) => response.url() === scheduleResponse.url());
+  releaseDisconnectedLoad();
+  await disconnectedLoadResponse;
+  await expect(page.getByText("STALE disconnected Schedule response", { exact: true })).toHaveCount(0);
+  await page.unroute("**/api/v1/clients");
+  await expect(scheduleDisconnected).toHaveCount(0, { timeout: 10000 });
+  await expect(page.getByRole("button", { name: "Create Job", exact: true })).toBeEnabled();
+  await page.getByRole("heading", { name: browserAtTitle, exact: true }).waitFor();
+  await expect(page.getByText("STALE disconnected Schedule response", { exact: true })).toHaveCount(0);
+  await page.unroute("**/schedule/jobs", delayDisconnectedLoad);
+
+  async function deleteBrowserScheduleJob(title) {
+    const job = page.getByRole("listitem").filter({ hasText: title });
+    await job.getByRole("button", { name: "Delete", exact: true }).click();
+    const deleteDialog = page.getByRole("dialog", { name: "Delete this Schedule Job?" });
+    const deleteResponse = page.waitForResponse((response) => (
+      response.request().method() === "DELETE"
+      && /\/schedule\/jobs\/[^/]+$/.test(response.url())
+    ));
+    await deleteDialog.getByRole("button", { name: "Delete Job", exact: true }).click();
+    const response = await deleteResponse;
+    assert.equal(response.status(), 200, `${title} Schedule Job deletion failed`);
+    await deleteDialog.waitFor({ state: "hidden" });
+    await page.getByText("Schedule Job deleted.", { exact: true }).waitFor();
+    await expect(job).toHaveCount(0);
+  }
+
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+  await deleteBrowserScheduleJob(browserAtTitle);
+  const deletedScheduleNotice = page.getByRole("status").filter({ hasText: "Schedule Job deleted." });
+  await page.clock.runFor(9999);
+  await expect(deletedScheduleNotice).toBeVisible();
+  await page.clock.runFor(1);
+  await expect(deletedScheduleNotice).toHaveCount(0);
+  await page.clock.resume();
+  await deleteBrowserScheduleJob(browserEveryTitle);
+  await deletedScheduleNotice.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(deletedScheduleNotice).toHaveCount(0);
+  await deleteBrowserScheduleJob(browserCronTitle);
+  await deleteBrowserScheduleJob(retryScheduleTitle);
+  await expect(page.getByText("E2E browser at message", { exact: true })).toHaveCount(0);
+  await expect(scheduleStatus).toContainText("Paused");
+  await expect(scheduleStatus).toContainText("Available");
+  await page.getByRole("link", { name: "Open sessions", exact: true }).click();
   await page.getByRole("heading", { name: "project-one", exact: true }).waitFor();
   const sessionList = page.getByRole("list", { name: "Conversation Sessions" });
   await sessionList.getByRole("button", { name: /Web available history/ }).click();
@@ -1076,7 +1427,7 @@ try {
   await renameDialog.getByRole("button", { name: "Save" }).click();
   await renameDialog.getByText("This Session changed elsewhere. Reload it and try again.", { exact: true }).waitFor();
   await renameDialog.getByRole("button", { name: "Save" }).waitFor({ state: "visible" });
-  await page.waitForFunction(() => !document.querySelector("[role='dialog'] button[type='submit']")?.disabled);
+  await expect(renameDialog.getByRole("button", { name: "Save" })).toBeEnabled();
   assert.equal(await renameDialog.getByLabel("Session title").inputValue(), "Renamed available history",
     "A metadata conflict discarded the user's title");
   await page.unroute("**/api/v1/projects/*/sessions/*", interceptRenameConflict);
@@ -1310,6 +1661,33 @@ try {
     await page.getByText(language === "en" ? "Project registered." : "项目已登记。", { exact: true }).waitFor();
   }
   await page.clock.resume();
+  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await firstProjectItem.getByRole("link", { name: "Open schedule" }).click();
+  await page.getByRole("heading", { name: "E2E saved project job", exact: true }).waitFor();
+  let notifySwitchingScheduleLoad;
+  let releaseSwitchingScheduleLoad;
+  const switchingScheduleLoadArrived = new Promise((done) => { notifySwitchingScheduleLoad = done; });
+  const switchingScheduleLoadGate = new Promise((done) => { releaseSwitchingScheduleLoad = done; });
+  const delaySwitchingScheduleLoad = async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.jobs[0] = { ...body.jobs[0], title: "STALE previous Project Schedule response" };
+    notifySwitchingScheduleLoad();
+    await switchingScheduleLoadGate;
+    await route.fulfill({ response, json: body });
+  };
+  await page.route("**/schedule/jobs", delaySwitchingScheduleLoad);
+  await page.getByRole("button", { name: "Refresh schedule", exact: true }).click();
+  await switchingScheduleLoadArrived;
+  await page.locator("aside").getByRole("link", { name: "project-two", exact: true }).click();
+  await page.getByRole("heading", { name: "project-two", exact: true }).waitFor();
+  const switchingScheduleLoadResponse = page.waitForResponse((response) => response.url() === scheduleResponse.url());
+  releaseSwitchingScheduleLoad();
+  await switchingScheduleLoadResponse;
+  await expect(page.getByText("STALE previous Project Schedule response", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Schedule Jobs", exact: true })).toHaveCount(0);
+  await page.unroute("**/schedule/jobs", delaySwitchingScheduleLoad);
+  await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
   for (const language of ["en", "zh-CN"]) {
     await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
     await page.locator("header").getByText(language === "en" ? "Projects" : "项目", { exact: true }).waitFor();
@@ -1435,7 +1813,7 @@ try {
         await page.screenshot({ path: resolve(output, `schedule-review-${language}-${theme}-${viewport.width}.png`) });
         await page.keyboard.press("Escape");
         await review.waitFor({ state: "hidden" });
-        await page.waitForFunction((label) => document.activeElement?.textContent?.includes(label), resumeLabel);
+        await expect(resumeButton).toBeFocused();
         assert.equal(await resumeButton.evaluate((element) => element === document.activeElement), true);
         assert.equal(await resumeButton.evaluate((element) => window.getComputedStyle(element).outlineStyle), "solid",
           "The persistent resume entry has no visible keyboard focus outline");
@@ -1450,6 +1828,23 @@ try {
   const review = page.getByRole("dialog", { name: "Review Schedule Jobs" });
   await review.getByRole("button", { name: "Resume schedule" }).click();
   await page.locator('ul[aria-label="Projects"] > li').filter({ hasText: firstProject }).getByText("Schedule active").waitFor();
+
+  const resumedScheduleResponsePromise = page.waitForResponse((response) => (
+    response.request().method() === "GET"
+    && response.url().endsWith("/schedule/jobs")
+  ));
+  await page.locator('ul[aria-label="Projects"] > li').filter({ hasText: firstProject })
+    .getByRole("link", { name: "Open schedule" }).click();
+  const resumedScheduleResponse = await resumedScheduleResponsePromise;
+  assert.equal(resumedScheduleResponse.status(), 200, "Resumed Schedule page did not load its real response");
+  const resumedSchedulePayload = await resumedScheduleResponse.json();
+  assert.equal(resumedSchedulePayload.status.admitted, true, "Resumed Schedule page reported a false admission state");
+  assert.equal(resumedSchedulePayload.status.status, "available", "Resumed Schedule page reported a false health state");
+  const resumedScheduleStatus = page.locator('dl[aria-label="Schedule status"]');
+  await expect(resumedScheduleStatus).toContainText("Admitted");
+  await expect(resumedScheduleStatus).toContainText("Available");
+  await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
+  await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
 
   const removableProject = page.locator('ul[aria-label="Projects"] > li').filter({ hasText: firstProject });
   await removableProject.getByRole("button", { name: "Remove registration" }).click();
@@ -1489,7 +1884,7 @@ try {
   await page.unroute("**/api/v1/clients");
   await page.getByRole("status").first().getByText(/Online|在线/).waitFor({ timeout: 10000 });
   assert.deepEqual(browserErrors, [], "Browser JavaScript errors were reported");
-  console.log("Playwright production E2E: 4 locale/theme combinations x 3 viewports; Restore overwrite, cancel, stale responses, refresh, failure acknowledgement, 9999/10000ms feedback; delete, ticket, focus, reconnect passed");
+  console.log("Playwright production E2E: 4 locale/theme combinations x 3 viewports; Schedule CRUD, accepted-create lost-ack retry, locked fields, delayed detail focus, simulated status polling, stale page/Project/disconnected responses, keyboard validation and 9999/10000ms feedback; Restore overwrite, cancel, stale responses, refresh, failure acknowledgement; delete, ticket, focus, reconnect passed");
 } finally {
   await secondContext?.close();
   await browser?.close();

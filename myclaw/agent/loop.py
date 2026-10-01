@@ -920,7 +920,9 @@ class AgentLoop:
                 on_output=None,
                 confirmation=schedule_confirmation,
                 externalize_result=self._result_externalizer_for(session),
-                cancel_requested=self._schedule_service.cancellation_requested,
+                cancel_requested=lambda: self._schedule_service.job_cancellation_requested(
+                    job.job_id
+                ),
                 max_iterations=self._max_iterations,
             )
         except ConfirmationAborted:

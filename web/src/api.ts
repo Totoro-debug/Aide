@@ -7,6 +7,9 @@ import type {
   ProjectRemovalStatus,
   ProjectRegistration,
   ProjectScheduleResume,
+  ScheduleJobInput,
+  ScheduleJobResponse,
+  ScheduleJobsResponse,
   RegisteredClient,
   ProjectSessionsResponse,
   SessionClaimResponse,
@@ -305,6 +308,51 @@ export function resumeProjectSchedule(
     mutation: true,
     body: { request_id: createRequestId(), job_ids: jobIds },
   });
+}
+
+export function getScheduleJobs(workspaceId: string): Promise<ScheduleJobsResponse> {
+  return request<ScheduleJobsResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/schedule/jobs`,
+  );
+}
+
+export function createScheduleJob(
+  workspaceId: string,
+  input: ScheduleJobInput,
+  requestId: string,
+): Promise<ScheduleJobResponse> {
+  return request<ScheduleJobResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/schedule/jobs`,
+    {
+      method: "POST",
+      mutation: true,
+      body: { request_id: requestId, ...input },
+    },
+  );
+}
+
+export function getScheduleJob(
+  workspaceId: string,
+  jobId: string,
+): Promise<ScheduleJobResponse> {
+  return request<ScheduleJobResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/schedule/jobs/${encodeURIComponent(jobId)}`,
+  );
+}
+
+export function deleteScheduleJob(
+  workspaceId: string,
+  jobId: string,
+  requestId: string,
+): Promise<ScheduleJobResponse> {
+  return request<ScheduleJobResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/schedule/jobs/${encodeURIComponent(jobId)}`,
+    {
+      method: "DELETE",
+      mutation: true,
+      body: { request_id: requestId },
+    },
+  );
 }
 
 export function getProjectSessions(

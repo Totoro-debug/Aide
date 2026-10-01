@@ -194,6 +194,22 @@ class LocalServiceTransport:
             self._delete_session,
         )
         app.router.add_get(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/schedule/jobs",
+            self._list_schedule_jobs,
+        )
+        app.router.add_post(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/schedule/jobs",
+            self._create_schedule_job,
+        )
+        app.router.add_get(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/schedule/jobs/{{job_id}}",
+            self._get_schedule_job,
+        )
+        app.router.add_delete(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/schedule/jobs/{{job_id}}",
+            self._delete_schedule_job,
+        )
+        app.router.add_get(
             f"{_API_PREFIX}/workspaces/{{workspace_id}}/management/{{action:.*}}",
             self._management,
         )
@@ -755,6 +771,48 @@ class LocalServiceTransport:
         )
         del confirm
         return web.json_response({"request_id": request_id, **result})
+
+    async def _list_schedule_jobs(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, client_required=True)
+        result = await self.service.list_schedule_jobs(
+            _context_client_id(context),
+            request.match_info["workspace_id"],
+        )
+        return web.json_response(result)
+
+    async def _create_schedule_job(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        body = await _json_object(request)
+        request_id = _require_request_id(body)
+        result = await self.service.create_schedule_job(
+            _context_client_id(context),
+            request.match_info["workspace_id"],
+            body,
+            request_id,
+        )
+        return web.json_response(result)
+
+    async def _get_schedule_job(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, client_required=True)
+        result = await self.service.get_schedule_job(
+            _context_client_id(context),
+            request.match_info["workspace_id"],
+            request.match_info["job_id"],
+        )
+        return web.json_response(result)
+
+    async def _delete_schedule_job(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        body = await _json_object(request)
+        request_id = _require_request_id(body)
+        result = await self.service.delete_schedule_job(
+            _context_client_id(context),
+            request.match_info["workspace_id"],
+            request.match_info["job_id"],
+            request_id,
+            body,
+        )
+        return web.json_response(result)
 
     async def _management(self, request: web.Request) -> web.Response:
         if request.match_info["action"] in {"memory", "dream", "skills/reload"}:

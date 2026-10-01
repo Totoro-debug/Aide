@@ -7,7 +7,7 @@ import { URL } from "node:url";
 import { chromium, expect } from "@playwright/test";
 
 import setup from "./e2e-setup.mjs";
-import settingsAcceptance, { settingsConfirmationAcceptance } from "./settings-e2e.mjs";
+import settingsAcceptance, { settingsConfirmationAcceptance, settingsModelMcpAcceptance } from "./settings-e2e.mjs";
 
 const viewports = [
   { width: 1440, height: 900 },
@@ -18,6 +18,16 @@ const output = resolve("test-results");
 let control;
 let browser;
 let secondContext;
+let acceptanceError;
+
+async function shutdownControl() {
+  try {
+    await control?.shutdown();
+  } catch (error) {
+    if (acceptanceError === undefined) throw error;
+    console.error("E2E cleanup also failed:", error.message);
+  }
+}
 
 try {
   control = await setup();
@@ -103,6 +113,24 @@ try {
   await page.getByRole("status").first().getByText(/Online|在线/).waitFor();
   assert.match(page.url(), /\/status$/);
   secondContext = await browser.newContext();
+  await secondContext.addInitScript(() => {
+    const OriginalWebSocket = window.WebSocket;
+    window.__myclawTestMessages = [];
+    window.WebSocket = class extends OriginalWebSocket {
+      constructor(...args) {
+        super(...args);
+        window.__myclawTestControlCredential = Array.isArray(args[1]) ? args[1][1] : null;
+        window.__myclawTestSocket = this;
+        this.addEventListener("message", (event) => {
+          try {
+            window.__myclawTestMessages.push(JSON.parse(event.data));
+          } catch {
+            // Only JSON service messages are relevant to this test.
+          }
+        });
+      }
+    };
+  });
   const secondPage = await secondContext.newPage();
   await secondPage.goto(`${url}/#ticket=${encodeURIComponent(control.details.second_ticket)}`);
   await secondPage.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
@@ -215,6 +243,9 @@ try {
     "The explicit resume entry disappeared with the transient feedback",
   );
   await page.clock.resume();
+
+  await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
+  await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
 
   const firstProjectItem = projectItems.filter({ hasText: firstProject });
   const scheduleResponsePromise = page.waitForResponse((response) => (
@@ -1234,8 +1265,10 @@ try {
     "Remote Markdown image was loaded");
   assert.equal(await page.locator('a[href^="javascript:"]').count(), 0, "Unsafe Markdown link survived rendering");
   const codeBlock = page.locator("pre").filter({ hasText: "x".repeat(100) }).first();
-  assert.equal(await codeBlock.evaluate((element) => element.scrollWidth > element.clientWidth), true,
-    "Long code block did not scroll locally");
+  await expect(codeBlock).toBeVisible();
+  await expect.poll(() => codeBlock.evaluate((element) => element.scrollWidth > element.clientWidth), {
+    message: "Long code block did not scroll locally",
+  }).toBe(true);
   let persistedConversation;
   for (let attempt = 0; attempt < 50; attempt += 1) {
     try {
@@ -1400,9 +1433,22 @@ try {
   assert.ok(confirmationPath.endsWith("confirmation-outside.txt"));
   const settingsConfirmationRunId = await settingsConfirmationAcceptance({ page, control });
   await page.locator("aside").getByRole("link", { name: "project-one", exact: true }).click();
-  await page.getByRole("list", { name: "Conversation Sessions", exact: true })
-    .getByRole("button", { name: /Web available history/ }).click();
-  await page.locator("textarea").waitFor();
+  const availableHistory = page.getByRole("list", { name: "Conversation Sessions", exact: true })
+    .getByRole("button", { name: /Web available history/ });
+  let historyOpened = false;
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    await availableHistory.click();
+    try {
+      await page.locator("textarea").waitFor({ timeout: 1000 });
+      historyOpened = true;
+      break;
+    } catch (error) {
+      const alerts = await page.getByRole("alert").allTextContents();
+      if (!alerts.some((text) => text.includes("local service is closing"))) throw error;
+      await delay(500);
+    }
+  }
+  assert.equal(historyOpened, true, "Available history remained blocked by service cleanup");
   const confirmationCombinations = [];
   const confirmationRuns = [];
   for (const language of ["en", "zh-CN"]) {
@@ -1550,8 +1596,6 @@ try {
   await secondPage.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
   await secondPage.getByRole("button", { name: /Release session|释放会话/ }).click();
   await secondPage.getByRole("button", { name: /Release session|释放会话/ }).waitFor({ state: "detached" });
-  await secondContext.close();
-  secondContext = undefined;
 
   const sessionSearch = page.getByLabel("Search by title");
   await sessionSearch.fill("Web available");
@@ -1963,6 +2007,9 @@ try {
   const restarted = await control.restart();
   await page.goto(`${restarted.url}/#ticket=${encodeURIComponent(restarted.ticket)}`);
   await page.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
+  await secondPage.goto(`${restarted.url}/#ticket=${encodeURIComponent(restarted.second_ticket)}`);
+  await secondPage.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
+  await secondPage.getByRole("status").first().getByText(/Online|在线/).waitFor();
   await page.getByRole("link", { name: "Projects" }).click();
   await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
   await page.getByRole("heading", { name: "project-one" }).waitFor();
@@ -2078,6 +2125,8 @@ try {
   await page.getByText("Schedule paused for review").waitFor();
   await page.getByRole("button", { name: "Resume schedule" }).waitFor();
 
+  await settingsModelMcpAcceptance({ page: secondPage, secondPage: page, control, output });
+
   await page.getByRole("navigation").getByRole("link", { name: "Status" }).click();
   await page.getByRole("heading", { name: "Service status", exact: true }).waitFor();
   await page.route("**/api/v1/clients", (route) => route.abort());
@@ -2088,8 +2137,11 @@ try {
   await page.getByRole("status").first().getByText(/Online|在线/).waitFor({ timeout: 10000 });
   assert.deepEqual(browserErrors, [], "Browser JavaScript errors were reported");
   console.log("Playwright production E2E: 4 locale/theme combinations x 3 viewports; Schedule CRUD, accepted-create lost-ack retry, locked fields, delayed detail focus, simulated status polling, stale page/Project/disconnected responses, keyboard validation and 9999/10000ms feedback; Restore overwrite, cancel, stale responses, refresh, failure acknowledgement; delete, ticket, focus, reconnect passed");
+} catch (error) {
+  acceptanceError = error;
+  throw error;
 } finally {
   await secondContext?.close();
   await browser?.close();
-  await control?.shutdown();
+  await shutdownControl();
 }

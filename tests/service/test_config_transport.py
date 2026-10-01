@@ -19,6 +19,35 @@ from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
 ConfigHttp = tuple[LocalService, BaseTestServer, str, str]
 
+FULL_CONFIG = """[models.providers.primary]
+protocol = "openai-compatible"
+base_url = "https://models.example/v1"
+api_key = "transport-provider-secret-302"
+models = ["small-model"]
+
+[models.providers.retired]
+protocol = "anthropic"
+base_url = "https://anthropic.example"
+api_key = "transport-retired-secret-302"
+models = ["retired-model"]
+
+[models.routes.default]
+provider_id = "primary"
+model = "small-model"
+context_window = 8192
+max_output = 1024
+temperature = 0
+timeout = 30
+
+[mcp.servers.http]
+enabled = true
+transport = "streamable-http"
+url = "https://mcp.example/tools"
+headers = { Authorization = "transport-header-secret-302" }
+connect_timeout = 30
+call_timeout = 60
+"""
+
 
 @pytest_asyncio.fixture
 async def config_http(tmp_path: Path) -> AsyncIterator[ConfigHttp]:
@@ -53,7 +82,7 @@ async def test_config_get_returns_safe_structured_fields(config_http: ConfigHttp
 
     assert response.status == 200
     assert body["fields"]["runtime"]["max_iterations"] == 50
-    assert "api_key" not in str(body)
+    assert body["fields"]["models"]["providers"]["primary"]["api_key"] == {"configured": True}
     assert "minimal-secret" not in str(body)
     assert body["application"]["status"] == "active"
 
@@ -83,6 +112,7 @@ async def test_config_patch_rejects_invalid_values_without_writing(
                 "request_id": "invalid-config-edit",
                 "revision": revision,
                 "fields": {"runtime": {"max_iterations": 1}},
+                "secrets": {},
             },
         )
 
@@ -109,6 +139,7 @@ async def test_config_patch_reports_pending_then_active_and_stale_conflict(
         "request_id": "valid-config-edit",
         "revision": revision,
         "fields": {"runtime": {"max_iterations": 80}},
+        "secrets": {},
     }
 
     async with aiohttp.ClientSession() as http:
@@ -192,3 +223,150 @@ async def test_config_application_replaces_workspace_generation(
         workspace._schedule_loops["config-test-job"].loop._configuration.runtime.max_iterations
         == 81
     )
+
+
+@pytest_asyncio.fixture
+async def full_config_http(tmp_path: Path) -> AsyncIterator[ConfigHttp]:
+    home = AgentHome(tmp_path / "agent-home")
+    home.initialize()
+    (home.path / "config.toml").write_text(FULL_CONFIG, encoding="utf-8")
+    configuration = ConfigLoader(home).load_for_startup()
+    service = LocalService(home, configuration, reconnect_timeout=3600)
+    await service.start()
+    create_credential(home)
+    web_client = await service.register_client("web")
+    assert web_client.web_control_credential is not None
+    async with TestServer(create_app(service), host="127.0.0.1") as server:
+        yield service, server, web_client.client_id, web_client.web_control_credential
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_config_patch_edits_models_routes_mcp_and_write_only_secrets(
+    full_config_http: ConfigHttp,
+) -> None:
+    service, server, client_id, control = full_config_http
+    token = create_credential(service.agent_home)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-MyClaw-CSRF": token,
+        "X-MyClaw-Client": client_id,
+        "X-MyClaw-Control": control,
+    }
+    observed: list[str] = []
+
+    async with aiohttp.ClientSession() as http:
+        current_response = await http.get(server.make_url("/api/v1/config"), headers=headers)
+        current = await current_response.json()
+        observed.append(str(current))
+        assert current_response.status == 200
+        assert current["fields"]["models"]["providers"]["primary"]["api_key"] == {
+            "configured": True
+        }
+        assert current["fields"]["mcp"]["http"]["headers"] == {
+            "Authorization": {"configured": True}
+        }
+        response = await http.patch(
+            server.make_url("/api/v1/config"),
+            headers=headers,
+            json={
+                "request_id": "transport-model-mcp-edit",
+                "revision": current["revision"],
+                "fields": {
+                    "models": {
+                        "providers": {
+                            "primary": {"base_url": "https://models.example/v2"},
+                            "retired": {},
+                        },
+                        "routes": {"default": {"model": "small-model"}},
+                    },
+                    "mcp": {"http": {"url": "https://mcp.example/replaced"}},
+                },
+                "secrets": {
+                    "models.providers.primary.api_key": {
+                        "action": "replace",
+                        "value": "transport-provider-replaced-302",
+                    },
+                    "mcp.http.headers.Authorization": {
+                        "action": "replace",
+                        "value": "transport-header-replaced-302",
+                    },
+                    "models.providers.retired.api_key": {"action": "keep"},
+                },
+            },
+        )
+        saved = await response.json()
+        observed.append(str(saved))
+        current_response = await http.get(server.make_url("/api/v1/config"), headers=headers)
+        current = await current_response.json()
+        observed.append(str(current))
+
+    assert response.status == 200
+    assert current["fields"]["models"]["providers"]["primary"]["base_url"] == (
+        "https://models.example/v2"
+    )
+    assert current["fields"]["mcp"]["http"]["url"] == "https://mcp.example/replaced"
+    assert all(
+        secret not in "".join(observed)
+        for secret in (
+            "transport-provider-secret-302",
+            "transport-provider-replaced-302",
+            "transport-header-secret-302",
+            "transport-header-replaced-302",
+            "transport-retired-secret-302",
+        )
+    )
+    saved_text = (service.agent_home.path / "config.toml").read_text(encoding="utf-8")
+    assert "transport-provider-replaced-302" in saved_text
+    assert "transport-header-replaced-302" in saved_text
+
+
+@pytest.mark.asyncio
+async def test_config_patch_secret_clear_is_explicit_and_preserves_bytes_on_conflict(
+    full_config_http: ConfigHttp,
+) -> None:
+    service, server, client_id, control = full_config_http
+    token = create_credential(service.agent_home)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-MyClaw-CSRF": token,
+        "X-MyClaw-Client": client_id,
+        "X-MyClaw-Control": control,
+    }
+    async with aiohttp.ClientSession() as http:
+        current = await (await http.get(server.make_url("/api/v1/config"), headers=headers)).json()
+        clear = await http.patch(
+            server.make_url("/api/v1/config"),
+            headers=headers,
+            json={
+                "request_id": "transport-secret-clear",
+                "revision": current["revision"],
+                "fields": {},
+                "secrets": {
+                    "models.providers.retired.api_key": {"action": "clear"},
+                    "mcp.http.headers.Authorization": {"action": "clear"},
+                },
+            },
+        )
+        cleared = await clear.json()
+        before_conflict = (service.agent_home.path / "config.toml").read_bytes()
+        conflict = await http.patch(
+            server.make_url("/api/v1/config"),
+            headers=headers,
+            json={
+                "request_id": "transport-stale-secret",
+                "revision": current["revision"],
+                "fields": {},
+                "secrets": {
+                    "models.providers.retired.api_key": {"action": "replace", "value": "stale"}
+                },
+            },
+        )
+        conflict_body = await conflict.json()
+
+    assert clear.status == 200
+    assert cleared["fields"]["models"]["providers"]["retired"]["api_key"] == {"configured": False}
+    assert cleared["fields"]["mcp"]["http"]["headers"] == {}
+    assert conflict.status == 409
+    assert conflict_body["code"] == "config_revision_conflict"
+    assert (service.agent_home.path / "config.toml").read_bytes() == before_conflict

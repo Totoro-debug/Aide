@@ -80,7 +80,10 @@ export default async function setup() {
       typeof details.restore_session_id !== "string" ||
       typeof details.restore_target !== "string" ||
       typeof details.manual_restore_session_id !== "string" ||
-      typeof details.manual_restore_target !== "string"
+      typeof details.manual_restore_target !== "string" ||
+      typeof details.provider_observation_path !== "string" ||
+      typeof details.mcp_v1_path !== "string" ||
+      typeof details.mcp_v2_path !== "string"
     ) {
       throw new Error("E2E service returned invalid startup details.");
     }
@@ -103,6 +106,9 @@ export default async function setup() {
     process.env.MYCLAW_E2E_RESTORE_TARGET = details.restore_target;
     process.env.MYCLAW_E2E_MANUAL_RESTORE_SESSION = details.manual_restore_session_id;
     process.env.MYCLAW_E2E_MANUAL_RESTORE_TARGET = details.manual_restore_target;
+    process.env.MYCLAW_E2E_PROVIDER_OBSERVATION_PATH = details.provider_observation_path;
+    process.env.MYCLAW_E2E_MCP_V1_PATH = details.mcp_v1_path;
+    process.env.MYCLAW_E2E_MCP_V2_PATH = details.mcp_v2_path;
     return details;
   }
 

@@ -393,7 +393,7 @@ class LocalServiceTransport:
     async def _patch_config(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, mutation=True, client_required=True)
         body = await _json_object(request)
-        if set(body) != {"request_id", "revision", "fields"}:
+        if set(body) != {"request_id", "revision", "fields", "secrets"}:
             raise service_error(
                 "validation_error", "Configuration request fields are invalid.", status=422
             )
@@ -414,8 +414,16 @@ class LocalServiceTransport:
                 status=422,
                 field_errors={"fields": "must be an object"},
             )
+        secrets = body.get("secrets")
+        if not isinstance(secrets, Mapping):
+            raise service_error(
+                "validation_error",
+                "Configuration secret operations must be an object.",
+                status=422,
+                field_errors={"secrets": "must be an object"},
+            )
         result = await self.service.update_configuration(
-            request_id, revision, fields, client_id=context.client_id
+            request_id, revision, fields, secrets, client_id=context.client_id
         )
         return web.json_response({"request_id": request_id, **result})
 

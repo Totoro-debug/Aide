@@ -54,6 +54,7 @@ def _patch(service: LocalService, request_id: str = "security-save") -> dict[str
         "request_id": request_id,
         "revision": service.config_view()["revision"],
         "fields": {"runtime": {"max_iterations": 87}},
+        "secrets": {},
     }
 
 
@@ -320,7 +321,7 @@ async def test_config_http_ws_errors_and_logs_never_expose_existing_secrets(
         + 'url = "http://127.0.0.1:1/mcp"\n'
         + f'headers = {{ Authorization = "{secrets[1]}" }}\n'
         + '\n[mcp.servers.stdio]\nenabled = false\ntransport = "stdio"\n'
-        + f'command = "python"\nargs = ["{secrets[2]}"]\n',
+        + 'command = "python"\nargs = ["mcp-server-filesystem", "."]\n',
         encoding="utf-8",
     )
     observed: list[str] = []
@@ -355,6 +356,7 @@ async def test_config_http_ws_errors_and_logs_never_expose_existing_secrets(
                         "request_id": "secret-canary-save",
                         "revision": projection["revision"],
                         "fields": {"memory": {"batch_size": 24}},
+                        "secrets": {},
                     },
                 )
                 assert saved.status == 200
@@ -364,6 +366,16 @@ async def test_config_http_ws_errors_and_logs_never_expose_existing_secrets(
                     observed.append(json.dumps(event))
                     if event.get("type") == "config.application":
                         break
+                path.write_text(
+                    path.read_text(encoding="utf-8")
+                    + '\n[mcp.servers.invalid]\nenabled = false\ntransport = "stdio"\n'
+                    + 'command = "python"\n'
+                    + f'env = {{ API_TOKEN = "{secrets[2]}" }}\n',
+                    encoding="utf-8",
+                )
+                invalid_view = await http.get(server.make_url("/api/v1/config"), headers=headers)
+                assert invalid_view.status == 200
+                observed.append(json.dumps(await invalid_view.json()))
                 invalid = await http.patch(
                     server.make_url("/api/v1/config"),
                     headers=headers,
@@ -371,6 +383,7 @@ async def test_config_http_ws_errors_and_logs_never_expose_existing_secrets(
                         "request_id": "secret-canary-invalid",
                         "revision": ConfigLoader(service.agent_home).revision(),
                         "fields": {"memory": {"batch_size": secrets[2]}},
+                        "secrets": {},
                     },
                 )
                 assert invalid.status == 422
@@ -378,5 +391,42 @@ async def test_config_http_ws_errors_and_logs_never_expose_existing_secrets(
         assert all(secret not in "".join(observed) for secret in secrets)
         assert "Traceback" not in "".join(observed)
         assert all(secret in path.read_text(encoding="utf-8") for secret in secrets)
+    finally:
+        logger.remove(sink)
+
+
+@pytest.mark.asyncio
+async def test_secret_replacement_persistence_failure_is_safe(
+    security_http: SecurityHttp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, server, headers, _ = security_http
+    path = service.agent_home.path / "config.toml"
+    before = path.read_bytes()
+    secret = "replacement-error-canary-302"
+    observed: list[str] = []
+    sink = logger.add(lambda message: observed.append(str(message)), format="{message}")
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError(f"Injected persistence failure {secret}")
+
+    monkeypatch.setattr(service._config_loader, "patch_editable_fields", fail)
+    try:
+        async with aiohttp.ClientSession() as http:
+            response = await http.patch(
+                server.make_url("/api/v1/config"),
+                headers=headers,
+                json={
+                    **_patch(service),
+                    "secrets": {
+                        "models.providers.primary.api_key": {"action": "replace", "value": secret}
+                    },
+                },
+            )
+            observed.append(await response.text())
+            assert response.status == 500
+            assert path.read_bytes() == before
+        assert secret not in "".join(observed)
+        assert "minimal-secret" not in "".join(observed)
+        assert "Traceback" not in "".join(observed)
     finally:
         logger.remove(sink)

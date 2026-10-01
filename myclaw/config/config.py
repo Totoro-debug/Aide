@@ -325,7 +325,7 @@ class ConfigView:
 
 @dataclass(frozen=True, slots=True)
 class ConfigEditableSnapshot:
-    """Safe Runtime and Memory values exposed to an authenticated editor."""
+    """Safe editable configuration values exposed to an authenticated editor."""
 
     revision: str
     fields: Mapping[str, Mapping[str, object]]
@@ -349,8 +349,9 @@ class ConfigEditResult:
 class ConfigError(Exception):
     """A safe User Configuration error suitable for a CLI or Management view."""
 
-    def __init__(self, error: ErrorInfo) -> None:
+    def __init__(self, error: ErrorInfo, *, field_errors: dict[str, str] | None = None) -> None:
         self.error = error
+        self.field_errors = {} if field_errors is None else field_errors
         super().__init__(error.message)
 
 
@@ -372,12 +373,19 @@ class ConfigFieldError(ConfigError):
     """A validation failure for a known editable field without its supplied value."""
 
     def __init__(self, field_name: str, rule: str) -> None:
-        self.field_errors = {field_name: rule}
-        super().__init__(ErrorInfo("config_invalid", "Review the highlighted settings."))
+        super().__init__(
+            ErrorInfo("config_invalid", "Review the highlighted settings."),
+            field_errors={field_name: rule},
+        )
 
 
 def _invalid(field: str, rule: str) -> NoReturn:
-    raise ConfigError(ErrorInfo("config_invalid", f"Configuration field '{field}' {rule}."))
+    raise ConfigError(
+        ErrorInfo("config_invalid", f"Configuration field '{field}' {rule}."),
+        field_errors={
+            field.removeprefix("config.secrets.").replace("mcp.servers.", "mcp.", 1): rule
+        },
+    )
 
 
 def _table(value: object, field: str) -> dict[str, object]:
@@ -411,7 +419,8 @@ def _missing_default_route_error() -> ConfigError:
         ErrorInfo(
             "route_unavailable",
             "Default Model Route is missing. Add [models.routes.default] to User Configuration.",
-        )
+        ),
+        field_errors={"models.routes.default": "must define a default Model Route"},
     )
 
 
@@ -1087,6 +1096,31 @@ def _configuration_revision(content: bytes) -> str:
 def _editable_configuration_fields(
     configuration: UserConfiguration,
 ) -> Mapping[str, Mapping[str, object]]:
+    providers = {
+        provider_id: {
+            "protocol": provider.protocol,
+            "base_url": provider.base_url,
+            "models": provider.models,
+            "api_key": {"configured": bool(provider.api_key)},
+        }
+        for provider_id, provider in configuration.models.providers.items()
+    }
+    routes = {
+        route_name: {
+            "provider_id": route.provider_id,
+            "model": route.model,
+            "context_window": route.context_window,
+            "max_output": route.max_output,
+            "temperature": route.temperature,
+            "reasoning_effort": route.reasoning_effort,
+            "timeout": route.timeout,
+        }
+        for route_name, route in configuration.models.routes.items()
+    }
+    mcp = {
+        server_name: _editable_mcp_server_fields(server)
+        for server_name, server in configuration.mcp.items()
+    }
     return {
         "runtime": {
             "max_tool_result_chars": configuration.runtime.max_tool_result_chars,
@@ -1099,6 +1133,25 @@ def _editable_configuration_fields(
         "memory": {
             "batch_size": configuration.memory.batch_size,
             "schedule": configuration.memory.schedule,
+        },
+        "models": {"providers": providers, "routes": routes},
+        "mcp": mcp,
+    }
+
+
+def _editable_mcp_server_fields(server: MCPServerConfiguration) -> dict[str, object]:
+    return {
+        "enabled": server.enabled,
+        "transport": server.transport,
+        "command": server.command,
+        "args": server.args,
+        "cwd": None if server.cwd is None else str(server.cwd),
+        "url": server.url,
+        "headers": {name: {"configured": bool(value)} for name, value in server.headers.items()},
+        "connect_timeout": server.connect_timeout,
+        "call_timeout": server.call_timeout,
+        "tool_keywords": {
+            tool_name: keywords for tool_name, keywords in server.tool_keywords.items()
         },
     }
 
@@ -1143,15 +1196,230 @@ def _editable_field_value(section: str, field: str, value: object) -> object:
     _invalid("config.fields", "contains a field that is not editable")
 
 
+def _editable_table(value: object, field: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        _invalid(field, "must be a table")
+    table = cast(Mapping[object, object], value)
+    if any(not isinstance(key, str) for key in table):
+        _invalid(field, "must contain string field names")
+    return cast(Mapping[str, object], table)
+
+
+def _reject_unknown_fields(table: Mapping[str, object], allowed: set[str], field: str) -> None:
+    unknown = next((name for name in table if name not in allowed), None)
+    if unknown is not None:
+        _invalid(f"{field}.{unknown}", "is not editable")
+
+
+def _require_editable_value(table: Mapping[str, object], name: str, field: str) -> object:
+    if name not in table:
+        _invalid(f"{field}.{name}", "is required")
+    return table[name]
+
+
+def _editable_string_array(value: object, field: str) -> list[str]:
+    parsed = _parse_string_array(value, field)
+    if len(set(parsed)) != len(parsed):
+        _invalid(field, "must contain unique string values")
+    return list(parsed)
+
+
+def _validate_provider_fields(provider_id: str, value: object) -> dict[str, object]:
+    field = f"models.providers.{provider_id}"
+    if not _PROVIDER_ID_PATTERN.fullmatch(provider_id):
+        _invalid(field, "must use a lowercase kebab-case provider ID")
+    table = _editable_table(value, field)
+    _reject_unknown_fields(table, {"protocol", "base_url", "models"}, field)
+    normalized: dict[str, object] = {}
+    if "protocol" in table:
+        protocol = _string(table["protocol"], f"{field}.protocol")
+        if protocol not in {"anthropic", "openai-compatible"}:
+            _invalid(f"{field}.protocol", "must be anthropic or openai-compatible")
+        normalized["protocol"] = protocol
+    if "base_url" in table:
+        base_url = _string(table["base_url"], f"{field}.base_url")
+        if not _has_absolute_http_url(base_url):
+            _invalid(f"{field}.base_url", "must be an absolute HTTP or HTTPS URL")
+        normalized["base_url"] = base_url
+    if "models" in table:
+        normalized["models"] = _editable_string_array(table["models"], f"{field}.models")
+    return normalized
+
+
+def _validate_route_fields(route_name: str, value: object) -> dict[str, object]:
+    field = f"models.routes.{route_name}"
+    if route_name not in _ROUTE_NAMES:
+        _invalid(field, "is not a supported Model Route")
+    table = _editable_table(value, field)
+    allowed = {
+        "provider_id",
+        "model",
+        "context_window",
+        "max_output",
+        "temperature",
+        "reasoning_effort",
+        "timeout",
+    }
+    _reject_unknown_fields(table, allowed, field)
+    normalized: dict[str, object] = {}
+    if "provider_id" in table:
+        provider_id = _string(table["provider_id"], f"{field}.provider_id", nonempty=True)
+        if not _PROVIDER_ID_PATTERN.fullmatch(provider_id):
+            _invalid(f"{field}.provider_id", "must be a lowercase kebab-case provider ID")
+        normalized["provider_id"] = provider_id
+    if "model" in table:
+        normalized["model"] = _string(table["model"], f"{field}.model", nonempty=True)
+    if "context_window" in table:
+        normalized["context_window"] = _integer(
+            table["context_window"], f"{field}.context_window", 1024, 10_000_000
+        )
+    if "max_output" in table:
+        normalized["max_output"] = _integer(
+            table["max_output"], f"{field}.max_output", 1, 9_999_999
+        )
+    if "context_window" in normalized and "max_output" in normalized:
+        if cast(int, normalized["max_output"]) >= cast(int, normalized["context_window"]):
+            _invalid(f"{field}.max_output", "must be less than context_window")
+    if "temperature" in table:
+        normalized["temperature"] = _number(table["temperature"], f"{field}.temperature", 0, 2)
+    if "reasoning_effort" in table:
+        reasoning_effort = _string(table["reasoning_effort"], f"{field}.reasoning_effort")
+        if _parse_default_reasoning_effort(reasoning_effort) is None:
+            _invalid(f"{field}.reasoning_effort", "must be low, medium, high, xhigh, or max")
+        normalized["reasoning_effort"] = reasoning_effort
+    if "timeout" in table:
+        normalized["timeout"] = _integer(table["timeout"], f"{field}.timeout", 1, 600)
+    return normalized
+
+
+def _validate_redacted_headers(value: object, field: str) -> dict[str, dict[str, bool]]:
+    table = _editable_table(value, field)
+    headers: dict[str, dict[str, bool]] = {}
+    for header_name, header_value in table.items():
+        if not header_name or header_name != header_name.strip():
+            _invalid(field, "must contain nonempty header names without surrounding whitespace")
+        redacted = _editable_table(header_value, f"{field}.{header_name}")
+        _reject_unknown_fields(redacted, {"configured"}, f"{field}.{header_name}")
+        configured = _require_editable_value(redacted, "configured", f"{field}.{header_name}")
+        if not isinstance(configured, bool):
+            _invalid(f"{field}.{header_name}.configured", "must be a boolean")
+        headers[header_name] = {"configured": configured}
+    return headers
+
+
+def _validate_mcp_fields(mcp_name: str, value: object) -> dict[str, object]:
+    field = f"mcp.{mcp_name}"
+    if _MCP_NAME_PATTERN.fullmatch(mcp_name) is None:
+        _invalid(field, "must use a lowercase name with up to 64 letters, digits, '_' or '-'")
+    table = _editable_table(value, field)
+    allowed = {
+        "enabled",
+        "transport",
+        "command",
+        "args",
+        "cwd",
+        "url",
+        "headers",
+        "connect_timeout",
+        "call_timeout",
+        "tool_keywords",
+    }
+    _reject_unknown_fields(table, allowed, field)
+    normalized: dict[str, object] = {}
+    transport: str | None = None
+    if "transport" in table:
+        transport = _string(table["transport"], f"{field}.transport")
+        if transport not in _MCP_TRANSPORTS:
+            _invalid(f"{field}.transport", "must be either 'stdio' or 'streamable-http'")
+        normalized["transport"] = transport
+    if "enabled" in table:
+        normalized["enabled"] = _boolean(table["enabled"], f"{field}.enabled")
+    for timeout_name in ("connect_timeout", "call_timeout"):
+        if timeout_name in table:
+            normalized[timeout_name] = _integer(
+                table[timeout_name], f"{field}.{timeout_name}", 1, _MCP_MAX_TIMEOUT
+            )
+    if "tool_keywords" in table:
+        keywords_table = _editable_table(table["tool_keywords"], f"{field}.tool_keywords")
+        keywords: dict[str, list[str]] = {}
+        for remote_name, raw_keywords in keywords_table.items():
+            if not remote_name:
+                _invalid(f"{field}.tool_keywords", "must contain nonempty remote Tool names")
+            try:
+                keywords[remote_name] = list(normalize_mcp_tool_keywords(raw_keywords))
+            except TypeError:
+                _invalid(f"{field}.tool_keywords.{remote_name}", "must be an array of strings")
+            except ValueError:
+                _invalid(f"{field}.tool_keywords.{remote_name}", "must contain English terms")
+        normalized["tool_keywords"] = keywords
+    if "headers" in table:
+        normalized["headers"] = _validate_redacted_headers(table["headers"], f"{field}.headers")
+    if "command" in table:
+        command = table["command"]
+        normalized["command"] = (
+            None if command is None else _string(command, f"{field}.command", nonempty=True)
+        )
+    if "args" in table:
+        normalized["args"] = list(_parse_string_array(table["args"], f"{field}.args"))
+    if "cwd" in table:
+        cwd = table["cwd"]
+        normalized["cwd"] = None if cwd is None else _string(cwd, f"{field}.cwd", nonempty=True)
+    if "url" in table:
+        url = table["url"]
+        normalized["url"] = None if url is None else _string(url, f"{field}.url", nonempty=True)
+        if url is not None and not _has_absolute_http_url(cast(str, normalized["url"])):
+            _invalid(f"{field}.url", "must be an absolute HTTP or HTTPS URL")
+    if transport == "stdio":
+        if normalized.get("url") is not None:
+            _invalid(f"{field}.url", "must be null for the stdio transport")
+        if normalized.get("headers"):
+            _invalid(f"{field}.headers", "must be empty for the stdio transport")
+    elif transport == "streamable-http":
+        if normalized.get("command") is not None:
+            _invalid(f"{field}.command", "must be null for the streamable-http transport")
+        if normalized.get("args") not in (None, []):
+            _invalid(f"{field}.args", "must be empty for the streamable-http transport")
+        if normalized.get("cwd") is not None:
+            _invalid(f"{field}.cwd", "must be null for the streamable-http transport")
+    return normalized
+
+
 def _validate_editable_fields(fields: Mapping[str, object]) -> dict[str, dict[str, object]]:
     if not isinstance(fields, Mapping):
         _invalid("config.fields", "must be a table")
     normalized: dict[str, dict[str, object]] = {}
     for section, raw_values in fields.items():
-        if section not in {"runtime", "memory"}:
+        if section not in {"runtime", "memory", "models", "mcp"}:
             _invalid("config.fields", "contains a section that is not editable")
         if not isinstance(raw_values, Mapping):
             _invalid(f"config.fields.{section}", "must be a table")
+        if section == "models":
+            model_values = _editable_table(raw_values, "config.fields.models")
+            _reject_unknown_fields(model_values, {"providers", "routes"}, "config.fields.models")
+            models: dict[str, object] = {}
+            if "providers" in model_values:
+                providers = _editable_table(
+                    model_values["providers"], "config.fields.models.providers"
+                )
+                models["providers"] = {
+                    provider_id: _validate_provider_fields(provider_id, provider)
+                    for provider_id, provider in providers.items()
+                }
+            if "routes" in model_values:
+                routes = _editable_table(model_values["routes"], "config.fields.models.routes")
+                models["routes"] = {
+                    route_name: _validate_route_fields(route_name, route)
+                    for route_name, route in routes.items()
+                }
+            normalized[section] = models
+            continue
+        if section == "mcp":
+            servers = _editable_table(raw_values, "config.fields.mcp")
+            normalized[section] = {
+                server_name: _validate_mcp_fields(server_name, server)
+                for server_name, server in servers.items()
+            }
+            continue
         section_values: dict[str, object] = {}
         for field_name, value in raw_values.items():
             if not isinstance(field_name, str):
@@ -1161,13 +1429,211 @@ def _validate_editable_fields(fields: Mapping[str, object]) -> dict[str, dict[st
     return normalized
 
 
+def _mutable_toml_table(
+    parent: MutableMapping[str, object], key: str, field: str
+) -> MutableMapping[str, object]:
+    value = parent.get(key)
+    if value is None:
+        value = tomlkit.table()
+        parent[key] = value
+    if not isinstance(value, MutableMapping):
+        _invalid(field, "must be a table")
+    return cast(MutableMapping[str, object], value)
+
+
+def _set_toml_table_value(table: MutableMapping[str, object], key: str, value: object) -> None:
+    if value is None:
+        table.pop(key, None)
+    elif isinstance(value, list):
+        table[key] = list(value)
+    elif isinstance(value, Mapping):
+        nested = tomlkit.table()
+        for nested_key, nested_value in value.items():
+            _set_toml_table_value(nested, nested_key, nested_value)
+        table[key] = nested
+    else:
+        table[key] = value
+
+
+def _apply_model_fields(
+    document: MutableMapping[str, object], values: Mapping[str, object]
+) -> None:
+    models = _mutable_toml_table(document, "models", "models")
+    if "providers" in values:
+        providers = _mutable_toml_table(models, "providers", "models.providers")
+        provider_values = cast(Mapping[str, Mapping[str, object]], values["providers"])
+        for provider_id in tuple(providers):
+            if provider_id not in provider_values:
+                del providers[provider_id]
+        for provider_id, provider in provider_values.items():
+            table = _mutable_toml_table(providers, provider_id, f"models.providers.{provider_id}")
+            if "api_key" not in table:
+                table["api_key"] = ""
+            for field, value in provider.items():
+                _set_toml_table_value(table, field, value)
+    if "routes" in values:
+        routes = _mutable_toml_table(models, "routes", "models.routes")
+        route_values = cast(Mapping[str, Mapping[str, object]], values["routes"])
+        for route_name in tuple(routes):
+            if route_name in _ROUTE_NAMES and route_name not in route_values:
+                del routes[route_name]
+        for route_name, route in route_values.items():
+            table = _mutable_toml_table(routes, route_name, f"models.routes.{route_name}")
+            for field, value in route.items():
+                _set_toml_table_value(table, field, value)
+
+
+def _apply_mcp_fields(document: MutableMapping[str, object], values: Mapping[str, object]) -> None:
+    mcp = _mutable_toml_table(document, "mcp", "mcp")
+    servers = _mutable_toml_table(mcp, "servers", "mcp.servers")
+    server_values = cast(Mapping[str, Mapping[str, object]], values)
+    for server_name in tuple(servers):
+        if server_name not in server_values:
+            del servers[server_name]
+    for server_name, server in server_values.items():
+        table = _mutable_toml_table(servers, server_name, f"mcp.{server_name}")
+        effective_transport = server.get("transport", table.get("transport"))
+        if isinstance(effective_transport, str) and effective_transport in _MCP_TRANSPORTS:
+            _validate_mcp_fields(server_name, {"transport": effective_transport, **server})
+        for field_name in ("enabled", "transport", "connect_timeout", "call_timeout"):
+            if field_name in server:
+                _set_toml_table_value(table, field_name, server[field_name])
+        transport = cast(str | None, server.get("transport", table.get("transport")))
+        if transport == "stdio":
+            for field in ("command", "args", "cwd"):
+                if field in server:
+                    _set_toml_table_value(table, field, server[field])
+            for field in ("url", "headers"):
+                if field in table:
+                    del table[field]
+        else:
+            if "url" in server:
+                _set_toml_table_value(table, "url", server["url"])
+            for field in ("command", "args", "cwd"):
+                if field in table:
+                    del table[field]
+            if "headers" in server:
+                header_values = cast(Mapping[str, object], server["headers"])
+                headers = _mutable_toml_table(table, "headers", f"mcp.{server_name}.headers")
+                for header_name in tuple(headers):
+                    if header_name not in header_values:
+                        del headers[header_name]
+                for header_name in header_values:
+                    if header_name not in headers:
+                        headers[header_name] = ""
+                if not headers:
+                    del table["headers"]
+        if "tool_keywords" in server:
+            keyword_values = cast(Mapping[str, object], server["tool_keywords"])
+            keywords = _mutable_toml_table(
+                table, "tool_keywords", f"mcp.{server_name}.tool_keywords"
+            )
+            for remote_name in tuple(keywords):
+                if remote_name not in keyword_values:
+                    del keywords[remote_name]
+            for remote_name, raw_keywords in keyword_values.items():
+                _set_toml_table_value(keywords, remote_name, raw_keywords)
+            if not keywords and "tool_keywords" in table:
+                del table["tool_keywords"]
+
+
+def _apply_secret_changes(
+    document: MutableMapping[str, object], changes: Mapping[str, object]
+) -> None:
+    if not isinstance(changes, Mapping):
+        _invalid("config.secrets", "must be a table")
+    models = document.get("models")
+    mcp = document.get("mcp")
+    for path, raw_change in changes.items():
+        if not isinstance(path, str):
+            _invalid("config.secrets", "must contain string paths")
+        change = _editable_table(raw_change, f"config.secrets.{path}")
+        _reject_unknown_fields(change, {"action", "value"}, f"config.secrets.{path}")
+        action = _string(
+            _require_editable_value(change, "action", f"config.secrets.{path}"),
+            f"config.secrets.{path}.action",
+        )
+        if action not in {"keep", "replace", "clear"}:
+            _invalid(f"config.secrets.{path}.action", "must be keep, replace, or clear")
+        if action == "replace":
+            value = _string(
+                _require_editable_value(change, "value", f"config.secrets.{path}"),
+                f"config.secrets.{path}.value",
+            )
+            if not value:
+                _invalid(f"config.secrets.{path}.value", "must be a nonempty string")
+        elif "value" in change:
+            _invalid(f"config.secrets.{path}.value", "is only valid for replace")
+        if path.startswith("models.providers.") and path.endswith(".api_key"):
+            provider_id = path[len("models.providers.") : -len(".api_key")]
+            if not isinstance(models, MutableMapping):
+                _invalid(path, "does not identify an existing Provider")
+            providers = models.get("providers")
+            if not isinstance(providers, MutableMapping) or provider_id not in providers:
+                _invalid(path, "does not identify an existing Provider")
+            provider = providers[provider_id]
+            if not isinstance(provider, MutableMapping):
+                _invalid(path, "does not identify an editable Provider")
+            if action == "replace":
+                provider["api_key"] = value
+            elif action == "clear":
+                provider["api_key"] = ""
+            continue
+        if path.startswith("mcp.") and ".headers." in path:
+            server_name, header_name = path[4:].split(".headers.", 1)
+            if not server_name or not header_name or header_name != header_name.strip():
+                _invalid(path, "does not identify an editable MCP header")
+            if not isinstance(mcp, MutableMapping):
+                _invalid(path, "does not identify an existing MCP Server")
+            servers = mcp.get("servers")
+            if not isinstance(servers, MutableMapping) or server_name not in servers:
+                _invalid(path, "does not identify an existing MCP Server")
+            server = servers[server_name]
+            if (
+                not isinstance(server, MutableMapping)
+                or server.get("transport") != "streamable-http"
+            ):
+                _invalid(path, "does not identify an editable MCP header")
+            headers = server.get("headers")
+            if headers is None:
+                headers = tomlkit.table()
+                server["headers"] = headers
+            if not isinstance(headers, MutableMapping):
+                _invalid(path, "does not identify an editable MCP header")
+            if action == "replace":
+                headers[header_name] = value
+            elif action == "clear" and header_name in headers:
+                del headers[header_name]
+            continue
+        _invalid(path, "is not an editable secret")
+
+
 def _require_complete_candidate(
     configuration: UserConfiguration,
     diagnostics: tuple[ConfigurationDiagnosticValue, ...] | list[ConfigurationDiagnosticValue],
 ) -> None:
     if "default" not in configuration.models.routes:
         raise _missing_default_route_error()
-    configuration.resolve_route("chat")
+    for provider_id, configured_provider in configuration.models.providers.items():
+        if configured_provider.protocol not in {"anthropic", "openai-compatible"}:
+            _invalid(
+                f"models.providers.{provider_id}.protocol", "must be anthropic or openai-compatible"
+            )
+        if not _has_absolute_http_url(configured_provider.base_url):
+            _invalid(
+                f"models.providers.{provider_id}.base_url", "must be an absolute HTTP or HTTPS URL"
+            )
+    for route_name, route in configuration.models.routes.items():
+        provider = configuration.models.providers.get(route.provider_id)
+        if provider is None:
+            _invalid(
+                f"models.routes.{route_name}.provider_id",
+                "must reference an existing Model Provider",
+            )
+        if route.model not in provider.models:
+            _invalid(f"models.routes.{route_name}.model", "must reference an available model")
+        if _usable_route(configuration.models, route_name) is None:
+            _invalid(f"models.routes.{route_name}", "must reference a usable Model Provider")
     if diagnostics:
         raise ConfigError(
             ErrorInfo("config_invalid", "The complete User Configuration contains invalid fields.")
@@ -1206,7 +1672,7 @@ class ConfigLoader:
         return _configuration_revision(self.path.read_bytes())
 
     def editable_snapshot(self) -> ConfigEditableSnapshot:
-        """Read the safe Runtime and Memory projection for a Web editor."""
+        """Read the safe structured configuration projection for a Web editor."""
         try:
             content = self.path.read_bytes()
             document = _table(tomllib.loads(content.decode("utf-8")), "configuration")
@@ -1233,6 +1699,7 @@ class ConfigLoader:
         self,
         expected_revision: str,
         fields: Mapping[str, object],
+        secrets: Mapping[str, object] | None = None,
     ) -> ConfigEditResult:
         """Atomically apply safe fields when the caller still has the latest revision."""
         if not isinstance(expected_revision, str) or not expected_revision:
@@ -1255,14 +1722,21 @@ class ConfigLoader:
                 ) from error
 
             for section, section_values in normalized.items():
-                table = source_document.get(section)
-                if table is None:
-                    table = tomlkit.table()
-                    source_document[section] = table
-                if not isinstance(table, MutableMapping):
-                    _invalid(section, "must be a table")
-                for field_name, value in section_values.items():
-                    table[field_name] = value
+                if section == "models":
+                    _apply_model_fields(source_document, section_values)
+                elif section == "mcp":
+                    _apply_mcp_fields(source_document, section_values)
+                else:
+                    table = source_document.get(section)
+                    if table is None:
+                        table = tomlkit.table()
+                        source_document[section] = table
+                    if not isinstance(table, MutableMapping):
+                        _invalid(section, "must be a table")
+                    for field_name, value in section_values.items():
+                        table[field_name] = value
+
+            _apply_secret_changes(source_document, {} if secrets is None else secrets)
 
             candidate_content = tomlkit.dumps(source_document)
             try:

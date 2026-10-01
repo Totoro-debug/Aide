@@ -35,7 +35,8 @@ import type {
   ServiceStatus,
   ConfigPatchResponse,
   ConfigResponse,
-  ConfigFields,
+  ConfigPatchFields,
+  ConfigSecrets,
 } from "./protocol";
 
 const API_PREFIX = "/api/v1";
@@ -163,13 +164,14 @@ export function getConfig(): Promise<ConfigResponse> {
 
 export function patchConfig(
   revision: string,
-  fields: ConfigFields,
+  fields: ConfigPatchFields,
+  secrets: ConfigSecrets,
   requestId: string = createRequestId(),
 ): Promise<ConfigPatchResponse> {
   return request<ConfigPatchResponse>("/config", {
     method: "PATCH",
     mutation: true,
-    body: { request_id: requestId, revision, fields },
+    body: { request_id: requestId, revision, fields, secrets },
   });
 }
 

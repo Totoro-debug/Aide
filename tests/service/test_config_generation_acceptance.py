@@ -330,6 +330,7 @@ async def test_http_save_drains_real_foreground_schedule_and_confirmation_withou
                             "runtime": {"max_iterations": 81, "permission_level": "full-access"},
                             "memory": {"batch_size": 11},
                         },
+                        "secrets": {},
                     },
                 )
                 saved = await response.json()

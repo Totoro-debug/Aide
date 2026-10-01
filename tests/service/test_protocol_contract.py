@@ -204,7 +204,7 @@ def test_versioned_protocol_schema_is_packaged_and_keeps_secrets_write_only() ->
     assert {
         choice["properties"]["action"]["const"]
         for choice in definitions["config_secret_change"]["oneOf"]
-    } == {"replace", "clear"}
+    } == {"keep", "replace", "clear"}
 
 
 def test_event_and_error_envelopes_reject_missing_identity_and_unknown_fields() -> None:
@@ -244,7 +244,7 @@ def test_config_patch_requires_explicit_secret_operation_and_revision() -> None:
     patch = {
         "request_id": "request-1",
         "revision": "sha256:old",
-        "fields": {"runtime.compact_ratio": 0.7},
+        "fields": {"runtime": {"compact_ratio": 0.7}},
         "secrets": {"models.providers.primary.api_key": {"action": "replace", "value": "new"}},
     }
     validator = _validator("config_patch")

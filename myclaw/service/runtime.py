@@ -10,6 +10,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 from time import monotonic
 from types import MappingProxyType
@@ -318,6 +319,20 @@ def _project_catalog_service_error(error: ProjectCatalogError) -> ServiceError:
         status=422,
         field_errors={"path": detail},
     )
+
+
+def _configuration_request_fingerprint(
+    client_id: str | None,
+    action: str,
+    payload: object,
+) -> str:
+    serialized = json.dumps(
+        [client_id, action, payload],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _consume_task_result(task: asyncio.Task[object]) -> None:
@@ -2303,6 +2318,7 @@ class LocalService:
         request_id: str,
         expected_revision: str,
         fields: Mapping[str, object],
+        secrets: Mapping[str, object] | None = None,
         *,
         client_id: str | None = None,
     ) -> dict[str, object]:
@@ -2313,13 +2329,19 @@ class LocalService:
             self._require_client(client_id)
         if self.state in {"draining", "stopped"}:
             raise service_error("admission_closed", "The local service is stopping.")
-        fingerprint = json.dumps([client_id, "patch", expected_revision, fields], sort_keys=True)
+        fingerprint = _configuration_request_fingerprint(
+            client_id,
+            "patch",
+            {"revision": expected_revision, "fields": fields, "secrets": secrets or {}},
+        )
         async with self._config_lock:
             existing = self._configuration_request_result(request_id, fingerprint)
             if existing is not None:
                 return existing
             try:
-                result = self._config_loader.patch_editable_fields(expected_revision, fields)
+                result = self._config_loader.patch_editable_fields(
+                    expected_revision, fields, secrets
+                )
             except ConfigRevisionConflict as error:
                 raise service_error(
                     "config_revision_conflict",
@@ -2336,7 +2358,10 @@ class LocalService:
                 ) from error
             except ConfigError as error:
                 raise service_error(
-                    error.error.code, "The complete User Configuration is invalid.", status=422
+                    error.error.code,
+                    "The complete User Configuration is invalid.",
+                    status=422,
+                    field_errors=error.field_errors,
                 ) from error
             except OSError as error:
                 raise service_error(

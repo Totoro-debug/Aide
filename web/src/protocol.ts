@@ -81,7 +81,65 @@ export interface ConfigFields {
     batch_size: number;
     schedule: string;
   };
+  models: ConfigModelsFields;
+  mcp: Record<string, ConfigMcpFields>;
 }
+
+export interface ConfigRedactedSecret {
+  configured: boolean;
+}
+
+export interface ConfigProviderFields {
+  protocol: string;
+  base_url: string;
+  models: string[];
+  api_key: ConfigRedactedSecret;
+}
+
+export interface ConfigRouteFields {
+  provider_id: string;
+  model: string;
+  context_window: number;
+  max_output: number;
+  temperature: number;
+  reasoning_effort: ReasoningEffort;
+  timeout: number;
+}
+
+export interface ConfigMcpFields {
+  enabled: boolean;
+  transport: "stdio" | "streamable-http";
+  command: string | null;
+  args: string[];
+  cwd: string | null;
+  url: string | null;
+  headers: Record<string, ConfigRedactedSecret>;
+  connect_timeout: number;
+  call_timeout: number;
+  tool_keywords: Record<string, string[]>;
+}
+
+export interface ConfigModelsFields {
+  providers: Record<string, ConfigProviderFields>;
+  routes: Record<string, ConfigRouteFields>;
+}
+
+export type ConfigPatchFields = {
+  runtime?: Partial<ConfigFields["runtime"]>;
+  memory?: Partial<ConfigFields["memory"]>;
+  models?: {
+    providers?: Record<string, Partial<Omit<ConfigProviderFields, "api_key">>>;
+    routes?: Record<string, Partial<ConfigRouteFields>>;
+  };
+  mcp?: Record<string, Partial<ConfigMcpFields>>;
+};
+
+export type ConfigSecretChange =
+  | { action: "keep" }
+  | { action: "clear" }
+  | { action: "replace"; value: string };
+
+export type ConfigSecrets = Record<string, ConfigSecretChange>;
 
 export type ConfigApplicationStatus = "active" | "pending" | "failed-to-apply";
 

@@ -2578,6 +2578,101 @@ h1 {
   padding: 12px 0;
 }
 
+.settingsSubsection {
+  display: grid;
+  gap: 12px;
+  padding-top: 20px;
+}
+
+.settingsSubsection h3,
+.settingsSubsection h4 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.settingsCollection {
+  display: grid;
+  gap: 12px;
+}
+
+.settingsCollectionItem {
+  display: grid;
+  min-width: 0;
+  gap: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  padding: 16px;
+}
+
+.settingsCollectionItemHeader,
+.settingsCollectionHeader {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settingsCollectionItemHeader strong,
+.settingsCollectionHeader h4 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.settingsCollectionHeader {
+  align-items: baseline;
+}
+
+.settingsSecretRow {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(0, 1.2fr);
+  gap: 8px;
+}
+
+.settingsSecretState {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.settingsSecretItem {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(90px, 0.4fr) minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+}
+
+.settingsSecretName {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  padding-top: 10px;
+}
+
+.textArea {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface-app);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  padding: 9px 10px;
+}
+
+.textArea:focus {
+  border-color: var(--accent-strong);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
 .settingsVersions {
   display: grid;
   gap: 8px;
@@ -2711,6 +2806,19 @@ h1 {
 
 @media (max-width: 680px) {
   .settingsFieldGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settingsCollectionItem {
+    padding: 12px;
+  }
+
+  .settingsCollectionItemHeader,
+  .settingsCollectionHeader {
+    align-items: flex-start;
+  }
+
+  .settingsSecretRow {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -2916,4 +3024,11 @@ h1 {
   .metric:nth-child(4) {
     border-top: 1px solid var(--border-subtle);
   }
+}
+
+.settingsListRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
 }

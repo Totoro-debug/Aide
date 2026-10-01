@@ -102,7 +102,10 @@ import type {
   ServiceEvent,
   ServiceStatus,
   ConfigFields,
+  ConfigPatchFields,
   ConfigResponse,
+  ConfigSecretChange,
+  ConfigSecrets,
   SessionClaim,
   SessionSnapshot,
   SessionSummary,
@@ -835,6 +838,56 @@ interface SettingsForm {
     batch_size: string;
     schedule: string;
   };
+  models: {
+    providers: Record<string, ProviderForm>;
+    routes: Record<string, RouteForm>;
+  };
+  mcp: Record<string, McpForm>;
+}
+
+type SecretAction = ConfigSecretChange["action"];
+
+interface SecretDraft {
+  configured: boolean;
+  action: SecretAction;
+  value: string;
+}
+
+interface ProviderForm {
+  id: string;
+  protocol: string;
+  base_url: string;
+  models: string[];
+  api_key: SecretDraft;
+}
+
+interface RouteForm {
+  name: string;
+  provider_id: string;
+  model: string;
+  context_window: string;
+  max_output: string;
+  temperature: string;
+  reasoning_effort: ReasoningEffort;
+  timeout: string;
+}
+
+interface McpForm {
+  name: string;
+  enabled: boolean;
+  transport: "stdio" | "streamable-http";
+  command: string;
+  args: string[];
+  cwd: string;
+  url: string;
+  headers: Record<string, SecretDraft & { name: string }>;
+  connect_timeout: string;
+  call_timeout: string;
+  tool_keywords: { id: string; name: string; keywords: string[] }[];
+}
+
+function secretDraft(configured: boolean): SecretDraft {
+  return { configured, action: "keep", value: "" };
 }
 
 function formFromConfig(fields: ConfigFields): SettingsForm {
@@ -851,11 +904,92 @@ function formFromConfig(fields: ConfigFields): SettingsForm {
       batch_size: String(fields.memory.batch_size),
       schedule: fields.memory.schedule,
     },
+    models: {
+      providers: Object.fromEntries(Object.entries(fields.models.providers).map(([id, provider]) => [id, {
+        id,
+        protocol: provider.protocol,
+        base_url: provider.base_url,
+        models: provider.models,
+        api_key: secretDraft(provider.api_key.configured),
+      }])),
+      routes: Object.fromEntries(Object.entries(fields.models.routes).map(([name, route]) => [name, {
+        name,
+        provider_id: route.provider_id,
+        model: route.model,
+        context_window: String(route.context_window),
+        max_output: String(route.max_output),
+        temperature: String(route.temperature),
+        reasoning_effort: route.reasoning_effort,
+        timeout: String(route.timeout),
+      }])),
+    },
+    mcp: Object.fromEntries(Object.entries(fields.mcp).map(([name, server]) => [name, {
+      name,
+      enabled: server.enabled,
+      transport: server.transport,
+      command: server.command ?? "",
+      args: server.args,
+      cwd: server.cwd ?? "",
+      url: server.url ?? "",
+      headers: Object.fromEntries(Object.entries(server.headers).map(([header, value]) => [header, { ...secretDraft(value.configured), name: header }])),
+      connect_timeout: String(server.connect_timeout),
+      call_timeout: String(server.call_timeout),
+      tool_keywords: Object.entries(server.tool_keywords).map(([name, keywords]) => ({ id: createRequestId(), name, keywords })),
+    }])),
   };
 }
 
-function configFromForm(form: SettingsForm): ConfigFields {
+function configFromForm(form: SettingsForm): { fields: ConfigPatchFields; secrets: ConfigSecrets } {
+  const secrets: ConfigSecrets = {};
+  const providers: Record<string, { protocol: string; base_url: string; models: string[] }> = {};
+  for (const provider of Object.values(form.models.providers)) {
+    providers[provider.id] = {
+      protocol: provider.protocol,
+      base_url: provider.base_url,
+      models: provider.models,
+    };
+    secrets[`models.providers.${provider.id}.api_key`] = provider.api_key.action === "replace"
+      ? { action: "replace", value: provider.api_key.value }
+      : { action: provider.api_key.action };
+  }
+  const routes: Record<string, Record<string, string | number>> = {};
+  for (const route of Object.values(form.models.routes)) {
+    routes[route.name] = {
+      provider_id: route.provider_id,
+      model: route.model,
+      context_window: Number(route.context_window),
+      max_output: Number(route.max_output),
+      temperature: Number(route.temperature),
+      reasoning_effort: route.reasoning_effort,
+      timeout: Number(route.timeout),
+    };
+  }
+  const mcp: Record<string, Record<string, unknown>> = {};
+  for (const server of Object.values(form.mcp)) {
+    const headers: Record<string, { configured: boolean }> = Object.create(null) as Record<string, { configured: boolean }>;
+    for (const draft of server.transport === "streamable-http" ? Object.values(server.headers) : []) {
+      const header = draft.name;
+      headers[header] = { configured: draft.configured };
+      const path = `mcp.${server.name}.headers.${header}`;
+      secrets[path] = draft.action === "replace"
+        ? { action: "replace", value: draft.value }
+        : { action: draft.action };
+    }
+    mcp[server.name] = {
+      enabled: server.enabled,
+      transport: server.transport,
+      command: server.transport === "stdio" ? server.command : null,
+      args: server.transport === "stdio" ? server.args : [],
+      cwd: server.transport === "stdio" && server.cwd.trim() ? server.cwd.trim() : null,
+      url: server.transport === "streamable-http" ? server.url.trim() : null,
+      headers,
+      connect_timeout: Number(server.connect_timeout),
+      call_timeout: Number(server.call_timeout),
+      tool_keywords: Object.fromEntries(server.tool_keywords.map((tool) => [tool.name, tool.keywords])),
+    };
+  }
   return {
+    fields: {
     runtime: {
       max_tool_result_chars: Number(form.runtime.max_tool_result_chars),
       max_iterations: Number(form.runtime.max_iterations),
@@ -868,7 +1002,63 @@ function configFromForm(form: SettingsForm): ConfigFields {
       batch_size: Number(form.memory.batch_size),
       schedule: form.memory.schedule.trim(),
     },
+      models: { providers, routes },
+      mcp,
+    },
+    secrets,
   };
+}
+
+interface SecretInputProps {
+  id: string;
+  label: string;
+  secret: SecretDraft;
+  disabled: boolean;
+  onChange: (update: Partial<SecretDraft>) => void;
+  error?: string;
+}
+
+function SecretInput({ id, label, secret, disabled, onChange, error }: SecretInputProps) {
+  const { t } = useTranslation();
+  return (
+    <div className={styles.settingsField} id={id} tabIndex={-1}>
+      <span className={styles.fieldLabel} id={`${id}-label`}>{label}</span>
+      <div className={styles.settingsSecretRow}>
+        <select
+          className={styles.selectInput}
+          id={`${id}-action`}
+          aria-labelledby={`${id}-label`}
+          aria-invalid={error !== undefined}
+          aria-describedby={error !== undefined ? `${id}-error` : undefined}
+          value={secret.action}
+          disabled={disabled}
+          onChange={(event) => onChange({ action: event.currentTarget.value as SecretAction, value: "" })}
+        >
+          <option value="keep">{t("settings.secretKeep")}</option>
+          <option value="replace">{t("settings.secretReplace")}</option>
+          <option value="clear">{t("settings.secretClear")}</option>
+        </select>
+        {secret.action === "replace" ? (
+          <input
+            className={styles.textInput}
+            id={`${id}-value`}
+            type="password"
+            aria-invalid={error !== undefined}
+            aria-describedby={error !== undefined ? `${id}-error` : undefined}
+            autoComplete="new-password"
+            aria-label={t("settings.secretValue")}
+            value={secret.value}
+            disabled={disabled}
+            onChange={(event) => onChange({ value: event.currentTarget.value })}
+          />
+        ) : null}
+      </div>
+      {error !== undefined ? <span className={styles.fieldError} id={`${id}-error`}>{error}</span> : null}
+      <small className={styles.settingsSecretState}>
+        {secret.configured ? t("settings.secretConfigured") : t("settings.secretNotConfigured")}
+      </small>
+    </div>
+  );
 }
 
 type SettingsFieldError = Record<string, string>;
@@ -969,6 +1159,41 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
         return t("settings.invalidInteger");
       }
     }
+    if (path.endsWith(".context_window")) {
+      const numeric = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+      if (!Number.isSafeInteger(numeric) || numeric < 1024 || numeric > 10_000_000) {
+        return t("settings.invalidInteger");
+      }
+    }
+    if (path.endsWith(".max_output")) {
+      const numeric = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+      if (!Number.isSafeInteger(numeric) || numeric < 1 || numeric > 9_999_999) {
+        return t("settings.invalidInteger");
+      }
+    }
+    if (path.endsWith(".timeout") || path.endsWith(".connect_timeout") || path.endsWith(".call_timeout")) {
+      const numeric = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+      if (!Number.isSafeInteger(numeric) || numeric < 1 || numeric > 600) {
+        return t("settings.invalidInteger");
+      }
+    }
+    if (path.endsWith(".temperature")) {
+      const numeric = typeof value === "string" ? Number(value) : NaN;
+      if (!Number.isFinite(numeric) || numeric < 0 || numeric > 2) {
+        return t("settings.invalidValue");
+      }
+    }
+    if (path.endsWith(".api_key.value") || path.endsWith(".headers.value")) {
+      if (typeof value !== "string" || value.length === 0) return t("settings.secretRequired");
+    }
+    if (path.endsWith(".url") && typeof value === "string" && value.trim() !== "") {
+      try {
+        const url = new URL(value);
+        if (url.protocol !== "http:" && url.protocol !== "https:") return t("settings.invalidUrl");
+      } catch {
+        return t("settings.invalidUrl");
+      }
+    }
     if (path === "runtime.compact_ratio") {
       const numeric = typeof value === "string" ? Number(value) : NaN;
       if (!Number.isFinite(numeric) || numeric < 0.5 || numeric > 0.95) {
@@ -999,6 +1224,158 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
     setSubmitError(null);
   }, []);
 
+  const updateDraft = useCallback((update: (current: SettingsForm) => SettingsForm) => {
+    dirtyRef.current = true;
+    setDraft((current) => current === null ? current : update(current));
+    setDirty(true);
+    setNotice(null);
+    setSubmitError(null);
+  }, []);
+
+  const updateProvider = useCallback((id: string, update: Partial<ProviderForm>) => {
+    updateDraft((current) => ({
+      ...current,
+      models: {
+        ...current.models,
+        providers: {
+          ...current.models.providers,
+          [id]: { ...current.models.providers[id], ...update },
+        },
+      },
+    }));
+  }, [updateDraft]);
+
+  const updateRoute = useCallback((id: string, update: Partial<RouteForm>) => {
+    updateDraft((current) => ({
+      ...current,
+      models: {
+        ...current.models,
+        routes: { ...current.models.routes, [id]: { ...current.models.routes[id], ...update } },
+      },
+    }));
+  }, [updateDraft]);
+
+  const updateMcp = useCallback((id: string, update: Partial<McpForm>) => {
+    updateDraft((current) => ({
+      ...current,
+      mcp: { ...current.mcp, [id]: { ...current.mcp[id], ...update } },
+    }));
+  }, [updateDraft]);
+
+  const addProvider = useCallback(() => {
+    const current = draftRef.current;
+    if (current === null) return;
+    let id = "new-provider";
+    let index = 2;
+    while (current.models.providers[id] !== undefined) id = `new-provider-${index++}`;
+    updateDraft((form) => ({
+      ...form,
+      models: {
+        ...form.models,
+        providers: {
+          ...form.models.providers,
+          [id]: { id, protocol: "openai-compatible", base_url: "", models: [], api_key: secretDraft(false) },
+        },
+      },
+    }));
+  }, [updateDraft]);
+
+  const removeProvider = useCallback((id: string) => {
+    updateDraft((current) => {
+      const providers = { ...current.models.providers };
+      delete providers[id];
+      return { ...current, models: { ...current.models, providers } };
+    });
+  }, [updateDraft]);
+
+  const addRoute = useCallback(() => {
+    const current = draftRef.current;
+    if (current === null) return;
+    const name = (["default", "chat", "memory", "schedule"] as const).find(
+      (candidate) => current.models.routes[candidate] === undefined,
+    );
+    if (name === undefined) return;
+    updateDraft((form) => ({
+      ...form,
+      models: {
+        ...form.models,
+        routes: {
+          ...form.models.routes,
+          [name]: {
+            name,
+            provider_id: Object.values(form.models.providers)[0]?.id ?? "",
+            model: "",
+            context_window: "8192",
+            max_output: "1024",
+            temperature: "0",
+            reasoning_effort: "medium",
+            timeout: "60",
+          },
+        },
+      },
+    }));
+  }, [updateDraft]);
+
+  const removeRoute = useCallback((id: string) => {
+    updateDraft((current) => {
+      const routes = { ...current.models.routes };
+      delete routes[id];
+      return { ...current, models: { ...current.models, routes } };
+    });
+  }, [updateDraft]);
+
+  const addMcp = useCallback(() => {
+    const current = draftRef.current;
+    if (current === null) return;
+    let name = "new-mcp";
+    let index = 2;
+    while (current.mcp[name] !== undefined) name = `new-mcp-${index++}`;
+    updateDraft((form) => ({
+      ...form,
+      mcp: {
+        ...form.mcp,
+        [name]: {
+          name,
+          enabled: false,
+          transport: "stdio",
+          command: "python",
+          args: [],
+          cwd: "",
+          url: "",
+          headers: {},
+          connect_timeout: "30",
+          call_timeout: "60",
+          tool_keywords: [],
+        },
+      },
+    }));
+  }, [updateDraft]);
+
+  const removeMcp = useCallback((id: string) => {
+    updateDraft((current) => {
+      const mcp = { ...current.mcp };
+      delete mcp[id];
+      return { ...current, mcp };
+    });
+  }, [updateDraft]);
+
+  const addHeader = useCallback((serverId: string) => {
+    const current = draftRef.current?.mcp[serverId];
+    if (current === undefined) return;
+    let header = "Authorization";
+    let index = 2;
+    while (current.headers[header] !== undefined) header = `X-Header-${index++}`;
+    updateMcp(serverId, { headers: { ...current.headers, [header]: { ...secretDraft(false), name: header } } });
+  }, [updateMcp]);
+
+  const removeHeader = useCallback((serverId: string, header: string) => {
+    const current = draftRef.current?.mcp[serverId];
+    if (current === undefined) return;
+    const headers = { ...current.headers };
+    delete headers[header];
+    updateMcp(serverId, { headers });
+  }, [updateMcp]);
+
   const validateAll = useCallback((current: SettingsForm): SettingsFieldError => {
     const values: Record<string, string | boolean> = {
       "runtime.max_tool_result_chars": current.runtime.max_tool_result_chars,
@@ -1015,8 +1392,60 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
       const error = validateField(path, value);
       if (error !== null) errors[path] = error;
     }
+    for (const [providerRow, provider] of Object.entries(current.models.providers)) {
+      const providerPath = `models.providers.${provider.id}`;
+      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(provider.id)) {
+        errors[`models.providers.${providerRow}.id`] = t("settings.invalidProviderId");
+      }
+      if (Object.values(current.models.providers).filter((entry) => entry.id === provider.id).length !== 1) errors[`models.providers.${providerRow}.id`] = t("settings.invalidProviderId");
+      if (provider.models.some((model) => !model || model !== model.trim()) || new Set(provider.models).size !== provider.models.length) errors[`${providerPath}.models`] = t("settings.invalidValue");
+      const baseError = validateField(`${providerPath}.url`, provider.base_url);
+      if (baseError || !provider.base_url) errors[`${providerPath}.base_url`] = baseError ?? t("settings.required");
+      if (provider.api_key.action === "replace" && provider.api_key.value.length === 0) {
+        errors[`${providerPath}.api_key.value`] = t("settings.secretRequired");
+      }
+    }
+    for (const route of Object.values(current.models.routes)) {
+      const routePath = `models.routes.${route.name}`;
+      for (const field of ["context_window", "max_output", "temperature", "timeout"] as const) {
+        const error = validateField(`${routePath}.${field}`, route[field]);
+        if (error !== null) errors[`${routePath}.${field}`] = error;
+      }
+      if (!route.provider_id.trim()) errors[`${routePath}.provider_id`] = t("settings.required");
+      if (!route.model.trim()) errors[`${routePath}.model`] = t("settings.required");
+    }
+    for (const [serverRow, server] of Object.entries(current.mcp)) {
+      const serverPath = `mcp.${server.name}`;
+      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(server.name)) {
+        errors[`mcp.${serverRow}.name`] = t("settings.invalidServerName");
+      }
+      for (const field of ["connect_timeout", "call_timeout"] as const) {
+        const error = validateField(`${serverPath}.${field}`, server[field]);
+        if (error !== null) errors[`${serverPath}.${field}`] = error;
+      }
+      if (server.transport === "stdio" && !server.command.trim()) {
+        errors[`${serverPath}.command`] = t("settings.required");
+      }
+      if (server.transport === "streamable-http") {
+        const error = validateField(`${serverPath}.url`, server.url);
+        if (error !== null) errors[`${serverPath}.url`] = error;
+        else if (!server.url.trim()) errors[`${serverPath}.url`] = t("settings.required");
+      }
+      if (Object.values(current.mcp).filter((entry) => entry.name === server.name).length !== 1) errors[`mcp.${serverRow}.name`] = t("settings.invalidServerName");
+      const toolNames = server.tool_keywords.map((tool) => tool.name);
+      if (new Set(toolNames).size !== toolNames.length || toolNames.some((name) => !name)) errors[`${serverPath}.tool_keywords`] = t("settings.invalidValue");
+      if (server.transport !== "streamable-http") continue;
+      const headerNames = Object.values(server.headers).map((secret) => secret.name);
+      if (new Set(headerNames).size !== headerNames.length) errors[`${serverPath}.headers`] = t("settings.invalidIdentifier");
+      for (const [header, secret] of Object.entries(server.headers)) {
+        if (!secret.name || secret.name !== secret.name.trim()) errors[`${serverPath}.headers`] = t("settings.required");
+        if (secret.action === "replace" && secret.value.length === 0) {
+          errors[`${serverPath}.headers.${header}.value`] = t("settings.secretRequired");
+        }
+      }
+    }
     return errors;
-  }, [validateField]);
+  }, [t, validateField]);
 
   const blurField = useCallback((path: string, value: string | boolean) => {
     const error = validateField(path, value);
@@ -1043,7 +1472,8 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
     setSubmitError(null);
     setNotice(null);
     try {
-      const next = await patchConfig(draftRevision, configFromForm(draft));
+      const config = configFromForm(draft);
+      const next = await patchConfig(draftRevision, config.fields, config.secrets);
       if (requestSequence.current !== sequence) return;
       dirtyRef.current = false;
       applyResponse(next);
@@ -1060,7 +1490,7 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
         setFieldErrors(Object.fromEntries(Object.keys(error.body.field_errors).map((path) => [
           path,
           t(path === "memory.schedule" ? "settings.invalidSchedule"
-            : path === "runtime.compact_ratio" ? "settings.invalidRatio" : "settings.invalidInteger"),
+            : path === "runtime.compact_ratio" ? "settings.invalidRatio" : "settings.invalidValue"),
         ])));
         setSubmitError(error.body.code === "config_invalid" ? t("settings.validationSummary") : error.body.message);
       } else {
@@ -1124,6 +1554,9 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
 
   const errorEntries = Object.entries(fieldErrors);
   const controlDisabled = draft === null || loading || saving || connectionState !== "online";
+  const canAddRoute = draft !== null && (["default", "chat", "memory", "schedule"] as const).some(
+    (name) => draft.models.routes[name] === undefined,
+  );
   const labelFor = (path: string): string => {
     const labels: Record<string, string> = {
       "runtime.max_tool_result_chars": t("settings.maxToolResultChars"),
@@ -1138,7 +1571,41 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
     return labels[path] ?? path;
   };
   const fieldId = (path: string) => `settings-${path.replaceAll(".", "-")}`;
+  const headerInputId = (server: string, header: string) => `settings-mcp-${server}-headers-${encodeURIComponent(header).replaceAll(".", "%2E")}`;
   const fieldError = (path: string) => fieldErrors[path];
+  const groupError = (prefix: string) => Object.entries(fieldErrors).find(([path]) => path === prefix || path.startsWith(`${prefix}.`))?.[1];
+  const focusError = (path: string) => {
+    let targetPath = path;
+    for (const server of Object.values(draft?.mcp ?? {})) {
+      const prefix = `mcp.${server.name}.headers.`;
+      for (const [row, secret] of Object.entries(server.headers).sort((left, right) => right[1].name.length - left[1].name.length)) {
+        const secretPath = `${prefix}${secret.name}`;
+        const rowPath = `${prefix}${row}`;
+        const matchedPath = path === secretPath || path.startsWith(`${secretPath}.`) ? secretPath
+          : path === rowPath || path.startsWith(`${rowPath}.`) ? rowPath : null;
+        if (matchedPath !== null) {
+          const id = `${headerInputId(server.name, row)}${path.slice(matchedPath.length).replaceAll(".", "-")}`;
+          const target = document.getElementById(id);
+          (target?.matches("input, select") ? target : target?.querySelector<HTMLElement>("input, select") ?? target)?.focus();
+          return;
+        }
+      }
+      const keywordPrefix = `mcp.${server.name}.tool_keywords`;
+      if (path.startsWith(`${keywordPrefix}.`)) {
+        const index = server.tool_keywords.findIndex((tool) => path === `${keywordPrefix}.${tool.name}`);
+        if (index >= 0) {
+          document.getElementById(`${fieldId(keywordPrefix)}-${index}`)?.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+          return;
+        }
+      }
+    }
+    let target = document.getElementById(fieldId(targetPath));
+    while (target === null && targetPath.includes(".")) {
+      targetPath = targetPath.slice(0, targetPath.lastIndexOf("."));
+      target = document.getElementById(fieldId(targetPath));
+    }
+    (target?.matches("input, select, textarea") ? target : target?.querySelector<HTMLElement>("input, select, textarea") ?? target)?.focus();
+  };
 
   if (authState !== "ready") {
     return (
@@ -1232,7 +1699,7 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
                 <li key={path}>
                   <a href={`#${fieldId(path)}`} onClick={(event) => {
                     event.preventDefault();
-                    document.getElementById(fieldId(path))?.focus();
+                    focusError(path);
                   }}>{labelFor(path)}: {message}</a>
                 </li>
               ))}
@@ -1360,6 +1827,226 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
             </div>
           </div>
 
+          <div className={styles.settingsSection}>
+            <div className={styles.settingsSectionHeader}>
+              <div>
+                <p className={styles.eyebrow}>{t("settings.models")}</p>
+                <h2>{t("settings.models")}</h2>
+              </div>
+              <Gauge size={20} aria-hidden="true" />
+            </div>
+            <div className={styles.settingsSubsection}>
+              <div className={styles.settingsCollectionHeader}>
+                <h3>{t("settings.providers")}</h3>
+                <button className={styles.secondaryButton} type="button" onClick={addProvider} disabled={controlDisabled}>
+                  <Plus size={14} aria-hidden="true" />{t("settings.addProvider")}
+                </button>
+              </div>
+              <div className={styles.settingsCollection}>
+                {Object.entries(draft.models.providers).map(([providerRow, provider]) => (
+                  <div className={styles.settingsCollectionItem} key={providerRow} id={fieldId(`models.providers.${provider.id}`)} tabIndex={-1}>
+                    <div className={styles.settingsCollectionItemHeader}>
+                      <h4>{provider.id}</h4>
+                      <button
+                        className={styles.iconButton}
+                        type="button"
+                        aria-label={t("settings.removeProvider")}
+                        title={t("settings.removeProvider")}
+                        disabled={controlDisabled}
+                        onClick={() => removeProvider(providerRow)}
+                      ><Trash2 size={15} aria-hidden="true" /></button>
+                    </div>
+                    <div className={styles.settingsFieldGrid}>
+                      <label className={styles.settingsField} htmlFor={fieldId(`models.providers.${providerRow}.id`)}>
+                        <span className={styles.fieldLabel}>{t("settings.providerId")}</span>
+                        <input
+                          className={styles.textInput}
+                          id={fieldId(`models.providers.${providerRow}.id`)}
+                          value={provider.id}
+                          readOnly={response?.fields.models.providers[providerRow] !== undefined}
+                          disabled={controlDisabled}
+                          onChange={(event) => updateProvider(providerRow, { id: event.currentTarget.value })}
+                          aria-invalid={fieldError(`models.providers.${providerRow}.id`) !== undefined}
+                        />
+                        <span className={styles.fieldError}>{fieldError(`models.providers.${providerRow}.id`) ?? ""}</span>
+                      </label>
+                      <label className={styles.settingsField} htmlFor={fieldId(`models.providers.${provider.id}.protocol`)}>
+                        <span className={styles.fieldLabel}>{t("settings.protocol")}</span>
+                        <select className={styles.selectInput} id={fieldId(`models.providers.${provider.id}.protocol`)} value={provider.protocol} disabled={controlDisabled} onChange={(event) => updateProvider(providerRow, { protocol: event.currentTarget.value })}>
+                          {!['openai-compatible', 'anthropic'].includes(provider.protocol) ? <option value={provider.protocol}>{provider.protocol}</option> : null}
+                          <option value="openai-compatible">openai-compatible</option><option value="anthropic">anthropic</option>
+                        </select>
+                      </label>
+                      <label className={styles.settingsField} htmlFor={fieldId(`models.providers.${provider.id}.base_url`)}>
+                        <span className={styles.fieldLabel}>{t("settings.baseUrl")}</span>
+                        <input
+                          className={styles.textInput}
+                          id={fieldId(`models.providers.${provider.id}.base_url`)}
+                          value={provider.base_url}
+                          aria-invalid={fieldError(`models.providers.${provider.id}.base_url`) !== undefined}
+                          aria-describedby={fieldError(`models.providers.${provider.id}.base_url`) !== undefined ? `${fieldId(`models.providers.${provider.id}.base_url`)}-error` : undefined}
+                          disabled={controlDisabled}
+                          onChange={(event) => updateProvider(providerRow, { base_url: event.currentTarget.value })}
+                        />
+                        <span className={styles.fieldError} id={`${fieldId(`models.providers.${provider.id}.base_url`)}-error`}>{fieldError(`models.providers.${provider.id}.base_url`) ?? ""}</span>
+                      </label>
+                      <SettingsListField id={fieldId(`models.providers.${provider.id}.models`)} label={t("settings.modelsList")} values={provider.models} error={groupError(`models.providers.${provider.id}.models`)} disabled={controlDisabled} onChange={(models) => updateProvider(providerRow, { models })} />
+                      <SecretInput
+                        id={fieldId(`models.providers.${provider.id}.api_key`)}
+                        label={t("settings.apiKey")}
+                        secret={provider.api_key}
+                        error={groupError(`models.providers.${provider.id}.api_key`)}
+                        disabled={controlDisabled}
+                        onChange={(update) => updateProvider(providerRow, { api_key: { ...provider.api_key, ...update } as SecretDraft })}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className={styles.settingsSubsection}>
+              <div className={styles.settingsCollectionHeader} id="settings-models-routes" tabIndex={-1}>
+                <h3>{t("settings.routes")}</h3>
+                <button className={styles.secondaryButton} type="button" onClick={addRoute} disabled={controlDisabled || !canAddRoute}>
+                  <Plus size={14} aria-hidden="true" />{t("settings.addRoute")}
+                </button>
+              </div>
+              <div className={styles.settingsCollection}>
+                {Object.values(draft.models.routes).map((route) => (
+                  <div className={styles.settingsCollectionItem} key={route.name} id={fieldId(`models.routes.${route.name}`)} tabIndex={-1}>
+                    <div className={styles.settingsCollectionItemHeader}>
+                      <h4>{route.name}</h4>
+                      <button
+                        className={styles.iconButton}
+                        type="button"
+                        aria-label={t("settings.removeRoute")}
+                        title={t("settings.removeRoute")}
+                        disabled={controlDisabled}
+                        onClick={() => removeRoute(route.name)}
+                      ><Trash2 size={15} aria-hidden="true" /></button>
+                    </div>
+                    <div className={styles.settingsFieldGrid}>
+                      <label className={styles.settingsField} htmlFor={fieldId(`models.routes.${route.name}.provider_id`)}>
+                        <span className={styles.fieldLabel}>{t("settings.providerId")}</span>
+                        <select
+                          className={styles.selectInput}
+                          id={fieldId(`models.routes.${route.name}.provider_id`)}
+                          value={route.provider_id}
+                          disabled={controlDisabled}
+                          onChange={(event) => updateRoute(route.name, { provider_id: event.currentTarget.value })}
+                        >
+                          {!Object.values(draft.models.providers).some((provider) => provider.id === route.provider_id) ? <option value={route.provider_id}>{route.provider_id || t("settings.required")}</option> : null}
+                          {Object.entries(draft.models.providers).map(([row, provider]) => <option key={row} value={provider.id}>{provider.id}</option>)}
+                        </select>
+                        <span className={styles.fieldError}>{fieldError(`models.routes.${route.name}.provider_id`) ?? ""}</span>
+                      </label>
+                      <label className={styles.settingsField} htmlFor={fieldId(`models.routes.${route.name}.model`)}>
+                        <span className={styles.fieldLabel}>{t("settings.model")}</span>
+                        <input
+                          className={styles.textInput}
+                          id={fieldId(`models.routes.${route.name}.model`)}
+                          value={route.model}
+                          disabled={controlDisabled}
+                          onChange={(event) => updateRoute(route.name, { model: event.currentTarget.value })}
+                        />
+                        <span className={styles.fieldError}>{fieldError(`models.routes.${route.name}.model`) ?? ""}</span>
+                      </label>
+                      <SettingsNumberField id={fieldId(`models.routes.${route.name}.context_window`)} label={t("settings.contextWindow")} value={route.context_window} error={fieldError(`models.routes.${route.name}.context_window`)} disabled={controlDisabled} onChange={(value) => updateRoute(route.name, { context_window: value })} onBlur={() => blurField(`models.routes.${route.name}.context_window`, route.context_window)} />
+                      <SettingsNumberField id={fieldId(`models.routes.${route.name}.max_output`)} label={t("settings.maxOutput")} value={route.max_output} error={fieldError(`models.routes.${route.name}.max_output`)} disabled={controlDisabled} onChange={(value) => updateRoute(route.name, { max_output: value })} onBlur={() => blurField(`models.routes.${route.name}.max_output`, route.max_output)} />
+                      <SettingsNumberField id={fieldId(`models.routes.${route.name}.temperature`)} label={t("settings.temperature")} value={route.temperature} error={fieldError(`models.routes.${route.name}.temperature`)} disabled={controlDisabled} step="0.1" onChange={(value) => updateRoute(route.name, { temperature: value })} onBlur={() => blurField(`models.routes.${route.name}.temperature`, route.temperature)} />
+                      <label className={styles.settingsField} htmlFor={fieldId(`models.routes.${route.name}.reasoning_effort`)}>
+                        <span className={styles.fieldLabel}>{t("settings.reasoningEffort")}</span>
+                        <select className={styles.selectInput} id={fieldId(`models.routes.${route.name}.reasoning_effort`)} value={route.reasoning_effort} disabled={controlDisabled} onChange={(event) => updateRoute(route.name, { reasoning_effort: event.currentTarget.value as ReasoningEffort })}>
+                          {(["low", "medium", "high", "xhigh", "max"] as ReasoningEffort[]).map((effort) => <option key={effort} value={effort}>{t(`settings.reasoningEfforts.${effort}`)}</option>)}
+                        </select>
+                      </label>
+                      <SettingsNumberField id={fieldId(`models.routes.${route.name}.timeout`)} label={t("settings.timeout")} value={route.timeout} error={fieldError(`models.routes.${route.name}.timeout`)} disabled={controlDisabled} onChange={(value) => updateRoute(route.name, { timeout: value })} onBlur={() => blurField(`models.routes.${route.name}.timeout`, route.timeout)} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className={styles.settingsSection}>
+            <div className={styles.settingsSectionHeader}>
+              <div>
+                <p className={styles.eyebrow}>{t("settings.mcp")}</p>
+                <h2>{t("settings.mcp")}</h2>
+              </div>
+              <ShieldX size={20} aria-hidden="true" />
+            </div>
+            <div className={styles.settingsCollectionHeader}>
+              <h3>{t("settings.mcpServers")}</h3>
+              <button className={styles.secondaryButton} type="button" onClick={addMcp} disabled={controlDisabled}>
+                <Plus size={14} aria-hidden="true" />{t("settings.addMcp")}
+              </button>
+            </div>
+            <div className={styles.settingsCollection}>
+              {Object.entries(draft.mcp).map(([serverRow, server]) => (
+                <div className={styles.settingsCollectionItem} key={serverRow} id={fieldId(`mcp.${server.name}`)} tabIndex={-1}>
+                  <div className={styles.settingsCollectionItemHeader}>
+                    <h4>{server.name}</h4>
+                    <button className={styles.iconButton} type="button" aria-label={t("settings.removeMcp")} title={t("settings.removeMcp")} disabled={controlDisabled} onClick={() => removeMcp(serverRow)}><Trash2 size={15} aria-hidden="true" /></button>
+                  </div>
+                  <div className={styles.settingsFieldGrid}>
+                    <label className={styles.settingsField} htmlFor={fieldId(`mcp.${serverRow}.name`)}><span className={styles.fieldLabel}>{t("settings.serverName")}</span><input className={styles.textInput} id={fieldId(`mcp.${serverRow}.name`)} value={server.name} aria-invalid={fieldError(`mcp.${serverRow}.name`) !== undefined} readOnly={response?.fields.mcp[serverRow] !== undefined} disabled={controlDisabled} onChange={(event) => updateMcp(serverRow, { name: event.currentTarget.value })} /></label>
+                    <label className={styles.settingsField} htmlFor={fieldId(`mcp.${server.name}.transport`)}>
+                      <span className={styles.fieldLabel}>{t("settings.transport")}</span>
+                      <select className={styles.selectInput} id={fieldId(`mcp.${server.name}.transport`)} value={server.transport} disabled={controlDisabled} onChange={(event) => updateMcp(serverRow, { transport: event.currentTarget.value as McpForm["transport"] })}>
+                        <option value="stdio">stdio</option>
+                        <option value="streamable-http">streamable-http</option>
+                      </select>
+                    </label>
+                    <label className={styles.settingsToggle} htmlFor={fieldId(`mcp.${server.name}.enabled`)}>
+                      <input id={fieldId(`mcp.${server.name}.enabled`)} type="checkbox" checked={server.enabled} disabled={controlDisabled} onChange={(event) => updateMcp(serverRow, { enabled: event.currentTarget.checked })} />
+                      <span><strong>{t("settings.enabled")}</strong><small>{server.enabled ? t("settings.yes") : t("settings.no")}</small></span>
+                    </label>
+                    {server.transport === "stdio" ? (
+                      <>
+                        <label className={styles.settingsField} htmlFor={fieldId(`mcp.${server.name}.command`)}><span className={styles.fieldLabel}>{t("settings.command")}</span><input className={styles.textInput} id={fieldId(`mcp.${server.name}.command`)} value={server.command} disabled={controlDisabled} onChange={(event) => updateMcp(serverRow, { command: event.currentTarget.value })} /><span className={styles.fieldError}>{fieldError(`mcp.${server.name}.command`) ?? ""}</span></label>
+                        <SettingsListField id={fieldId(`mcp.${server.name}.args`)} label={t("settings.args")} values={server.args} error={groupError(`mcp.${server.name}.args`)} disabled={controlDisabled} onChange={(args) => updateMcp(serverRow, { args })} />
+                        <label className={styles.settingsField} htmlFor={fieldId(`mcp.${server.name}.cwd`)}><span className={styles.fieldLabel}>{t("settings.cwd")}</span><input className={styles.textInput} id={fieldId(`mcp.${server.name}.cwd`)} value={server.cwd} disabled={controlDisabled} onChange={(event) => updateMcp(serverRow, { cwd: event.currentTarget.value })} /></label>
+                      </>
+                    ) : (
+                      <label className={styles.settingsField} htmlFor={fieldId(`mcp.${server.name}.url`)}><span className={styles.fieldLabel}>{t("settings.url")}</span><input className={styles.textInput} id={fieldId(`mcp.${server.name}.url`)} value={server.url} disabled={controlDisabled} onChange={(event) => updateMcp(serverRow, { url: event.currentTarget.value })} onBlur={() => blurField(`mcp.${server.name}.url`, server.url)} /><span className={styles.fieldError}>{fieldError(`mcp.${server.name}.url`) ?? ""}</span></label>
+                    )}
+                    <SettingsNumberField id={fieldId(`mcp.${server.name}.connect_timeout`)} label={t("settings.connectTimeout")} value={server.connect_timeout} error={fieldError(`mcp.${server.name}.connect_timeout`)} disabled={controlDisabled} onChange={(value) => updateMcp(serverRow, { connect_timeout: value })} onBlur={() => blurField(`mcp.${server.name}.connect_timeout`, server.connect_timeout)} />
+                    <SettingsNumberField id={fieldId(`mcp.${server.name}.call_timeout`)} label={t("settings.callTimeout")} value={server.call_timeout} error={fieldError(`mcp.${server.name}.call_timeout`)} disabled={controlDisabled} onChange={(value) => updateMcp(serverRow, { call_timeout: value })} onBlur={() => blurField(`mcp.${server.name}.call_timeout`, server.call_timeout)} />
+                    <div className={styles.settingsField} id={fieldId(`mcp.${server.name}.tool_keywords`)} tabIndex={-1}>
+                      <span className={styles.fieldLabel}>{t("settings.toolKeywords")}</span>
+                      {server.tool_keywords.map((tool, index) => (
+                        <div className={styles.settingsCollectionItem} key={tool.id}>
+                          <label className={styles.settingsField}><span className={styles.fieldLabel}>{t("settings.toolName")}</span><input className={styles.textInput} value={tool.name} disabled={controlDisabled} onChange={(event) => updateMcp(serverRow, { tool_keywords: server.tool_keywords.map((entry) => entry.id === tool.id ? { ...entry, name: event.currentTarget.value } : entry) })} /></label>
+                          <SettingsListField id={`${fieldId(`mcp.${server.name}.tool_keywords`)}-${index}`} label={t("settings.toolKeywords")} values={tool.keywords} error={fieldError(`mcp.${server.name}.tool_keywords.${tool.name}`)} disabled={controlDisabled} onChange={(keywords) => updateMcp(serverRow, { tool_keywords: server.tool_keywords.map((entry) => entry.id === tool.id ? { ...entry, keywords } : entry) })} />
+                          <button type="button" className={styles.secondaryButton} disabled={controlDisabled} onClick={() => updateMcp(serverRow, { tool_keywords: server.tool_keywords.filter((entry) => entry.id !== tool.id) })}>{t("settings.removeTool")}</button>
+                        </div>
+                      ))}
+                      <span className={styles.fieldError}>{groupError(`mcp.${server.name}.tool_keywords`) ?? ""}</span>
+                      <button type="button" className={styles.secondaryButton} disabled={controlDisabled} onClick={() => updateMcp(serverRow, { tool_keywords: [...server.tool_keywords, { id: createRequestId(), name: "", keywords: [] }] })}>{t("settings.addTool")}</button>
+                    </div>
+                  </div>
+                  {server.transport === "streamable-http" ? (
+                    <div className={styles.settingsSubsection} id={fieldId(`mcp.${server.name}.headers`)} tabIndex={-1}>
+                      <span className={styles.fieldError}>{groupError(`mcp.${server.name}.headers`) ?? ""}</span>
+                      <div className={styles.settingsCollectionHeader}><h4>{t("settings.headers")}</h4><button className={styles.secondaryButton} type="button" onClick={() => addHeader(serverRow)} disabled={controlDisabled}><Plus size={14} aria-hidden="true" />{t("settings.addHeader")}</button></div>
+                      <div className={styles.settingsCollection}>
+                        {Object.entries(server.headers).map(([header, secret]) => (
+                          <div className={styles.settingsSecretItem} key={header}>
+                            <label className={styles.settingsField}><span className={styles.fieldLabel}>{t("settings.headerName")}</span><input className={styles.textInput} value={secret.name} readOnly={response?.fields.mcp[serverRow]?.headers[header] !== undefined} disabled={controlDisabled} onChange={(event) => updateMcp(serverRow, { headers: { ...server.headers, [header]: { ...secret, name: event.currentTarget.value } } })} /></label>
+                            <SecretInput id={headerInputId(server.name, header)} label={t("settings.headerValue")} secret={secret} error={groupError(`mcp.${server.name}.headers.${header}`) ?? groupError(`mcp.${server.name}.headers.${secret.name}`)} disabled={controlDisabled} onChange={(update) => updateMcp(serverRow, { headers: { ...server.headers, [header]: { ...secret, ...update } } })} />
+                            <button className={styles.iconButton} type="button" aria-label={t("settings.removeHeader")} title={t("settings.removeHeader")} disabled={controlDisabled} onClick={() => removeHeader(serverRow, header)}><Trash2 size={15} aria-hidden="true" /></button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </div>
+
           <div className={styles.settingsActions}>
             {conflict ? (
               <button className={styles.secondaryButton} type="button" onClick={() => void reloadSaved()} disabled={controlDisabled}>
@@ -1381,6 +2068,32 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
         </form>
       ) : null}
     </section>
+  );
+}
+
+interface SettingsListFieldProps {
+  error?: string;
+  id: string;
+  label: string;
+  values: string[];
+  disabled: boolean;
+  onChange: (values: string[]) => void;
+}
+
+function SettingsListField({ id, label, values, disabled, onChange, error }: SettingsListFieldProps) {
+  const { t } = useTranslation();
+  return (
+    <div className={styles.settingsField} id={id} tabIndex={-1}>
+      <span className={styles.fieldLabel}>{label}</span>
+      {values.map((value, index) => (
+        <div className={styles.settingsListRow} key={index}>
+          <textarea className={styles.textArea} aria-label={`${label} ${index + 1}`} rows={2} aria-invalid={error !== undefined} aria-describedby={error !== undefined ? `${id}-error` : undefined} value={value} disabled={disabled} onChange={(event) => onChange(values.map((entry, position) => position === index ? event.currentTarget.value : entry))} />
+          <button type="button" className={styles.iconButton} aria-label={`${t("settings.removeItem")} ${label} ${index + 1}`} disabled={disabled} onClick={() => { onChange(values.filter((_, position) => position !== index)); document.getElementById(id)?.focus(); }}><Trash2 size={15} aria-hidden="true" /></button>
+        </div>
+      ))}
+      {error !== undefined ? <span className={styles.fieldError} id={`${id}-error`}>{error}</span> : null}
+      <button type="button" className={styles.secondaryButton} disabled={disabled} onClick={() => onChange([...values, ""])}>{t("settings.addItem")}</button>
+    </div>
   );
 }
 

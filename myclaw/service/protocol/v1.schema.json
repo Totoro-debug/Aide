@@ -26,6 +26,135 @@
         "schedule": {"type": "string", "minLength": 1}
       }
     },
+    "config_redacted_secret": {
+      "type": "object", "additionalProperties": false,
+      "required": ["configured"],
+      "properties": {"configured": {"type": "boolean"}}
+    },
+    "config_provider_fields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "base_url", "models", "api_key"],
+      "properties": {
+        "protocol": {"type": "string"},
+        "base_url": {"type": "string"},
+        "models": {"type": "array", "items": {"type": "string"}},
+        "api_key": {"$ref": "#/$defs/config_redacted_secret"}
+      }
+    },
+    "config_route_fields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider_id", "model", "context_window", "max_output", "temperature", "reasoning_effort", "timeout"],
+      "properties": {
+        "provider_id": {"type": "string"},
+        "model": {"type": "string"},
+        "context_window": {"type": "integer", "minimum": 1024, "maximum": 10000000},
+        "max_output": {"type": "integer", "minimum": 1, "maximum": 9999999},
+        "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+        "reasoning_effort": {"$ref": "#/$defs/reasoning_effort"},
+        "timeout": {"type": "integer", "minimum": 1, "maximum": 600}
+      }
+    },
+    "config_mcp_fields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "transport", "command", "args", "cwd", "url", "headers", "connect_timeout", "call_timeout", "tool_keywords"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "transport": {"enum": ["stdio", "streamable-http"]},
+        "command": {"type": ["string", "null"]},
+        "args": {"type": "array", "items": {"type": "string"}},
+        "cwd": {"type": ["string", "null"]},
+        "url": {"type": ["string", "null"]},
+        "headers": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/config_redacted_secret"}
+        },
+        "connect_timeout": {"type": "integer", "minimum": 1, "maximum": 600},
+        "call_timeout": {"type": "integer", "minimum": 1, "maximum": 600},
+        "tool_keywords": {
+          "type": "object",
+          "additionalProperties": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "config_models_fields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["providers", "routes"],
+      "properties": {
+        "providers": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/config_provider_fields"}
+        },
+        "routes": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/config_route_fields"}
+        }
+      }
+    },
+    "config_patch_provider_fields": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "protocol": {"type": "string"},
+        "base_url": {"type": "string"},
+        "models": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "config_patch_route_fields": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "provider_id": {"type": "string"},
+        "model": {"type": "string"},
+        "context_window": {"type": "integer", "minimum": 1024, "maximum": 10000000},
+        "max_output": {"type": "integer", "minimum": 1, "maximum": 9999999},
+        "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+        "reasoning_effort": {"$ref": "#/$defs/reasoning_effort"},
+        "timeout": {"type": "integer", "minimum": 1, "maximum": 600}
+      }
+    },
+    "config_patch_mcp_fields": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "transport": {"enum": ["stdio", "streamable-http"]},
+        "command": {"type": ["string", "null"]},
+        "args": {"type": "array", "items": {"type": "string"}},
+        "cwd": {"type": ["string", "null"]},
+        "url": {"type": ["string", "null"]},
+        "headers": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/config_redacted_secret"}
+        },
+        "connect_timeout": {"type": "integer", "minimum": 1, "maximum": 600},
+        "call_timeout": {"type": "integer", "minimum": 1, "maximum": 600},
+        "tool_keywords": {
+          "type": "object",
+          "additionalProperties": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "config_patch_fields": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "runtime": {"$ref": "#/$defs/config_runtime_fields"},
+        "memory": {"$ref": "#/$defs/config_memory_fields"},
+        "models": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "providers": {
+              "type": "object",
+              "additionalProperties": {"$ref": "#/$defs/config_patch_provider_fields"}
+            },
+            "routes": {
+              "type": "object",
+              "additionalProperties": {"$ref": "#/$defs/config_patch_route_fields"}
+            }
+          }
+        },
+        "mcp": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/config_patch_mcp_fields"}
+        }
+      }
+    },
     "runtime_memory_config_patch": {
       "type": "object", "additionalProperties": false,
       "required": ["request_id", "revision", "fields"],
@@ -51,13 +180,18 @@
     },
     "config_fields": {
       "type": "object", "additionalProperties": false,
-      "required": ["runtime", "memory"],
+      "required": ["runtime", "memory", "models", "mcp"],
       "properties": {
         "runtime": {
           "$ref": "#/$defs/config_runtime_fields",
           "required": ["max_tool_result_chars", "max_iterations", "enable_skill_always_load", "compact_ratio", "permission_level", "exec_shell"]
         },
-        "memory": {"$ref": "#/$defs/config_memory_fields", "required": ["batch_size", "schedule"]}
+        "memory": {"$ref": "#/$defs/config_memory_fields", "required": ["batch_size", "schedule"]},
+        "models": {"$ref": "#/$defs/config_models_fields"},
+        "mcp": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/config_mcp_fields"}
+        }
       }
     },
     "config_application_status": {"enum": ["active", "pending", "failed-to-apply"]},
@@ -417,6 +551,10 @@
         },
         {
           "type": "object", "additionalProperties": false,
+          "required": ["action"], "properties": {"action": {"const": "keep"}}
+        },
+        {
+          "type": "object", "additionalProperties": false,
           "required": ["action"], "properties": {"action": {"const": "clear"}}
         }
       ]
@@ -428,7 +566,7 @@
       "properties": {
         "request_id": {"$ref": "#/$defs/request_id"},
         "revision": {"$ref": "#/$defs/identifier"},
-        "fields": {"type": "object"},
+        "fields": {"$ref": "#/$defs/config_patch_fields"},
         "secrets": {
           "type": "object", "additionalProperties": {"$ref": "#/$defs/config_secret_change"}
         }

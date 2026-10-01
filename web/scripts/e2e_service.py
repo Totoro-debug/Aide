@@ -23,18 +23,34 @@ from myclaw.schedule.model import JobSchedule, ScheduleJob
 from myclaw.schedule.store import WorkspaceScheduleStore
 from myclaw.service.client import ServiceClient
 from myclaw.service.discovery import discovery_path
+from myclaw.service.errors import ServiceError
 
 CONFIRMATION_PATH: str | None = None
 SETTINGS_ENTERED = asyncio.Event()
 SETTINGS_RELEASE = asyncio.Event()
+MODEL_MCP_ENTERED = asyncio.Event()
+MODEL_MCP_RELEASE = asyncio.Event()
+PROVIDER_OBSERVATION_PATH: Path | None = None
 
 
-def _config(base_url: str) -> str:
+def _config(
+    base_url: str,
+    *,
+    mcp_command: str,
+    mcp_args: list[str],
+    mcp_cwd: str,
+) -> str:
     return f"""[models.providers.primary]
 protocol = "openai-compatible"
 base_url = "{base_url}"
-api_key = "e2e-fixture-only"
-models = ["small-model"]
+api_key = "e2e-provider-secret-302"
+models = ["small-model", "large-model"]
+
+[models.providers.retired]
+protocol = "openai-compatible"
+base_url = "{base_url}"
+api_key = "e2e-retired-secret-302"
+models = ["retired-model"]
 
 [runtime]
 compact_ratio = 0.9
@@ -46,7 +62,52 @@ model = "small-model"
 context_window = 8192
 max_output = 1024
 temperature = 0
+reasoning_effort = "medium"
 timeout = 30
+
+[models.routes.chat]
+provider_id = "primary"
+model = "small-model"
+context_window = 8192
+max_output = 1024
+temperature = 0
+reasoning_effort = "medium"
+timeout = 30
+
+[models.routes.memory]
+provider_id = "primary"
+model = "small-model"
+context_window = 8192
+max_output = 1024
+temperature = 0
+reasoning_effort = "low"
+timeout = 30
+
+[models.routes.schedule]
+provider_id = "primary"
+model = "small-model"
+context_window = 8192
+max_output = 1024
+temperature = 0
+reasoning_effort = "medium"
+timeout = 30
+
+[mcp.servers.fixture]
+enabled = true
+transport = "stdio"
+command = {json.dumps(mcp_command)}
+args = {json.dumps(mcp_args)}
+cwd = {json.dumps(mcp_cwd)}
+connect_timeout = 30
+call_timeout = 60
+
+[mcp.servers.remote]
+enabled = false
+transport = "streamable-http"
+url = "http://127.0.0.1:1/mcp"
+headers = {{ Authorization = "e2e-mcp-secret-302", __proto__ = "e2e-prototype-header-canary-302" }}
+connect_timeout = 30
+call_timeout = 60
 """
 
 
@@ -60,13 +121,14 @@ def _chunk(
     *,
     request_id: str,
     delta: dict[str, object],
+    model: str,
     finish_reason: str | None = None,
 ) -> dict[str, object]:
     return {
         "id": request_id,
         "object": "chat.completion.chunk",
         "created": int(time.time()),
-        "model": "small-model",
+        "model": model,
         "choices": [
             {
                 "index": 0,
@@ -91,6 +153,7 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
     messages = body.get("messages", []) if isinstance(body, dict) else []
     user_prompt = ""
     has_tool_result = False
+    tool_result_ids: list[str] = []
     last_user_index = -1
     if isinstance(messages, list):
         for index, message in enumerate(messages):
@@ -101,13 +164,54 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
                 last_user_index = index
             if message.get("role") == "tool":
                 has_tool_result = True
+                if isinstance(message.get("tool_call_id"), str):
+                    tool_result_ids.append(message["tool_call_id"])
 
     request_id = f"fixture-{uuid4()}"
     chunks: list[dict[str, object]] = []
     normalized_prompt = user_prompt.lower()
+    model = str(body.get("model", "small-model"))
+    tool_names = tuple(
+        str(function.get("name"))
+        for tool in body.get("tools", [])
+        if isinstance(tool, dict)
+        and isinstance(function := tool.get("function"), dict)
+        and isinstance(function.get("name"), str)
+    )
+    if PROVIDER_OBSERVATION_PATH is not None:
+        with PROVIDER_OBSERVATION_PATH.open("a", encoding="utf-8") as observations:
+            observations.write(
+                json.dumps(
+                    {
+                        "model": model,
+                        "prompt": user_prompt,
+                        "tools": tool_names,
+                        "tool_results": tuple(tool_result_ids),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
     if "settings generation barrier" in normalized_prompt and isinstance(body.get("tools"), list):
         SETTINGS_ENTERED.set()
         await SETTINGS_RELEASE.wait()
+    model_mcp_barrier = "model mcp generation barrier" in normalized_prompt
+    model_mcp_request = "model mcp resource" in normalized_prompt
+    tool_search_completed = any(
+        result_id.startswith("call-model-mcp-search-") for result_id in tool_result_ids
+    )
+    v1_tool_completed = "call-model-mcp-v1" in tool_result_ids
+    v2_tool_completed = "call-model-mcp-v2" in tool_result_ids
+    needs_tool_search = (
+        (model_mcp_barrier or model_mcp_request)
+        and "tool_search" in tool_names
+        and not tool_search_completed
+        and not v1_tool_completed
+        and not v2_tool_completed
+    )
+    if model_mcp_barrier and needs_tool_search:
+        MODEL_MCP_ENTERED.set()
+        await MODEL_MCP_RELEASE.wait()
     tool_states_request = "tool states" in normalized_prompt
     has_confirmation_result = any(
         index > last_user_index
@@ -134,7 +238,99 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
         if sys.platform == "win32"
         else "tail -f fixture.txt"
     )
-    if confirmation_request and not has_confirmation_result:
+    if needs_tool_search:
+        suffix = "v1" if model_mcp_barrier else "v2"
+        chunks.append(
+            _chunk(
+                request_id=request_id,
+                model=model,
+                delta={
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": f"call-model-mcp-search-{suffix}",
+                            "type": "function",
+                            "function": {
+                                "name": "tool_search",
+                                "arguments": json.dumps(
+                                    {
+                                        "query": (
+                                            "fixture_echo_v1 model mcp generation resource"
+                                            if model_mcp_barrier
+                                            else "fixture_echo_v2 model mcp generation resource"
+                                        )
+                                    }
+                                ),
+                            },
+                        }
+                    ]
+                },
+            )
+        )
+        chunks.append(
+            _chunk(request_id=request_id, model=model, delta={}, finish_reason="tool_calls")
+        )
+    elif model_mcp_barrier and not v1_tool_completed:
+        tool_name = next((name for name in tool_names if name.endswith("fixture_echo_v1")), None)
+        if tool_name is None:
+            raise web.HTTPInternalServerError(text="MCP v1 fixture tool was not discovered")
+        chunks.append(
+            _chunk(
+                request_id=request_id,
+                model=model,
+                delta={
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call-model-mcp-v1",
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": json.dumps({"value": "old"}),
+                            },
+                        }
+                    ]
+                },
+            )
+        )
+        chunks.append(
+            _chunk(request_id=request_id, model=model, delta={}, finish_reason="tool_calls")
+        )
+    elif model_mcp_request and not v2_tool_completed:
+        tool_name = next((name for name in tool_names if name.endswith("fixture_echo_v2")), None)
+        if tool_name is None:
+            raise web.HTTPInternalServerError(text="MCP v2 fixture tool was not discovered")
+        chunks.append(
+            _chunk(
+                request_id=request_id,
+                model=model,
+                delta={
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call-model-mcp-v2",
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": json.dumps({"value": "new"}),
+                            },
+                        }
+                    ]
+                },
+            )
+        )
+        chunks.append(
+            _chunk(request_id=request_id, model=model, delta={}, finish_reason="tool_calls")
+        )
+    elif (model_mcp_barrier and v1_tool_completed) or (model_mcp_request and v2_tool_completed):
+        result_text = (
+            "New model and MCP resource completed."
+            if model_mcp_request
+            else "Old model and MCP resource completed."
+        )
+        chunks.append(_chunk(request_id=request_id, model=model, delta={"content": result_text}))
+        chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="stop"))
+    elif confirmation_request and not has_confirmation_result:
         if CONFIRMATION_PATH is None:
             raise web.HTTPInternalServerError(text="Confirmation fixture path is not configured")
         tool_state_calls: list[tuple[str, str, dict[str, object]]] = [
@@ -148,6 +344,7 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
             chunks.append(
                 _chunk(
                     request_id=request_id,
+                    model=model,
                     delta={
                         "tool_calls": [
                             {
@@ -163,12 +360,18 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
                     },
                 )
             )
-        chunks.append(_chunk(request_id=request_id, delta={}, finish_reason="tool_calls"))
+        chunks.append(
+            _chunk(request_id=request_id, model=model, delta={}, finish_reason="tool_calls")
+        )
     elif confirmation_request and has_confirmation_result:
         chunks.append(
-            _chunk(request_id=request_id, delta={"content": "Confirmation fixture completed."})
+            _chunk(
+                request_id=request_id,
+                model=model,
+                delta={"content": "Confirmation fixture completed."},
+            )
         )
-        chunks.append(_chunk(request_id=request_id, delta={}, finish_reason="stop"))
+        chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="stop"))
     elif tool_states_request and not has_tool_result:
         tool_calls: list[tuple[str, str, dict[str, object]]] = [
             ("call-completed", "read_file", {"path": "fixture.txt"}),
@@ -188,6 +391,7 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
             chunks.append(
                 _chunk(
                     request_id=request_id,
+                    model=model,
                     delta={
                         "tool_calls": [
                             {
@@ -203,7 +407,9 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
                     },
                 )
             )
-        chunks.append(_chunk(request_id=request_id, delta={}, finish_reason="tool_calls"))
+        chunks.append(
+            _chunk(request_id=request_id, model=model, delta={}, finish_reason="tool_calls")
+        )
     elif streaming_request:
         for content in (
             "# Streamed answer\n\n",
@@ -213,11 +419,13 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
             "![remote](https://example.com/remote.png)\n\n",
             "The response arrived in multiple chunks.\n",
         ):
-            chunks.append(_chunk(request_id=request_id, delta={"content": content}))
-        chunks.append(_chunk(request_id=request_id, delta={}, finish_reason="stop"))
+            chunks.append(_chunk(request_id=request_id, model=model, delta={"content": content}))
+        chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="stop"))
     else:
-        chunks.append(_chunk(request_id=request_id, delta={"content": "Fixture response."}))
-        chunks.append(_chunk(request_id=request_id, delta={}, finish_reason="stop"))
+        chunks.append(
+            _chunk(request_id=request_id, model=model, delta={"content": "Fixture response."})
+        )
+        chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="stop"))
 
     response = web.StreamResponse(
         status=200,
@@ -403,14 +611,80 @@ async def _stop_service(home: AgentHome, port: int) -> None:
 
 
 async def _run_e2e(provider_base_url: str) -> None:
-    global CONFIRMATION_PATH
+    global CONFIRMATION_PATH, MODEL_MCP_ENTERED, MODEL_MCP_RELEASE, PROVIDER_OBSERVATION_PATH
     with tempfile.TemporaryDirectory(prefix="myclaw-web-e2e-") as root:
         path = Path(root)
+        repo_root = Path(__file__).resolve().parents[2]
         CONFIRMATION_PATH = str(path / "confirmation-outside.txt")
         Path(CONFIRMATION_PATH).write_text("confirmation fixture content\n", encoding="utf-8")
+        MODEL_MCP_ENTERED.clear()
+        MODEL_MCP_RELEASE.clear()
+        PROVIDER_OBSERVATION_PATH = path / "provider-observations.jsonl"
+        PROVIDER_OBSERVATION_PATH.write_text("", encoding="utf-8")
+        mcp_wire_path = repo_root / "tests" / "fixtures" / "mcp_wire.py"
+        mcp_v1_path = path / "mcp-v1.json"
+        mcp_v2_path = path / "mcp-v2.json"
+        mcp_v1_path.write_text(
+            json.dumps(
+                {
+                    "pages": {
+                        "": {
+                            "tools": [
+                                {
+                                    "name": "fixture_echo_v1",
+                                    "description": "E2E MCP v1 fixture tool",
+                                    "inputSchema": {
+                                        "type": "object",
+                                        "properties": {"value": {"type": "string"}},
+                                    },
+                                }
+                            ]
+                        }
+                    },
+                    "results": {
+                        "fixture_echo_v1": {"content": [{"type": "text", "text": "mcp-v1-result"}]}
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        mcp_v2_path.write_text(
+            json.dumps(
+                {
+                    "pages": {
+                        "": {
+                            "tools": [
+                                {
+                                    "name": "fixture_echo_v2",
+                                    "description": "E2E MCP v2 fixture tool",
+                                    "inputSchema": {
+                                        "type": "object",
+                                        "properties": {"value": {"type": "string"}},
+                                    },
+                                }
+                            ]
+                        }
+                    },
+                    "results": {
+                        "fixture_echo_v2": {"content": [{"type": "text", "text": "mcp-v2-result"}]}
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        mcp_command = Path(sys.executable).as_posix()
+        mcp_args = [mcp_wire_path.as_posix(), mcp_v1_path.as_posix()]
         home = AgentHome(path / ".myclaw")
         home.initialize()
-        (home.path / "config.toml").write_text(_config(provider_base_url), encoding="utf-8")
+        (home.path / "config.toml").write_text(
+            _config(
+                provider_base_url,
+                mcp_command=mcp_command,
+                mcp_args=mcp_args,
+                mcp_cwd=repo_root.as_posix(),
+            ),
+            encoding="utf-8",
+        )
         cli_workspace = path / "cli-workspace"
         first_project = path / "project-one"
         project_alias = path / "project-one-alias"
@@ -496,6 +770,9 @@ async def _run_e2e(provider_base_url: str) -> None:
                             "manual_restore_target": str(manual_restore_target),
                             "failure_restore_session_id": failure_restore_session_id,
                             "failure_restore_target": str(failure_restore_target),
+                            "provider_observation_path": str(PROVIDER_OBSERVATION_PATH),
+                            "mcp_v1_path": str(mcp_v1_path),
+                            "mcp_v2_path": str(mcp_v2_path),
                         }
                     ),
                     flush=True,
@@ -505,6 +782,8 @@ async def _run_e2e(provider_base_url: str) -> None:
             while True:
                 command = await asyncio.to_thread(sys.stdin.readline)
                 if not command or command.strip() == "stop":
+                    SETTINGS_RELEASE.set()
+                    MODEL_MCP_RELEASE.set()
                     break
                 if command.strip() == "settings-arm":
                     SETTINGS_ENTERED.clear()
@@ -512,19 +791,44 @@ async def _run_e2e(provider_base_url: str) -> None:
                     print(json.dumps({"armed": True}), flush=True)
                     continue
                 if command.strip() == "settings-wait":
-                    await asyncio.wait_for(SETTINGS_ENTERED.wait(), timeout=15)
+                    await asyncio.wait_for(SETTINGS_ENTERED.wait(), timeout=60)
                     print(json.dumps({"holding": True}), flush=True)
                     continue
                 if command.strip() == "settings-hold":
                     SETTINGS_ENTERED.clear()
                     SETTINGS_RELEASE.clear()
-                    await client.submit_input("settings generation barrier")
-                    await asyncio.wait_for(SETTINGS_ENTERED.wait(), timeout=15)
+                    for _ in range(1200):
+                        try:
+                            await client.submit_input("settings generation barrier")
+                        except ServiceError as error:
+                            if error.code != "admission_closed":
+                                raise
+                            await asyncio.sleep(0.05)
+                        else:
+                            break
+                    else:
+                        raise RuntimeError(
+                            "Settings generation barrier could not enter the workspace."
+                        )
+                    await asyncio.wait_for(SETTINGS_ENTERED.wait(), timeout=60)
                     print(json.dumps({"holding": True, "pid": client.discovery.pid}), flush=True)
                     continue
                 if command.strip() == "settings-release":
                     SETTINGS_RELEASE.set()
                     print(json.dumps({"released": True, "pid": client.discovery.pid}), flush=True)
+                    continue
+                if command.strip() == "model-mcp-arm":
+                    MODEL_MCP_ENTERED.clear()
+                    MODEL_MCP_RELEASE.clear()
+                    print(json.dumps({"armed": True}), flush=True)
+                    continue
+                if command.strip() == "model-mcp-wait":
+                    await asyncio.wait_for(MODEL_MCP_ENTERED.wait(), timeout=60)
+                    print(json.dumps({"holding": True}), flush=True)
+                    continue
+                if command.strip() == "model-mcp-release":
+                    MODEL_MCP_RELEASE.set()
+                    print(json.dumps({"released": True}), flush=True)
                     continue
                 if command.strip() != "restart":
                     continue

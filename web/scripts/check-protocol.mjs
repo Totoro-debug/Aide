@@ -76,6 +76,11 @@ const referenceTypes = {
   skill_metadata: "SkillMetadata",
   management_result: "ManagementResult",
   config_fields: "ConfigFields",
+  config_models_fields: "ConfigModelsFields",
+  config_mcp_fields: "ConfigMcpFields",
+  config_provider_fields: "ConfigProviderFields",
+  config_route_fields: "ConfigRouteFields",
+  config_redacted_secret: "ConfigRedactedSecret",
   config_application: "ConfigApplication",
   config_application_status: "ConfigApplicationStatus",
 };

@@ -194,7 +194,23 @@
         }
       }
     },
-    "config_application_status": {"enum": ["active", "pending", "failed-to-apply"]},
+    "config_application_status": {"enum": ["active", "pending", "pending-repair", "failed-to-apply"]},
+    "config_projection_state": {"enum": ["active", "missing", "invalid", "malformed"]},
+    "config_projection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "repair_required", "backup_required", "requires_secret_reentry", "error"],
+      "properties": {
+        "state": {"$ref": "#/$defs/config_projection_state"},
+        "repair_required": {"type": "boolean"},
+        "backup_required": {"type": "boolean"},
+        "requires_secret_reentry": {"type": "boolean"},
+        "error": {"anyOf": [
+          {"type": "null"},
+          {"type": "object", "additionalProperties": false, "required": ["code", "message"],
+            "properties": {"code": {"type": "string"}, "message": {"type": "string"}}}
+        ]}
+      }
+    },
     "config_application": {
       "type": "object", "additionalProperties": false,
       "required": ["status", "saved_revision", "active_revision", "pending_revision", "waiting_for", "error"],
@@ -213,20 +229,23 @@
     },
     "config_response": {
       "type": "object", "additionalProperties": false,
-      "required": ["revision", "fields", "application"],
+      "required": ["revision", "fields", "configuration", "application"],
       "properties": {
         "revision": {"type": "string"},
         "fields": {"$ref": "#/$defs/config_fields"},
+        "configuration": {"$ref": "#/$defs/config_projection"},
         "application": {"$ref": "#/$defs/config_application"}
       }
     },
     "config_mutation_response": {
       "type": "object", "additionalProperties": false,
-      "required": ["request_id", "revision", "fields", "application"],
+      "required": ["request_id", "revision", "fields", "configuration", "application"],
       "properties": {
         "request_id": {"type": "string"},
         "revision": {"type": "string"},
         "fields": {"$ref": "#/$defs/config_fields"},
+        "configuration": {"$ref": "#/$defs/config_projection"},
+        "backup_id": {"type": ["string", "null"]},
         "application": {"$ref": "#/$defs/config_application"}
       }
     },

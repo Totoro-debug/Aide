@@ -86,6 +86,10 @@ class ServiceSink(Protocol):
 _PROJECT_REMOVAL_FAILURE_MESSAGE = (
     "Project work could not be stopped; the registration remains blocked."
 )
+_CONFIG_INVALID_ERROR = {
+    "code": "config_invalid",
+    "message": "The saved User Configuration contains invalid fields.",
+}
 _MAX_SESSION_PAGE_SIZE = 100
 _MISSING = object()
 
@@ -2160,6 +2164,7 @@ class LocalService:
         self._client_by_reconnect: dict[str, str] = {}
         self._workspaces: dict[str, WorkspaceServiceRuntime] = {}
         self._workspace_keys: dict[str, str] = {}
+        self._initial_configuration_candidates: list[WorkspaceServiceRuntime] = []
         self._global_reconnect_task: asyncio.Task[None] | None = None
         self._stop_task: asyncio.Task[None] | None = None
         self._stop_failed = False
@@ -2180,7 +2185,12 @@ class LocalService:
         self._config_active_revision: str | None = None
         self._config_pending_revision: str | None = None
         self._config_fields: dict[str, dict[str, object]] | None = None
-        self._config_status = "active"
+        self._config_status = "active" if configuration is not None else "pending-repair"
+        self._config_state = "active" if configuration is not None else "missing"
+        self._config_repair_required = configuration is None
+        self._config_backup_required = False
+        self._config_requires_secret_reentry = configuration is None
+        self._config_projection_error: dict[str, str] | None = None
         self._config_waiting_for: tuple[str, ...] = ()
         self._config_error: dict[str, str] | None = None
         self._config_apply_task: asyncio.Task[None] | None = None
@@ -2191,13 +2201,24 @@ class LocalService:
         if self.state != "starting":
             return
         self.agent_home.initialize()
-        if self.configuration is not None:
-            snapshot = self._config_loader.editable_snapshot()
-            self._config_saved_revision = snapshot.revision
+        snapshot = self._config_loader.web_snapshot()
+        self._config_saved_revision = snapshot.revision
+        self._config_fields = {section: dict(values) for section, values in snapshot.fields.items()}
+        self._config_state = snapshot.state
+        self._config_repair_required = snapshot.repair_required
+        self._config_backup_required = snapshot.backup_required
+        self._config_requires_secret_reentry = snapshot.requires_secret_reentry
+        self._config_projection_error = None if snapshot.error is None else dict(snapshot.error)
+        if snapshot.state == "active":
+            self.configuration = snapshot.configuration
+            self._config_saved_configuration = snapshot.configuration
             self._config_active_revision = snapshot.revision
-            self._config_fields = {
-                section: dict(values) for section, values in snapshot.fields.items()
-            }
+            self._config_status = "active"
+        else:
+            self.configuration = None
+            self._config_saved_configuration = None
+            self._config_active_revision = None
+            self._config_status = "pending-repair"
         self.confirmation.bind_presenter(self._presenter)
         for record in self.projects.list():
             if record.schedule_state == "removing" and record.removal_error is None:
@@ -2205,7 +2226,11 @@ class LocalService:
                     record.project_id,
                     "Project removal was interrupted; retry to finish stopping its work.",
                 )
-            if record.schedule_state == "available" and record.path.is_dir():
+            if (
+                snapshot.state == "active"
+                and record.schedule_state == "available"
+                and record.path.is_dir()
+            ):
                 await self._get_or_create_workspace(record.path)
         self.state = "ready"
         await self._reconcile_schedule_admission()
@@ -2219,9 +2244,37 @@ class LocalService:
     def configuration_transition_active(self) -> bool:
         return self._configuration_transition_active
 
+    @property
+    def configuration_ready(self) -> bool:
+        """Return whether new Agent and Schedule work may be admitted."""
+        return (
+            self.configuration is not None
+            and self._config_active_revision is not None
+            and not self._configuration_transition_active
+        )
+
     def config_view(self) -> dict[str, object]:
         """Return the safe persisted projection and active-generation status."""
-        snapshot = self._config_loader.editable_snapshot()
+        snapshot = self._config_loader.web_snapshot()
+        self._config_state = snapshot.state
+        self._config_repair_required = snapshot.repair_required
+        self._config_backup_required = snapshot.backup_required
+        self._config_requires_secret_reentry = snapshot.requires_secret_reentry
+        self._config_projection_error = None if snapshot.error is None else dict(snapshot.error)
+        self._config_fields = {section: dict(values) for section, values in snapshot.fields.items()}
+        if snapshot.state != "active":
+            self._config_saved_revision = snapshot.revision
+            self._config_pending_revision = snapshot.revision
+            self._config_waiting_for = tuple(self._workspaces)
+            if self.configuration is None or self._config_active_revision is None:
+                self._config_saved_configuration = None
+                self._config_status = "pending-repair"
+            else:
+                self._config_status = "failed-to-apply"
+                self._config_error = dict(snapshot.error or _CONFIG_INVALID_ERROR)
+            self._configuration_transition_active = False
+            return self._config_response()
+
         if self._config_saved_revision is None:
             self._config_saved_revision = snapshot.revision
         elif snapshot.revision != self._config_saved_revision:
@@ -2232,21 +2285,13 @@ class LocalService:
             self._config_error = None
             self._config_waiting_for = tuple(self._workspaces)
             self._configuration_transition_active = True
-            try:
-                snapshot.require_valid_candidate()
-            except ConfigError:
-                self._config_status = "failed-to-apply"
-                self._config_error = {
-                    "code": "config_invalid",
-                    "message": "The saved User Configuration contains invalid fields.",
-                }
-                self._configuration_transition_active = False
-            else:
-                self._start_configuration_application()
-        if self._config_fields is None or snapshot.revision == self._config_saved_revision:
-            self._config_fields = {
-                section: dict(values) for section, values in snapshot.fields.items()
-            }
+            self._start_configuration_application()
+        elif self._config_saved_configuration is None:
+            self._config_saved_configuration = snapshot.configuration
+            self._config_pending_revision = snapshot.revision
+            self._config_status = "pending"
+            self._configuration_transition_active = True
+            self._start_configuration_application()
         return self._config_response()
 
     def _start_configuration_application(self) -> None:
@@ -2269,14 +2314,25 @@ class LocalService:
         return self._config_request_results.get(request_id)
 
     def _config_response(self) -> dict[str, object]:
-        if self._config_saved_revision is None or self._config_fields is None:
-            raise service_error("config_invalid", "User Configuration is unavailable.", status=422)
+        saved_revision = self._config_saved_revision or ConfigLoader.revision_from_bytes(b"")
+        fields = {} if self._config_fields is None else self._config_fields
         return {
-            "revision": self._config_saved_revision,
-            "fields": {section: dict(values) for section, values in self._config_fields.items()},
+            "revision": saved_revision,
+            "fields": {section: dict(values) for section, values in fields.items()},
+            "configuration": {
+                "state": self._config_state,
+                "repair_required": self._config_repair_required,
+                "backup_required": self._config_backup_required,
+                "requires_secret_reentry": self._config_requires_secret_reentry,
+                "error": (
+                    None
+                    if self._config_projection_error is None
+                    else dict(self._config_projection_error)
+                ),
+            },
             "application": {
                 "status": self._config_status,
-                "saved_revision": self._config_saved_revision,
+                "saved_revision": saved_revision,
                 "active_revision": self._config_active_revision,
                 "pending_revision": self._config_pending_revision,
                 "waiting_for": self._configuration_waiting_reasons(),
@@ -2376,6 +2432,11 @@ class LocalService:
             self._config_fields = {
                 section: dict(values) for section, values in result.fields.items()
             }
+            self._config_state = "active"
+            self._config_repair_required = False
+            self._config_backup_required = False
+            self._config_requires_secret_reentry = False
+            self._config_projection_error = None
             self._config_pending_revision = (
                 None if result.revision == self._config_active_revision else result.revision
             )
@@ -2384,6 +2445,100 @@ class LocalService:
             self._config_waiting_for = tuple(self._workspaces)
             self._configuration_transition_active = self._config_status == "pending"
             response = self._config_response()
+            self._config_request_results[request_id] = response
+            self._config_request_fingerprints[request_id] = fingerprint
+            if len(self._config_request_results) > 256:
+                oldest = next(iter(self._config_request_results))
+                self._config_request_results.pop(oldest, None)
+                self._config_request_fingerprints.pop(oldest, None)
+            if self._config_pending_revision is not None and (
+                self._config_apply_task is None or self._config_apply_task.done()
+            ):
+                self._config_apply_task = asyncio.create_task(self._apply_configuration_loop())
+                self._config_apply_task.add_done_callback(_consume_task_result)
+        await self._reconcile_schedule_admission()
+        await self._emit_configuration_event()
+        return response
+
+    async def repair_configuration(
+        self,
+        request_id: str,
+        expected_revision: str,
+        fields: Mapping[str, object],
+        secrets: Mapping[str, object] | None = None,
+        *,
+        client_id: str | None = None,
+    ) -> dict[str, object]:
+        """Persist a first-use or malformed-file repair before activating a generation."""
+        if not request_id:
+            raise service_error("validation_error", "Request ID is required.", status=422)
+        if client_id is not None:
+            self._require_client(client_id)
+        if self.state in {"draining", "stopped"}:
+            raise service_error("admission_closed", "The local service is stopping.")
+        fingerprint = _configuration_request_fingerprint(
+            client_id,
+            "repair",
+            {"revision": expected_revision, "fields": fields, "secrets": secrets or {}},
+        )
+        async with self._config_lock:
+            existing = self._configuration_request_result(request_id, fingerprint)
+            if existing is not None:
+                return existing
+            try:
+                result = self._config_loader.repair_editable_fields(
+                    expected_revision, fields, secrets
+                )
+            except ConfigRevisionConflict as error:
+                raise service_error(
+                    "config_revision_conflict",
+                    error.error.message,
+                    status=409,
+                    retryable=True,
+                ) from error
+            except ConfigFieldError as error:
+                raise service_error(
+                    error.error.code,
+                    error.error.message,
+                    status=422,
+                    field_errors=error.field_errors,
+                ) from error
+            except ConfigError as error:
+                raise service_error(
+                    error.error.code,
+                    "The complete User Configuration is invalid.",
+                    status=422,
+                    field_errors=error.field_errors,
+                ) from error
+            except OSError as error:
+                raise service_error(
+                    "persistence_error",
+                    "User Configuration could not be written.",
+                    status=500,
+                    retryable=True,
+                ) from error
+
+            self._config_saved_configuration = result.configuration
+            self._config_saved_revision = result.revision
+            self._config_fields = {
+                section: dict(values) for section, values in result.fields.items()
+            }
+            self._config_state = "active"
+            self._config_repair_required = False
+            self._config_backup_required = False
+            self._config_requires_secret_reentry = False
+            self._config_projection_error = None
+            self._config_pending_revision = (
+                None if result.revision == self._config_active_revision else result.revision
+            )
+            self._config_status = "active" if self._config_pending_revision is None else "pending"
+            self._config_error = None
+            self._config_waiting_for = tuple(self._workspaces)
+            self._configuration_transition_active = self._config_status == "pending"
+            response = {
+                "backup_id": result.backup_id,
+                **self._config_response(),
+            }
             self._config_request_results[request_id] = response
             self._config_request_fingerprints[request_id] = fingerprint
             if len(self._config_request_results) > 256:
@@ -2426,12 +2581,11 @@ class LocalService:
                 raise service_error(
                     "config_invalid", "User Configuration is unavailable.", status=422
                 )
-            try:
-                self._config_loader.editable_snapshot().require_valid_candidate()
-            except ConfigError as error:
+            snapshot = self._config_loader.web_snapshot()
+            if snapshot.state != "active":
                 raise service_error(
                     "config_invalid", "The complete User Configuration is invalid.", status=422
-                ) from error
+                )
             self._config_status = "pending"
             self._config_pending_revision = revision
             self._config_error = None
@@ -2511,6 +2665,91 @@ class LocalService:
         await self._reconcile_schedule_admission()
         await self._emit_configuration_event()
 
+    async def _activate_initial_configuration(
+        self, target: UserConfiguration, target_revision: str
+    ) -> bool:
+        """Build catalog Workspaces before publishing the first usable generation."""
+        async with self._project_lifecycle_lock:
+            return await self._prepare_initial_configuration(target, target_revision)
+
+    async def _discard_initial_configuration_candidates(self) -> None:
+        """Keep failed cleanup owned so retry and service stop can finish it."""
+        candidates = tuple(self._initial_configuration_candidates)
+        results = await asyncio.gather(
+            *(runtime.close() for runtime in candidates), return_exceptions=True
+        )
+        errors: list[BaseException] = []
+        for runtime, result in zip(candidates, results, strict=True):
+            if isinstance(result, BaseException):
+                errors.append(result)
+            else:
+                self._initial_configuration_candidates.remove(runtime)
+        if errors:
+            raise service_error(
+                "runtime_generation_cleanup_failed",
+                "Prepared Workspace resources could not be stopped; retry the configuration.",
+                status=500,
+                retryable=True,
+            ) from BaseExceptionGroup("Initial configuration cleanup failed", errors)
+
+    async def _prepare_initial_configuration(
+        self, target: UserConfiguration, target_revision: str
+    ) -> bool:
+        await self._discard_initial_configuration_candidates()
+        async with self._config_lock:
+            self.config_view()
+            if target_revision != self._config_saved_revision:
+                return False
+        created: list[tuple[str, WorkspaceServiceRuntime]] = []
+        try:
+            seen: set[str] = set()
+            for record in self.projects.list():
+                if (
+                    record.schedule_state not in {"available", "awaiting_resume"}
+                    or not record.path.is_dir()
+                ):
+                    continue
+                key = os.path.normcase(str(record.path.resolve(strict=True)))
+                if key in seen or key in self._workspace_keys:
+                    continue
+                seen.add(key)
+                runtime = WorkspaceServiceRuntime(
+                    self, record.path.resolve(strict=True), target, workspace_id=str(uuid4())
+                )
+                self._initial_configuration_candidates.append(runtime)
+                created.append((key, runtime))
+                await runtime.start()
+        except BaseException:
+            await self._discard_initial_configuration_candidates()
+            raise
+
+        async with self._config_lock:
+            self.config_view()
+            if (
+                self.state in {"draining", "stopped"}
+                or target_revision != self._config_saved_revision
+                or self._workspaces
+            ):
+                stale = True
+            else:
+                stale = False
+                for key, runtime in created:
+                    self._workspace_keys[key] = runtime.workspace_id
+                    self._workspaces[runtime.workspace_id] = runtime
+                    self._initial_configuration_candidates.remove(runtime)
+                self.configuration = target
+                for client in self._clients.values():
+                    client.permission_control.reconfigure(target.runtime.permission_level)
+                self._config_active_revision = target_revision
+                self._config_status = "active"
+                self._config_pending_revision = None
+                self._config_error = None
+                self._config_waiting_for = ()
+        if stale:
+            await self._discard_initial_configuration_candidates()
+            return False
+        return True
+
     async def _apply_configuration_loop(self) -> None:
         current_task = asyncio.current_task()
         try:
@@ -2521,7 +2760,8 @@ class LocalService:
                     active_revision = self._config_active_revision
                 if target is None or target_revision is None or target_revision == active_revision:
                     async with self._config_lock:
-                        self._config_status = "active"
+                        if target is not None and self.configuration is not None:
+                            self._config_status = "active"
                         self._config_pending_revision = None
                         self._configuration_transition_active = False
                         self._config_waiting_for = ()
@@ -2532,6 +2772,39 @@ class LocalService:
                     return
 
                 workspaces = tuple(self._workspaces.values())
+                if self.configuration is None and not workspaces:
+                    try:
+                        activated = await self._activate_initial_configuration(
+                            target, target_revision
+                        )
+                    except BaseException as error:
+                        if isinstance(error, asyncio.CancelledError):
+                            raise
+                        async with self._config_lock:
+                            if target_revision != self._config_saved_revision:
+                                continue
+                            self._config_status = "failed-to-apply"
+                            self._config_pending_revision = target_revision
+                            self._config_waiting_for = ()
+                            self._config_error = {
+                                "code": "runtime_generation_failed",
+                                "message": "The saved configuration could not be applied.",
+                            }
+                            self._configuration_transition_active = False
+                        await self._reconcile_schedule_admission()
+                        await self._emit_configuration_event()
+                        return
+                    if not activated:
+                        continue
+                    async with self._config_lock:
+                        if target_revision != self._config_saved_revision:
+                            continue
+                        self._configuration_transition_active = False
+                    await self._reconcile_schedule_admission()
+                    await self._emit_configuration_event()
+                    if self._config_status == "pending":
+                        continue
+                    return
                 prepared: list[tuple[WorkspaceServiceRuntime, _PreparedWorkspaceGeneration]] = []
                 committed = False
                 try:
@@ -2844,7 +3117,7 @@ class LocalService:
             workspace_id = self._workspace_keys.get(key)
             if workspace_id is not None:
                 return self._workspaces[workspace_id]
-            if self.configuration is None:
+            if self.configuration is None or self._config_active_revision is None:
                 raise service_error(
                     "config_invalid", "User Configuration is unavailable.", status=422
                 )
@@ -2867,6 +3140,7 @@ class LocalService:
     def _schedule_admission_open(self) -> bool:
         return (
             self.state == "ready"
+            and self.configuration_ready
             and not self._configuration_transition_active
             and any(client.connected for client in self._clients.values())
         )
@@ -2885,6 +3159,10 @@ class LocalService:
     ) -> tuple[ProjectRecord, WorkspaceServiceRuntime, tuple[ScheduleJob, ...]]:
         async with self._project_lifecycle_lock:
             self._require_client(client_id)
+            if self.configuration is None or self._config_active_revision is None:
+                raise service_error(
+                    "config_invalid", "User Configuration is unavailable.", status=422
+                )
             try:
                 record = self.projects.register(path, schedule_state="awaiting_resume")
             except ProjectCatalogError as error:
@@ -2932,11 +3210,14 @@ class LocalService:
             if workspace_id is None:
                 if self.state in {"draining", "stopped"}:
                     return (), None
-                if record.schedule_state != "available":
+                if not self.configuration_ready or record.schedule_state != "available":
+                    state = WorkspaceState(record.path)
                     try:
-                        jobs = await WorkspaceScheduleStore(
-                            WorkspaceState(record.path)
-                        ).public_snapshot()
+                        state.path.lstat()
+                    except FileNotFoundError:
+                        return (), None
+                    try:
+                        jobs = await WorkspaceScheduleStore(state).public_snapshot()
                     except FileNotFoundError:
                         jobs = ()
                     return jobs, None
@@ -4201,6 +4482,13 @@ class LocalService:
         return None, None, None
 
     async def stop(self) -> None:
+        if (
+            self._stop_task is not None
+            and self._stop_task.done()
+            and self._stop_failed
+            and self._initial_configuration_candidates
+        ):
+            self._stop_task = None
         if self._stop_task is not None:
             await self._stop_task
             return
@@ -4208,7 +4496,7 @@ class LocalService:
         await self._stop_task
 
     async def _stop_owned(self) -> None:
-        if self.state == "stopped":
+        if self.state == "stopped" and not self._initial_configuration_candidates:
             return
         self.state = "draining"
         errors: list[Exception] = []
@@ -4216,6 +4504,10 @@ class LocalService:
         if config_task is not None and config_task is not asyncio.current_task():
             config_task.cancel()
             await asyncio.gather(config_task, return_exceptions=True)
+        try:
+            await self._discard_initial_configuration_candidates()
+        except Exception as error:
+            errors.append(error)
         if self._global_reconnect_task is not None:
             self._global_reconnect_task.cancel()
         await self._reconcile_schedule_admission()

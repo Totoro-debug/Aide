@@ -371,9 +371,11 @@ class ServiceClient:
         *,
         port: int = DEFAULT_SERVICE_PORT,
         reconnect_credential: str | None = None,
+        attach_workspace: bool = True,
     ) -> ServiceClient:
         agent_home.initialize()
-        workspace = workspace.resolve(strict=True)
+        if attach_workspace:
+            workspace = workspace.resolve(strict=True)
         key = str(agent_home.path.resolve())
         lock = cls._startup_locks.setdefault(key, asyncio.Lock())
         async with lock:
@@ -392,6 +394,7 @@ class ServiceClient:
                         discovery,
                         token,
                         reconnect_credential,
+                        attach_workspace,
                     )
             process = _spawn_service(agent_home, port)
             discovery, token = await cls._wait_for_started_service(
@@ -405,6 +408,7 @@ class ServiceClient:
                 discovery,
                 token,
                 reconnect_credential,
+                attach_workspace,
             )
 
     @classmethod
@@ -444,6 +448,7 @@ class ServiceClient:
         discovery: ServiceDiscovery,
         token: str,
         reconnect_credential: str | None,
+        attach_workspace: bool,
     ) -> ServiceClient:
         timeout = aiohttp.ClientTimeout(total=15)
         http = aiohttp.ClientSession(timeout=timeout)
@@ -470,6 +475,8 @@ class ServiceClient:
                 client_id=client_id,
                 reconnect_credential=new_reconnect,
             )
+            if not attach_workspace:
+                return client
             previous_workspace_id = client_data.get("current_workspace_id")
             previous_session_id = client_data.get("current_session_id")
             attached = await client._http_request(

@@ -175,6 +175,19 @@ export function patchConfig(
   });
 }
 
+export function repairConfig(
+  revision: string,
+  fields: ConfigPatchFields,
+  secrets: ConfigSecrets,
+  requestId: string = createRequestId(),
+): Promise<ConfigPatchResponse> {
+  return request<ConfigPatchResponse>("/config/repair", {
+    method: "POST",
+    mutation: true,
+    body: { request_id: requestId, revision, fields, secrets },
+  });
+}
+
 export function retryConfig(
   revision: string,
   requestId: string = createRequestId(),

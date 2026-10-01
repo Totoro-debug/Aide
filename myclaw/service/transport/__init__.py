@@ -127,6 +127,7 @@ class LocalServiceTransport:
         app.router.add_get(f"{_API_PREFIX}/service", self._service_info)
         app.router.add_get(f"{_API_PREFIX}/config", self._config)
         app.router.add_patch(f"{_API_PREFIX}/config", self._patch_config)
+        app.router.add_post(f"{_API_PREFIX}/config/repair", self._repair_config)
         app.router.add_post(f"{_API_PREFIX}/config/retry", self._retry_config)
         app.router.add_post(f"{_API_PREFIX}/clients", self._register_client)
         app.router.add_post(f"{_API_PREFIX}/workspaces/attach", self._attach_workspace)
@@ -448,6 +449,43 @@ class LocalServiceTransport:
         )
         return web.json_response({"request_id": request_id, **result})
 
+    async def _repair_config(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        body = await _json_object(request)
+        if set(body) != {"request_id", "revision", "fields", "secrets"}:
+            raise service_error(
+                "validation_error", "Configuration repair fields are invalid.", status=422
+            )
+        request_id = _require_request_id(body)
+        revision = body.get("revision")
+        fields = body.get("fields")
+        if not isinstance(revision, str) or not revision:
+            raise service_error(
+                "validation_error",
+                "Configuration revision is required.",
+                status=422,
+                field_errors={"revision": "must be a nonempty string"},
+            )
+        if not isinstance(fields, Mapping):
+            raise service_error(
+                "validation_error",
+                "Configuration fields must be an object.",
+                status=422,
+                field_errors={"fields": "must be an object"},
+            )
+        secrets = body.get("secrets")
+        if not isinstance(secrets, Mapping):
+            raise service_error(
+                "validation_error",
+                "Configuration secret operations must be an object.",
+                status=422,
+                field_errors={"secrets": "must be an object"},
+            )
+        result = await self.service.repair_configuration(
+            request_id, revision, fields, secrets, client_id=context.client_id
+        )
+        return web.json_response({"request_id": request_id, **result})
+
     async def _service_identity(self, request: web.Request) -> web.Response:
         self._check_host_origin(request, websocket=False)
         challenge = request.query.get("challenge", "")
@@ -559,7 +597,7 @@ class LocalServiceTransport:
                 "path": str(record.path),
                 "name": record.path.name,
                 "schedule_state": record.schedule_state,
-                "available": record.path.is_dir(),
+                "available": record.path.is_dir() and self.service.configuration_ready,
                 "saved_jobs": [_project_job_summary(job) for job in saved_jobs],
                 "schedule_status": schedule_status,
             }

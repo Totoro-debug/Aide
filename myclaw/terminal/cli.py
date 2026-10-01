@@ -1073,6 +1073,7 @@ async def _create_web_launch_url() -> str:
     client = await ServiceClient.connect_or_start(
         AgentHome.production(),
         Path.cwd(),
+        attach_workspace=False,
     )
     try:
         return await client.create_web_ticket()

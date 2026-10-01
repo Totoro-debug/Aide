@@ -83,6 +83,8 @@ const referenceTypes = {
   config_redacted_secret: "ConfigRedactedSecret",
   config_application: "ConfigApplication",
   config_application_status: "ConfigApplicationStatus",
+  config_projection: "ConfigProjection",
+  config_projection_state: "ConfigProjectionState",
 };
 
 function schemaType(definition) {
@@ -148,6 +150,7 @@ for (const [name, definition] of [
   ["ToolPermissionLevel", "tool_permission_level"],
   ["ReasoningEffort", "reasoning_effort"],
   ["ConfigApplicationStatus", "config_application_status"],
+  ["ConfigProjectionState", "config_projection_state"],
 ]) {
   const declaration = protocolSource.statements.find(
     (statement) => ts.isTypeAliasDeclaration(statement) && statement.name.text === name,
@@ -167,6 +170,7 @@ checkMembers("RuntimeStatus", interfaceDeclaration("RuntimeStatus").members, def
 checkMembers("ManagementResponse", interfaceDeclaration("ManagementResponse").members, definitions.management_response);
 checkMembers("ConfigFields", interfaceDeclaration("ConfigFields").members, definitions.config_fields);
 checkMembers("ConfigApplication", interfaceDeclaration("ConfigApplication").members, definitions.config_application);
+checkMembers("ConfigProjection", interfaceDeclaration("ConfigProjection").members, definitions.config_projection);
 checkMembers("ConfigResponse", interfaceDeclaration("ConfigResponse").members, definitions.config_response);
 const configPatch = interfaceDeclaration("ConfigPatchResponse");
 if (configPatch.heritageClauses?.[0]?.types?.[0]?.expression.getText(protocolSource) !== "ConfigResponse") {

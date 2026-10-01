@@ -15,7 +15,7 @@ from typing import Any, cast
 from aiohttp import web
 
 from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigError, ConfigLoader
+from myclaw.config.config import ConfigError
 from myclaw.service.discovery import (
     DEFAULT_SERVICE_HOST,
     DEFAULT_SERVICE_PORT,
@@ -45,10 +45,8 @@ async def serve_service(
         raise ServiceError(
             "validation_error", "The local service must bind IPv4 loopback.", status=422
         )
-    configuration = ConfigLoader(agent_home).load_for_startup()
     service = LocalService(
         agent_home,
-        configuration,
         reconnect_timeout=reconnect_timeout,
     )
     runner = web.AppRunner(create_app(service), access_log=None)

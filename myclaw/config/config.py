@@ -1,15 +1,19 @@
 """User Configuration generation and loading."""
 
+import os
 import re
+import tempfile
 import tomllib
 from collections.abc import Callable, Mapping, MutableMapping, MutableSequence, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import partial
 from hashlib import sha256
 from math import isfinite
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, NoReturn, cast
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import tomlkit
 from croniter import croniter  # type: ignore[import-untyped]
@@ -338,12 +342,27 @@ class ConfigEditableSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfigWebSnapshot:
+    """Safe Web projection for active, missing, and repairable configuration."""
+
+    revision: str
+    fields: Mapping[str, Mapping[str, object]]
+    configuration: UserConfiguration
+    state: Literal["active", "missing", "invalid", "malformed"]
+    repair_required: bool
+    backup_required: bool
+    requires_secret_reentry: bool
+    error: Mapping[str, str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ConfigEditResult:
     """The validated result of one compare-and-swap configuration edit."""
 
     revision: str
     fields: Mapping[str, Mapping[str, object]]
     configuration: UserConfiguration
+    backup_id: str | None = None
 
 
 class ConfigError(Exception):
@@ -1640,6 +1659,344 @@ def _require_complete_candidate(
         )
 
 
+def _safe_projection_row[T](
+    value: object,
+    defaults: Mapping[str, object],
+    prefix: str,
+    parse: Callable[[Mapping[str, object]], T],
+) -> T:
+    """Retain valid siblings while replacing only unprojectable known field values."""
+    row = dict(defaults)
+    if isinstance(value, Mapping):
+        row.update({name: item for name, item in value.items() if name in defaults})
+    while True:
+        try:
+            return parse(row)
+        except ConfigError as error:
+            field_name = next(iter(error.field_errors), "")
+            relative = field_name.removeprefix(prefix + ".").replace("mcp.servers.", "mcp.", 1)
+            name, _, nested = relative.partition(".")
+            if name not in row:
+                raise
+            field_value = row[name]
+            if nested and isinstance(field_value, Mapping):
+                values = dict(field_value)
+                values.pop(nested, None)
+                row[name] = values
+            elif row[name] != defaults[name]:
+                row[name] = defaults[name]
+            else:
+                raise
+
+
+def _safe_web_configuration(document: Mapping[str, object]) -> tuple[UserConfiguration, bool]:
+    """Project a parseable document without allowing malformed values into the Web form."""
+    default_document = _table(tomllib.loads(DEFAULT_CONFIG_TEMPLATE), "configuration")
+    safe_document: dict[str, object] = {}
+    has_issues = False
+
+    default_runtime = _table(default_document.get("runtime", {}), "runtime")
+    runtime_value = document.get("runtime", {})
+    runtime = dict(default_runtime)
+    if not isinstance(runtime_value, Mapping):
+        has_issues = True
+    else:
+        for field_name in default_runtime:
+            if field_name not in runtime_value:
+                continue
+            try:
+                _parse_runtime({"runtime": {field_name: runtime_value[field_name]}}, diagnostics=[])
+            except ConfigError:
+                has_issues = True
+            else:
+                runtime[field_name] = runtime_value[field_name]
+    safe_document["runtime"] = runtime
+
+    default_memory = _table(default_document.get("memory", {}), "memory")
+    memory_value = document.get("memory", {})
+    memory = dict(default_memory)
+    if not isinstance(memory_value, Mapping):
+        has_issues = True
+    else:
+        for field_name in default_memory:
+            if field_name not in memory_value:
+                continue
+            try:
+                _parse_memory({"memory": {field_name: memory_value[field_name]}}, diagnostics=[])
+            except ConfigError:
+                has_issues = True
+            else:
+                memory[field_name] = memory_value[field_name]
+    safe_document["memory"] = memory
+
+    default_models = _table(default_document.get("models", {}), "models")
+    default_providers = _table(default_models.get("providers", {}), "models.providers")
+    default_routes = _table(default_models.get("routes", {}), "models.routes")
+    models_value = document.get("models", {})
+    raw_providers: Mapping[object, object] = {}
+    raw_routes: Mapping[object, object] = {}
+    if not isinstance(models_value, Mapping):
+        has_issues = True
+    else:
+        providers_value = models_value.get("providers", {})
+        routes_value = models_value.get("routes", {})
+        if not isinstance(providers_value, Mapping):
+            has_issues = True
+        else:
+            raw_providers = providers_value
+        if not isinstance(routes_value, Mapping):
+            has_issues = True
+        else:
+            raw_routes = routes_value
+
+    use_model_defaults = "models" not in document or not isinstance(models_value, Mapping)
+    providers: dict[str, object] = (
+        {
+            str(provider_id): dict(provider)
+            for provider_id, provider in default_providers.items()
+            if isinstance(provider_id, str) and isinstance(provider, Mapping)
+        }
+        if use_model_defaults
+        else {}
+    )
+    unsafe_providers: dict[str, ProviderConfiguration] = {}
+    for provider_id, raw_provider in raw_providers.items():
+        if not isinstance(provider_id, str):
+            has_issues = True
+            continue
+        parse_id = provider_id if _PROVIDER_ID_PATTERN.fullmatch(provider_id) else "repair"
+        if not isinstance(raw_provider, Mapping):
+            has_issues = True
+        provider = _safe_projection_row(
+            raw_provider,
+            {"protocol": "openai-compatible", "base_url": "", "api_key": "", "models": []},
+            f"models.providers.{parse_id}",
+            partial(_parse_provider, parse_id),
+        )
+        if parse_id != provider_id:
+            unsafe_providers[provider_id] = replace(provider, provider_id=provider_id)
+            continue
+        providers[provider_id] = {
+            "protocol": provider.protocol,
+            "base_url": provider.base_url,
+            "api_key": provider.api_key,
+            "models": list(provider.models),
+        }
+
+    routes: dict[str, object] = (
+        {
+            str(route_name): dict(route)
+            for route_name, route in default_routes.items()
+            if isinstance(route_name, str) and isinstance(route, Mapping)
+        }
+        if use_model_defaults
+        else {}
+    )
+    for route_name, raw_route in raw_routes.items():
+        if not isinstance(route_name, str) or route_name not in _ROUTE_NAMES:
+            continue
+        if not isinstance(raw_route, Mapping):
+            has_issues = True
+        default_route = dict(cast(Mapping[str, object], default_routes["default"]))
+        default_route["max_output"] = 1
+        default_route["reasoning_effort"] = _DEFAULT_REASONING_EFFORT
+        route = _safe_projection_row(
+            raw_route,
+            default_route,
+            f"models.routes.{route_name}",
+            partial(_parse_route, route_name, diagnostics=[]),
+        )
+        routes[route_name] = {
+            "provider_id": route.provider_id,
+            "model": route.model,
+            "context_window": route.context_window,
+            "max_output": route.max_output,
+            "temperature": route.temperature,
+            "reasoning_effort": route.reasoning_effort,
+            "timeout": route.timeout,
+        }
+
+    mcp: dict[str, object] = {}
+    unsafe_mcp: dict[str, MCPServerConfiguration] = {}
+    mcp_value = document.get("mcp", {})
+    if not isinstance(mcp_value, Mapping):
+        has_issues = True
+    else:
+        servers_value = mcp_value.get("servers", {})
+        if not isinstance(servers_value, Mapping):
+            has_issues = True
+        else:
+            for server_name, server in servers_value.items():
+                if not isinstance(server_name, str):
+                    has_issues = True
+                    continue
+                parse_name = server_name if _MCP_NAME_PATTERN.fullmatch(server_name) else "repair"
+                if not isinstance(server, Mapping):
+                    server = {}
+                transport = server.get("transport", "stdio")
+                defaults: dict[str, object] = {
+                    "enabled": False,
+                    "transport": (
+                        transport
+                        if isinstance(transport, str) and transport in _MCP_TRANSPORTS
+                        else "stdio"
+                    ),
+                    "connect_timeout": _MCP_DEFAULT_CONNECT_TIMEOUT,
+                    "call_timeout": _MCP_DEFAULT_CALL_TIMEOUT,
+                    "tool_keywords": {},
+                }
+                if defaults["transport"] == "streamable-http":
+                    defaults.update(url="http://127.0.0.1", headers={})
+                else:
+                    defaults.update(command="python", args=[])
+                    if "cwd" in server:
+                        defaults["cwd"] = None
+                projected = _safe_projection_row(
+                    server,
+                    defaults,
+                    f"mcp.{parse_name}",
+                    partial(_parse_mcp_server, parse_name),
+                )
+                if parse_name != server_name:
+                    unsafe_mcp[server_name] = replace(projected, mcp_name=server_name)
+                    continue
+                safe_server = {name: value for name, value in defaults.items()}
+                safe_server.update(
+                    enabled=projected.enabled,
+                    transport=projected.transport,
+                    connect_timeout=projected.connect_timeout,
+                    call_timeout=projected.call_timeout,
+                    tool_keywords={
+                        name: list(value) for name, value in projected.tool_keywords.items()
+                    },
+                )
+                if projected.transport == "streamable-http":
+                    safe_server.update(url=projected.url, headers=dict(projected.headers))
+                else:
+                    safe_server.update(command=projected.command, args=list(projected.args))
+                    if projected.cwd is not None:
+                        safe_server["cwd"] = str(projected.cwd)
+                mcp[server_name] = safe_server
+
+    safe_document["models"] = {"providers": providers, "routes": routes}
+    safe_document["mcp"] = {"servers": mcp}
+    diagnostics: list[ConfigurationDiagnosticValue] = []
+    configuration = _parse_configuration(safe_document, diagnostics=diagnostics)
+    if unsafe_providers or unsafe_mcp:
+        configuration = replace(
+            configuration,
+            models=replace(
+                configuration.models,
+                providers=MappingProxyType({**configuration.models.providers, **unsafe_providers}),
+            ),
+            mcp=MappingProxyType({**configuration.mcp, **unsafe_mcp}),
+        )
+    return configuration, has_issues or bool(diagnostics)
+
+
+def _config_web_error(code: str, message: str) -> Mapping[str, str]:
+    return {"code": code, "message": message}
+
+
+def _create_private_backup(target: Path, content: bytes) -> bool:
+    """Protect an empty temporary file before writing and publishing exact bytes."""
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=target.parent, prefix=".config-backup-", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        HOST_FILESYSTEM.protect_private_file(temporary)
+        stream = os.fdopen(descriptor, "wb")
+        descriptor = -1
+        with stream:
+            if stream.write(content) != len(content):
+                raise OSError("Malformed configuration backup was not fully written")
+            stream.flush()
+            HOST_FILESYSTEM.sync_file(stream.fileno())
+        try:
+            os.link(temporary, target)
+        except FileExistsError:
+            return False
+        HOST_FILESYSTEM.sync_parent_directory(target.parent)
+        return True
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def _prepare_repair_tables(
+    document: MutableMapping[str, object], normalized: Mapping[str, Mapping[str, object]]
+) -> None:
+    """Replace touched invalid table shapes while preserving parseable sibling tables."""
+    for section, values in normalized.items():
+        if section in document and not isinstance(document[section], MutableMapping):
+            document[section] = tomlkit.table()
+        if section == "models":
+            models = _mutable_toml_table(document, section, section)
+            for collection_name in values:
+                if collection_name in models and not isinstance(
+                    models[collection_name], MutableMapping
+                ):
+                    models[collection_name] = tomlkit.table()
+                collection = _mutable_toml_table(
+                    models, collection_name, f"models.{collection_name}"
+                )
+                rows = cast(Mapping[str, object], values[collection_name])
+                for row_name in rows:
+                    if row_name in collection and not isinstance(
+                        collection[row_name], MutableMapping
+                    ):
+                        collection[row_name] = tomlkit.table()
+        elif section == "mcp":
+            mcp = _mutable_toml_table(document, section, section)
+            if "servers" in mcp and not isinstance(mcp["servers"], MutableMapping):
+                mcp["servers"] = tomlkit.table()
+            servers = _mutable_toml_table(mcp, "servers", "mcp.servers")
+            for row_name in values:
+                if row_name in servers and not isinstance(servers[row_name], MutableMapping):
+                    servers[row_name] = tomlkit.table()
+                if isinstance(servers.get(row_name), MutableMapping):
+                    row = cast(MutableMapping[str, object], servers[row_name])
+                    changed = cast(Mapping[str, object], values[row_name])
+                    for nested in ("headers", "tool_keywords"):
+                        if (
+                            nested in changed
+                            and nested in row
+                            and not isinstance(row[nested], MutableMapping)
+                        ):
+                            row[nested] = tomlkit.table()
+
+
+def _require_explicit_transport_repair(
+    document: MutableMapping[str, object], fields: Mapping[str, object]
+) -> None:
+    mcp = document.get("mcp")
+    if not isinstance(mcp, Mapping) or not isinstance(mcp.get("servers"), Mapping):
+        return
+    servers = cast(Mapping[str, object], mcp["servers"])
+    for name, changes in fields.items():
+        original = servers.get(name)
+        if not isinstance(original, Mapping) or not isinstance(changes, Mapping):
+            continue
+        transport = original.get("transport")
+        if changes.get("transport", transport) != transport:
+            continue
+        incompatible = (
+            ("url", "headers")
+            if transport == "stdio"
+            else ("command", "args", "cwd")
+            if transport == "streamable-http"
+            else ()
+        )
+        for field_name in incompatible:
+            if field_name in original:
+                _invalid(
+                    f"mcp.{name}.{field_name}",
+                    "requires an explicit transport change or Server removal before repair",
+                )
+
+
 class ConfigLoader:
     """Access User Configuration beneath an injected fixed Agent Home."""
 
@@ -1693,6 +2050,86 @@ class ConfigLoader:
             fields=_editable_configuration_fields(configuration),
             configuration=configuration,
             diagnostics=tuple(diagnostics),
+        )
+
+    def web_snapshot(self) -> ConfigWebSnapshot:
+        """Return a redacted projection that remains available during first-use repair."""
+        try:
+            content = self.path.read_bytes()
+        except FileNotFoundError:
+            configuration, _ = _safe_web_configuration({})
+            self._diagnostics = ()
+            return ConfigWebSnapshot(
+                revision=_configuration_revision(b""),
+                fields=_editable_configuration_fields(configuration),
+                configuration=configuration,
+                state="missing",
+                repair_required=True,
+                backup_required=False,
+                requires_secret_reentry=True,
+                error=_config_web_error(
+                    "config_missing",
+                    "A User Configuration is required before MyClaw can run.",
+                ),
+            )
+        except OSError:
+            raise
+
+        revision = _configuration_revision(content)
+        try:
+            document = _table(tomllib.loads(content.decode("utf-8")), "configuration")
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+            configuration, _ = _safe_web_configuration({})
+            self._diagnostics = ()
+            return ConfigWebSnapshot(
+                revision=revision,
+                fields=_editable_configuration_fields(configuration),
+                configuration=configuration,
+                state="malformed",
+                repair_required=True,
+                backup_required=True,
+                requires_secret_reentry=True,
+                error=_config_web_error(
+                    "config_parse_error",
+                    "User Configuration TOML could not be parsed.",
+                ),
+            )
+
+        try:
+            diagnostics: list[ConfigurationDiagnosticValue] = []
+            configuration = _parse_configuration(document, diagnostics=diagnostics)
+            _require_complete_candidate(configuration, diagnostics)
+        except ConfigError:
+            configuration, _ = _safe_web_configuration(document)
+            valid = False
+        else:
+            valid = True
+        self._diagnostics = ()
+        if not valid:
+            return ConfigWebSnapshot(
+                revision=revision,
+                fields=_editable_configuration_fields(configuration),
+                configuration=configuration,
+                state="invalid",
+                repair_required=True,
+                backup_required=False,
+                requires_secret_reentry=not any(
+                    provider.api_key.strip() for provider in configuration.models.providers.values()
+                ),
+                error=_config_web_error(
+                    "config_invalid",
+                    "The saved User Configuration contains invalid fields.",
+                ),
+            )
+        return ConfigWebSnapshot(
+            revision=revision,
+            fields=_editable_configuration_fields(configuration),
+            configuration=configuration,
+            state="active",
+            repair_required=False,
+            backup_required=False,
+            requires_secret_reentry=False,
+            error=None,
         )
 
     def patch_editable_fields(
@@ -1766,6 +2203,126 @@ class ConfigLoader:
                 fields=_editable_configuration_fields(configuration),
                 configuration=configuration,
             )
+
+    def repair_editable_fields(
+        self,
+        expected_revision: str,
+        fields: Mapping[str, object],
+        secrets: Mapping[str, object] | None = None,
+    ) -> ConfigEditResult:
+        """Repair a missing or malformed document using a validated default structure."""
+        if not isinstance(expected_revision, str) or not expected_revision:
+            _invalid("config.revision", "must be a nonempty string")
+        normalized = _validate_editable_fields(fields)
+        lock_path = self.path.with_name(f".{self.path.name}.lock")
+        with HOST_FILESYSTEM.exclusive_lock(lock_path):
+            missing = False
+            HOST_FILESYSTEM.require_owned_directory(
+                self.agent_home.path, within=self.agent_home.path
+            )
+            if HOST_FILESYSTEM.entry_exists(self.path):
+                HOST_FILESYSTEM.require_owned_regular_file(self.path, within=self.agent_home.path)
+            try:
+                original_content = self.path.read_bytes()
+            except FileNotFoundError:
+                missing = True
+                original_content = b""
+            current_revision = _configuration_revision(original_content)
+            if current_revision != expected_revision:
+                raise ConfigRevisionConflict(expected_revision, current_revision)
+
+            malformed = False
+            if missing:
+                source_document = tomlkit.parse(DEFAULT_CONFIG_TEMPLATE)
+            else:
+                try:
+                    source_document = tomlkit.parse(original_content.decode("utf-8"))
+                except (tomlkit.exceptions.ParseError, UnicodeDecodeError):
+                    malformed = True
+                    source_document = tomlkit.parse(DEFAULT_CONFIG_TEMPLATE)
+
+            if "mcp" in normalized:
+                _require_explicit_transport_repair(source_document, normalized["mcp"])
+            _prepare_repair_tables(source_document, normalized)
+            for section, section_values in normalized.items():
+                if section == "models":
+                    _apply_model_fields(source_document, section_values)
+                elif section == "mcp":
+                    _apply_mcp_fields(source_document, section_values)
+                else:
+                    table = source_document.get(section)
+                    if table is None:
+                        table = tomlkit.table()
+                        source_document[section] = table
+                    if not isinstance(table, MutableMapping):
+                        _invalid(section, "must be a table")
+                    for field_name, value in section_values.items():
+                        table[field_name] = value
+
+            _apply_secret_changes(source_document, {} if secrets is None else secrets)
+            candidate_content = tomlkit.dumps(source_document)
+            try:
+                candidate = tomllib.loads(candidate_content)
+            except tomllib.TOMLDecodeError as error:
+                raise ConfigError(
+                    ErrorInfo("config_parse_error", "User Configuration TOML could not be parsed.")
+                ) from error
+            candidate_diagnostics: list[ConfigurationDiagnosticValue] = []
+            configuration = _parse_configuration(
+                _table(candidate, "configuration"),
+                diagnostics=candidate_diagnostics,
+            )
+            _require_complete_candidate(configuration, candidate_diagnostics)
+
+            try:
+                latest_content = self.path.read_bytes()
+            except FileNotFoundError:
+                latest_content = b""
+            latest_revision = _configuration_revision(latest_content)
+            if latest_revision != current_revision:
+                raise ConfigRevisionConflict(expected_revision, latest_revision)
+
+            backup_id: str | None = None
+            if malformed:
+                backup_id = self._backup_malformed_content(original_content)
+            if HOST_FILESYSTEM.entry_exists(self.path):
+                HOST_FILESYSTEM.require_owned_regular_file(self.path, within=self.agent_home.path)
+            try:
+                final_content = self.path.read_bytes()
+            except FileNotFoundError:
+                final_content = b""
+            final_revision = _configuration_revision(final_content)
+            if final_revision != current_revision:
+                raise ConfigRevisionConflict(expected_revision, final_revision)
+            HOST_FILESYSTEM.atomic_replace_text(self.path, candidate_content)
+            self._diagnostics = tuple(candidate_diagnostics)
+            return ConfigEditResult(
+                revision=_configuration_revision(candidate_content.encode("utf-8")),
+                fields=_editable_configuration_fields(configuration),
+                configuration=configuration,
+                backup_id=backup_id,
+            )
+
+    def _backup_malformed_content(self, content: bytes) -> str:
+        digest = sha256(content).hexdigest()
+        backup_id = f"sha256:{digest}"
+        target = self.agent_home.path / f"config.toml.backup.{digest}"
+        for attempt in range(32):
+            if HOST_FILESYSTEM.entry_exists(target):
+                HOST_FILESYSTEM.require_owned_regular_file(target, within=self.agent_home.path)
+                if target.read_bytes() == content:
+                    HOST_FILESYSTEM.protect_private_file(target)
+                    return backup_id
+                target = self.agent_home.path / (
+                    f"config.toml.backup.{digest}.{attempt + 1}-{uuid4().hex[:12]}"
+                )
+                continue
+            if _create_private_backup(target, content):
+                HOST_FILESYSTEM.require_owned_regular_file(target, within=self.agent_home.path)
+                if target.read_bytes() != content:
+                    raise OSError("Malformed configuration backup verification failed")
+                return backup_id
+        raise OSError("Could not publish a unique malformed configuration backup")
 
     def load(self) -> UserConfiguration:
         """Load User Configuration as immutable typed values."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import importlib
 import os
@@ -77,6 +78,8 @@ class FilesystemAdapter(Protocol):
 
     def restrict_private_file(self, path: Path) -> None: ...
 
+    def protect_private_file(self, path: Path) -> None: ...
+
     def restrict_private_descriptor(self, descriptor: int) -> None: ...
 
     def try_lock_exclusive(self, descriptor: int) -> bool: ...
@@ -147,6 +150,35 @@ class WindowsFilesystemAdapter:
 
     def restrict_private_file(self, path: Path) -> None:
         del path
+
+    def protect_private_file(self, path: Path) -> None:
+        from ctypes import wintypes
+
+        security = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        convert = security.ConvertStringSecurityDescriptorToSecurityDescriptorW
+        convert.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_void_p,
+        ]
+        convert.restype = wintypes.BOOL
+        set_security = security.SetFileSecurityW
+        set_security.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
+        set_security.restype = wintypes.BOOL
+        free = kernel.LocalFree
+        free.argtypes = [ctypes.c_void_p]
+        free.restype = ctypes.c_void_p
+        descriptor = ctypes.c_void_p()
+        # A protected ACL grants full access only to the file owner and SYSTEM.
+        if not convert("D:P(A;;FA;;;OW)(A;;FA;;;SY)", 1, ctypes.byref(descriptor), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            if not set_security(str(path), 0x80000004, descriptor):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            free(descriptor)
 
     def restrict_private_descriptor(self, descriptor: int) -> None:
         del descriptor
@@ -232,6 +264,9 @@ class PosixFilesystemAdapter:
     def restrict_private_file(self, path: Path) -> None:
         path.chmod(0o600)
 
+    def protect_private_file(self, path: Path) -> None:
+        self.restrict_private_file(path)
+
     def restrict_private_descriptor(self, descriptor: int) -> None:
         fchmod = getattr(os, "fchmod", None)
         if fchmod is None:
@@ -314,6 +349,10 @@ class HostFilesystem:
     def restrict_private_file(self, path: Path) -> None:
         """Narrow a private file to host-appropriate owner access."""
         self._adapter.restrict_private_file(path)
+
+    def protect_private_file(self, path: Path) -> None:
+        """Enforce private access before writing or reusing a secret backup."""
+        self._adapter.protect_private_file(self.path_for_io(path))
 
     def restrict_private_descriptor(self, descriptor: int) -> None:
         """Narrow an opened private file to host-appropriate owner access."""

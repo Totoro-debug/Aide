@@ -41,7 +41,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { Link, NavLink, Navigate, Route, Routes, useLocation, useParams } from "react-router-dom";
+import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -83,6 +83,7 @@ import {
   ServiceCommandError,
   triggerRuntimeDream,
   patchConfig,
+  repairConfig,
   retryConfig,
   updateRuntimeEffort,
   updateRuntimePermission,
@@ -152,9 +153,11 @@ const REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", 
 export default function App() {
   const { i18n, t } = useTranslation();
   const location = useLocation();
+  const navigate = useNavigate();
   const [authState, setAuthState] = useState<AuthState>("checking");
   const [connectionState, setConnectionState] = useState<ConnectionState>("checking");
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
+  const [configurationNeedsSetup, setConfigurationNeedsSetup] = useState<boolean | null>(null);
   const [registeredClient, setRegisteredClient] = useState<RegisteredClient | null>(null);
   const [projects, setProjects] = useState<RegisteredProject[]>([]);
   const [projectsLoadState, setProjectsLoadState] = useState<ProjectsLoadState>("idle");
@@ -245,6 +248,47 @@ export default function App() {
   useEffect(() => {
     if (authState === "ready") void refreshProjects();
   }, [authState, refreshProjects]);
+
+  useEffect(() => {
+    if (authState !== "ready") return;
+    let active = true;
+    let sequence = 0;
+    const refreshConfiguration = async () => {
+      const requestSequence = ++sequence;
+      try {
+        const response = await getConfig();
+        if (active && requestSequence === sequence) {
+          setConfigurationNeedsSetup(response.application.active_revision === null);
+        }
+      } catch {
+        // SettingsView owns the detailed configuration error state.
+      }
+    };
+    const unsubscribe = subscribeServiceEvents((event) => {
+      if (event.type === "config.application") {
+        ++sequence;
+        setConfigurationNeedsSetup(event.payload.active_revision === null);
+      } else if (event.type === "snapshot.required") {
+        void refreshConfiguration();
+      }
+    });
+    void refreshConfiguration();
+    const timer = window.setInterval(() => void refreshConfiguration(), 5000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      unsubscribe();
+    };
+  }, [authState, connectionState, subscribeServiceEvents]);
+
+  useEffect(() => {
+    if (
+      configurationNeedsSetup === true
+      && (location.pathname === "/" || location.pathname === "/status")
+    ) {
+      navigate("/settings", { replace: true });
+    }
+  }, [configurationNeedsSetup, location.pathname, navigate]);
 
   useEffect(() => {
     if (authState !== "ready") return;
@@ -574,7 +618,11 @@ export default function App() {
           <Routes>
             <Route
               path="/"
-              element={<Navigate replace to="/status" />}
+              element={
+                configurationNeedsSetup === true
+                  ? <Navigate replace to="/settings" />
+                  : <Navigate replace to="/status" />
+              }
             />
             <Route
               path="/status"
@@ -1473,7 +1521,9 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
     setNotice(null);
     try {
       const config = configFromForm(draft);
-      const next = await patchConfig(draftRevision, config.fields, config.secrets);
+      const next = response?.configuration.repair_required
+        ? await repairConfig(draftRevision, config.fields, config.secrets)
+        : await patchConfig(draftRevision, config.fields, config.secrets);
       if (requestSequence.current !== sequence) return;
       dirtyRef.current = false;
       applyResponse(next);
@@ -1492,7 +1542,8 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
           t(path === "memory.schedule" ? "settings.invalidSchedule"
             : path === "runtime.compact_ratio" ? "settings.invalidRatio" : "settings.invalidValue"),
         ])));
-        setSubmitError(error.body.code === "config_invalid" ? t("settings.validationSummary") : error.body.message);
+        setSubmitError(error.body.code === "config_invalid" ? t("settings.validationSummary")
+          : error.body.code === "persistence_error" ? t("settings.persistenceFailed") : error.body.message);
       } else {
         setSubmitError(t("settings.unavailable"));
       }
@@ -1640,6 +1691,8 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
                 ? t("settings.saving")
                 : response.application.status === "pending"
                   ? t("settings.pending")
+                  : response.application.status === "pending-repair"
+                    ? t("settings.pendingRepair")
                   : response.application.status === "failed-to-apply"
                     ? t("settings.failed")
                     : t("settings.active")}
@@ -1680,6 +1733,18 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
             <RefreshCw size={14} aria-hidden="true" />
             {t("settings.retry")}
           </button>
+        </div>
+      ) : null}
+
+      {response?.configuration.repair_required ? (
+        <div className={styles.errorBanner} role="alert">
+          <TriangleAlert size={17} aria-hidden="true" />
+          <span>
+            {response.configuration.state === "malformed"
+              ? t("settings.malformedBackup")
+              : t(response.application.active_revision === null ? "settings.repairRequired" : "settings.savedRepairRequired")}
+            {response.configuration.requires_secret_reentry ? ` ${t("settings.secretReentry")}` : ""}
+          </span>
         </div>
       ) : null}
 
@@ -3034,7 +3099,7 @@ function ProjectsView({
                 && project.removal_error === undefined;
               const removalBlocked = project.schedule_state === "failed"
                 || project.removal_error !== undefined;
-              const admissionClosed = removalPending || removalBlocked;
+              const admissionClosed = !project.available || removalPending || removalBlocked;
               return (
                 <li className={styles.projectItem} id={`project-${project.project_id}`} key={project.project_id}>
                 <div className={styles.projectItemHeader}>

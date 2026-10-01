@@ -141,7 +141,17 @@ export type ConfigSecretChange =
 
 export type ConfigSecrets = Record<string, ConfigSecretChange>;
 
-export type ConfigApplicationStatus = "active" | "pending" | "failed-to-apply";
+export type ConfigApplicationStatus = "active" | "pending" | "pending-repair" | "failed-to-apply";
+
+export type ConfigProjectionState = "active" | "missing" | "invalid" | "malformed";
+
+export interface ConfigProjection {
+  state: ConfigProjectionState;
+  repair_required: boolean;
+  backup_required: boolean;
+  requires_secret_reentry: boolean;
+  error: { code: string; message: string } | null;
+}
 
 export interface ConfigApplication {
   status: ConfigApplicationStatus;
@@ -155,11 +165,13 @@ export interface ConfigApplication {
 export interface ConfigResponse {
   revision: string;
   fields: ConfigFields;
+  configuration: ConfigProjection;
   application: ConfigApplication;
 }
 
 export interface ConfigPatchResponse extends ConfigResponse {
   request_id: string;
+  backup_id?: string | null;
 }
 
 export type ToolPermissionLevel = "read-only" | "workspace-write" | "full-access";

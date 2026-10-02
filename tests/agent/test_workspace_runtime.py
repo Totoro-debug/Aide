@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 from dataclasses import fields
 from datetime import UTC, datetime
@@ -269,19 +268,13 @@ async def test_workspace_runtime_reuses_directory_alias(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     alias = tmp_path / "workspace-alias"
-    if os.name == "nt":
-        created = subprocess.run(
-            ("cmd", "/c", "mklink", "/J", str(alias), str(workspace)),
-            capture_output=True,
-            check=False,
-        )
-        if created.returncode:
-            pytest.skip("host cannot create a directory junction")
-    else:
-        try:
-            alias.symlink_to(workspace, target_is_directory=True)
-        except OSError:
-            pytest.skip("host cannot create a directory symlink")
+    created = subprocess.run(
+        ("cmd", "/c", "mklink", "/J", str(alias), str(workspace)),
+        capture_output=True,
+        check=False,
+    )
+    if created.returncode:
+        pytest.skip("host cannot create a directory junction")
 
     agent_home = AgentHome(tmp_path / "agent-home")
     agent_home.initialize()

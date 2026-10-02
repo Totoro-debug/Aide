@@ -992,14 +992,13 @@ def _spawn_service(agent_home: AgentHome, port: int) -> subprocess.Popen[bytes]:
         "--port",
         str(port),
     ]
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         return subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
     except OSError as error:
         raise ServiceStartupError(

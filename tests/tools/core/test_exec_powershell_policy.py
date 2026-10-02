@@ -101,9 +101,8 @@ def _create_directory_link(link: Path, target: Path) -> None:
     try:
         link.symlink_to(target, target_is_directory=True)
         return
-    except (OSError, NotImplementedError) as error:
-        if os.name != "nt":
-            pytest.skip(f"directory symlinks unavailable: {error}")
+    except (OSError, NotImplementedError):
+        pass
     created = subprocess.run(
         ("cmd", "/c", "mklink", "/J", str(link), str(target)),
         capture_output=True,
@@ -251,7 +250,6 @@ async def test_powershell_alias_requires_confirmation_and_never_executes_on_decl
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell paths")
 async def test_windows_powershell_51_canonical_workspace_read_executes_directly(
     tmp_path: Path,
 ) -> None:
@@ -335,17 +333,6 @@ async def test_every_approved_powershell_candidate_has_a_direct_fixture(
     command: str,
     level: str,
 ) -> None:
-    if os.name != "nt" and command in {
-        "Get-Content -LiteralPath .\\inside.txt",
-        "Get-Content -LiteralPath .\\inside.txt -Tail 1",
-        "Get-FileHash -LiteralPath .\\inside.txt",
-        "Select-String -Pattern content -LiteralPath .\\inside.txt",
-        "Test-Path -LiteralPath .\\inside.txt",
-        "Resolve-Path -LiteralPath .\\inside.txt",
-        "Copy-Item -LiteralPath .\\inside.txt -Destination .\\copy.txt",
-        "Move-Item -LiteralPath .\\inside.txt -Destination .\\moved.txt",
-    }:
-        pytest.skip("requires native Windows PowerShell paths")
     inside = tmp_path / "inside.txt"
     inside.write_text("content", encoding="utf-8")
     executable = r"C:\PowerShell\pwsh.exe"
@@ -717,13 +704,6 @@ async def test_powershell_path_roles_follow_level_and_canonical_containment(
     cwd: str,
     expected_confirmation: bool,
 ) -> None:
-    if os.name != "nt" and command_template in {
-        "Get-Content -LiteralPath .\\inside.txt",
-        "Get-Content -LiteralPath {inside_case}",
-        "New-Item -Path {inside} -Name ..\\outside",
-        "Rename-Item -LiteralPath {inside} -NewName ..\\outside.txt",
-    }:
-        pytest.skip("requires native Windows PowerShell paths")
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"
     workspace.mkdir()
@@ -892,7 +872,6 @@ async def test_powershell_read_through_workspace_reparse_point_confirms(
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell paths")
 @pytest.mark.parametrize(
     "command",
     (
@@ -1102,28 +1081,6 @@ def test_git_environment_is_fixed_only_for_git_processes() -> None:
         'git -C "repo root" show --no-ext-diff --no-textconv HEAD'
     )
     assert host.command_for_execution("git status") == "git status"
-
-
-def test_bash_command_and_environment_are_hardened_for_git() -> None:
-    resolved = resolve_exec_shell(
-        "auto",
-        platform="posix",
-        which=_which({"bash": "/bin/bash"}),
-        environment={"PATH": "/bin", "HOME": "/home/test"},
-    )
-    host = create_exec_host(resolved)
-
-    environment = host.environment_for_command("git diff --stat")  # type: ignore[attr-defined]
-    assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
-    assert environment["GIT_CONFIG_GLOBAL"] == "/dev/null"
-    assert environment["GIT_PAGER"] == "cat"
-    assert environment["GIT_EXTERNAL_DIFF"] == ""
-    assert environment["GIT_OPTIONAL_LOCKS"] == "0"
-    assert environment["GIT_CONFIG_VALUE_1"] == "false"
-    assert environment["GIT_CONFIG_VALUE_3"] == "/dev/null"
-    assert host.command_for_execution("git diff --stat") == (  # type: ignore[attr-defined]
-        "git diff --no-ext-diff --no-textconv --stat"
-    )
 
 
 @pytest.mark.parametrize(

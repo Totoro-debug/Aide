@@ -5,6 +5,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import { chromium, expect } from "@playwright/test";
 import { URL } from "node:url";
 
+if (process.platform !== "win32") {
+  console.error("MyClaw requires Windows.");
+  process.exit(1);
+}
+
 const baseUrl = process.env.MYCLAW_E2E_URL;
 const ticket = process.env.MYCLAW_E2E_TICKET;
 const workspace = process.env.MYCLAW_E2E_WORKSPACE;
@@ -32,7 +37,7 @@ async function waitForJson(path, timeout = 90_000) {
 }
 
 const browser = await chromium.launch({
-  channel: process.env.MYCLAW_E2E_BROWSER_CHANNEL ?? (process.platform === "win32" ? "msedge" : undefined),
+  channel: process.env.MYCLAW_E2E_BROWSER_CHANNEL ?? "msedge",
 });
 const context = await browser.newContext();
 const page = await context.newPage();

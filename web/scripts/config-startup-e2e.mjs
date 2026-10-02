@@ -7,6 +7,11 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { chromium, expect } from "@playwright/test";
 
+if (process.platform !== "win32") {
+  console.error("MyClaw requires Windows.");
+  process.exit(1);
+}
+
 const repoRoot = resolve(process.cwd(), "..");
 const output = resolve(process.cwd(), "test-results", "config-startup-e2e");
 const narrowViewport = { width: 390, height: 844 };
@@ -506,7 +511,7 @@ const urls = [];
 try {
   await mkdir(output, { recursive: true });
   browser = await chromium.launch({
-    channel: process.env.MYCLAW_E2E_BROWSER_CHANNEL ?? (process.platform === "win32" ? "msedge" : undefined),
+    channel: process.env.MYCLAW_E2E_BROWSER_CHANNEL ?? "msedge",
   });
   for (const state of states) urls.push(await runState(browser, state));
   console.log(

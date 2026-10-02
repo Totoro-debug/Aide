@@ -18,8 +18,6 @@ from stat import (
     FILE_ATTRIBUTE_DEVICE,
     FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_REPARSE_POINT,
-    S_ISDIR,
-    S_ISREG,
 )
 from typing import Any, Final, NoReturn, Protocol, cast
 
@@ -29,13 +27,6 @@ _WINDOWS_RESERVED_BASENAMES: Final = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {f"COM{index}" for index in range(1, 10)}
     | {f"LPT{index}" for index in range(1, 10)}
-)
-_POSIX_UNSUPPORTED_SYNC_ERRNOS: Final = frozenset(
-    {
-        errno.EINVAL,
-        getattr(errno, "ENOTSUP", errno.EINVAL),
-        getattr(errno, "EOPNOTSUPP", errno.EINVAL),
-    }
 )
 _LOCK_RETRY_INTERVAL_SECONDS: Final = 0.01
 
@@ -200,94 +191,6 @@ class WindowsFilesystemAdapter:
 
         os.lseek(descriptor, 0, os.SEEK_SET)
         msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
-
-
-class PosixFilesystemAdapter:
-    """POSIX native path, object-type, and durability behavior."""
-
-    def path_for_io(self, path: Path) -> Path:
-        return Path(path)
-
-    def remove_owned_entry(self, path: Path, *, root: Path, tree: bool) -> None:
-        from myclaw.utils._owned_deletion import remove_owned_posix
-
-        remove_owned_posix(path, root=root, tree=tree)
-
-    def is_directory(self, status: stat_result) -> bool:
-        return S_ISDIR(status.st_mode)
-
-    def is_regular_file(self, status: stat_result) -> bool:
-        return S_ISREG(status.st_mode)
-
-    def resolved_for_comparison(self, path: Path) -> Path:
-        return path.resolve(strict=True)
-
-    def is_reserved_component(self, component: str) -> bool:
-        del component
-        return False
-
-    def has_alternate_data_stream(self, component: str) -> bool:
-        del component
-        return False
-
-    def accepts_native_executable_name(self, path: Path) -> bool:
-        del path
-        return True
-
-    def sync_file(self, descriptor: int) -> None:
-        try:
-            os.fsync(descriptor)
-        except OSError as error:
-            if error.errno not in _POSIX_UNSUPPORTED_SYNC_ERRNOS:
-                raise
-
-    def sync_parent_directory(self, path: Path) -> None:
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        try:
-            descriptor = os.open(path, flags)
-        except OSError as error:
-            if error.errno in _POSIX_UNSUPPORTED_SYNC_ERRNOS:
-                return
-            raise
-        try:
-            try:
-                os.fsync(descriptor)
-            except OSError as error:
-                if error.errno not in _POSIX_UNSUPPORTED_SYNC_ERRNOS:
-                    raise
-        finally:
-            os.close(descriptor)
-
-    def restrict_private_directory(self, path: Path) -> None:
-        path.chmod(0o700)
-
-    def restrict_private_file(self, path: Path) -> None:
-        path.chmod(0o600)
-
-    def protect_private_file(self, path: Path) -> None:
-        self.restrict_private_file(path)
-
-    def restrict_private_descriptor(self, descriptor: int) -> None:
-        fchmod = getattr(os, "fchmod", None)
-        if fchmod is None:
-            raise OSError("descriptor permission changes are unavailable")
-        fchmod(descriptor, 0o600)
-
-    def try_lock_exclusive(self, descriptor: int) -> bool:
-        fcntl = cast(Any, importlib.import_module("fcntl"))
-
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as error:
-            if error.errno in {errno.EACCES, errno.EAGAIN}:
-                return False
-            raise
-        return True
-
-    def unlock(self, descriptor: int) -> None:
-        fcntl = cast(Any, importlib.import_module("fcntl"))
-
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
 class HostFilesystem:
@@ -551,5 +454,4 @@ def _raise_unsafe(path: Path) -> NoReturn:
 
 
 WINDOWS_HOST_FILESYSTEM: Final = HostFilesystem(WindowsFilesystemAdapter())
-POSIX_HOST_FILESYSTEM: Final = HostFilesystem(PosixFilesystemAdapter())
-HOST_FILESYSTEM: Final = WINDOWS_HOST_FILESYSTEM if os.name == "nt" else POSIX_HOST_FILESYSTEM
+HOST_FILESYSTEM: Final = WINDOWS_HOST_FILESYSTEM

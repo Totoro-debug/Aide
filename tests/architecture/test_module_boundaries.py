@@ -1160,9 +1160,9 @@ def test_package_initializers_do_not_create_aggregate_import_entries() -> None:
     assert violations == []
 
 
-def test_host_selection_is_confined_to_the_workspace_filesystem_adapter() -> None:
+def test_host_checks_are_confined_to_runtime_entry_and_exec_resolution() -> None:
     expected = {
-        Path("myclaw/utils/host_filesystem.py"),
+        Path("myclaw/utils/platform.py"),
         Path("myclaw/agent/tools/core/exec_host.py"),
     }
     actual = {

@@ -2,21 +2,11 @@
 
 from __future__ import annotations
 
-import errno
 import hashlib
 import json
-import os
 from pathlib import Path
 
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
-
-_POSIX_UNSUPPORTED_SYNC_ERRNOS = frozenset(
-    {
-        errno.EINVAL,
-        getattr(errno, "ENOTSUP", errno.EINVAL),
-        getattr(errno, "EOPNOTSUPP", errno.EINVAL),
-    }
-)
 
 
 def canonical_json_bytes(value: object) -> bytes:
@@ -34,33 +24,10 @@ def sha256_hex(content: bytes) -> str:
 
 
 def sync_directory(path: Path) -> None:
-    if not getattr(os, "O_DIRECTORY", 0):
-        return
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    try:
-        descriptor = os.open(HOST_FILESYSTEM.path_for_io(path), flags)
-    except OSError as error:
-        if error.errno in _POSIX_UNSUPPORTED_SYNC_ERRNOS:
-            return
-        raise
-    try:
-        try:
-            os.fsync(descriptor)
-        except OSError as error:
-            if error.errno not in _POSIX_UNSUPPORTED_SYNC_ERRNOS:
-                raise
-    finally:
-        os.close(descriptor)
+    HOST_FILESYSTEM.sync_parent_directory(path)
 
 
 def sync_created_directory(path: Path) -> None:
-    if not getattr(os, "O_DIRECTORY", 0):
-        return
     sync_directory(path)
     sync_directory(path.parent)
 

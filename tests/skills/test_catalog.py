@@ -1,4 +1,3 @@
-import os
 import subprocess
 from collections.abc import Callable
 from io import StringIO
@@ -586,15 +585,12 @@ def test_skill_directory_reparse_escape_is_excluded_when_links_are_available(
     linked_directory = agent_home / "skills" / "escaped"
     linked_directory.parent.mkdir(parents=True)
     try:
-        if os.name == "nt":
-            subprocess.run(
-                ["cmd", "/c", "mklink", "/J", str(linked_directory), str(outside)],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        else:
-            linked_directory.symlink_to(outside, target_is_directory=True)
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(linked_directory), str(outside)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
     except (OSError, NotImplementedError, subprocess.CalledProcessError) as error:
         pytest.skip(f"directory links unavailable: {error}")
 

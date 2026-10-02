@@ -3,21 +3,18 @@ import os
 import subprocess
 import sys
 import time
-from os import stat_result
 from pathlib import Path
-from stat import S_IFDIR, S_IFIFO, S_IFLNK, S_IFREG
+from stat import S_IFLNK
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
 from myclaw.utils.host_filesystem import (
     HOST_FILESYSTEM,
-    POSIX_HOST_FILESYSTEM,
     WINDOWS_HOST_FILESYSTEM,
-    PosixFilesystemAdapter,
     host_path_is_within,
 )
-
-windows_only = pytest.mark.skipif(os.name != "nt", reason="requires native Windows paths")
 
 _LOCK_PROCESS_SCRIPT = """
 import sys
@@ -47,19 +44,16 @@ def test_host_path_is_within_accepts_child_and_rejects_sibling_prefix(tmp_path: 
     assert not host_path_is_within(tmp_path / "workspace-copy" / "child", root)
 
 
-@windows_only
 def test_host_path_is_within_uses_host_case_rules(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
 
     assert host_path_is_within(Path(str(root).swapcase()) / "child", root)
 
 
-@windows_only
 def test_host_path_is_within_rejects_incompatible_drives() -> None:
     assert not host_path_is_within(Path("C:/workspace/child"), Path("D:/workspace"))
 
 
-@windows_only
 def test_windows_host_filesystem_prepares_local_and_unc_io_paths(tmp_path: Path) -> None:
     local = tmp_path / "state.txt"
     unc = Path(r"\\server\share\state.txt")
@@ -102,7 +96,6 @@ def test_host_entry_exists_keeps_dangling_link_and_other_errors(
     assert captured.value is permission_error
 
 
-@windows_only
 def test_windows_host_filesystem_accepts_an_owned_directory(tmp_path: Path) -> None:
     owned = tmp_path / "owned"
     child = owned / "child"
@@ -113,7 +106,6 @@ def test_windows_host_filesystem_accepts_an_owned_directory(tmp_path: Path) -> N
     )
 
 
-@windows_only
 def test_windows_host_filesystem_rejects_redirected_or_external_directory(
     tmp_path: Path,
 ) -> None:
@@ -134,7 +126,6 @@ def test_windows_host_filesystem_rejects_redirected_or_external_directory(
             WINDOWS_HOST_FILESYSTEM.require_owned_directory(candidate, within=owned)
 
 
-@windows_only
 def test_windows_host_filesystem_accepts_an_owned_regular_file(tmp_path: Path) -> None:
     owned = tmp_path / "owned"
     owned.mkdir()
@@ -255,7 +246,6 @@ def test_host_filesystem_exclusive_lock_releases_after_body_failure(tmp_path: Pa
     assert lock_path.read_bytes() == b""
 
 
-@windows_only
 def test_windows_host_filesystem_rejects_an_open_file_with_mismatched_path(
     tmp_path: Path,
 ) -> None:
@@ -273,160 +263,40 @@ def test_windows_host_filesystem_rejects_an_open_file_with_mismatched_path(
             )
 
 
-def test_posix_host_filesystem_classifies_only_ordinary_directories_and_files() -> None:
-    directory = stat_result((S_IFDIR | 0o700, 1, 1, 1, 0, 0, 0, 0, 0, 0))
-    regular_file = stat_result((S_IFREG | 0o600, 2, 1, 1, 0, 0, 0, 0, 0, 0))
-    symbolic_link = stat_result((S_IFLNK | 0o777, 3, 1, 1, 0, 0, 0, 0, 0, 0))
-    fifo = stat_result((S_IFIFO | 0o600, 4, 1, 1, 0, 0, 0, 0, 0, 0))
-
-    assert POSIX_HOST_FILESYSTEM.is_directory(directory)
-    assert POSIX_HOST_FILESYSTEM.is_regular_file(regular_file)
-    assert not POSIX_HOST_FILESYSTEM.is_directory(symbolic_link)
-    assert not POSIX_HOST_FILESYSTEM.is_regular_file(symbolic_link)
-    assert not POSIX_HOST_FILESYSTEM.is_regular_file(fifo)
-
-
 def test_host_filesystem_applies_only_native_reserved_component_rules() -> None:
     assert WINDOWS_HOST_FILESYSTEM.is_reserved_component("CON.txt")
     assert WINDOWS_HOST_FILESYSTEM.has_alternate_data_stream("state.json:secret")
-    assert not POSIX_HOST_FILESYSTEM.is_reserved_component("CON.txt")
-    assert not POSIX_HOST_FILESYSTEM.has_alternate_data_stream("state.json:secret")
 
 
-def test_posix_host_filesystem_rejects_hard_linked_and_escaping_files(
-    tmp_path: Path,
-) -> None:
-    owned = tmp_path / "owned"
-    owned.mkdir()
-    ordinary = owned / "ordinary.json"
-    ordinary.write_bytes(b"{}")
-    outside = tmp_path / "outside.json"
-    outside.write_bytes(b"outside")
-    hard_link = owned / "hard-link.json"
-    hard_link.hardlink_to(outside)
-
-    assert POSIX_HOST_FILESYSTEM.require_owned_regular_file(
-        ordinary, within=owned
-    ) == ordinary.resolve(strict=True)
-    for candidate in (hard_link, outside):
-        with pytest.raises(PermissionError):
-            POSIX_HOST_FILESYSTEM.require_owned_regular_file(candidate, within=owned)
-
-
-def test_posix_host_filesystem_rejects_injected_symbolic_link_metadata(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_windows_filesystem_rejects_injected_reparse_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     owned = tmp_path / "owned"
     redirected = owned / "redirected"
     redirected.mkdir(parents=True)
-    symbolic_link = stat_result((S_IFLNK | 0o777, 3, 1, 1, 0, 0, 0, 0, 0, 0))
     original_lstat = Path.lstat
 
-    def injected_lstat(path: Path) -> stat_result:
+    def injected_lstat(path: Path) -> os.stat_result:
         if path == redirected:
-            return symbolic_link
+            return cast(os.stat_result, SimpleNamespace(st_file_attributes=0x410))
         return original_lstat(path)
 
     monkeypatch.setattr(Path, "lstat", injected_lstat)
-
     with pytest.raises(PermissionError):
-        POSIX_HOST_FILESYSTEM.require_owned_directory(redirected, within=owned)
+        HOST_FILESYSTEM.require_owned_directory(redirected, within=owned)
 
 
-@pytest.mark.parametrize(
-    "unsupported_errno",
-    (
-        errno.EINVAL,
-        getattr(errno, "ENOTSUP", errno.EINVAL),
-        getattr(errno, "EOPNOTSUPP", errno.EINVAL),
-    ),
-)
-def test_posix_parent_sync_ignores_only_unsupported_open_errors(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    unsupported_errno: int,
+@pytest.mark.parametrize("error_number", [errno.EINVAL, errno.EIO, errno.EACCES])
+def test_windows_file_sync_ignores_only_unsupported_sync(
+    monkeypatch: pytest.MonkeyPatch, error_number: int
 ) -> None:
-    def unsupported_open(
-        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-        flags: int,
-        mode: int = 0o777,
-    ) -> int:
-        del path, flags, mode
-        raise OSError(unsupported_errno, "directory sync is unsupported")
+    def failed_sync(descriptor: int) -> None:
+        raise OSError(error_number, "injected sync failure")
 
-    monkeypatch.setattr(os, "open", unsupported_open)
-
-    PosixFilesystemAdapter().sync_parent_directory(tmp_path)
-
-
-def test_posix_parent_sync_ignores_an_unsupported_fsync_error_and_closes_descriptor(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    closed: list[int] = []
-    monkeypatch.setattr(os, "open", lambda *_args: 51)
-    monkeypatch.setattr(
-        os,
-        "fsync",
-        lambda _descriptor: (_ for _ in ()).throw(OSError(errno.EINVAL, "unsupported")),
-    )
-    monkeypatch.setattr(os, "close", closed.append)
-
-    PosixFilesystemAdapter().sync_parent_directory(tmp_path)
-
-    assert closed == [51]
-
-
-@pytest.mark.parametrize("operation", ("open", "fsync", "close"))
-def test_posix_parent_sync_propagates_real_io_errors(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    operation: str,
-) -> None:
-    if operation == "open":
-        monkeypatch.setattr(
-            os,
-            "open",
-            lambda *_args: (_ for _ in ()).throw(OSError(errno.EACCES, "denied")),
-        )
+    monkeypatch.setattr(os, "fsync", failed_sync)
+    if error_number == errno.EINVAL:
+        HOST_FILESYSTEM.sync_file(51)
     else:
-        monkeypatch.setattr(os, "open", lambda *_args: 52)
-        monkeypatch.setattr(os, "fsync", lambda _descriptor: None)
-        monkeypatch.setattr(os, "close", lambda _descriptor: None)
-        monkeypatch.setattr(
-            os,
-            operation,
-            lambda _descriptor: (_ for _ in ()).throw(OSError(errno.EIO, "io failure")),
-        )
-
-    with pytest.raises(OSError) as error:
-        PosixFilesystemAdapter().sync_parent_directory(tmp_path)
-
-    assert error.value.errno in {errno.EACCES, errno.EIO}
-
-
-def test_posix_parent_sync_failure_surfaces_after_complete_atomic_replacement(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = tmp_path / "state.txt"
-    target.write_bytes(b"old")
-    original_open = os.open
-
-    def reject_parent_open(
-        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-        flags: int,
-        mode: int = 0o777,
-    ) -> int:
-        if Path(os.fsdecode(path)) == tmp_path:
-            raise OSError(errno.EIO, "injected directory open failure")
-        return original_open(path, flags, mode)
-
-    monkeypatch.setattr(os, "open", reject_parent_open)
-
-    with pytest.raises(OSError, match="injected directory open failure"):
-        POSIX_HOST_FILESYSTEM.atomic_replace_text(target, "complete\n")
-
-    assert target.read_bytes() == b"complete\n"
-    assert tuple(tmp_path.iterdir()) == (target,)
+        with pytest.raises(OSError) as error:
+            HOST_FILESYSTEM.sync_file(51)
+        assert error.value.errno == error_number

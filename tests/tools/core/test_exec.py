@@ -10,8 +10,12 @@ import pytest
 
 from myclaw.agent.tools import base as tool_base_module
 from myclaw.agent.tools.core.exec import ExecTool
-from myclaw.agent.tools.core.exec_host import BashExecHost, ExecProcessSpec, resolve_exec_shell
-from myclaw.agent.tools.core.exec_policy import ExecAssessment, ExecOutcome
+from myclaw.agent.tools.core.exec_host import (
+    ExecProcessSpec,
+    PowerShellExecHost,
+    resolve_exec_shell,
+)
+from myclaw.agent.tools.core.exec_policy import ExecAssessment, ExecOutcome, assess_command
 from myclaw.agent.tools.network_safety import DNSResolver
 from myclaw.agent.tools.tool_gateway import (
     ConfirmationDecision,
@@ -106,19 +110,26 @@ def _gateway(
     resolver: DNSResolver | None = None,
     confirmation: ConfirmationRequester | None = None,
 ) -> SingleToolGateway:
-    tool = ExecTool(workspace=workspace, resolver=resolver, host=_bash_host())
+    tool = ExecTool(workspace=workspace, resolver=resolver, host=_powershell_host())
     return SingleToolGateway((tool,), confirmation=confirmation)
 
 
-def _bash_host() -> BashExecHost:
-    return BashExecHost(
+class InspectedPowerShellHost(PowerShellExecHost):
+    """Supply parser facts while exercising real process cleanup and output handling."""
+
+    async def inspect(self, command: str, cwd: Path) -> ExecAssessment:
+        return assess_command(command, family="pwsh", syntax_confidence="high", syntax_uncertain=False)
+
+
+def _powershell_host() -> PowerShellExecHost:
+    return InspectedPowerShellHost(
         resolve_exec_shell(
-            "auto",
-            platform="posix",
-            which=lambda name: "/usr/bin/bash" if name == "bash" else None,
+            "pwsh",
+            platform="windows",
+            which=lambda name: r"C:\PowerShell\pwsh.exe" if name == "pwsh" else None,
+            version_probe=lambda *_: (7, 5),
         )
     )
-
 
 def _fake_process_factory(
     monkeypatch: pytest.MonkeyPatch,
@@ -171,7 +182,7 @@ def test_exec_schema_declares_host_shell_command_cwd_and_timeout(workspace: Path
 
 
 @pytest.mark.asyncio
-async def test_exec_starts_a_no_profile_bash_with_minimal_environment_and_captured_streams(
+async def test_exec_starts_a_no_profile_powershell_with_minimal_environment_and_captured_streams(
     monkeypatch: pytest.MonkeyPatch,
     workspace: Path,
 ) -> None:
@@ -180,10 +191,10 @@ async def test_exec_starts_a_no_profile_bash_with_minimal_environment_and_captur
     process = FakeProcess(stdout=b"out\n", stderr=b"err\n")
     calls = _fake_process_factory(monkeypatch, process)
     gateway = _gateway(workspace)
-    command = "printf output"
+    command = "Write-Output output"
 
     result = await gateway.call(_call({"command": command, "cwd": "nested", "timeout": 1}))
-    default_cwd_result = await gateway.call(_call({"command": "pwd"}, call_id="default-cwd"))
+    default_cwd_result = await gateway.call(_call({"command": "Get-Location"}, call_id="default-cwd"))
 
     assert result.status == "success"
     assert default_cwd_result.status == "success"
@@ -191,7 +202,8 @@ async def test_exec_starts_a_no_profile_bash_with_minimal_environment_and_captur
     assert "stdout:\nout\n" in result.content
     assert "stderr:\nerr\n" in result.content
     argv, options = calls[0]
-    assert argv == ("/usr/bin/bash", "--noprofile", "--norc", "-c", command)
+    assert argv[:5] == (r"C:\PowerShell\pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command")
+    assert command in argv[5]
     assert options["cwd"] == os.fspath(nested.resolve())
     assert options["stdin"] is asyncio.subprocess.DEVNULL
     assert options["stdout"] is asyncio.subprocess.PIPE
@@ -199,7 +211,7 @@ async def test_exec_starts_a_no_profile_bash_with_minimal_environment_and_captur
     environment = cast(dict[str, str], options["env"])
     expected_environment = {
         name: next(value for key, value in os.environ.items() if key.upper() == name)
-        for name in ("HOME", "LANG", "TERM", "PATH")
+        for name in ("HOME", "LANG", "TERM", "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "USERPROFILE")
         if any(key.upper() == name for key in os.environ)
     }
     assert environment == expected_environment
@@ -214,7 +226,7 @@ async def test_exec_keeps_nonzero_exit_success_and_replaces_invalid_utf8(
     process = FakeProcess(stdout=b"ok\xff\n", stderr=b"failed\xfe\n", returncode=23)
     _fake_process_factory(monkeypatch, process)
 
-    result = await _gateway(workspace).call(_call({"command": "printf output"}))
+    result = await _gateway(workspace).call(_call({"command": "Write-Output output"}))
 
     assert result.status == "success"
     assert "Exit code: 23" in result.content
@@ -245,7 +257,7 @@ async def test_exec_freezes_canonical_cwd_before_inspection_and_execution(
         return Path(requested)
 
     class Host:
-        resolved_shell = _bash_host().resolved_shell
+        resolved_shell = _powershell_host().resolved_shell
 
         async def inspect(self, command: str, cwd: Path) -> ExecAssessment:
             del command
@@ -263,7 +275,7 @@ async def test_exec_freezes_canonical_cwd_before_inspection_and_execution(
     monkeypatch.setattr(tool_base_module, "resolve_tool_path", drifting_resolution)
     gateway = SingleToolGateway((ExecTool(workspace=workspace, host=Host()),))
 
-    result = await gateway.call(_call({"command": "pwd"}))
+    result = await gateway.call(_call({"command": "Get-Location"}))
 
     assert result.status == "success"
     assert inspected == executed == [inside]
@@ -287,8 +299,8 @@ async def test_exec_rejects_blank_or_out_of_range_arguments_before_dns_or_spawn(
     gateway = _gateway(workspace, resolver=resolver)
 
     blank = await gateway.call(_call({"command": "  "}, call_id="blank"))
-    low = await gateway.call(_call({"command": "pwd", "timeout": 0}, call_id="low"))
-    high = await gateway.call(_call({"command": "pwd", "timeout": 601}, call_id="high"))
+    low = await gateway.call(_call({"command": "Get-Location", "timeout": 0}, call_id="low"))
+    high = await gateway.call(_call({"command": "Get-Location", "timeout": 601}, call_id="high"))
 
     assert blank.status == "error"
     assert low.status == "error"
@@ -498,7 +510,7 @@ async def test_exec_requests_confirmation_for_external_working_directory(
         return "approved"
 
     result = await _gateway(workspace, confirmation=confirm).call(
-        _call({"command": "pwd", "cwd": str(outside)}, call_id="external-cwd")
+        _call({"command": "Get-Location", "cwd": str(outside)}, call_id="external-cwd")
     )
 
     assert result.status == "success"
@@ -508,7 +520,7 @@ async def test_exec_requests_confirmation_for_external_working_directory(
 
 
 @pytest.mark.asyncio
-async def test_exec_timeout_kills_direct_bash_and_returns_partial_streams(
+async def test_exec_timeout_kills_direct_powershell_and_returns_partial_streams(
     monkeypatch: pytest.MonkeyPatch,
     workspace: Path,
 ) -> None:
@@ -516,7 +528,7 @@ async def test_exec_timeout_kills_direct_bash_and_returns_partial_streams(
     _fake_process_factory(monkeypatch, process)
 
     result = await _gateway(workspace).call(
-        _call({"command": "sleep 60", "timeout": 1}, call_id="timeout")
+        _call({"command": "Start-Sleep -Seconds 60", "timeout": 1}, call_id="timeout")
     )
 
     assert result.status == "error"
@@ -536,7 +548,7 @@ async def test_exec_cancellation_kills_and_reaps_before_propagating(
     process = BlockingProcess()
     _fake_process_factory(monkeypatch, process)
     execution = asyncio.create_task(
-        _gateway(workspace).call(_call({"command": "sleep 60"}, call_id="cancel"))
+        _gateway(workspace).call(_call({"command": "Start-Sleep -Seconds 60"}, call_id="cancel"))
     )
     await process.started.wait()
 
@@ -565,7 +577,7 @@ async def test_exec_cancellation_during_spawn_cleans_up_the_created_process(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
     execution = asyncio.create_task(
-        _gateway(workspace).call(_call({"command": "sleep 60"}, call_id="spawn-cancel"))
+        _gateway(workspace).call(_call({"command": "Start-Sleep -Seconds 60"}, call_id="spawn-cancel"))
     )
     await spawn_started.wait()
     execution.cancel()
@@ -599,7 +611,7 @@ async def test_exec_cancellation_during_spawn_propagates_with_bounded_late_clean
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
     execution = asyncio.create_task(
-        _gateway(workspace).call(_call({"command": "sleep 60"}, call_id="bounded-cancel"))
+        _gateway(workspace).call(_call({"command": "Start-Sleep -Seconds 60"}, call_id="bounded-cancel"))
     )
     await spawn_started.wait()
 
@@ -622,7 +634,7 @@ async def test_exec_cancellation_during_timeout_cleanup_finishes_cleanup_before_
     process = TimeoutThenSlowReapProcess()
     _fake_process_factory(monkeypatch, process)
     execution = asyncio.create_task(
-        _gateway(workspace).call(_call({"command": "sleep 60"}, call_id="cleanup-cancel"))
+        _gateway(workspace).call(_call({"command": "Start-Sleep -Seconds 60"}, call_id="cleanup-cancel"))
     )
     await process.reap_started.wait()
 
@@ -645,7 +657,7 @@ async def test_exec_output_uses_prefix_truncation_at_4000_characters(
     process = FakeProcess(stdout=b"x" * 5000)
     _fake_process_factory(monkeypatch, process)
 
-    result = await _gateway(workspace).call(_call({"command": "yes"}))
+    result = await _gateway(workspace).call(_call({"command": "Write-Output many"}))
 
     assert result.status == "success"
     assert len(result.content) <= 4000
@@ -660,11 +672,11 @@ async def test_exec_launch_failure_is_a_tool_error(
 ) -> None:
     async def fail_to_spawn(*command: str, **kwargs: object) -> FakeProcess:
         del command, kwargs
-        raise OSError("BASH_START_FAILURE")
+        raise OSError("POWERSHELL_START_FAILURE")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_to_spawn)
 
-    result = await _gateway(workspace).call(_call({"command": "pwd"}))
+    result = await _gateway(workspace).call(_call({"command": "Get-Location"}))
 
     assert result.status == "error"
-    assert "BASH_START_FAILURE" in result.content
+    assert "POWERSHELL_START_FAILURE" in result.content

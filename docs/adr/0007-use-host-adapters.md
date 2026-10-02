@@ -2,8 +2,10 @@
 status: accepted
 ---
 
-# Use Host Adapters for Portable Runtime Behavior
+# Use Windows Runtime and Filesystem Boundaries
 
-MyClaw has no supported-platform gate. Windows selects native Windows filesystem behavior, while other hosts attempt the POSIX filesystem behavior and fail at the operation that needs an unavailable capability. Native path conversion, object and redirection checks, containment, atomic replacement, and host-appropriate synchronization are concentrated in the host filesystem module.
+MyClaw runs only on Windows. Application, service, and validation entry points reject other operating systems before creating runtime state. The check occurs at execution time, so module discovery, static analysis, and package builds can import modules without starting the application.
 
-Exec uses the process-lifetime PowerShell or Bash Host Adapter selected and owned as defined by [ADR-0010](0010-fixed-tool-catalog-and-base-tool-boundaries.md). That decision supersedes this ADR's former direct-Bash-only clause. Packaging emits one `py3-none-any` wheel; Windows x64 is currently validated, macOS Intel and Apple Silicon remain intended but unverified, and no formal support claim is made for other POSIX hosts.
+The host filesystem module retains its public persistence interface and always uses the Windows adapter. Native path conversion, UNC and extended paths, case-insensitive containment, reserved names, alternate streams, hard links, junction/reparse checks, atomic replacement, cross-process locks, ACL protection, and handle-pinned deletion remain concentrated behind this boundary. Session Restore uses the same synchronization boundary and retains existing Windows persistence behavior and schemas.
+
+Exec uses the process-lifetime PowerShell Host defined in [ADR-0010](0010-fixed-tool-catalog-and-base-tool-boundaries.md), retaining Windows PowerShell 5.1 and PowerShell 7. The package is pure Python and emits one `py3-none-any` wheel; that packaging tag does not widen the runtime support contract. Windows x64 is currently validated; this decision adds no CPU architecture commitment. Release acceptance requires both real PowerShell hosts and the complete Windows filesystem and application scenarios.

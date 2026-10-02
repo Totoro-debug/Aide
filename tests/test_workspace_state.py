@@ -1,5 +1,4 @@
 import importlib.util
-import os
 import shutil
 import subprocess
 from pathlib import Path, PurePath, PureWindowsPath
@@ -15,7 +14,6 @@ from myclaw.agent.workspace_state import (
 EXPECTED_MEMORY = (
     "# Long-term Memory\n\n## User Info\n\n## User Preference\n\n## Project Fact\n\n## Lesson\n"
 )
-windows_only = pytest.mark.skipif(os.name != "nt", reason="requires native Windows paths")
 
 
 def state_for(workspace: Path) -> WorkspaceState:
@@ -51,21 +49,18 @@ def test_normalized_workspace_path_uses_the_current_hosts_native_path_type(
     assert type(normalized) is type(Path())
 
 
-@windows_only
 def test_windows_drive_workspace_path_has_the_accepted_identity() -> None:
     normalized = normalize_workspace_path(PureWindowsPath(r"D:\desktop\project\Demo-one"))
 
     assert normalized == Path(r"D:\desktop\project\Demo-one")
 
 
-@windows_only
 def test_unc_workspace_path_has_the_accepted_identity() -> None:
     normalized = normalize_workspace_path(PureWindowsPath(r"\\server\share\Demo-one"))
 
     assert normalized == Path(r"\\server\share\Demo-one")
 
 
-@windows_only
 def test_windows_workspace_path_is_lexically_normalized() -> None:
     normalized = normalize_workspace_path(
         PureWindowsPath(r"D:\desktop\project\discarded\..\current")
@@ -74,7 +69,6 @@ def test_windows_workspace_path_is_lexically_normalized() -> None:
     assert normalized == Path(r"D:\desktop\project\current")
 
 
-@windows_only
 def test_relative_pure_windows_workspace_path_is_rejected() -> None:
     with pytest.raises(ValueError, match="absolute"):
         normalize_workspace_path(PureWindowsPath(r"project\subdirectory"))
@@ -146,7 +140,6 @@ def test_initialization_rejects_workspace_beneath_agent_home_without_reading_leg
     assert {path: path.read_bytes() for path in legacy_files} == legacy_files
 
 
-@windows_only
 def test_initialization_rejects_case_and_junction_aliases_of_agent_home(
     agent_home: Path,
     tmp_path: Path,
@@ -251,7 +244,6 @@ def test_initialization_rejects_non_directory_root(
     assert root.read_text(encoding="utf-8") == "collision"
 
 
-@windows_only
 def test_initialization_rejects_junction_root(
     agent_home: Path,
     workspace: Path,
@@ -270,7 +262,6 @@ def test_initialization_rejects_junction_root(
     assert not (target / "memory").exists()
 
 
-@windows_only
 def test_initialization_rejects_external_memory_directory_alias(
     workspace: Path,
 ) -> None:
@@ -287,7 +278,6 @@ def test_initialization_rejects_external_memory_directory_alias(
     assert not (outside / "memory.md").exists()
 
 
-@windows_only
 def test_initialization_rejects_external_sessions_directory_alias(
     workspace: Path,
 ) -> None:

@@ -24,8 +24,6 @@ from myclaw.agent.tools.core.exec_policy import (
     ExecGrammarClassification,
     ExecPathAccess,
     ResolvedExecShell,
-    bash_recursive_forced_delete_targets,
-    classify_bash_command,
     classify_powershell_command,
 )
 from myclaw.utils.host_filesystem import host_path_is_within
@@ -598,24 +596,6 @@ def _classify_exec_invocation(
             "Exec shell facts are incomplete.",
             exec_assessment=assessment,
         )
-    if shell.family == "bash":
-        if context.level is None:
-            path_decision, path_reason = _classify_exec_paths(
-                assessment.file_accesses,
-                facts=facts,
-                context=context,
-            )
-            if path_decision == "confirm":
-                return _DecisionAuthorizationSession(
-                    "confirm",
-                    path_reason,
-                    exec_assessment=assessment,
-                )
-            return _DecisionAuthorizationSession("direct", exec_assessment=assessment)
-        return _classify_bash_invocation(facts, context)
-    if shell.family not in {"powershell", "pwsh"}:
-        return _DecisionAuthorizationSession("direct", exec_assessment=assessment)
-
     if context.level == "full-access":
         return _DecisionAuthorizationSession("direct", exec_assessment=assessment)
 
@@ -682,104 +662,6 @@ def _classify_exec_grammar_result(
             exec_assessment=assessment,
         )
     return _DecisionAuthorizationSession("direct", exec_assessment=assessment)
-
-
-def _classify_bash_invocation(
-    facts: ToolInvocationFacts,
-    context: PermissionContext,
-) -> ToolAuthorizationSession:
-    assessment = facts.exec_assessment
-    if assessment is None:
-        return _DecisionAuthorizationSession(
-            "confirm",
-            "Exec command facts are incomplete.",
-            exec_assessment=assessment,
-        )
-    command = facts.normalized_arguments.get("command")
-    if not isinstance(command, str):
-        return _DecisionAuthorizationSession(
-            "confirm",
-            "Exec command facts are incomplete.",
-            exec_assessment=assessment,
-        )
-    if _bash_deletes_workspace_root(command, facts=facts, context=context):
-        return _DecisionAuthorizationSession(
-            "confirm",
-            EXEC_CATASTROPHIC_REASON,
-            exec_assessment=assessment,
-        )
-    if context.level == "full-access":
-        return _DecisionAuthorizationSession("direct", exec_assessment=assessment)
-
-    workspace_root = context.workspace_root
-    if workspace_root is None:
-        return _DecisionAuthorizationSession(
-            "confirm",
-            "Exec Workspace facts are incomplete.",
-            exec_assessment=assessment,
-        )
-    if any(
-        _is_workspace_bash_identity(identity, workspace_root)
-        for identity in assessment.command_identities
-    ):
-        return _DecisionAuthorizationSession(
-            "confirm",
-            "The Bash executable resolves inside the Workspace and requires confirmation.",
-            exec_assessment=assessment,
-        )
-
-    grammar = classify_bash_command(command, assessment)
-    return _classify_exec_grammar_result(
-        grammar,
-        facts=facts,
-        context=context,
-        assessment=assessment,
-    )
-
-
-def _bash_deletes_workspace_root(
-    command: str,
-    *,
-    facts: ToolInvocationFacts,
-    context: PermissionContext,
-) -> bool:
-    workspace_root = context.workspace_root
-    cwd = facts.normalized_arguments.get("cwd")
-    if workspace_root is None or not isinstance(cwd, str):
-        return False
-    base = Path(cwd)
-    for target in bash_recursive_forced_delete_targets(command):
-        try:
-            access = canonicalize_file_access(
-                workspace=workspace_root,
-                base=base,
-                requested=target,
-                role="write",
-            )
-        except (OSError, RuntimeError, ValueError):
-            continue
-        if host_path_is_within(
-            access.path,
-            access.workspace_root,
-        ) and host_path_is_within(access.workspace_root, access.path):
-            return True
-    return False
-
-
-def _is_workspace_bash_identity(identity: object, workspace_root: Path) -> bool:
-    if getattr(identity, "kind", None) == "workspace":
-        return True
-    if getattr(identity, "kind", None) != "native":
-        return False
-    resolved = getattr(identity, "resolved", None)
-    if not isinstance(resolved, str) or not os.path.isabs(resolved):
-        return True
-    try:
-        canonical = Path(resolved).resolve(strict=False)
-        root = workspace_root.resolve(strict=True)
-    except (OSError, RuntimeError, ValueError):
-        return True
-    return host_path_is_within(canonical, root)
 
 
 def _is_workspace_git_identity(identity: object, workspace_root: Path) -> bool:

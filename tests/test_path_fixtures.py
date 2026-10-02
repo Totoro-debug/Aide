@@ -1,4 +1,3 @@
-import os
 import subprocess
 from pathlib import Path
 
@@ -26,15 +25,12 @@ def test_workspace_fixture_preserves_lexical_directory_alias(tmp_path: Path) -> 
     target = tmp_path / "workspace-target"
     target.mkdir()
     alias = tmp_path / "workspace-alias"
-    if os.name == "nt":
-        subprocess.run(
-            ("cmd", "/c", "mklink", "/J", str(alias), str(target)),
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    else:
-        alias.symlink_to(target, target_is_directory=True)
+    subprocess.run(
+        ("cmd", "/c", "mklink", "/J", str(alias), str(target)),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
     workspace = create_workspace(alias)
 

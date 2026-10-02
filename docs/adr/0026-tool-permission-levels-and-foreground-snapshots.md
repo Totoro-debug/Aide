@@ -38,29 +38,11 @@ call-local; it is never cached in a shared Tool instance.
 The foreground Runtime Context and the foreground run Gateway receive the
 same snapshot object. Runtime Context reports the permission level, resolved
 Exec Shell family, and that permission checks may require confirmation. The
-Gateway uses the snapshot for File policy and the strict PowerShell and Bash
+Gateway uses the snapshot for File policy and the strict PowerShell
 Exec policies described below; Web Search remains direct and Web Fetch uses
 the execution-time per-hop authorization described below.
 
 ## Exec Permission Mapping
-
-For POSIX Bash, Read-Only and Workspace-Write direct execution is limited to
-the fixed read candidates (`pwd`, `ls`, `cat`, `head`, `tail`, `wc`, `stat`,
-`file`, `grep`, `rg`, `find`, `sort`, `uniq`, `cut`, and `diff`) and write
-candidates (`mkdir`, `touch`, `cp`, `mv`, and `rm`) recorded in ADR-0010. The
-Host returns AST dynamic-construct facts, native PATH identity, and static
-path-role facts. Only the approved `pwd` builtin and one matching PATH entry
-for a native executable outside the Workspace can be direct. A symlink in that
-entry's parent directory alone does not change a one-hit identity. Repeated
-PATH entries, two entries where one directory symlinks to the other, and two
-distinct executable targets are ambiguous and require one confirmation, even
-when the hits resolve to the same target. A final-component executable symlink
-is a shim and requires one confirmation even with one hit. Aliases, functions,
-scripts, other shims, unknown identities, dynamic syntax, unlisted options,
-follow/watch modes, external preprocessors, `find` actions, and unsafe
-pipelines also require one confirmation. Full-Access
-directly executes parseable non-catastrophic dynamic Bash commands while
-retaining catastrophic and inspector-uncertain confirmation.
 
 Exec inspection is a detached Host fact collection that happens after
 argument normalization and before authorization. A missing selected shell is
@@ -104,7 +86,7 @@ The selector reports the current level and leaves it unchanged when the same
 level is submitted. An upgrade to `full-access` opens a warning with Cancel
 focused by default on every attempt. Full-Access removes ordinary permission
 confirmation for foreground File Tools, parseable non-catastrophic
-PowerShell or Bash Exec calls, and MCP Tool invocations; it is not an
+PowerShell Exec calls, and MCP Tool invocations; it is not an
 operating-system sandbox and does not bypass validation, capability checks,
 business refusals, catastrophic or uncertain Exec confirmation, or Tool
 errors. Web Search is direct at every level. Web Fetch uses the per-hop
@@ -225,7 +207,7 @@ section above. Foreground MCP invocation authorization requires
 lower levels to confirm every call while Full-Access calls directly; neither
 path changes ordinary MCP hard-error behavior.
 It does not provide an operating-system sandbox. Full-Access removes ordinary
-foreground File and parseable non-catastrophic PowerShell or Bash Exec
+foreground File and parseable non-catastrophic PowerShell Exec
 permission confirmation; validation, capability checks, business refusals, catastrophic
 or uncertain Exec confirmation, and Tool errors remain enforced. Web Search
 remains direct; Web Fetch applies the per-hop rules above. User Schedule MCP
@@ -235,7 +217,7 @@ Full-Access calls directly.
 The existing Skill Loader remains responsible for its own internal reads, and
 ADR-0016 no longer defines a confirmation-free boundary for model-issued
 `read_file` calls. Exec uses the same structured, detached authorization facts
-for its PowerShell and Bash policies. Calls without a foreground permission
+for its PowerShell policies. Calls without a foreground permission
 snapshot use explicit origin and fact-based policy decisions; they do not enter
 an alternate Tool authorization path.
 

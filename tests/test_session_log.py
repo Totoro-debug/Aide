@@ -13,8 +13,6 @@ from loguru import logger
 from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.logging.session import session_log, without_session_log
 
-windows_only = pytest.mark.skipif(os.name != "nt", reason="requires native Windows paths")
-
 
 def _session_id() -> str:
     return f"20260802-120000-000000_{uuid4()}"
@@ -191,7 +189,6 @@ def test_session_log_directory_failure_isolated_and_retried(
     assert "second" in (state.logs_directory / f"{session_id}.log").read_text(encoding="utf-8")
 
 
-@windows_only
 def test_session_log_rejects_a_junction_logs_directory_without_stopping_work(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -378,7 +375,6 @@ def test_session_log_rotation_failure_does_not_stop_work(
     assert active.read_bytes() == original
 
 
-@windows_only
 def test_session_log_preserves_windows_acl_inheritance(tmp_path: Path) -> None:
     state = _state(tmp_path)
     state.path.mkdir(parents=True)

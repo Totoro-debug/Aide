@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
@@ -360,8 +359,6 @@ async def test_grep_preserves_file_link_paths(workspace: Path) -> None:
     try:
         link.symlink_to(workspace / "visible.py")
     except (OSError, NotImplementedError) as error:
-        if os.name != "nt":
-            pytest.skip(f"file links unavailable: {error}")
         pytest.skip(f"file links unavailable: {error}")
 
     gateway = _gateway(GrepTool(workspace=workspace))

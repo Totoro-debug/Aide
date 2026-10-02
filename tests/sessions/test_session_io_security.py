@@ -1,5 +1,4 @@
 import asyncio
-import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -51,15 +50,12 @@ def _session(state: WorkspaceState) -> Session:
 
 
 def _create_directory_alias(alias: Path, target: Path) -> None:
-    if os.name == "nt":
-        subprocess.run(
-            ("cmd", "/c", "mklink", "/J", str(alias), str(target)),
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return
-    alias.symlink_to(target, target_is_directory=True)
+    subprocess.run(
+        ("cmd", "/c", "mklink", "/J", str(alias), str(target)),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _create_file_alias(alias: Path, target: Path, kind: str) -> None:

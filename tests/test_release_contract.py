@@ -272,12 +272,12 @@ def test_distribution_directly_declares_host_timezone_discovery() -> None:
     assert "tzlocal>=5,<6" in project["dependencies"]
 
 
-def test_distribution_metadata_builds_one_host_neutral_wheel() -> None:
+def test_distribution_metadata_builds_one_windows_runtime_wheel() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
 
     assert project["scripts"]["myclaw"] == "myclaw.terminal.process_entry:run"
     assert "Operating System :: OS Independent" not in project["classifiers"]
-    assert "Operating System :: Microsoft :: Windows" not in project["classifiers"]
+    assert "Operating System :: Microsoft :: Windows" in project["classifiers"]
     setup_path = ROOT / "setup.cfg"
     setup = setup_path.read_text(encoding="utf-8") if setup_path.exists() else ""
     assert "plat_name" not in setup
@@ -409,7 +409,7 @@ def test_application_modules_do_not_depend_on_standard_library_logging() -> None
     assert violations == []
 
 
-def test_active_support_contract_matches_host_neutral_release_evidence() -> None:
+def test_active_support_contract_matches_windows_release_evidence() -> None:
     decision_path = ROOT / "docs" / "adr" / "0007-use-host-adapters.md"
     assert decision_path.exists()
     decision = decision_path.read_text(encoding="utf-8").lower()
@@ -423,10 +423,10 @@ def test_active_support_contract_matches_host_neutral_release_evidence() -> None
         "py3-none-any",
         "windows x64",
         "currently validated",
-        "macos intel",
-        "apple silicon",
-        "unverified",
-        "no supported-platform gate",
+        "runs only on windows",
+        "reject other operating systems",
+        "windows powershell 5.1",
+        "powershell 7",
     ):
         assert claim in decision
 

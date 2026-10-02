@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 const source = resolve(process.cwd(), "dist");
 const target = resolve(process.cwd(), "../myclaw/web_assets");
 const projectRoot = resolve(process.cwd(), "..");
-const python = process.env.PYTHON || (process.platform === "win32" ? "python" : "python3");
+const python = process.env.PYTHON || "python";
 const validator = join(projectRoot, "scripts", "validate_web_assets.py");
 const staging = await mkdtemp(join(dirname(target), ".web-assets-staging-"));
 const previous = `${staging}-previous`;

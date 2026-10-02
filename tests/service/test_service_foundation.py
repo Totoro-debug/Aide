@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import subprocess
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -118,7 +117,6 @@ def test_project_catalog_deduplicates_a_native_directory_alias(tmp_path: Path) -
     assert len(catalog.list()) == 1
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows junction only")
 def test_project_catalog_deduplicates_a_windows_junction(tmp_path: Path) -> None:
     home = AgentHome(tmp_path / "agent-home")
     project = tmp_path / "project"

@@ -12,7 +12,6 @@ import pytest
 from myclaw.agent.tools.core.exec import ExecTool
 from myclaw.agent.tools.core.exec_host import (
     EXEC_CAPABILITY_ERROR,
-    BashExecHost,
     ExecProcessSpec,
     PowerShellExecHost,
     create_exec_host,
@@ -143,15 +142,6 @@ def _version(
             None,
             False,
         ),
-        (
-            "posix",
-            "pwsh",
-            {"bash": "/usr/bin/bash"},
-            {},
-            "bash",
-            "/usr/bin/bash",
-            True,
-        ),
     ),
 )
 def test_resolve_exec_shell_covers_platform_and_fallback_contract(
@@ -168,7 +158,7 @@ def test_resolve_exec_shell_covers_platform_and_fallback_contract(
         platform=platform,
         which=_which(paths),
         version_probe=_version(versions),
-        environment={"PATH": r"C:\secret\path"} if platform == "windows" else {"PATH": "/safe"},
+        environment={"PATH": r"C:\secret\path"},
     )
 
     assert resolved.family == family
@@ -258,18 +248,11 @@ def test_minimal_environment_is_platform_aware() -> None:
         version_probe=_version({r"C:\PowerShell\pwsh.exe": (7, 5)}),
         environment=source,
     )
-    posix = resolve_exec_shell(
-        "auto",
-        platform="posix",
-        which=_which({"bash": "/usr/bin/bash"}),
-        environment=source,
-    )
 
     assert windows.env["PATHEXT"] == ".COM;.EXE;.BAT;.CMD"
     assert windows.env["SYSTEMROOT"] == r"C:\Windows"
     assert windows.env["USERPROFILE"] == r"C:\Users\person"
     assert "PSMODULEPATH" not in windows.env
-    assert posix.env == {"HOME": r"C:\Users\person", "PATH": r"C:\Tools"}
 
 
 def test_unavailable_exec_host_is_cataloguable_but_fails_at_tool_call(
@@ -307,29 +290,6 @@ async def test_missing_shell_is_a_capability_error_without_confirmation(tmp_path
     assert result.status == "error"
     assert result.content == EXEC_CAPABILITY_ERROR
     assert result.confirmation is None
-
-
-@pytest.mark.asyncio
-async def test_bash_parse_only_inspection_does_not_execute_input(tmp_path: Path) -> None:
-    sentinel = tmp_path / "sentinel.txt"
-    host = BashExecHost(
-        resolve_exec_shell(
-            "auto",
-            platform="posix",
-            which=_which({"bash": "/usr/bin/bash"}),
-            version_probe=_version({}),
-            environment={"PATH": "/safe"},
-        )
-    )
-
-    assessment = await host.inspect(
-        f"value=$(touch {sentinel}); echo $value; touch {sentinel}",
-        tmp_path,
-    )
-
-    assert assessment.syntax_uncertain is False
-    assert assessment.dynamic_constructs
-    assert not sentinel.exists()
 
 
 @pytest.mark.asyncio
@@ -638,14 +598,14 @@ def test_catastrophic_matcher_ignores_safe_or_scoped_lookalikes(command: str) ->
     assert catastrophic_matches(command) == ()
 
 
-def test_assessment_has_typed_cross_host_boundary() -> None:
+def test_assessment_has_typed_host_boundary() -> None:
     assessment = ExecAssessment(
         syntax_confidence="high",
         syntax_uncertain=False,
-        command_identities=(ExecCommandIdentity(requested="pwd", resolved="/usr/bin/pwd"),),
+        command_identities=(ExecCommandIdentity(requested="pwd", resolved=r"C:\Tools\pwd.exe"),),
     )
 
-    assert assessment.command_identities[0].resolved == "/usr/bin/pwd"
+    assert assessment.command_identities[0].resolved == r"C:\Tools\pwd.exe"
     assert assessment.file_accesses == ()
     assert assessment.network_targets == ()
     assert assessment.catastrophic_matches == ()
@@ -656,10 +616,10 @@ async def test_host_returns_raw_outcome_and_gateway_constructs_tool_result(tmp_p
     class Host:
         resolved_shell = resolve_exec_shell(
             "auto",
-            platform="posix",
-            which=_which({"bash": "/usr/bin/bash"}),
-            version_probe=_version({}),
-            environment={"PATH": "/safe"},
+            platform="windows",
+            which=_which({"pwsh": r"C:\PowerShell\pwsh.exe"}),
+            version_probe=_version({r"C:\PowerShell\pwsh.exe": (7, 5)}),
+            environment={"PATH": r"C:\Tools"},
         )
 
         async def inspect(self, command: str, cwd: Path) -> ExecAssessment:
@@ -678,7 +638,7 @@ async def test_host_returns_raw_outcome_and_gateway_constructs_tool_result(tmp_p
         ModelToolCall(
             id="raw-boundary",
             name="exec",
-            arguments='{"command":"printf raw"}',
+            arguments='{"command":"Write-Output raw"}',
         )
     )
 
@@ -691,17 +651,17 @@ async def test_host_returns_raw_outcome_and_gateway_constructs_tool_result(tmp_p
 def test_exec_process_spec_is_shared_between_inspection_and_execution(tmp_path: Path) -> None:
     resolved = resolve_exec_shell(
         "auto",
-        platform="posix",
-        which=_which({"bash": "/usr/bin/bash"}),
-        version_probe=_version({}),
-        environment={"PATH": "/safe"},
+        platform="windows",
+        which=_which({"pwsh": r"C:\PowerShell\pwsh.exe"}),
+        version_probe=_version({r"C:\PowerShell\pwsh.exe": (7, 5)}),
+        environment={"PATH": r"C:\Tools"},
     )
-    host = BashExecHost(resolved)
+    host = PowerShellExecHost(resolved)
 
     inspect_spec = host.process_spec(tmp_path)
     execute_spec = host.process_spec(tmp_path)
 
     assert isinstance(inspect_spec, ExecProcessSpec)
     assert inspect_spec == execute_spec
-    assert inspect_spec.executable == "/usr/bin/bash"
-    assert inspect_spec.flags == ("--noprofile", "--norc")
+    assert inspect_spec.executable == r"C:\PowerShell\pwsh.exe"
+    assert inspect_spec.flags == ("-NoLogo", "-NoProfile", "-NonInteractive")

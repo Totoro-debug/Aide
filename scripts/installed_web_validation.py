@@ -21,6 +21,7 @@ import aiohttp
 import web.scripts.e2e_service as fixture_service
 from myclaw.config.agent_home import AgentHome
 from myclaw.service.discovery import read_credential, read_discovery
+from myclaw.utils.platform import WINDOWS_REQUIRED_ERROR, is_windows_host
 from scripts.release_validation import (
     ROOT,
     _artifact_environment,
@@ -491,13 +492,9 @@ async def _run_installed_joint(
         scenario_root, config, environment
     )
     discovery_path = home.path / "service.json"
-    capture = scenario_root / ("capture-browser.cmd" if os.name == "nt" else "capture-browser.sh")
+    capture = scenario_root / "capture-browser.cmd"
     url_file = scenario_root / "browser-url.txt"
-    if os.name == "nt":
-        capture.write_text(f'@echo off\n>"{url_file}" echo %*\n', encoding="utf-8")
-    else:
-        capture.write_text('#!/bin/sh\nprintf "%s" "$1" > "$MYCLAW_CAPTURE_URL"\n')
-        capture.chmod(0o700)
+    capture.write_text(f'@echo off\n>"{url_file}" echo %*\n', encoding="utf-8")
     observation_path = scenario_root / "provider-observations.jsonl"
     observation_path.write_text("", encoding="utf-8")
     fixture_service.PROVIDER_OBSERVATION_PATH = observation_path
@@ -688,19 +685,15 @@ async def _run_installed_joint(
 async def validate_install(wheel: Path, root: Path, node: str) -> dict[str, object]:
     installed = await asyncio.to_thread(_smoke_installed_wheel, wheel, root)
     entry = str(installed["entry_point"])
-    python = Path(entry).parent / ("python.exe" if os.name == "nt" else "python")
+    python = Path(entry).parent / "python.exe"
     profile = root / "用户配置"
     home = profile / ".myclaw"
     home.mkdir(parents=True)
     workspace = root / "workspace"
     workspace.mkdir()
-    capture = root / ("capture-browser.cmd" if os.name == "nt" else "capture-browser.sh")
+    capture = root / "capture-browser.cmd"
     url_file = root / "browser-url.txt"
-    if os.name == "nt":
-        capture.write_text(f'@echo off\n>"{url_file}" echo %*\n', encoding="utf-8")
-    else:
-        capture.write_text('#!/bin/sh\nprintf "%s" "$1" > "$MYCLAW_CAPTURE_URL"\n')
-        capture.chmod(0o700)
+    capture.write_text(f'@echo off\n>"{url_file}" echo %*\n', encoding="utf-8")
     environment = {
         **_artifact_environment(),
         "USERPROFILE": str(profile),
@@ -1061,6 +1054,9 @@ async def validate(wheels: tuple[Path, Path], output: Path, node: str) -> None:
 
 
 def main() -> None:
+    if not is_windows_host():
+        print(WINDOWS_REQUIRED_ERROR, file=sys.stderr)
+        raise SystemExit(1)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()

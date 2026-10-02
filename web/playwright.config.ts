@@ -8,7 +8,7 @@ export default defineConfig({
   reporter: "list",
   globalSetup: "./scripts/e2e-setup.mjs",
   use: {
-    channel: process.env.MYCLAW_E2E_BROWSER_CHANNEL ?? (process.platform === "win32" ? "msedge" : undefined),
+    channel: process.env.MYCLAW_E2E_BROWSER_CHANNEL ?? "msedge",
     trace: "retain-on-failure",
     ...devices["Desktop Chrome"],
   },

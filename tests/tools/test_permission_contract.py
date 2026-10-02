@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +12,7 @@ from myclaw.agent.tools.base import BaseTool, ToolError
 from myclaw.agent.tools.core.exec_policy import (
     ExecAssessment,
     ExecCommandIdentity,
+    ExecShellSelector,
     ResolvedExecShell,
 )
 from myclaw.agent.tools.permission import (
@@ -417,7 +417,7 @@ def test_exec_network_confirmation_reason_uses_exec_subject(
     assert authorization.confirmation_reason() == expected_reason
 
 
-@pytest.mark.parametrize("shell_family", ["pwsh", "bash"])
+@pytest.mark.parametrize("shell_family", ["pwsh", "powershell"])
 @pytest.mark.parametrize(
     ("case", "level", "expected_decision", "expected_reason"),
     [
@@ -446,57 +446,31 @@ def test_exec_network_confirmation_reason_uses_exec_subject(
 )
 def test_exec_post_grammar_policy_preserves_shell_parity(
     tmp_path: Path,
-    shell_family: str,
+    shell_family: ExecShellSelector,
     case: str,
     level: ToolPermissionLevel,
     expected_decision: PermissionDecision,
     expected_reason: str | None,
 ) -> None:
-    if os.name != "nt" and shell_family == "pwsh" and case in {
-        "workspace_read",
-        "external_read",
-        "external_write_readonly",
-    }:
-        pytest.skip("requires native Windows PowerShell paths")
     (tmp_path / "inside.txt").write_text("inside", encoding="utf-8")
     (tmp_path.parent / "outside.txt").write_text("outside", encoding="utf-8")
     commands = {
-        "pwsh": {
-            "grammar_rejection": "Write-Host hello",
-            "workspace_read": r"Get-Content -LiteralPath .\inside.txt",
-            "readonly_write": r"Clear-Content -LiteralPath .\inside.txt",
-            "workspace_write": r"Clear-Content -LiteralPath .\inside.txt",
-            "external_read": r"Get-Content -LiteralPath ..\outside.txt",
-            "external_write_readonly": r"Clear-Content -LiteralPath ..\outside.txt",
-        },
-        "bash": {
-            "grammar_rejection": "printf hello",
-            "workspace_read": "cat ./inside.txt",
-            "readonly_write": "touch ./inside.txt",
-            "workspace_write": "touch ./inside.txt",
-            "external_read": "cat ../outside.txt",
-            "external_write_readonly": "touch ../outside.txt",
-        },
+        "grammar_rejection": "Write-Host hello",
+        "workspace_read": r"Get-Content -LiteralPath .\inside.txt",
+        "readonly_write": r"Clear-Content -LiteralPath .\inside.txt",
+        "workspace_write": r"Clear-Content -LiteralPath .\inside.txt",
+        "external_read": r"Get-Content -LiteralPath ..\outside.txt",
+        "external_write_readonly": r"Clear-Content -LiteralPath ..\outside.txt",
     }
-    command = commands[shell_family][case]
+    command = commands[case]
     command_name = command.split(maxsplit=1)[0]
-    identity = (
-        ExecCommandIdentity(
-            requested=command_name,
-            canonical=command_name,
-            resolved="Microsoft.PowerShell.Management",
-            module="Microsoft.PowerShell.Management",
-            kind="cmdlet",
-            resolution_count=1,
-        )
-        if shell_family == "pwsh"
-        else ExecCommandIdentity(
-            requested=command_name,
-            canonical=command_name,
-            resolved=str(tmp_path.parent / "bin" / command_name),
-            kind="native",
-            resolution_count=1,
-        )
+    identity = ExecCommandIdentity(
+        requested=command_name,
+        canonical=command_name,
+        resolved="Microsoft.PowerShell.Management",
+        module="Microsoft.PowerShell.Management",
+        kind="cmdlet",
+        resolution_count=1,
     )
     assessment = ExecAssessment(
         syntax_confidence="high",
@@ -504,10 +478,10 @@ def test_exec_post_grammar_policy_preserves_shell_parity(
         command_identities=(identity,),
     )
     shell = ResolvedExecShell(
-        selector="pwsh" if shell_family == "pwsh" else "auto",
-        platform="windows" if shell_family == "pwsh" else "posix",
-        family="pwsh" if shell_family == "pwsh" else "bash",
-        executable="pwsh" if shell_family == "pwsh" else "bash",
+        selector=shell_family,
+        platform="windows",
+        family="pwsh" if shell_family == "pwsh" else "powershell",
+        executable=shell_family,
         flags=(),
         environment=(),
         available=True,
@@ -529,11 +503,7 @@ def test_exec_post_grammar_policy_preserves_shell_parity(
     )
 
     if expected_reason is None:
-        expected_reason = (
-            "The PowerShell command is not on the fixed candidate list."
-            if shell_family == "pwsh"
-            else "The Bash command is not on the fixed candidate list."
-        )
+        expected_reason = "The PowerShell command is not on the fixed candidate list."
     assert authorization.initial_decision() == expected_decision
     assert authorization.confirmation_reason() == expected_reason
     assert authorization.exec_assessment == assessment

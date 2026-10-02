@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import string
 import subprocess
 from pathlib import Path
@@ -195,9 +194,8 @@ def _create_directory_link(link: Path, target: Path) -> None:
     try:
         link.symlink_to(target, target_is_directory=True)
         return
-    except (OSError, NotImplementedError) as error:
-        if os.name != "nt":
-            pytest.skip(f"directory symlinks unavailable: {error}")
+    except (OSError, NotImplementedError):
+        pass
     created = subprocess.run(
         ("cmd", "/c", "mklink", "/J", str(link), str(target)),
         capture_output=True,
@@ -473,7 +471,6 @@ async def test_linked_skill_root_and_missing_write_descendant_remain_external(
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(os.name != "nt", reason="Windows host path semantics")
 async def test_windows_path_case_uses_host_case_insensitive_containment(tmp_path: Path) -> None:
     workspace, _outside, workspace_file, _outside_file = _prepare_file_fixture(tmp_path)
     case_variant = Path(str(workspace_file).swapcase())
@@ -494,7 +491,6 @@ async def test_windows_path_case_uses_host_case_insensitive_containment(tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(os.name != "nt", reason="Windows drive semantics")
 async def test_windows_different_drive_is_external(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -524,7 +520,6 @@ async def test_windows_different_drive_is_external(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(os.name != "nt", reason="Windows UNC semantics")
 async def test_windows_reachable_unc_path_is_classified_by_real_host_semantics(
     tmp_path: Path,
 ) -> None:

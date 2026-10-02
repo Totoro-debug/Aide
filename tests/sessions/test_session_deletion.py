@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ctypes
 import json
-import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -74,14 +73,11 @@ async def test_deletion_marker_fences_load_and_recovery_removes_owned_data(
 
 
 def _directory_alias(alias: Path, target: Path) -> None:
-    if os.name == "nt":
-        subprocess.run(
-            ("cmd", "/c", "mklink", "/J", str(alias), str(target)),
-            check=True,
-            capture_output=True,
-        )
-    else:
-        alias.symlink_to(target, target_is_directory=True)
+    subprocess.run(
+        ("cmd", "/c", "mklink", "/J", str(alias), str(target)),
+        check=True,
+        capture_output=True,
+    )
 
 
 @pytest.mark.asyncio
@@ -120,7 +116,7 @@ async def test_deletion_rejects_directory_aliases_and_preserves_owned_history(
             assert (state.sessions_directory / f"{session_id}.jsonl").exists()
             assert session_deletion_pending(state, session_id)
     finally:
-        alias.rmdir() if os.name == "nt" else alias.unlink()
+        alias.rmdir()
 
 
 @pytest.mark.asyncio
@@ -174,7 +170,6 @@ async def test_corrupt_marker_never_deletes_data(tmp_path: Path, corruption: str
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(os.name != "nt", reason="Windows held-handle directory replacement")
 async def test_deletion_pins_ancestors_during_native_file_removal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -248,7 +243,7 @@ async def test_replacement_before_native_traversal_keeps_external_data(
         assert session_deletion_pending(state, session_id)
         assert (state.sessions_directory / f"{session_id}.jsonl").exists()
     finally:
-        artifact.rmdir() if os.name == "nt" else artifact.unlink()
+        artifact.rmdir()
 
 
 @pytest.mark.asyncio

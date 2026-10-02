@@ -253,11 +253,7 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
         )
     )
     streaming_request = "streaming markdown" in user_prompt.lower()
-    wait_command = (
-        "Get-Content -LiteralPath .\\fixture.txt -Wait"
-        if sys.platform == "win32"
-        else "tail -f fixture.txt"
-    )
+    wait_command = "Get-Content -LiteralPath .\\fixture.txt -Wait"
     if needs_tool_search:
         suffix = "v1" if model_mcp_barrier else "v2"
         chunks.append(
@@ -762,14 +758,11 @@ async def _run_e2e(provider_base_url: str) -> None:
         first_project.mkdir()
         second_project.mkdir()
         (first_project / "fixture.txt").write_text("fixture content\n", encoding="utf-8")
-        if sys.platform == "win32":
-            subprocess.run(
-                ["cmd", "/c", "mklink", "/J", str(project_alias), str(first_project)],
-                check=True,
-                capture_output=True,
-            )
-        else:
-            project_alias.symlink_to(first_project, target_is_directory=True)
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(project_alias), str(first_project)],
+            check=True,
+            capture_output=True,
+        )
         await _seed_schedule_job(home, first_project)
         await _seed_schedule_history(home, first_project)
         occupied_session_id = await _seed_session(

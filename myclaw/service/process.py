@@ -6,7 +6,7 @@ import argparse
 import asyncio
 import errno
 import os
-import signal
+import sys
 from collections.abc import Sequence
 from contextlib import suppress
 from pathlib import Path
@@ -31,6 +31,7 @@ from myclaw.service.discovery import (
 from myclaw.service.errors import ServiceError
 from myclaw.service.runtime import LocalService
 from myclaw.service.transport import create_app
+from myclaw.utils.platform import WINDOWS_REQUIRED_ERROR, is_windows_host
 
 
 async def serve_service(
@@ -91,7 +92,6 @@ async def serve_service(
                 pid=os.getpid(),
             )
             write_discovery(agent_home, discovery)
-        _install_signal_handlers(service)
         await service.wait_closed()
         assert discovery is not None
         return discovery
@@ -120,26 +120,6 @@ def _bound_port(site: web.TCPSite) -> int:
     return port
 
 
-def _install_signal_handlers(service: LocalService) -> None:
-    loop = asyncio.get_running_loop()
-    for signal_name in ("SIGINT", "SIGTERM"):
-        signal_value = getattr(signal, signal_name, None)
-        if signal_value is None:
-            continue
-        with suppress(NotImplementedError, RuntimeError):
-            loop.add_signal_handler(signal_value, _schedule_stop, service)
-
-
-def _schedule_stop(service: LocalService) -> None:
-    task = asyncio.create_task(service.stop())
-    task.add_done_callback(_consume_task_result)
-
-
-def _consume_task_result(task: asyncio.Task[object]) -> None:
-    with suppress(BaseException):
-        task.exception()
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the MyClaw local service.")
     parser.add_argument("--agent-home", type=Path, required=True)
@@ -150,6 +130,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run(argv: Sequence[str] | None = None) -> int:
+    if not is_windows_host():
+        print(WINDOWS_REQUIRED_ERROR, file=sys.stderr)
+        return 1
     args = build_parser().parse_args(argv)
     try:
         asyncio.run(

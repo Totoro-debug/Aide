@@ -9,6 +9,11 @@ import { chromium, expect } from "@playwright/test";
 import setup from "./e2e-setup.mjs";
 import settingsAcceptance, { settingsConfirmationAcceptance, settingsModelMcpAcceptance } from "./settings-e2e.mjs";
 
+if (process.platform !== "win32") {
+  console.error("MyClaw requires Windows.");
+  process.exit(1);
+}
+
 const viewports = [
   { width: 1440, height: 900 },
   { width: 1024, height: 768 },
@@ -32,7 +37,7 @@ async function shutdownControl() {
 try {
   control = await setup();
   browser = await chromium.launch({
-    channel: process.env.MYCLAW_E2E_BROWSER_CHANNEL ?? (process.platform === "win32" ? "msedge" : undefined),
+    channel: process.env.MYCLAW_E2E_BROWSER_CHANNEL ?? "msedge",
   });
   const primaryContext = await browser.newContext();
   const page = await primaryContext.newPage();

@@ -6,11 +6,11 @@ MyClaw 是面向单用户、本地优先的个人 Agent 运行时。通过全屏
 
 ## 项目安装
 
-需要 Python 3.12+ 和 Git。POSIX 主机使用 Bash；Windows 主机的 `auto` 选择可用的 PowerShell 7，否则使用 Windows PowerShell 5.1。
+仅支持 Windows，需要 Python 3.12+ 和 Git。`auto` 选择可用的 PowerShell 7，否则使用 Windows PowerShell 5.1。
 
-目前已验证 Windows x64；macOS 尚未完成原生验证，其他 POSIX 平台暂无正式支持承诺。
+目前已验证 Windows x64。应用、服务和发布验证入口在初始化前拒绝其他操作系统。
 
-```bash
+```powershell
 git clone https://github.com/Totoro-debug/myclaw.git
 cd myclaw
 ```
@@ -23,31 +23,23 @@ python -m venv .venv
 python -m pip install .
 ```
 
-macOS / Linux：
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install .
-```
-
 ## Web 界面与服务生命周期
 
 安装 wheel 或 source distribution 后，运行时只需要 Python 及其依赖，不需要 Node.js、npm 或前端源码。直接执行 `myclaw web`；首次配置或配置需要修复时，会打开对应的设置页面。已有有效配置时，也可运行裸 `myclaw` 进入 CLI 对话。
 
-```bash
+```powershell
 myclaw web
 ```
 
 `myclaw web` 会启动或复用当前 Agent Home 的本地服务，并打开一次性的浏览器登录地址。服务只监听 `127.0.0.1:8765`，浏览器和 CLI 连接使用同一个服务与生命周期；关闭浏览器后服务会保留短暂的重连窗口。需要立即收尾时执行：
 
-```bash
+```powershell
 myclaw service stop
 ```
 
 停止命令请求服务正常排空活动运行、关闭连接并清理发现文件；它不会删除 Workspace、会话或用户配置。源码开发者只有在重新生成发布资源时才需要 Node.js/npm：
 
-```bash
+```powershell
 npm --prefix web ci
 npm --prefix web run build
 python -m build --sdist --wheel
@@ -61,7 +53,7 @@ python -m build --sdist --wheel
 
 发布验证仅在 GitHub Actions 的 Windows runner 上运行 `--phase all`。Windows 必须真实执行 Windows PowerShell 5.1 和 PowerShell 7 的 Host Exec 检查、执行、Full-Access 动态命令及文件系统能力检查，并运行完整测试、lint、类型检查、构建，在隔离环境中安装 wheel，从源码树外执行 entry point 与配置 smoke。`release-gate` 仅依赖 Windows 作业成功；主机缺失或必需测试跳过均不算通过。
 
-PowerShell 选择器配置位于 `[runtime].exec_shell`；`auto` 优先选择 PowerShell 7，随后选择 Windows PowerShell 5.1，显式选择不会交叉回退。验证脚本仍可在 POSIX 本地运行，由实际操作系统选择 Bash；命令行保留默认 `--shell both`，不接受显式 PowerShell 选择器。GitHub Actions 仅验证 Windows，可通过推送到 `main`、面向 `main` 的 PR 或手动触发工作流：
+PowerShell 选择器配置位于 `[runtime].exec_shell`；`auto` 优先选择 PowerShell 7，随后选择 Windows PowerShell 5.1，显式选择不会交叉回退。验证脚本只在 Windows 运行；默认 `--shell both` 覆盖两个 PowerShell 版本，也可用 `--shell powershell|pwsh` 单独检查对应 Host。GitHub Actions 仅验证 Windows，可通过推送到 `main`、面向 `main` 的 PR 或手动触发工作流：
 
 ```powershell
 python scripts/release_validation.py --phase all
@@ -97,7 +89,7 @@ API Key 直接保存在配置文件中，当前不支持环境变量引用；`my
 
 MCP Server 可在 `[mcp.servers.<name>.tool_keywords]` 下按远端 Tool 原名配置英文关键词；缺失或为空的关键词会在启动时通过现有 `chat` Model Route 生成并尽力保存。生成失败时，当前进程使用对应的远端 Tool 原名；生成成功但保存失败时，当前进程继续使用已生成的内存关键词。两类失败都不会阻止 Agent 启动。
 
-`[runtime].permission_level` 接受 `read-only`、`workspace-write` 和 `full-access`，默认值为 `workspace-write`；`[runtime].exec_shell` 接受 `auto`、`powershell` 和 `pwsh`，默认值为 `auto`。Windows 下 `auto` 优先选择版本至少为 7 的 `pwsh`，否则选择 Windows PowerShell 5.1；显式选择不会交叉回退，POSIX 始终使用 Bash 并忽略该 Windows selector。Exec Host 的检查和执行都禁用 Profile/rc（PowerShell 使用 `-NoLogo -NoProfile -NonInteractive`，Bash 不使用 login/profile/rc），并共享同一个可执行文件、工作目录、最小环境和超时/取消行为。选定 Shell 缺失不会阻止启动，只显示一次安全诊断；Exec 仍在工具目录中，但调用时返回稳定的能力错误。Shell 存在但检查器失败时按不确定结果继续沿用确认语义。
+`[runtime].permission_level` 接受 `read-only`、`workspace-write` 和 `full-access`，默认值为 `workspace-write`；`[runtime].exec_shell` 接受 `auto`、`powershell` 和 `pwsh`，默认值为 `auto`。Windows 下 `auto` 优先选择版本至少为 7 的 `pwsh`，否则选择 Windows PowerShell 5.1；显式选择不会交叉回退。Exec Host 的检查和执行都使用 `-NoLogo -NoProfile -NonInteractive` 禁用 Profile，并共享同一个可执行文件、工作目录、最小环境和超时/取消行为。选定 Shell 缺失不会阻止启动，只显示一次安全诊断；Exec 仍在工具目录中，但调用时返回稳定的能力错误。Shell 存在但检查器失败时按不确定结果继续沿用确认语义。
 在 Read-Only 和 Workspace-Write 下，PowerShell Exec 只有固定候选命令、固定参数语法、唯一 canonical 身份、预期 Microsoft module 以及 Workspace 内静态 FileSystem 路径时才直通；别名、函数、脚本、shim、歧义身份、未知参数、变量、glob、表达式、pipeline-fed path、Provider 路径和外部路径都需要一次确认。候选只包括只读的 `Get-ChildItem`、`Get-Content`、`Get-Item`、`Get-Location`、`Get-FileHash`、`Measure-Object`、`Select-Object`、`Sort-Object`、`Select-String`、`Test-Path`、`Resolve-Path`、`Format-List`、`Format-Table`、`Out-String`，以及 Workspace-Write 新增的 `New-Item`、`Set-Content`、`Add-Content`、`Clear-Content`、`Copy-Item`、`Move-Item`、`Rename-Item`、`Remove-Item`、`Out-File`。Full-Access 允许可解析的非灾难性动态 Exec 直通，但灾难性操作和检查器不确定仍需确认；参数校验、能力错误、业务拒绝和执行错误不被绕过。Git 只直通固定只读 form；Host 固定禁用 pager、external diff/textconv、fsmonitor、hook 和 prompt。静态检查不会启动 Git；只有 canonical Git 已证明在 Workspace 外且仓库目标已规范化到 Workspace 内，才会在直通前审计 include 与 clean/process filter 配置。
 
 前台 Agent Run 会在标题生成、Skill 解析和 Task Framing 之前捕获当前权限级别与已解析的 Exec Shell，并在本次运行内保持不变。Runtime Context 会显示该快照以及 Tool 调用可能需要确认；确认只绑定到一次规范化后的 Tool 调用，不会缓存到共享 Tool。每次 Gateway 调用都由 `BaseTool.prepare()` 产出规范化参数和结构化事实，再由唯一权限策略决定 direct 或 confirm；validation、business refusal、capability error 和 execution error 独立于权限决策并保持为 hard error。Tool 不再提供独立的字符串授权路径。File Tool 的权限矩阵和主机路径规范化见 [ADR-0026](docs/adr/0026-tool-permission-levels-and-foreground-snapshots.md)。模型发起的 `read_file` 不继承 Skill Root 的内部加载豁免；Dream 私有 Tool 和 Runtime 持久化写入不属于该模型 File 策略。
@@ -112,10 +104,10 @@ Web Search 在所有权限级别始终 direct。Web Fetch 会在初始 URL 和�
 
 ## 项目启动
 
-在已激活虚拟环境的交互式终端中，进入希望 Agent 操作的目录后启动（将 `<workspace>` 替换为实际路径）：
+在已激活虚拟环境的交互式终端中，进入希望 Agent 操作的目录后启动（将示例路径替换为实际路径）：
 
-```bash
-cd <workspace>
+```powershell
+Set-Location "D:\path\to\workspace"
 myclaw
 ```
 
@@ -184,8 +176,6 @@ Memory、Schedule 和前台 Session 之前完成 pending transaction，并按 du
 Memory、Schedule、Dream、Exec/MCP effects、manual edits、Tool Artifacts、Session Log
 以及 result files 不作为独立 rollback 目标而被保留；这些参与者后来改动过的 tracked file
 仍可能被 File Restore 覆盖。
-
-POSIX Bash 在 Read-Only 和 Workspace-Write 下也使用严格 Exec 策略：只读候选为 `pwd`、`ls`、`cat`、`head`、`tail`、`wc`、`stat`、`file`、`grep`、`rg`、`find`、`sort`、`uniq`、`cut`、`diff`，写入候选为 `mkdir`、`touch`、`cp`、`mv`、`rm`。每个候选只接受固定参数语法和静态路径角色；固定的简单 pipeline 可以直通。Bash 命令必须是唯一的 PATH native executable，或受信任的 `pwd` builtin；重复 PATH、symlink、别名、函数、脚本、shim、Workspace executable、歧义/未知身份、动态展开、重定向、控制流、glob、follow/watch、外部预处理和 `find` action 都会请求一次确认。Read-Only 只允许 Workspace 读取，Workspace-Write 允许 Workspace 读取和写入；Full-Access 允许可解析的非灾难性动态 Bash Exec 直通，但灾难性操作和检查器不确定仍需确认。Bash Git 与 PowerShell Git 使用相同的固定环境隔离、diff/show 参数加固和 Workspace 内仓库配置审计。
 
 ## 项目架构
 

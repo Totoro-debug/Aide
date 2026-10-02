@@ -120,7 +120,7 @@ async def _seed_project(home: AgentHome, project: Path) -> str:
 async def _stop_service(home: AgentHome, port: int) -> None:
     discovery = read_discovery(home)
     process_handle = None
-    if os.name == "nt" and discovery is not None:
+    if discovery is not None:
         from ctypes import wintypes
 
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)

@@ -4,7 +4,6 @@ import importlib.util
 import os
 import shutil
 import subprocess
-import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -2443,127 +2442,6 @@ def test_installed_myclaw_console_entry_starts() -> None:
 
     assert result.returncode == 0, result.stderr
     assert "MyClaw Personal Agent" in result.stdout
-
-
-@pytest.mark.skipif(
-    os.name == "nt",
-    reason="The Windows Python runtime has no termios/pty harness; use the Windows Terminal matrix.",
-)
-def test_installed_wheel_terminal_conversation_pseudo_terminal_smoke(tmp_path: Path) -> None:
-    pty = pytest.importorskip("pty")
-    termios = pytest.importorskip("termios")
-    import select
-    import time
-
-    wheel_dir = tmp_path / "wheel"
-    wheel_dir.mkdir()
-    build_result = subprocess.run(
-        [sys.executable, "-m", "build", "--wheel", "--outdir", str(wheel_dir)],
-        cwd=Path(__file__).resolve().parents[1],
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    assert build_result.returncode == 0, build_result.stderr
-    wheels = tuple(wheel_dir.glob("myclaw-*.whl"))
-    assert len(wheels) == 1
-
-    venv = tmp_path / "venv"
-    venv_result = subprocess.run(
-        [sys.executable, "-m", "venv", "--system-site-packages", str(venv)],
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    assert venv_result.returncode == 0, venv_result.stderr
-    venv_bin = venv / "bin"
-    venv_python = venv_bin / "python"
-    install_result = subprocess.run(
-        [str(venv_python), "-m", "pip", "install", "--no-deps", str(wheels[0])],
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    assert install_result.returncode == 0, install_result.stderr
-
-    agent_home = tmp_path / "home" / ".myclaw"
-    agent_home.mkdir(parents=True)
-    (agent_home / "config.toml").write_text(VALID_CONFIG, encoding="utf-8")
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    environment = os.environ.copy()
-    environment.pop("PYTHONPATH", None)
-    environment["HOME"] = str(agent_home.parent)
-
-    master_fd, slave_fd = pty.openpty()
-    process: subprocess.Popen[bytes] | None = None
-    try:
-        original_terminal = termios.tcgetattr(slave_fd)
-        process = subprocess.Popen(
-            [str(venv_bin / "myclaw")],
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            cwd=workspace,
-            env=environment,
-            close_fds=True,
-        )
-        output = bytearray()
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and b"Message MyClaw" not in output:
-            ready, _, _ = select.select([master_fd], [], [], 0.1)
-            if ready:
-                output.extend(os.read(master_fd, 4096))
-        assert b"Message MyClaw" in output or b"\x1b[?1049h" in output
-        assert process.poll() is None
-
-        os.write(master_fd, b"\x03")
-        deadline = time.monotonic() + 5
-        while process.poll() is None and time.monotonic() < deadline:
-            ready, _, _ = select.select([master_fd], [], [], 0.1)
-            if ready:
-                try:
-                    output.extend(os.read(master_fd, 4096))
-                except OSError:
-                    break
-        assert process.poll() == 0
-
-        while True:
-            ready, _, _ = select.select([master_fd], [], [], 0)
-            if not ready:
-                break
-            try:
-                chunk = os.read(master_fd, 4096)
-            except OSError:
-                break
-            if not chunk:
-                break
-            output.extend(chunk)
-
-        terminal_output = bytes(output)
-        restoration_pairs = (
-            (b"\x1b[?2004h", b"\x1b[?2004l"),
-            (b"\x1b[?1000h", b"\x1b[?1000l"),
-            (b"\x1b[?1003h", b"\x1b[?1003l"),
-            (b"\x1b[?1015h", b"\x1b[?1015l"),
-            (b"\x1b[?1006h", b"\x1b[?1006l"),
-            (b"\x1b[?1004h", b"\x1b[?1004l"),
-            (b"\x1b[?1049h", b"\x1b[?1049l"),
-            (b"\x1b[?25l", b"\x1b[?25h"),
-            (b"\x1b[>1u", b"\x1b[<u"),
-        )
-        assert b"\x1b[?1049h" in terminal_output
-        for enabled, restored in restoration_pairs:
-            if enabled in terminal_output:
-                assert restored in terminal_output
-                assert terminal_output.rfind(restored) > terminal_output.rfind(enabled)
-        assert termios.tcgetattr(slave_fd) == original_terminal
-    finally:
-        if process is not None and process.poll() is None:
-            process.kill()
-            process.wait(timeout=5)
-        os.close(master_fd)
-        os.close(slave_fd)
 
 
 def test_installed_myclaw_generates_missing_configuration_and_stops(

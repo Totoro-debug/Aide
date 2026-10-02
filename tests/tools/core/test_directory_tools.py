@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -112,7 +111,7 @@ async def test_glob_supports_pattern_dialects_kinds_and_pagination(workspace: Pa
     assert wrong_case_directory.content == ""
     assert dirs.content == "Sub/\nSub/Deep/"
     assert paged.content == "Sub/c.txt"
-    expected_host_case = "Sub/Deep/d.txt\nSub/c.txt\na.txt" if os.name == "nt" else ""
+    expected_host_case = "Sub/Deep/d.txt\nSub/c.txt\na.txt"
     assert windows_case.content == expected_host_case
 
 
@@ -199,12 +198,8 @@ async def test_ignored_roots_remain_ignored_without_gitignore_parsing(workspace:
     assert "kept.txt" not in matches.content
     assert ignored_matches.content == ""
     assert ".gitignore" in listing.content
-    if os.name == "nt":
-        assert "NODE_MODULES/" not in listing.content
-        assert "NODE_MODULES/" not in matches.content
-    else:
-        assert "NODE_MODULES/" in listing.content
-        assert "NODE_MODULES/" in matches.content
+    assert "NODE_MODULES/" not in listing.content
+    assert "NODE_MODULES/" not in matches.content
 
 
 @pytest.mark.asyncio
@@ -216,8 +211,6 @@ async def test_directory_links_are_reported_but_never_traversed(workspace: Path)
     try:
         link.symlink_to(target, target_is_directory=True)
     except (OSError, NotImplementedError) as error:
-        if os.name != "nt":
-            pytest.skip(f"directory links unavailable: {error}")
         junction = subprocess.run(
             ("cmd", "/c", "mklink", "/J", str(link), str(target)),
             capture_output=True,
@@ -268,7 +261,6 @@ async def test_directory_symlink_roots_are_never_traversed(workspace: Path) -> N
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(os.name != "nt", reason="Windows junction behavior")
 async def test_directory_junction_roots_are_never_traversed(workspace: Path) -> None:
     target = workspace / "target"
     target.mkdir()

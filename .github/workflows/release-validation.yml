@@ -39,7 +39,7 @@ jobs:
           from myclaw.agent.tools.core.exec_host import _minimal_environment, _probe_powershell_version
 
           executable = str(Path(os.environ["WINDIR"]) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
-          environment = _minimal_environment(os.environ, platform="windows")
+          environment = _minimal_environment(os.environ)
           for attempt in range(3):
               start = time.perf_counter()
               version = _probe_powershell_version(executable, environment)

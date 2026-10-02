@@ -1,12 +1,9 @@
-import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from myclaw.utils.host_filesystem import HOST_FILESYSTEM
-
-pytestmark = pytest.mark.skipif(os.name != "nt", reason="requires native Windows paths")
 
 
 def test_require_owned_directory_returns_normalized_owned_path(tmp_path: Path) -> None:

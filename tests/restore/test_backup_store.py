@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -698,16 +697,3 @@ def test_backup_store_has_no_small_file_size_limit(workspace: Path) -> None:
 
     assert ticket is not None
     assert store.read_backup(ticket.operation_id) == content
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are not available on Windows")
-def test_restore_store_directories_are_private_on_posix(workspace: Path) -> None:
-    store = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
-    target = workspace.parent / "private.bin"
-    target.write_bytes(b"private")
-    store.before_write(uuid4(), target)
-    root = workspace / ".myclaw" / "restore" / SESSION_ID
-
-    assert stat.S_IMODE(root.stat().st_mode) == 0o700
-    assert stat.S_IMODE((root / "entries").stat().st_mode) == 0o700
-    assert stat.S_IMODE((root / "blobs").stat().st_mode) == 0o700

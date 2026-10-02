@@ -6,10 +6,8 @@ import asyncio
 import ctypes
 import json
 import os
-import select
 import shutil
 import socket
-import subprocess
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -41,67 +39,30 @@ class _ProcessExitWitness:
         self.closed = False
         self._check: Callable[[], bool]
         self._release: Callable[[], None]
-        if os.name == "nt":
-            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
-            kernel.OpenProcess.restype = ctypes.c_void_p
-            kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-            kernel.WaitForSingleObject.restype = ctypes.c_uint32
-            kernel.CloseHandle.argtypes = [ctypes.c_void_p]
-            kernel.CloseHandle.restype = ctypes.c_int
-            handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
-            if not handle:
-                raise OSError(ctypes.get_last_error(), "Could not observe the service process")
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel.WaitForSingleObject.restype = ctypes.c_uint32
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel.CloseHandle.restype = ctypes.c_int
+        handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if not handle:
+            raise OSError(ctypes.get_last_error(), "Could not observe the service process")
 
-            def check_handle() -> bool:
-                result = int(kernel.WaitForSingleObject(handle, 0))
-                if result not in {0, 258}:  # WAIT_OBJECT_0 / WAIT_TIMEOUT
-                    raise OSError(ctypes.get_last_error(), "Service process wait failed")
-                return result == 0
+        def check_handle() -> bool:
+            result = int(kernel.WaitForSingleObject(handle, 0))
+            if result not in {0, 258}:  # WAIT_OBJECT_0 / WAIT_TIMEOUT
+                raise OSError(ctypes.get_last_error(), "Service process wait failed")
+            return result == 0
 
-            def release_handle() -> None:
-                if not kernel.CloseHandle(handle):
-                    raise OSError(ctypes.get_last_error(), "Service process handle close failed")
+        def release_handle() -> None:
+            if not kernel.CloseHandle(handle):
+                raise OSError(ctypes.get_last_error(), "Service process handle close failed")
 
-            self._check = check_handle
-            self._release = release_handle
-            self.method = "windows-process-handle"
-        elif callable(pidfd_open := getattr(os, "pidfd_open", None)):
-            descriptor = int(pidfd_open(pid, 0))
-            self._check = lambda: bool(select.select([descriptor], [], [], 0)[0])
-            self._release = lambda: os.close(descriptor)
-            self.method = "posix-pidfd"
-        else:
-
-            def process_start() -> bytes:
-                result = subprocess.run(
-                    ["ps", "-p", str(pid), "-o", "lstart="],
-                    capture_output=True,
-                    check=False,
-                    env={**os.environ, "LC_ALL": "C"},
-                )
-                return result.stdout.strip()
-
-            original_start = process_start()
-            assert original_start, "Original service process must exist before departure"
-
-            def check_posix() -> bool:
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    return True
-                current_start = process_start()
-                if not current_start:
-                    try:
-                        os.kill(pid, 0)
-                    except ProcessLookupError:
-                        return True
-                    raise AssertionError("Could not establish the live process identity")
-                return current_start != original_start
-
-            self._check = check_posix
-            self._release = lambda: None
-            self.method = "posix-start-time"
+        self._check = check_handle
+        self._release = release_handle
+        self.method = "windows-process-handle"
         try:
             assert not self.exited(), "Original service process already exited before departure"
         except BaseException:

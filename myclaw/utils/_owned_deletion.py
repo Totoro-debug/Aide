@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import ctypes
-import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from stat import S_ISDIR, S_ISREG
 from typing import Any
 
 
@@ -22,69 +20,6 @@ def remove_owned_windows(path: Path, *, root: Path, tree: bool) -> None:
     """Remove below directories held against rename by Windows handles."""
     _relative_target(path, root)
     _windows_remove(path.absolute(), root=root.absolute(), tree=tree)
-
-
-def remove_owned_posix(path: Path, *, root: Path, tree: bool) -> None:
-    """Remove relative to no-follow directory descriptors on POSIX."""
-    relative = _relative_target(path, root)
-    with _posix_parent(root, relative.parts[:-1]) as parent:
-        _posix_remove(parent, relative.name, tree=tree)
-
-
-@contextmanager
-def _posix_parent(root: Path, parts: tuple[str, ...]) -> Iterator[int]:
-    descriptors: list[int] = []
-    flags = _posix_directory_flags()
-    try:
-        absolute_root = root.absolute()
-        descriptors.append(os.open(absolute_root.anchor, flags))
-        for part in (*absolute_root.parts[1:], *parts):
-            descriptors.append(os.open(part, flags, dir_fd=descriptors[-1]))
-        yield descriptors[-1]
-    finally:
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
-
-
-def _posix_directory_flags() -> int:
-    directory = getattr(os, "O_DIRECTORY", None)
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if not isinstance(directory, int) or not isinstance(nofollow, int):
-        raise NotImplementedError("Safe directory deletion is unavailable on this host")
-    return os.O_RDONLY | directory | nofollow
-
-
-def _posix_remove(parent: int, name: str, *, tree: bool) -> None:
-    try:
-        status = os.stat(name, dir_fd=parent, follow_symlinks=False)
-    except FileNotFoundError:
-        return
-    if tree:
-        if not S_ISDIR(status.st_mode):
-            raise PermissionError("Deletion directory is not ordinary")
-        descriptor = os.open(
-            name,
-            _posix_directory_flags(),
-            dir_fd=parent,
-        )
-        try:
-            opened = os.fstat(descriptor)
-            if (opened.st_dev, opened.st_ino) != (status.st_dev, status.st_ino):
-                raise PermissionError("Deletion directory identity changed")
-            for child in os.listdir(descriptor):
-                child_status = os.stat(child, dir_fd=descriptor, follow_symlinks=False)
-                _posix_remove(descriptor, child, tree=S_ISDIR(child_status.st_mode))
-        finally:
-            os.close(descriptor)
-        current = os.stat(name, dir_fd=parent, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != (status.st_dev, status.st_ino):
-            raise PermissionError("Deletion directory identity changed")
-        os.rmdir(name, dir_fd=parent)
-    else:
-        if not S_ISREG(status.st_mode) or status.st_nlink != 1:
-            raise PermissionError("Deletion file is not ordinary and singly linked")
-        os.unlink(name, dir_fd=parent)
-    os.fsync(parent)
 
 
 class _WindowsFileInformation(ctypes.Structure):

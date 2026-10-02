@@ -193,10 +193,7 @@ def test_malformed_non_utf8_backup_is_exact_and_private(tmp_path: Path) -> None:
     assert result.backup_id == f"sha256:{sha256(original).hexdigest()}"
     assert "old-secret" not in loader.path.read_text()
     assert "new-secret" in loader.path.read_text()
-    if os.name == "nt":
-        assert _windows_dacl(backup) == "D:P(A;;FA;;;OW)(A;;FA;;;SY)"
-    else:
-        assert backup.stat().st_mode & 0o777 == 0o600
+    assert _windows_dacl(backup) == "D:P(A;;FA;;;OW)(A;;FA;;;SY)"
 
 
 def test_malformed_secret_keep_cannot_recover_secret_from_source(tmp_path: Path) -> None:
@@ -315,10 +312,7 @@ def test_reused_backup_is_restricted_before_repair(tmp_path: Path) -> None:
     backup.write_bytes(original)
     loader.repair_editable_fields(*_malformed_repair(loader))
     assert backup.read_bytes() == original
-    if os.name == "nt":
-        assert _windows_dacl(backup) == "D:P(A;;FA;;;OW)(A;;FA;;;SY)"
-    else:
-        assert backup.stat().st_mode & 0o777 == 0o600
+    assert _windows_dacl(backup) == "D:P(A;;FA;;;OW)(A;;FA;;;SY)"
 
 
 @pytest.mark.parametrize("link_source", [False, True])
@@ -387,14 +381,11 @@ def test_redirected_backup_target_rejects_repair_without_touching_external_direc
     marker = external / "keep.txt"
     marker.write_bytes(b"untouched")
     target = loader.agent_home.path / f"config.toml.backup.{sha256(original).hexdigest()}"
-    if os.name == "nt":
-        subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(target), str(external)],
-            check=True,
-            capture_output=True,
-        )
-    else:
-        target.symlink_to(external, target_is_directory=True)
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(target), str(external)],
+        check=True,
+        capture_output=True,
+    )
     try:
         with pytest.raises(OSError):
             loader.repair_editable_fields(*_malformed_repair(loader))
@@ -402,7 +393,4 @@ def test_redirected_backup_target_rejects_repair_without_touching_external_direc
         assert marker.read_bytes() == b"untouched"
         assert set(external.iterdir()) == {marker}
     finally:
-        if os.name == "nt":
-            target.rmdir()
-        else:
-            target.unlink()
+        target.rmdir()

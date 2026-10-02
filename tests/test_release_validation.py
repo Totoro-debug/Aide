@@ -21,6 +21,7 @@ from scripts.release_validation import (
     CoverageRule,
     PytestEvidence,
     ReleasePhase,
+    build_acceptance_matrix,
     build_coverage_evidence,
 )
 
@@ -541,3 +542,366 @@ def test_coverage_evidence_is_json_serializable() -> None:
     payload = evidence.to_dict()
     assert json.loads(json.dumps(payload)) == payload
     assert payload["collected_nodes"] == ["tests/example.py::test_case"]
+
+
+def test_pytest_evidence_report_preserves_passed_nodes() -> None:
+    evidence = PytestEvidence(
+        label="full",
+        paths=("tests",),
+        total=2,
+        passed=1,
+        passed_nodes=("tests/example.py::test_case",),
+        skips=(
+            {
+                "suite": "full",
+                "nodeid": "tests/example.py::test_skipped",
+                "message": "host limitation",
+            },
+        ),
+    )
+
+    assert evidence.to_dict() == {
+        "label": "full",
+        "paths": ["tests"],
+        "total": 2,
+        "passed": 1,
+        "passed_nodes": ["tests/example.py::test_case"],
+        "skipped": 1,
+        "skips": [
+            {
+                "suite": "full",
+                "nodeid": "tests/example.py::test_skipped",
+                "message": "host limitation",
+            }
+        ],
+    }
+
+
+def test_acceptance_matrix_keeps_backend_and_external_scopes_separate() -> None:
+    matrix = build_acceptance_matrix(
+        (
+            "tests/service/test_service_concurrency.py::test_two_cli_clients_complete_distinct_sessions_through_transport",
+            "tests/service/test_service_concurrency.py::test_distinct_sessions_run_in_parallel_and_cancel_is_scoped",
+            "tests/service/test_service_concurrency.py::test_claim_race_denies_loser_content_over_http_events_and_reconnect",
+        ),
+        installed_statuses={"R02": "passed"},
+    )
+    assert [item["id"] for item in matrix] == [f"R{index:02d}" for index in range(1, 18)]
+    r02 = matrix[1]
+    assert r02["overall"] == "passed"
+    scopes = cast(dict[str, dict[str, object]], r02["scopes"])
+    assert scopes["backend_service"]["status"] == "passed"
+    assert scopes["installed_cli_browser"]["status"] == "passed"
+    assert scopes["production_browser"]["status"] == "not-run"
+    assert scopes["backend_service"]["command"] == "python -m pytest -q"
+    nodes = cast(list[dict[str, object]], scopes["backend_service"]["nodes"])
+    assert str(nodes[0]["nodeid"]).endswith(
+        "test_two_cli_clients_complete_distinct_sessions_through_transport"
+    )
+
+    parameterized = build_acceptance_matrix(
+        (
+            "tests/service/test_service_concurrency.py::"
+            "test_event_reconnect_replays_once_and_cache_overflow_requires_snapshot",
+            "tests/service/test_service_concurrency.py::"
+            "test_replay_holds_live_events_until_cached_events_are_sent",
+            "tests/service/test_service_concurrency.py::"
+            "test_snapshot_resync_includes_selected_and_switched_away_claims",
+            "tests/service/test_service_concurrency.py::"
+            "test_client_expiry_keeps_claim_until_cancelled_run_cleanup_finishes",
+            "tests/service/test_runtime_management.py::"
+            "test_permission_resets_only_after_client_expiry_at_thirty_seconds",
+            "tests/service/test_service_foundation.py::"
+            "test_reacquired_claim_rejects_the_previous_version[fixture]",
+        )
+    )[2]
+    parameterized_scopes = cast(dict[str, dict[str, object]], parameterized["scopes"])
+    parameterized_node = cast(
+        list[dict[str, object]], parameterized_scopes["backend_service"]["nodes"]
+    )[5]
+    assert parameterized_scopes["backend_service"]["status"] == "passed"
+    assert parameterized_node["result"] == "passed"
+    assert parameterized_node["matched_nodes"] == [
+        "tests/service/test_service_foundation.py::"
+        "test_reacquired_claim_rejects_the_previous_version[fixture]"
+    ]
+
+
+def test_release_failure_writes_partial_report_and_keeps_fail_fast_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "release.json"
+    monkeypatch.setattr(release_validation, "_platform", lambda: "windows")
+    monkeypatch.setattr(
+        release_validation,
+        "_source_identity",
+        lambda: {"head": "fixture-head", "dirty": True},
+    )
+    monkeypatch.setattr(
+        release_validation,
+        "_host_capabilities",
+        lambda: {"platform": "windows", "shells": {}},
+    )
+
+    def phase(
+        current: ReleasePhase,
+        shell_option: str,
+        *,
+        host_results: object = None,
+    ) -> dict[str, object]:
+        del shell_option, host_results
+        if current is ReleasePhase.HOST_INTEGRATION:
+            raise release_validation.ReleaseBlockedError("fixture link capability missing")
+        if current is ReleasePhase.COVERAGE:
+            return {"coverage": {"collected_nodes": ["tests/example.py::test_case"]}}
+        raise AssertionError(f"unexpected phase {current}")
+
+    monkeypatch.setattr(release_validation, "_run_named_phase", phase)
+
+    assert (
+        release_validation.main(
+            ["--phase", "all", "--shell", "both", "--report", str(report_path)]
+        )
+        == 1
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["report_schema_version"] == 2
+    assert report["status"] == "blocked"
+    assert report["source"] == {"head": "fixture-head", "dirty": True}
+    assert report["coverage"]["collected_nodes"] == ["tests/example.py::test_case"]
+    assert report["execution"]["executed_phases"] == ["coverage", "host-integration"]
+    assert report["execution"]["not_run_phases"] == ["quality", "artifact-smoke"]
+    assert report["execution"]["remaining_gates"] == [
+        "quality",
+        "artifact-smoke",
+        "host-capability: fixture link capability missing",
+    ]
+    assert report["failure"]["type"] == "ReleaseBlockedError"
+    assert "fixture link capability missing" in report["failure"]["message"]
+
+
+def test_reported_command_failure_retains_command_and_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = release_validation._ReportRecorder("quality", "both")
+    token = release_validation._REPORT_CONTEXT.set(recorder)
+    try:
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(
+                args=args[0],
+                returncode=17,
+                stdout="original stdout",
+                stderr="original stderr",
+            ),
+        )
+        with pytest.raises(RuntimeError, match=r"original stdout.*original stderr"):
+            release_validation._run_command(("fixture-tool", "--case", "failure"))
+    finally:
+        release_validation._REPORT_CONTEXT.reset(token)
+
+    assert recorder.commands == [
+        {
+            "command": ["fixture-tool", "--case", "failure"],
+            "rendered": "fixture-tool --case failure",
+            "cwd": str(release_validation.ROOT),
+            "status": "failed",
+            "exit_code": 17,
+            "failure_output": "original stdoutoriginal stderr",
+        }
+    ]
+
+
+def test_blocked_report_promotes_partial_quality_evidence() -> None:
+    recorder = release_validation._ReportRecorder("all", "both")
+    recorder.begin_phase("quality")
+    recorder.add_phase_evidence(
+        "quality",
+        {
+            "path_capability": {"file_symlink": {"available": False}},
+            "pytest": {
+                "full": {
+                    "total": 3,
+                    "passed": 2,
+                    "failed": 1,
+                    "failed_nodes": ["tests/example.py::test_failure"],
+                    "skipped": 0,
+                }
+            },
+        },
+    )
+    error = release_validation.ReleaseBlockedError("file symlink capability missing")
+    recorder.finish_phase("quality", status="blocked", error=error)
+
+    report = recorder.build(payload=None, error=error)
+    pytest_report = cast(dict[str, object], report["pytest"])
+    full_report = cast(dict[str, object], pytest_report["full"])
+    path_report = cast(dict[str, object], report["path_capability"])
+    file_symlink = cast(dict[str, object], path_report["file_symlink"])
+    execution = cast(dict[str, object], report["execution"])
+    phases = cast(dict[str, object], execution["phases"])
+    quality_phase = cast(dict[str, object], phases["quality"])
+    quality_evidence = cast(dict[str, object], quality_phase["evidence"])
+    assert full_report["failed_nodes"] == ["tests/example.py::test_failure"]
+    assert file_symlink["available"] is False
+    assert quality_evidence["pytest"] == pytest_report
+
+
+def test_working_tree_identity_tracks_content_deletions_and_untracked_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    source = tmp_path / "scripts" / "probe.py"
+    source.parent.mkdir()
+    source.write_text("original", encoding="utf-8")
+    (tmp_path / ".gitignore").write_text("scripts/ignored/\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Release test",
+            "-c",
+            "user.email=release@example.invalid",
+            "commit",
+            "-m",
+            "baseline",
+        ],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(release_validation, "ROOT", tmp_path)
+    original = release_validation._working_tree_identity()
+    identity = release_validation._source_identity()
+    assert len(str(identity["head_tree"])) == 40
+    assert identity["working_tree"] == original
+    assert release_validation._working_tree_identity() == original
+    source.write_text("modified", encoding="utf-8")
+    modified = release_validation._working_tree_identity()
+    assert original["sha256"] != modified["sha256"]
+    untracked = tmp_path / "scripts" / "new_probe.py"
+    untracked.write_text("new source", encoding="utf-8")
+    added = release_validation._working_tree_identity()
+    assert added["sha256"] != modified["sha256"]
+    source.unlink()
+    deleted = release_validation._working_tree_identity()
+    records = cast(list[dict[str, object]], deleted["files"])
+    assert (
+        next(record for record in records if record["path"] == "scripts/probe.py")["kind"]
+        == "missing"
+    )
+    assert deleted["sha256"] != added["sha256"]
+    ignored = source.parent / "ignored"
+    ignored.mkdir()
+    (ignored / "large-tree.txt").write_text("ignored", encoding="utf-8")
+    plan = tmp_path / "docs" / "plans"
+    plan.mkdir(parents=True)
+    (plan / "user-plan.md").write_text("user-owned", encoding="utf-8")
+    assert release_validation._working_tree_identity() == deleted
+
+
+def test_reported_timeout_preserves_original_failure_and_redacts_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = release_validation._ReportRecorder("all", "both")
+    recorder.begin_phase("quality")
+    token = release_validation._REPORT_CONTEXT.set(recorder)
+
+    def timeout(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise subprocess.TimeoutExpired(
+            cmd=("fixture", "--api-key", "command-secret"),
+            timeout=7,
+            output=b"provider failed with raw-env-secret; Bearer bearer-secret",
+            stderr="http://localhost/#ticket=ticket-secret api_key='key-secret'",
+        )
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            release_validation._run_command(
+                ("fixture", "--api-key", "command-secret"),
+                timeout=7,
+                env={"FIXTURE_API_KEY": "raw-env-secret"},
+            )
+        recorder.finish_phase("quality", status="failed", error=caught.value)
+        command = recorder.commands[0]
+        assert command["status"] == "failed"
+        assert "exit_code" not in command
+        failure = cast(dict[str, object], command["failure"])
+        assert failure["type"] == "TimeoutExpired"
+        assert failure["timeout_seconds"] == 7
+        phase_failure = cast(dict[str, object], recorder.phases["quality"]["failure"])
+        assert cast(dict[str, object], phase_failure["cause"])["type"] == "TimeoutExpired"
+        encoded = json.dumps([recorder.commands, recorder.phases, str(caught.value)])
+        for secret in (
+            "command-secret",
+            "raw-env-secret",
+            "bearer-secret",
+            "ticket-secret",
+            "key-secret",
+        ):
+            assert secret not in encoded
+        assert "provider failed" in encoded
+        assert "secret with spaces" not in release_validation._redact_report_text(
+            'api_key="secret with spaces"'
+        )
+        assert release_validation._safe_command(("fixture", "--api-key=secret with spaces")) == [
+            "fixture",
+            "--api-key=[redacted]",
+        ]
+        assert (
+            release_validation._redact_report_text("service credential not observed")
+            == "service credential not observed"
+        )
+    finally:
+        release_validation._REPORT_CONTEXT.reset(token)
+
+
+def test_exception_payload_preserves_context_and_bounds_cycles() -> None:
+    try:
+        raise OSError("original OS failure")
+    except OSError:
+        try:
+            raise RuntimeError("cleanup failure")
+        except RuntimeError as error:
+            payload = release_validation._exception_payload(error)
+    assert cast(dict[str, object], payload["context"])["type"] == "OSError"
+    cyclic = RuntimeError("cycle")
+    cyclic.__cause__ = cyclic
+    assert release_validation._exception_payload(cyclic)["cause"] == {
+        "type": "RuntimeError",
+        "cycle": True,
+    }
+
+
+def test_exception_payload_redacts_unlabelled_secrets_without_report_context() -> None:
+    error = subprocess.TimeoutExpired(
+        cmd=("fixture", "--api-key", "naked-command-secret"),
+        timeout=7,
+        output=b"naked-command-secret naked-environment-secret",
+        stderr="naked-command-secret",
+    )
+    payload = release_validation._exception_payload(error, secrets=("naked-environment-secret",))
+    serialized = json.dumps(payload)
+    assert "naked-command-secret" not in serialized
+    assert "naked-environment-secret" not in serialized
+    assert payload["type"] == "TimeoutExpired"
+    assert payload["timeout_seconds"] == 7
+
+
+def test_acceptance_matrix_requires_executed_artifact_evidence_for_r17() -> None:
+    statuses = {"R17": "passed"}
+    missing = build_acceptance_matrix((), browser_statuses=statuses, installed_statuses=statuses)[
+        -1
+    ]
+    completed = build_acceptance_matrix(
+        (), browser_statuses=statuses, installed_statuses=statuses, artifact_status="passed"
+    )[-1]
+    assert missing["id"] == completed["id"] == "R17"
+    assert missing["overall"] == "partial"
+    assert completed["overall"] == "passed"

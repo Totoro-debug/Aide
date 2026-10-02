@@ -34,14 +34,14 @@ export default async function setup() {
     while (lineWaiters.length > 0) lineWaiters.shift().reject(error);
   });
 
-  function readLine(timeoutMs = 30000) {
+  function readLine(timeoutMs = 30000, operation = "startup") {
     if (stdoutClosed) return Promise.reject(new Error(`E2E service closed: ${errors}`));
     let waiter;
     const result = new Promise((resolveLine, rejectLine) => {
       const timeout = setTimeout(() => {
         const index = lineWaiters.findIndex((candidate) => candidate === waiter);
         if (index >= 0) lineWaiters.splice(index, 1);
-        rejectLine(new Error(`E2E service response timed out: ${errors}`));
+        rejectLine(new Error(`E2E service response timed out during ${operation}: ${errors}`));
       }, timeoutMs);
       waiter = {
         resolve: (line) => {
@@ -123,13 +123,13 @@ export default async function setup() {
   return {
     details,
     async command(command) {
-      const response = readLine();
+      const response = readLine(30000, `command ${command}`);
       child.stdin.write(`${command}\n`);
       return JSON.parse(await response);
     },
     async restart() {
       child.stdin.write("restart\n");
-      details = publish(parseDetails(await readLine()));
+      details = publish(parseDetails(await readLine(30000, "restart")));
       return details;
     },
     async shutdown() {

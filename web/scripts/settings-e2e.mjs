@@ -20,10 +20,36 @@ async function waitForActiveGeneration(target) {
 export async function settingsConfirmationAcceptance({ page, control }) {
   await page.bringToFront();
   await page.getByRole("button", { name: "EN", exact: true }).click();
+  const draftResponses = Promise.all([
+    page.waitForResponse((response) => (
+      /\/projects\/[^/]+\/sessions$/.test(new globalThis.URL(response.url()).pathname)
+      && response.request().method() === "POST"
+    )),
+    page.waitForResponse((response) => (
+      /\/projects\/[^/]+\/sessions\/[^/]+\/claim$/.test(new globalThis.URL(response.url()).pathname)
+      && response.request().method() === "POST"
+    )),
+  ]);
   await page.getByRole("button", { name: "New session", exact: true }).click();
+  const [createdResponse, claimedResponse] = await draftResponses;
+  assert.equal(createdResponse.status(), 200, "Settings draft creation failed");
+  assert.equal(claimedResponse.status(), 200, "Settings draft Claim failed");
+  const created = await createdResponse.json();
+  const claimed = await claimedResponse.json();
+  assert.equal(claimed.claim.session_id, created.session_id);
+  await expect(page.getByRole("button", { name: "New session", exact: true })).toBeEnabled();
   await control.command("settings-arm");
   await page.locator("textarea").fill("settings generation barrier confirmation");
   await page.locator("textarea").press("Enter");
+  let acceptedRun;
+  await expect.poll(async () => {
+    acceptedRun = await page.evaluate((sessionId) => [...(window.__myclawTestMessages ?? [])]
+      .reverse().find((event) => (
+        event.type === "input.accepted" && event.session_id === sessionId
+        && event.payload?.text === "settings generation barrier confirmation"
+      )), created.session_id);
+    return acceptedRun?.session_id;
+  }, { timeout: 10000, message: "Settings input must be accepted in the newly claimed draft" }).toBe(created.session_id);
   await control.command("settings-wait");
   await page.getByRole("navigation").getByRole("link", { name: "Settings", exact: true }).click();
   const field = page.getByLabel("Maximum iterations", { exact: true });
@@ -44,9 +70,7 @@ export async function settingsConfirmationAcceptance({ page, control }) {
   await expect(dialog).toBeHidden();
   await waitForActiveGeneration(page);
   console.log("Settings pending generation: existing browser Run Tool confirmation remains usable and finishes naturally after save");
-  return page.evaluate(() => [...window.__myclawTestMessages].reverse().find((event) => (
-    event.type === "input.accepted" && event.payload?.text === "settings generation barrier confirmation"
-  )).run_id);
+  return acceptedRun.run_id;
 }
 
 export async function settingsModelMcpAcceptance({ page, secondPage, control, output }) {

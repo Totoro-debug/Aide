@@ -905,7 +905,13 @@ class AgentLoop:
             )
         except asyncio.CancelledError:
             if not self._aborted:
-                self._commit_schedule_run(session, run_context, [current_user], job=job)
+                self._record_schedule_failure(
+                    session,
+                    run_context,
+                    current_user,
+                    ErrorInfo("turn_cancelled", TURN_CANCELLED_MESSAGE),
+                    job,
+                )
             raise
         except CommittableAgentRunError as failure:
             if self._aborted:
@@ -964,6 +970,14 @@ class AgentLoop:
             raise ScheduleJobExecutionError(failure.error) from failure
         if self._aborted:
             raise asyncio.CancelledError()
+        if result.finish_reason == "cancelled" and not result.messages:
+            self._commit_schedule_failure(
+                session,
+                run_context,
+                current_user,
+                result.error or ErrorInfo("turn_cancelled", TURN_CANCELLED_MESSAGE),
+                job,
+            )
         self._commit_schedule_run(
             session,
             run_context,

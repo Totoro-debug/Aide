@@ -2067,7 +2067,28 @@ async def test_schedule_exec_keeps_legacy_authorization_behavior(tmp_path: Path)
 async def test_real_powershell_host_inspects_and_executes_canonical_cmdlet(
     tmp_path: Path,
     selector: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    configured_path = os.environ.get(
+        "MYCLAW_PWSH_PATH" if selector == "pwsh" else "MYCLAW_POWERSHELL_PATH"
+    )
+    candidates = (
+        [Path(configured_path)]
+        if configured_path
+        else [
+            Path.home() / ".cache/codex-runtimes/codex-primary-runtime/dependencies/native/powershell/pwsh.exe"
+            if selector == "pwsh"
+            else Path(os.environ.get("WINDIR", r"C:\Windows"))
+            / "System32/WindowsPowerShell/v1.0/powershell.exe",
+        ]
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            monkeypatch.setenv(
+                "PATH",
+                os.pathsep.join((str(candidate.parent), os.environ.get("PATH", ""))),
+            )
+            break
     shell = resolve_exec_shell(selector, platform="windows")  # type: ignore[arg-type]
     if not shell.available:
         pytest.skip(f"{selector} is not installed")

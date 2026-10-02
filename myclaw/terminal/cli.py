@@ -5,7 +5,7 @@ import webbrowser
 from collections.abc import Mapping
 from pathlib import Path
 from time import monotonic
-from typing import Any, Literal, cast
+from typing import Literal, cast
 from uuid import uuid4
 
 import typer
@@ -138,7 +138,7 @@ _ORIGINAL_LEGACY_COMPONENTS = (
 )
 
 
-def _print_error_info(error: ErrorInfo) -> None:
+def _print_error_info(error: ErrorInfo | ServiceStartupError | ServiceError) -> None:
     console.print(
         f"{error.code}: {error.message}",
         markup=False,
@@ -1173,10 +1173,10 @@ def main(context: typer.Context) -> None:
         )
         raise typer.Exit(code=1) from None
     except ServiceStartupError as service_error:
-        _print_error_info(ErrorInfo(cast(Any, service_error.code), service_error.message))
+        _print_error_info(service_error)
         raise typer.Exit(code=1) from None
     except ServiceError as service_error:
-        _print_error_info(ErrorInfo(cast(Any, service_error.code), service_error.message))
+        _print_error_info(service_error)
         raise typer.Exit(code=1) from None
     except Exception:
         _print_error_info(_RUNTIME_STARTUP_ERROR)
@@ -1189,11 +1189,11 @@ def service_stop_command() -> None:
     try:
         stopped = asyncio.run(ServiceClient.stop_existing(AgentHome.production()))
     except ServiceStartupError as error:
-        _print_error_info(ErrorInfo(cast(Any, error.code), error.message))
+        _print_error_info(error)
         raise typer.Exit(code=1) from None
     if not stopped:
         _print_error_info(
-            ErrorInfo(cast(Any, "service_not_running"), "No active local service was found.")
+            ServiceStartupError("service_not_running", "No active local service was found.")
         )
         raise typer.Exit(code=1)
 
@@ -1206,10 +1206,10 @@ def web_command() -> None:
         if not webbrowser.open_new_tab(url):
             console.print(url, markup=False, highlight=False)
     except ServiceStartupError as error:
-        _print_error_info(ErrorInfo(cast(Any, error.code), error.message))
+        _print_error_info(error)
         raise typer.Exit(code=1) from None
     except ServiceError as error:
-        _print_error_info(ErrorInfo(cast(Any, error.code), error.message))
+        _print_error_info(error)
         raise typer.Exit(code=1) from None
 
 

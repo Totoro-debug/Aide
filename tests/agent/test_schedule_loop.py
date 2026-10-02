@@ -882,7 +882,9 @@ async def test_schedule_cancelled_runner_persists_user_and_propagates_cancelled_
         f"schedule_{JOB_ID}",
         partition=SessionStoragePartition.SCHEDULE,
     )
-    assert [message["role"] for message in schedule_session.messages] == ["user"]
+    assert [message["role"] for message in schedule_session.messages] == ["user", "assistant"]
+    assert schedule_session.messages[-1]["status"] == "interrupted"
+    assert schedule_session.messages[-1]["error"]["code"] == "turn_cancelled"
     assert router.requests == []
 
 
@@ -929,7 +931,9 @@ async def test_schedule_context_preparation_failures_preserve_cancel(
         partition=SessionStoragePartition.SCHEDULE,
     )
     assert [message["role"] for message in failed_session.messages] == ["user", "assistant"]
-    assert [message["role"] for message in cancelled_session.messages] == ["user"]
+    assert [message["role"] for message in cancelled_session.messages] == ["user", "assistant"]
+    assert cancelled_session.messages[-1]["status"] == "interrupted"
+    assert cancelled_session.messages[-1]["error"]["code"] == "turn_cancelled"
 
 
 @pytest.mark.asyncio

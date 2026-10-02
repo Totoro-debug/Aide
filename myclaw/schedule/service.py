@@ -335,8 +335,8 @@ class ScheduleService:
         self._admission_guard = guard
 
     def cancellation_requested(self) -> bool:
-        """Return whether Runtime shutdown has requested Schedule execution cancellation."""
-        return self._closing.is_set()
+        """Return whether a draining pause or shutdown requested run cancellation."""
+        return self._closing.is_set() or self._pause_task is not None
 
     def job_cancellation_requested(self, job_id: str) -> bool:
         """Include deletion of the exact Job in its Runner cancellation boundary."""

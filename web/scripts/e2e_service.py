@@ -28,6 +28,11 @@ from myclaw.service.errors import ServiceError
 CONFIRMATION_PATH: str | None = None
 SETTINGS_ENTERED = asyncio.Event()
 SETTINGS_RELEASE = asyncio.Event()
+SETTINGS_RELEASE_PATH: Path | None = None
+PROJECT_REMOVAL_ENTERED = asyncio.Event()
+PROJECT_REMOVAL_RELEASE = asyncio.Event()
+INSTALLED_CONCURRENCY_RELEASE = asyncio.Event()
+INSTALLED_EXPIRY_RELEASE = asyncio.Event()
 MODEL_MCP_ENTERED = asyncio.Event()
 MODEL_MCP_RELEASE = asyncio.Event()
 PROVIDER_OBSERVATION_PATH: Path | None = None
@@ -170,6 +175,8 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
     request_id = f"fixture-{uuid4()}"
     chunks: list[dict[str, object]] = []
     normalized_prompt = user_prompt.lower()
+    requested_prompt = user_prompt.rsplit("## User Input\n", 1)[-1].strip()
+    normalized_requested_prompt = requested_prompt.lower()
     model = str(body.get("model", "small-model"))
     tool_names = tuple(
         str(function.get("name"))
@@ -195,13 +202,26 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
     if "settings generation barrier" in normalized_prompt and isinstance(body.get("tools"), list):
         SETTINGS_ENTERED.set()
         await SETTINGS_RELEASE.wait()
+    if "project removal barrier" in normalized_prompt and isinstance(body.get("tools"), list):
+        PROJECT_REMOVAL_ENTERED.set()
+        await PROJECT_REMOVAL_RELEASE.wait()
+    if "concurrent session streaming markdown" in normalized_requested_prompt:
+        await INSTALLED_CONCURRENCY_RELEASE.wait()
+    if "installed expiry barrier" in normalized_requested_prompt:
+        await INSTALLED_EXPIRY_RELEASE.wait()
     model_mcp_barrier = "model mcp generation barrier" in normalized_prompt
     model_mcp_request = "model mcp resource" in normalized_prompt
+    current_tool_result_ids = {
+        message.get("tool_call_id")
+        for message in messages[last_user_index + 1 :]
+        if isinstance(message, dict) and message.get("role") == "tool"
+    }
     tool_search_completed = any(
-        result_id.startswith("call-model-mcp-search-") for result_id in tool_result_ids
+        isinstance(result_id, str) and result_id.startswith("call-model-mcp-search-")
+        for result_id in current_tool_result_ids
     )
-    v1_tool_completed = "call-model-mcp-v1" in tool_result_ids
-    v2_tool_completed = "call-model-mcp-v2" in tool_result_ids
+    v1_tool_completed = "call-model-mcp-v1" in current_tool_result_ids
+    v2_tool_completed = "call-model-mcp-v2" in current_tool_result_ids
     needs_tool_search = (
         (model_mcp_barrier or model_mcp_request)
         and "tool_search" in tool_names
@@ -222,9 +242,9 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
     )
     confirmation_request = (
         isinstance(body.get("tools"), list)
-        and "confirmation" in normalized_prompt
+        and "confirmation" in normalized_requested_prompt
         and not any(
-            marker in normalized_prompt
+            marker in normalized_requested_prompt
             for marker in (
                 "tool states",
                 "streaming markdown",
@@ -426,6 +446,55 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
             _chunk(request_id=request_id, model=model, delta={"content": "Fixture response."})
         )
         chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="stop"))
+
+    if body.get("stream") is False:
+        content_parts: list[str] = []
+        nonstream_tool_calls: list[dict[str, object]] = []
+        nonstream_finish_reason = "stop"
+        for chunk in chunks:
+            choices = chunk.get("choices")
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                continue
+            choice = choices[0]
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                delta_content = delta.get("content")
+                if isinstance(delta_content, str):
+                    content_parts.append(delta_content)
+                calls = delta.get("tool_calls")
+                if isinstance(calls, list):
+                    nonstream_tool_calls.extend(call for call in calls if isinstance(call, dict))
+            finish_value = choice.get("finish_reason")
+            if isinstance(finish_value, str):
+                nonstream_finish_reason = finish_value
+        nonstream_message: dict[str, object] = {
+            "role": "assistant",
+            "content": "".join(content_parts) or None,
+        }
+        if nonstream_tool_calls:
+            nonstream_message["tool_calls"] = [
+                {
+                    "id": call.get("id"),
+                    "type": call.get("type", "function"),
+                    "function": call.get("function", {}),
+                }
+                for call in nonstream_tool_calls
+            ]
+        return web.json_response(
+            {
+                "id": request_id,
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": nonstream_message,
+                        "finish_reason": nonstream_finish_reason,
+                    }
+                ],
+            }
+        )
 
     response = web.StreamResponse(
         status=200,

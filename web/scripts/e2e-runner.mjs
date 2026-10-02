@@ -1746,7 +1746,8 @@ try {
           ? "Delete this Session permanently?" : "永久删除此会话？" });
         const deleteTrigger = page.getByRole("button", { name: deleteLabel, exact: true });
         await deleteTrigger.waitFor();
-        const extendedCase = language === "en" && theme === "light" && viewport.width === 1440;
+        const extendedCase = language === "en" && theme === "light"
+          && [1440, 768].includes(viewport.width);
         if (extendedCase) {
           await page.getByRole("button", { name: "Rename session", exact: true }).click();
           const titleDialog = page.getByRole("dialog");
@@ -1827,10 +1828,16 @@ try {
           ? "Session deletion did not finish. Retry to continue cleanup."
           : "会话删除尚未完成，请重试以继续清理。", { exact: true }).waitFor();
         let otherPrompt = null;
+        let otherSessionId = null;
         if (extendedCase) {
           await deleteDialog.getByRole("button", { name: "Cancel", exact: true }).click();
           await deleteDialog.waitFor({ state: "hidden" });
+          const otherSessionCreation = page.waitForResponse((response) => (
+            response.request().method() === "POST"
+            && /\/api\/v1\/projects\/[^/]+\/sessions$/.test(new URL(response.url()).pathname)
+          ));
           await page.getByRole("button", { name: "New session", exact: true }).click();
+          otherSessionId = (await (await otherSessionCreation).json()).session_id;
           await page.getByRole("heading", { name: "New Session draft", exact: true }).waitFor();
           otherPrompt = "retry once another session stays selected";
           await page.getByLabel("Message input").fill(otherPrompt);
@@ -1839,14 +1846,56 @@ try {
             && messages.some((accepted) => accepted.type === "input.accepted"
               && accepted.payload?.text === otherPrompt && accepted.run_id === completed.run_id)), "unrelated Session completion");
         }
-        await page.reload();
+        let releaseRestoredSessionClaim;
+        let notifyRestoredSessionClaim;
+        let notifyRestoredSessionClaimResponse;
+        const restoredSessionClaimStarted = new Promise((resolveStarted) => {
+          notifyRestoredSessionClaim = resolveStarted;
+        });
+        const restoredSessionClaimReleased = new Promise((resolveReleased) => {
+          releaseRestoredSessionClaim = resolveReleased;
+        });
+        const restoredSessionClaimResponse = new Promise((resolveResponse) => {
+          notifyRestoredSessionClaimResponse = resolveResponse;
+        });
+        const delayRestoredSessionClaim = async (route) => {
+          const response = await route.fetch();
+          const pathname = new URL(route.request().url()).pathname;
+          if (otherSessionId !== null && pathname.endsWith(`/sessions/${otherSessionId}/claim`)) {
+            notifyRestoredSessionClaim();
+            await restoredSessionClaimReleased;
+          }
+          await route.fulfill({ response });
+          if (otherSessionId !== null && pathname.endsWith(`/sessions/${otherSessionId}/claim`)) {
+            notifyRestoredSessionClaimResponse();
+          }
+        };
+        if (otherSessionId !== null) {
+          await page.route("**/api/v1/projects/*/sessions/*/claim", delayRestoredSessionClaim);
+        }
         const deletionRetry = page.getByRole("button", { name: language === "en" ? "Retry" : "重试", exact: true });
+        await page.reload();
         await expect(deletionRetry).toBeEnabled();
-        await deletionRetry.click();
+        if (otherSessionId !== null) {
+          await Promise.race([
+            restoredSessionClaimStarted,
+            delay(10_000).then(() => { throw new Error("Reload did not issue the expected restored Session Claim"); }),
+          ]);
+        }
+        await deletionRetry.focus();
+        await expect(deletionRetry).toBeFocused();
+        await page.keyboard.press("Enter");
         await deleteDialog.waitFor();
+        if (otherSessionId !== null) {
+          releaseRestoredSessionClaim();
+          await restoredSessionClaimResponse;
+          await page.getByRole("button", { name: "Delete session", exact: true }).waitFor();
+          await page.unroute("**/api/v1/projects/*/sessions/*/claim", delayRestoredSessionClaim);
+        }
         await page.keyboard.press("Escape");
         await deleteDialog.waitFor({ state: "hidden" });
         await expect(deletionRetry, "Retry deletion dialog did not restore focus to Retry").toBeFocused();
+        await page.screenshot({ path: resolve(output, `delete-retry-focus-${language}-${theme}-${viewport.width}.png`) });
         await deletionRetry.click();
         if (otherPrompt !== null) {
           await page.getByRole("log", { includeHidden: true }).getByText(otherPrompt, { exact: true }).waitFor({ state: "attached" });

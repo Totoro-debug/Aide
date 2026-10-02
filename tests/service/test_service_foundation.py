@@ -438,17 +438,17 @@ async def test_project_removal_keeps_failed_loop_for_retry(
     session_id = await workspace.create_draft(client.client_id)
     await service.claim(client.client_id, workspace.workspace_id, session_id)
     loop = workspace.loops[session_id].loop
-    original_abort = loop.abort
+    original_close = loop.close
     failed = False
 
-    async def abort_once() -> None:
+    async def close_once() -> None:
         nonlocal failed
         if not failed:
             failed = True
             raise OSError("injected cancellation failure")
-        await original_abort()
+        await original_close()
 
-    monkeypatch.setattr(loop, "abort", abort_once)
+    monkeypatch.setattr(loop, "close", close_once)
     try:
         with pytest.raises(ServiceError) as error:
             await service.remove_project(client.client_id, record.project_id)

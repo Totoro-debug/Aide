@@ -4984,6 +4984,8 @@ function ProjectSessionsContent({
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const renameTriggerRef = useRef<HTMLButtonElement | null>(null);
   const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const deleteRetryTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const deleteFocusOriginRef = useRef<"toolbar" | "retry">("toolbar");
   const restoreTriggerRef = useRef<HTMLButtonElement | null>(null);
   const managementTriggerRef = useRef<HTMLButtonElement | null>(null);
   const restoreBusyRef = useRef(false);
@@ -5877,6 +5879,7 @@ function ProjectSessionsContent({
     if (draft || claim === null || selectedSummary === undefined) return;
     if (pendingDeletionRef.current?.attempted) return;
     deleteTriggerRef.current = event.currentTarget;
+    deleteFocusOriginRef.current = "toolbar";
     if (pendingDeletionRef.current === null) {
       const operation = { claim: { ...claim }, requestId: createRequestId(), attempted: false, title: selectedSummary.title };
       pendingDeletionRef.current = operation;
@@ -5996,10 +5999,11 @@ function ProjectSessionsContent({
           {pendingDeletion?.attempted ? (
             <button
               className={styles.dangerButton}
+              ref={deleteRetryTriggerRef}
               type="button"
               disabled={deleteBusy || connectionState !== "online"}
-              onClick={(event) => {
-                deleteTriggerRef.current = event.currentTarget;
+              onClick={() => {
+                deleteFocusOriginRef.current = "retry";
                 setDeleteOpen(true);
               }}
             >
@@ -6387,7 +6391,9 @@ function ProjectSessionsContent({
             onPointerDownOutside={(event) => { if (deleteBusyRef.current) event.preventDefault(); }}
             onCloseAutoFocus={(event) => {
               event.preventDefault();
-              const trigger = deleteTriggerRef.current;
+              const trigger = deleteFocusOriginRef.current === "retry"
+                ? deleteRetryTriggerRef.current
+                : deleteTriggerRef.current;
               if (trigger?.isConnected && !trigger.disabled) trigger.focus();
               else document.getElementById("sessions-heading")?.focus();
             }}

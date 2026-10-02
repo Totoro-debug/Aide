@@ -10,6 +10,7 @@ from typing import cast
 import pytest
 import pytest_asyncio
 
+from myclaw.agent.loop import AgentLoop
 from myclaw.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRequest, ModelToolCall
 from myclaw.agent.workspace_runtime import WorkspaceRuntime
 from myclaw.config.agent_home import AgentHome
@@ -174,6 +175,70 @@ async def test_retirement_failure_does_not_discard_published_generation(
     assert workspace.runtime.router.route_status("chat").model
     await service.stop()
     assert attempts >= 2
+
+
+@pytest.mark.asyncio
+async def test_active_configuration_status_waits_for_workspace_admission(
+    generation_service: LocalService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = generation_service
+    client = await service.register_client("cli")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    workspace = await service.attach_workspace(client.client_id, path)
+    previous = workspace.runtime
+    assert previous is not None
+    entered, release = asyncio.Event(), asyncio.Event()
+    close = previous.router.close
+
+    async def blocked_close() -> None:
+        entered.set()
+        await release.wait()
+        await close()
+
+    monkeypatch.setattr(previous.router, "close", blocked_close)
+    await _save(service)
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        application = cast(dict[str, object], service.config_view()["application"])
+        assert workspace.configuration.runtime.max_iterations == 83
+        assert service.configuration_transition_active
+        assert application["status"] == "pending"
+        assert application["pending_revision"] == application["saved_revision"]
+    finally:
+        release.set()
+        task = service._config_apply_task
+        if task is not None:
+            await asyncio.wait_for(asyncio.shield(task), timeout=10)
+    await _applied(service)
+    assert not service.configuration_transition_active
+    draft = await service.create_session(client.client_id, workspace.workspace_id)
+    claimed = await service.claim(
+        client.client_id, workspace.workspace_id, cast(str, draft["session_id"])
+    )
+    claim = cast(dict[str, object], claimed["claim"])
+
+    async def hold_preparation(
+        loop: AgentLoop, context: object, *, tool_gateway: object
+    ) -> list[dict[str, object]]:
+        del loop, context, tool_gateway
+        await asyncio.Event().wait()
+        return []
+
+    monkeypatch.setattr(AgentLoop, "_prepare_agent_run", hold_preparation)
+    accepted = await service.handle_command(
+        client.client_id,
+        {
+            "request_id": "input-immediately-after-active",
+            "type": "input",
+            "workspace_id": workspace.workspace_id,
+            "session_id": draft["session_id"],
+            "claim_version": claim["claim_version"],
+            "payload": {"text": "new generation input"},
+        },
+    )
+    assert accepted["accepted"] is True
+    assert cast(dict[str, object], accepted["result"])["run_id"]
 
 
 @pytest.mark.asyncio

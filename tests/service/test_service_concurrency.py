@@ -16,7 +16,7 @@ from aiohttp.test_utils import TestServer
 
 import myclaw.service.runtime as service_runtime
 from myclaw.agent.memory.manager import MemoryManager
-from myclaw.agent.session.session import Session
+from myclaw.agent.session.session import Session, SessionStoragePartition
 from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
 from myclaw.config.config import ConfigLoader, ProviderConfiguration
@@ -193,8 +193,9 @@ class _ScheduleProvider:
 
 
 class _RemovalProvider(_ConcurrentProvider):
-    def __init__(self) -> None:
+    def __init__(self, *, block_schedule_preparation: bool = True) -> None:
         super().__init__(block_b=True)
+        self.block_schedule_preparation = block_schedule_preparation
         self.schedule_started = asyncio.Event()
         self.schedule_cancelled = asyncio.Event()
         self.release_schedule = asyncio.Event()
@@ -212,7 +213,9 @@ class _RemovalProvider(_ConcurrentProvider):
         continuation: object = None,
     ) -> ModelResponse:
         del model, max_output, temperature, reasoning_effort, timeout, continuation
-        if "scheduled removal job" in json.dumps(messages):
+        if "scheduled removal job" in json.dumps(messages) and (
+            self.block_schedule_preparation or tools
+        ):
             self.schedule_started.set()
             try:
                 await self.release_schedule.wait()
@@ -1157,14 +1160,15 @@ async def test_workspace_schedule_and_memory_are_shared_across_clients(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("block_schedule_preparation", [True, False])
 async def test_project_removal_cancels_foreground_and_schedule_runs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, block_schedule_preparation: bool
 ) -> None:
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
     record = ProjectCatalog(home).register(workspace_path)
-    provider = _RemovalProvider()
+    provider = _RemovalProvider(block_schedule_preparation=block_schedule_preparation)
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
     service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     server, port = await _serve(service, home)
@@ -1175,6 +1179,7 @@ async def test_project_removal_cancels_foreground_and_schedule_runs(
         second = await ServiceClient.connect_or_start(home, workspace_path, port=port)
         workspace = service.workspace(first.workspace_id)
         workspace_id = first.workspace_id
+        session_ids = (first.session_id, second.session_id)
 
         await first.submit_input("session-a")
         await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
@@ -1199,6 +1204,25 @@ async def test_project_removal_cancels_foreground_and_schedule_runs(
         await asyncio.wait_for(provider.session_a_cancelled.wait(), timeout=2)
         await asyncio.wait_for(provider.session_b_cancelled.wait(), timeout=2)
         await asyncio.wait_for(provider.schedule_cancelled.wait(), timeout=2)
+        for session_id, prompt, partition in (
+            (session_ids[0], "session-a", SessionStoragePartition.FOREGROUND),
+            (session_ids[1], "session-b", SessionStoragePartition.FOREGROUND),
+            (job.session_id, job.message, SessionStoragePartition.SCHEDULE),
+        ):
+            persisted = Session.load(workspace.workspace_state, session_id, partition=partition)
+            assert (
+                sum(
+                    message.get("role") == "user" and message.get("content") == prompt
+                    for message in persisted.messages
+                )
+                == 1
+            )
+            assert any(
+                message.get("role") == "assistant"
+                and isinstance(message.get("error"), dict)
+                and message["error"].get("code") == "turn_cancelled"
+                for message in persisted.messages
+            ), persisted.messages
         assert not workspace.loops
         assert not workspace._schedule_loops
         assert workspace.schedule_service.status_snapshot().to_dict()["active_job_count"] == 0
@@ -1600,7 +1624,7 @@ async def test_snapshot_resync_includes_selected_and_switched_away_claims(
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    provider = _ConcurrentProvider()
+    provider = _ConcurrentProvider(block_b=True)
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
     service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     initial_sink = _CollectingSink()
@@ -1615,19 +1639,36 @@ async def test_snapshot_resync_includes_selected_and_switched_away_claims(
             client.client_id, first_session, _claim_version(first_claim), "session-a", "run-a"
         )
         await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
-        second_session = await workspace.create_draft(
-            client.client_id, reuse_startup_session=False
+        second_session = await workspace.create_draft(client.client_id, reuse_startup_session=False)
+        second_claim = await service.claim(client.client_id, workspace.workspace_id, second_session)
+        await workspace.input(
+            client.client_id, second_session, _claim_version(second_claim), "session-b", "run-b"
         )
-        await service.claim(client.client_id, workspace.workspace_id, second_session)
+        await asyncio.wait_for(provider.session_b_started.wait(), timeout=2)
         assert set(client.claimed) == {
             (workspace.workspace_id, first_session),
             (workspace.workspace_id, second_session),
         }
         last_seq = client.sequence
         await service.disconnect_client(client.client_id, sink=initial_sink)
+        provider.release_b.set()
+        for _ in range(200):
+            if any(
+                message.get("role") == "assistant"
+                and message.get("content") == "answer from session B"
+                for message in workspace.loops[second_session].loop.session.messages
+            ):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("Selected Session did not complete while its Client was offline")
+        await workspace.loops[second_session].loop.session.wait_for_pending_persist()
         for marker in range(257):
             await service.emit(
-                "test.event", workspace_id=None, session_id=None, run_id=None,
+                "test.event",
+                workspace_id=None,
+                session_id=None,
+                run_id=None,
                 payload={"marker": marker},
             )
         replay_sink = _CollectingSink()
@@ -1650,11 +1691,58 @@ async def test_snapshot_resync_includes_selected_and_switched_away_claims(
         snapshot = cast(dict[str, object], payload["snapshot"])
         sessions = cast(list[dict[str, object]], snapshot["sessions"])
         assert {cast(dict[str, object], item["snapshot"])["session_id"] for item in sessions} == {
-            first_session, second_session,
+            first_session,
+            second_session,
         }
+        recovered = {
+            cast(dict[str, object], item["snapshot"])["session_id"]: cast(
+                dict[str, object], item["snapshot"]
+            )
+            for item in sessions
+        }
+        selected_messages = cast(list[dict[str, object]], recovered[second_session]["messages"])
+        persisted = Session.load(workspace.workspace_state, second_session).messages
+        expected = [(message["role"], message.get("content")) for message in persisted]
+        assert [
+            (message["role"], message.get("content")) for message in selected_messages
+        ] == expected
+        assert expected.count(("user", "session-b")) == 1
+        assert expected.count(("assistant", "answer from session B")) == 1
+        background_messages = cast(list[dict[str, object]], recovered[first_session]["messages"])
+        # Active turns stage their messages until terminal commit; snapshots expose committed history.
+        assert background_messages == workspace.loops[first_session].loop.session.messages
+        provider.release_a.set()
+        completed = await asyncio.wait_for(
+            replay_sink.wait_for("run.completed", "run-a"), timeout=2
+        )
+        assert cast(int, completed["seq"]) > cast(int, event["seq"])
+        assert (
+            sum(
+                item.get("type") == "run.completed" and item.get("run_id") == "run-a"
+                for item in replay_sink.events
+            )
+            == 1
+        )
+        completed_history = Session.load(workspace.workspace_state, first_session).messages
+        assert (
+            sum(
+                message.get("role") == "user" and message.get("content") == "session-a"
+                for message in completed_history
+            )
+            == 1
+        )
+        assert (
+            sum(
+                message.get("role") == "assistant"
+                and message.get("content") == "answer from session A"
+                for message in completed_history
+            )
+            == 1
+        )
         assert "credential" not in json.dumps(event)
     finally:
         provider.release_a.set()
+        provider.release_b.set()
         await service.stop()
 
 

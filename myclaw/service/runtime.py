@@ -2075,6 +2075,7 @@ class WorkspaceServiceRuntime:
             await state.loop.abort()
         else:
             await state.loop.close()
+            await self.service.confirmation.cancel_generation(state.loop.generation_id)
 
     async def _close_loop(self, session_id: str, *, abort: bool = False) -> None:
         state = self._loops.get(session_id)
@@ -2132,10 +2133,11 @@ class WorkspaceServiceRuntime:
                 self._close_failed = False
 
     async def _close_all_loops(self) -> None:
+        """Drain accepted work into durable terminal outcomes during lifecycle shutdown."""
         for session_id in tuple(self._loops):
-            await self._close_loop(session_id, abort=True)
+            await self._close_loop(session_id)
         for job_id in tuple(self._schedule_loops):
-            await self._close_schedule_loop(job_id, abort=True)
+            await self._close_schedule_loop(job_id)
 
 
 class LocalService:
@@ -2854,10 +2856,6 @@ class LocalService:
                                     target.runtime.permission_level
                                 )
                             self._config_active_revision = target_revision
-                            self._config_status = "active"
-                            self._config_pending_revision = None
-                            self._config_error = None
-                            self._config_waiting_for = ()
                     if latest:
                         for workspace, candidate in prepared:
                             await workspace.discard_prepared_configuration(candidate)
@@ -2873,6 +2871,10 @@ class LocalService:
                         if target_revision != self._config_saved_revision:
                             continue
                         self._configuration_transition_active = False
+                        self._config_status = "active"
+                        self._config_pending_revision = None
+                        self._config_error = None
+                        self._config_waiting_for = ()
                     await self._reconcile_schedule_admission()
                     await self._emit_configuration_event()
                     if self._config_status == "pending":

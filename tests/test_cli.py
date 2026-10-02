@@ -32,6 +32,8 @@ from myclaw.management.service import (
     ResumeResult,
 )
 from myclaw.provider.model_router import ModelRouteStatus
+from myclaw.service.client import ServiceClient, ServiceStartupError
+from myclaw.service.errors import ServiceError
 from myclaw.skills.catalog import SkillMetadata
 from myclaw.terminal.conversation import TerminalConversationApp
 from myclaw.utils.time import local_now
@@ -65,6 +67,42 @@ def test_legacy_runtime_module_is_not_discoverable() -> None:
     assert importlib.util.find_spec(legacy_module) is None
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module(legacy_module)
+
+
+def test_service_stop_without_an_active_service_prints_a_clear_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_service(_home: AgentHome) -> bool:
+        return False
+
+    monkeypatch.setattr(ServiceClient, "stop_existing", no_service)
+    result = CliRunner().invoke(cli.app, ["service", "stop"])
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert result.stdout.count("service_not_running: No active local service was found.") == 1
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ServiceStartupError("service_port_in_use", "The local service port is occupied."),
+        ServiceError("admission_closed", "The local service is stopping."),
+    ],
+)
+def test_web_service_errors_are_reported_without_a_runtime_error_code_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+    error: ServiceStartupError | ServiceError,
+) -> None:
+    async def fail_launch() -> str:
+        raise error
+
+    monkeypatch.setattr(cli, "_create_web_launch_url", fail_launch)
+    result = CliRunner().invoke(cli.app, ["web"])
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert result.stdout.count(f"{error.code}: {error.message}") == 1
+    assert result.stderr == ""
 
 
 @pytest.mark.asyncio

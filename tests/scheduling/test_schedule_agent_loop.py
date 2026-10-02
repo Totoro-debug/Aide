@@ -1592,14 +1592,17 @@ async def test_schedule_shutdown_during_model_persists_user_and_keeps_job_pendin
         partition=SessionStoragePartition.SCHEDULE,
     )
     assert [(message["role"], message["content"]) for message in schedule_session.messages] == [
-        ("user", job.message)
+        ("user", job.message),
+        ("assistant", schedule_session.messages[1]["content"]),
     ]
+    assert schedule_session.messages[1]["status"] == "interrupted"
+    assert schedule_session.messages[1]["error"]["code"] == "turn_cancelled"
     history = read_schedule_history(WorkspaceState(workspace), job.job_id)
     groups = cast(list[dict[str, Any]], history["groups"])
     assert len(groups) == 1
-    assert groups[0]["result_state"] == "unknown"
-    assert groups[0]["complete"] is False
-    assert groups[0]["finished_at"] is None
+    assert groups[0]["result_state"] == "canceled"
+    assert groups[0]["complete"] is True
+    assert isinstance(groups[0]["finished_at"], str)
     assert groups[0]["messages"] == schedule_session.messages
 
 
@@ -1649,14 +1652,17 @@ async def test_schedule_shutdown_during_preparation_persists_user(
         partition=SessionStoragePartition.SCHEDULE,
     )
     assert [(message["role"], message["content"]) for message in schedule_session.messages] == [
-        ("user", job.message)
+        ("user", job.message),
+        ("assistant", schedule_session.messages[1]["content"]),
     ]
+    assert schedule_session.messages[1]["status"] == "interrupted"
+    assert schedule_session.messages[1]["error"]["code"] == "turn_cancelled"
     history = read_schedule_history(WorkspaceState(workspace), job.job_id)
     groups = cast(list[dict[str, Any]], history["groups"])
     assert len(groups) == 1
-    assert groups[0]["result_state"] == "unknown"
-    assert groups[0]["complete"] is False
-    assert groups[0]["finished_at"] is None
+    assert groups[0]["result_state"] == "canceled"
+    assert groups[0]["complete"] is True
+    assert isinstance(groups[0]["finished_at"], str)
     assert groups[0]["messages"] == schedule_session.messages
 
 

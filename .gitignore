@@ -10,3 +10,4 @@ dist/
 web/node_modules/
 web/dist/
 web/test-results/
+myclaw/.web-assets-staging-*/

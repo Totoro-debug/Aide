@@ -11,13 +11,16 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import xml.etree.ElementTree as ET
+import zipfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from importlib import import_module
 from pathlib import Path
-from typing import Final, Literal, cast
+from typing import Any, Final, Literal, cast
 
 from myclaw.agent.permission import PermissionSnapshot
 from myclaw.agent.tools.core.exec import ExecTool
@@ -1384,9 +1387,12 @@ def _run_quality(host_results: Sequence[Mapping[str, object]] | None = None) -> 
 
 
 _ARTIFACT_SMOKE_PROGRAM: Final[str] = r"""
+import hashlib
 import json
 import os
+import shutil
 import sys
+from importlib.resources import files
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -1402,6 +1408,17 @@ environment_prefix = Path(sys.prefix).resolve()
 source_root = Path(os.environ["MYCLAW_SOURCE_ROOT"]).resolve()
 assert module_path.is_relative_to(environment_prefix)
 assert not module_path.is_relative_to(source_root)
+assert shutil.which("node") is None
+assert shutil.which("npm") is None
+
+asset_root = files("myclaw.web_assets")
+manifest = json.loads((asset_root / "manifest.json").read_text(encoding="utf-8"))
+assert manifest["schema_version"] == 1
+assert manifest["entry"] == "index.html"
+for record in manifest["files"]:
+    asset = (asset_root / record["path"]).read_bytes()
+    assert len(asset) == record["bytes"]
+    assert hashlib.sha256(asset).hexdigest() == record["sha256"]
 
 with TemporaryDirectory(prefix="myclaw-wheel-config-") as temporary:
     home = Path(temporary) / "agent-home"
@@ -1473,99 +1490,226 @@ print(
 """
 
 
-def _run_artifact_smoke() -> dict[str, object]:
-    with tempfile.TemporaryDirectory(prefix="myclaw-release-artifact-") as temporary:
+def _artifact_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    for inherited in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
+        environment.pop(inherited, None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment["PATH"] = os.pathsep.join(
+        part
+        for part in environment.get("PATH", "").split(os.pathsep)
+        if "node" not in part.casefold() and "npm" not in part.casefold()
+    )
+    environment["MYCLAW_SOURCE_ROOT"] = str(ROOT)
+    return environment
+
+
+def _source_web_asset_bytes() -> dict[str, bytes]:
+    asset_root = ROOT / "myclaw" / "web_assets"
+    validator_module = cast(
+        Any,
+        import_module("scripts.validate_web_assets" if __package__ else "validate_web_assets"),
+    )
+    manifest = validator_module.validate_web_assets(asset_root)
+    expected = {
+        str(record["path"]): (asset_root / str(record["path"])).read_bytes()
+        for record in manifest["files"]
+    }
+    expected["manifest.json"] = (asset_root / "manifest.json").read_bytes()
+    return expected
+
+
+def _assert_wheel_web_assets(wheel: Path, expected: Mapping[str, bytes]) -> None:
+    prefix = "myclaw/web_assets/"
+    with zipfile.ZipFile(wheel) as archive:
+        names = {name.replace("\\", "/") for name in archive.namelist()}
+        if any("/web/" in name or "node_modules/" in name for name in names):
+            raise RuntimeError(f"wheel contains frontend source or node_modules: {wheel}")
+        actual = {name.removeprefix(prefix) for name in names if name.startswith(prefix)}
+        allowed = set(expected) | {"__init__.py"}
+        if actual != allowed:
+            raise RuntimeError(
+                f"wheel Web asset members differ: expected {sorted(allowed)}, "
+                f"found {sorted(actual)}"
+            )
+        for relative, contents in expected.items():
+            if archive.read(prefix + relative) != contents:
+                raise RuntimeError(f"wheel Web asset differs from source: {relative}")
+
+
+def _assert_sdist_web_assets(sdist: Path, expected: Mapping[str, bytes]) -> None:
+    marker = "/myclaw/web_assets/"
+    with tarfile.open(sdist, "r:gz") as archive:
+        members = {member.name.replace("\\", "/"): member for member in archive.getmembers()}
+        if any("/web/" in name or "node_modules/" in name for name in members):
+            raise RuntimeError(f"sdist contains frontend source or node_modules: {sdist}")
+        asset_members = {
+            name.split(marker, 1)[1]: member
+            for name, member in members.items()
+            if marker in name and member.isfile()
+        }
+        allowed = set(expected) | {"__init__.py"}
+        if set(asset_members) != allowed:
+            raise RuntimeError(
+                f"sdist Web asset members differ: expected {sorted(allowed)}, "
+                f"found {sorted(asset_members)}"
+            )
+        for relative, contents in expected.items():
+            extracted = archive.extractfile(asset_members[relative])
+            if extracted is None or extracted.read() != contents:
+                raise RuntimeError(f"sdist Web asset differs from source: {relative}")
+
+
+def _extract_sdist(sdist: Path, destination: Path) -> Path:
+    destination.mkdir()
+    resolved_destination = destination.resolve()
+    with tarfile.open(sdist, "r:gz") as archive:
+        for member in archive.getmembers():
+            target = (destination / member.name).resolve()
+            if not target.is_relative_to(resolved_destination):
+                raise RuntimeError(f"sdist contains an unsafe path: {member.name}")
+        archive.extractall(destination, filter="data")
+    roots = tuple(path for path in destination.iterdir() if path.is_dir())
+    if len(roots) != 1:
+        raise RuntimeError(f"sdist extraction did not produce one source root: {roots}")
+    return roots[0]
+
+
+def _smoke_installed_wheel(wheel: Path, root: Path) -> dict[str, object]:
+    root.mkdir(parents=True, exist_ok=True)
+    venv_dir = root / "venv"
+    _run_command([sys.executable, "-m", "venv", str(venv_dir)])
+    scripts_dir = venv_dir / ("Scripts" if _platform() == "windows" else "bin")
+    python = scripts_dir / ("python.exe" if _platform() == "windows" else "python")
+    entry_point = scripts_dir / ("myclaw.exe" if _platform() == "windows" else "myclaw")
+    if not python.is_file():
+        raise RuntimeError("wheel smoke virtual environment has no Python executable")
+    environment = _artifact_environment()
+    _run_command(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--force-reinstall",
+            str(wheel),
+        ],
+        env=environment,
+    )
+    smoke_cwd = root / "smoke-cwd"
+    smoke_cwd.mkdir()
+    if not entry_point.is_file():
+        raise RuntimeError("installed wheel did not create the myclaw console entry point")
+    entry_result = _run_command(
+        [str(entry_point), "--help"],
+        cwd=smoke_cwd,
+        env=environment,
+        timeout=60,
+    )
+    if "MyClaw Personal Agent runtime" not in entry_result.stdout:
+        raise RuntimeError("installed myclaw entry point did not start normally")
+    result = subprocess.run(
+        [str(python), "-c", _ARTIFACT_SMOKE_PROGRAM],
+        cwd=smoke_cwd,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "installed wheel configuration smoke failed:\n" + result.stdout + result.stderr
+        )
+    try:
+        smoke_payload = json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            "installed wheel smoke returned malformed evidence:\n" + result.stdout + result.stderr
+        ) from error
+    if smoke_payload.get("marker") != "ARTIFACT_CONFIG_SMOKE_OK":
+        raise RuntimeError(
+            "installed wheel smoke returned an unexpected marker:\n" + result.stdout + result.stderr
+        )
+    return {
+        "wheel": wheel.name,
+        "cwd": str(smoke_cwd),
+        "marker": "ARTIFACT_CONFIG_SMOKE_OK",
+        "module_path": smoke_payload["module_path"],
+        "environment_prefix": smoke_payload["environment_prefix"],
+        "entry_point": str(entry_point),
+        "entry_point_help": "passed",
+    }
+
+
+def _run_distribution_validation() -> dict[str, object]:
+    expected_assets = _source_web_asset_bytes()
+    with tempfile.TemporaryDirectory(prefix="myclaw-release-distribution-") as temporary:
         root = Path(temporary)
-        wheel_dir = root / "wheel"
-        wheel_dir.mkdir()
+        distribution_dir = root / "distribution"
+        distribution_dir.mkdir()
         _run_command(
             [
                 sys.executable,
                 "-m",
                 "build",
-                "--no-isolation",
+                "--sdist",
                 "--wheel",
                 "--outdir",
-                str(wheel_dir),
-            ]
+                str(distribution_dir),
+            ],
+            env=_artifact_environment(),
         )
-        wheels = tuple(wheel_dir.glob("myclaw-*.whl"))
-        if len(wheels) != 1:
-            raise RuntimeError(f"expected one wheel, found {len(wheels)}")
-        venv_dir = root / "venv"
-        _run_command([sys.executable, "-m", "venv", str(venv_dir)])
-        scripts_dir = venv_dir / ("Scripts" if _platform() == "windows" else "bin")
-        python = scripts_dir / ("python.exe" if _platform() == "windows" else "python")
-        entry_point = scripts_dir / ("myclaw.exe" if _platform() == "windows" else "myclaw")
-        if not python.is_file():
-            raise RuntimeError("wheel smoke virtual environment has no Python executable")
-        environment = dict(os.environ)
-        for inherited in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
-            environment.pop(inherited, None)
-        environment["PYTHONNOUSERSITE"] = "1"
-        environment["MYCLAW_SOURCE_ROOT"] = str(ROOT)
+        wheels = tuple(distribution_dir.glob("myclaw-*.whl"))
+        sdists = tuple(distribution_dir.glob("myclaw-*.tar.gz"))
+        if len(wheels) != 1 or len(sdists) != 1:
+            raise RuntimeError(
+                f"expected one direct wheel and sdist, found {len(wheels)} wheels and "
+                f"{len(sdists)} sdists"
+            )
+        _assert_wheel_web_assets(wheels[0], expected_assets)
+        _assert_sdist_web_assets(sdists[0], expected_assets)
+
+        extracted_root = _extract_sdist(sdists[0], root / "extracted")
+        rebuilt_dir = root / "rebuilt"
+        rebuilt_dir.mkdir()
         _run_command(
             [
-                str(python),
+                sys.executable,
                 "-m",
-                "pip",
-                "install",
-                "--disable-pip-version-check",
-                "--force-reinstall",
-                str(wheels[0]),
+                "build",
+                "--wheel",
+                "--outdir",
+                str(rebuilt_dir),
+                str(extracted_root),
             ],
-            env=environment,
+            cwd=extracted_root,
+            env=_artifact_environment(),
         )
-        smoke_cwd = root / "smoke-cwd"
-        smoke_cwd.mkdir()
-        if not entry_point.is_file():
-            raise RuntimeError("installed wheel did not create the myclaw console entry point")
-        entry_result = _run_command(
-            [str(entry_point), "--help"],
-            cwd=smoke_cwd,
-            env=environment,
-            timeout=60,
-        )
-        if "MyClaw Personal Agent runtime" not in entry_result.stdout:
-            raise RuntimeError("installed myclaw entry point did not start normally")
-        result = subprocess.run(
-            [str(python), "-c", _ARTIFACT_SMOKE_PROGRAM],
-            cwd=smoke_cwd,
-            env=environment,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=120,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                "installed wheel configuration smoke failed:\n" + result.stdout + result.stderr
-            )
-        try:
-            smoke_payload = json.loads(result.stdout.strip().splitlines()[-1])
-        except (IndexError, json.JSONDecodeError) as error:
-            raise RuntimeError(
-                "installed wheel smoke returned malformed evidence:\n"
-                + result.stdout
-                + result.stderr
-            ) from error
-        if smoke_payload.get("marker") != "ARTIFACT_CONFIG_SMOKE_OK":
-            raise RuntimeError(
-                "installed wheel smoke returned an unexpected marker:\n"
-                + result.stdout
-                + result.stderr
-            )
+        rebuilt_wheels = tuple(rebuilt_dir.glob("myclaw-*.whl"))
+        if len(rebuilt_wheels) != 1:
+            raise RuntimeError(f"expected one sdist-rebuilt wheel, found {len(rebuilt_wheels)}")
+        _assert_wheel_web_assets(rebuilt_wheels[0], expected_assets)
+        direct_smoke = _smoke_installed_wheel(wheels[0], root / "direct-install")
+        rebuilt_smoke = _smoke_installed_wheel(rebuilt_wheels[0], root / "rebuilt-install")
         return {
             "wheel": wheels[0].name,
-            "cwd": str(smoke_cwd),
-            "marker": "ARTIFACT_CONFIG_SMOKE_OK",
-            "module_path": smoke_payload["module_path"],
-            "environment_prefix": smoke_payload["environment_prefix"],
-            "entry_point": str(entry_point),
-            "entry_point_help": "passed",
+            "sdist": sdists[0].name,
+            "rebuilt_wheel": rebuilt_wheels[0].name,
+            "direct_install": direct_smoke,
+            "rebuilt_install": rebuilt_smoke,
+            "asset_manifest": "verified",
+            "sdist_rebuild": "verified",
         }
+
+
+def _run_artifact_smoke() -> dict[str, object]:
+    distribution = _run_distribution_validation()
+    direct_smoke = cast(dict[str, object], distribution["direct_install"])
+    return {**direct_smoke, "distribution": distribution}
 
 
 def _write_report(report_path: Path, payload: Mapping[str, object]) -> None:

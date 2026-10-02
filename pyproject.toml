@@ -1,6 +1,7 @@
 [build-system]
 requires = ["setuptools>=77"]
-build-backend = "setuptools.build_meta"
+build-backend = "scripts.build_backend"
+backend-path = ["."]
 
 [project]
 name = "myclaw"
@@ -52,7 +53,15 @@ include = ["myclaw*"]
 [tool.setuptools.package-data]
 "myclaw.templates" = ["*.md"]
 "myclaw.service.protocol" = ["*.json"]
-"myclaw.web_assets" = ["*.html", "*.js", "*.css", "*.svg", "*.webmanifest", "assets/*"]
+"myclaw.web_assets" = [
+    "*.html",
+    "*.json",
+    "*.js",
+    "*.css",
+    "*.svg",
+    "*.webmanifest",
+    "assets/*",
+]
 
 [tool.pytest.ini_options]
 addopts = ["--strict-config", "--strict-markers", "-ra"]

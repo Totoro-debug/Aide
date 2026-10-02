@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "entry": "index.html",
+  "files": [
+    {
+      "path": "assets/index-Ci4iPtgL.css",
+      "sha256": "8668ec6fbfc456f1d9eb444c9a4c33f45c70872dfa03bd3132a0b608555686ae",
+      "bytes": 51842
+    },
+    {
+      "path": "assets/index-D2FLfWCl.js",
+      "sha256": "45ff0e8f4034b01692746151ce7d887be6094e30f3ce71873a71df0f1c824801",
+      "bytes": 689914
+    },
+    {
+      "path": "favicon.svg",
+      "sha256": "d9a2b6ac72ad46d5e332bf57c855f196a0a76afea44d59abd702a6b9cbaee3a5",
+      "bytes": 285
+    },
+    {
+      "path": "index.html",
+      "sha256": "702c9bcf5a13116639d437d5ea889c4128435c62871ab9b6b3e6b2f97ac9b0c1",
+      "bytes": 485
+    }
+  ]
+}

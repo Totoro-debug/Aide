@@ -31,6 +31,32 @@ source .venv/bin/activate
 python -m pip install .
 ```
 
+## Web 界面与服务生命周期
+
+安装 wheel 或 source distribution 后，运行时只需要 Python 及其依赖，不需要 Node.js、npm 或前端源码。直接执行 `myclaw web`；首次配置或配置需要修复时，会打开对应的设置页面。已有有效配置时，也可运行裸 `myclaw` 进入 CLI 对话。
+
+```bash
+myclaw web
+```
+
+`myclaw web` 会启动或复用当前 Agent Home 的本地服务，并打开一次性的浏览器登录地址。服务只监听 `127.0.0.1:8765`，浏览器和 CLI 连接使用同一个服务与生命周期；关闭浏览器后服务会保留短暂的重连窗口。需要立即收尾时执行：
+
+```bash
+myclaw service stop
+```
+
+停止命令请求服务正常排空活动运行、关闭连接并清理发现文件；它不会删除 Workspace、会话或用户配置。源码开发者只有在重新生成发布资源时才需要 Node.js/npm：
+
+```bash
+npm --prefix web ci
+npm --prefix web run build
+python -m build --sdist --wheel
+```
+
+构建会校验入口 HTML、引用资源、SHA-256 清单和分发包资源；资源缺失或清单不一致时直接失败，不会生成只有后端的安装包。
+
+发布者可在仓库根目录执行 `python -m scripts.installed_web_validation --output D:/myclaw-installed-check`（使用新的源码外目录）。该入口以正常隔离构建生成 wheel/sdist，独立重建并安装两种 wheel，验收生产 Web 页面、深层路由、对话、Settings、同服务 CLI 连接和停止，保存报告及截图。浏览器控制器需要 `web/` 的 Playwright/Node 开发依赖；安装后的应用使用无 Node/npm 的独立环境。默认端口被占用时检查会失败，不停止已有服务。
+
 ## Windows 发布验证
 
 发布验证仅在 GitHub Actions 的 Windows runner 上运行 `--phase all`。Windows 必须真实执行 Windows PowerShell 5.1 和 PowerShell 7 的 Host Exec 检查、执行、Full-Access 动态命令及文件系统能力检查，并运行完整测试、lint、类型检查、构建，在隔离环境中安装 wheel，从源码树外执行 entry point 与配置 smoke。`release-gate` 仅依赖 Windows 作业成功；主机缺失或必需测试跳过均不算通过。

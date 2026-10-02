@@ -422,6 +422,7 @@ def test_skip_allowlists_are_platform_specific(monkeypatch: pytest.MonkeyPatch) 
 def test_artifact_smoke_uses_platform_venv_paths(
     monkeypatch: pytest.MonkeyPatch,
     platform: str,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(release_validation, "_platform", lambda: platform)
     commands: list[list[str]] = []
@@ -459,12 +460,21 @@ def test_artifact_smoke_uses_platform_venv_paths(
 
     monkeypatch.setattr(release_validation, "_run_command", command)
     monkeypatch.setattr(subprocess, "run", smoke)
-    result = release_validation._run_artifact_smoke()
+    result = release_validation._smoke_installed_wheel(tmp_path / "fixture.whl", tmp_path)
     expected_folder = "Scripts" if platform == "windows" else "bin"
     expected_entry = "myclaw.exe" if platform == "windows" else "myclaw"
     assert Path(cast(str, result["entry_point"])).parts[-2:] == (expected_folder, expected_entry)
     assert commands[-1][-1] == "--help"
     assert Path(cast(str, result["cwd"])).name == "smoke-cwd"
+
+
+def test_artifact_smoke_preserves_report_contract_without_duplicate_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    direct = {"marker": "ARTIFACT_CONFIG_SMOKE_OK", "wheel": "fixture.whl"}
+    distribution = {"direct_install": direct, "rebuilt_install": {"wheel": "rebuilt.whl"}}
+    monkeypatch.setattr(release_validation, "_run_distribution_validation", lambda: distribution)
+    assert release_validation._run_artifact_smoke() == {**direct, "distribution": distribution}
 
 
 def test_artifact_program_rejects_source_tree_import() -> None:

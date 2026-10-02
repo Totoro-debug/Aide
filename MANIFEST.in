@@ -1,0 +1,7 @@
+include LICENSE README.md MANIFEST.in pyproject.toml setup.py
+include scripts/*.py
+include myclaw/web_assets/index.html
+include myclaw/web_assets/favicon.svg
+include myclaw/web_assets/manifest.json
+recursive-include myclaw/web_assets/assets *
+global-exclude __pycache__ *.py[cod]

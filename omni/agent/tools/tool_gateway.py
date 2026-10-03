@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +21,7 @@ from omni.agent.tools.base import (
     BaseTool,
     ToolError,
 )
+from omni.agent.tools.context import ToolRunContext
 from omni.agent.tools.core.edit_file import EditFileTool
 from omni.agent.tools.core.exec import ExecTool
 from omni.agent.tools.core.exec_host import ExecHost
@@ -212,55 +215,132 @@ def _normalize_tool_names(names: Collection[str], *, label: str) -> tuple[str, .
     return tuple(normalized)
 
 
+class BuiltInToolCatalog:
+    """Own one immutable set of reusable Built-in Tool implementations."""
+
+    def __init__(
+        self,
+        *,
+        skill_root: Path | None = None,
+        exec_host: ExecHost | None = None,
+    ) -> None:
+        tools: tuple[BaseTool, ...] = (
+            ReadFileTool(skill_root=skill_root),
+            WriteFileTool(),
+            EditFileTool(),
+            ListDirTool(),
+            GlobTool(),
+            GrepTool(),
+            ExecTool(host=exec_host),
+            WebSearchTool(),
+            WebFetchTool(),
+            ScheduleTool(),
+        )
+        if len({tool.name for tool in tools}) != len(tools):
+            raise ValueError("Built-in Tool names must be unique")
+        self._tools = tools
+
+    @property
+    def tools(self) -> tuple[BaseTool, ...]:
+        """Return the shared implementation objects in fixed catalog order."""
+        return self._tools
+
+
+_BOUND_BUILT_IN_CATALOG: ContextVar[BuiltInToolCatalog | None] = ContextVar(
+    "omni_bound_builtin_tool_catalog",
+    default=None,
+)
+
+
+@contextmanager
+def bind_built_in_tool_catalog(catalog: BuiltInToolCatalog) -> Iterator[None]:
+    """Bind a service-owned catalog only while composing one Agent Loop."""
+    if not isinstance(catalog, BuiltInToolCatalog):
+        raise TypeError("Bound Built-in Tool Catalog must be a BuiltInToolCatalog")
+    token = _BOUND_BUILT_IN_CATALOG.set(catalog)
+    try:
+        yield
+    finally:
+        _BOUND_BUILT_IN_CATALOG.reset(token)
+
+
 class ToolGateway:
     """Create and invoke the Built-in Tool Catalog."""
 
     def __init__(
         self,
         *,
-        workspace: Path,
-        schedule_service: ScheduleService,
+        workspace: Path | None = None,
+        schedule_service: ScheduleService | None = None,
         skill_root: Path | None = None,
         additional_tools: Sequence[BaseTool] = (),
         permission_policy: ToolPermissionPolicy | None = None,
         permission_context: PermissionContext | None = None,
         exec_host: ExecHost | None = None,
+        catalog: BuiltInToolCatalog | None = None,
+        tool_context: ToolRunContext | None = None,
     ) -> None:
-        if not isinstance(workspace, Path):
-            raise TypeError("Tool Gateway requires a Path")
-        if not isinstance(schedule_service, ScheduleService):
-            raise TypeError("Tool Gateway requires a ScheduleService")
+        if catalog is not None and not isinstance(catalog, BuiltInToolCatalog):
+            raise TypeError("Tool Gateway catalog must be a BuiltInToolCatalog")
+        if tool_context is not None and not isinstance(tool_context, ToolRunContext):
+            raise TypeError("Tool Gateway context must be a ToolRunContext")
+        if workspace is not None and not isinstance(workspace, Path):
+            raise TypeError("Tool Gateway workspace must be a Path")
+        if schedule_service is not None and not isinstance(schedule_service, ScheduleService):
+            raise TypeError("Tool Gateway schedule_service must be a ScheduleService or None")
+
+        if tool_context is None and workspace is not None:
+            tool_context = ToolRunContext(
+                workspace=workspace,
+                schedule_service=schedule_service,
+            )
+        elif (
+            tool_context is not None
+            and workspace is not None
+            and workspace != tool_context.workspace
+        ):
+            raise ValueError("Tool Gateway workspace must match its Tool Run Context")
+        if tool_context is not None and schedule_service is not None:
+            if (
+                tool_context.schedule_service is not None
+                and tool_context.schedule_service is not schedule_service
+            ):
+                raise ValueError("Tool Gateway Schedule Service must match its Tool Run Context")
 
         generation_tools = tuple(additional_tools)
         if any(not isinstance(tool, BaseTool) for tool in generation_tools):
             raise TypeError("Additional Tools must be BaseTool instances")
-        tools: tuple[BaseTool, ...] = (
-            ReadFileTool(workspace=workspace, skill_root=skill_root),
-            WriteFileTool(workspace=workspace),
-            EditFileTool(workspace=workspace),
-            ListDirTool(workspace=workspace),
-            GlobTool(workspace=workspace),
-            GrepTool(workspace=workspace),
-            ExecTool(workspace=workspace, host=exec_host),
-            WebSearchTool(),
-            WebFetchTool(),
-            ScheduleTool(schedule_service=schedule_service),
-            *generation_tools,
-        )
+        if catalog is None:
+            catalog = _BOUND_BUILT_IN_CATALOG.get()
+        if catalog is None:
+            if workspace is None:
+                raise TypeError("Tool Gateway requires a workspace or shared catalog")
+            catalog = BuiltInToolCatalog(skill_root=skill_root, exec_host=exec_host)
+        tools: tuple[BaseTool, ...] = (*catalog.tools, *generation_tools)
         if len({tool.name for tool in tools}) != len(tools):
             raise ValueError("Tool names must be unique")
         self._catalog = tools
         self._tools = {tool.name: tool for tool in tools}
         self._exposed_names = tuple(tool.name for tool in tools)
+        self._tool_context = tool_context
         self._failure_observer: Callable[[Exception], None] | None = None
         self._permission_policy = (
             ToolPermissionPolicy() if permission_policy is None else permission_policy
         )
         self._permission_context = (
-            PermissionContext(workspace_root=workspace)
+            PermissionContext(
+                workspace_root=(None if tool_context is None else tool_context.workspace)
+            )
             if permission_context is None
             else permission_context
         )
+        if (
+            tool_context is not None
+            and permission_context is not None
+            and permission_context.workspace_root is not None
+            and permission_context.workspace_root != tool_context.workspace
+        ):
+            raise ValueError("Tool Gateway permission context must match its Tool Run Context")
 
     def for_run(
         self,
@@ -271,6 +351,7 @@ class ToolGateway:
         permission_policy: ToolPermissionPolicy | None = None,
         permission_context: PermissionContext | None = None,
         permission_snapshot: PermissionSnapshot | None = None,
+        tool_context: ToolRunContext | None = None,
     ) -> ToolGateway:
         """Create an isolated Run view over this Gateway's reusable Tool instances."""
         excluded = _normalize_tool_names(excluded_names, label="Excluded Tool names")
@@ -294,11 +375,17 @@ class ToolGateway:
 
         if permission_snapshot is not None and permission_context is not None:
             raise ValueError("Run permission context and snapshot are mutually exclusive")
+        if tool_context is not None and not isinstance(tool_context, ToolRunContext):
+            raise TypeError("Run Tool context must be a ToolRunContext")
         selected_context = (
             _context_from_snapshot(self._permission_context, permission_snapshot)
             if permission_snapshot is not None
             else (self._permission_context if permission_context is None else permission_context)
         )
+        selected_tool_context = self._tool_context if tool_context is None else tool_context
+        if selected_tool_context is not None and selected_context.workspace_root is not None:
+            if selected_context.workspace_root != selected_tool_context.workspace:
+                raise ValueError("Run permission context must match its Tool Run Context")
         return self._from_catalog(
             catalog,
             exposed_names=exposure,
@@ -307,6 +394,7 @@ class ToolGateway:
                 self._permission_policy if permission_policy is None else permission_policy
             ),
             permission_context=selected_context,
+            tool_context=selected_tool_context,
         )
 
     @classmethod
@@ -318,11 +406,13 @@ class ToolGateway:
         on_failure: Callable[[Exception], None] | None,
         permission_policy: ToolPermissionPolicy | None = None,
         permission_context: PermissionContext | None = None,
+        tool_context: ToolRunContext | None = None,
     ) -> ToolGateway:
         gateway = object.__new__(cls)
         gateway._catalog = catalog
         gateway._tools = {tool.name: tool for tool in catalog}
         gateway._exposed_names = exposed_names
+        gateway._tool_context = tool_context
         gateway._failure_observer = on_failure
         gateway._permission_policy = (
             ToolPermissionPolicy() if permission_policy is None else permission_policy
@@ -341,6 +431,11 @@ class ToolGateway:
     def catalog(self) -> tuple[BaseTool, ...]:
         """Return the complete Tool Catalog owned by this Gateway view."""
         return self._catalog
+
+    @property
+    def tool_context(self) -> ToolRunContext | None:
+        """Return the immutable Workspace and runtime context for this view."""
+        return self._tool_context
 
     def is_micro_compression_eligible(self, tool_name: str) -> bool:
         """Return whether one catalogued Tool result may be micro-compressed."""
@@ -369,6 +464,7 @@ class ToolGateway:
         on_failure: Callable[[Exception], None] | None = None,
         permission_policy: ToolPermissionPolicy | None = None,
         permission_context: PermissionContext | None = None,
+        tool_context: ToolRunContext | None = None,
     ) -> ToolGateway:
         """Build the isolated Long-term Memory catalog without widening the public API."""
         if not tools or len({tool.name for tool in tools}) != len(tools):
@@ -380,6 +476,7 @@ class ToolGateway:
             on_failure=on_failure,
             permission_policy=permission_policy,
             permission_context=permission_context,
+            tool_context=tool_context,
         )
 
     @property
@@ -411,8 +508,18 @@ class ToolGateway:
         if tool is None:
             return _result(tool_call, "error", "The requested tool is not available.")
 
+        effective_run_token = run_token
+        if effective_run_token is None and self._tool_context is not None:
+            effective_run_token = self._tool_context.run_token
+
         try:
-            facts = await tool.prepare(cast(dict[str, Any], parsed))
+            if self._tool_context is None:
+                facts = await tool.prepare(cast(dict[str, Any], parsed))
+            else:
+                facts = await tool.prepare_for_context(
+                    cast(dict[str, Any], parsed),
+                    context=self._tool_context,
+                )
             if not isinstance(facts, ToolInvocationFacts):
                 raise TypeError("Tool preparation returned an invalid value")
             execution_arguments = facts.execution_arguments
@@ -430,6 +537,7 @@ class ToolGateway:
                 tool,
                 execution_arguments,
                 mutation_target=mutation_target,
+                tool_context=self._tool_context,
             )
         except asyncio.CancelledError:
             raise
@@ -502,8 +610,9 @@ class ToolGateway:
                 authorization=authorization,
                 confirmation_state=confirmation_state,
                 file_mutation_recorder=file_mutation_recorder,
-                run_token=run_token,
+                run_token=effective_run_token,
                 mutation_target=mutation_target,
+                tool_context=self._tool_context,
             )
 
         try:
@@ -550,8 +659,9 @@ class ToolGateway:
             authorization=authorization,
             confirmation_state=confirmation_state,
             file_mutation_recorder=file_mutation_recorder,
-            run_token=run_token,
+            run_token=effective_run_token,
             mutation_target=mutation_target,
+            tool_context=self._tool_context,
         )
 
     @staticmethod
@@ -560,14 +670,19 @@ class ToolGateway:
         prepared_arguments: dict[str, Any],
         *,
         mutation_target: Path | None,
+        tool_context: ToolRunContext | None = None,
     ) -> str | None:
-        refusal = getattr(tool, "refusal_reason", None)
-        if refusal is None:
-            return None
         refusal_arguments = deepcopy(prepared_arguments)
         if mutation_target is not None and isinstance(tool, (WriteFileTool, EditFileTool)):
             refusal_arguments["path"] = str(mutation_target)
-        reason = cast(Callable[..., object], refusal)(**refusal_arguments)
+        reason: object
+        if tool_context is not None:
+            reason = tool.refusal_reason_for_context(refusal_arguments, context=tool_context)
+        else:
+            refusal = getattr(tool, "refusal_reason", None)
+            if refusal is None:
+                return None
+            reason = cast(Callable[..., object], refusal)(**refusal_arguments)
         if reason is not None and not isinstance(reason, str):
             raise TypeError("Tool refusal checks must return a string reason or None")
         return reason
@@ -583,9 +698,24 @@ class ToolGateway:
         file_mutation_recorder: FileMutationRecorder | None,
         run_token: UUID | None,
         mutation_target: Path | None,
+        tool_context: ToolRunContext | None,
     ) -> ToolResult:
         try:
-            if (
+            if tool_context is not None:
+                contextual_recorder = (
+                    file_mutation_recorder
+                    if self._permission_context.origin == "foreground"
+                    else None
+                )
+                content = await tool.execute_authorized_for_context(
+                    deepcopy(prepared_arguments),
+                    authorization,
+                    context=tool_context,
+                    mutation_recorder=contextual_recorder,
+                    run_token=run_token,
+                    mutation_target=mutation_target,
+                )
+            elif (
                 self._permission_context.origin == "foreground"
                 and file_mutation_recorder is not None
                 and run_token is not None
@@ -727,6 +857,7 @@ def _result(
 
 __all__ = [
     "BUILT_IN_TOOL_NAMES",
+    "BuiltInToolCatalog",
     "ConfirmationDecision",
     "ConfirmationRequest",
     "ConfirmationRequester",
@@ -735,4 +866,5 @@ __all__ = [
     "ToolGateway",
     "ToolResult",
     "ToolResultStatus",
+    "bind_built_in_tool_catalog",
 ]

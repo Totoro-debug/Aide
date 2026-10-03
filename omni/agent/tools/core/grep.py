@@ -6,9 +6,10 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Final
+from typing import Annotated, Any, Final, cast
 
 from omni.agent.tools.base import BaseTool, ToolError, ToolParam
+from omni.agent.tools.context import ToolRunContext, bind_tool_run_context, bound_tool_run_context
 from omni.agent.tools.core._directory import (
     is_ignored_directory_name,
     iter_directory_entries,
@@ -71,6 +72,7 @@ class GrepTool(BaseTool):
     name = "grep"
     description = "Search UTF-8 text in a file or directory."
     required = ("pattern",)
+    _contextual = True
 
     pattern: Annotated[
         str, ToolParam(description="Regular expression or fixed text.", min_length=1)
@@ -105,8 +107,11 @@ class GrepTool(BaseTool):
         int, ToolParam(description="Number of matches or files to skip.", minimum=0)
     ] = 0
 
-    def __init__(self, *, workspace: Path) -> None:
-        self._workspace = workspace
+    _workspace: Path | None
+
+    def __init__(self, *, workspace: Path | None = None) -> None:
+        if workspace is not None:
+            self._workspace = workspace
 
     def validate_arguments(  # type: ignore[override]
         self,
@@ -138,10 +143,26 @@ class GrepTool(BaseTool):
         return None
 
     def build_file_accesses(self, prepared_arguments: dict[str, object]) -> tuple[FileAccess, ...]:
+        return self._build_file_accesses(prepared_arguments, workspace=self._legacy_workspace())
+
+    def build_file_accesses_for_context(
+        self,
+        prepared_arguments: dict[str, object],
+        *,
+        context: ToolRunContext,
+    ) -> tuple[FileAccess, ...]:
+        return self._build_file_accesses(prepared_arguments, workspace=context.workspace)
+
+    def _build_file_accesses(
+        self,
+        prepared_arguments: dict[str, object],
+        *,
+        workspace: Path,
+    ) -> tuple[FileAccess, ...]:
         return (
             self.canonical_file_access(
-                workspace=self._workspace,
-                base=self._workspace,
+                workspace=workspace,
+                base=workspace,
                 requested=str(prepared_arguments["path"]),
                 role="read",
             ),
@@ -161,8 +182,64 @@ class GrepTool(BaseTool):
         head_limit: int,
         offset: int,
     ) -> str:
-        target = self.resolve_path_argument(workspace=self._workspace, requested=path)
-        candidates, approved_root = self._candidates(target=target, requested=path)
+        return await self._execute_at_workspace(
+            workspace=self._legacy_workspace(),
+            pattern=pattern,
+            path=path,
+            glob=glob,
+            type=type,
+            output_mode=output_mode,
+            fixed_string=fixed_string,
+            ignore_case=ignore_case,
+            context=context,
+            head_limit=head_limit,
+            offset=offset,
+        )
+
+    async def execute_authorized_for_context(
+        self,
+        arguments: dict[str, Any],
+        authorization: object,
+        *,
+        context: ToolRunContext,
+        **kwargs: object,
+    ) -> str:
+        del authorization, kwargs
+        with bind_tool_run_context(context):
+            return await self.execute(
+                pattern=cast(str, arguments["pattern"]),
+                path=cast(str, arguments["path"]),
+                glob=cast(str | None, arguments["glob"]),
+                type=cast(str | None, arguments["type"]),
+                output_mode=cast(str, arguments["output_mode"]),
+                fixed_string=cast(bool, arguments["fixed_string"]),
+                ignore_case=cast(bool, arguments["ignore_case"]),
+                context=cast(int, arguments["context"]),
+                head_limit=cast(int, arguments["head_limit"]),
+                offset=cast(int, arguments["offset"]),
+            )
+
+    async def _execute_at_workspace(
+        self,
+        *,
+        workspace: Path,
+        pattern: str,
+        path: str,
+        glob: str | None,
+        type: str | None,
+        output_mode: str,
+        fixed_string: bool,
+        ignore_case: bool,
+        context: int,
+        head_limit: int,
+        offset: int,
+    ) -> str:
+        target = self.resolve_path_argument(workspace=workspace, requested=path)
+        candidates, approved_root = self._candidates(
+            workspace=workspace,
+            target=target,
+            requested=path,
+        )
         glob_filter = _optional_glob(glob)
         type_filter = _type_patterns(type)
         matcher = _matcher(pattern, fixed_string=fixed_string, ignore_case=ignore_case)
@@ -204,9 +281,15 @@ class GrepTool(BaseTool):
             f"{item.candidate.reported}:{len(item.matching_lines)}" for item in selected
         )
 
-    def _candidates(self, *, target: Path, requested: str) -> tuple[list[_Candidate], Path]:
-        workspace_root = self._workspace.resolve(strict=True)
-        lexical = _lexical_path(self._workspace, requested)
+    def _candidates(
+        self,
+        *,
+        workspace: Path,
+        target: Path,
+        requested: str,
+    ) -> tuple[list[_Candidate], Path]:
+        workspace_root = workspace.resolve(strict=True)
+        lexical = _lexical_path(workspace, requested)
         if target.is_dir():
             if _contains_directory_link(lexical, workspace_root=workspace_root):
                 return [], target
@@ -222,7 +305,7 @@ class GrepTool(BaseTool):
                         relative=entry.relative,
                         reported=report_path(
                             entry,
-                            workspace=self._workspace,
+                            workspace=workspace,
                             search_root=target,
                         ),
                         explicit=False,
@@ -255,6 +338,15 @@ class GrepTool(BaseTool):
                 explicit=True,
             )
         ], target.parent
+
+    def _legacy_workspace(self) -> Path:
+        workspace = getattr(self, "_workspace", None)
+        if not isinstance(workspace, Path):
+            context = bound_tool_run_context()
+            if context is not None:
+                return context.workspace
+            raise RuntimeError("Grep requires an explicit Tool Run Context")
+        return workspace
 
     @staticmethod
     def _read_lines(candidate: _Candidate, *, approved_root: Path) -> tuple[str, ...] | None:

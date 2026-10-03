@@ -45,7 +45,11 @@ from omni.agent.session.session import Session, SessionStoragePartition
 from omni.agent.tools.core.exec_host import ExecHost, create_exec_host, resolve_exec_shell
 from omni.agent.tools.mcp_keywords import MCPKeywordPreparer
 from omni.agent.tools.mcp_runtime import MCPRuntimeManager
-from omni.agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES
+from omni.agent.tools.tool_gateway import (
+    BUILT_IN_TOOL_NAMES,
+    BuiltInToolCatalog,
+    bind_built_in_tool_catalog,
+)
 from omni.agent.workspace_runtime import (
     WorkspaceRuntime,
     WorkspaceRuntimeFactories,
@@ -675,8 +679,12 @@ class WorkspaceServiceRuntime:
                 raise RuntimeError("Workspace service runtime is closed")
             if self._started:
                 return
-            resolved_shell = resolve_exec_shell(self.configuration.runtime.exec_shell)
-            self._exec_host = create_exec_host(resolved_shell)
+            if self.service._exec_host is None:
+                resolved_shell = resolve_exec_shell(self.configuration.runtime.exec_shell)
+                self._exec_host = create_exec_host(resolved_shell)
+            else:
+                self._exec_host = self.service.exec_host
+                resolved_shell = self._exec_host.resolved_shell
 
             async def execute_user_job(job: ScheduleJob) -> None:
                 # Admission was checked at reservation; accepted occurrences must drain.
@@ -1824,11 +1832,12 @@ class WorkspaceServiceRuntime:
             "skill_loader": self.service._skill_loader,
             "reload_skills": self.service.reload_skills,
         }
-        loop = (
-            AgentLoop.with_session(session, **loop_kwargs)
-            if session is not None
-            else AgentLoop(**loop_kwargs)
-        )
+        with bind_built_in_tool_catalog(self.service.built_in_tool_catalog):
+            loop = (
+                AgentLoop.with_session(session, **loop_kwargs)
+                if session is not None
+                else AgentLoop(**loop_kwargs)
+            )
         loop.bind_confirmation_requester(self.service.confirmation.request)
         loop.preflight()
         await loop.start()
@@ -2250,6 +2259,8 @@ class LocalService:
         self._workspace_registry = WorkspaceRuntimeRegistry()
         self._skill_loader: SkillLoader | None = None
         self._model_router: ModelRouter | None = None
+        self._exec_host: ExecHost | None = None
+        self._built_in_tool_catalog: BuiltInToolCatalog | None = None
         self._initial_configuration_candidates: list[WorkspaceServiceRuntime] = []
         self._global_reconnect_task: asyncio.Task[None] | None = None
         self._stop_task: asyncio.Task[None] | None = None
@@ -2340,6 +2351,18 @@ class LocalService:
             raise RuntimeError("Model Router is unavailable")
         return self._model_router
 
+    @property
+    def exec_host(self) -> ExecHost:
+        if self._exec_host is None:
+            raise RuntimeError("Exec Host is unavailable")
+        return self._exec_host
+
+    @property
+    def built_in_tool_catalog(self) -> BuiltInToolCatalog:
+        if self._built_in_tool_catalog is None:
+            raise RuntimeError("Built-in Tool Catalog is unavailable")
+        return self._built_in_tool_catalog
+
     def _initialize_shared_resources(self, configuration: UserConfiguration) -> None:
         """Publish the service-owned Skill and Model resources once per lifetime."""
         if self._skill_loader is None:
@@ -2354,6 +2377,13 @@ class LocalService:
             self._model_router = ModelRouter(
                 configuration=configuration,
                 provider_factory=create_provider,
+            )
+        if self._exec_host is None:
+            self._exec_host = create_exec_host(resolve_exec_shell(configuration.runtime.exec_shell))
+        if self._built_in_tool_catalog is None:
+            self._built_in_tool_catalog = BuiltInToolCatalog(
+                skill_root=self.skill_loader.root,
+                exec_host=self._exec_host,
             )
 
     def reload_skills(self) -> tuple[SkillMetadata, ...]:

@@ -59,6 +59,7 @@ from omni.agent.session.session import (
     SessionStoragePartition,
 )
 from omni.agent.tools.base import BaseTool
+from omni.agent.tools.context import ToolRunContext
 from omni.agent.tools.core.exec_host import ExecHost
 from omni.agent.tools.deferred import build_agent_run_gateway
 from omni.agent.tools.permission import MCPToolIdentity, PermissionContext
@@ -259,6 +260,11 @@ class AgentLoop:
             skill_root=skill_loader.root,
             additional_tools=tuple(mcp_tools),
             exec_host=exec_host,
+            tool_context=ToolRunContext(
+                workspace=workspace_path,
+                schedule_service=schedule_service,
+                exec_host=exec_host,
+            ),
             permission_context=PermissionContext(
                 workspace_root=workspace_path,
                 configured_schedule_level=(

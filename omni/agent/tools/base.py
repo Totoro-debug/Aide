@@ -26,6 +26,7 @@ from uuid import uuid4
 
 from loguru import logger
 
+from omni.agent.tools.context import ToolRunContext
 from omni.agent.tools.permission import (
     FileAccess,
     FileAccessRole,
@@ -44,6 +45,8 @@ _ARTIFACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _ARTIFACT_SESSION_PATTERN = re.compile(r"^[^./\\]+$")
 _DEFAULT_TRUNCATION_MARKER = "\n\n...[truncated]"
 _ARTIFACT_WRITE_FAILURE_MARKER = "\n\n...[artifact write failed; full result was not stored]"
+
+
 class ToolError(Exception):
     """An expected Tool failure whose message is safe to return to the model."""
 
@@ -194,6 +197,7 @@ class BaseTool(ABC, metaclass=_BaseToolMeta):
     description: str
     parameters: ClassVar[dict[str, Any]]
     required: ClassVar[tuple[str, ...]] = ()
+    _contextual: ClassVar[bool] = False
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
@@ -233,6 +237,118 @@ class BaseTool(ABC, metaclass=_BaseToolMeta):
         """Execute one prepared call while retaining its per-call authorization boundary."""
         del authorization
         return await self.execute_prepared(arguments)
+
+    async def prepare_for_context(
+        self,
+        arguments: dict[str, Any],
+        *,
+        context: ToolRunContext,
+    ) -> ToolInvocationFacts:
+        """Prepare one call using an explicit Run context when the Tool supports it."""
+        if not self._contextual:
+            return await self.prepare(arguments)
+
+        prepared_arguments = await self.prepare_arguments_for_context(arguments, context=context)
+        if not isinstance(prepared_arguments, dict):
+            raise TypeError("Tool argument preparation must return a dictionary")
+
+        validation = self.validate_arguments_for_context(prepared_arguments, context=context)
+        if inspect.isawaitable(validation):
+            validation = await validation
+        if isinstance(validation, str):
+            raise ToolError(validation)
+        if validation is False:
+            raise ToolError("Tool arguments are invalid.")
+
+        return await self.collect_invocation_facts_for_context(
+            prepared_arguments,
+            context=context,
+        )
+
+    async def prepare_arguments_for_context(
+        self,
+        arguments: dict[str, Any],
+        *,
+        context: ToolRunContext,
+    ) -> dict[str, Any]:
+        """Normalize arguments for a context-aware Tool."""
+        return await self.prepare_arguments(arguments)
+
+    def validate_arguments_for_context(
+        self,
+        prepared_arguments: dict[str, Any],
+        *,
+        context: ToolRunContext,
+    ) -> Any:
+        """Validate normalized arguments for a context-aware Tool."""
+        del context
+        return self.validate_arguments(**deepcopy(prepared_arguments))
+
+    def build_file_accesses_for_context(
+        self,
+        prepared_arguments: dict[str, Any],
+        *,
+        context: ToolRunContext,
+    ) -> tuple[FileAccess, ...]:
+        """Collect path facts using the explicit Workspace in a Run context."""
+        del context
+        return self.build_file_accesses(prepared_arguments)
+
+    def build_invocation_facts_for_context(
+        self,
+        prepared_arguments: dict[str, Any],
+        *,
+        context: ToolRunContext,
+    ) -> ToolInvocationFacts:
+        """Build detached authorization facts for a context-aware Tool."""
+        return ToolInvocationFacts(
+            tool_name=self.name,
+            normalized_arguments=prepared_arguments,
+            file_accesses=self.build_file_accesses_for_context(
+                prepared_arguments,
+                context=context,
+            ),
+        )
+
+    async def collect_invocation_facts_for_context(
+        self,
+        prepared_arguments: dict[str, Any],
+        *,
+        context: ToolRunContext,
+    ) -> ToolInvocationFacts:
+        """Collect detached facts for a context-aware Tool."""
+        return self.build_invocation_facts_for_context(
+            prepared_arguments,
+            context=context,
+        )
+
+    def refusal_reason_for_context(
+        self,
+        prepared_arguments: dict[str, Any],
+        *,
+        context: ToolRunContext,
+    ) -> str | None:
+        """Evaluate a business refusal against the explicit Run context."""
+        del context
+        refusal = getattr(self, "refusal_reason", None)
+        if refusal is None:
+            return None
+        result = cast(Callable[..., object], refusal)(**deepcopy(prepared_arguments))
+        if result is not None and not isinstance(result, str):
+            raise TypeError("Tool refusal checks must return a string reason or None")
+        return result
+
+    async def execute_authorized_for_context(
+        self,
+        arguments: dict[str, Any],
+        authorization: ToolAuthorizationSession,
+        *,
+        context: ToolRunContext,
+        **kwargs: Any,
+    ) -> str:
+        """Execute an authorized call through the explicit Run context."""
+        del context, kwargs
+        return await self.execute_authorized(arguments, authorization)
 
     @final
     def resolve_path_argument(

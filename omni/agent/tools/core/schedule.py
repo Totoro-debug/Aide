@@ -9,6 +9,7 @@ from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 from omni.agent.tools.base import BaseTool, ToolError
+from omni.agent.tools.context import ToolRunContext
 from omni.agent.tools.permission import (
     ScheduleAction,
     ScheduleActionName,
@@ -111,17 +112,21 @@ class ScheduleTool(BaseTool):
     name = "schedule"
     description = "Manage one-time and recurring Schedule Jobs."
     parameters = _ScheduleArgumentsSchema().to_json_schema()
+    _contextual = True
+
+    _schedule_service: ScheduleService | None
 
     def __init__(
         self,
         *,
-        schedule_service: ScheduleService,
+        schedule_service: ScheduleService | None = None,
         now: Callable[[], datetime] | None = None,
         new_uuid: Callable[[], UUID] | None = None,
     ) -> None:
-        if not isinstance(schedule_service, ScheduleService):
-            raise TypeError("Schedule Tool requires a ScheduleService")
-        self._schedule_service = schedule_service
+        if schedule_service is not None and not isinstance(schedule_service, ScheduleService):
+            raise TypeError("Schedule Tool requires a ScheduleService or None")
+        if schedule_service is not None:
+            self._schedule_service = schedule_service
         self._now: Callable[[], datetime] = (lambda: datetime.now(UTC)) if now is None else now
         self._new_uuid: Callable[[], UUID] = uuid4 if new_uuid is None else new_uuid
 
@@ -129,11 +134,29 @@ class ScheduleTool(BaseTool):
         return _ScheduleArgumentsSchema()
 
     async def prepare_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        if (
-            arguments.get("action") == "add"
-            and "title" in arguments
-            and arguments["title"] is None
-        ):
+        return await self._prepare_arguments_for_service(
+            arguments,
+            schedule_service=self._legacy_schedule_service(),
+        )
+
+    async def prepare_arguments_for_context(
+        self,
+        arguments: dict[str, Any],
+        *,
+        context: ToolRunContext,
+    ) -> dict[str, Any]:
+        return await self._prepare_arguments_for_service(
+            arguments,
+            schedule_service=self._context_schedule_service(context),
+        )
+
+    async def _prepare_arguments_for_service(
+        self,
+        arguments: dict[str, Any],
+        *,
+        schedule_service: ScheduleService,
+    ) -> dict[str, Any]:
+        if arguments.get("action") == "add" and "title" in arguments and arguments["title"] is None:
             raise ToolError(_INVALID_ARGUMENTS)
         prepared = await super().prepare_arguments(arguments)
         if prepared.get("action") == "remove":
@@ -143,7 +166,10 @@ class ScheduleTool(BaseTool):
                     require_uuid4_string(job_id, field="job_id")
                 except ValueError:
                     return prepared
-                if await self._current_public_job(job_id) is None:
+                if (
+                    await self._current_public_job(job_id, schedule_service=schedule_service)
+                    is None
+                ):
                     raise ToolError(_NOT_FOUND)
         return prepared
 
@@ -151,13 +177,32 @@ class ScheduleTool(BaseTool):
         self,
         prepared_arguments: dict[str, Any],
     ) -> ToolInvocationFacts:
+        return self._build_invocation_facts_for_service(
+            prepared_arguments,
+            schedule_service=self._legacy_schedule_service(),
+        )
+
+    def build_invocation_facts_for_context(
+        self,
+        prepared_arguments: dict[str, Any],
+        *,
+        context: ToolRunContext,
+    ) -> ToolInvocationFacts:
+        return self._build_invocation_facts_for_service(
+            prepared_arguments,
+            schedule_service=self._context_schedule_service(context),
+        )
+
+    def _build_invocation_facts_for_service(
+        self,
+        prepared_arguments: dict[str, Any],
+        *,
+        schedule_service: ScheduleService,
+    ) -> ToolInvocationFacts:
         action = prepared_arguments.get("action")
         if not isinstance(action, str) or action not in {"list", "add", "remove"}:
             raise ToolError(_INVALID_ARGUMENTS)
-        if (
-            action in {"add", "remove"}
-            and self._schedule_service.status_snapshot().status == "faulted"
-        ):
+        if action in {"add", "remove"} and schedule_service.status_snapshot().status == "faulted":
             raise ToolError(_STATE_UPDATE_FAILED)
         normalized_arguments = self._normalized_invocation_arguments(
             prepared_arguments,
@@ -214,6 +259,52 @@ class ScheduleTool(BaseTool):
         at_time: str | None = None,
         job_id: str | None = None,
     ) -> str:
+        return await self._execute_for_service(
+            action=action,
+            message=message,
+            title=title,
+            every_seconds=every_seconds,
+            cron_expr=cron_expr,
+            timezone=timezone,
+            at_time=at_time,
+            job_id=job_id,
+            schedule_service=self._legacy_schedule_service(),
+        )
+
+    async def execute_authorized_for_context(
+        self,
+        arguments: dict[str, Any],
+        authorization: object,
+        *,
+        context: ToolRunContext,
+        **kwargs: object,
+    ) -> str:
+        del authorization, kwargs
+        return await self._execute_for_service(
+            action=cast(str, arguments.get("action")),
+            message=cast(str | None, arguments.get("message")),
+            title=cast(str | None, arguments.get("title")),
+            every_seconds=cast(int | None, arguments.get("every_seconds")),
+            cron_expr=cast(str | None, arguments.get("cron_expr")),
+            timezone=cast(str | None, arguments.get("timezone")),
+            at_time=cast(str | None, arguments.get("at_time")),
+            job_id=cast(str | None, arguments.get("job_id")),
+            schedule_service=self._context_schedule_service(context),
+        )
+
+    async def _execute_for_service(
+        self,
+        *,
+        action: str,
+        message: str | None,
+        title: str | None,
+        every_seconds: int | None,
+        cron_expr: str | None,
+        timezone: str | None,
+        at_time: str | None,
+        job_id: str | None,
+        schedule_service: ScheduleService,
+    ) -> str:
         if action == "add":
             normalized_message, normalized_title, schedule = self._normalize_add(
                 message=message,
@@ -233,14 +324,14 @@ class ScheduleTool(BaseTool):
                 updated_at_ms=timestamp,
             )
             try:
-                await self._schedule_service.add_user_job(job)
+                await schedule_service.add_user_job(job)
             except Exception as error:
                 raise ToolError(_STATE_UPDATE_FAILED) from error
             return _json_content({"action": "add", "job": _public_job(job)})
 
         if action == "list":
             try:
-                jobs = await self._schedule_service.public_snapshot()
+                jobs = await schedule_service.public_snapshot()
             except Exception as error:
                 raise ToolError(_STATE_READ_FAILED) from error
             return _json_content({"jobs": [_public_job(job) for job in jobs]})
@@ -252,11 +343,11 @@ class ScheduleTool(BaseTool):
                 require_uuid4_string(job_id, field="job_id")
             except ValueError as error:
                 raise ToolError(_INVALID_ARGUMENTS) from error
-            public_job = await self._current_public_job(job_id)
+            public_job = await self._current_public_job(job_id, schedule_service=schedule_service)
             if public_job is None:
                 raise ToolError(_NOT_FOUND)
             try:
-                removed = await self._schedule_service.remove_user_job(
+                removed = await schedule_service.remove_user_job(
                     job_id,
                     expected=public_job,
                 )
@@ -329,12 +420,30 @@ class ScheduleTool(BaseTool):
             raise ToolError(_INVALID_ARGUMENTS)
         return milliseconds
 
-    async def _current_public_job(self, job_id: str) -> ScheduleJob | None:
+    async def _current_public_job(
+        self,
+        job_id: str,
+        *,
+        schedule_service: ScheduleService,
+    ) -> ScheduleJob | None:
         try:
-            jobs = await self._schedule_service.public_snapshot()
+            jobs = await schedule_service.public_snapshot()
         except Exception as error:
             raise ToolError(_STATE_READ_FAILED) from error
         return next((job for job in jobs if job.job_id == job_id), None)
+
+    def _legacy_schedule_service(self) -> ScheduleService:
+        schedule_service = getattr(self, "_schedule_service", None)
+        if not isinstance(schedule_service, ScheduleService):
+            raise RuntimeError("Schedule requires an explicit Tool Run Context")
+        return schedule_service
+
+    @staticmethod
+    def _context_schedule_service(context: ToolRunContext) -> ScheduleService:
+        schedule_service = context.schedule_service
+        if not isinstance(schedule_service, ScheduleService):
+            raise ToolError("Schedule requires a Workspace Schedule Service.")
+        return schedule_service
 
     def _normalized_invocation_arguments(
         self,

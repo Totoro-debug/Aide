@@ -46,7 +46,11 @@ from omni.agent.tools.core.exec_host import ExecHost, create_exec_host, resolve_
 from omni.agent.tools.mcp_keywords import MCPKeywordPreparer
 from omni.agent.tools.mcp_runtime import MCPRuntimeManager
 from omni.agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES
-from omni.agent.workspace_runtime import WorkspaceRuntime, WorkspaceRuntimeFactories
+from omni.agent.workspace_runtime import (
+    WorkspaceRuntime,
+    WorkspaceRuntimeFactories,
+    WorkspaceRuntimeRegistry,
+)
 from omni.agent.workspace_state import WorkspaceState
 from omni.config.agent_home import AgentHome
 from omni.config.config import (
@@ -58,6 +62,7 @@ from omni.config.config import (
     UserConfiguration,
 )
 from omni.errors import ErrorInfo
+from omni.management.commands import MANAGEMENT_COMMANDS
 from omni.provider.factory import create_provider
 from omni.provider.model_router import ModelRouter
 from omni.schedule.history import (
@@ -74,6 +79,7 @@ from omni.schedule.store import (
 )
 from omni.service.errors import ServiceError, service_error
 from omni.service.projects import ProjectCatalog, ProjectCatalogError, ProjectRecord
+from omni.skills.catalog import LoadedSkill, SkillLoader, SkillMetadata
 from omni.utils.host_filesystem import HOST_FILESYSTEM
 from omni.utils.text import normalize_title_candidate
 from omni.utils.time import local_now
@@ -694,6 +700,8 @@ class WorkspaceServiceRuntime:
                 timezone_name=get_localzone_name(),
                 provider_factory=create_provider,
                 built_in_names=BUILT_IN_TOOL_NAMES,
+                registry=self.service._workspace_registry,
+                shared_router=self.service._model_router,
                 factories=WorkspaceRuntimeFactories(
                     workspace_state=WorkspaceState,
                     restore_manager=RestoreManager,
@@ -1813,6 +1821,8 @@ class WorkspaceServiceRuntime:
             "exec_host": exec_host,
             "permission_control": permission_control,
             "configured_schedule_level": configuration.runtime.permission_level,
+            "skill_loader": self.service._skill_loader,
+            "reload_skills": self.service.reload_skills,
         }
         loop = (
             AgentLoop.with_session(session, **loop_kwargs)
@@ -2237,6 +2247,9 @@ class LocalService:
         self._client_by_reconnect: dict[str, str] = {}
         self._workspaces: dict[str, WorkspaceServiceRuntime] = {}
         self._workspace_keys: dict[str, str] = {}
+        self._workspace_registry = WorkspaceRuntimeRegistry()
+        self._skill_loader: SkillLoader | None = None
+        self._model_router: ModelRouter | None = None
         self._initial_configuration_candidates: list[WorkspaceServiceRuntime] = []
         self._global_reconnect_task: asyncio.Task[None] | None = None
         self._stop_task: asyncio.Task[None] | None = None
@@ -2288,6 +2301,7 @@ class LocalService:
             self._config_saved_configuration = snapshot.configuration
             self._config_active_revision = snapshot.revision
             self._config_status = "active"
+            self._initialize_shared_resources(snapshot.configuration)
         else:
             self.configuration = None
             self._config_saved_configuration = None
@@ -2313,6 +2327,45 @@ class LocalService:
     @property
     def workspaces(self) -> Mapping[str, WorkspaceServiceRuntime]:
         return self._workspaces
+
+    @property
+    def skill_loader(self) -> SkillLoader:
+        if self._skill_loader is None:
+            raise RuntimeError("Skill Loader is unavailable")
+        return self._skill_loader
+
+    @property
+    def model_router(self) -> ModelRouter:
+        if self._model_router is None:
+            raise RuntimeError("Model Router is unavailable")
+        return self._model_router
+
+    def _initialize_shared_resources(self, configuration: UserConfiguration) -> None:
+        """Publish the service-owned Skill and Model resources once per lifetime."""
+        if self._skill_loader is None:
+            skill_loader = SkillLoader(
+                root=self.agent_home.skills_directory,
+                reserved_names=tuple(command.token for command in MANAGEMENT_COMMANDS),
+                enable_always_load=configuration.runtime.enable_skill_always_load,
+            )
+            skill_loader.load()
+            self._skill_loader = skill_loader
+        if self._model_router is None:
+            self._model_router = ModelRouter(
+                configuration=configuration,
+                provider_factory=create_provider,
+            )
+
+    def reload_skills(self) -> tuple[SkillMetadata, ...]:
+        """Validate every loaded Session before publishing one global Skill snapshot."""
+
+        def validate(skills: tuple[LoadedSkill, ...]) -> None:
+            for workspace in self._workspaces.values():
+                for state in workspace.loops.values():
+                    state.loop._validate_model_context_budget(skills)
+
+        self.skill_loader.load(validate=validate)
+        return self.skill_loader.metadata
 
     @property
     def configuration_transition_active(self) -> bool:
@@ -2574,11 +2627,10 @@ class LocalService:
         return self.configuration.resolve_route("chat").route.reasoning_effort
 
     def set_reasoning_effort(self, effort: ReasoningEffort) -> None:
-        """Publish to every current Router; later Workspaces inherit the override."""
+        """Publish the shared chat control for every current and future Workspace."""
         self._chat_effort_override = effort
-        for workspace in self._workspaces.values():
-            if workspace.runtime is not None:
-                workspace.runtime.router.set_reasoning_effort(effort)
+        if self._model_router is not None:
+            self._model_router.set_reasoning_effort(effort)
 
     async def persist_reasoning_effort(self, effort: ReasoningEffort) -> None:
         """Best-effort persistence does not activate other saved settings."""
@@ -2759,7 +2811,7 @@ class LocalService:
                                         schedule=candidate.schedule,
                                     )
                                 )
-                            WorkspaceRuntime.publish_replacements(
+                            self._workspace_registry.publish_replacements(
                                 tuple(
                                     (candidate.previous, candidate.runtime)
                                     for _, candidate in prepared
@@ -3053,9 +3105,6 @@ class LocalService:
                 self, path, self.configuration, workspace_id=workspace_id
             )
             await runtime.start()
-            if self._chat_effort_override is not None:
-                assert runtime.runtime is not None
-                runtime.runtime.router.set_reasoning_effort(self._chat_effort_override)
             self._workspace_keys[key] = workspace_id
             self._workspaces[workspace_id] = runtime
             return runtime
@@ -4473,6 +4522,11 @@ class LocalService:
         for workspace in tuple(self._workspaces.values()):
             try:
                 await workspace.close()
+            except Exception as error:
+                errors.append(error)
+        if self._model_router is not None:
+            try:
+                await self._model_router.close()
             except Exception as error:
                 errors.append(error)
         self._stop_failed = bool(errors)

@@ -362,6 +362,8 @@ def test_agent_loop_constructor_is_the_generation_composition_boundary() -> None
         "configured_schedule_level",
         "mcp_tools",
         "mcp_keywords",
+        "skill_loader",
+        "reload_skills",
     )
     assert tuple(inspect.signature(AgentLoop.close).parameters) == ("self",)
 

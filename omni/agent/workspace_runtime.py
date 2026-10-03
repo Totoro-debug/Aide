@@ -78,6 +78,29 @@ class WorkspaceRuntimeRestoreError(RuntimeError):
     """Raised when startup Restore recovery cannot complete safely."""
 
 
+class WorkspaceRuntimeRegistry:
+    """Own Workspace Runtime identity and lifecycle coordination for one owner."""
+
+    def __init__(self) -> None:
+        self.runtimes: dict[str, WorkspaceRuntime] = {}
+        self.lock = RLock()
+
+    def publish_replacements(
+        self, replacements: tuple[tuple[WorkspaceRuntime, WorkspaceRuntime], ...]
+    ) -> None:
+        """Validate all owners before publishing any Runtime generation."""
+        with self.lock:
+            for previous, candidate in replacements:
+                key = _workspace_key(candidate.workspace_path)
+                if self.runtimes.get(key) is not previous or previous._closed or candidate._closed:
+                    raise WorkspaceRuntimeError("Workspace Runtime replacement owner is stale")
+            for _previous, candidate in replacements:
+                self.runtimes[_workspace_key(candidate.workspace_path)] = candidate
+
+
+_LEGACY_WORKSPACE_RUNTIME_REGISTRY = WorkspaceRuntimeRegistry()
+
+
 async def _noop_cancel_confirmation(_owner: ConfirmationOwner) -> None:
     return None
 
@@ -85,13 +108,14 @@ async def _noop_cancel_confirmation(_owner: ConfirmationOwner) -> None:
 class WorkspaceRuntime:
     """Own one initialized Workspace and its shared Runtime-Lifetime resources.
 
-    The registry is process-local and keyed by the host-resolved directory. It
+    The owner-provided registry is keyed by the host-resolved directory. It
     prevents path aliases from creating a second owner while keeping Session,
     Message Bus, and Agent Loop state in the caller that owns those concerns.
     """
 
-    _registry: ClassVar[dict[str, WorkspaceRuntime]] = {}
-    _registry_lock: ClassVar[RLock] = RLock()
+    # Direct callers without an explicit owner retain the historical acquire API.
+    _legacy_registry: ClassVar[WorkspaceRuntimeRegistry] = _LEGACY_WORKSPACE_RUNTIME_REGISTRY
+    _registry: ClassVar[dict[str, WorkspaceRuntime]] = _LEGACY_WORKSPACE_RUNTIME_REGISTRY.runtimes
 
     def __init__(
         self,
@@ -110,6 +134,8 @@ class WorkspaceRuntime:
         built_in_names: tuple[str, ...],
         schedule_clock: ScheduleClock | None,
         factories: WorkspaceRuntimeFactories,
+        registry: WorkspaceRuntimeRegistry,
+        shared_router: ModelRouter | None,
     ) -> None:
         self.workspace_path = workspace_path
         self.agent_home = agent_home
@@ -125,6 +151,9 @@ class WorkspaceRuntime:
         self._built_in_names = built_in_names
         self._schedule_clock = schedule_clock
         self._factories = factories
+        self._runtime_registry = registry
+        self._shared_router = shared_router
+        self._router_owned = shared_router is None
         self._lifecycle_lock = asyncio.Lock()
 
         self._workspace_state: WorkspaceState | None = None
@@ -161,12 +190,15 @@ class WorkspaceRuntime:
         built_in_names: Iterable[str] = BUILT_IN_TOOL_NAMES,
         schedule_clock: ScheduleClock | None = None,
         factories: WorkspaceRuntimeFactories | None = None,
+        registry: WorkspaceRuntimeRegistry | None = None,
+        shared_router: ModelRouter | None = None,
     ) -> Self:
         """Return the sole active Runtime for one resolved Workspace path."""
         workspace_path = _resolve_workspace_identity(workspace)
         key = _workspace_key(workspace_path)
-        with cls._registry_lock:
-            existing = cls._registry.get(key)
+        selected_registry = cls._legacy_registry if registry is None else registry
+        with selected_registry.lock:
+            existing = selected_registry.runtimes.get(key)
             if existing is not None and not existing._closed:
                 if _workspace_key(_resolve_workspace_identity(existing.workspace_path)) != key:
                     raise WorkspaceRuntimeError("Workspace Runtime identity changed")
@@ -207,8 +239,10 @@ class WorkspaceRuntime:
                 built_in_names=tuple(built_in_names),
                 schedule_clock=schedule_clock,
                 factories=WorkspaceRuntimeFactories() if factories is None else factories,
+                registry=selected_registry,
+                shared_router=shared_router,
             )
-            cls._registry[key] = runtime
+            selected_registry.runtimes[key] = runtime
             return runtime
 
     async def start(self) -> Self:
@@ -266,13 +300,17 @@ class WorkspaceRuntime:
         self._mcp_startup_report = startup_report
         self._mcp_snapshot = startup_report.snapshot
 
-        router = cast(
-            ModelRouter,
-            self._factories.router(
-                configuration=self.configuration,
-                provider_factory=self._provider_factory,
-            ),
-        )
+        if self._shared_router is None:
+            router = cast(
+                ModelRouter,
+                self._factories.router(
+                    configuration=self.configuration,
+                    provider_factory=self._provider_factory,
+                ),
+            )
+            self._router_owned = True
+        else:
+            router = self._shared_router
         self._router = router
         keyword_preparer = cast(
             MCPKeywordPreparer,
@@ -339,6 +377,8 @@ class WorkspaceRuntime:
             built_in_names=self._built_in_names,
             schedule_clock=self._schedule_clock,
             factories=self._factories,
+            registry=self._runtime_registry,
+            shared_router=self._shared_router,
         )
 
     async def start_replacement(self, previous: WorkspaceRuntime) -> Self:
@@ -367,13 +407,7 @@ class WorkspaceRuntime:
         cls, replacements: tuple[tuple[WorkspaceRuntime, WorkspaceRuntime], ...]
     ) -> None:
         """Validate all owners before publishing any generation."""
-        with cls._registry_lock:
-            for previous, candidate in replacements:
-                key = _workspace_key(candidate.workspace_path)
-                if cls._registry.get(key) is not previous or previous._closed or candidate._closed:
-                    raise WorkspaceRuntimeError("Workspace Runtime replacement owner is stale")
-            for _previous, candidate in replacements:
-                cls._registry[_workspace_key(candidate.workspace_path)] = candidate
+        cls._legacy_registry.publish_replacements(replacements)
 
     async def prepare_schedule(self, schedule: JobSchedule) -> None:
         """Prepare the single Schedule dispatcher and register Dream once."""
@@ -502,7 +536,7 @@ class WorkspaceRuntime:
             await _collect_cleanup(errors, self._mcp_manager.close)
         if self._dream is not None:
             await _collect_cleanup(errors, self._dream.close)
-        if self._router is not None:
+        if self._router is not None and self._router_owned:
             await _collect_cleanup(errors, self._router.close)
         return errors
 
@@ -526,9 +560,9 @@ class WorkspaceRuntime:
         self._closed = True
         self._started = False
         key = _workspace_key(self.workspace_path)
-        with self._registry_lock:
-            if self._registry.get(key) is self:
-                del self._registry[key]
+        with self._runtime_registry.lock:
+            if self._runtime_registry.runtimes.get(key) is self:
+                del self._runtime_registry.runtimes[key]
 
 
 async def _collect_cleanup(
@@ -564,5 +598,6 @@ __all__ = [
     "WorkspaceRuntime",
     "WorkspaceRuntimeError",
     "WorkspaceRuntimeFactories",
+    "WorkspaceRuntimeRegistry",
     "WorkspaceRuntimeRestoreError",
 ]

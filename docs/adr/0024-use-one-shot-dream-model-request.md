@@ -10,4 +10,4 @@ A response with no Tool call is a successful unchanged result; all returned edit
 
 This keeps Agent Runner as the sole bounded ReAct engine while avoiding a second model request whose only purpose was to confirm edits the first response had already specified.
 
-Requirements: [Unified Agent Run token budgeting and context compaction](https://github.com/Totoro-debug/MyClaw/issues/234).
+Requirements: [Unified Agent Run token budgeting and context compaction](https://github.com/Totoro-debug/OmniAgent/issues/234).

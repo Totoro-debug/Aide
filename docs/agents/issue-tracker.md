@@ -1,6 +1,6 @@
 # Issue tracker: GitHub
 
-Issues and PRDs for this repo live as [GitHub issues](https://github.com/Totoro-debug/myclaw/issues), the authoritative source for product requirements and accepted discussion decisions. Local documentation contains current domain vocabulary, architectural decisions, and usage guidance; Git and GitHub retain design and implementation history. Use the `gh` CLI for issue operations.
+Issues and PRDs for this repo live as [GitHub issues](https://github.com/Totoro-debug/OmniAgent/issues), the authoritative source for product requirements and accepted discussion decisions. Local documentation contains current domain vocabulary, architectural decisions, and usage guidance; Git and GitHub retain design and implementation history. Use the `gh` CLI for issue operations.
 
 ## Conventions
 

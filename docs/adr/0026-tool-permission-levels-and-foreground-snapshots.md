@@ -15,15 +15,15 @@ MyClaw exposes three configured Tool Permission Levels through
   prompts, not argument validation, business refusals, capability errors, or
   execution errors.
 
-The default remains `workspace-write`. The Runtime Lifetime owns one
-`RuntimePermissionControl` containing the configured level and the current
-selected level. Every Runtime Generation receives the same control object, so
-generation replacement does not reset the current value. A foreground Agent
+The default remains `workspace-write`. Each service client owns one
+`RuntimePermissionControl` containing the configured level and current
+selection. Its Session Loops receive the same control object, so Session or
+Workspace switching does not reset the current value. A foreground Agent
 Run captures one immutable `PermissionSnapshot` before Session title work,
 manual Skill resolution, or Task Framing. The snapshot contains the current
-Tool Permission Level and the process-lifetime resolved Exec Shell. Changing
+Tool Permission Level and the Workspace generation's resolved Exec Shell. Changing
 the control during a run affects only a later run. Selection and capture are
-synchronous operations confined to the CLI event-loop thread, so there is no
+synchronous operations confined to the service event-loop thread, so there is no
 await boundary at which a caller can observe a partially updated selection.
 
 ## Authorization Boundary
@@ -52,8 +52,13 @@ requires one confirmation at every level. Catastrophic Exec matches also
 require one confirmation at every level.
 
 For PowerShell 5.1 and 7, Read-Only and Workspace-Write direct execution is
-limited to the fixed candidate command and parameter grammars recorded in
-ADR-0010. The Host returns canonical command identity, expected Microsoft
+limited to fixed candidate command and parameter grammars. Read candidates are
+`Get-ChildItem`, `Get-Content`, `Get-Item`, `Get-Location`, `Get-FileHash`,
+`Measure-Object`, `Select-Object`, `Sort-Object`, `Select-String`, `Test-Path`,
+`Resolve-Path`, `Format-List`, `Format-Table`, and `Out-String`. Workspace-Write
+also permits `New-Item`, `Set-Content`, `Add-Content`, `Clear-Content`,
+`Copy-Item`, `Move-Item`, `Rename-Item`, `Remove-Item`, and `Out-File`.
+The Host returns canonical command identity, expected Microsoft
 module, resolution count, and static path-role facts. The policy canonicalizes
 those paths using the Exec cwd and Workspace root, accepts only the FileSystem
 Provider, and applies Read-Only or Workspace-Write path rules. Unknown or
@@ -62,7 +67,8 @@ and external paths require one confirmation. Full-Access directly executes
 parseable non-catastrophic dynamic commands, while still enforcing normal
 argument validation, capability checks, business refusals, and Tool errors.
 
-Approved Git read forms use a unique native executable outside the Workspace.
+Approved Git read forms are `status`, `diff`, `log`, `show`, `branch --list`,
+`rev-parse`, and `ls-files`, using a unique native executable outside the Workspace.
 The Host fixes Git configuration, pager, external-diff/textconv, fsmonitor,
 hook, prompt, and optional-lock behavior through the process environment and
 adds `--no-ext-diff --no-textconv` to `diff` and `show`. Static inspection does
@@ -73,14 +79,17 @@ filter configuration. Positive, failed, or ineligible audits, unlisted Git
 forms, and Workspace-resident Git executables require confirmation at the
 lower levels.
 
-## Foreground Management and Runtime Lifetime
+## Foreground Management and Client Lifetime
 
-The CLI owns one `RuntimePermissionControl` for the process Runtime Lifetime
-and reuses it for every foreground generation. The `/permission` command
+The service retains one `RuntimePermissionControl` per client and reuses it
+for that client's foreground Sessions. The `/permission` command
 selects one of the three levels for later foreground Agent Runs only. The
 selection is not persisted to User Configuration, Conversation Session, or
-Schedule; a successful generation replacement retains it, a failed replacement
-does not change it, and a new process starts from the configured value.
+Schedule. Session switching and reconnect grace retain it; expiry ends the
+client selection, and a new client starts from the active configured value.
+Global configuration activation updates the configured default while
+preserving an explicit client selection; clients without an explicit selection
+adopt the new default. Ownership follows [ADR-0029](0029-host-cli-and-web-through-one-local-service.md).
 
 The selector reports the current level and leaves it unchanged when the same
 level is submitted. An upgrade to `full-access` opens a warning with Cancel
@@ -96,7 +105,7 @@ identity and complete arguments; approval is never cached. User Schedule
 Agent Runs use the admission snapshot through their run-local Gateway and
 enter the background confirmation coordinator at the lower levels. Full-Access
 calls directly. A
-process startup notice is shown at most once when the configured level is
+CLI startup notice is shown at most once when the configured level is
 Full-Access. `/config` reports the configured level, and `/status` reports both
 configured and current foreground levels.
 
@@ -109,7 +118,7 @@ Read-Only and are direct in Workspace-Write and Full-Access. The confirmation
 is still required for a mutation even when the configured level is lower than
 the current foreground level.
 
-The generation-owned Gateway retains the immutable startup configured Schedule
+The generation-owned Gateway retains its immutable configured Schedule
 level. A foreground Run captures the selected current level in its
 `PermissionSnapshot`. For `add` only, a configured level strictly above the
 captured current level adds an escalation reason. If the Run is Read-Only,
@@ -128,7 +137,7 @@ level; Full-Access does not bypass them. Schedule Job persistence and public
 JSON contain no permission level or snapshot.
 
 At User Schedule occurrence admission, Schedule Service captures the immutable
-startup configured level and process-lifetime resolved Exec Shell in a runtime
+active generation's configured level and resolved Exec Shell in a runtime
 `PermissionSnapshot`. The exact snapshot is projected into the Schedule Runtime
 Context and the run-local Gateway. Read-Only and Workspace-Write apply the same
 structured File, Exec, Web Fetch, and per-call MCP rules as the corresponding
@@ -202,17 +211,9 @@ semantics. Web Fetch sends no cross-origin sensitive headers.
 
 This decision does not alter the fixed Tool Catalog, Tool Exposure, Tool
 Activation, Tool Search, MCP discovery, transport, or schema projection.
-Foreground Schedule behavior is defined in the Foreground Schedule Management
-section above. Foreground MCP invocation authorization requires
-lower levels to confirm every call while Full-Access calls directly; neither
-path changes ordinary MCP hard-error behavior.
-It does not provide an operating-system sandbox. Full-Access removes ordinary
-foreground File and parseable non-catastrophic PowerShell Exec
-permission confirmation; validation, capability checks, business refusals, catastrophic
-or uncertain Exec confirmation, and Tool errors remain enforced. Web Search
-remains direct; Web Fetch applies the per-hop rules above. User Schedule MCP
-calls use the same per-call policy through the background confirmation path;
-Full-Access calls directly.
+It does not provide an operating-system sandbox. The service's confirmation
+queues, client audiences, reconnect behavior, and cancellation ownership are
+defined in [ADR-0029](0029-host-cli-and-web-through-one-local-service.md).
 
 The existing Skill Loader remains responsible for its own internal reads, and
 ADR-0016 no longer defines a confirmation-free boundary for model-issued

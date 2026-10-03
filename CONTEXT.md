@@ -25,7 +25,7 @@ Persistent Personal Agent state owned by exactly one Workspace rather than by th
 _Avoid_: Agent Home, project source, global state, cache
 
 **Message Bus**:
-The transient pair of Inbound and Outbound queues shared by one Command-line Conversation and its current Agent Loop for foreground conversation flow.
+The transient Inbound and Outbound queues for one foreground conversation lane, connecting an Agent Loop or Command-line Conversation to its local service adapter.
 _Avoid_: persistent event log, broadcast bus, Schedule queue
 
 **Inbound Message**:
@@ -48,6 +48,18 @@ _Avoid_: Terminal session, shell command, chat channel, one-shot command, plain 
 The local-browser entry for one person to converse with and manage the Personal Agent.
 _Avoid_: remote service, multi-user platform, read-only dashboard
 
+**Local Service**:
+The shared local authority through which CLI and Web clients operate the Personal Agent, coordinating Workspace runtimes, Session Claims, and Tool Confirmation.
+_Avoid_: always-on daemon, remote service, separate CLI runtime
+
+**Client**:
+One CLI or Web participant in the Local Service, with its own foreground permission selection and exclusive claims on loaded Conversation Sessions.
+_Avoid_: operating-system account, Conversation Session, Project, Model Provider client
+
+**Workspace Runtime**:
+The shared runtime authority for one Workspace, coordinating its Memory System, Schedule, and independently active Conversation Sessions.
+_Avoid_: Client, Runtime Lifetime, Conversation Session, separate process per Session
+
 **Management Command**:
 An explicit user command for inspecting or changing runtime-managed state without relying on natural-language conversation.
 _Avoid_: Tool call, chat instruction, task management, one-shot conversation
@@ -57,11 +69,11 @@ The boundary through which Management Commands use runtime capabilities without 
 _Avoid_: Message Bus, direct file access, admin API
 
 **Runtime Lifetime**:
-The lifetime of one Command-line Conversation process, including every Runtime Generation it owns over time.
+The lifetime of one Local Service instance, including the Clients, Workspace runtimes, and Runtime Generations it coordinates over time.
 _Avoid_: Detached mode, daemon mode, persistent background process, one-shot command
 
 **Runtime Generation**:
-One replaceable set of Session-bound runtime components owned by a Runtime Lifetime.
+One replaceable set of runtime components within a Workspace Runtime, including the components bound to its active Conversation Sessions.
 _Avoid_: Runtime Lifetime, Conversation Session, Agent Run
 
 **Session Log**:
@@ -69,7 +81,7 @@ Workspace-owned technical diagnostics associated with one Conversation Session r
 _Avoid_: Runtime Log, Conversation log, chat transcript, audit log, activity feed
 
 **Agent Loop**:
-The Session-scoped product orchestrator that owns foreground state, consumes Inbound Messages serially, invokes Agent Runs, and publishes Outbound Messages through the Command-line Conversation's Message Bus.
+The Session-scoped product orchestrator that serializes accepted input, invokes Agent Runs, and publishes conversation output through its foreground lane.
 _Avoid_: Agent Runner, Runtime Lifetime, model loop, Schedule Service
 
 **Agent Runner**:
@@ -249,7 +261,7 @@ The single User Configuration item keyed by `mcp_name` that declares an MCP Serv
 _Avoid_: MCP endpoint, MCP profile, Server Tool
 
 **MCP Runtime Manager**:
-The CLI-owned Runtime Lifetime component that connects configured MCP Servers, retains healthy clients, prepares per-generation MCP Tool Snapshots, and closes the clients during shutdown.
+The Workspace Runtime component that connects configured MCP Servers, retains healthy connections, prepares MCP Tool Snapshots, and closes the connections when its generation retires.
 _Avoid_: Tool Gateway, MCP registry, Agent Loop
 
 **MCP Tool**:
@@ -289,7 +301,7 @@ The unique System Schedule Job that invokes Dream through its dedicated executio
 _Avoid_: User Schedule Job, Memory Task scheduler, scheduled Agent Run
 
 **Schedule Service**:
-The sole management and execution boundary for Schedule Jobs within one Runtime Lifetime.
+The sole management and execution boundary for Schedule Jobs within one Workspace Runtime.
 _Avoid_: Schedule, Schedule Job, detached background process
 
 **Tool Permission Level**:

@@ -18,4 +18,4 @@ Built-in Tool Search Keywords are English constants declared in code. MCP keywor
 
 Tool Activation changes the Model Request Context revision. Before the next ReAct request, the projected token budget is therefore checked again under [ADR-0023](0023-manage-agent-run-context-by-projected-token-budget.md). There is no schema truncation or automatic eviction introduced to make an activation fit the context window.
 
-Requirements: [BM25 Tool Search and per-run schema exposure](https://github.com/Totoro-debug/MyClaw/issues/225).
+Requirements: [BM25 Tool Search and per-run schema exposure](https://github.com/Totoro-debug/OmniAgent/issues/225).

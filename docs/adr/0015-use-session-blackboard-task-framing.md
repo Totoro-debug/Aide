@@ -12,7 +12,7 @@ interpreting that continuity without introducing workflow control or a visible t
 
 Before every nonempty ordinary foreground user input that is not a Manual Skill
 Invocation, MyClaw performs an isolated Task Framing call through the configured `chat`
-Model Route with no Tools. Task Framing uses the same Runtime Lifetime-owned Model Router
+Model Route with no Tools. Task Framing uses the same Workspace Runtime-owned Model Router
 instance supplied to the Agent Loop; it does not construct or own another router. The
 call receives only the previous Blackboard, the complete content of the latest assistant
 Session message, and the new raw user input. These values are embedded into one
@@ -76,4 +76,4 @@ Framing is excluded from Schedule and Memory execution.
   and Tool Gateway contracts otherwise remain unchanged.
 
 The complete implementation contract and acceptance plan are recorded in
-[GitHub Issue #174](https://github.com/Totoro-debug/MyClaw/issues/174).
+[GitHub Issue #174](https://github.com/Totoro-debug/OmniAgent/issues/174).

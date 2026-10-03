@@ -6,7 +6,7 @@ status: accepted
 
 Reasoning Effort has five levels: `low`, `medium`, `high`, `xhigh`, and `max`, with `medium` as the configuration default. Runtime selection applies to `chat` and `default` requests and survives Session replacement; explicitly configured `memory` and `schedule` routes retain their own values.
 
-The shared `ModelRouter` remains the Runtime Lifetime authority for the current Reasoning Effort. A successful
+The Workspace runtime's shared `ModelRouter` is the immediate authority for its current Reasoning Effort. A successful
 `/effort` update publishes that in-memory value before it performs any User Configuration I/O. The Management
 Port owns this ordering, so a configuration failure cannot prevent the next logical model request from using the
 committed value or cancel an active Agent Run.
@@ -26,8 +26,8 @@ failure path.
 Persistence is deliberately best effort. Parse, validation, and replacement failures leave the published runtime
 value intact; Management records one safe diagnostic containing only the stable operation and exception type, then
 returns the normal successful selection result. It does not log configuration contents, credentials, or a traceback.
-Temporary divergence between Runtime Lifetime status and the on-disk User Configuration is accepted until a later
-successful update or process restart.
+Temporary divergence between runtime status and the on-disk User Configuration is accepted until a later
+successful update or runtime restart. The local service coordinates successful persistence with global configuration activation under [ADR-0029](0029-host-cli-and-web-through-one-local-service.md).
 
 The serialization guarantee applies only to MyClaw writers that use this lock. An ordinary external editor does not
 participate and must not save `config.toml` during a MyClaw write transaction; atomic replacement prevents partial
@@ -35,4 +35,4 @@ files but cannot merge an arbitrary concurrent external write. This decision doe
 framework, rollback transactions, or a global mutable User Configuration aggregate. Provider retry/fallback
 behavior, Session state, and Agent Loop ownership are unchanged.
 
-Requirements: [Reasoning Effort selection](https://github.com/Totoro-debug/myclaw/issues/213), [best-effort persistence](https://github.com/Totoro-debug/myclaw/issues/216).
+Requirements: [Reasoning Effort selection](https://github.com/Totoro-debug/OmniAgent/issues/213), [best-effort persistence](https://github.com/Totoro-debug/OmniAgent/issues/216).

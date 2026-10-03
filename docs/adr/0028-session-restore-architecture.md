@@ -5,10 +5,9 @@ status: accepted
 # Define the Session Restore Architecture
 
 This ADR records the durable architecture for [Add `/restore` for Session
-Restore with optional File Restore (#262)](https://github.com/Totoro-debug/MyClaw/issues/262).
-It is the ADR deliverable for [#263](https://github.com/Totoro-debug/MyClaw/issues/263)
-and is a constraint for the later implementation tasks. It changes no
-production behavior by itself.
+Restore with optional File Restore (#262)](https://github.com/Totoro-debug/OmniAgent/issues/262).
+CLI and Web use the same durable restore boundary through the shared service
+defined in [ADR-0029](0029-host-cli-and-web-through-one-local-service.md).
 
 ## Scope and vocabulary
 
@@ -93,10 +92,11 @@ ID, anchor, removal counts, a digest of the current serialized Session, the
 active journal revision, eligible targets, latest observed post-write state,
 external target counts, and any Backup Gap in the selected active range.
 
-After Schedule reaches natural idle and before inspection, CLI directly waits
-for Agent Loop Restore readiness, including pending title work and Session
-persistence. Inspection failure releases the foreground and Schedule barriers
-before returning the safe management error.
+The service's Management boundary validates the client's Session Claim and
+waits for Agent Loop Restore readiness, including pending title work and
+Session persistence. It holds the Workspace restore barrier and waits for
+Schedule natural idle before inspection. Inspection failure releases the
+foreground and Schedule barriers before returning the safe management error.
 
 `revalidate()` runs after the runtime idle barriers and before final
 confirmation; execution revalidates again before its first mutation. A stale
@@ -186,7 +186,7 @@ MCP operation itself.
 
 ### Protected restore state
 
-ADR-0005 permits the fixed File Tools to access Workspace State through normal
+[ADR-0001](0001-file-first-local-persistence.md) permits the fixed File Tools to access Workspace State through normal
 Workspace path resolution. The protected `.myclaw/restore/` subtree is an
 explicit write-side exception: Built-in File Tools must reject direct writes
 there, so a recorder cannot journal its own journal or corrupt a pending

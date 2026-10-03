@@ -34,8 +34,13 @@ from omni.provider.models import (
     ReasoningEffort,
 )
 from omni.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
-from omni.schedule.service import ScheduleJobExecutionError, ScheduleOccurrence, ScheduleService
-from omni.schedule.store import WorkspaceScheduleStore
+from omni.schedule.service import (
+    ScheduleDispatcher,
+    ScheduleJobExecutionError,
+    ScheduleOccurrence,
+    ScheduleService,
+)
+from omni.schedule.store import ScheduleStoreFaultedError, WorkspaceScheduleStore
 from omni.utils import scheduler as scheduler_module
 from omni.utils.scheduler import AsyncioSchedulerClock
 from tests.configuration.test_config import VALID_CONFIG
@@ -1176,7 +1181,9 @@ async def test_every_terminal_store_fault_preserves_previous_state_and_faults_se
         service.start()
         await callback.started.wait()
         await _wait_until(lambda: service.status_snapshot().active_job_count == 0)
-        await service.close()
+        for drain in (service.pause_and_wait_idle, service.pause_and_drain, service.close):
+            with pytest.raises(ScheduleStoreFaultedError, match="Schedule terminal update failed"):
+                await drain()
     finally:
         capture.close()
 
@@ -1868,3 +1875,96 @@ async def test_failed_at_is_deleted_and_a_new_service_does_not_replay_it(
     await restarted.close()
 
     assert second.calls == []
+
+
+@pytest.mark.asyncio
+async def test_global_dispatcher_runs_registered_workspace_services_from_one_task(
+    tmp_path: Path,
+) -> None:
+    agent_home = AgentHome(tmp_path / "agent-home")
+    agent_home.initialize()
+    first_workspace = tmp_path / "first"
+    second_workspace = tmp_path / "second"
+    first_workspace.mkdir()
+    second_workspace.mkdir()
+    first_state = _state(first_workspace, agent_home.path)
+    second_state = _state(second_workspace, agent_home.path)
+    first_store = WorkspaceScheduleStore(first_state)
+    second_store = WorkspaceScheduleStore(second_state)
+    first_callback = RecordingScheduleCallback()
+    second_callback = RecordingScheduleCallback()
+    first = _service(
+        store=first_store,
+        callback=first_callback,
+        clock=ControlledClock(START),
+    )
+    second = _service(
+        store=second_store,
+        callback=second_callback,
+        clock=ControlledClock(START),
+    )
+    dispatcher = ScheduleDispatcher()
+    dispatcher.register("first", first)
+    dispatcher.register("second", second)
+    await first_store.add_user_job(_job())
+    await second_store.add_user_job(_job(job_id=OTHER_UUID))
+
+    first.start()
+    second.start()
+    try:
+        await _wait_until(lambda: len(first_callback.calls) == 1)
+        await _wait_until(lambda: len(second_callback.calls) == 1)
+        assert dispatcher.service_count == 2
+        assert dispatcher.task is not None
+        assert first._loop_task is None
+        assert second._loop_task is None
+    finally:
+        await first.close()
+        await second.close()
+        await dispatcher.close()
+
+
+@pytest.mark.asyncio
+async def test_global_dispatcher_isolates_one_workspace_dispatch_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_home = AgentHome(tmp_path / "agent-home")
+    agent_home.initialize()
+    first_workspace = tmp_path / "first"
+    second_workspace = tmp_path / "second"
+    first_workspace.mkdir()
+    second_workspace.mkdir()
+    first = _service(
+        store=WorkspaceScheduleStore(_state(first_workspace, agent_home.path)),
+        callback=RecordingScheduleCallback(),
+        clock=ControlledClock(START),
+    )
+    second_callback = RecordingScheduleCallback()
+    second_store = WorkspaceScheduleStore(_state(second_workspace, agent_home.path))
+    second = _service(
+        store=second_store,
+        callback=second_callback,
+        clock=ControlledClock(START),
+    )
+    dispatcher = ScheduleDispatcher()
+    dispatcher.register("first", first)
+    dispatcher.register("second", second)
+    await second_store.add_user_job(_job(job_id=OTHER_UUID))
+
+    async def fail_dispatch() -> float | None:
+        raise RuntimeError("injected workspace dispatch failure")
+
+    monkeypatch.setattr(first, "_dispatch_once", fail_dispatch)
+    first.start()
+    second.start()
+    try:
+        await _wait_until(lambda: len(second_callback.calls) == 1)
+        await _wait_until(lambda: first.status_snapshot().status == "faulted")
+        assert second.status_snapshot().status == "available"
+        assert dispatcher.task is not None
+        assert not dispatcher.task.done()
+    finally:
+        await first.close()
+        await second.close()
+        await dispatcher.close()

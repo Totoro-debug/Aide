@@ -5,6 +5,7 @@ import json
 from collections.abc import AsyncIterator, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -31,6 +32,7 @@ from omni.service.errors import ServiceError
 from omni.service.runtime import LocalService, SessionClaim, WorkspaceServiceRuntime
 from omni.skills.catalog import LoadedSkill, SkillLoader
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
+from tests.fixtures.project_removal import wait_for_project_removal
 from tests.service.test_service_concurrency import _CollectingSink
 
 
@@ -230,6 +232,81 @@ async def test_service_shares_one_skill_loader_and_model_router_across_workspace
         assert len(load_calls) == 1
     finally:
         await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("one_shot", [False, True])
+async def test_terminal_store_failure_blocks_project_removal_without_stopping_other_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, one_shot: bool
+) -> None:
+    home = _home(tmp_path / "agent-home")
+    monkeypatch.setattr(
+        service_runtime, "create_provider", lambda _configuration: _CountingProvider()
+    )
+    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        first = await _session_case(service, tmp_path / "workspace-a")
+        second = await _session_case(service, tmp_path / "workspace-b")
+        record, _, _ = await service.register_project(
+            first.client_id, first.workspace.workspace_path
+        )
+        failing = first.workspace.schedule_service
+        failing_job = ScheduleJob(
+            job_id=str(uuid4()),
+            message="shared schedule request",
+            schedule=(
+                JobSchedule.at("2000-01-01T00:00:00.000+00:00")
+                if one_shot
+                else JobSchedule.every(3600)
+            ),
+            created_at_ms=1,
+            updated_at_ms=1,
+        )
+        await failing.add_user_job(failing_job)
+
+        def fail_replace(_path: Path, _content: str) -> None:
+            raise OSError("PRIVATE_TERMINAL_FAILURE")
+
+        monkeypatch.setattr(failing._store, "_replace_text", fail_replace)
+        async with asyncio.timeout(5):
+            while failing.status_snapshot().status != "faulted":
+                await asyncio.sleep(0)
+        assert await failing.public_snapshot() == (failing_job,)
+        operation = await service.start_project_removal(first.client_id, record.project_id)
+        status = await wait_for_project_removal(
+            service, first.client_id, record.project_id, cast(str, operation["operation_id"])
+        )
+        assert status["status"] == "failed"
+        assert "PRIVATE_TERMINAL_FAILURE" not in str(status)
+        assert service.projects.list()[0].schedule_state == "removing"
+        assert first.workspace.workspace_id in service.workspace_resources.resources
+
+        surviving_job = ScheduleJob(
+            job_id=str(uuid4()),
+            message="shared schedule request",
+            schedule=JobSchedule.every(3600),
+            created_at_ms=1,
+            updated_at_ms=1,
+        )
+        surviving = second.workspace.schedule_service
+        await surviving.add_user_job(surviving_job)
+        async with asyncio.timeout(5):
+            while (await surviving.public_snapshot())[0].state.last_status != "ok":
+                await asyncio.sleep(0)
+        assert surviving.status_snapshot().status == "available"
+        history = Session.load(
+            second.workspace.workspace_state,
+            surviving_job.session_id,
+            partition=SessionStoragePartition.SCHEDULE,
+        )
+        assert [message["role"] for message in history.messages] == ["user", "assistant"]
+        assert service.schedule_dispatcher.task is not None
+        assert not service.schedule_dispatcher.task.done()
+    finally:
+        with pytest.raises(ServiceError) as failed:
+            await service.stop()
+        assert failed.value.code == "service_stop_failed"
 
 
 @pytest.mark.asyncio
@@ -442,5 +519,68 @@ async def test_global_reload_rejects_candidate_that_overflows_another_workspace(
         )
         await asyncio.gather(first.completed("kept-a"), second.completed("kept-b"))
         assert service.skill_loader.skills is snapshot
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_service_owns_workspace_memory_dream_and_one_schedule_dispatcher(
+    tmp_path: Path,
+) -> None:
+    home = _home(tmp_path / "agent-home")
+    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        first = await _session_case(service, tmp_path / "workspace-a")
+        second = await _session_case(service, tmp_path / "workspace-b")
+
+        first_resources = service.workspace_resources.get(first.workspace.workspace_id)
+        second_resources = service.workspace_resources.get(second.workspace.workspace_id)
+        assert first_resources.memory_manager is first.workspace.memory_manager
+        assert second_resources.memory_manager is second.workspace.memory_manager
+        assert first_resources.memory_manager is not second_resources.memory_manager
+        assert first_resources.dream is first.workspace.dream
+        assert second_resources.dream is second.workspace.dream
+        assert first_resources.schedule_service.dispatcher is service.schedule_dispatcher
+        assert second_resources.schedule_service.dispatcher is service.schedule_dispatcher
+        assert service.schedule_dispatcher.service_count == 2
+        assert service.schedule_dispatcher.task is not None
+
+        same_workspace = await _session_case(service, tmp_path / "workspace-a")
+        assert same_workspace.workspace.memory_manager is first_resources.memory_manager
+        now = datetime.now(UTC)
+        contents = {f"first-summary-{index}" for index in range(20)}
+        appended = await asyncio.gather(
+            *(
+                owner.memory_manager.append_summary(content, now)
+                for owner, content in zip(
+                    [first.workspace, same_workspace.workspace] * 10,
+                    sorted(contents),
+                    strict=True,
+                )
+            )
+        )
+        await second.workspace.memory_manager.append_summary("second-summary", now)
+        first_claim = await first_resources.memory_manager.claim_summaries(20)
+        second_claim = await second_resources.memory_manager.claim_summaries(20)
+        assert sorted(entry.index for entry in appended) == list(range(1, 21))
+        assert {entry.content for entry in first_claim.entries} == contents
+        assert [entry.index for entry in first_claim.entries] == list(range(1, 21))
+        assert first_claim.cursor == 20
+        assert [entry.content for entry in second_claim.entries] == ["second-summary"]
+        assert second_claim.cursor == 1
+        second_memory = await second_resources.memory_manager.read_long_term()
+        await first_resources.memory_manager.edit_long_term(
+            old="## User Preference\n", new="## User Preference\n\nFIRST-WORKSPACE-ONLY\n"
+        )
+        assert "FIRST-WORKSPACE-ONLY" in await first_resources.memory_manager.read_long_term()
+        assert await second_resources.memory_manager.read_long_term() == second_memory
+        for resources in (first_resources, second_resources):
+            jobs = await resources.schedule_service._store.snapshot()
+            assert len([job for job in jobs if job.source == "system"]) == 1
+
+        await first.workspace.close()
+        assert service.schedule_dispatcher.service_count == 1
+        assert service.workspace_resources.get(second.workspace.workspace_id) is second_resources
     finally:
         await service.stop()

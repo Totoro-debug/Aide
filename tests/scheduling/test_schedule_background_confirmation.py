@@ -617,7 +617,8 @@ async def test_generation_abort_drain_reports_terminal_store_failure(
         await service.drain_confirmation_aborts(generation_id=generation_id)
 
     assert service.status_snapshot().status == "faulted"
-    await service.close()
+    with pytest.raises(ScheduleStoreFaultedError, match="Schedule terminal update failed"):
+        await service.close()
 
 
 @pytest.mark.asyncio

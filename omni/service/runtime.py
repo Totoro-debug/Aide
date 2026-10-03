@@ -75,7 +75,12 @@ from omni.schedule.history import (
     read_schedule_history,
 )
 from omni.schedule.model import JobSchedule, ScheduleJob
-from omni.schedule.service import ScheduleOccurrence, ScheduleService, ScheduleStaleRemovalError
+from omni.schedule.service import (
+    ScheduleDispatcher,
+    ScheduleOccurrence,
+    ScheduleService,
+    ScheduleStaleRemovalError,
+)
 from omni.schedule.store import (
     ScheduleStateError,
     ScheduleStoreFaultedError,
@@ -83,6 +88,7 @@ from omni.schedule.store import (
 )
 from omni.service.errors import ServiceError, service_error
 from omni.service.projects import ProjectCatalog, ProjectCatalogError, ProjectRecord
+from omni.service.resources import WorkspaceResourceManager
 from omni.skills.catalog import LoadedSkill, SkillLoader, SkillMetadata
 from omni.utils.host_filesystem import HOST_FILESYSTEM
 from omni.utils.text import normalize_title_candidate
@@ -723,6 +729,7 @@ class WorkspaceServiceRuntime:
                 ),
             )
             await self.runtime.start()
+            self.service.workspace_resources.register(self.workspace_id, self.runtime)
             self.runtime.schedule_service.set_admission_guard(lambda: self.schedule_admitted)
             self.workspace_state = self.runtime.workspace_state
             await self.runtime.prepare_schedule(
@@ -735,9 +742,30 @@ class WorkspaceServiceRuntime:
 
     @property
     def schedule_service(self) -> ScheduleService:
+        registered = self.service.workspace_resources.resources.get(self.workspace_id)
+        if registered is not None:
+            return registered.schedule_service
         if self.runtime is None:
             raise RuntimeError("Workspace service runtime has not started")
         return self.runtime.schedule_service
+
+    @property
+    def memory_manager(self) -> MemoryManager:
+        registered = self.service.workspace_resources.resources.get(self.workspace_id)
+        if registered is not None:
+            return registered.memory_manager
+        if self.runtime is None:
+            raise RuntimeError("Workspace service runtime has not started")
+        return self.runtime.memory_manager
+
+    @property
+    def dream(self) -> Dream:
+        registered = self.service.workspace_resources.resources.get(self.workspace_id)
+        if registered is not None:
+            return registered.dream
+        if self.runtime is None:
+            raise RuntimeError("Workspace service runtime has not started")
+        return self.runtime.dream
 
     @property
     def loops(self) -> Mapping[str, _LoopState]:
@@ -2024,6 +2052,11 @@ class WorkspaceServiceRuntime:
             prepared.previous.schedule_service,
             jobs=prepared.schedule_jobs,
         )
+        self.service.workspace_resources.replace(
+            self.workspace_id,
+            previous=prepared.previous,
+            runtime=prepared.runtime,
+        )
         for state in retired.loops:
             if state.output_task is not None:
                 state.output_task.cancel()
@@ -2058,6 +2091,7 @@ class WorkspaceServiceRuntime:
             except Exception as error:
                 errors.append(error)
         try:
+            retired.runtime.release_execution_resources()
             await retired.runtime.close()
         except Exception as error:
             errors.append(error)
@@ -2209,10 +2243,20 @@ class WorkspaceServiceRuntime:
                     await self._release_restore_barrier(self._restore_owner)
                 if self.runtime is not None:
                     await self.runtime.abort_dream()
-                    await self.runtime.close(
-                        close_foreground=lambda: self._close_all_loops(),
-                        drain_confirmation_aborts=True,
-                    )
+                    if self.workspace_id in self.service.workspace_resources.resources:
+                        try:
+                            await self.service.workspace_resources.close_workspace(
+                                self.workspace_id,
+                                close_foreground=self._close_all_loops,
+                                drain_confirmation_aborts=True,
+                            )
+                        finally:
+                            await self.runtime.close()
+                    else:
+                        await self.runtime.close(
+                            close_foreground=lambda: self._close_all_loops(),
+                            drain_confirmation_aborts=True,
+                        )
                 else:
                     await self._close_all_loops()
                 for retired in tuple(self._retired_generations):
@@ -2258,6 +2302,7 @@ class LocalService:
         self._workspaces: dict[str, WorkspaceServiceRuntime] = {}
         self._workspace_keys: dict[str, str] = {}
         self._workspace_registry = WorkspaceRuntimeRegistry()
+        self._workspace_resources = WorkspaceResourceManager()
         self._skill_loader: SkillLoader | None = None
         self._model_router: ModelRouter | None = None
         self._mcp_manager: MCPRuntimeManager | None = None
@@ -2347,6 +2392,14 @@ class LocalService:
     @property
     def workspaces(self) -> Mapping[str, WorkspaceServiceRuntime]:
         return self._workspaces
+
+    @property
+    def workspace_resources(self) -> WorkspaceResourceManager:
+        return self._workspace_resources
+
+    @property
+    def schedule_dispatcher(self) -> ScheduleDispatcher:
+        return self._workspace_resources.dispatcher
 
     @property
     def skill_loader(self) -> SkillLoader:
@@ -4589,6 +4642,10 @@ class LocalService:
                 await workspace.close()
             except Exception as error:
                 errors.append(error)
+        try:
+            await self._workspace_resources.close()
+        except Exception as error:
+            errors.append(error)
         if self._mcp_manager is not None:
             try:
                 await self._mcp_manager.close()

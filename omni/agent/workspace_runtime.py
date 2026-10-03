@@ -171,6 +171,7 @@ class WorkspaceRuntime:
         self._memory_manager: MemoryManager | None = None
         self._dream: Dream | None = None
         self._schedule_service: ScheduleService | None = None
+        self._execution_resources_borrowed = False
         self._schedule_prepared = False
         self._started = False
         self._closed = False
@@ -532,6 +533,16 @@ class WorkspaceRuntime:
         if self._dream is not None and not self._closed:
             await self._dream.abort_and_wait()
 
+    def borrow_execution_resources(self) -> None:
+        """Transfer Memory, Dream, and Schedule cleanup to the service owner."""
+        if not self._started or self._closed:
+            raise RuntimeError("Workspace Runtime is unavailable")
+        self._execution_resources_borrowed = True
+
+    def release_execution_resources(self) -> None:
+        """Return generation resources to this Runtime for retirement cleanup."""
+        self._execution_resources_borrowed = False
+
     async def _close_owned_resources(
         self,
         *,
@@ -541,7 +552,7 @@ class WorkspaceRuntime:
         errors: list[BaseException] = []
 
         schedule = self._schedule_service
-        if schedule is not None:
+        if schedule is not None and not self._execution_resources_borrowed:
             if drain_confirmation_aborts:
                 await _collect_cleanup(errors, schedule.drain_confirmation_aborts)
             await _collect_cleanup(errors, schedule.pause_and_drain)
@@ -552,7 +563,7 @@ class WorkspaceRuntime:
 
         if self._mcp_manager is not None:
             await _collect_cleanup(errors, self._mcp_manager.close)
-        if self._dream is not None:
+        if self._dream is not None and not self._execution_resources_borrowed:
             await _collect_cleanup(errors, self._dream.close)
         if self._router is not None and self._router_owned:
             await _collect_cleanup(errors, self._router.close)

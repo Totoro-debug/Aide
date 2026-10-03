@@ -325,7 +325,7 @@ class _ReportRecorder:
 
 
 _REPORT_CONTEXT: contextvars.ContextVar[_ReportRecorder | None] = contextvars.ContextVar(
-    "myclaw_release_report", default=None
+    "omni_release_report", default=None
 )
 
 
@@ -539,13 +539,13 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/e2e-runner.mjs launches myclaw web and asserts the isolated service URL",
+            "web/scripts/e2e-runner.mjs launches omni web and asserts the isolated service URL",
             "the production browser path does not itself start two CLI processes",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
             "scripts/installed_web_validation.py::_run_installed_cli_competition cold-starts two installed metadata console entries with Textual headless I/O and asserts one PID/instance/port",
-            "the installed myclaw web executable refuses a real unrelated fixed-port listener without killing it or disclosing credentials",
+            "the installed omni web executable refuses a real unrelated fixed-port listener without killing it or disclosing credentials",
         ),
     ),
     AcceptanceScenario(
@@ -909,7 +909,7 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
-            "web/scripts/installed_cli_probe.py asserts installed myclaw console entry, no node/npm, same service discovery, and JSONL assistant persistence",
+            "web/scripts/installed_cli_probe.py asserts installed omni console entry, no node/npm, same service discovery, and JSONL assistant persistence",
             "direct and rebuilt reports both record stop=passed and port/discovery cleanup",
         ),
     ),
@@ -1330,8 +1330,8 @@ def build_coverage_evidence(nodes: Sequence[str]) -> CoverageEvidence:
 
 def _find_windows_shell(selector: str) -> str | None:
     overrides = {
-        "powershell": "MYCLAW_POWERSHELL_PATH",
-        "pwsh": "MYCLAW_PWSH_PATH",
+        "powershell": "OMNI_POWERSHELL_PATH",
+        "pwsh": "OMNI_PWSH_PATH",
     }
     candidates: list[Path] = []
     override = os.environ.get(overrides[selector])
@@ -1385,7 +1385,7 @@ async def _exercise_powershell_host(selector: str) -> dict[str, object]:
         raise ReleaseBlockedError("powershell did not resolve to Windows PowerShell 5.1")
     if selector == "pwsh" and shell.version < (7,):
         raise ReleaseBlockedError("pwsh did not resolve to PowerShell 7 or newer")
-    with tempfile.TemporaryDirectory(prefix=f"myclaw-{selector}-") as temporary:
+    with tempfile.TemporaryDirectory(prefix=f"omni-{selector}-") as temporary:
         workspace = Path(temporary).resolve()
         host = PowerShellExecHost(shell)
         spec = host.process_spec(workspace)
@@ -1586,7 +1586,7 @@ def _run_pytest_with_report(
 
 def _windows_path_capability_evidence() -> dict[str, object]:
     """Prove the Windows reparse behavior gate and record fixture limitations."""
-    with tempfile.TemporaryDirectory(prefix="myclaw-links-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="omni-links-") as temporary:
         root = Path(temporary)
         target = root / "target"
         target.mkdir()
@@ -1813,7 +1813,7 @@ def _run_quality(host_results: Sequence[Mapping[str, object]] | None = None) -> 
         list(host_results) if host_results is not None else run_host_integration(_selectors("both"))
     )
     path_evidence = _windows_path_capability_evidence()
-    with tempfile.TemporaryDirectory(prefix="myclaw-release-quality-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="omni-release-quality-") as temporary:
         report_dir = Path(temporary)
         evidence_by_label: dict[str, PytestEvidence] = {}
         validated_skips: list[dict[str, str]] | None = None
@@ -1919,7 +1919,7 @@ from omni.config.config import ConfigError, ConfigLoader
 
 module_path = Path(omni.__file__).resolve()
 environment_prefix = Path(sys.prefix).resolve()
-source_root = Path(os.environ["MYCLAW_SOURCE_ROOT"]).resolve()
+source_root = Path(os.environ["OMNI_SOURCE_ROOT"]).resolve()
 assert module_path.is_relative_to(environment_prefix)
 assert not module_path.is_relative_to(source_root)
 assert shutil.which("node") is None
@@ -1934,7 +1934,7 @@ for record in manifest["files"]:
     assert len(asset) == record["bytes"]
     assert hashlib.sha256(asset).hexdigest() == record["sha256"]
 
-with TemporaryDirectory(prefix="myclaw-wheel-config-") as temporary:
+with TemporaryDirectory(prefix="omni-wheel-config-") as temporary:
     home = Path(temporary) / "agent-home"
     loader = ConfigLoader(AgentHome(home))
     assert loader.ensure_default() is True
@@ -2014,7 +2014,7 @@ def _artifact_environment() -> dict[str, str]:
         for part in environment.get("PATH", "").split(os.pathsep)
         if "node" not in part.casefold() and "npm" not in part.casefold()
     )
-    environment["MYCLAW_SOURCE_ROOT"] = str(ROOT)
+    environment["OMNI_SOURCE_ROOT"] = str(ROOT)
     return environment
 
 
@@ -2095,7 +2095,7 @@ def _smoke_installed_wheel(wheel: Path, root: Path) -> dict[str, object]:
     _run_command([sys.executable, "-m", "venv", str(venv_dir)])
     scripts_dir = venv_dir / "Scripts"
     python = scripts_dir / "python.exe"
-    entry_point = scripts_dir / "myclaw.exe"
+    entry_point = scripts_dir / "omni.exe"
     if not python.is_file():
         raise RuntimeError("wheel smoke virtual environment has no Python executable")
     environment = _artifact_environment()
@@ -2114,15 +2114,15 @@ def _smoke_installed_wheel(wheel: Path, root: Path) -> dict[str, object]:
     smoke_cwd = root / "smoke-cwd"
     smoke_cwd.mkdir()
     if not entry_point.is_file():
-        raise RuntimeError("installed wheel did not create the myclaw console entry point")
+        raise RuntimeError("installed wheel did not create the omni console entry point")
     entry_result = _run_command(
         [str(entry_point), "--help"],
         cwd=smoke_cwd,
         env=environment,
         timeout=60,
     )
-    if "MyClaw Personal Agent runtime" not in entry_result.stdout:
-        raise RuntimeError("installed myclaw entry point did not start normally")
+    if "Omni Personal Agent runtime" not in entry_result.stdout:
+        raise RuntimeError("installed omni entry point did not start normally")
     result = subprocess.run(
         [str(python), "-c", _ARTIFACT_SMOKE_PROGRAM],
         cwd=smoke_cwd,
@@ -2161,7 +2161,7 @@ def _smoke_installed_wheel(wheel: Path, root: Path) -> dict[str, object]:
 
 def _run_distribution_validation() -> dict[str, object]:
     expected_assets = _source_web_asset_bytes()
-    with tempfile.TemporaryDirectory(prefix="myclaw-release-distribution-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="omni-release-distribution-") as temporary:
         root = Path(temporary)
         distribution_dir = root / "distribution"
         distribution_dir.mkdir()
@@ -2177,8 +2177,8 @@ def _run_distribution_validation() -> dict[str, object]:
             ],
             env=_artifact_environment(),
         )
-        wheels = tuple(distribution_dir.glob("myclaw-*.whl"))
-        sdists = tuple(distribution_dir.glob("myclaw-*.tar.gz"))
+        wheels = tuple(distribution_dir.glob("omni-*.whl"))
+        sdists = tuple(distribution_dir.glob("omni-*.tar.gz"))
         if len(wheels) != 1 or len(sdists) != 1:
             raise RuntimeError(
                 f"expected one direct wheel and sdist, found {len(wheels)} wheels and "
@@ -2203,7 +2203,7 @@ def _run_distribution_validation() -> dict[str, object]:
             cwd=extracted_root,
             env=_artifact_environment(),
         )
-        rebuilt_wheels = tuple(rebuilt_dir.glob("myclaw-*.whl"))
+        rebuilt_wheels = tuple(rebuilt_dir.glob("omni-*.whl"))
         if len(rebuilt_wheels) != 1:
             raise RuntimeError(f"expected one sdist-rebuilt wheel, found {len(rebuilt_wheels)}")
         _assert_wheel_web_assets(rebuilt_wheels[0], expected_assets)

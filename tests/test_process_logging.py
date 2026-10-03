@@ -151,7 +151,7 @@ def test_process_entry_configures_logging_on_eager_help_path(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(sys, "argv", ["myclaw", "--help"])
+    monkeypatch.setattr(sys, "argv", ["omni", "--help"])
 
     with pytest.raises(SystemExit) as exited:
         run()

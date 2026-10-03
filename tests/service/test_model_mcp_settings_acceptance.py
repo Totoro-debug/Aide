@@ -190,15 +190,15 @@ async def test_model_and_http_mcp_change_drains_foreground_and_schedule(
         browser = await service.register_client("web")
         headers = {
             "Authorization": f"Bearer {cli.token}",
-            "X-MyClaw-CSRF": cli.token,
-            "X-MyClaw-Client": browser.client_id,
-            "X-MyClaw-Control": cast(str, browser.web_control_credential),
+            "X-Omni-CSRF": cli.token,
+            "X-Omni-Client": browser.client_id,
+            "X-Omni-Control": cast(str, browser.web_control_credential),
         }
         async with aiohttp.ClientSession() as http:
             async with http.ws_connect(
                 server.make_url("/api/v1/events"),
                 headers={**headers, "Origin": str(server.make_url("/")).rstrip("/")},
-                protocols=("myclaw-v1",),
+                protocols=("omni-v1",),
             ) as ws:
                 await ws.send_json(
                     {

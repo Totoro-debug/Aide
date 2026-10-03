@@ -140,7 +140,7 @@ async def _service_json(
         raise RuntimeError(f"installed service discovery is missing: {home.path}")
     headers = {"Authorization": f"Bearer {read_credential(home)}"}
     if client_id is not None:
-        headers["X-MyClaw-Client"] = client_id
+        headers["X-Omni-Client"] = client_id
     async with aiohttp.ClientSession() as http:
         async with http.get(
             f"http://{discovery.host}:{discovery.port}{path}", headers=headers
@@ -245,10 +245,10 @@ async def _run_installed_cli_competition(
                     ],
                     "environment": {
                         **scenario_environment,
-                        "MYCLAW_CLI_SCENARIO": "competition",
-                        "MYCLAW_CLI_READY": str(ready_path),
-                        "MYCLAW_CLI_DONE": str(done_path),
-                        "MYCLAW_CLI_PROMPT": prompt,
+                        "OMNI_CLI_SCENARIO": "competition",
+                        "OMNI_CLI_READY": str(ready_path),
+                        "OMNI_CLI_DONE": str(done_path),
+                        "OMNI_CLI_PROMPT": prompt,
                     },
                 }
             )
@@ -365,18 +365,18 @@ async def _run_installed_last_client_grace(
     companion_done = scenario_root / "companion-done.json"
     keep_environment = {
         **scenario_environment,
-        "MYCLAW_CLI_SCENARIO": "last-client-grace",
-        "MYCLAW_CLI_READY": str(keep_ready),
-        "MYCLAW_CLI_DONE": str(keep_done),
-        "MYCLAW_CLI_RELEASE": str(keep_release),
-        "MYCLAW_PROVIDER_OBSERVATION_PATH": str(observation_path),
+        "OMNI_CLI_SCENARIO": "last-client-grace",
+        "OMNI_CLI_READY": str(keep_ready),
+        "OMNI_CLI_DONE": str(keep_done),
+        "OMNI_CLI_RELEASE": str(keep_release),
+        "OMNI_PROVIDER_OBSERVATION_PATH": str(observation_path),
     }
     companion_environment = {
         **scenario_environment,
-        "MYCLAW_CLI_SCENARIO": "competition",
-        "MYCLAW_CLI_READY": str(companion_ready),
-        "MYCLAW_CLI_DONE": str(companion_done),
-        "MYCLAW_CLI_PROMPT": "installed CLI companion streaming markdown",
+        "OMNI_CLI_SCENARIO": "competition",
+        "OMNI_CLI_READY": str(companion_ready),
+        "OMNI_CLI_DONE": str(companion_done),
+        "OMNI_CLI_PROMPT": "installed CLI companion streaming markdown",
     }
     keep_command = [str(python), "-I", str(ROOT / "web/scripts/installed_cli_probe.py")]
     companion_command = [str(python), "-I", str(ROOT / "web/scripts/installed_cli_probe.py")]
@@ -515,7 +515,7 @@ async def _run_installed_joint(
     scenario_environment = {
         **scenario_environment,
         "BROWSER": str(capture),
-        "MYCLAW_CAPTURE_URL": str(url_file),
+        "OMNI_CAPTURE_URL": str(url_file),
     }
     browser_process: asyncio.subprocess.Process | None = None
     cli_process: asyncio.subprocess.Process | None = None
@@ -547,22 +547,22 @@ async def _run_installed_joint(
             raise RuntimeError("installed CLI reused a single-use Web launch ticket")
         browser_environment = {
             **os.environ,
-            "MYCLAW_E2E_URL": "http://127.0.0.1:8765",
-            "MYCLAW_E2E_TICKET": launch_url.split("#ticket=", 1)[1],
-            "MYCLAW_E2E_SECOND_TICKET": second_launch_ticket,
-            "MYCLAW_E2E_WORKSPACE": str(workspace),
-            "MYCLAW_E2E_OUTPUT": str(scenario_root),
-            "MYCLAW_E2E_INSTANCE": discovery.service_instance_id,
-            "MYCLAW_PROVIDER_OBSERVATION_PATH": str(observation_path),
-            "MYCLAW_JOINT_BROWSER_READY": str(browser_ready),
-            "MYCLAW_CLI_READY": str(cli_ready),
-            "MYCLAW_CLI_FOREGROUND_READY": str(cli_foreground_ready),
-            "MYCLAW_CLI_REMOVAL_DONE": str(cli_removal_done),
-            "MYCLAW_CLI_SETTINGS_START": str(cli_settings_start),
-            "MYCLAW_CLI_SETTINGS_READY": str(cli_settings_ready),
-            "MYCLAW_CLI_SETTINGS_DONE": str(cli_settings_done),
-            "MYCLAW_CLI_SETTINGS_RELEASE": str(cli_settings_release),
-            "MYCLAW_CLI_DONE": str(cli_done),
+            "OMNI_E2E_URL": "http://127.0.0.1:8765",
+            "OMNI_E2E_TICKET": launch_url.split("#ticket=", 1)[1],
+            "OMNI_E2E_SECOND_TICKET": second_launch_ticket,
+            "OMNI_E2E_WORKSPACE": str(workspace),
+            "OMNI_E2E_OUTPUT": str(scenario_root),
+            "OMNI_E2E_INSTANCE": discovery.service_instance_id,
+            "OMNI_PROVIDER_OBSERVATION_PATH": str(observation_path),
+            "OMNI_JOINT_BROWSER_READY": str(browser_ready),
+            "OMNI_CLI_READY": str(cli_ready),
+            "OMNI_CLI_FOREGROUND_READY": str(cli_foreground_ready),
+            "OMNI_CLI_REMOVAL_DONE": str(cli_removal_done),
+            "OMNI_CLI_SETTINGS_START": str(cli_settings_start),
+            "OMNI_CLI_SETTINGS_READY": str(cli_settings_ready),
+            "OMNI_CLI_SETTINGS_DONE": str(cli_settings_done),
+            "OMNI_CLI_SETTINGS_RELEASE": str(cli_settings_release),
+            "OMNI_CLI_DONE": str(cli_done),
         }
         browser_process = await asyncio.create_subprocess_exec(
             node,
@@ -593,16 +593,16 @@ async def _run_installed_joint(
         )
         cli_environment = {
             **scenario_environment,
-            "MYCLAW_CLI_SCENARIO": "joint",
-            "MYCLAW_CLI_READY": str(cli_ready),
-            "MYCLAW_CLI_FOREGROUND_READY": str(cli_foreground_ready),
-            "MYCLAW_CLI_REMOVAL_DONE": str(cli_removal_done),
-            "MYCLAW_CLI_SETTINGS_START": str(cli_settings_start),
-            "MYCLAW_CLI_SETTINGS_READY": str(cli_settings_ready),
-            "MYCLAW_CLI_SETTINGS_DONE": str(cli_settings_done),
-            "MYCLAW_CLI_SETTINGS_RELEASE": str(cli_settings_release),
-            "MYCLAW_CLI_DONE": str(cli_done),
-            "MYCLAW_PROVIDER_OBSERVATION_PATH": str(observation_path),
+            "OMNI_CLI_SCENARIO": "joint",
+            "OMNI_CLI_READY": str(cli_ready),
+            "OMNI_CLI_FOREGROUND_READY": str(cli_foreground_ready),
+            "OMNI_CLI_REMOVAL_DONE": str(cli_removal_done),
+            "OMNI_CLI_SETTINGS_START": str(cli_settings_start),
+            "OMNI_CLI_SETTINGS_READY": str(cli_settings_ready),
+            "OMNI_CLI_SETTINGS_DONE": str(cli_settings_done),
+            "OMNI_CLI_SETTINGS_RELEASE": str(cli_settings_release),
+            "OMNI_CLI_DONE": str(cli_done),
+            "OMNI_PROVIDER_OBSERVATION_PATH": str(observation_path),
         }
         cli_process = await asyncio.create_subprocess_exec(
             str(python),
@@ -699,7 +699,7 @@ async def validate_install(wheel: Path, root: Path, node: str) -> dict[str, obje
         "USERPROFILE": str(profile),
         "HOME": str(profile),
         "BROWSER": str(capture),
-        "MYCLAW_CAPTURE_URL": str(url_file),
+        "OMNI_CAPTURE_URL": str(url_file),
     }
     provider, base_url = await _start_fixture_provider()
     config = f'''[models.providers.fixture]
@@ -775,17 +775,17 @@ timeout = 120
         discovery = json.loads(discovery_path.read_text(encoding="utf-8"))
         browser_environment = {
             **os.environ,
-            "MYCLAW_E2E_URL": "http://127.0.0.1:8765",
-            "MYCLAW_E2E_TICKET": launch_url.split("#ticket=", 1)[1],
-            "MYCLAW_E2E_WORKSPACE": str(workspace),
-            "MYCLAW_E2E_OUTPUT": str(root),
-            "MYCLAW_E2E_INSTANCE": discovery["service_instance_id"],
-            "MYCLAW_CROSS_CLIENT_READY": str(cross_ready_path),
-            "MYCLAW_CROSS_CLIENT_CLI_READY": str(cross_cli_ready_path),
-            "MYCLAW_CROSS_CLIENT_CLI_DONE": str(cross_cli_done_path),
-            "MYCLAW_CLI_PRIVATE_MARKER": private_marker,
-            "MYCLAW_PROVIDER_OBSERVATION_PATH": str(cross_observation_path),
-            "MYCLAW_CONCURRENCY_RELEASE": str(cross_release_path),
+            "OMNI_E2E_URL": "http://127.0.0.1:8765",
+            "OMNI_E2E_TICKET": launch_url.split("#ticket=", 1)[1],
+            "OMNI_E2E_WORKSPACE": str(workspace),
+            "OMNI_E2E_OUTPUT": str(root),
+            "OMNI_E2E_INSTANCE": discovery["service_instance_id"],
+            "OMNI_CROSS_CLIENT_READY": str(cross_ready_path),
+            "OMNI_CROSS_CLIENT_CLI_READY": str(cross_cli_ready_path),
+            "OMNI_CROSS_CLIENT_CLI_DONE": str(cross_cli_done_path),
+            "OMNI_CLI_PRIVATE_MARKER": private_marker,
+            "OMNI_PROVIDER_OBSERVATION_PATH": str(cross_observation_path),
+            "OMNI_CONCURRENCY_RELEASE": str(cross_release_path),
         }
         browser_process = await asyncio.create_subprocess_exec(
             node,
@@ -800,13 +800,13 @@ timeout = 120
             browser_ready = await _wait_for_json_file(cross_ready_path)
             cli_environment = {
                 **environment,
-                "MYCLAW_CLI_SCENARIO": "cross-client",
-                "MYCLAW_CLI_READY": str(cross_cli_ready_path),
-                "MYCLAW_CLI_DONE": str(cross_cli_done_path),
-                "MYCLAW_CLI_PROMPT": "installed CLI concurrent session streaming markdown",
-                "MYCLAW_CLI_CONTESTED_SESSION": str(browser_ready["browser_session_id"]),
-                "MYCLAW_CLI_PRIVATE_MARKER": private_marker,
-                "MYCLAW_PROVIDER_OBSERVATION_PATH": str(cross_observation_path),
+                "OMNI_CLI_SCENARIO": "cross-client",
+                "OMNI_CLI_READY": str(cross_cli_ready_path),
+                "OMNI_CLI_DONE": str(cross_cli_done_path),
+                "OMNI_CLI_PROMPT": "installed CLI concurrent session streaming markdown",
+                "OMNI_CLI_CONTESTED_SESSION": str(browser_ready["browser_session_id"]),
+                "OMNI_CLI_PRIVATE_MARKER": private_marker,
+                "OMNI_PROVIDER_OBSERVATION_PATH": str(cross_observation_path),
             }
             cli_process = await asyncio.create_subprocess_exec(
                 str(python),

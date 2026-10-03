@@ -17,9 +17,9 @@ committed value or cancel an active Agent Run.
 configuration before making exactly one same-directory atomic replacement. It never materializes a missing `chat`
 route and does not use the startup `UserConfiguration` snapshot as a write source.
 
-All MyClaw operations that replace `config.toml` serialize through the stable `.config.toml.lock` sidecar in Agent
+All Omni operations that replace `config.toml` serialize through the stable `.config.toml.lock` sidecar in Agent
 Home. Each operation acquires the OS-backed process lock before rereading the latest document and holds it through
-validation and atomic replacement, so cooperating MyClaw writers cannot publish from the same stale source. Lock
+validation and atomic replacement, so cooperating Omni writers cannot publish from the same stale source. Lock
 acquisition has a fixed one-second timeout. A timeout or lock failure follows the operation's existing best-effort
 failure path.
 
@@ -29,8 +29,8 @@ returns the normal successful selection result. It does not log configuration co
 Temporary divergence between runtime status and the on-disk User Configuration is accepted until a later
 successful update or runtime restart. The local service coordinates successful persistence with global configuration activation under [ADR-0029](0029-host-cli-and-web-through-one-local-service.md).
 
-The serialization guarantee applies only to MyClaw writers that use this lock. An ordinary external editor does not
-participate and must not save `config.toml` during a MyClaw write transaction; atomic replacement prevents partial
+The serialization guarantee applies only to Omni writers that use this lock. An ordinary external editor does not
+participate and must not save `config.toml` during a Omni write transaction; atomic replacement prevents partial
 files but cannot merge an arbitrary concurrent external write. This decision does not add a general mutation
 framework, rollback transactions, or a global mutable User Configuration aggregate. Provider retry/fallback
 behavior, Session state, and Agent Loop ownership are unchanged.

@@ -2027,7 +2027,7 @@ async def test_real_powershell_host_inspects_and_executes_canonical_cmdlet(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     configured_path = os.environ.get(
-        "MYCLAW_PWSH_PATH" if selector == "pwsh" else "MYCLAW_POWERSHELL_PATH"
+        "OMNI_PWSH_PATH" if selector == "pwsh" else "OMNI_POWERSHELL_PATH"
     )
     candidates = (
         [Path(configured_path)]

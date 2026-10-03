@@ -49,7 +49,7 @@ _WINDOWS_ENVIRONMENT: Final[tuple[str, ...]] = (
 )
 _PS_FLAGS: Final[tuple[str, ...]] = ("-NoLogo", "-NoProfile", "-NonInteractive")
 _BACKGROUND_CLEANUPS: Final[set[asyncio.Task[None]]] = set()
-_PS_VERSION_PREFIX: Final[str] = "MYCLAW_PS_VERSION:"
+_PS_VERSION_PREFIX: Final[str] = "OMNI_PS_VERSION:"
 _GIT_HARDENED_FORM_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^(?P<leading>\s*)(?P<requested>git(?:\.exe)?)"
     r"(?P<global>(?:\s+-C\s+(?:\"[^\"]*\"|'[^']*'|[^\s]+))*)\s+"

@@ -88,7 +88,7 @@ async def test_cli_real_mcp_flow_persists_result_reuses_session_snapshot_and_clo
     home.initialize()
     directory = tmp_path / "workspace"
     directory.mkdir()
-    monkeypatch.setenv("MYCLAW_MCP_FLOW_TEST", "inherited")
+    monkeypatch.setenv("OMNI_MCP_FLOW_TEST", "inherited")
     script = "\n".join(
         (
             "import os",
@@ -96,7 +96,7 @@ async def test_cli_real_mcp_flow_persists_result_reuses_session_snapshot_and_clo
             "server = MCPServer('cli-flow')",
             "@server.tool()",
             "def echo(value: str) -> str:",
-            "    return f\"{value}:{os.environ['MYCLAW_MCP_FLOW_TEST']}\"",
+            "    return f\"{value}:{os.environ['OMNI_MCP_FLOW_TEST']}\"",
             "server.run()",
         )
     )

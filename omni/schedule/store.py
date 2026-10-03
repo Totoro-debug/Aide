@@ -32,7 +32,7 @@ class ScheduleStateError(ScheduleStoreError, WorkspaceStateError):
         self.path = path
         self.error = ErrorInfo(
             "schedule_state_error",
-            "Schedule state could not be loaded. Repair or move the file, then start MyClaw again.",
+            "Schedule state could not be loaded. Repair or move the file, then start Omni again.",
         )
         Exception.__init__(self, self.error.message)
 

@@ -145,7 +145,7 @@ interface PendingConfirmation {
   title: string | null;
 }
 
-const THEME_KEY = "myclaw.theme";
+const THEME_KEY = "omni.theme";
 const initialLaunchTicket = readAndClearTicket();
 const PERMISSION_LEVELS: ToolPermissionLevel[] = ["read-only", "workspace-write", "full-access"];
 const REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
@@ -4682,7 +4682,7 @@ interface PendingSessionDeletion {
 
 function readPendingDeletion(projectId: string): PendingSessionDeletion | null {
   try {
-    const value = JSON.parse(sessionStorage.getItem(`myclaw.session-delete.${projectId}`) ?? "null") as Partial<PendingSessionDeletion> | null;
+    const value = JSON.parse(sessionStorage.getItem(`omni.session-delete.${projectId}`) ?? "null") as Partial<PendingSessionDeletion> | null;
     if (value?.attempted !== true || typeof value.requestId !== "string"
       || typeof value.claim?.session_id !== "string" || typeof value.claim.workspace_id !== "string"
       || typeof value.claim.reconnect_credential !== "string"
@@ -5114,14 +5114,14 @@ function ProjectSessionsContent({
   const clearPendingDeletion = useCallback(() => {
     pendingDeletionRef.current = null;
     setPendingDeletion(null);
-    try { sessionStorage.removeItem(`myclaw.session-delete.${projectId}`); } catch { /* Storage can be unavailable. */ }
+    try { sessionStorage.removeItem(`omni.session-delete.${projectId}`); } catch { /* Storage can be unavailable. */ }
   }, [projectId]);
 
   const rememberPendingDeletion = useCallback((operation: PendingSessionDeletion) => {
     pendingDeletionRef.current = operation;
     setPendingDeletion(operation);
     try {
-      sessionStorage.setItem(`myclaw.session-delete.${projectId}`, JSON.stringify(operation));
+      sessionStorage.setItem(`omni.session-delete.${projectId}`, JSON.stringify(operation));
     } catch { /* In-memory retries remain available when browser storage is unavailable. */ }
   }, [projectId]);
 
@@ -6002,7 +6002,7 @@ function ProjectSessionsContent({
           const rejectedOperation = { ...operation, attempted: false };
           pendingDeletionRef.current = rejectedOperation;
           setPendingDeletion(rejectedOperation);
-          try { sessionStorage.removeItem(`myclaw.session-delete.${projectId}`); } catch { /* Storage can be unavailable. */ }
+          try { sessionStorage.removeItem(`omni.session-delete.${projectId}`); } catch { /* Storage can be unavailable. */ }
           throw error;
         }
       }

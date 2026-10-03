@@ -4,7 +4,7 @@ build-backend = "scripts.build_backend"
 backend-path = ["."]
 
 [project]
-name = "myclaw"
+name = "omni"
 version = "0.1.0"
 description = "Windows local-first Personal Agent runtime"
 readme = "README.md"
@@ -43,7 +43,7 @@ dev = [
 ]
 
 [project.scripts]
-myclaw = "omni.terminal.process_entry:run"
+omni = "omni.terminal.process_entry:run"
 
 [tool.setuptools.packages.find]
 where = ["."]

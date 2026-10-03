@@ -35,7 +35,7 @@ async def _launch_web(root: Path, workspace: Path) -> str:
         "import sys, webbrowser; "
         "from omni.terminal.process_entry import run; "
         "webbrowser.open_new_tab = lambda _url: False; "
-        "sys.argv = ['myclaw', 'web']; run()"
+        "sys.argv = ['omni', 'web']; run()"
     )
     environment = {
         **os.environ,
@@ -59,7 +59,7 @@ async def _launch_web(root: Path, workspace: Path) -> str:
         await process.wait()
         raise
     if process.returncode != 0:
-        raise RuntimeError(f"Production myclaw web failed: {stderr.decode()}")
+        raise RuntimeError(f"Production omni web failed: {stderr.decode()}")
     return stdout.decode().strip()
 
 

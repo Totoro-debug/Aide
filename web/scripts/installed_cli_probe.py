@@ -201,7 +201,7 @@ async def _authenticated_json(
 ) -> dict[str, object]:
     headers = {"Authorization": f"Bearer {read_credential(home)}"}
     if client_id is not None:
-        headers["X-MyClaw-Client"] = client_id
+        headers["X-Omni-Client"] = client_id
     async with aiohttp.ClientSession() as http:
         async with http.get(url, headers=headers) as response:
             body = await response.json()
@@ -392,7 +392,7 @@ async def _run_last_client_grace_scenario(
             )
             await reconnected.bus.put_inbound(InboundMessage(expiry_prompt))
             await _wait_for_observation(
-                Path(os.environ["MYCLAW_PROVIDER_OBSERVATION_PATH"]), expiry_prompt
+                Path(os.environ["OMNI_PROVIDER_OBSERVATION_PATH"]), expiry_prompt
             )
             expiry_job_prompt = f"installed expiry grace Job must not run {uuid4()}"
             expiry_job_due = datetime.now(UTC) + timedelta(seconds=10)
@@ -451,7 +451,7 @@ async def _run_last_client_grace_scenario(
             assert not expiry_schedule_path.exists()
             provider_records = [
                 json.loads(line)
-                for line in Path(os.environ["MYCLAW_PROVIDER_OBSERVATION_PATH"])
+                for line in Path(os.environ["OMNI_PROVIDER_OBSERVATION_PATH"])
                 .read_text(encoding="utf-8")
                 .splitlines()
                 if line.strip()
@@ -642,7 +642,7 @@ async def _run_joint_scenario(
         )
         await client.bus.put_inbound(InboundMessage(settings_prompt))
         await _wait_for_observation(observation_path, settings_prompt)
-        await _wait_for_file(Path(os.environ["MYCLAW_CLI_SETTINGS_RELEASE"]))
+        await _wait_for_file(Path(os.environ["OMNI_CLI_SETTINGS_RELEASE"]))
         await _wait_for_prompt_completion(settings_session_path, settings_prompt)
         deadline = asyncio.get_running_loop().time() + 90
         while asyncio.get_running_loop().time() < deadline:
@@ -696,7 +696,7 @@ async def _run_joint_scenario(
             ),
             encoding="utf-8",
         )
-        done_path = Path(os.environ["MYCLAW_CLI_DONE"])
+        done_path = Path(os.environ["OMNI_CLI_DONE"])
         done_path.write_text(
             json.dumps(
                 {
@@ -717,7 +717,7 @@ async def _run_joint_scenario(
             encoding="utf-8",
         )
     except BaseException as error:
-        Path(os.environ["MYCLAW_CLI_DONE"]).write_text(
+        Path(os.environ["OMNI_CLI_DONE"]).write_text(
             json.dumps({"status": "failed", "error": f"{type(error).__name__}: {error}"}),
             encoding="utf-8",
         )
@@ -728,7 +728,7 @@ async def headless_terminal(self: Any, **_kwargs: object) -> None:
     async with self.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         assert self.query_one("#conversation-input")
-        scenario = os.environ.get("MYCLAW_CLI_SCENARIO")
+        scenario = os.environ.get("OMNI_CLI_SCENARIO")
         current_discovery = read_discovery(AgentHome.production())
         if scenario not in {"competition", "last-client-grace"}:
             assert current_discovery == before
@@ -740,17 +740,17 @@ async def headless_terminal(self: Any, **_kwargs: object) -> None:
         if scenario == "competition":
             await _run_competition_scenario(
                 client=client,
-                ready_path=Path(os.environ["MYCLAW_CLI_READY"]),
-                done_path=Path(os.environ["MYCLAW_CLI_DONE"]),
-                prompt=os.environ["MYCLAW_CLI_PROMPT"],
+                ready_path=Path(os.environ["OMNI_CLI_READY"]),
+                done_path=Path(os.environ["OMNI_CLI_DONE"]),
+                prompt=os.environ["OMNI_CLI_PROMPT"],
                 entry_value=console_entry.value,
             )
         elif scenario == "last-client-grace":
             await _run_last_client_grace_scenario(
                 client=client,
-                ready_path=Path(os.environ["MYCLAW_CLI_READY"]),
-                done_path=Path(os.environ["MYCLAW_CLI_DONE"]),
-                release_path=Path(os.environ["MYCLAW_CLI_RELEASE"]),
+                ready_path=Path(os.environ["OMNI_CLI_READY"]),
+                done_path=Path(os.environ["OMNI_CLI_DONE"]),
+                release_path=Path(os.environ["OMNI_CLI_RELEASE"]),
                 entry_value=console_entry.value,
             )
         elif scenario == "joint":
@@ -767,21 +767,21 @@ async def headless_terminal(self: Any, **_kwargs: object) -> None:
             with patch.object(bus, "put_remote_output", observe_output):
                 await _run_joint_scenario(
                     client=client,
-                    ready_path=Path(os.environ["MYCLAW_CLI_READY"]),
-                    foreground_ready_path=Path(os.environ["MYCLAW_CLI_FOREGROUND_READY"]),
-                    removal_done_path=Path(os.environ["MYCLAW_CLI_REMOVAL_DONE"]),
-                    settings_ready_path=Path(os.environ["MYCLAW_CLI_SETTINGS_READY"]),
-                    settings_done_path=Path(os.environ["MYCLAW_CLI_SETTINGS_DONE"]),
-                    settings_start_path=Path(os.environ["MYCLAW_CLI_SETTINGS_START"]),
-                    observation_path=Path(os.environ["MYCLAW_PROVIDER_OBSERVATION_PATH"]),
+                    ready_path=Path(os.environ["OMNI_CLI_READY"]),
+                    foreground_ready_path=Path(os.environ["OMNI_CLI_FOREGROUND_READY"]),
+                    removal_done_path=Path(os.environ["OMNI_CLI_REMOVAL_DONE"]),
+                    settings_ready_path=Path(os.environ["OMNI_CLI_SETTINGS_READY"]),
+                    settings_done_path=Path(os.environ["OMNI_CLI_SETTINGS_DONE"]),
+                    settings_start_path=Path(os.environ["OMNI_CLI_SETTINGS_START"]),
+                    observation_path=Path(os.environ["OMNI_PROVIDER_OBSERVATION_PATH"]),
                     entry_value=console_entry.value,
                     notices=notices,
                 )
         elif scenario == "cross-client":
-            ready_path = Path(os.environ["MYCLAW_CLI_READY"])
-            done_path = Path(os.environ["MYCLAW_CLI_DONE"])
-            prompt = os.environ["MYCLAW_CLI_PROMPT"]
-            contested_session_id = os.environ["MYCLAW_CLI_CONTESTED_SESSION"]
+            ready_path = Path(os.environ["OMNI_CLI_READY"])
+            done_path = Path(os.environ["OMNI_CLI_DONE"])
+            prompt = os.environ["OMNI_CLI_PROMPT"]
+            contested_session_id = os.environ["OMNI_CLI_CONTESTED_SESSION"]
             try:
                 try:
                     await client.switch_session(contested_session_id)
@@ -791,22 +791,22 @@ async def headless_terminal(self: Any, **_kwargs: object) -> None:
                 else:
                     raise AssertionError("The installed CLI claimed the browser Session")
                 assert claim_error_code == "session_claimed"
-                assert os.environ["MYCLAW_CLI_PRIVATE_MARKER"] not in claim_error_text
+                assert os.environ["OMNI_CLI_PRIVATE_MARKER"] not in claim_error_text
                 try:
                     await client._http_request(
                         "GET",
                         f"/api/v1/workspaces/{client.workspace_id}/sessions/{contested_session_id}"
                         f"?claim_version={client.claim_version}",
-                        extra_headers={"X-MyClaw-Claim": client.claim_credential},
+                        extra_headers={"X-Omni-Claim": client.claim_credential},
                     )
                 except ServiceError as error:
                     assert error.code in {"stale_claim", "session_claimed"}, error.code
-                    assert os.environ["MYCLAW_CLI_PRIVATE_MARKER"] not in str(error)
+                    assert os.environ["OMNI_CLI_PRIVATE_MARKER"] not in str(error)
                 else:
                     raise AssertionError("Claim loser could read the browser Session body")
                 await bus.put_inbound(InboundMessage(prompt))
                 await _wait_for_observation(
-                    Path(os.environ["MYCLAW_PROVIDER_OBSERVATION_PATH"]), prompt
+                    Path(os.environ["OMNI_PROVIDER_OBSERVATION_PATH"]), prompt
                 )
                 session_path = Path.cwd() / ".omni" / "sessions" / f"{client.session_id}.jsonl"
                 ready_path.write_text(
@@ -857,16 +857,16 @@ async def headless_terminal(self: Any, **_kwargs: object) -> None:
 
 assert Path(omni.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
 assert shutil.which("node") is None and shutil.which("npm") is None
-scenario = os.environ.get("MYCLAW_CLI_SCENARIO")
+scenario = os.environ.get("OMNI_CLI_SCENARIO")
 before = read_discovery(AgentHome.production())
 if scenario not in {"competition", "last-client-grace", "joint"}:
     assert before is not None
     assert before.service_instance_id == sys.argv[1]
     assert before.pid == int(sys.argv[2])
 # Replace only terminal I/O; retain the installed entry, CLI composition and client.
-console_entry = next(iter(entry_points(group="console_scripts", name="myclaw")))
+console_entry = next(iter(entry_points(group="console_scripts", name="omni")))
 entry = console_entry
-sys.argv = ["myclaw"]
+sys.argv = ["omni"]
 with (
     patch.object(cli, "is_interactive_terminal", return_value=True),
     patch.object(TerminalConversationApp, "run_async", headless_terminal),

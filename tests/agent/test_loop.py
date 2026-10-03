@@ -2896,7 +2896,7 @@ async def test_loop_commits_max_iteration_repair_once_before_safe_terminal(
         assert len(router.calls) == 50
         assert terminal.type == "system_control"
         assert terminal.content == (
-            "MyClaw 本轮对话已经达到最大循环次数，仍没有输出最终结果。"  # noqa: RUF001
+            "Omni 本轮对话已经达到最大循环次数，仍没有输出最终结果。"  # noqa: RUF001
             "可以再次尝试本次请求或者尝试给出更明确的任务目标。"
         )
         assert terminal.metadata == {
@@ -3183,7 +3183,7 @@ async def test_preparation_cancellation_publishes_the_cancelled_terminal(
         terminal = (await _terminals(_bus, 1))[0]
 
         assert terminal.type == "system_control"
-        assert terminal.content == "MyClaw 已取消本轮对话。"
+        assert terminal.content == "Omni 已取消本轮对话。"
         assert terminal.metadata == {
             "finish_reason": "cancelled",
             "error_code": "turn_cancelled",

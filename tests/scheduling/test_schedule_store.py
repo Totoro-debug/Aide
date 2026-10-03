@@ -295,7 +295,7 @@ def test_strict_load_rejects_duplicate_keys_and_duplicate_job_ids(workspace: Pat
     assert raised.value.path == state.schedule_path
     assert raised.value.error.code == "schedule_state_error"
     assert raised.value.error.message == (
-        "Schedule state could not be loaded. Repair or move the file, then start MyClaw again."
+        "Schedule state could not be loaded. Repair or move the file, then start Omni again."
     )
     assert raised.value.error.retryable is False
     assert raised.value.error.retry_after_seconds is None

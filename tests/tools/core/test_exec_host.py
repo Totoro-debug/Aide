@@ -206,8 +206,8 @@ def test_resolve_exec_shell_rejects_ambiguous_or_wrong_shell_identity(
     ("returncode", "stdout"),
     (
         (0, "7\n"),
-        (1, "MYCLAW_PS_VERSION:7.5.0\n"),
-        (0, "noise\nMYCLAW_PS_VERSION:7.5.0\n"),
+        (1, "OMNI_PS_VERSION:7.5.0\n"),
+        (0, "noise\nOMNI_PS_VERSION:7.5.0\n"),
     ),
 )
 def test_real_version_probe_rejects_failed_or_spoofed_output(

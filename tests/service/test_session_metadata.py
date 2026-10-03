@@ -92,9 +92,9 @@ async def _metadata_service(tmp_path: Path) -> AsyncIterator[MetadataHarness]:
                 server,
                 {
                     "Authorization": f"Bearer {token}",
-                    "X-MyClaw-CSRF": token,
-                    "X-MyClaw-Client": client.client_id,
-                    "X-MyClaw-Claim": claim.credential,
+                    "X-Omni-CSRF": token,
+                    "X-Omni-Client": client.client_id,
+                    "X-Omni-Claim": claim.credential,
                 },
             )
     finally:

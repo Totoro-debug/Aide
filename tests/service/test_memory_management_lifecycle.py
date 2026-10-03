@@ -47,9 +47,9 @@ async def _post(
         server.make_url(f"/api/v1/workspaces/{scoped.workspace_id}/management/{action}"),
         headers={
             "Authorization": f"Bearer {token}",
-            "X-MyClaw-CSRF": token,
-            "X-MyClaw-Client": owner.client_id,
-            "X-MyClaw-Claim": selected.credential,
+            "X-Omni-CSRF": token,
+            "X-Omni-Client": owner.client_id,
+            "X-Omni-Claim": selected.credential,
         },
         json={
             "request_id": request_id,

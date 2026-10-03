@@ -6,21 +6,21 @@ import { chromium, expect } from "@playwright/test";
 import { URL } from "node:url";
 
 if (process.platform !== "win32") {
-  console.error("MyClaw requires Windows.");
+  console.error("Omni requires Windows.");
   process.exit(1);
 }
 
-const baseUrl = process.env.MYCLAW_E2E_URL;
-const ticket = process.env.MYCLAW_E2E_TICKET;
-const workspace = process.env.MYCLAW_E2E_WORKSPACE;
-const output = process.env.MYCLAW_E2E_OUTPUT;
+const baseUrl = process.env.OMNI_E2E_URL;
+const ticket = process.env.OMNI_E2E_TICKET;
+const workspace = process.env.OMNI_E2E_WORKSPACE;
+const output = process.env.OMNI_E2E_OUTPUT;
 const prompt = "installed package conversation\nstreaming markdown";
-const crossClientReadyPath = process.env.MYCLAW_CROSS_CLIENT_READY;
-const crossClientCliReadyPath = process.env.MYCLAW_CROSS_CLIENT_CLI_READY;
-const crossClientCliDonePath = process.env.MYCLAW_CROSS_CLIENT_CLI_DONE;
-const crossClientPrivateMarker = process.env.MYCLAW_CLI_PRIVATE_MARKER;
-const observationPath = process.env.MYCLAW_PROVIDER_OBSERVATION_PATH;
-const concurrencyReleasePath = process.env.MYCLAW_CONCURRENCY_RELEASE;
+const crossClientReadyPath = process.env.OMNI_CROSS_CLIENT_READY;
+const crossClientCliReadyPath = process.env.OMNI_CROSS_CLIENT_CLI_READY;
+const crossClientCliDonePath = process.env.OMNI_CROSS_CLIENT_CLI_DONE;
+const crossClientPrivateMarker = process.env.OMNI_CLI_PRIVATE_MARKER;
+const observationPath = process.env.OMNI_PROVIDER_OBSERVATION_PATH;
+const concurrencyReleasePath = process.env.OMNI_CONCURRENCY_RELEASE;
 assert.ok(baseUrl && ticket && workspace);
 
 async function waitForJson(path, timeout = 90_000) {
@@ -37,7 +37,7 @@ async function waitForJson(path, timeout = 90_000) {
 }
 
 const browser = await chromium.launch({
-  channel: process.env.MYCLAW_E2E_BROWSER_CHANNEL ?? "msedge",
+  channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge",
 });
 const context = await browser.newContext();
 const page = await context.newPage();
@@ -113,7 +113,7 @@ try {
   const serviceResponse = await context.request.get(`${baseUrl}/api/v1/service`);
   assert.equal(serviceResponse.status(), 200, "Installed Web app API did not respond");
   const service = await serviceResponse.json();
-  assert.equal(service.service_instance_id, process.env.MYCLAW_E2E_INSTANCE);
+  assert.equal(service.service_instance_id, process.env.OMNI_E2E_INSTANCE);
 
   await page.goto(`${baseUrl}/status`);
   await page.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();

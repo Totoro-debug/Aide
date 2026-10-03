@@ -4,9 +4,9 @@ status: accepted
 
 # Use a Full-Screen Terminal Conversation
 
-Running `myclaw` without arguments starts one full-screen terminal UI with a scrollable conversation display and a bottom multiline input area. There is no plain REPL or non-TTY fallback. Non-interactive Management Commands remain separate; automated UI tests use Textual's headless test harness.
+Running `omni` without arguments starts one full-screen terminal UI with a scrollable conversation display and a bottom multiline input area. There is no plain REPL or non-TTY fallback. Non-interactive Management Commands remain separate; automated UI tests use Textual's headless test harness.
 
-MyClaw uses Textual `>=8.2.8,<9` and Rich `>=14.2.0,<15` for the application lifecycle, Markdown, scrolling, modal interaction, mouse input, and headless tests. A narrow capability-gated keyboard adapter handles modifier-aware Enter reports and restoration; unsupported terminals use `Ctrl+J` as the reliable newline fallback. Runtime ownership and confirmation delivery follow [ADR-0029](0029-host-cli-and-web-through-one-local-service.md).
+Omni uses Textual `>=8.2.8,<9` and Rich `>=14.2.0,<15` for the application lifecycle, Markdown, scrolling, modal interaction, mouse input, and headless tests. A narrow capability-gated keyboard adapter handles modifier-aware Enter reports and restoration; unsupported terminals use `Ctrl+J` as the reliable newline fallback. Runtime ownership and confirmation delivery follow [ADR-0029](0029-host-cli-and-web-through-one-local-service.md).
 
 User input is right-aligned and assistant Markdown is left-aligned. Intermediate model output and Tool activity belong to one ordered Agent Run Activity Group; the final answer stays outside it. Active groups remain open, successful groups collapse, and failed or cancelled groups remain open. Completed groups support mouse disclosure. Scrolling preserves a historical anchor until the user returns to the latest content; activity changes use the same scroll behavior.
 

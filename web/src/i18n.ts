@@ -4,7 +4,7 @@ import { initReactI18next } from "react-i18next";
 const resources = {
   en: {
     translation: {
-      app: { name: "MyClaw", subtitle: "Local workbench" },
+      app: { name: "Omni", subtitle: "Local workbench" },
       nav: { status: "Status", projects: "Projects", sessions: "Sessions", schedule: "Schedule", settings: "Settings" },
       controls: {
         language: "Language",
@@ -64,7 +64,7 @@ const resources = {
         protocol: "Protocol",
         instance: "Service instance",
         connection: "Connection",
-        authenticationRequired: "Open this workbench from the local MyClaw command.",
+        authenticationRequired: "Open this workbench from the local Omni command.",
         unavailable: "The local service is unavailable.",
         detailsTitle: "Connection details",
         detailsDescription: "Current service identity and transport state.",
@@ -461,7 +461,7 @@ const resources = {
         deletePersistenceError: "Session deletion did not finish. Retry to continue cleanup.",
         actionError: "The Session action could not be completed.",
         userMessage: "You",
-        assistantMessage: "MyClaw",
+        assistantMessage: "Omni",
         toolMessage: "Tool",
         systemMessage: "System",
       },
@@ -471,7 +471,7 @@ const resources = {
         enterHint: "Press Enter to send; Shift+Enter adds a line.",
         activeRun: "A run is active in this Session.",
         emptyDraft: "Start a conversation in this Session.",
-        assistantPending: "MyClaw is working...",
+        assistantPending: "Omni is working...",
         submitting: "Submitting",
         accepted: "Accepted",
         running: "Running",
@@ -513,7 +513,7 @@ const resources = {
   },
   "zh-CN": {
     translation: {
-      app: { name: "MyClaw", subtitle: "本地工作台" },
+      app: { name: "Omni", subtitle: "本地工作台" },
       nav: { status: "状态", projects: "项目", sessions: "会话", schedule: "调度", settings: "设置" },
       controls: {
         language: "语言",
@@ -573,7 +573,7 @@ const resources = {
         protocol: "协议",
         instance: "服务实例",
         connection: "连接",
-        authenticationRequired: "请从本地 MyClaw 命令打开此工作台。",
+        authenticationRequired: "请从本地 Omni 命令打开此工作台。",
         unavailable: "本地服务不可用。",
         detailsTitle: "连接详情",
         detailsDescription: "当前服务身份和传输状态。",
@@ -970,7 +970,7 @@ const resources = {
         deletePersistenceError: "会话删除尚未完成，请重试以继续清理。",
         actionError: "会话操作未完成。",
         userMessage: "你",
-        assistantMessage: "MyClaw",
+        assistantMessage: "Omni",
         toolMessage: "工具",
         systemMessage: "系统",
       },
@@ -980,7 +980,7 @@ const resources = {
         enterHint: "按 Enter 发送，Shift+Enter 换行。",
         activeRun: "此会话中有运行正在进行。",
         emptyDraft: "从此会话开始对话。",
-        assistantPending: "MyClaw 正在处理……",
+        assistantPending: "Omni 正在处理……",
         submitting: "提交中",
         accepted: "已接受",
         running: "运行中",
@@ -1022,7 +1022,7 @@ const resources = {
   },
 } as const;
 
-const language = readPreference("myclaw.language") ?? detectLanguage();
+const language = readPreference("omni.language") ?? detectLanguage();
 
 void i18n.use(initReactI18next).init({
   resources,
@@ -1032,7 +1032,7 @@ void i18n.use(initReactI18next).init({
 });
 
 i18n.on("languageChanged", (value) => {
-  writePreference("myclaw.language", value);
+  writePreference("omni.language", value);
   document.documentElement.lang = value;
 });
 

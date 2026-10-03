@@ -1,8 +1,8 @@
-# MyClaw
+# Omni
 
 ## 项目简介
 
-MyClaw 是面向单用户、本地优先的个人 Agent 运行时。通过全屏终端或本地 Web 界面调用模型与工具，支持并行会话、会话恢复、三层记忆、Skill、MCP 和定时任务。CLI 与 Web 共用一个按需启动的本地服务，运行状态以文件形式保存在本地。
+Omni 是面向单用户、本地优先的个人 Agent 运行时。通过全屏终端或本地 Web 界面调用模型与工具，支持并行会话、会话恢复、三层记忆、Skill、MCP 和定时任务。CLI 与 Web 共用一个按需启动的本地服务，运行状态以文件形式保存在本地。
 
 ## 项目安装
 
@@ -11,8 +11,8 @@ MyClaw 是面向单用户、本地优先的个人 Agent 运行时。通过全屏
 目前已验证 Windows x64。应用、服务和发布验证入口在初始化前拒绝其他操作系统。
 
 ```powershell
-git clone https://github.com/Totoro-debug/OmniAgent.git myclaw
-cd myclaw
+git clone https://github.com/Totoro-debug/OmniAgent.git omni
+cd omni
 ```
 
 Windows PowerShell：
@@ -25,16 +25,16 @@ python -m pip install .
 
 ## Web 界面与服务生命周期
 
-安装 wheel 或 source distribution 后，运行时只需要 Python 及其依赖，不需要 Node.js、npm 或前端源码。直接执行 `myclaw web`；首次配置或配置需要修复时，会打开对应的设置页面。已有有效配置时，也可运行裸 `myclaw` 进入 CLI 对话。
+安装 wheel 或 source distribution 后，运行时只需要 Python 及其依赖，不需要 Node.js、npm 或前端源码。直接执行 `omni web`；首次配置或配置需要修复时，会打开对应的设置页面。已有有效配置时，也可运行裸 `omni` 进入 CLI 对话。
 
 ```powershell
-myclaw web
+omni web
 ```
 
-`myclaw web` 会启动或复用当前 Agent Home 的本地服务，并打开一次性的浏览器登录地址。服务只监听 `127.0.0.1:8765`，浏览器和 CLI 连接使用同一个服务与生命周期；关闭浏览器后服务会保留短暂的重连窗口。需要立即收尾时执行：
+`omni web` 会启动或复用当前 Agent Home 的本地服务，并打开一次性的浏览器登录地址。服务只监听 `127.0.0.1:8765`，浏览器和 CLI 连接使用同一个服务与生命周期；关闭浏览器后服务会保留短暂的重连窗口。需要立即收尾时执行：
 
 ```powershell
-myclaw service stop
+omni service stop
 ```
 
 刷新页面或在 30 秒宽限期内重连会恢复已接受的输入、进行中的输出、工具状态和待处理确认；当前运行仍可取消，确认使用原请求。未登记为 Project 的 CLI Workspace 仅在有在线使用者时接收新的 Schedule 执行；最后一个使用者断线后立即暂停新执行，宽限期到期后收尾并释放运行时，保留 Job 和用户文件。已登记且可用的 Project 在服务仍有在线客户端时继续调度。
@@ -51,7 +51,7 @@ python -m build --sdist --wheel
 
 构建会校验入口 HTML、引用资源、SHA-256 清单和分发包资源；资源缺失或清单不一致时直接失败，不会生成只有后端的安装包。
 
-发布者可在仓库根目录执行 `python -m scripts.installed_web_validation --output D:/myclaw-installed-check`（使用新的源码外目录）。该入口以正常隔离构建生成 wheel/sdist，独立重建并安装两种 wheel，验收生产 Web 页面、深层路由、对话、Settings、同服务 CLI 连接和停止，保存报告及截图。浏览器控制器需要 `web/` 的 Playwright/Node 开发依赖；安装后的应用使用无 Node/npm 的独立环境。默认端口被占用时检查会失败，不停止已有服务。
+发布者可在仓库根目录执行 `python -m scripts.installed_web_validation --output D:/omni-installed-check`（使用新的源码外目录）。该入口以正常隔离构建生成 wheel/sdist，独立重建并安装两种 wheel，验收生产 Web 页面、深层路由、对话、Settings、同服务 CLI 连接和停止，保存报告及截图。浏览器控制器需要 `web/` 的 Playwright/Node 开发依赖；安装后的应用使用无 Node/npm 的独立环境。默认端口被占用时检查会失败，不停止已有服务。
 
 ## Windows 发布验证
 
@@ -67,7 +67,7 @@ python scripts/release_validation.py --phase all
 
 ## 项目最小配置
 
-执行 `myclaw config` 生成默认配置，再将 `~/.omni/config.toml` 的内容替换为以下配置。已有配置不会被该命令覆盖。`~` 表示当前用户主目录，Windows 下通常为 `C:\Users\<用户名>`。
+执行 `omni config` 生成默认配置，再将 `~/.omni/config.toml` 的内容替换为以下配置。已有配置不会被该命令覆盖。`~` 表示当前用户主目录，Windows 下通常为 `C:\Users\<用户名>`。
 
 选择支持工具调用的模型，替换服务地址、API Key 和两处模型 ID。按模型实际限制设置 `context_window` 与 `max_output`，单位均为 token，后者必须小于前者；`timeout` 单位为秒。
 
@@ -89,7 +89,7 @@ timeout = 120
 
 `protocol` 支持 `openai-compatible` 和 `anthropic`。只配置 `default` 路由即可供对话、记忆和定时任务使用，其余配置采用默认值。
 
-API Key 直接保存在配置文件中，当前不支持环境变量引用；`myclaw config` 显示时会脱敏。更多可选配置及 MCP 示例见[配置模板](omni/templates/default-config.md)。
+API Key 直接保存在配置文件中，当前不支持环境变量引用；`omni config` 显示时会脱敏。更多可选配置及 MCP 示例见[配置模板](omni/templates/default-config.md)。
 
 MCP Server 可在 `[mcp.servers.<name>.tool_keywords]` 下按远端 Tool 原名配置英文关键词；缺失或为空的关键词会在启动时通过现有 `chat` Model Route 生成并尽力保存。生成失败时，当前进程使用对应的远端 Tool 原名；生成成功但保存失败时，当前进程继续使用已生成的内存关键词。两类失败都不会阻止 Agent 启动。
 
@@ -105,7 +105,7 @@ MCP Server 可在 `[mcp.servers.<name>.tool_keywords]` 下按远端 Tool 原名�
 
 `[runtime].exec_shell` 接受 `auto`、`powershell` 和 `pwsh`，默认 `auto`。`auto` 优先选择 PowerShell 7，否则使用 Windows PowerShell 5.1；显式选择不会交叉回退。检查和执行均禁用 Profile。所选 Shell 缺失时显示安全诊断，Exec 调用返回能力错误。用户定时任务使用生效 Workspace generation 的配置权限和 Shell，不继承客户端的临时权限选择。
 
-可选字段缺失时使用默认值，显式非法值回退到默认值并产生脱敏诊断；未知字段被忽略，加载不会自动改写原始 TOML。`compact_ratio` 默认 `0.9`，有效范围为 `0.5` 至 `0.95`。`myclaw config` 与 `/config` 显示有效值、诊断和脱敏配置；完整默认值合同见 [ADR-0025](docs/adr/0025-ignore-unknown-user-configuration-fields.md)。
+可选字段缺失时使用默认值，显式非法值回退到默认值并产生脱敏诊断；未知字段被忽略，加载不会自动改写原始 TOML。`compact_ratio` 默认 `0.9`，有效范围为 `0.5` 至 `0.95`。`omni config` 与 `/config` 显示有效值、诊断和脱敏配置；完整默认值合同见 [ADR-0025](docs/adr/0025-ignore-unknown-user-configuration-fields.md)。
 
 Web Settings 提供 Runtime、Memory、模型、路由和 MCP 的结构化编辑。已有 API Key 和 MCP 凭据不会回传浏览器，修改时需明确替换或清空。无效或版本冲突的保存不会覆盖原文件；有效保存等待当前工作完成后生效，失败时可重试。缺失或损坏配置可在设置页面初始化或修复。
 
@@ -115,14 +115,14 @@ Web Settings 提供 Runtime、Memory、模型、路由和 MCP 的结构化编辑
 
 ```powershell
 Set-Location "D:\path\to\workspace"
-myclaw
+omni
 ```
 
-新开终端后需重新激活安装目录中的虚拟环境，或使用其中 `myclaw` 可执行文件的绝对路径。启动需要交互式输入、输出，不能通过管道运行。
+新开终端后需重新激活安装目录中的虚拟环境，或使用其中 `omni` 可执行文件的绝对路径。启动需要交互式输入、输出，不能通过管道运行。
 
 启动目录即 CLI Workspace，不会自动切换到 Git 根目录。运行状态保存在该目录的 `.omni/` 中；定时任务的运行条件见前面的“Web 界面与服务生命周期”。
 
-从使用 `.myclaw/` 的版本升级时，先执行 `myclaw service stop` 并退出客户端，再将用户主目录和各 Workspace 下的 `.myclaw/` 整体重命名为 `.omni/`，保留目录内所有文件。若目标 `.omni/` 已存在，请先核对两处数据，避免覆盖。应用启动后使用 `.omni/`，不会自动迁移旧目录。
+从使用旧名称的版本升级时，先用该版本的服务停止命令退出服务和客户端，再安装新版，并使用 `omni` 命令启动。全局配置目录和各 Workspace 的运行目录统一使用 `.omni/`；若需要迁移旧目录，应整体重命名并保留所有文件，目标已存在时先核对数据，避免覆盖。浏览器需通过 `omni web` 重新登录并重新选择主题和语言。
 
 Schedule Tool 和 Web Schedule 页面可创建、查看及删除任务；已有任务不能直接编辑。任务可以指定 `title`，省略时从消息的第一条非空行派生，并规范化为最多 60 个 Unicode code points。每个用户任务有独立的 Schedule Session，Web 中的历史按 occurrence 分组。持久化格式见 [ADR-0001](docs/adr/0001-file-first-local-persistence.md)。
 

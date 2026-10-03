@@ -416,7 +416,7 @@ async def test_project_removal_during_preparation_closes_unpublished_candidate(
     "generation_service",
     [
         '\n[mcp.servers.unavailable]\nenabled = true\ntransport = "stdio"\n'
-        'command = "myclaw-acceptance-nonexistent-mcp-server"\nconnect_timeout = 1\n'
+        'command = "omni-acceptance-nonexistent-mcp-server"\nconnect_timeout = 1\n'
     ],
     indirect=True,
 )

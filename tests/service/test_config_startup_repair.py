@@ -65,8 +65,8 @@ async def repair_http(
     assert client.web_control_credential is not None
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-MyClaw-Client": client.client_id,
-        "X-MyClaw-Control": client.web_control_credential,
+        "X-Omni-Client": client.client_id,
+        "X-Omni-Control": client.web_control_credential,
     }
     async with TestServer(create_app(service), host="127.0.0.1") as server:
         yield service, server, headers
@@ -106,7 +106,7 @@ async def test_missing_configuration_keeps_service_online_but_blocks_runtime(
     assert not (service.agent_home.path / "config.toml").exists()
     assert service.workspaces == {}
     with pytest.raises(ServiceError) as blocked:
-        await service.attach_workspace(headers["X-MyClaw-Client"], project)
+        await service.attach_workspace(headers["X-Omni-Client"], project)
     assert blocked.value.code == "config_invalid"
     async with aiohttp.ClientSession() as http:
         listed = await http.get(server.make_url("/api/v1/projects"), headers=headers)
@@ -134,7 +134,7 @@ async def test_malformed_configuration_is_repaired_after_exact_private_backup(
 
         repair_headers = {
             **headers,
-            "X-MyClaw-CSRF": headers["Authorization"].removeprefix("Bearer "),
+            "X-Omni-CSRF": headers["Authorization"].removeprefix("Bearer "),
         }
         fields = _usable_repair_fields(cast(dict[str, Any], current["fields"]))
         repair_response = await http.post(
@@ -193,7 +193,7 @@ async def test_malformed_repair_backup_failure_leaves_original_bytes_untouched(
         current = await (await http.get(server.make_url("/api/v1/config"), headers=headers)).json()
         repair_headers = {
             **headers,
-            "X-MyClaw-CSRF": headers["Authorization"].removeprefix("Bearer "),
+            "X-Omni-CSRF": headers["Authorization"].removeprefix("Bearer "),
         }
         fields = _usable_repair_fields(cast(dict[str, Any], current["fields"]))
         response = await http.post(
@@ -229,7 +229,7 @@ async def test_repair_http_security_validation_cas_and_secret_safe_replay(
     config_path.write_bytes(REPAIRABLE_CONFIG)
     mutation_headers = {
         **headers,
-        "X-MyClaw-CSRF": headers["Authorization"].removeprefix("Bearer "),
+        "X-Omni-CSRF": headers["Authorization"].removeprefix("Bearer "),
     }
     async with aiohttp.ClientSession() as http:
         current = await (await http.get(server.make_url("/api/v1/config"), headers=headers)).json()
@@ -248,7 +248,7 @@ async def test_repair_http_security_validation_cas_and_secret_safe_replay(
         for request_headers in [
             {},
             headers,
-            {key: value for key, value in mutation_headers.items() if key != "X-MyClaw-Client"},
+            {key: value for key, value in mutation_headers.items() if key != "X-Omni-Client"},
             {**mutation_headers, "Origin": "https://outside.example"},
         ]:
             rejected = await http.post(url, headers=request_headers, json=payload)
@@ -257,7 +257,7 @@ async def test_repair_http_security_validation_cas_and_secret_safe_replay(
         launcher = await service.register_client("cli")
         ticket_response = await http.post(
             server.make_url("/api/v1/web/ticket"),
-            headers={**mutation_headers, "X-MyClaw-Client": launcher.client_id},
+            headers={**mutation_headers, "X-Omni-Client": launcher.client_id},
             json={"request_id": "launch-for-repair-auth"},
         )
         ticket = (await ticket_response.json())["ticket"]
@@ -270,13 +270,13 @@ async def test_repair_http_security_validation_cas_and_secret_safe_replay(
             csrf = (await exchanged.json())["csrf_token"]
             registered = await browser.post(
                 server.make_url("/api/v1/clients"),
-                headers={"X-MyClaw-CSRF": csrf},
+                headers={"X-Omni-CSRF": csrf},
                 json={"request_id": "browser-repair-auth", "kind": "web"},
             )
             control = (await registered.json())["web_control_credential"]
             for browser_headers in [
-                {"X-MyClaw-Control": control},
-                {"X-MyClaw-CSRF": csrf, "X-MyClaw-Control": "wrong"},
+                {"X-Omni-Control": control},
+                {"X-Omni-CSRF": csrf, "X-Omni-Control": "wrong"},
             ]:
                 blocked = await browser.post(url, headers=browser_headers, json=payload)
                 assert blocked.status == 403
@@ -306,8 +306,8 @@ async def test_repair_http_security_validation_cas_and_secret_safe_replay(
         other = await service.register_client("web")
         other_headers = {
             **mutation_headers,
-            "X-MyClaw-Client": other.client_id,
-            "X-MyClaw-Control": other.web_control_credential or "",
+            "X-Omni-Client": other.client_id,
+            "X-Omni-Control": other.web_control_credential or "",
         }
         cross_client = await http.post(url, headers=other_headers, json=payload)
         assert cross_client.status == 409

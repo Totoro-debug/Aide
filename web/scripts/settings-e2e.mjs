@@ -43,7 +43,7 @@ export async function settingsConfirmationAcceptance({ page, control }) {
   await page.locator("textarea").press("Enter");
   let acceptedRun;
   await expect.poll(async () => {
-    acceptedRun = await page.evaluate((sessionId) => [...(window.__myclawTestMessages ?? [])]
+    acceptedRun = await page.evaluate((sessionId) => [...(window.__omniTestMessages ?? [])]
       .reverse().find((event) => (
         event.type === "input.accepted" && event.session_id === sessionId
         && event.payload?.text === "settings generation barrier confirmation"
@@ -55,7 +55,7 @@ export async function settingsConfirmationAcceptance({ page, control }) {
   await expect(page.getByRole("log").getByText("settings generation barrier confirmation", { exact: true }))
     .toBeVisible({ timeout: 5000 });
   await expect(page.getByRole("button", { name: "Cancel run", exact: true })).toBeEnabled();
-  await expect.poll(async () => page.evaluate((runId) => window.__myclawTestMessages
+  await expect.poll(async () => page.evaluate((runId) => window.__omniTestMessages
     .filter((event) => event.type === "snapshot.required")
     .some((event) => event.payload?.snapshot?.sessions?.some((entry) => (
       entry.snapshot.live_state?.runs?.some((run) => run.run_id === runId)
@@ -75,11 +75,11 @@ export async function settingsConfirmationAcceptance({ page, control }) {
   const dialog = page.getByRole("dialog", { name: "Tool Confirmation", exact: true });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("confirmation-outside.txt");
-  const original = await page.evaluate(() => [...window.__myclawTestMessages]
+  const original = await page.evaluate(() => [...window.__omniTestMessages]
     .reverse().find((event) => event.type === "confirmation.requested"));
   await page.reload();
   await expect(dialog).toBeVisible({ timeout: 5000 });
-  const restored = await page.evaluate(() => [...window.__myclawTestMessages]
+  const restored = await page.evaluate(() => [...window.__omniTestMessages]
     .reverse().find((event) => event.type === "snapshot.required"
       && event.payload?.snapshot?.pending_confirmation)?.payload.snapshot.pending_confirmation);
   assert.equal(restored?.payload.token, original.payload.token);
@@ -92,9 +92,9 @@ export async function settingsConfirmationAcceptance({ page, control }) {
 
 export async function settingsModelMcpAcceptance({ page, secondPage, control, output }) {
   const configPath = resolve(control.details.home_root, ".omni", "config.toml");
-  const providerObservationPath = process.env.MYCLAW_E2E_PROVIDER_OBSERVATION_PATH;
-  const mcpV1Path = process.env.MYCLAW_E2E_MCP_V1_PATH;
-  const mcpV2Path = process.env.MYCLAW_E2E_MCP_V2_PATH;
+  const providerObservationPath = process.env.OMNI_E2E_PROVIDER_OBSERVATION_PATH;
+  const mcpV1Path = process.env.OMNI_E2E_MCP_V1_PATH;
+  const mcpV2Path = process.env.OMNI_E2E_MCP_V2_PATH;
   assert.ok(providerObservationPath);
   assert.ok(mcpV1Path);
   assert.ok(mcpV2Path);
@@ -125,10 +125,10 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   };
   const openProject = async (target) => {
     const project = await target.evaluate(async () => {
-      const credential = window.__myclawTestControlCredential;
+      const credential = window.__omniTestControlCredential;
       const response = await globalThis.fetch("/api/v1/projects", {
         credentials: "include",
-        headers: credential == null ? {} : { "X-MyClaw-Control": credential },
+        headers: credential == null ? {} : { "X-Omni-Control": credential },
       });
       if (!response.ok) throw new Error(`Project catalog request failed: ${response.status}`);
       const body = await response.json();
@@ -451,7 +451,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await page.setViewportSize({ width: 1440, height: 900 });
   await openProject(page);
   const bodies = await Promise.all(responseBodies);
-  const events = await page.evaluate(() => window.__myclawTestMessages ?? []);
+  const events = await page.evaluate(() => window.__omniTestMessages ?? []);
   for (const secret of [
     "e2e-provider-secret-302",
     "e2e-retired-secret-302",
@@ -517,7 +517,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   assert.match(await readFile(configPath, "utf8"), /large-model/);
 
   const hold = await control.command("settings-hold");
-  await page.evaluate(() => { window.__settingsSocketBefore = window.__myclawTestSocket; });
+  await page.evaluate(() => { window.__settingsSocketBefore = window.__omniTestSocket; });
   await page.getByLabel("Memory batch size", { exact: true }).fill("13");
   const pending = await save(page);
   assert.equal(pending.application.status, "pending");
@@ -529,7 +529,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   const released = await control.command("settings-release");
   assert.equal(released.pid, hold.pid, "Configuration application restarted the service");
   await waitForActiveGeneration(page);
-  assert.equal(await page.evaluate(() => window.__settingsSocketBefore === window.__myclawTestSocket), true,
+  assert.equal(await page.evaluate(() => window.__settingsSocketBefore === window.__omniTestSocket), true,
     "Configuration application replaced the browser connection");
 
   const memoryPath = resolve(control.details.cli_workspace, ".omni", "memory", "memory.md");
@@ -606,7 +606,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   const saveButton = page.getByRole("button", { name: "Save settings", exact: true });
   await expect(saveButton).toBeEnabled();
   await page.route("**/api/v1/clients", (route) => route.abort());
-  await page.evaluate(() => window.__myclawTestSocket.close());
+  await page.evaluate(() => window.__omniTestSocket.close());
   await expect(saveButton).toBeDisabled({ timeout: 10000 });
   await expect(page.getByLabel("Maximum iterations", { exact: true })).toHaveValue("67");
   await page.unroute("**/api/v1/clients");

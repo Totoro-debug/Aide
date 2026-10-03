@@ -6,11 +6,11 @@ def test_installed_package_exposes_its_version() -> None:
     import omni
 
     assert omni.__version__ == "0.1.0"
-    assert version("myclaw") == omni.__version__
+    assert version("omni") == omni.__version__
 
 
 def test_installed_distribution_declares_and_bundles_apache_2_license() -> None:
-    installed = distribution("myclaw")
+    installed = distribution("omni")
 
     assert installed.metadata.get("License-Expression") == "Apache-2.0"
     assert installed.metadata.get_all("License-File") == ["LICENSE"]

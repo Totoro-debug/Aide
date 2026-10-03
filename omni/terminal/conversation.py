@@ -1483,7 +1483,7 @@ def _make_links_visible(state: StateCore) -> None:
 
 def _markdown_parser() -> MarkdownIt:
     parser = MarkdownIt("gfm-like")
-    parser.core.ruler.after("linkify", "myclaw_visible_links", _make_links_visible)
+    parser.core.ruler.after("linkify", "omni_visible_links", _make_links_visible)
     return parser
 
 
@@ -2988,7 +2988,7 @@ class TerminalConversationApp(App[None]):
             Static("", id="pending-queue", markup=False),
             _ReasoningEffortSelector(id="reasoning-effort-selector"),
             _PermissionSelector(id="permission-selector"),
-            _ConversationInput(id="conversation-input", placeholder="Message MyClaw"),
+            _ConversationInput(id="conversation-input", placeholder="Message Omni"),
             Static("Ready", id="status-bar", markup=False),
             id="conversation-input-region",
         )

@@ -8,7 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { chromium, expect } from "@playwright/test";
 
 if (process.platform !== "win32") {
-  console.error("MyClaw requires Windows.");
+  console.error("Omni requires Windows.");
   process.exit(1);
 }
 
@@ -19,7 +19,7 @@ const viewports = [narrowViewport, { width: 768, height: 1024 }, { width: 1024, 
 const states = ["missing", "invalid", "malformed"];
 
 function startupCli(homeRoot, command) {
-  const argv = JSON.stringify(["myclaw", ...command]);
+  const argv = JSON.stringify(["omni", ...command]);
   const source = [
     "import sys, webbrowser",
     "from omni.terminal.process_entry import run",
@@ -112,12 +112,12 @@ async function fetchJson(page, path, method = "GET", body = undefined) {
   return page.evaluate(async ({ path: requestPath, method: requestMethod, body: requestBody }) => {
     const headers = {};
     const control = window.__startupControlCredential;
-    if (typeof control === "string") headers["X-MyClaw-Control"] = control;
+    if (typeof control === "string") headers["X-Omni-Control"] = control;
     if (requestMethod !== "GET") {
       const session = await window.fetch("/api/v1/web/session", { credentials: "include" });
       const sessionBody = await session.json();
       headers["Content-Type"] = "application/json";
-      headers["X-MyClaw-CSRF"] = sessionBody.csrf_token;
+      headers["X-Omni-CSRF"] = sessionBody.csrf_token;
     }
     const response = await window.fetch(`/api/v1${requestPath}`, {
       method: requestMethod,
@@ -330,7 +330,7 @@ async function cleanupState(context, harness, root, failure) {
 }
 
 async function runState(browser, state) {
-  const root = await mkdtemp(join(tmpdir(), `myclaw-startup-${state}-`));
+  const root = await mkdtemp(join(tmpdir(), `omni-startup-${state}-`));
   let harness;
   let context;
   let failure;
@@ -342,7 +342,7 @@ async function runState(browser, state) {
     assert.ok(details.cold_launch_url.startsWith(`${details.url}/#ticket=`), "Cold production Web startup was bypassed");
     console.log(`${state}: ${details.url} pid=${details.pid} port=${details.port}`);
 
-    const bareRoot = await mkdtemp(join(tmpdir(), `myclaw-bare-${state}-`));
+    const bareRoot = await mkdtemp(join(tmpdir(), `omni-bare-${state}-`));
     try {
       const source = join(details.home_root, "config.toml");
       if (state !== "missing") {
@@ -360,10 +360,10 @@ async function runState(browser, state) {
     }
 
     const web = startupCli(details.user_home_root, ["web"]);
-    assert.equal(web.status, 0, `myclaw web failed for ${state}: ${web.stderr}`);
+    assert.equal(web.status, 0, `omni web failed for ${state}: ${web.stderr}`);
     const webOutput = `${web.stdout ?? ""}\n${web.stderr ?? ""}`;
     const launchUrl = webOutput.match(/http:\/\/127\.0\.0\.1:\d+\/#ticket=[\w-]+/)?.[0];
-    assert.ok(launchUrl?.startsWith(`${details.url}/#ticket=`), "myclaw web did not reuse the isolated service");
+    assert.ok(launchUrl?.startsWith(`${details.url}/#ticket=`), "omni web did not reuse the isolated service");
     const sharedBare = startupCli(details.user_home_root, []);
     assert.equal(sharedBare.status, 2, "Existing Web service swallowed bare CLI startup errors");
     const sharedBareOutput = `${sharedBare.stdout ?? ""}\n${sharedBare.stderr ?? ""}`;
@@ -511,7 +511,7 @@ const urls = [];
 try {
   await mkdir(output, { recursive: true });
   browser = await chromium.launch({
-    channel: process.env.MYCLAW_E2E_BROWSER_CHANNEL ?? "msedge",
+    channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge",
   });
   for (const state of states) urls.push(await runState(browser, state));
   console.log(

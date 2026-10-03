@@ -534,7 +534,7 @@ class ServiceClient:
             f"{self.base_url}/api/v1/events",
             headers={
                 **_auth_headers(self.token),
-                "X-MyClaw-Client": self.client_id,
+                "X-Omni-Client": self.client_id,
                 "Origin": self.base_url,
             },
             heartbeat=20.0,
@@ -837,7 +837,7 @@ class ServiceClient:
         if self.claim_version >= 1:
             request_payload["claim_version"] = self.claim_version
         if self.claim_credential:
-            extra_headers["X-MyClaw-Claim"] = self.claim_credential
+            extra_headers["X-Omni-Claim"] = self.claim_credential
         response = await self._http_request(
             "POST",
             f"/api/v1/workspaces/{self.workspace_id}/management/{action}",
@@ -857,7 +857,7 @@ class ServiceClient:
                     f"/api/v1/workspaces/{self.workspace_id}/sessions/{self.session_id}"
                     f"?claim_version={self.claim_version}"
                 ),
-                extra_headers={"X-MyClaw-Claim": self.claim_credential},
+                extra_headers={"X-Omni-Claim": self.claim_credential},
             )
             snapshot = current.get("snapshot")
             if not isinstance(snapshot, dict):
@@ -982,7 +982,7 @@ async def _http_json(
 ) -> dict[str, object]:
     headers = _auth_headers(token, mutation=mutation)
     if client_id is not None:
-        headers["X-MyClaw-Client"] = client_id
+        headers["X-Omni-Client"] = client_id
     if extra_headers is not None:
         headers.update(extra_headers)
     try:
@@ -1012,7 +1012,7 @@ async def _http_json(
 def _auth_headers(token: str, *, mutation: bool = False) -> dict[str, str]:
     headers = {"Authorization": f"Bearer {token}"}
     if mutation:
-        headers["X-MyClaw-CSRF"] = token
+        headers["X-Omni-CSRF"] = token
     return headers
 
 

@@ -1355,7 +1355,7 @@ async def test_stdio_transport_resolves_cwd_and_inherits_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
-    monkeypatch.setenv("MYCLAW_MCP_TEST_ENV", "inherited")
+    monkeypatch.setenv("OMNI_MCP_TEST_ENV", "inherited")
 
     @asynccontextmanager
     async def fake_stdio(parameters: object) -> Any:
@@ -1427,7 +1427,7 @@ async def test_stdio_transport_connects_to_a_local_real_mcp_server(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("MYCLAW_MCP_TEST_ENV", "inherited")
+    monkeypatch.setenv("OMNI_MCP_TEST_ENV", "inherited")
     server_script = "\n".join(
         (
             "import os",
@@ -1435,7 +1435,7 @@ async def test_stdio_transport_connects_to_a_local_real_mcp_server(
             "server = MCPServer('local-stdio')",
             "@server.tool()",
             "def echo(value: str) -> str:",
-            "    return f\"{value}:{os.environ['MYCLAW_MCP_TEST_ENV']}\"",
+            "    return f\"{value}:{os.environ['OMNI_MCP_TEST_ENV']}\"",
             "server.run()",
         )
     )

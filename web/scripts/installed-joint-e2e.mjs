@@ -6,26 +6,26 @@ import { URL } from "node:url";
 import { chromium, expect } from "@playwright/test";
 
 if (process.platform !== "win32") {
-  console.error("MyClaw requires Windows.");
+  console.error("Omni requires Windows.");
   process.exit(1);
 }
 
-const baseUrl = process.env.MYCLAW_E2E_URL;
-const ticket = process.env.MYCLAW_E2E_TICKET;
-const secondTicket = process.env.MYCLAW_E2E_SECOND_TICKET;
-const workspace = process.env.MYCLAW_E2E_WORKSPACE;
-const output = process.env.MYCLAW_E2E_OUTPUT;
-const expectedInstance = process.env.MYCLAW_E2E_INSTANCE;
-const observationPath = process.env.MYCLAW_PROVIDER_OBSERVATION_PATH;
-const cliReadyPath = process.env.MYCLAW_CLI_READY;
-const browserReadyPath = process.env.MYCLAW_JOINT_BROWSER_READY;
-const cliForegroundReadyPath = process.env.MYCLAW_CLI_FOREGROUND_READY;
-const cliRemovalDonePath = process.env.MYCLAW_CLI_REMOVAL_DONE;
-const cliSettingsStartPath = process.env.MYCLAW_CLI_SETTINGS_START;
-const cliSettingsReadyPath = process.env.MYCLAW_CLI_SETTINGS_READY;
-const cliSettingsDonePath = process.env.MYCLAW_CLI_SETTINGS_DONE;
-const cliDonePath = process.env.MYCLAW_CLI_DONE;
-const settingsReleasePath = process.env.MYCLAW_CLI_SETTINGS_RELEASE;
+const baseUrl = process.env.OMNI_E2E_URL;
+const ticket = process.env.OMNI_E2E_TICKET;
+const secondTicket = process.env.OMNI_E2E_SECOND_TICKET;
+const workspace = process.env.OMNI_E2E_WORKSPACE;
+const output = process.env.OMNI_E2E_OUTPUT;
+const expectedInstance = process.env.OMNI_E2E_INSTANCE;
+const observationPath = process.env.OMNI_PROVIDER_OBSERVATION_PATH;
+const cliReadyPath = process.env.OMNI_CLI_READY;
+const browserReadyPath = process.env.OMNI_JOINT_BROWSER_READY;
+const cliForegroundReadyPath = process.env.OMNI_CLI_FOREGROUND_READY;
+const cliRemovalDonePath = process.env.OMNI_CLI_REMOVAL_DONE;
+const cliSettingsStartPath = process.env.OMNI_CLI_SETTINGS_START;
+const cliSettingsReadyPath = process.env.OMNI_CLI_SETTINGS_READY;
+const cliSettingsDonePath = process.env.OMNI_CLI_SETTINGS_DONE;
+const cliDonePath = process.env.OMNI_CLI_DONE;
+const settingsReleasePath = process.env.OMNI_CLI_SETTINGS_RELEASE;
 let csrfToken = null;
 let webControlCredential = null;
 assert.ok(
@@ -102,8 +102,8 @@ async function requestJson(request, method, path, data) {
   const response = await request[method](path, {
     headers: {
       Origin: baseUrl,
-      ...(method !== "get" ? { "X-MyClaw-CSRF": csrfToken } : {}),
-      ...(webControlCredential === null ? {} : { "X-MyClaw-Control": webControlCredential }),
+      ...(method !== "get" ? { "X-Omni-CSRF": csrfToken } : {}),
+      ...(webControlCredential === null ? {} : { "X-Omni-Control": webControlCredential }),
     },
     data,
   });
@@ -184,7 +184,7 @@ async function persistedTerminal(path, prompt, expected) {
 
 async function decide(page, token, requestId) {
   return page.evaluate(({ token, requestId }) => new Promise((resolve, reject) => {
-    const socket = window.__myclawJointSocket;
+    const socket = window.__omniJointSocket;
     const timer = setTimeout(() => {
       socket.removeEventListener("message", listener);
       reject(new Error("Confirmation response timed out"));
@@ -204,7 +204,7 @@ async function decide(page, token, requestId) {
 }
 
 const browser = await chromium.launch({
-  channel: process.env.MYCLAW_E2E_BROWSER_CHANNEL ?? "msedge",
+  channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge",
 });
 const context = await browser.newContext();
 const secondContext = await browser.newContext();
@@ -223,14 +223,14 @@ function redact(text) {
 
 const observeWebSocket = () => {
   const OriginalWebSocket = window.WebSocket;
-  window.__myclawJointEvents = [];
+  window.__omniJointEvents = [];
   window.WebSocket = class extends OriginalWebSocket {
     constructor(...args) {
       super(...args);
-      window.__myclawJointSocket = this;
+      window.__omniJointSocket = this;
       this.addEventListener("message", (event) => {
         try {
-          window.__myclawJointEvents.push(JSON.parse(event.data));
+          window.__omniJointEvents.push(JSON.parse(event.data));
         } catch {
           // Non-JSON frames are outside the service event contract.
         }
@@ -310,7 +310,7 @@ try {
   const backgroundJobId = background.job.job_id;
   await ensureScheduleAdmitted(context.request, firstProjectId, firstWorkspaceId);
   await expect.poll(async () => {
-    const events = await page.evaluate(() => window.__myclawJointEvents);
+    const events = await page.evaluate(() => window.__omniJointEvents);
     return events.find((event) => (
       event.type === "confirmation.requested"
       && event.payload?.origin === "background"
@@ -318,7 +318,7 @@ try {
     ));
   }, { timeout: 90_000 }).toBeTruthy();
   const backgroundConfirmation = await page.evaluate((jobId) => (
-    window.__myclawJointEvents.find((event) => (
+    window.__omniJointEvents.find((event) => (
       event.type === "confirmation.requested"
       && event.payload?.origin === "background"
       && event.payload?.job_id === jobId
@@ -342,7 +342,7 @@ try {
   await page.reload();
   webControlCredential = (await (await recoveryRegistration).json()).web_control_credential;
   await expect(backgroundDialog).toBeVisible({ timeout: 5000 });
-  const recovered = await page.evaluate(() => [...window.__myclawJointEvents].reverse()
+  const recovered = await page.evaluate(() => [...window.__omniJointEvents].reverse()
     .find((event) => event.type === "snapshot.required"
       && event.payload?.snapshot?.pending_confirmation)?.payload.snapshot.pending_confirmation);
   assert.equal(recovered?.payload.token, confirmation.payload.token);

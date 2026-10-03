@@ -17,7 +17,7 @@ from omni.provider.errors import (
 
 
 def test_turn_cancelled_message_is_the_stable_user_visible_contract() -> None:
-    assert TURN_CANCELLED_MESSAGE == "MyClaw 已取消本轮对话。"
+    assert TURN_CANCELLED_MESSAGE == "Omni 已取消本轮对话。"
 
 
 def test_model_context_overflow_error_returns_fresh_normalized_failures() -> None:

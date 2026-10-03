@@ -4,7 +4,7 @@ status: accepted
 
 # Use Run-Local Tool Permission Levels and Foreground Snapshots
 
-MyClaw exposes three configured Tool Permission Levels through
+Omni exposes three configured Tool Permission Levels through
 `[runtime].permission_level`:
 
 - `read-only` permits internal Workspace File reads directly. Every File write

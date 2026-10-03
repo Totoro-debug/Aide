@@ -39,9 +39,9 @@ async def security_http(tmp_path: Path) -> AsyncIterator[SecurityHttp]:
         headers.append(
             {
                 "Authorization": f"Bearer {token}",
-                "X-MyClaw-CSRF": token,
-                "X-MyClaw-Client": client.client_id,
-                "X-MyClaw-Control": client.web_control_credential,
+                "X-Omni-CSRF": token,
+                "X-Omni-Client": client.client_id,
+                "X-Omni-Control": client.web_control_credential,
             }
         )
     async with TestServer(create_app(service), host="127.0.0.1") as server:
@@ -75,8 +75,8 @@ async def test_config_http_auth_csrf_client_and_unknown_fields_preserve_bytes(
     async with aiohttp.ClientSession() as http:
         cases = [
             ({}, payload),
-            ({key: value for key, value in headers.items() if key != "X-MyClaw-CSRF"}, payload),
-            ({**headers, "X-MyClaw-Client": "missing-client"}, payload),
+            ({key: value for key, value in headers.items() if key != "X-Omni-CSRF"}, payload),
+            ({**headers, "X-Omni-Client": "missing-client"}, payload),
             (headers, {**payload, "unknown": "canary"}),
             (headers, {**payload, "fields": {"providers": {"api_key": "canary"}}}),
             (headers, {**payload, "fields": {"runtime": {"unknown": 1}}}),
@@ -104,7 +104,7 @@ async def test_browser_cookie_config_requires_current_control_and_csrf(
     async with aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True)) as http:
         ticket_response = await http.post(
             server.make_url("/api/v1/web/ticket"),
-            headers={**bearer_headers, "X-MyClaw-Client": cli.client_id},
+            headers={**bearer_headers, "X-Omni-Client": cli.client_id},
             json={"request_id": "browser-ticket"},
         )
         assert ticket_response.status == 200
@@ -116,7 +116,7 @@ async def test_browser_cookie_config_requires_current_control_and_csrf(
         )
         assert exchanged_response.status == 200
         exchanged = await exchanged_response.json()
-        browser_headers = {"Origin": origin, "X-MyClaw-CSRF": exchanged["csrf_token"]}
+        browser_headers = {"Origin": origin, "X-Omni-CSRF": exchanged["csrf_token"]}
         registered_response = await http.post(
             server.make_url("/api/v1/clients"),
             headers=browser_headers,
@@ -124,12 +124,12 @@ async def test_browser_cookie_config_requires_current_control_and_csrf(
         )
         assert registered_response.status == 200
         registered = await registered_response.json()
-        owned = {**browser_headers, "X-MyClaw-Control": registered["web_control_credential"]}
+        owned = {**browser_headers, "X-Omni-Control": registered["web_control_credential"]}
         for headers in (
             browser_headers,
-            {**owned, "X-MyClaw-Control": "wrong-control"},
-            {**owned, "X-MyClaw-Client": cli.client_id},
-            {key: value for key, value in owned.items() if key != "X-MyClaw-CSRF"},
+            {**owned, "X-Omni-Control": "wrong-control"},
+            {**owned, "X-Omni-Client": cli.client_id},
+            {key: value for key, value in owned.items() if key != "X-Omni-CSRF"},
             {**owned, "Origin": "http://example.invalid"},
         ):
             response = await http.patch(
@@ -331,7 +331,7 @@ async def test_config_http_ws_errors_and_logs_never_expose_existing_secrets(
             async with http.ws_connect(
                 server.make_url("/api/v1/events"),
                 headers={**headers, "Origin": str(server.make_url("/")).rstrip("/")},
-                protocols=("myclaw-v1",),
+                protocols=("omni-v1",),
             ) as socket:
                 await socket.send_json(
                     {

@@ -229,7 +229,7 @@ def test_quality_runs_complete_sequence_and_requires_platform_evidence(
         commands.append(arguments)
         if "--outdir" in arguments:
             output = Path(arguments[arguments.index("--outdir") + 1])
-            (output / "myclaw-test.whl").write_text("fixture", encoding="utf-8")
+            (output / "omni-test.whl").write_text("fixture", encoding="utf-8")
         return subprocess.CompletedProcess(arguments, 0, "", "")
 
     monkeypatch.setattr(release_validation, "_run_pytest_with_report", pytest_report)
@@ -243,7 +243,7 @@ def test_quality_runs_complete_sequence_and_requires_platform_evidence(
         [sys.executable, "-m", "mypy", "omni", "tests", "scripts"],
     ]
     assert commands[3][2:4] == ["build", "--no-isolation"]
-    assert report["build"] == {"artifacts": ["myclaw-test.whl"]}
+    assert report["build"] == {"artifacts": ["omni-test.whl"]}
     assert report["host_integration"] == _host_evidence()
     assert report["static"] == {
         "ruff_lint": "passed",
@@ -318,13 +318,13 @@ def test_artifact_smoke_uses_platform_venv_paths(
         commands.append(arguments)
         if "--outdir" in arguments:
             output = Path(arguments[arguments.index("--outdir") + 1])
-            (output / "myclaw-test.whl").write_text("fixture", encoding="utf-8")
+            (output / "omni-test.whl").write_text("fixture", encoding="utf-8")
         elif arguments[1:3] == ["-m", "venv"]:
             folder = Path(arguments[-1]) / "Scripts"
             folder.mkdir(parents=True)
             (folder / "python.exe").touch()
-            (folder / "myclaw.exe").touch()
-        help_text = "MyClaw Personal Agent runtime" if arguments[-1] == "--help" else ""
+            (folder / "omni.exe").touch()
+        help_text = "Omni Personal Agent runtime" if arguments[-1] == "--help" else ""
         return subprocess.CompletedProcess(arguments, 0, help_text, "")
 
     def smoke(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -347,7 +347,7 @@ def test_artifact_smoke_uses_platform_venv_paths(
     monkeypatch.setattr(subprocess, "run", smoke)
     result = release_validation._smoke_installed_wheel(tmp_path / "fixture.whl", tmp_path)
     expected_folder = "Scripts"
-    expected_entry = "myclaw.exe"
+    expected_entry = "omni.exe"
     assert Path(cast(str, result["entry_point"])).parts[-2:] == (expected_folder, expected_entry)
     assert commands[-1][-1] == "--help"
     assert Path(cast(str, result["cwd"])).name == "smoke-cwd"
@@ -364,7 +364,7 @@ def test_artifact_smoke_preserves_report_contract_without_duplicate_install(
 
 def test_artifact_program_rejects_source_tree_import() -> None:
     environment = dict(os.environ)
-    environment["MYCLAW_SOURCE_ROOT"] = str(release_validation.ROOT)
+    environment["OMNI_SOURCE_ROOT"] = str(release_validation.ROOT)
     result = subprocess.run(
         [
             sys.executable,

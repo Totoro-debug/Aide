@@ -255,7 +255,7 @@ def test_distribution_directly_declares_host_timezone_discovery() -> None:
 def test_distribution_metadata_builds_one_windows_runtime_wheel() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
 
-    assert project["scripts"]["myclaw"] == "omni.terminal.process_entry:run"
+    assert project["scripts"]["omni"] == "omni.terminal.process_entry:run"
     assert "Operating System :: OS Independent" not in project["classifiers"]
     assert "Operating System :: Microsoft :: Windows" in project["classifiers"]
     setup_path = ROOT / "setup.cfg"
@@ -294,8 +294,8 @@ def test_clean_distributions_build_and_import_cleanly(
     )
     assert build_result.returncode == 0, build_result.stderr
 
-    sdists = tuple(artifact_dir.glob("myclaw-*.tar.gz"))
-    wheels = tuple(artifact_dir.glob("myclaw-*.whl"))
+    sdists = tuple(artifact_dir.glob("omni-*.tar.gz"))
+    wheels = tuple(artifact_dir.glob("omni-*.whl"))
     assert len(sdists) == 1
     assert len(wheels) == 1
 

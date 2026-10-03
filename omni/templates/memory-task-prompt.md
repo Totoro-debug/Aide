@@ -1,4 +1,4 @@
-Maintain the MyClaw Long-term Memory from new Conversation Summaries.
+Maintain the Omni Long-term Memory from new Conversation Summaries.
 The complete current Long-term Memory is included in the request context below.
 Do not request or use any Tool other than edit_file.
 Use edit_file only when stable information should be retained, and edit exactly {long_term_path}.

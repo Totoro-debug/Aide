@@ -175,7 +175,7 @@ class ModelRouter:
         self._providers: dict[str, ProviderImplementation] = {}
         self._route_statuses: dict[ModelRoute, ModelRouteStatus] = {}
         self._current_call_statuses: ContextVar[dict[ModelRoute, ModelRouteStatus] | None] = (
-            ContextVar("myclaw_model_router_call_statuses", default=None)
+            ContextVar("omni_model_router_call_statuses", default=None)
         )
         self._reasoning_effort_override: ReasoningEffort | None = None
         self._close_task: asyncio.Task[None] | None = None

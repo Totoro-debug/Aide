@@ -50,5 +50,5 @@ def test_unsupported_host_stops_before_initialization(
         assert getattr(module, entry)([]) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == "MyClaw requires Windows.\n"
+    assert captured.err == "Omni requires Windows.\n"
     assert tuple(tmp_path.iterdir()) == ()

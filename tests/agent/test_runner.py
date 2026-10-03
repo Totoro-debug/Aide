@@ -1697,7 +1697,7 @@ async def test_runner_stops_after_fiftieth_tool_iteration_without_a_new_model_ca
     assert result.error is not None
     assert result.error.code == "agent_iteration_limit"
     assert result.final_content == (
-        "MyClaw 本轮对话已经达到最大循环次数，仍没有输出最终结果。"  # noqa: RUF001
+        "Omni 本轮对话已经达到最大循环次数，仍没有输出最终结果。"  # noqa: RUF001
         "可以再次尝试本次请求或者尝试给出更明确的任务目标。"
     )
     assert len(provider.stream_requests) == 50

@@ -475,7 +475,7 @@ async def test_claim_race_denies_loser_content_over_http_events_and_reconnect(
             await loser._http_request(
                 "GET",
                 f"{path}?claim_version={owner.claim_version}",
-                extra_headers={"X-MyClaw-Claim": owner.claim_credential},
+                extra_headers={"X-Omni-Claim": owner.claim_credential},
             )
         assert denied.value.code == "stale_claim"
         listing = await loser._http_request(
@@ -503,7 +503,7 @@ async def test_claim_race_denies_loser_content_over_http_events_and_reconnect(
             await reconnected._http_request(
                 "GET",
                 f"{path}?claim_version={owner.claim_version}",
-                extra_headers={"X-MyClaw-Claim": owner.claim_credential},
+                extra_headers={"X-Omni-Claim": owner.claim_credential},
             )
         assert denied_after_reconnect.value.code == "stale_claim"
     finally:

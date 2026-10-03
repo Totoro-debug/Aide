@@ -611,15 +611,15 @@ async def test_restore_management_http_requires_csrf_and_claim_headers(tmp_path:
         }
         base_headers = {
             "Authorization": f"Bearer {token}",
-            "X-MyClaw-Client": client.client_id,
-            "X-MyClaw-Claim": claim.credential,
+            "X-Omni-Client": client.client_id,
+            "X-Omni-Claim": claim.credential,
         }
         async with aiohttp.ClientSession() as http:
             async with http.post(url, headers=base_headers, json=payload) as response:
                 assert response.status == 403
             async with http.post(
                 url,
-                headers={**base_headers, "X-MyClaw-CSRF": token},
+                headers={**base_headers, "X-Omni-CSRF": token},
                 json=payload,
             ) as response:
                 assert response.status == 200
@@ -632,8 +632,8 @@ async def test_restore_management_http_requires_csrf_and_claim_headers(tmp_path:
                 result_url,
                 headers={
                     **base_headers,
-                    "X-MyClaw-Request": "http-restore-result",
-                    "X-MyClaw-Session": session.session_id,
+                    "X-Omni-Request": "http-restore-result",
+                    "X-Omni-Session": session.session_id,
                 },
                 params={"session_id": session.session_id, "claim_version": str(claim.version)},
             ) as response:
@@ -641,7 +641,7 @@ async def test_restore_management_http_requires_csrf_and_claim_headers(tmp_path:
                 assert (await response.json())["result"].get("restore_result") is None
             async with http.post(
                 url,
-                headers={**base_headers, "X-MyClaw-CSRF": token},
+                headers={**base_headers, "X-Omni-CSRF": token},
                 json={**payload, "request_id": "http-restore-stale", "claim_version": 99},
             ) as response:
                 assert response.status == 409

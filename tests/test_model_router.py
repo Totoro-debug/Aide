@@ -160,7 +160,7 @@ def memory_configuration() -> UserConfiguration:
 def request(*, route: str = "default", stream: bool = True) -> dict[str, Any]:
     del route, stream
     return {
-        "messages": [{"role": "system", "content": "You are MyClaw."}],
+        "messages": [{"role": "system", "content": "You are Omni."}],
         "tools": (),
     }
 

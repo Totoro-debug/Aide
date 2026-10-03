@@ -1,6 +1,6 @@
 # Domain Documentation
 
-MyClaw has one bounded context. Before exploring a feature, read the relevant definitions in [CONTEXT.md](../../CONTEXT.md) and current decisions in [docs/adr/](../adr/).
+Omni has one bounded context. Before exploring a feature, read the relevant definitions in [CONTEXT.md](../../CONTEXT.md) and current decisions in [docs/adr/](../adr/).
 
 - [GitHub Issues](https://github.com/Totoro-debug/OmniAgent/issues) are the authoritative product requirements and discussion history. Follow [issue-tracker.md](issue-tracker.md) to retrieve the relevant issue and its accepted decisions.
 - [CONTEXT.md](../../CONTEXT.md) defines domain vocabulary, without API inventories or implementation plans.

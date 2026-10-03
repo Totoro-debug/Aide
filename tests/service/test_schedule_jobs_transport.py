@@ -48,8 +48,8 @@ def _prepare_agent_home(path: Path) -> AgentHome:
 def _headers(client: ServiceClient) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {client.token}",
-        "X-MyClaw-CSRF": client.token,
-        "X-MyClaw-Client": client.client_id,
+        "X-Omni-CSRF": client.token,
+        "X-Omni-Client": client.client_id,
     }
 
 
@@ -76,8 +76,8 @@ async def schedule_http(
     url = str(server.make_url(f"/api/v1/workspaces/{workspace.workspace_id}/schedule/jobs"))
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-MyClaw-CSRF": token,
-        "X-MyClaw-Client": client.client_id,
+        "X-Omni-CSRF": token,
+        "X-Omni-Client": client.client_id,
     }
     try:
         yield service, server, url, headers
@@ -480,8 +480,8 @@ async def test_schedule_job_http_delete_cancels_a_running_job_and_keeps_deleted_
         await server.start_server()
         headers = {
             "Authorization": f"Bearer {token}",
-            "X-MyClaw-CSRF": token,
-            "X-MyClaw-Client": client.client_id,
+            "X-Omni-CSRF": token,
+            "X-Omni-Client": client.client_id,
         }
         jobs_url = str(
             server.make_url(f"/api/v1/workspaces/{workspace.workspace_id}/schedule/jobs")
@@ -610,7 +610,7 @@ async def test_schedule_queued_retry_rechecks_current_identity(
         try:
             await asyncio.wait_for(checked.wait(), 5)
             if invalidated == "client":
-                service.client(headers["X-MyClaw-Client"]).expired = True
+                service.client(headers["X-Omni-Client"]).expired = True
             else:
                 record = service.projects.register(workspace.workspace_path)
                 service.projects.begin_removal(record.project_id, None)
@@ -633,7 +633,7 @@ async def test_schedule_scope_reuse_and_transport_guards(
     payload = {"request_id": "scope", "message": "task", "at_time": "2099-01-01T08:00:00+08:00"}
     other_path = tmp_path / "other"
     other_path.mkdir()
-    other = await service.attach_workspace(headers["X-MyClaw-Client"], other_path)
+    other = await service.attach_workspace(headers["X-Omni-Client"], other_path)
     other_url = str(server.make_url(f"/api/v1/workspaces/{other.workspace_id}/schedule/jobs"))
     async with aiohttp.ClientSession() as http:
         async with http.post(url, headers=headers, json=payload) as response:
@@ -646,7 +646,7 @@ async def test_schedule_scope_reuse_and_transport_guards(
             assert (await response.json())["code"] == "request_reused"
         for denied_headers, expected in [
             ({}, 401),
-            ({k: v for k, v in headers.items() if k != "X-MyClaw-CSRF"}, 403),
+            ({k: v for k, v in headers.items() if k != "X-Omni-CSRF"}, 403),
             ({**headers, "Origin": "https://example.com"}, 403),
         ]:
             async with http.post(
@@ -730,8 +730,8 @@ async def test_schedule_http_delete_drains_real_tool_and_preserves_session_termi
     url = str(server.make_url(f"/api/v1/workspaces/{workspace.workspace_id}/schedule/jobs"))
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-MyClaw-CSRF": token,
-        "X-MyClaw-Client": client.client_id,
+        "X-Omni-CSRF": token,
+        "X-Omni-Client": client.client_id,
     }
     try:
         async with aiohttp.ClientSession() as http:

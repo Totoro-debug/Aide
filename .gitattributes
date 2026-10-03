@@ -3,3 +3,6 @@ omni/web_assets/assets/* -text -diff
 omni/web_assets/** -text
 # The Windows manifest writer uses CRLF; preserve its published bytes.
 omni/web_assets/manifest.json whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+# Keep Vite input resources consistent before publishing their exact bytes.
+web/index.html text eol=lf
+web/public/favicon.svg text eol=lf

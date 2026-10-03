@@ -588,9 +588,9 @@ async def test_typed_http_actions_require_auth_csrf_and_matching_client_identity
     app = create_app(case.service)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-MyClaw-CSRF": token,
-        "X-MyClaw-Client": case.second.client_id,
-        "X-MyClaw-Claim": case.other_claim.credential,
+        "X-Omni-CSRF": token,
+        "X-Omni-Client": case.second.client_id,
+        "X-Omni-Claim": case.other_claim.credential,
     }
     body = {
         "request_id": "http-runtime",
@@ -603,7 +603,7 @@ async def test_typed_http_actions_require_auth_csrf_and_matching_client_identity
         url = server.make_url(
             f"/api/v1/workspaces/{case.workspace.workspace_id}/management/{action}"
         )
-        for missing in ("Authorization", "X-MyClaw-CSRF", "X-MyClaw-Client"):
+        for missing in ("Authorization", "X-Omni-CSRF", "X-Omni-Client"):
             async with http.post(
                 url,
                 headers={key: value for key, value in headers.items() if key != missing},
@@ -611,11 +611,11 @@ async def test_typed_http_actions_require_auth_csrf_and_matching_client_identity
             ) as response:
                 assert response.status in {401, 403}
         async with http.post(
-            url, headers={**headers, "X-MyClaw-Client": "unknown-client"}, json=body
+            url, headers={**headers, "X-Omni-Client": "unknown-client"}, json=body
         ) as response:
             assert response.status in {401, 403}
         async with http.post(
-            url, headers={**headers, "X-MyClaw-Claim": "foreign-claim"}, json=body
+            url, headers={**headers, "X-Omni-Claim": "foreign-claim"}, json=body
         ) as response:
             assert response.status == 409
             assert (await response.json())["code"] == "stale_claim"
@@ -652,9 +652,9 @@ async def test_new_management_http_actions_reject_get_and_head_without_execution
                 url,
                 headers={
                     "Authorization": f"Bearer {token}",
-                    "X-MyClaw-Client": case.second.client_id,
-                    "X-MyClaw-Claim": case.other_claim.credential,
-                    "X-MyClaw-Request": "read-cannot-mutate",
+                    "X-Omni-Client": case.second.client_id,
+                    "X-Omni-Claim": case.other_claim.credential,
+                    "X-Omni-Request": "read-cannot-mutate",
                 },
                 params={
                     "session_id": case.other_claim.session_id,
@@ -719,9 +719,9 @@ async def test_http_reload_preserves_active_run_snapshot_resources_and_next_run_
     token = create_credential(case.service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-MyClaw-CSRF": token,
-        "X-MyClaw-Client": case.second.client_id,
-        "X-MyClaw-Claim": case.other_claim.credential,
+        "X-Omni-CSRF": token,
+        "X-Omni-Client": case.second.client_id,
+        "X-Omni-Claim": case.other_claim.credential,
     }
     sink = cast(_CollectingSink, case.second.sink)
     loop = case.other_claim.loop
@@ -829,9 +829,9 @@ async def test_http_dream_updates_memory_and_replay_does_not_repeat_model_work(
     token = create_credential(case.service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-MyClaw-CSRF": token,
-        "X-MyClaw-Client": case.first.client_id,
-        "X-MyClaw-Claim": case.claim.credential,
+        "X-Omni-CSRF": token,
+        "X-Omni-Client": case.first.client_id,
+        "X-Omni-Claim": case.claim.credential,
     }
     async with TestServer(create_app(case.service)) as server, aiohttp.ClientSession() as http:
         base = f"/api/v1/workspaces/{case.workspace.workspace_id}/management"

@@ -310,15 +310,15 @@ async def test_http_save_drains_real_foreground_schedule_and_confirmation_withou
         revision = service.config_view()["revision"]
         headers = {
             "Authorization": f"Bearer {cli.token}",
-            "X-MyClaw-CSRF": cli.token,
-            "X-MyClaw-Client": browser.client_id,
-            "X-MyClaw-Control": cast(str, browser.web_control_credential),
+            "X-Omni-CSRF": cli.token,
+            "X-Omni-Client": browser.client_id,
+            "X-Omni-Control": cast(str, browser.web_control_credential),
         }
         async with aiohttp.ClientSession() as http:
             async with http.ws_connect(
                 server.make_url("/api/v1/events"),
                 headers={**headers, "Origin": str(server.make_url("/")).rstrip("/")},
-                protocols=("myclaw-v1",),
+                protocols=("omni-v1",),
             ) as web_socket:
                 response = await http.patch(
                     server.make_url("/api/v1/config"),

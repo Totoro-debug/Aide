@@ -682,7 +682,7 @@ async def _stop_service(home: AgentHome, port: int) -> None:
 
 async def _run_e2e(provider_base_url: str) -> None:
     global CONFIRMATION_PATH, MODEL_MCP_ENTERED, MODEL_MCP_RELEASE, PROVIDER_OBSERVATION_PATH
-    with tempfile.TemporaryDirectory(prefix="myclaw-web-e2e-") as root:
+    with tempfile.TemporaryDirectory(prefix="omni-web-e2e-") as root:
         path = Path(root)
         repo_root = Path(__file__).resolve().parents[2]
         CONFIRMATION_PATH = str(path / "confirmation-outside.txt")

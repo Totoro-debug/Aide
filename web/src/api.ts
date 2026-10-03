@@ -97,7 +97,7 @@ async function request<T>(
     if (csrfToken === null) {
       throw new ApiError(403, null);
     }
-    headers.set("X-MyClaw-CSRF", csrfToken);
+    headers.set("X-Omni-CSRF", csrfToken);
   }
   if (options.extraHeaders !== undefined) {
     for (const [name, value] of Object.entries(options.extraHeaders)) {
@@ -105,7 +105,7 @@ async function request<T>(
     }
   }
   if (webControlCredential !== null) {
-    headers.set("X-MyClaw-Control", webControlCredential);
+    headers.set("X-Omni-Control", webControlCredential);
   }
   const response = await fetch(`${API_PREFIX}${path}`, {
     method: options.method ?? "GET",
@@ -215,7 +215,7 @@ export async function getRuntimeStatus(
         current_session_id: sessionId,
         claim_version: claimVersion,
       },
-      extraHeaders: { "X-MyClaw-Claim": claimCredential },
+      extraHeaders: { "X-Omni-Claim": claimCredential },
     },
   );
   return response.result;
@@ -239,7 +239,7 @@ export async function updateRuntimePermission(
         claim_version: claimVersion,
         permission_level: permissionLevel,
       },
-      extraHeaders: { "X-MyClaw-Claim": claimCredential },
+      extraHeaders: { "X-Omni-Claim": claimCredential },
     },
   );
   return response.result;
@@ -263,7 +263,7 @@ export async function updateRuntimeEffort(
         claim_version: claimVersion,
         effort,
       },
-      extraHeaders: { "X-MyClaw-Claim": claimCredential },
+      extraHeaders: { "X-Omni-Claim": claimCredential },
     },
   );
   return response.result;
@@ -286,7 +286,7 @@ async function postRuntimeManagement(
         current_session_id: sessionId,
         claim_version: claimVersion,
       },
-      extraHeaders: { "X-MyClaw-Claim": claimCredential },
+      extraHeaders: { "X-Omni-Claim": claimCredential },
     },
   );
   return response.result;
@@ -448,7 +448,7 @@ export function renameProjectSession(
         metadata_version: metadataVersion,
         title,
       },
-      extraHeaders: { "X-MyClaw-Claim": claimCredential },
+      extraHeaders: { "X-Omni-Claim": claimCredential },
     },
   );
 }
@@ -461,7 +461,7 @@ export function getProjectSession(
 ): Promise<SessionSnapshot> {
   return request<{ snapshot: SessionSnapshot }>(
     `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}?claim_version=${claimVersion}`,
-    { extraHeaders: { "X-MyClaw-Claim": claimCredential } },
+    { extraHeaders: { "X-Omni-Claim": claimCredential } },
   ).then((response) => response.snapshot);
 }
 
@@ -484,7 +484,7 @@ function postRestoreManagement(
         claim_version: claimVersion,
         ...payload,
       },
-      extraHeaders: { "X-MyClaw-Claim": claimCredential },
+      extraHeaders: { "X-Omni-Claim": claimCredential },
     },
   ).then((response) => response.result);
 }
@@ -531,7 +531,7 @@ export async function executeRestore(
       plan: { anchor_id: plan.anchor_id },
       mode,
     },
-    extraHeaders: { "X-MyClaw-Claim": claimCredential },
+    extraHeaders: { "X-Omni-Claim": claimCredential },
   });
   const nextResult = response.result.restore_result;
   const nextClaimVersion = response.result.claim_version;
@@ -625,7 +625,7 @@ export function releaseProjectSession(
       method: "POST",
       mutation: true,
       body: { request_id: createRequestId(), claim_version: claimVersion },
-      extraHeaders: { "X-MyClaw-Claim": claimCredential },
+      extraHeaders: { "X-Omni-Claim": claimCredential },
     },
   );
 }
@@ -647,7 +647,7 @@ export function deleteProjectSession(
         claim_version: claimVersion,
         confirm: true,
       },
-      extraHeaders: { "X-MyClaw-Claim": claimCredential },
+      extraHeaders: { "X-Omni-Claim": claimCredential },
     },
   );
 }
@@ -674,7 +674,7 @@ export function openEventStream(
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(
     `${protocol}//${window.location.host}${API_PREFIX}/events`,
-    ["myclaw-v1", webControlCredential],
+    ["omni-v1", webControlCredential],
   );
   const pending = new Map<
     string,

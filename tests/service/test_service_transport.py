@@ -166,7 +166,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                 f"/api/v1/workspaces/{first.workspace_id}/management/status"
                 f"?session_id={first.session_id}&claim_version={first.claim_version}"
             ),
-            extra_headers={"X-MyClaw-Claim": first.claim_credential},
+            extra_headers={"X-Omni-Claim": first.claim_credential},
         )
         status_view = cast(
             dict[str, object], cast(dict[str, object], status_response["result"])["status_view"]
@@ -187,7 +187,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                 "permission_level": "read-only",
             },
             mutation=True,
-            extra_headers={"X-MyClaw-Claim": first.claim_credential},
+            extra_headers={"X-Omni-Claim": first.claim_credential},
         )
         typed_permission_result = cast(dict[str, object], typed_permission["result"])
         assert typed_permission_result["published_permission_level"] == "read-only"
@@ -202,7 +202,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                 "permission_level": "read-only",
             },
             mutation=True,
-            extra_headers={"X-MyClaw-Claim": first.claim_credential},
+            extra_headers={"X-Omni-Claim": first.claim_credential},
         )
         assert replay == typed_permission
 
@@ -215,7 +215,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                 "claim_version": first.claim_version,
             },
             mutation=True,
-            extra_headers={"X-MyClaw-Claim": first.claim_credential},
+            extra_headers={"X-Omni-Claim": first.claim_credential},
         )
         first_status_view = cast(
             dict[str, object],
@@ -232,7 +232,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                 "claim_version": second.claim_version,
             },
             mutation=True,
-            extra_headers={"X-MyClaw-Claim": second.claim_credential},
+            extra_headers={"X-Omni-Claim": second.claim_credential},
         )
         second_status_view = cast(
             dict[str, object], cast(dict[str, object], second_status["result"])["status_view"]
@@ -249,7 +249,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                 "effort": "high",
             },
             mutation=True,
-            extra_headers={"X-MyClaw-Claim": first.claim_credential},
+            extra_headers={"X-Omni-Claim": first.claim_credential},
         )
         typed_effort_result = cast(dict[str, object], typed_effort["result"])
         assert typed_effort_result["published_effort"] == "high"
@@ -262,8 +262,8 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                     f"?session_id={first.session_id}&claim_version={first.claim_version}"
                 ),
                 extra_headers={
-                    "X-MyClaw-Claim": "wrong-claim",
-                    "X-MyClaw-Request": "stale-status",
+                    "X-Omni-Claim": "wrong-claim",
+                    "X-Omni-Request": "stale-status",
                 },
             )
         assert stale.value.code == "stale_claim"
@@ -327,7 +327,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                     f"{first.base_url}/api/v1/events",
                     headers={
                         "Authorization": f"Bearer {first.token}",
-                        "X-MyClaw-Client": first.client_id,
+                        "X-Omni-Client": first.client_id,
                     },
                 )
             assert handshake.value.status == 403
@@ -335,7 +335,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                 f"{first.base_url}/api/v1/clients",
                 headers={
                     "Authorization": f"Bearer {first.token}",
-                    "X-MyClaw-CSRF": first.token,
+                    "X-Omni-CSRF": first.token,
                 },
                 json={
                     "request_id": "duplicate-online-client",
@@ -387,8 +387,8 @@ async def test_project_http_contract_reports_path_errors_and_keeps_cli_workspace
         cli_client = await ServiceClient.connect_or_start(home, cli_workspace, port=port)
         headers = {
             "Authorization": f"Bearer {client.token}",
-            "X-MyClaw-CSRF": client.token,
-            "X-MyClaw-Client": client.client_id,
+            "X-Omni-CSRF": client.token,
+            "X-Omni-Client": client.client_id,
         }
         async with aiohttp.ClientSession() as http:
             async with http.post(
@@ -483,8 +483,8 @@ async def test_project_http_delete_returns_operation_and_preserves_directory(
         client = await ServiceClient.connect_or_start(home, project, port=port)
         headers = {
             "Authorization": f"Bearer {client.token}",
-            "X-MyClaw-CSRF": client.token,
-            "X-MyClaw-Client": client.client_id,
+            "X-Omni-CSRF": client.token,
+            "X-Omni-Client": client.client_id,
         }
         async with aiohttp.ClientSession() as http:
             async with http.post(
@@ -611,8 +611,8 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
         second = await ServiceClient.connect_or_start(home, other_project, port=port)
         headers = {
             "Authorization": f"Bearer {first.token}",
-            "X-MyClaw-CSRF": first.token,
-            "X-MyClaw-Client": first.client_id,
+            "X-Omni-CSRF": first.token,
+            "X-Omni-Client": first.client_id,
         }
         async with aiohttp.ClientSession() as http:
             async with http.post(
@@ -660,7 +660,7 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
                 f"{first.base_url}/api/v1/projects/{project_id}/sessions/{newer_id}",
                 headers={
                     **headers,
-                    "X-MyClaw-Claim": cast(str, claim_data["reconnect_credential"]),
+                    "X-Omni-Claim": cast(str, claim_data["reconnect_credential"]),
                 },
                 json={
                     "request_id": "rename-project-session",
@@ -677,8 +677,8 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
 
             second_headers = {
                 "Authorization": f"Bearer {second.token}",
-                "X-MyClaw-CSRF": second.token,
-                "X-MyClaw-Client": second.client_id,
+                "X-Omni-CSRF": second.token,
+                "X-Omni-Client": second.client_id,
             }
             async with http.post(
                 f"{second.base_url}/api/v1/projects/{project_id}/sessions/{newer_id}/claim",
@@ -694,7 +694,7 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
                 ),
                 headers={
                     **second_headers,
-                    "X-MyClaw-Claim": cast(str, claim_data["reconnect_credential"]),
+                    "X-Omni-Claim": cast(str, claim_data["reconnect_credential"]),
                 },
             ) as response:
                 assert response.status == 409
@@ -704,7 +704,7 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
                 f"{first.base_url}/api/v1/projects/{project_id}/sessions/{newer_id}/release",
                 headers={
                     **headers,
-                    "X-MyClaw-Claim": cast(str, claim_data["reconnect_credential"]),
+                    "X-Omni-Claim": cast(str, claim_data["reconnect_credential"]),
                 },
                 json={
                     "request_id": "release-newer",
@@ -725,7 +725,7 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
                 f"{first.base_url}/api/v1/projects/{project_id}/sessions/{draft_id}/release",
                 headers={
                     **headers,
-                    "X-MyClaw-Claim": cast(str, empty_claim_data["reconnect_credential"]),
+                    "X-Omni-Claim": cast(str, empty_claim_data["reconnect_credential"]),
                 },
                 json={
                     "request_id": "release-empty-draft",
@@ -779,7 +779,7 @@ async def test_session_page_limit_preserves_optional_and_validation_contract(
         async with aiohttp.ClientSession() as http:
             async with http.get(
                 server.make_url(f"/api/v1/{scope}/{identity}/sessions"),
-                headers={"Authorization": f"Bearer {token}", "X-MyClaw-Client": client.client_id},
+                headers={"Authorization": f"Bearer {token}", "X-Omni-Client": client.client_id},
                 params={} if limit is None else {"limit": limit},
             ) as response:
                 body = await response.json()
@@ -846,7 +846,7 @@ async def test_workspace_session_listing_filters_titles_and_pages_without_histor
         other = await ServiceClient.connect_or_start(home, other_project, port=port)
         headers = {
             "Authorization": f"Bearer {first.token}",
-            "X-MyClaw-Client": first.client_id,
+            "X-Omni-Client": first.client_id,
         }
         async with aiohttp.ClientSession() as http:
             async with http.get(
@@ -877,7 +877,7 @@ async def test_workspace_session_listing_filters_titles_and_pages_without_histor
                 f"{other.base_url}/api/v1/workspaces/{other.workspace_id}/sessions",
                 headers={
                     "Authorization": f"Bearer {other.token}",
-                    "X-MyClaw-Client": other.client_id,
+                    "X-Omni-Client": other.client_id,
                 },
                 params={"title": "BUILD API", "cursor": first_page["next_cursor"]},
             ) as response:
@@ -903,7 +903,7 @@ async def test_workspace_session_listing_filters_titles_and_pages_without_histor
                 f"{other.base_url}/api/v1/workspaces/{other.workspace_id}/sessions",
                 headers={
                     "Authorization": f"Bearer {other.token}",
-                    "X-MyClaw-Client": other.client_id,
+                    "X-Omni-Client": other.client_id,
                 },
                 params={"title": "build"},
             ) as response:
@@ -940,8 +940,8 @@ async def test_workspace_session_rename_requires_claim_and_persists_metadata_ver
         client = await ServiceClient.connect_or_start(home, workspace, port=port)
         headers = {
             "Authorization": f"Bearer {client.token}",
-            "X-MyClaw-CSRF": client.token,
-            "X-MyClaw-Client": client.client_id,
+            "X-Omni-CSRF": client.token,
+            "X-Omni-Client": client.client_id,
         }
         async with aiohttp.ClientSession() as http:
             await client.claim_session(session_id)
@@ -949,7 +949,7 @@ async def test_workspace_session_rename_requires_claim_and_persists_metadata_ver
             claim_credential = client.claim_credential
             claim_headers = {
                 **headers,
-                "X-MyClaw-Claim": claim_credential,
+                "X-Omni-Claim": claim_credential,
             }
 
             async with http.patch(
@@ -1002,7 +1002,7 @@ async def test_workspace_session_rename_requires_claim_and_persists_metadata_ver
                 assert response.status == 422
             async with http.patch(
                 f"{client.base_url}/api/v1/workspaces/{client.workspace_id}/sessions/{session_id}",
-                headers={**claim_headers, "X-MyClaw-Claim": "invalid-claim"},
+                headers={**claim_headers, "X-Omni-Claim": "invalid-claim"},
                 json={
                     "request_id": "rename-session",
                     "claim_version": claim_version,
@@ -1041,7 +1041,7 @@ async def test_workspace_session_rename_requires_claim_and_persists_metadata_ver
                 f"{client.base_url}/api/v1/workspaces/{client.workspace_id}/sessions/{draft_id}",
                 headers={
                     **headers,
-                    "X-MyClaw-Claim": draft_claim_credential,
+                    "X-Omni-Claim": draft_claim_credential,
                 },
                 json={
                     "request_id": "rename-draft",
@@ -1117,9 +1117,9 @@ async def test_workspace_session_delete_requires_confirmation_and_cleans_only_se
         await client.claim_session(target_id)
         headers = {
             "Authorization": f"Bearer {client.token}",
-            "X-MyClaw-CSRF": client.token,
-            "X-MyClaw-Client": client.client_id,
-            "X-MyClaw-Claim": client.claim_credential,
+            "X-Omni-CSRF": client.token,
+            "X-Omni-Client": client.client_id,
+            "X-Omni-Claim": client.claim_credential,
         }
         delete_url = (
             f"{client.base_url}/api/v1/workspaces/{client.workspace_id}/sessions/{target_id}"
@@ -1197,9 +1197,9 @@ async def test_project_session_delete_returns_project_identity(
         await client.claim_session(session_id)
         headers = {
             "Authorization": f"Bearer {client.token}",
-            "X-MyClaw-CSRF": client.token,
-            "X-MyClaw-Client": client.client_id,
-            "X-MyClaw-Claim": client.claim_credential,
+            "X-Omni-CSRF": client.token,
+            "X-Omni-Client": client.client_id,
+            "X-Omni-Claim": client.claim_credential,
         }
         async with aiohttp.ClientSession() as http:
             async with http.delete(
@@ -1249,9 +1249,9 @@ async def test_session_delete_requires_the_current_client_claim(
         await owner.claim_session(session_id)
         headers = {
             "Authorization": f"Bearer {other.token}",
-            "X-MyClaw-CSRF": other.token,
-            "X-MyClaw-Client": other.client_id,
-            "X-MyClaw-Claim": owner.claim_credential,
+            "X-Omni-CSRF": other.token,
+            "X-Omni-Client": other.client_id,
+            "X-Omni-Claim": owner.claim_credential,
         }
         async with aiohttp.ClientSession() as http:
             async with http.delete(
@@ -1614,7 +1614,7 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
             async with browser.get(f"{client.base_url}/") as response:
                 assert response.status == 200
                 index = await response.text()
-                assert "MyClaw" in index
+                assert "Omni" in index
                 assert client.token not in index
 
             async with browser.get(
@@ -1633,8 +1633,8 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
                 assert isinstance(exchanged["csrf_token"], str)
                 assert client.token not in await response.text()
                 cookies = browser.cookie_jar.filter_cookies(URL(client.base_url))
-                assert "myclaw_session" in cookies
-                assert "myclaw_csrf" not in cookies
+                assert "omni_session" in cookies
+                assert "omni_csrf" not in cookies
 
             async with browser.post(
                 f"{client.base_url}/api/v1/web/ticket",
@@ -1646,7 +1646,7 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
             csrf = exchanged["csrf_token"]
             async with browser.post(
                 f"{client.base_url}/api/v1/clients",
-                headers={"Origin": client.base_url, "X-MyClaw-CSRF": csrf},
+                headers={"Origin": client.base_url, "X-Omni-CSRF": csrf},
                 json={"request_id": "browser-client", "kind": "web"},
             ) as response:
                 assert response.status == 200
@@ -1657,8 +1657,8 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
 
             web_headers = {
                 "Origin": client.base_url,
-                "X-MyClaw-CSRF": csrf,
-                "X-MyClaw-Control": control,
+                "X-Omni-CSRF": csrf,
+                "X-Omni-Control": control,
             }
             async with browser.post(
                 f"{client.base_url}/api/v1/projects",
@@ -1671,7 +1671,7 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
             socket = await browser.ws_connect(
                 f"{client.base_url}/api/v1/events",
                 headers={"Origin": client.base_url},
-                protocols=("myclaw-v1", control),
+                protocols=("omni-v1", control),
             )
             try:
                 async with browser.post(
@@ -1685,7 +1685,7 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
 
                 async with browser.post(
                     f"{client.base_url}/api/v1/projects/{project_id}/sessions/{session_id}/claim",
-                    headers={"Origin": client.base_url, "X-MyClaw-CSRF": csrf},
+                    headers={"Origin": client.base_url, "X-Omni-CSRF": csrf},
                     json={"request_id": "copied-tab-claim"},
                 ) as response:
                     assert response.status == 403
@@ -1699,7 +1699,7 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
                     ),
                     headers={
                         "Origin": client.base_url,
-                        "X-MyClaw-Claim": claim_data["reconnect_credential"],
+                        "X-Omni-Claim": claim_data["reconnect_credential"],
                     },
                 ) as response:
                     assert response.status == 403
@@ -1713,7 +1713,7 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
                 assert handshake.value.status == 403
                 async with browser.post(
                     f"{client.base_url}/api/v1/clients",
-                    headers={"Origin": client.base_url, "X-MyClaw-CSRF": csrf},
+                    headers={"Origin": client.base_url, "X-Omni-CSRF": csrf},
                     json={"request_id": "copied-tab-register", "kind": "web"},
                 ) as response:
                     assert response.status == 409

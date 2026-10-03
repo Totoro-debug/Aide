@@ -2069,7 +2069,7 @@ class ConfigLoader:
                 requires_secret_reentry=True,
                 error=_config_web_error(
                     "config_missing",
-                    "A User Configuration is required before MyClaw can run.",
+                    "A User Configuration is required before Omni can run.",
                 ),
             )
         except OSError:
@@ -2349,7 +2349,7 @@ class ConfigLoader:
                 raise ConfigError(
                     ErrorInfo(
                         "config_missing",
-                        "A default User Configuration was created; edit it before starting MyClaw.",
+                        "A default User Configuration was created; edit it before starting Omni.",
                     )
                 )
             configuration = self.load()

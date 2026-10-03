@@ -1,4 +1,4 @@
-"""Load versioned Markdown templates bundled with MyClaw."""
+"""Load versioned Markdown templates bundled with Omni."""
 
 from functools import cache
 from importlib.resources import files

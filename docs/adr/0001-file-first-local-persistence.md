@@ -4,13 +4,13 @@ status: accepted
 
 # Use File-First Local Persistence
 
-MyClaw stores configuration, Project registrations, and Workspace-owned state as inspectable local files instead of using a database or mixed storage model. The shared local service is the runtime authority for concurrent CLI and Web clients; atomic file replacement alone does not coordinate independent runtimes. Service ownership follows [ADR-0029](0029-host-cli-and-web-through-one-local-service.md).
+Omni stores configuration, Project registrations, and Workspace-owned state as inspectable local files instead of using a database or mixed storage model. The shared local service is the runtime authority for concurrent CLI and Web clients; atomic file replacement alone does not coordinate independent runtimes. Service ownership follows [ADR-0029](0029-host-cli-and-web-through-one-local-service.md).
 
 ## Agent Home and Workspace boundaries
 
 Agent Home is fixed at `~/.omni/` for the current operating-system account, without profiles or configurable data roots. It owns global `config.toml`, user-authored `skills/`, the durable `projects.json` catalog, and service discovery and locking state. Project registrations are references to existing directories, not copies of Workspace data. Legacy Agent Home Runtime Log files remain untouched.
 
-Each Workspace owns its non-global persistent state under `<workspace>/.omni/`. CLI startup selects the current directory; Web selects a registered Project directory. Directory identity is normalized and resolved for shared runtime ownership. MyClaw does not infer a Git root, search ancestors, or fall back to Agent Home or temporary storage when Workspace State cannot be initialized safely.
+Each Workspace owns its non-global persistent state under `<workspace>/.omni/`. CLI startup selects the current directory; Web selects a registered Project directory. Directory identity is normalized and resolved for shared runtime ownership. Omni does not infer a Git root, search ancestors, or fall back to Agent Home or temporary storage when Workspace State cannot be initialized safely.
 
 ```text
 .omni/

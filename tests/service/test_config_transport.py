@@ -72,8 +72,8 @@ async def test_config_get_returns_safe_structured_fields(config_http: ConfigHttp
     token = create_credential(_service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-MyClaw-Client": client_id,
-        "X-MyClaw-Control": control,
+        "X-Omni-Client": client_id,
+        "X-Omni-Control": control,
     }
 
     async with aiohttp.ClientSession() as http:
@@ -99,9 +99,9 @@ async def test_config_patch_rejects_invalid_values_without_writing(
     revision = cast(str, current["revision"])
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-MyClaw-CSRF": token,
-        "X-MyClaw-Client": client_id,
-        "X-MyClaw-Control": control,
+        "X-Omni-CSRF": token,
+        "X-Omni-Client": client_id,
+        "X-Omni-Control": control,
     }
 
     async with aiohttp.ClientSession() as http:
@@ -131,9 +131,9 @@ async def test_config_patch_reports_pending_then_active_and_stale_conflict(
     revision = cast(str, current["revision"])
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-MyClaw-CSRF": token,
-        "X-MyClaw-Client": client_id,
-        "X-MyClaw-Control": control,
+        "X-Omni-CSRF": token,
+        "X-Omni-Client": client_id,
+        "X-Omni-Control": control,
     }
     payload = {
         "request_id": "valid-config-edit",
@@ -249,9 +249,9 @@ async def test_config_patch_edits_models_routes_mcp_and_write_only_secrets(
     token = create_credential(service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-MyClaw-CSRF": token,
-        "X-MyClaw-Client": client_id,
-        "X-MyClaw-Control": control,
+        "X-Omni-CSRF": token,
+        "X-Omni-Client": client_id,
+        "X-Omni-Control": control,
     }
     observed: list[str] = []
 
@@ -329,9 +329,9 @@ async def test_config_patch_secret_clear_is_explicit_and_preserves_bytes_on_conf
     token = create_credential(service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-MyClaw-CSRF": token,
-        "X-MyClaw-Client": client_id,
-        "X-MyClaw-Control": control,
+        "X-Omni-CSRF": token,
+        "X-Omni-Client": client_id,
+        "X-Omni-Control": control,
     }
     async with aiohttp.ClientSession() as http:
         current = await (await http.get(server.make_url("/api/v1/config"), headers=headers)).json()

@@ -11,7 +11,7 @@ interpreting that continuity without introducing workflow control or a visible t
 ## Decision
 
 Before every nonempty ordinary foreground user input that is not a Manual Skill
-Invocation, MyClaw performs an isolated Task Framing call through the configured `chat`
+Invocation, Omni performs an isolated Task Framing call through the configured `chat`
 Model Route with no Tools. Task Framing uses the same Workspace Runtime-owned Model Router
 instance supplied to the Agent Loop; it does not construct or own another router. The
 call receives only the previous Blackboard, the complete content of the latest assistant

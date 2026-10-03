@@ -3213,7 +3213,7 @@ async def test_terminal_conversation_starts_blank_and_focuses_input() -> None:
     async with app.run_test(size=(80, 24)):
         visible_text = _visible_screen_text(app)
 
-        assert "Message MyClaw" in visible_text
+        assert "Message Omni" in visible_text
         assert "Welcome" not in visible_text
         assert "Session" not in visible_text
         assert "Ready" in visible_text

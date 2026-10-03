@@ -1,4 +1,4 @@
-"""Command-line entry point for MyClaw."""
+"""Command-line entry point for Omni."""
 
 import asyncio
 import webbrowser
@@ -28,12 +28,12 @@ from omni.terminal.conversation import (
 
 app = typer.Typer(
     add_completion=False,
-    help="MyClaw Personal Agent runtime.",
+    help="Omni Personal Agent runtime.",
     rich_markup_mode="rich",
 )
 console = Console()
 
-service_app = typer.Typer(add_completion=False, help="Manage the local MyClaw service.")
+service_app = typer.Typer(add_completion=False, help="Manage the local Omni service.")
 app.add_typer(service_app, name="service")
 
 _MODEL_CONTEXT_OVERFLOW_ERROR = ErrorInfo(
@@ -54,7 +54,7 @@ _RUNTIME_SESSION_REPLACEMENT_ERROR = ErrorInfo(
 )
 _RUNTIME_STARTUP_ERROR = ErrorInfo(
     "persistence_error",
-    "MyClaw runtime could not be started.",
+    "Omni runtime could not be started.",
 )
 _RESTORE_STARTUP_ERROR = ErrorInfo(
     "persistence_error",
@@ -131,7 +131,7 @@ async def _create_web_launch_url() -> str:
 
 @app.callback(invoke_without_command=True)
 def main(context: typer.Context) -> None:
-    """Start the MyClaw Personal Agent."""
+    """Start the Omni Personal Agent."""
     if context.invoked_subcommand is not None:
         return
     agent_home = AgentHome.production()

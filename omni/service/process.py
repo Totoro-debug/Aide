@@ -121,7 +121,7 @@ def _bound_port(site: web.TCPSite) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the MyClaw local service.")
+    parser = argparse.ArgumentParser(description="Run the Omni local service.")
     parser.add_argument("--agent-home", type=Path, required=True)
     parser.add_argument("--host", default=DEFAULT_SERVICE_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_SERVICE_PORT)

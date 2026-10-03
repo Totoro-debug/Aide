@@ -26,10 +26,10 @@ from ..runtime import LocalService, ServiceSink
 
 _API_PREFIX = "/api/v1"
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
-_CSRF_HEADER = "X-MyClaw-CSRF"
-_CLIENT_HEADER = "X-MyClaw-Client"
-_WEB_CONTROL_HEADER = "X-MyClaw-Control"
-_WEB_SESSION_COOKIE = "myclaw_session"
+_CSRF_HEADER = "X-Omni-CSRF"
+_CLIENT_HEADER = "X-Omni-Client"
+_WEB_CONTROL_HEADER = "X-Omni-Control"
+_WEB_SESSION_COOKIE = "omni_session"
 _WEB_TICKET_TTL_SECONDS = 25.0
 _WEB_SESSION_MAX_AGE_SECONDS = 24 * 60 * 60
 _STATIC_CSP = (
@@ -119,7 +119,7 @@ class LocalServiceTransport:
 
     def create_app(self) -> web.Application:
         app = web.Application(middlewares=[self._error_middleware])
-        app["myclaw.service"] = self.service
+        app["omni.service"] = self.service
         app.router.add_get("/", self._static_index)
         app.router.add_post(f"{_API_PREFIX}/web/ticket", self._web_ticket)
         app.router.add_get(f"{_API_PREFIX}/web/session", self._web_session_info)
@@ -713,7 +713,7 @@ class LocalServiceTransport:
             request.match_info["project_id"],
             request.match_info["session_id"],
             _integer_query(request, "claim_version"),
-            _required_header(request, "X-MyClaw-Claim"),
+            _required_header(request, "X-Omni-Claim"),
         )
         return web.json_response(result)
 
@@ -748,7 +748,7 @@ class LocalServiceTransport:
             request.match_info["project_id"],
             request.match_info["session_id"],
             claim_version,
-            _required_header(request, "X-MyClaw-Claim"),
+            _required_header(request, "X-Omni-Claim"),
             title,
             expected_metadata_version,
             request_id,
@@ -778,7 +778,7 @@ class LocalServiceTransport:
             request.match_info["project_id"],
             request.match_info["session_id"],
             claim_version,
-            _required_header(request, "X-MyClaw-Claim"),
+            _required_header(request, "X-Omni-Claim"),
         )
         return web.json_response({"request_id": request_id, "released": True})
 
@@ -793,7 +793,7 @@ class LocalServiceTransport:
             request.match_info["project_id"],
             request.match_info["session_id"],
             claim_version,
-            _required_header(request, "X-MyClaw-Claim"),
+            _required_header(request, "X-Omni-Claim"),
             request_id,
         )
         del confirm
@@ -828,7 +828,7 @@ class LocalServiceTransport:
         workspace_id = request.match_info["workspace_id"]
         session_id = request.match_info["session_id"]
         claim_version = _integer_query(request, "claim_version")
-        claim_credential = _required_header(request, "X-MyClaw-Claim")
+        claim_credential = _required_header(request, "X-Omni-Claim")
         workspace = self.service.workspace(workspace_id)
         claim = workspace.require_claim(client_id, session_id, claim_version, claim_credential)
         workspace._ensure_session_available(session_id)
@@ -852,7 +852,7 @@ class LocalServiceTransport:
             request.match_info["workspace_id"],
             request.match_info["session_id"],
             claim_version,
-            _required_header(request, "X-MyClaw-Claim"),
+            _required_header(request, "X-Omni-Claim"),
             title,
             expected_metadata_version,
             request_id,
@@ -877,7 +877,7 @@ class LocalServiceTransport:
             request.match_info["workspace_id"],
             request.match_info["session_id"],
             claim_version,
-            _required_header(request, "X-MyClaw-Claim"),
+            _required_header(request, "X-Omni-Claim"),
             request_id,
         )
         del confirm
@@ -959,7 +959,7 @@ class LocalServiceTransport:
             if isinstance(query_session, str) and query_session:
                 session_value = query_session
             else:
-                session_value = _required_header(request, "X-MyClaw-Session")
+                session_value = _required_header(request, "X-Omni-Session")
         if request.method == "GET":
             body["request_id"] = request_id
             raw_query_claim_version = request.query.get("claim_version")
@@ -981,7 +981,7 @@ class LocalServiceTransport:
             request.match_info["action"],
             body,
             claim_version=claim_version,
-            claim_credential=request.headers.get("X-MyClaw-Claim"),
+            claim_credential=request.headers.get("X-Omni-Claim"),
         )
         return web.json_response({"request_id": request_id, "result": result})
 
@@ -1001,7 +1001,7 @@ class LocalServiceTransport:
         client_id = _context_client_id(context)
         if self.service.client(client_id).connected:
             raise service_error("client_already_connected", "This Client already has a connection.")
-        socket = web.WebSocketResponse(heartbeat=20.0, autoping=True, protocols=("myclaw-v1",))
+        socket = web.WebSocketResponse(heartbeat=20.0, autoping=True, protocols=("omni-v1",))
         await socket.prepare(request)
         sink = _WebSocketSink(socket)
         try:
@@ -1190,7 +1190,7 @@ def _bearer_token(request: web.Request) -> str | None:
 
 
 def _request_id_from_request(request: web.Request) -> str:
-    return request.headers.get("X-MyClaw-Request", "transport") or "transport"
+    return request.headers.get("X-Omni-Request", "transport") or "transport"
 
 
 def _request_id_from_value(value: object) -> str:

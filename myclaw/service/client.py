@@ -1158,22 +1158,6 @@ def _consume_task_result(task: asyncio.Task[object]) -> None:
         task.exception()
 
 
-def _wire_value(value: object) -> object:
-    if hasattr(value, "to_dict") and callable(value.to_dict):
-        return _wire_value(value.to_dict())
-    if isinstance(value, Mapping):
-        return {str(key): _wire_value(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_wire_value(item) for item in value]
-    if isinstance(value, (Path, UUID, RestoreMode)):
-        return str(value)
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if hasattr(value, "__dict__"):
-        return {key: _wire_value(item) for key, item in vars(value).items()}
-    return value
-
-
 def _management_result(value: Mapping[str, object]) -> Any:
     from myclaw.management.commands import ManagementCommandResult
 

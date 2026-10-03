@@ -3542,12 +3542,6 @@ class LocalService:
             self._schedule_removal_jobs.pop(removal_key, None)
             return result
 
-    async def _project_workspace(
-        self, client_id: str, project_id: str
-    ) -> tuple[ProjectRecord, WorkspaceServiceRuntime]:
-        async with self._project_lifecycle_lock:
-            return await self._project_workspace_owned(client_id, project_id)
-
     async def _project_workspace_owned(
         self, client_id: str, project_id: str
     ) -> tuple[ProjectRecord, WorkspaceServiceRuntime]:
@@ -3568,13 +3562,6 @@ class LocalService:
         workspace = await self._get_or_create_workspace(record.path)
         client.attached_workspaces.add(workspace.workspace_id)
         return record, workspace
-
-    async def list_project_sessions(
-        self, client_id: str, project_id: str
-    ) -> tuple[ProjectRecord, WorkspaceServiceRuntime, list[dict[str, object]]]:
-        async with self._project_lifecycle_lock:
-            record, workspace = await self._project_workspace_owned(client_id, project_id)
-            return record, workspace, await workspace.list_sessions(client_id)
 
     async def list_project_sessions_page(
         self,

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from myclaw.errors import ErrorInfo
-
 
 class ServiceError(Exception):
     """A safe service failure with an HTTP/WebSocket status mapping."""
@@ -30,10 +28,6 @@ class ServiceError(Exception):
         self.retryable = retryable
         self.field_errors = {} if field_errors is None else dict(field_errors)
         Exception.__init__(self, self.message)
-
-    @classmethod
-    def from_error_info(cls, error: ErrorInfo, *, status: int = 409) -> ServiceError:
-        return cls(error.code, error.message, status=status)
 
     def to_dict(self, request_id: str) -> dict[str, object]:
         return {

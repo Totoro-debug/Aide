@@ -100,12 +100,6 @@ def recover_session_deletions(workspace_state: WorkspaceState) -> tuple[str, ...
     return tuple(unresolved)
 
 
-def pending_session_deletions(workspace_state: WorkspaceState) -> tuple[str, ...]:
-    """Return marker identities after validating the marker directory and files."""
-    marker_root = _existing_marker_root(workspace_state)
-    return () if marker_root is None else _pending_session_ids(marker_root)
-
-
 def session_restore_pending(workspace_state: WorkspaceState, session_id: str) -> bool:
     """Keep even unreadable Restore recovery state until its owner completes it."""
     from myclaw.agent.session.restore import RestoreError, RestoreManager
@@ -269,7 +263,6 @@ __all__ = [
     "SessionDeletionPending",
     "begin_session_deletion",
     "delete_session_data",
-    "pending_session_deletions",
     "recover_session_deletions",
     "session_deletion_pending",
 ]

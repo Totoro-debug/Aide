@@ -365,10 +365,6 @@ class WorkspaceRuntime:
                 raise
             return self
 
-    def publish_replacement(self, previous: WorkspaceRuntime) -> None:
-        """Publish this prepared generation as the process-local Workspace owner."""
-        self.publish_replacements(((previous, self),))
-
     @classmethod
     def publish_replacements(
         cls, replacements: tuple[tuple[WorkspaceRuntime, WorkspaceRuntime], ...]

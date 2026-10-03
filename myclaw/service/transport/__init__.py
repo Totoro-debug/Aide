@@ -671,7 +671,7 @@ class LocalServiceTransport:
             project_id,
             title=request.query.get("title"),
             cursor=request.query.get("cursor"),
-            limit=_session_page_limit(request),
+            limit=_optional_page_limit(request),
         )
         return web.json_response(
             {
@@ -807,7 +807,7 @@ class LocalServiceTransport:
             request.match_info["workspace_id"],
             title=request.query.get("title"),
             cursor=request.query.get("cursor"),
-            limit=_session_page_limit(request),
+            limit=_optional_page_limit(request),
         )
         return web.json_response(page)
 
@@ -919,7 +919,7 @@ class LocalServiceTransport:
             request.match_info["workspace_id"],
             request.match_info["job_id"],
             cursor=request.query.get("cursor"),
-            limit=_schedule_history_page_limit(request),
+            limit=_optional_page_limit(request),
         )
         return web.json_response(result)
 
@@ -1226,14 +1226,7 @@ def _integer_query(request: web.Request, name: str) -> int:
     return value
 
 
-def _session_page_limit(request: web.Request) -> int | None:
-    raw = request.query.get("limit")
-    if raw is None:
-        return None
-    return _integer_query(request, "limit")
-
-
-def _schedule_history_page_limit(request: web.Request) -> int | None:
+def _optional_page_limit(request: web.Request) -> int | None:
     raw = request.query.get("limit")
     if raw is None:
         return None

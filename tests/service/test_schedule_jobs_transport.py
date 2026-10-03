@@ -365,6 +365,25 @@ async def test_schedule_job_history_groups_existing_schedule_session_and_paginat
         second_session.close()
 
         history_url = f"{jobs_url}/{job_id}/history"
+        for limit in (None, "", "0", "-1", "1.5", "invalid", "1", "101"):
+            async with http.get(
+                history_url,
+                params={} if limit is None else {"limit": limit},
+                headers=headers,
+            ) as response:
+                body = await response.json()
+                if limit in {None, "1"}:
+                    assert response.status == 200
+                    assert len(body["groups"]) == (2 if limit is None else 1)
+                    assert bool(body["next_cursor"]) == (limit == "1")
+                else:
+                    assert response.status == 422
+                    assert body["code"] == "validation_error"
+                    assert body["message"] == (
+                        "limit must be between 1 and 100." if limit == "101" else "limit is invalid."
+                    )
+                    assert body["field_errors"] == {}
+                    assert body["retryable"] is False
         async with http.get(f"{history_url}?limit=1", headers=headers) as response:
             assert response.status == 200
             first_page = cast(dict[str, object], await response.json())

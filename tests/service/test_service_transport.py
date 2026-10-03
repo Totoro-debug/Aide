@@ -16,6 +16,7 @@ from xml.etree import ElementTree
 import aiohttp
 import pytest
 from aiohttp import web
+from aiohttp.test_utils import TestServer
 from yarl import URL
 
 import myclaw.service.transport as service_transport
@@ -47,7 +48,7 @@ from myclaw.service.discovery import (
 from myclaw.service.errors import ServiceError
 from myclaw.service.projects import ProjectCatalog
 from myclaw.service.runtime import LocalService
-from myclaw.service.transport import _project_job_summary
+from myclaw.service.transport import _project_job_summary, create_app
 from myclaw.terminal.conversation import TerminalConversationApp, _ConversationInput
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
@@ -747,6 +748,57 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
         if first is not None:
             await first.close()
         await ServiceClient.stop_existing(home, port=port)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["workspaces", "projects"])
+@pytest.mark.parametrize("limit", [None, "", "0", "-1", "1.5", "invalid", "1", "101"])
+async def test_session_page_limit_preserves_optional_and_validation_contract(
+    tmp_path: Path, scope: str, limit: str | None
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    directory = tmp_path / "project"
+    directory.mkdir()
+    for index in range(3):
+        await _persist_session(
+            directory,
+            home=home,
+            title=f"Session {index}",
+            created_at=datetime(2026, 2, index + 1, tzinfo=UTC),
+            content="Private history",
+        )
+    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    token = create_credential(home)
+    server = TestServer(create_app(service))
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        record, workspace, _jobs = await service.register_project(client.client_id, directory)
+        identity = workspace.workspace_id if scope == "workspaces" else record.project_id
+        await server.start_server()
+        async with aiohttp.ClientSession() as http:
+            async with http.get(
+                server.make_url(f"/api/v1/{scope}/{identity}/sessions"),
+                headers={"Authorization": f"Bearer {token}", "X-MyClaw-Client": client.client_id},
+                params={} if limit is None else {"limit": limit},
+            ) as response:
+                body = await response.json()
+                if limit in {None, "1"}:
+                    assert response.status == 200
+                    assert len(body["sessions"]) == (3 if limit is None else 1)
+                    assert bool(body["next_cursor"]) == (limit == "1")
+                    assert "Private history" not in str(body)
+                else:
+                    assert response.status == 422
+                    assert body["code"] == "validation_error"
+                    assert body["message"] == (
+                        "limit must be between 1 and 100." if limit == "101" else "limit is invalid."
+                    )
+                    assert body["field_errors"] == {}
+                    assert body["retryable"] is False
+    finally:
+        await server.close()
+        await service.stop()
 
 
 @pytest.mark.asyncio

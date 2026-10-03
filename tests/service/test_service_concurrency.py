@@ -39,6 +39,7 @@ from myclaw.service.runtime import LocalService
 from myclaw.service.transport import create_app
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
+from tests.fixtures.project_removal import complete_project_removal
 from tests.service.test_protocol_contract import _validator
 
 
@@ -1201,7 +1202,7 @@ async def test_project_removal_cancels_foreground_and_schedule_runs(
         assert len(workspace._schedule_loops) == 1
         assert workspace.schedule_service.status_snapshot().to_dict()["active_job_count"] == 1
 
-        await service.remove_project(first.client_id, record.project_id)
+        await complete_project_removal(service, first.client_id, record.project_id)
 
         await asyncio.wait_for(provider.session_a_cancelled.wait(), timeout=2)
         await asyncio.wait_for(provider.session_b_cancelled.wait(), timeout=2)

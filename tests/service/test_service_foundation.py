@@ -43,6 +43,7 @@ from myclaw.service.projects import ProjectCatalog, ProjectCatalogError
 from myclaw.service.runtime import LocalService, WorkspaceServiceRuntime
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
+from tests.fixtures.project_removal import complete_project_removal, wait_for_project_removal
 from tests.service.test_protocol_contract import _validator
 from tests.service.test_service_concurrency import _CollectingSink
 
@@ -253,7 +254,7 @@ async def test_registered_projects_start_once_and_removal_releases_claims(tmp_pa
         claim = await service.claim(client.client_id, first.workspace_id, session_id)
         assert cast(dict[str, object], claim["claim"])["claim_version"] == 1
 
-        await service.remove_project(client.client_id, record.project_id)
+        await complete_project_removal(service, client.client_id, record.project_id)
         assert len(service.workspaces) == 0
         assert not client.claimed
         assert ProjectCatalog(home).list() == ()
@@ -301,15 +302,29 @@ async def test_project_removal_closes_admission_clears_claims_and_blocks_reentry
             await service.attach_workspace(client.client_id, project)
         assert blocked.value.code == "admission_closed"
 
-        allow_close.set()
-        operation = service._project_removals[record.project_id]
-        assert operation.task is not None
-        await asyncio.wait_for(asyncio.shield(operation.task), timeout=2)
+        repeated = await service.start_project_removal(client.client_id, record.project_id)
+        assert repeated == response
+        waiter = asyncio.create_task(
+            wait_for_project_removal(
+                service, client.client_id, record.project_id, cast(str, response["operation_id"])
+            )
+        )
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
         assert (
             await service.project_removal_status(
-                client.client_id, record.project_id, operation.operation_id
+                client.client_id, record.project_id, cast(str, response["operation_id"])
             )
-        )["status"] == "completed"
+        )["status"] == "removing"
+        assert not allow_close.is_set()
+
+        allow_close.set()
+        status = await wait_for_project_removal(
+            service, client.client_id, record.project_id, cast(str, response["operation_id"])
+        )
+        assert status["status"] == "completed"
 
         assert not workspace._claims
         assert not client.claimed
@@ -328,7 +343,7 @@ async def test_project_removal_closes_admission_clears_claims_and_blocks_reentry
             "cli", reconnect_credential=client.reconnect_credential
         )
         assert reconnected is client
-        await service.remove_project(client.client_id, reentered.project_id)
+        await complete_project_removal(service, client.client_id, reentered.project_id)
     finally:
         await service.stop()
 
@@ -346,7 +361,7 @@ async def test_project_removal_notifies_unattached_web_requester_without_blockin
     client = await service.register_client("web")
     try:
         assert not client.attached_workspaces
-        await service.remove_project(client.client_id, record.project_id)
+        await complete_project_removal(service, client.client_id, record.project_id)
         assert [
             event_type
             for event in client.events
@@ -415,7 +430,7 @@ async def test_project_removal_waits_for_restore_transaction(
         release_restore.set()
         committed = await asyncio.wait_for(restore_task, timeout=2)
         assert committed.restore_result is not None
-        await service.remove_project(client.client_id, record.project_id)
+        await complete_project_removal(service, client.client_id, record.project_id)
         assert ProjectCatalog(home).list() == ()
         assert Session.load(state, session.session_id).messages == []
     finally:
@@ -450,12 +465,14 @@ async def test_project_removal_keeps_failed_loop_for_retry(
 
     monkeypatch.setattr(loop, "close", close_once)
     try:
-        with pytest.raises(ServiceError) as error:
-            await service.remove_project(client.client_id, record.project_id)
-        assert error.value.code == "project_removal_failed"
+        operation = await service.start_project_removal(client.client_id, record.project_id)
+        status = await wait_for_project_removal(
+            service, client.client_id, record.project_id, cast(str, operation["operation_id"])
+        )
+        assert status["status"] == "failed"
         assert session_id in workspace.loops
         assert session_id in workspace._claims
-        await service.remove_project(client.client_id, record.project_id)
+        await complete_project_removal(service, client.client_id, record.project_id)
         assert not workspace.loops
         assert not workspace._claims
     finally:
@@ -633,7 +650,7 @@ async def test_removed_project_re_registration_keeps_saved_jobs_paused_until_res
         await advance(7200)
         assert starts == []
 
-        await first_service.remove_project(first_client.client_id, first_record.project_id)
+        await complete_project_removal(first_service, first_client.client_id, first_record.project_id)
         assert ProjectCatalog(home).list() == ()
         assert {job.job_id for job in await store.public_snapshot()} == {job.job_id for job in jobs}
         record, workspace, saved = await first_service.register_project(
@@ -878,7 +895,7 @@ async def test_project_snapshot_cannot_recreate_a_removed_workspace(
         monkeypatch.setattr(workspace.schedule_service, "public_snapshot", delayed_snapshot)
         snapshot = asyncio.create_task(service.project_schedule_snapshot(record))
         await asyncio.wait_for(entered.wait(), timeout=1)
-        removing = asyncio.create_task(service.remove_project(client.client_id, record.project_id))
+        removing = asyncio.create_task(complete_project_removal(service, client.client_id, record.project_id))
         await asyncio.sleep(0)
         assert not removing.done()
         release.set()
@@ -1250,7 +1267,7 @@ async def test_project_removal_aborts_pending_confirmation_and_resolves_clients(
             if any(event["type"] == "confirmation.requested" for event in owner.events):
                 break
             await asyncio.sleep(0.01)
-        await service.remove_project(owner.client_id, record.project_id)
+        await complete_project_removal(service, owner.client_id, record.project_id)
         with pytest.raises(ConfirmationAborted):
             await asyncio.wait_for(pending, timeout=1)
         assert not service.workspaces
@@ -1386,13 +1403,17 @@ async def test_project_removal_failure_keeps_registration_blocked(
         raise RuntimeError("injected cleanup failure")
 
     monkeypatch.setattr(workspace.runtime, "close", failing_close)
-    with pytest.raises(ServiceError) as first:
-        await service.remove_project(client.client_id, record.project_id)
-    assert first.value.code == "project_removal_failed"
+    operation = await service.start_project_removal(client.client_id, record.project_id)
+    status = await wait_for_project_removal(
+        service, client.client_id, record.project_id, cast(str, operation["operation_id"])
+    )
+    assert status["status"] == "failed"
     assert ProjectCatalog(home).list()[0].schedule_state == "removing"
-    with pytest.raises(ServiceError) as retried:
-        await service.remove_project(client.client_id, record.project_id)
-    assert retried.value.code == "project_removal_failed"
+    operation = await service.start_project_removal(client.client_id, record.project_id)
+    status = await wait_for_project_removal(
+        service, client.client_id, record.project_id, cast(str, operation["operation_id"])
+    )
+    assert status["status"] == "failed"
     assert ProjectCatalog(home).list()[0].schedule_state == "removing"
     with pytest.raises(ServiceError):
         await service.stop()
@@ -1418,7 +1439,7 @@ async def test_project_removal_completion_survives_event_delivery_failure(
         await service.connect_client(client.client_id, FailingSink())
         record, _workspace, _jobs = await service.register_project(client.client_id, project)
 
-        await service.remove_project(client.client_id, record.project_id)
+        await complete_project_removal(service, client.client_id, record.project_id)
 
         assert ProjectCatalog(home).list() == ()
         assert project.is_dir()
@@ -1457,7 +1478,7 @@ async def test_project_removal_admission_failure_is_persisted_and_retryable(
         assert blocked.removal_error
 
         monkeypatch.setattr(service, "_reconcile_schedule_admission", original_reconcile)
-        await service.remove_project(client.client_id, record.project_id)
+        await complete_project_removal(service, client.client_id, record.project_id)
         assert ProjectCatalog(home).list() == ()
     finally:
         await service.stop()
@@ -1491,15 +1512,17 @@ async def test_project_removal_failure_can_retry_same_persisted_operation(
             raise RuntimeError("injected cleanup failure")
 
     monkeypatch.setattr(workspace.runtime, "close", fail_once)
-    with pytest.raises(ServiceError) as first:
-        await service.remove_project(client.client_id, record.project_id)
-    assert first.value.code == "project_removal_failed"
+    operation = await service.start_project_removal(client.client_id, record.project_id)
+    status = await wait_for_project_removal(
+        service, client.client_id, record.project_id, cast(str, operation["operation_id"])
+    )
+    assert status["status"] == "failed"
     failed_record = ProjectCatalog(home).list()[0]
     assert failed_record.schedule_state == "removing"
     assert failed_record.removal_operation_id
 
     monkeypatch.setattr(workspace.runtime, "close", original_close)
-    await service.remove_project(client.client_id, record.project_id)
+    await complete_project_removal(service, client.client_id, record.project_id)
     assert ProjectCatalog(home).list() == ()
     assert project.is_dir()
     await service.stop()
@@ -1529,9 +1552,11 @@ async def test_failed_project_removal_stays_blocked_after_service_restart(
         raise RuntimeError("injected cleanup failure")
 
     monkeypatch.setattr(workspace.runtime, "close", failing_close)
-    with pytest.raises(ServiceError) as failed:
-        await service.remove_project(client.client_id, record.project_id)
-    assert failed.value.code == "project_removal_failed"
+    operation = await service.start_project_removal(client.client_id, record.project_id)
+    status = await wait_for_project_removal(
+        service, client.client_id, record.project_id, cast(str, operation["operation_id"])
+    )
+    assert status["status"] == "failed"
     monkeypatch.setattr(workspace.runtime, "close", original_close)
     await service.stop()
 
@@ -1549,7 +1574,7 @@ async def test_failed_project_removal_stays_blocked_after_service_restart(
         with pytest.raises(ServiceError) as blocked:
             await restarted.attach_workspace(restarted_client.client_id, project)
         assert blocked.value.code == "admission_closed"
-        await restarted.remove_project(restarted_client.client_id, record.project_id)
+        await complete_project_removal(restarted, restarted_client.client_id, record.project_id)
         assert ProjectCatalog(home).list() == ()
         assert project.is_dir()
     finally:
@@ -1587,7 +1612,7 @@ async def test_interrupted_project_removal_is_retryable_after_restart(
                 client.client_id, record.project_id, cast(str, started.removal_operation_id)
             )
         )["status"] == "failed"
-        await service.remove_project(client.client_id, record.project_id)
+        await complete_project_removal(service, client.client_id, record.project_id)
         assert starts == [project]
         assert ProjectCatalog(home).list() == ()
     finally:

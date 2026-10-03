@@ -18,6 +18,7 @@ from myclaw.schedule.store import WorkspaceScheduleStore
 from myclaw.service.errors import ServiceError
 from myclaw.service.runtime import LocalService
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
+from tests.fixtures.project_removal import complete_project_removal
 from tests.service.test_service_concurrency import _CollectingSink
 
 
@@ -205,7 +206,7 @@ async def test_project_removal_serializes_with_initial_candidate_publication(
     monkeypatch.setattr(WorkspaceRuntime, "prepare_schedule", blocked)
     _save_first_configuration(service)
     await asyncio.wait_for(started.wait(), timeout=10)
-    removal = asyncio.create_task(service.remove_project(client.client_id, record.project_id))
+    removal = asyncio.create_task(complete_project_removal(service, client.client_id, record.project_id))
     await asyncio.sleep(0)
     assert not removal.done()
     release.set()

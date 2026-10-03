@@ -18,6 +18,7 @@ from myclaw.config.config import ConfigLoader, UserConfiguration
 from myclaw.schedule.store import WorkspaceScheduleStore
 from myclaw.service.runtime import LocalService, _PreparedWorkspaceGeneration
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
+from tests.fixtures.project_removal import complete_project_removal
 
 
 @pytest_asyncio.fixture
@@ -402,7 +403,7 @@ async def test_project_removal_during_preparation_closes_unpublished_candidate(
     monkeypatch.setattr(workspace, "prepare_configuration", blocked)
     await _save(service)
     await asyncio.wait_for(started.wait(), timeout=10)
-    await asyncio.wait_for(service.remove_project(client.client_id, record.project_id), timeout=10)
+    await asyncio.wait_for(complete_project_removal(service, client.client_id, record.project_id), timeout=10)
     release.set()
     await _applied(service)
     assert workspace.workspace_id not in service.workspaces

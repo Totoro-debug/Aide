@@ -3885,22 +3885,6 @@ class LocalService:
                 }
             raise service_error("not_found", "Project removal was not found.", status=404)
 
-    async def remove_project(self, client_id: str, project_id: str) -> Path:
-        """Start a removal and wait for its terminal outcome for legacy callers."""
-        await self.start_project_removal(client_id, project_id)
-        operation = self._project_removals[project_id]
-        task = operation.task
-        if task is not None:
-            await asyncio.shield(task)
-        if operation.status != "completed":
-            raise service_error(
-                "project_removal_failed",
-                "Project work could not be stopped; the registration remains blocked.",
-                status=500,
-                retryable=True,
-            )
-        return operation.path
-
     @staticmethod
     def _project_removal_response(operation: _ProjectRemoval) -> dict[str, object]:
         return {

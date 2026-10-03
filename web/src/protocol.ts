@@ -42,6 +42,25 @@ export interface ConfirmationRequestedPayload {
   owner?: ConfirmationEventOwner;
 }
 
+export interface PendingConfirmationSnapshot {
+  workspace_id: string;
+  project_id: string | null;
+  session_id: string | null;
+  run_id: string | null;
+  payload: ConfirmationRequestedPayload;
+}
+
+export interface RecoverySnapshot {
+  sessions: SessionRecoverySnapshot[];
+  pending_confirmation: PendingConfirmationSnapshot | null;
+}
+
+export interface SessionRecoverySnapshot {
+  workspace_id: string;
+  claim_version: number;
+  snapshot: SessionSnapshot;
+}
+
 export type ClientCommandType =
   | "claim"
   | "release"
@@ -379,6 +398,31 @@ export interface SessionSnapshot {
   session_id: string;
   messages: Record<string, unknown>[];
   restore_anchors: RestoreAnchor[];
+  live_state: SessionLiveState | null;
+}
+
+export interface SessionLiveState {
+  stream_id: string;
+  seq: number;
+  runs: ActiveRunSnapshot[];
+}
+
+export interface ActiveRunSnapshot {
+  run_id: string;
+  request_id: string;
+  prompt: string;
+  status: "accepted" | "running";
+  assistant_content: string;
+  tools: ActiveToolSnapshot[];
+  cancel_requested: boolean;
+  cancellable: boolean;
+}
+
+export interface ActiveToolSnapshot {
+  tool_call_id: string;
+  name: string;
+  arguments: string;
+  status: "running" | "completed" | "failed" | "rejected" | "canceled" | "unknown";
 }
 
 export interface RestoreAnchor {

@@ -336,6 +336,17 @@ try {
   await expect(confirmationButtons).toHaveCount(3);
   const secondDialog = secondPage.locator('[role="dialog"][data-confirmation-origin="background"]');
   await secondDialog.waitFor();
+  const recoveryRegistration = page.waitForResponse((response) => (
+    response.request().method() === "POST" && response.url().endsWith("/api/v1/clients")
+  ));
+  await page.reload();
+  webControlCredential = (await (await recoveryRegistration).json()).web_control_credential;
+  await expect(backgroundDialog).toBeVisible({ timeout: 5000 });
+  const recovered = await page.evaluate(() => [...window.__myclawJointEvents].reverse()
+    .find((event) => event.type === "snapshot.required"
+      && event.payload?.snapshot?.pending_confirmation)?.payload.snapshot.pending_confirmation);
+  assert.equal(recovered?.payload.token, confirmation.payload.token);
+  assert.deepEqual(recovered?.payload.request, confirmation.payload.request);
   const decisions = await Promise.all([
     decide(page, confirmation.payload.token, "installed-confirmation-race-one"),
     decide(secondPage, confirmation.payload.token, "installed-confirmation-race-two"),
@@ -362,6 +373,7 @@ try {
     accepted_decisions: 1,
     rejected_decisions: 1,
     persisted_tool_results: 1,
+    refreshed_original_confirmation: true,
   };
   await writeFile(browserReadyPath, JSON.stringify({
     status: "ready",

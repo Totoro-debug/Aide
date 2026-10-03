@@ -66,6 +66,17 @@ function interfaceDeclaration(name) {
 }
 
 const referenceTypes = {
+  confirmation_origin: "ConfirmationOrigin",
+  active_tool_snapshot: "ActiveToolSnapshot",
+  active_run_snapshot: "ActiveRunSnapshot",
+  session_live_state: "SessionLiveState",
+  session_snapshot: "SessionSnapshot",
+  session_recovery_snapshot: "SessionRecoverySnapshot",
+  pending_confirmation_snapshot: "PendingConfirmationSnapshot",
+  confirmation_request: "ConfirmationRequest",
+  confirmation_requested_payload: "ConfirmationRequestedPayload",
+  confirmation_event_owner: "ConfirmationEventOwner",
+  restore_anchor: "RestoreAnchor",
   identifier: "string",
   request_id: "string",
   tool_permission_level: "ToolPermissionLevel",
@@ -88,6 +99,7 @@ const referenceTypes = {
 };
 
 function schemaType(definition) {
+  if (Object.keys(definition).length === 0) return "unknown";
   if (definition.$ref) {
     const name = definition.$ref.split("/").at(-1);
     const type = referenceTypes[name];
@@ -104,6 +116,7 @@ function schemaType(definition) {
   if (definition.type === "object" && definition.additionalProperties) {
     return `Record<string,${schemaType(definition.additionalProperties)}>`;
   }
+  if (definition.type === "object" && !definition.properties) return "Record<string,unknown>";
   return definition.type;
 }
 
@@ -149,6 +162,7 @@ function checkMembers(name, members, definition, exact = true) {
 for (const [name, definition] of [
   ["ToolPermissionLevel", "tool_permission_level"],
   ["ReasoningEffort", "reasoning_effort"],
+  ["ConfirmationOrigin", "confirmation_origin"],
   ["ConfigApplicationStatus", "config_application_status"],
   ["ConfigProjectionState", "config_projection_state"],
 ]) {
@@ -163,6 +177,17 @@ for (const [name, definitionName] of [
   ["ManagementError", "management_error"],
   ["DreamResult", "dream_result"],
   ["SkillMetadata", "skill_metadata"],
+  ["ActiveToolSnapshot", "active_tool_snapshot"],
+  ["ActiveRunSnapshot", "active_run_snapshot"],
+  ["SessionLiveState", "session_live_state"],
+  ["SessionRecoverySnapshot", "session_recovery_snapshot"],
+  ["PendingConfirmationSnapshot", "pending_confirmation_snapshot"],
+  ["RecoverySnapshot", "recovery_snapshot"],
+  ["ConfirmationRequest", "confirmation_request"],
+  ["ConfirmationRequestedPayload", "confirmation_requested_payload"],
+  ["ConfirmationEventOwner", "confirmation_event_owner"],
+  ["SessionSnapshot", "session_snapshot"],
+  ["RestoreAnchor", "restore_anchor"],
 ]) {
   checkMembers(name, interfaceDeclaration(name).members, definitions[definitionName]);
 }

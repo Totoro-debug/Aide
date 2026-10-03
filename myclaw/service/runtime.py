@@ -8,6 +8,7 @@ import json
 import os
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import datetime
 from hashlib import sha256
@@ -410,6 +411,8 @@ class _LoopState:
     bus: MessageBus
     owner_client_id: str | None
     run_ids: deque[str] = field(default_factory=deque)
+    live_runs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    completed_user_count: int | None = None
     output_task: asyncio.Task[None] | None = None
     release_task: asyncio.Task[None] | None = None
     schedule: bool = False
@@ -467,6 +470,7 @@ class ServiceConfirmationPresenter(ConfirmationPresenter):
         self._wire_tokens: dict[object, str] = {}
         self._wire_sources: dict[object, tuple[str | None, str | None, str | None]] = {}
         self._wire_requests: dict[object, asyncio.Task[None]] = {}
+        self._wire_payloads: dict[object, dict[str, object]] = {}
 
     def present_confirmation(
         self,
@@ -500,6 +504,7 @@ class ServiceConfirmationPresenter(ConfirmationPresenter):
                 "job_id": envelope.owner.job_id,
                 "occurrence_id": str(envelope.owner.occurrence_id),
             }
+        self._wire_payloads[token] = payload
         task = asyncio.create_task(
             self._service.emit(
                 "confirmation.requested",
@@ -514,6 +519,7 @@ class ServiceConfirmationPresenter(ConfirmationPresenter):
         task.add_done_callback(_consume_task_result)
 
     async def dismiss_confirmation(self, token: object) -> None:
+        self._wire_payloads.pop(token, None)
         wire_token = self._wire_tokens.pop(token, None)
         if wire_token is None:
             return
@@ -579,6 +585,7 @@ class ServiceConfirmationPresenter(ConfirmationPresenter):
                     )
                 accepted = self._service.confirmation.decide(token, decision)
                 if accepted:
+                    self._wire_payloads.pop(token, None)
                     self._wire_tokens.pop(token, None)
                     workspace_id, session_id, run_id = self._wire_sources.pop(
                         token,
@@ -596,6 +603,25 @@ class ServiceConfirmationPresenter(ConfirmationPresenter):
                     task.add_done_callback(_consume_task_result)
                 return accepted
         return False
+
+    def snapshot(self, client_id: str) -> dict[str, object] | None:
+        """Project the current display slot only for an authorized Client."""
+        token = next((candidate for candidate in self._wire_payloads
+                      if self._service.confirmation.is_pending(candidate)), None)
+        if token is None:
+            return None
+        payload = self._wire_payloads[token]
+        workspace_id, session_id, run_id = self._wire_sources[token]
+        if client_id not in self._audience(workspace_id, session_id):
+            return None
+        workspace = self._service._workspaces.get(workspace_id or "")
+        project_id = None
+        if workspace is not None:
+            key = os.path.normcase(str(workspace.workspace_path))
+            project_id = next((record.project_id for record in self._service.projects.list()
+                               if os.path.normcase(str(record.path.resolve(strict=False))) == key), None)
+        return {"workspace_id": workspace_id, "project_id": project_id,
+                "session_id": session_id, "run_id": run_id, "payload": deepcopy(payload)}
 
 
 class WorkspaceServiceRuntime:
@@ -1034,9 +1060,38 @@ class WorkspaceServiceRuntime:
         if loop_state is None:
             raise service_error("not_found", "Conversation Session was not found.", status=404)
         projection = loop_state.loop.project_foreground_conversation()
+        messages = list(projection.messages)
+        anchors = list(loop_state.loop.session.restore_candidates())
+        if loop_state.live_runs and loop_state.completed_user_count is not None:
+            user_count = 0
+            for index, message in enumerate(messages):
+                if message.get("role") == "user":
+                    user_count += 1
+                    if user_count > loop_state.completed_user_count:
+                        messages = messages[:index]
+                        visible_anchor_ids = {
+                            record.get("restore_anchor_id")
+                            for record in loop_state.loop.session.messages[:index]
+                        }
+                        anchors = [anchor for anchor in anchors
+                                   if anchor.anchor_id in visible_anchor_ids]
+                        break
+        claim = self._claims.get(session_id)
+        client = self.service._clients.get(claim.client_id) if claim is not None else None
+        live_state = None
+        if client is not None:
+            runs = deepcopy(list(loop_state.live_runs.values()))
+            for run in runs:
+                run["cancellable"] = (
+                    bool(loop_state.run_ids) and loop_state.run_ids[0] == run["run_id"]
+                    and loop_state.loop.has_active_run and claim is not None
+                    and claim.status != "draining" and not run["cancel_requested"]
+                )
+            live_state = {"stream_id": client.stream_id, "seq": client.sequence, "runs": runs}
         return {
             "session_id": projection.session_id,
-            "messages": list(projection.messages),
+            "messages": messages,
+            "live_state": live_state,
             "restore_anchors": [
                 {
                     "anchor_id": anchor.anchor_id,
@@ -1044,7 +1099,7 @@ class WorkspaceServiceRuntime:
                     "content": anchor.content,
                     "timestamp": anchor.timestamp,
                 }
-                for anchor in loop_state.loop.session.restore_candidates()
+                for anchor in anchors
             ],
         }
 
@@ -1651,6 +1706,7 @@ class WorkspaceServiceRuntime:
         version: int,
         text: str,
         run_id: str,
+        request_id: str | None = None,
     ) -> SessionClaim:
         async with self._lock:
             self._require_admitted()
@@ -1668,8 +1724,19 @@ class WorkspaceServiceRuntime:
                     "admission_closed", "Conversation input is temporarily unavailable."
                 )
             state = self._loops[session_id]
-            state.run_ids.append(run_id)
-            await state.bus.put_inbound(InboundMessage(content=text))
+            client = self.service.client(client_id)
+            async with client.delivery_lock:
+                if not state.live_runs:
+                    state.completed_user_count = sum(
+                        message.get("role") == "user" for message in state.loop.session.messages
+                    )
+                state.run_ids.append(run_id)
+                state.live_runs[run_id] = {
+                    "run_id": run_id, "request_id": request_id or run_id, "prompt": text,
+                    "status": "accepted", "assistant_content": "", "tools": [],
+                    "cancel_requested": False, "cancellable": False,
+                }
+                await state.bus.put_inbound(InboundMessage(content=text))
             return claim
 
     async def cancel(self, client_id: str, session_id: str, version: int, run_id: str) -> None:
@@ -1679,6 +1746,10 @@ class WorkspaceServiceRuntime:
         state = self._loops[session_id]
         if not state.run_ids or state.run_ids[0] != run_id:
             raise service_error("stale_run", "The requested Agent Run is no longer active.")
+        client = self.service.client(client_id)
+        async with client.delivery_lock:
+            if run_id in state.live_runs:
+                state.live_runs[run_id]["cancel_requested"] = True
         await claim.loop.cancel_active_run()
         await self.service.emit(
             "run.cancelled",
@@ -3118,7 +3189,12 @@ class LocalService:
         async with self._lock:
             workspace_id = self._workspace_keys.get(key)
             if workspace_id is not None:
-                return self._workspaces[workspace_id]
+                runtime = self._workspaces[workspace_id]
+                if runtime._closed:
+                    raise service_error(
+                        "admission_closed", "Workspace cleanup has not completed.", retryable=True
+                    )
+                return runtime
             if self.configuration is None or self._config_active_revision is None:
                 raise service_error(
                     "config_invalid", "User Configuration is unavailable.", status=422
@@ -3137,7 +3213,10 @@ class LocalService:
         for record in self.projects.list():
             if os.path.normcase(str(record.path.resolve(strict=False))) == key:
                 return record.schedule_state == "available"
-        return True
+        return any(
+            self._clients[client_id].connected and not self._clients[client_id].expired
+            for client_id in self._workspace_clients(workspace.workspace_id)
+        )
 
     def _schedule_admission_open(self) -> bool:
         return (
@@ -4360,7 +4439,7 @@ class LocalService:
             )
             run_id = str(uuid4())
             await self.workspace(workspace_id).input(
-                client_id, session_id, claim_version, text, run_id
+                client_id, session_id, claim_version, text, run_id, request_id
             )
             result = {"run_id": run_id}
             await self.emit(
@@ -4368,7 +4447,7 @@ class LocalService:
                 workspace_id=workspace_id,
                 session_id=session_id,
                 run_id=run_id,
-                payload={"text": text},
+                payload={"text": text, "request_id": request_id},
                 target_client_ids=(client_id,),
             )
         elif command_type == "cancel":
@@ -4457,6 +4536,11 @@ class LocalService:
                 ):
                     continue
             async with client.delivery_lock:
+                if workspace_id is not None and session_id is not None and run_id is not None:
+                    workspace = self._workspaces.get(workspace_id)
+                    state = workspace._loops.get(session_id) if workspace is not None else None
+                    if state is not None and state.owner_client_id == client.client_id:
+                        self._update_live_run(state, event_type, run_id, payload)
                 client.sequence += 1
                 event = {
                     "protocol_version": self.protocol_version,
@@ -4473,6 +4557,40 @@ class LocalService:
                 client.events.append(event)
                 if client.connected and client.subscribed and client.sink is not None:
                     await self._send_event(client, event)
+
+    @staticmethod
+    def _update_live_run(
+        state: _LoopState, event_type: str, run_id: str, payload: dict[str, object]
+    ) -> None:
+        if event_type in {"run.completed", "run.failed"}:
+            if state.live_runs.pop(run_id, None) is not None:
+                if state.completed_user_count is not None:
+                    state.completed_user_count += 1
+                if not state.live_runs:
+                    state.completed_user_count = None
+            return
+        run = state.live_runs.get(run_id)
+        if run is None or event_type != "run.output":
+            return
+        message = cast(dict[str, Any], payload["message"])
+        metadata = message["metadata"]
+        run["status"] = "running"
+        if message["type"] == "model_response" and metadata.get("_stream_delta") is True:
+            run["assistant_content"] += message["content"]
+        elif message["type"] == "tool_call":
+            tool_id = metadata.get("tool_call_id")
+            if not isinstance(tool_id, str) or not tool_id:
+                return
+            tools = run["tools"]
+            tool = next((item for item in tools if item["tool_call_id"] == tool_id), None)
+            status = {"success": "completed", "error": "failed", "refused": "rejected",
+                      "cancelled": "canceled", "canceled": "canceled"}.get(metadata.get("status"))
+            if tool is None:
+                tools.append({"tool_call_id": tool_id, "name": message["content"],
+                              "arguments": metadata.get("arguments", ""),
+                              "status": status or "running"})
+            elif status is not None:
+                tool["status"] = status
 
     def confirmation_source(
         self, owner: ConfirmationOwner
@@ -4581,9 +4699,34 @@ class LocalService:
         client.expired = True
         self._client_by_reconnect.pop(client.reconnect_credential, None)
         errors: list[Exception] = []
-        for workspace in self._workspaces.values():
+        for workspace in tuple(self._workspaces.values()):
             try:
                 await workspace.expire_client(client_id)
+                async with self._project_lifecycle_lock:
+                    if self._workspaces.get(workspace.workspace_id) is not workspace:
+                        continue
+                    key = os.path.normcase(str(workspace.workspace_path))
+                    registered = any(
+                        os.path.normcase(str(record.path.resolve(strict=False))) == key
+                        for record in self.projects.list()
+                    )
+                    users = (
+                        self._clients[user_id]
+                        for user_id in self._workspace_clients(workspace.workspace_id)
+                    )
+                    if registered or any(
+                        not user.expired
+                        and (
+                            user.connected
+                            or user.reconnect_deadline is None
+                            or self._monotonic() < user.reconnect_deadline
+                        )
+                        for user in users
+                    ):
+                        continue
+                    await workspace.close()
+                    self._workspaces.pop(workspace.workspace_id, None)
+                    self._workspace_keys.pop(key, None)
             except Exception as error:
                 errors.append(error)
         if errors:
@@ -4608,6 +4751,7 @@ class LocalService:
             return
         client.claimed.clear()
         self._clients.pop(client_id, None)
+        await self._reconcile_schedule_admission()
 
     async def _stop_after_grace(self, deadline: float | None = None) -> None:
         try:
@@ -4667,8 +4811,11 @@ class LocalService:
             for event in tuple(client.events):
                 if int(cast(int, event["seq"])) > last_seq and client.sink is not None:
                     await self._send_event(client, event)
+            if client.kind == "web":
+                await self._send_snapshot_required(client, reason="reconnected")
 
     async def _send_snapshot_required(self, client: ClientState, *, reason: str) -> None:
+        client.sequence += 1
         snapshots: list[dict[str, object]] = []
         for workspace_id, session_id in tuple(client.claimed):
             workspace = self._workspaces.get(workspace_id)
@@ -4688,7 +4835,6 @@ class LocalService:
                     "snapshot": snapshot,
                 }
             )
-        client.sequence += 1
         event = {
             "protocol_version": self.protocol_version,
             "service_instance_id": self.service_instance_id,
@@ -4702,7 +4848,8 @@ class LocalService:
             "payload": {
                 "reason": reason,
                 "stream_id": client.stream_id,
-                "snapshot": {"sessions": snapshots},
+                "snapshot": {"sessions": snapshots,
+                             "pending_confirmation": self._presenter.snapshot(client.client_id)},
             },
         }
         client.events.append(event)

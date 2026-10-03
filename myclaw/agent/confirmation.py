@@ -225,6 +225,14 @@ class ToolConfirmationCoordinator:
         self._ensure_pump()
         return True
 
+    def is_pending(self, token: object) -> bool:
+        """Return whether the original displayed token still accepts a decision."""
+        item = self._active
+        return (
+            item is not None and item.token is token and item.state == "active"
+            and not item.future.done()
+        )
+
     async def cancel_owner(self, owner: ConfirmationOwner) -> None:
         if not isinstance(owner, (ForegroundConfirmationOwner, BackgroundConfirmationOwner)):
             raise TypeError("confirmation owner is invalid")

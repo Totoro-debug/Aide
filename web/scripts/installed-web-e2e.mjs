@@ -204,6 +204,14 @@ try {
       )));
     }, { timeout: 30000 }).toBe(true);
     assert.equal(events.some((event) => event.type === "run.completed" && event.run_id === concurrentAccepted.run_id), false);
+    await page.reload();
+    await expect(page.getByRole("log").getByText(concurrentPrompt, { exact: true }))
+      .toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole("button", { name: /Cancel run|取消运行/, exact: true })).toBeEnabled();
+    assert.ok(events.some((event) => event.type === "snapshot.required"
+      && event.payload?.snapshot?.sessions?.some((entry) => (
+        entry.snapshot.live_state?.runs?.some((run) => run.run_id === concurrentAccepted.run_id)
+      ))));
     await assert.rejects(readFile(crossClientCliDonePath, "utf8"), { code: "ENOENT" });
     await writeFile(concurrencyReleasePath, "release\n", "utf8");
     stage = "concurrent-completion";
@@ -251,6 +259,45 @@ try {
   await page.goto(page.url());
   await answer.waitFor();
 
+  stage = "confirmation-refresh";
+  await createClaimedDraft(newSession);
+  await input.fill("confirmation");
+  await input.press("Enter");
+  const confirmationDialog = page.locator('[role="dialog"][data-confirmation-origin="foreground"]');
+  await expect(confirmationDialog).toBeVisible();
+  const originalConfirmation = [...events].reverse().find((event) => event.type === "confirmation.requested");
+  const confirmedRun = [...events].reverse().find((event) => event.type === "input.accepted"
+    && event.session_id === originalConfirmation.session_id);
+  await page.reload();
+  await expect(confirmationDialog).toBeVisible({ timeout: 5000 });
+  const pending = [...events].reverse().find((event) => event.type === "snapshot.required"
+    && event.payload?.snapshot?.pending_confirmation)?.payload.snapshot.pending_confirmation;
+  assert.equal(pending?.payload.token, originalConfirmation.payload.token);
+  assert.deepEqual(pending?.payload.request, originalConfirmation.payload.request);
+  await page.keyboard.press("Enter");
+  await expect(confirmationDialog).toBeHidden();
+  await expect.poll(() => events.some((event) => event.type === "run.completed"
+    && event.run_id === confirmedRun.run_id)).toBe(true);
+
+  stage = "active-refresh-cancel";
+  const canceledSession = await createClaimedDraft(newSession);
+  const cancelPrompt = "installed expiry barrier";
+  await input.fill(cancelPrompt);
+  await input.press("Enter");
+  await expect.poll(() => events.filter((event) => event.type === "input.accepted"
+    && event.payload?.text === cancelPrompt).length).toBe(1);
+  const acceptedCancel = events.find((event) => event.type === "input.accepted"
+    && event.payload?.text === cancelPrompt);
+  await page.reload();
+  await expect(page.getByRole("log").getByText(cancelPrompt, { exact: true }))
+    .toBeVisible({ timeout: 5000 });
+  await page.getByRole("button", { name: /Cancel run|取消运行/, exact: true }).click();
+  await expect.poll(() => events.some((event) => event.type === "run.completed"
+    && event.run_id === acceptedCancel.run_id)).toBe(true);
+  const canceledRecords = (await readFile(join(workspace, ".myclaw", "sessions",
+    `${canceledSession.session_id}.jsonl`), "utf8")).split("\n").filter(Boolean).map(JSON.parse);
+  assert.equal(canceledRecords.filter((record) => record.role === "user" && record.content === cancelPrompt).length, 1);
+
   assert.deepEqual(errors, [], `Installed Web app reported browser errors: ${errors.join("; ")}`);
   const evidence = {
     marker: "INSTALLED_WEB_E2E_OK",
@@ -261,6 +308,7 @@ try {
     websocket: "passed",
     settings: "passed",
     conversation: "passed",
+    recovery: { active_refresh: "passed", confirmation_refresh: "passed", targeted_cancel: "passed" },
     accepted_runs: crossClientEvidence === null ? 1 : 2,
     completed_run: completedRunId,
     service_instance_id: service.service_instance_id,

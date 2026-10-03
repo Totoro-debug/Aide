@@ -151,6 +151,14 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
         assert read_discovery(home) is not None
         assert read_credential(home)
 
+        await first._command(
+            "subscribe", workspace_id=None, session_id=None, claim_version=None,
+            payload={"last_seq": None},
+        )
+        assert first.control.foreground_input_admitted()
+        assert not first.control.has_active_run
+        assert first.control.project_foreground_conversation().session_id == first.session_id
+
         status_response = await first._http_request(
             "GET",
             (

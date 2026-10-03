@@ -735,9 +735,10 @@
     "session_snapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["session_id", "messages", "restore_anchors"],
+      "required": ["session_id", "messages", "restore_anchors", "live_state"],
       "properties": {
         "session_id": {"$ref": "#/$defs/identifier"},
+        "live_state": {"anyOf": [{"$ref": "#/$defs/session_live_state"}, {"type": "null"}]},
         "messages": {"type": "array", "items": {"type": "object"}},
         "restore_anchors": {
           "type": "array",
@@ -847,6 +848,290 @@
         "session_id": {"$ref": "#/$defs/identifier"},
         "deleted": {"const": true}
       }
+    },
+    "active_tool_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool_call_id",
+        "name",
+        "arguments",
+        "status"
+      ],
+      "properties": {
+        "tool_call_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "arguments": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "running",
+            "completed",
+            "failed",
+            "rejected",
+            "canceled",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "active_run_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "request_id",
+        "prompt",
+        "status",
+        "assistant_content",
+        "tools",
+        "cancel_requested",
+        "cancellable"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "request_id": {
+          "$ref": "#/$defs/request_id"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "running"
+          ]
+        },
+        "assistant_content": {
+          "type": "string"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/active_tool_snapshot"
+          }
+        },
+        "cancel_requested": {
+          "type": "boolean"
+        },
+        "cancellable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "session_live_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stream_id",
+        "seq",
+        "runs"
+      ],
+      "properties": {
+        "stream_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/active_run_snapshot"
+          }
+        }
+      }
+    },
+    "confirmation_request": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "confirmation_id",
+        "tool_call_id",
+        "tool_name",
+        "reason",
+        "summary",
+        "details",
+        "warnings"
+      ],
+      "properties": {
+        "confirmation_id": {
+          "type": "string"
+        },
+        "tool_call_id": {
+          "type": "string"
+        },
+        "tool_name": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "confirmation_event_owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "generation_id"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/confirmation_origin"
+        },
+        "generation_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "occurrence_id": {
+          "type": "string"
+        }
+      }
+    },
+    "confirmation_requested_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "token",
+        "origin",
+        "request"
+      ],
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/confirmation_origin"
+        },
+        "request": {
+          "$ref": "#/$defs/confirmation_request"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/confirmation_event_owner"
+        }
+      }
+    },
+    "pending_confirmation_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_id",
+        "project_id",
+        "session_id",
+        "run_id",
+        "payload"
+      ],
+      "properties": {
+        "workspace_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "payload": {
+          "$ref": "#/$defs/confirmation_requested_payload"
+        }
+      }
+    },
+    "session_recovery_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_id",
+        "claim_version",
+        "snapshot"
+      ],
+      "properties": {
+        "workspace_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "claim_version": {
+          "type": "integer"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/session_snapshot"
+        }
+      }
+    },
+    "recovery_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessions",
+        "pending_confirmation"
+      ],
+      "properties": {
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/session_recovery_snapshot"
+          }
+        },
+        "pending_confirmation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/pending_confirmation_snapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "confirmation_origin": {
+      "enum": [
+        "foreground",
+        "background"
+      ]
     }
   }
 }

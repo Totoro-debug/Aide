@@ -145,10 +145,14 @@ def _chunk(
 
 
 async def _write_sse(
-    response: web.StreamResponse, chunks: list[dict[str, object]], *, delay: float
+    response: web.StreamResponse, chunks: list[dict[str, object]], *, delay: float,
+    hold_after_first: bool = False,
 ) -> None:
-    for chunk in chunks:
+    for index, chunk in enumerate(chunks):
         await response.write(f"data: {json.dumps(chunk)}\n\n".encode())
+        if hold_after_first and index == 0:
+            SETTINGS_ENTERED.set()
+            await SETTINGS_RELEASE.wait()
         await asyncio.sleep(delay)
     await response.write(b"data: [DONE]\n\n")
 
@@ -502,7 +506,8 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
     )
     await response.prepare(request)
     try:
-        await _write_sse(response, chunks, delay=0.35 if streaming_request else 0.04)
+        await _write_sse(response, chunks, delay=0.35 if streaming_request else 0.04,
+                         hold_after_first=streaming_request and "recovery streaming" in normalized_requested_prompt)
     except (asyncio.CancelledError, ConnectionResetError):
         pass
     return response

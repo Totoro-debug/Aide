@@ -756,6 +756,7 @@ timeout = 120
         cross_observation_path.write_text("", encoding="utf-8")
         fixture_service.PROVIDER_OBSERVATION_PATH = cross_observation_path
         fixture_service.INSTALLED_CONCURRENCY_RELEASE.clear()
+        fixture_service.INSTALLED_EXPIRY_RELEASE.clear()
 
         async def release_concurrent_runs() -> None:
             await _wait_for_path(cross_release_path, timeout=180)

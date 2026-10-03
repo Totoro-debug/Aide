@@ -961,6 +961,16 @@ try {
   await toolGroup.getByText("Failed", { exact: true }).waitFor();
   await toolGroup.getByText("Rejected", { exact: true }).waitFor();
   await toolGroup.getByText("Running", { exact: true }).waitFor();
+  const beforeToolRefresh = await page.evaluate(() => window.__myclawTestMessages);
+  await page.reload();
+  await expect(page.getByRole("log").getByText("tool states", { exact: true })).toHaveCount(1);
+  await page.evaluate((messages) => {
+    window.__myclawTestMessages = [...messages, ...window.__myclawTestMessages];
+  }, beforeToolRefresh);
+  await toolGroup.locator("summary").first().click();
+  for (const status of ["Completed", "Failed", "Rejected", "Running"]) {
+    await toolGroup.getByText(status, { exact: true }).waitFor();
+  }
 
   const newSessionResponsePromise = page.waitForResponse((response) => (
     response.request().method() === "POST"
@@ -1231,10 +1241,11 @@ try {
   await rm(resolve(skillRoot, "invalid"), { recursive: true });
   await page.getByRole("button", { name: "EN", exact: true }).click();
   await page.setViewportSize(viewports.at(-1));
-  await page.getByLabel("Message input").fill("streaming markdown");
+  await control.command("settings-arm");
+  await page.getByLabel("Message input").fill("recovery streaming markdown");
   await page.getByLabel("Message input").press("Shift+Enter");
   await page.getByLabel("Message input").type("second line");
-  const multilinePrompt = "streaming markdown\nsecond line";
+  const multilinePrompt = "recovery streaming markdown\nsecond line";
   assert.equal(await page.getByLabel("Message input").inputValue(), multilinePrompt);
   await page.getByLabel("Message input").evaluate((element) => {
     element.dispatchEvent(new element.ownerDocument.defaultView.KeyboardEvent("keydown", {
@@ -1246,11 +1257,40 @@ try {
   await page.getByText("Streamed answer", { exact: true }).waitFor();
   assert.equal(await page.getByText("The response arrived in multiple chunks.", { exact: true }).count(), 0,
     "The complete answer appeared before its first streamed frame was observed");
+  await control.command("settings-wait");
+  const beforeStreamRefresh = await page.evaluate(() => window.__myclawTestMessages);
+  await page.reload();
+  await expect(page.getByRole("log").getByText(multilinePrompt, { exact: true })).toHaveCount(1);
+  await expect(page.getByRole("heading", { name: "Streamed answer", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Cancel run", exact: true })).toBeEnabled();
+  await page.evaluate((messages) => {
+    window.__myclawTestMessages = [...messages, ...window.__myclawTestMessages];
+  }, beforeStreamRefresh);
   await sessionList.getByRole("button", { name: /Web available history/ }).click();
+  await expect(page.getByRole("log").getByText("tool states", { exact: true })).toHaveCount(1);
   const backgroundDraft = page.getByRole("button", { name: /New Session draft/ });
   await backgroundDraft.getByText("Running", { exact: true }).waitFor();
+  let releaseLateClaim;
+  const lateClaimGate = new Promise((resolveGate) => { releaseLateClaim = resolveGate; });
+  let lateClaimArrived;
+  const lateClaimArrival = new Promise((resolveArrival) => { lateClaimArrived = resolveArrival; });
+  const lateClaimRoute = `**/sessions/${conversationSessionId}/claim`;
+  await page.route(lateClaimRoute, async (route) => {
+    const response = await route.fetch();
+    lateClaimArrived();
+    await lateClaimGate;
+    await route.fulfill({ response });
+  });
   await backgroundDraft.click();
+  await lateClaimArrival;
+  await control.command("settings-release");
+  await waitForRecordedEvent((messages) => messages.some((event) => event.type === "run.completed"
+    && event.session_id === conversationSessionId), "Run completion while Claim response is held");
+  releaseLateClaim();
+  await page.unroute(lateClaimRoute);
   await page.getByText("Persisted Markdown", { exact: true }).waitFor();
+  await expect(page.getByRole("log").getByText(multilinePrompt, { exact: true })).toHaveCount(1);
+  await expect(page.getByRole("heading", { name: "Streamed answer", exact: true })).toHaveCount(1);
   await waitForRecordedEvent((messages) => messages.some((event) => (
     event.type === "run.completed" && messages.some((accepted) => (
       accepted.type === "input.accepted" && accepted.payload?.text === multilinePrompt && accepted.run_id === event.run_id
@@ -1471,10 +1511,49 @@ try {
         const primaryDialog = page.getByRole("dialog", { name: primaryTitle, exact: true });
         const secondaryDialog = secondPage.getByRole("dialog", { name: secondaryTitle, exact: true });
         const input = page.locator("textarea");
+        const previousPromptCount = await page.getByRole("log", { includeHidden: true })
+          .getByText("confirmation", { exact: true }).count();
         await input.fill("confirmation");
         await input.press("Enter");
         await primaryDialog.waitFor();
         await secondaryDialog.waitFor();
+        const originalRequest = await page.evaluate(() => [...window.__myclawTestMessages]
+          .reverse().find((event) => event.type === "confirmation.requested"));
+        const priorMessages = await page.evaluate(() => window.__myclawTestMessages);
+        if (viewport.width === 1440) {
+          await page.reload();
+          await expect(primaryDialog).toBeVisible({ timeout: 5000 });
+          await page.evaluate((messages) => {
+            window.__myclawTestMessages = [...messages, ...window.__myclawTestMessages];
+          }, priorMessages);
+        } else if (viewport.width === 1024) {
+          await page.evaluate(() => window.__myclawTestSocket.close());
+          await expect(primaryDialog).toBeHidden();
+          await expect(primaryDialog).toBeVisible({ timeout: 5000 });
+        } else {
+          const beforeSnapshots = await page.evaluate(() => window.__myclawTestMessages
+            .filter((event) => event.type === "snapshot.required").length);
+          await page.evaluate(() => {
+            const latest = [...window.__myclawTestMessages].reverse().find((event) =>
+              typeof event.seq === "number");
+            window.__myclawTestSocket.dispatchEvent(new globalThis.MessageEvent("message", {
+              data: JSON.stringify({ ...latest, type: "test.gap", seq: latest.seq + 2, payload: {} }),
+            }));
+          });
+          await expect.poll(() => page.evaluate(() => window.__myclawTestMessages
+            .filter((event) => event.type === "snapshot.required").length))
+            .toBeGreaterThan(beforeSnapshots);
+        }
+        {
+          const recoveredRequest = await page.evaluate(() => [...window.__myclawTestMessages]
+            .reverse().find((event) => event.type === "snapshot.required"
+              && event.payload?.snapshot?.pending_confirmation)?.payload.snapshot.pending_confirmation);
+          assert.equal(recoveredRequest?.payload.token, originalRequest.payload.token);
+          assert.deepEqual(recoveredRequest?.payload.request, originalRequest.payload.request);
+          await expect(page.getByRole("log", { includeHidden: true }).getByText("confirmation", { exact: true }))
+            .toHaveCount(previousPromptCount + 1);
+          await expect(page.getByRole("button", { name: /Cancel run|取消运行/, exact: true, includeHidden: true })).toBeVisible();
+        }
         assert.equal(await page.getByRole("status").filter({ hasText: /resolved by another client|其他客户端/ }).count(), 0,
           "A previous confirmation notice overlaps the active dialog");
 

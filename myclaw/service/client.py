@@ -213,6 +213,8 @@ class RemoteConfirmationCoordinator(ConfirmationPresentationCoordinator):
         owner_data = payload.get("owner")
         if not isinstance(token, str) or not isinstance(request_data, dict):
             return
+        if any(candidate == token for candidate, _owner in self._items.values()):
+            return
         try:
             request = _confirmation_request(request_data)
             owner = _confirmation_owner(owner_data, origin, event.get("run_id"))
@@ -616,6 +618,40 @@ class ServiceClient:
             await self.confirmation.handle_resolved(event)
         elif event_type == "snapshot.required":
             self.control.set_admitted(False)
+            snapshot = payload.get("snapshot") if isinstance(payload, dict) else None
+            if not isinstance(snapshot, dict):
+                return
+            sessions = snapshot.get("sessions")
+            if isinstance(sessions, list):
+                for entry in sessions:
+                    if not isinstance(entry, dict) or entry.get("workspace_id") != self.workspace_id:
+                        continue
+                    session = entry.get("snapshot")
+                    if (
+                        not isinstance(session, dict) or session.get("session_id") != self.session_id
+                        or entry.get("claim_version") != self.claim_version
+                    ):
+                        continue
+                    live = session.get("live_state")
+                    if not isinstance(live, dict) or not isinstance(live.get("runs"), list):
+                        continue
+                    self.control.set_projection(_projection(session))
+                    self.control.clear_runs()
+                    for run in live["runs"]:
+                        if isinstance(run, dict) and isinstance(run.get("run_id"), str):
+                            self.control.accept_run(run["run_id"])
+                    self.control.set_admitted(True)
+            if "pending_confirmation" in snapshot:
+                pending = snapshot["pending_confirmation"]
+                token = (
+                    pending.get("payload", {}).get("token")
+                    if isinstance(pending, dict) else None
+                )
+                for local, (candidate, _owner) in tuple(self.confirmation._items.items()):
+                    if candidate != token:
+                        await self.confirmation._dismiss_local(local)
+                if isinstance(pending, dict):
+                    await self.confirmation.handle_requested(pending)
         elif event_type == "project.removed" and event.get("workspace_id") == self.workspace_id:
             self.control.set_admitted(False)
             self.control.clear_runs()

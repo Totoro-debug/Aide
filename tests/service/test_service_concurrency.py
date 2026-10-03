@@ -39,6 +39,7 @@ from myclaw.service.runtime import LocalService
 from myclaw.service.transport import create_app
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
+from tests.service.test_protocol_contract import _validator
 
 
 class _CollectingSink:
@@ -1019,12 +1020,13 @@ async def test_duplicate_command_request_id_does_not_start_a_second_run(
             version: int,
             text: str,
             run_id: str,
+            request_id: str | None = None,
         ) -> Any:
             nonlocal call_count
             call_count += 1
             entered.set()
             await release.wait()
-            return await original_input(client_id, selected_session_id, version, text, run_id)
+            return await original_input(client_id, selected_session_id, version, text, run_id, request_id)
 
         monkeypatch.setattr(workspace, "input", slow_input)
         command = {
@@ -1608,9 +1610,11 @@ async def test_replay_holds_live_events_until_cached_events_are_sent(tmp_path: P
         replay_sink.resume.set()
         await asyncio.wait_for(asyncio.gather(subscribe, live), timeout=2)
         assert [event["seq"] for event in replay_sink.events] == [
-            last_seq + 1, last_seq + 2, last_seq + 3,
+            last_seq + 1, last_seq + 2, last_seq + 3, last_seq + 4,
         ]
-        assert [cast(dict[str, object], event["payload"])["marker"] for event in replay_sink.events] == [
+        assert replay_sink.events[2]["type"] == "snapshot.required"
+        assert [cast(dict[str, object], event["payload"])["marker"] for event in replay_sink.events
+                if event["type"] == "test.event"] == [
             "cached-a", "cached-b", "live",
         ]
     finally:
@@ -1782,4 +1786,213 @@ async def test_slow_consumer_reconnect_requires_snapshot(tmp_path: Path) -> None
         assert not client.resync_required
         assert "credential" not in json.dumps(replay_sink.events)
     finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_snapshot_recovers_accepted_input_and_live_output_without_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, streaming: bool
+) -> None:
+    home = _configured_home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    provider = _ConcurrentProvider(early_a_delta=streaming)
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _config: provider)
+    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, path)
+        session = await workspace.create_draft(client.client_id)
+        claimed = await service.claim(client.client_id, workspace.workspace_id, session)
+        command = {"request_id": "original-input", "type": "input",
+                   "workspace_id": workspace.workspace_id, "session_id": session,
+                   "claim_version": _claim_version(claimed), "payload": {"text": "session-a"}}
+        ack = await service.handle_command(client.client_id, command)
+        run_id = cast(dict[str, Any], ack["result"])["run_id"]
+        await asyncio.wait_for(provider.session_a_started.wait(), 2)
+        if streaming:
+            await asyncio.wait_for(sink.wait_for("run.output", run_id), 2)
+        recovered = await service.claim(client.client_id, workspace.workspace_id, session)
+        snapshot = cast(dict[str, Any], recovered["snapshot"])
+        _validator("session_snapshot").validate(snapshot)
+        live = snapshot["live_state"]
+        assert live["stream_id"] == client.stream_id
+        assert live["seq"] == client.sequence
+        assert len(live["runs"]) == 1
+        run = live["runs"][0]
+        assert run["run_id"] == run_id
+        assert run["request_id"] == "original-input"
+        assert run["prompt"] == "session-a"
+        assert run["assistant_content"] == ("early from session A" if streaming else "")
+        assert run["cancellable"] is True
+        assert await service.handle_command(client.client_id, command) == ack
+        assert snapshot["messages"] == []
+        await workspace.cancel(client.client_id, session, _claim_version(claimed), run_id)
+        await asyncio.wait_for(sink.wait_for("run.completed", run_id), 2)
+        assert workspace.session_snapshot(session)["live_state"] == {
+            "stream_id": client.stream_id, "seq": client.sequence, "runs": [],
+        }
+    finally:
+        provider.release_a.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_history", [False, True])
+async def test_snapshot_and_output_share_cursor_and_do_not_duplicate_committed_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_history: bool
+) -> None:
+    home = _configured_home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    provider = _ConcurrentProvider(early_a_delta=True)
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _config: provider)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class PausingSink(_CollectingSink):
+        async def send_event(self, event: dict[str, object]) -> None:
+            if event["type"] == "run.output":
+                entered.set()
+                await release.wait()
+            await super().send_event(event)
+
+    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        sink = PausingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, path)
+        session = await workspace.create_draft(client.client_id)
+        claim = await service.claim(client.client_id, workspace.workspace_id, session)
+        previous_messages = []
+        if legacy_history:
+            persisted = workspace.loops[session].loop.session
+            persisted.commit_agent_run(
+                [{"role": "user", "content": "legacy input"}],
+                pending_last_compacted=0, pending_action_summary="",
+            )
+            await persisted.wait_for_pending_persist()
+            previous_messages = cast(dict[str, Any], workspace.session_snapshot(session))["messages"]
+        await workspace.input(client.client_id, session, _claim_version(claim), "session-a", "run-a")
+        await asyncio.wait_for(entered.wait(), 2)
+        snapshot = cast(dict[str, Any], workspace.session_snapshot(session))
+        assert snapshot["live_state"]["runs"][0]["assistant_content"] == "early from session A"
+        assert snapshot["live_state"]["seq"] == client.sequence
+        # The terminal commit may complete while an earlier output is still being delivered.
+        provider.release_a.set()
+        async with asyncio.timeout(2):
+            while len(workspace.loops[session].loop.session.messages) <= len(previous_messages):
+                await asyncio.sleep(0)
+        snapshot = cast(dict[str, Any], workspace.session_snapshot(session))
+        assert snapshot["messages"] == previous_messages
+        assert snapshot["restore_anchors"] == []
+        assert len(snapshot["live_state"]["runs"]) == 1
+        release.set()
+        await asyncio.wait_for(sink.wait_for("run.completed", "run-a"), 2)
+        snapshot = cast(dict[str, Any], workspace.session_snapshot(session))
+        assert snapshot["live_state"]["runs"] == []
+        assert sum(message["role"] == "user" for message in snapshot["messages"]) == 1 + legacy_history
+    finally:
+        release.set()
+        provider.release_a.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_same_text_inputs_keep_distinct_request_ids_and_only_current_run_is_cancellable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    provider = _ConcurrentProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _config: provider)
+    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, path)
+        session = await workspace.create_draft(client.client_id)
+        claim = await service.claim(client.client_id, workspace.workspace_id, session)
+        commands = [{"type": "input", "request_id": request_id,
+            "workspace_id": workspace.workspace_id, "session_id": session,
+            "claim_version": _claim_version(claim), "payload": {"text": "session-a"}}
+            for request_id in ("first", "second")]
+        for command in commands:
+            await service.handle_command(client.client_id, command)
+        await asyncio.wait_for(provider.session_a_started.wait(), 2)
+        snapshot = cast(dict[str, Any], workspace.session_snapshot(session))
+        runs = snapshot["live_state"]["runs"]
+        assert [run["request_id"] for run in runs] == ["first", "second"]
+        assert len({run["run_id"] for run in runs}) == 2
+        assert [run["cancellable"] for run in runs] == [True, False]
+        await service.handle_command(client.client_id, commands[0])
+        assert len(cast(dict[str, Any], workspace.session_snapshot(session))["live_state"]["runs"]) == 2
+    finally:
+        provider.release_a.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reconnect", [True, False])
+async def test_expiring_unregistered_workspace_drains_running_schedule_or_resumes_same_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reconnect: bool
+) -> None:
+    home = _configured_home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    provider = _RemovalProvider(block_schedule_preparation=False)
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _config: provider)
+    clock = FakeClock(datetime(2026, 10, 3, tzinfo=UTC))
+    wake = asyncio.Event()
+    async def sleep(_seconds: float) -> None:
+        await wake.wait()
+        wake.clear()
+    service = LocalService(home, ConfigLoader(home).load_for_startup(),
+        monotonic_now=clock.monotonic, sleep=sleep)
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        other = await service.register_client("web")
+        await service.connect_client(client.client_id, _CollectingSink())
+        await service.connect_client(other.client_id, _CollectingSink())
+        workspace = await service.attach_workspace(client.client_id, path)
+        session = await workspace.create_draft(client.client_id)
+        claimed = await service.claim(client.client_id, workspace.workspace_id, session)
+        job = ScheduleJob(job_id=str(uuid4()), message="scheduled removal job",
+            schedule=JobSchedule.every(3600), created_at_ms=1, updated_at_ms=1)
+        await workspace.schedule_service.add_user_job(job)
+        await asyncio.wait_for(provider.schedule_started.wait(), 2)
+        expiry_client = client
+        await service.disconnect_client(client.client_id)
+        clock.advance(29)
+        assert not provider.schedule_cancelled.is_set()
+        assert workspace.schedule_status()["active_job_count"] == 1
+        if reconnect:
+            client = await service.register_client("cli", client.reconnect_credential)
+            await service.connect_client(client.client_id, _CollectingSink())
+            assert await service.attach_workspace(client.client_id, path) is workspace
+            assert await service.claim(client.client_id, workspace.workspace_id, session) == claimed
+            provider.release_schedule.set()
+        else:
+            clock.advance(1)
+            wake.set()
+            await asyncio.wait_for(cast(asyncio.Task[None], expiry_client.disconnect_task), 3)
+            assert provider.schedule_cancelled.is_set()
+            assert workspace.workspace_id not in service.workspaces
+            assert workspace.schedule_status()["active_job_count"] == 0
+            persisted = Session.load(workspace.workspace_state, job.session_id)
+            assert any(message.get("role") == "user" for message in persisted.messages)
+        assert path.exists()
+        assert len(await workspace.schedule_service.public_snapshot()) == 1
+    finally:
+        provider.release_schedule.set()
         await service.stop()

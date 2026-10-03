@@ -43,6 +43,8 @@ from myclaw.service.projects import ProjectCatalog, ProjectCatalogError
 from myclaw.service.runtime import LocalService, WorkspaceServiceRuntime
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
+from tests.service.test_protocol_contract import _validator
+from tests.service.test_service_concurrency import _CollectingSink
 
 
 def test_discovery_file_has_no_credential_and_round_trips_atomically(tmp_path: Path) -> None:
@@ -1623,4 +1625,296 @@ async def test_stale_run_id_cannot_cancel_the_next_run(
             await workspace.cancel(client.client_id, session_id, claim.version, "current-run")
             assert cancelled == [True]
     finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("registered_peer", [False, True])
+async def test_unregistered_workspace_loses_schedule_and_runtime_at_last_user_expiry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, registered_peer: bool
+) -> None:
+    home = _configured_home(tmp_path / "home")
+    clock = FakeClock(datetime(2026, 10, 3, tzinfo=UTC))
+    wake = asyncio.Event()
+    starts: list[str] = []
+
+    async def sleep(_seconds: float) -> None:
+        await wake.wait()
+        await asyncio.sleep(0)
+
+    async def execute(occurrence: ScheduleOccurrence) -> None:
+        starts.append(occurrence.job.message)
+
+    async def dream() -> None:
+        return None
+
+    class RecordingSchedule(ScheduleService):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**{**kwargs, "clock": clock, "execute_user_occurrence": execute,
+                               "execute_dream": dream})
+
+    monkeypatch.setattr(clock, "sleep", sleep)
+    monkeypatch.setattr(service_runtime, "ScheduleService", RecordingSchedule)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(),
+                           monotonic_now=clock.monotonic, sleep=sleep)
+    await service.start()
+    try:
+        clients = [await service.register_client(kind)
+                   for kind in ("cli", "cli", "web" if registered_peer else "cli")]
+        for client in clients:
+            await service.connect_client(client.client_id, _CollectingSink())
+        paths = [tmp_path / name for name in ("a", "b")]
+        for path in paths:
+            path.mkdir()
+        a = await service.attach_workspace(clients[0].client_id, paths[0])
+        await service.attach_workspace(clients[1].client_id, paths[0])
+        if registered_peer:
+            b = (await service.register_project(clients[2].client_id, paths[1]))[1]
+        else:
+            b = await service.attach_workspace(clients[2].client_id, paths[1])
+        await service.disconnect_client(clients[0].client_id)
+        assert a.schedule_status()["admitted"] is True
+        await a.schedule_service.add_user_job(ScheduleJob(
+            job_id=str(uuid4()), message="A with remaining user",
+            schedule=JobSchedule.at("2026-10-03T00:00:01.000+00:00"),
+            created_at_ms=1, updated_at_ms=1,
+        ))
+        clock.advance(1)
+        wake.set()
+        async with asyncio.timeout(2):
+            while not starts:
+                await asyncio.sleep(0)
+        wake.clear()
+        assert starts == ["A with remaining user"]
+        await service.disconnect_client(clients[1].client_id)
+        for workspace, message in ((a, "A"), (b, "B")):
+            await workspace.schedule_service.add_user_job(ScheduleJob(
+                job_id=str(uuid4()), message=message,
+                schedule=JobSchedule.at("2026-10-03T00:00:02.000+00:00"),
+                created_at_ms=1, updated_at_ms=1,
+            ))
+        clock.advance(29)
+        wake.set()
+        async with asyncio.timeout(2):
+            while "B" not in starts:
+                await asyncio.sleep(0)
+        assert starts == ["A with remaining user", "B"]
+        assert a.workspace_id in service.workspaces
+        clock.advance(1)
+        await asyncio.wait_for(cast(asyncio.Task[None], clients[1].disconnect_task), 2)
+        assert a.workspace_id not in service.workspaces
+        assert b.workspace_id in service.workspaces
+        assert len(await a.schedule_service.public_snapshot()) == 1
+        fresh = await service.register_client("cli")
+        reopened = await service.attach_workspace(fresh.client_id, paths[0])
+        assert reopened is not a
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("last_seq", [None, "current", 0, "slow"])
+async def test_subscribe_restores_only_valid_original_confirmation(
+    tmp_path: Path, last_seq: int | str | None
+) -> None:
+    home = _configured_home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        workspace = await service.attach_workspace(client.client_id, path)
+        session = await workspace.create_draft(client.client_id)
+        await service.claim(client.client_id, workspace.workspace_id, session)
+        envelope = ConfirmationEnvelope(
+            request=ConfirmationRequest(uuid4(), "call", "exec", "Exact command", {"command": "echo ok"}),
+            origin="foreground",
+            owner=ForegroundConfirmationOwner(workspace.loops[session].loop.generation_id, uuid4()),
+        )
+        pending = asyncio.create_task(service.confirmation.request(envelope))
+        async with asyncio.timeout(2):
+            while not any(event["type"] == "confirmation.requested" for event in client.events):
+                await asyncio.sleep(0)
+        requested = next(event for event in client.events if event["type"] == "confirmation.requested")
+        payload = cast(dict[str, object], requested["payload"])
+        cursor = client.sequence if last_seq in {"current", "slow"} else last_seq
+        if last_seq == "slow":
+            client.resync_required = True
+        if last_seq == 0:
+            for _ in range(260):
+                await service.emit("test.event", workspace_id=None, session_id=None, run_id=None, payload={})
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink, wait_for_subscribe=True)
+        await service.handle_command(client.client_id, {
+            "request_id": "subscribe", "type": "subscribe",
+            "payload": {"last_seq": cursor, "stream_id": client.stream_id},
+        })
+        snapshot = cast(dict[str, Any], sink.events[-1]["payload"])["snapshot"]
+        assert snapshot["pending_confirmation"]["payload"] == payload
+        _validator("recovery_snapshot").validate(snapshot)
+        await service.handle_command(client.client_id, {
+            "request_id": "decide", "type": "confirmation_decide",
+            "payload": {"token": payload["token"], "decision": "declined"},
+        })
+        assert await asyncio.wait_for(pending, 2) == "declined"
+        await service.handle_command(client.client_id, {
+            "request_id": "resubscribe", "type": "subscribe", "payload": {"last_seq": None},
+        })
+        assert cast(dict[str, Any], sink.events[-1]["payload"])["snapshot"]["pending_confirmation"] is None
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("background", [False, True])
+async def test_confirmation_snapshot_audience_competing_decision_and_cancel(
+    tmp_path: Path, background: bool
+) -> None:
+    home = _configured_home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        owner = await service.register_client("cli")
+        peer = await service.register_client("cli")
+        outsider = await service.register_client("cli")
+        workspace = await service.attach_workspace(owner.client_id, path)
+        await service.attach_workspace(peer.client_id, path)
+        session = await workspace.create_draft(owner.client_id)
+        await service.claim(owner.client_id, workspace.workspace_id, session)
+        generation = workspace.loops[session].loop.generation_id
+        if background:
+            generation = (await workspace._get_schedule_loop("job")).loop.generation_id
+        envelope = ConfirmationEnvelope(
+            request=ConfirmationRequest(uuid4(), "call", "exec", "Exact operation", {}),
+            origin="background" if background else "foreground",
+            owner=BackgroundConfirmationOwner(generation, "job", uuid4()) if background
+            else ForegroundConfirmationOwner(generation, uuid4()),
+            job_id="job" if background else None,
+            title="Background operation" if background else None,
+        )
+        pending = asyncio.create_task(service.confirmation.request(envelope))
+        async with asyncio.timeout(2):
+            while not any(event["type"] == "confirmation.requested" for event in owner.events):
+                await asyncio.sleep(0)
+        async def recover(client_id: str) -> dict[str, Any]:
+            sink = _CollectingSink()
+            await service.connect_client(client_id, sink, wait_for_subscribe=True)
+            await service.handle_command(client_id, {"request_id": str(uuid4()),
+                "type": "subscribe", "payload": {"last_seq": None}})
+            return cast(dict[str, Any], cast(dict[str, Any], sink.events[-1]["payload"])["snapshot"])
+        recovered = await recover(owner.client_id)
+        token = recovered["pending_confirmation"]["payload"]["token"]
+        assert (await recover(peer.client_id))["pending_confirmation"]["payload"]["token"] == token
+        assert (await recover(outsider.client_id))["pending_confirmation"] is None
+        decisions = await asyncio.gather(*(
+            service.handle_command(client.client_id, {"request_id": str(uuid4()),
+                "type": "confirmation_decide", "payload": {"token": token, "decision": "approved"}})
+            for client in (owner, peer)
+        ), return_exceptions=True)
+        assert sum(isinstance(result, dict) for result in decisions) == 1
+        assert await pending == "approved"
+        pending = asyncio.create_task(service.confirmation.request(envelope))
+        async with asyncio.timeout(2):
+            while len([event for event in owner.events if event["type"] == "confirmation.requested"]) < 2:
+                await asyncio.sleep(0)
+        await service.confirmation.cancel_generation(generation)
+        with pytest.raises(ConfirmationAborted):
+            await pending
+        await service.handle_command(owner.client_id, {"request_id": str(uuid4()),
+            "type": "subscribe", "payload": {"last_seq": None}})
+        assert cast(dict[str, Any], owner.events[-1]["payload"])["snapshot"]["pending_confirmation"] is None
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("register", [False, True])
+async def test_workspace_expiry_serializes_reentry_and_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, register: bool
+) -> None:
+    home = _configured_home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    clock = FakeClock(datetime(2026, 10, 3, tzinfo=UTC))
+    wake = asyncio.Event()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    async def sleep(_seconds: float) -> None:
+        await wake.wait()
+    service = LocalService(home, ConfigLoader(home).load_for_startup(),
+        monotonic_now=clock.monotonic, sleep=sleep)
+    await service.start()
+    try:
+        owner = await service.register_client("cli")
+        other = await service.register_client("web")
+        await service.connect_client(owner.client_id, _CollectingSink())
+        await service.connect_client(other.client_id, _CollectingSink())
+        workspace = await service.attach_workspace(owner.client_id, path)
+        original_close = workspace.close
+        async def close() -> None:
+            entered.set()
+            await release.wait()
+            await original_close()
+        monkeypatch.setattr(workspace, "close", close)
+        await service.disconnect_client(owner.client_id)
+        clock.advance(30)
+        wake.set()
+        await asyncio.wait_for(entered.wait(), 2)
+        reentry = asyncio.create_task(service.register_project(other.client_id, path) if register
+            else service.attach_workspace(other.client_id, path))
+        await asyncio.sleep(0)
+        assert not reentry.done()
+        release.set()
+        result = await asyncio.wait_for(reentry, 2)
+        reopened = cast(WorkspaceServiceRuntime, result[1] if isinstance(result, tuple) else result)
+        assert reopened is not workspace
+        assert reopened.workspace_id in service.workspaces
+        assert workspace.workspace_id not in service.workspaces
+    finally:
+        release.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_workspace_expiry_cleanup_failure_keeps_owned_runtime_and_closes_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    clock = FakeClock(datetime(2026, 10, 3, tzinfo=UTC))
+    wake = asyncio.Event()
+    async def sleep(_seconds: float) -> None:
+        await wake.wait()
+    service = LocalService(home, ConfigLoader(home).load_for_startup(),
+        monotonic_now=clock.monotonic, sleep=sleep)
+    await service.start()
+    original_close = None
+    try:
+        owner = await service.register_client("cli")
+        other = await service.register_client("web")
+        sink = _CollectingSink()
+        await service.connect_client(owner.client_id, _CollectingSink())
+        await service.connect_client(other.client_id, sink)
+        workspace = await service.attach_workspace(owner.client_id, path)
+        original_close = workspace.close
+        async def failing_close() -> None:
+            raise RuntimeError("injected cleanup failure")
+        monkeypatch.setattr(workspace, "close", failing_close)
+        await service.disconnect_client(owner.client_id)
+        clock.advance(30)
+        wake.set()
+        await asyncio.wait_for(cast(asyncio.Task[None], owner.disconnect_task), 2)
+        assert workspace.workspace_id in service.workspaces
+        assert service.state == "draining"
+        assert any(event["type"] == "service.cleanup_failed" for event in sink.events)
+        with pytest.raises(ServiceError) as unavailable:
+            await service.attach_workspace(other.client_id, path)
+        assert unavailable.value.code == "admission_closed"
+    finally:
+        if original_close is not None:
+            monkeypatch.setattr(workspace, "close", original_close)
         await service.stop()

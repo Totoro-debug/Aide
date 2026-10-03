@@ -51,6 +51,15 @@ export async function settingsConfirmationAcceptance({ page, control }) {
     return acceptedRun?.session_id;
   }, { timeout: 10000, message: "Settings input must be accepted in the newly claimed draft" }).toBe(created.session_id);
   await control.command("settings-wait");
+  await page.reload();
+  await expect(page.getByRole("log").getByText("settings generation barrier confirmation", { exact: true }))
+    .toBeVisible({ timeout: 5000 });
+  await expect(page.getByRole("button", { name: "Cancel run", exact: true })).toBeEnabled();
+  await expect.poll(async () => page.evaluate((runId) => window.__myclawTestMessages
+    .filter((event) => event.type === "snapshot.required")
+    .some((event) => event.payload?.snapshot?.sessions?.some((entry) => (
+      entry.snapshot.live_state?.runs?.some((run) => run.run_id === runId)
+    ))), acceptedRun.run_id)).toBe(true);
   await page.getByRole("navigation").getByRole("link", { name: "Settings", exact: true }).click();
   const field = page.getByLabel("Maximum iterations", { exact: true });
   await expect(field).toBeEnabled();
@@ -66,6 +75,14 @@ export async function settingsConfirmationAcceptance({ page, control }) {
   const dialog = page.getByRole("dialog", { name: "Tool Confirmation", exact: true });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("confirmation-outside.txt");
+  const original = await page.evaluate(() => [...window.__myclawTestMessages]
+    .reverse().find((event) => event.type === "confirmation.requested"));
+  await page.reload();
+  await expect(dialog).toBeVisible({ timeout: 5000 });
+  const restored = await page.evaluate(() => [...window.__myclawTestMessages]
+    .reverse().find((event) => event.type === "snapshot.required"
+      && event.payload?.snapshot?.pending_confirmation)?.payload.snapshot.pending_confirmation);
+  assert.equal(restored?.payload.token, original.payload.token);
   await dialog.getByRole("button", { name: "Approve", exact: true }).click();
   await expect(dialog).toBeHidden();
   await waitForActiveGeneration(page);
@@ -129,10 +146,22 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
         /\/projects\/[^/]+\/sessions$/.test(new globalThis.URL(response.url()).pathname)
         && response.request().method() === "POST"
       ));
+      const claimed = target.waitForResponse(async (response) => {
+        if (!/\/projects\/[^/]+\/sessions\/[^/]+\/claim$/.test(new globalThis.URL(response.url()).pathname)
+          || response.request().method() !== "POST") return false;
+        const created = await result;
+        if (!created.ok()) return false;
+        return new globalThis.URL(response.url()).pathname.endsWith(`/${(await created.json()).session_id}/claim`);
+      }).catch(() => null);
       await button.click();
       const response = await result;
       const body = await response.json();
       if (response.ok()) {
+        const claimResponse = await claimed;
+        assert.ok(claimResponse);
+        assert.equal(claimResponse.status(), 200);
+        assert.equal((await claimResponse.json()).claim.session_id, body.session_id);
+        await expect(button).toBeEnabled({ timeout: 30000 });
         await expect(target.locator("textarea")).toBeVisible({ timeout: 30000 });
         return;
       }

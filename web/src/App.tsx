@@ -297,7 +297,22 @@ export default function App() {
   }, [authState, refreshProjects]);
 
   useEffect(() => {
-    const unsubscribe = subscribeServiceEvents((event) => {
+    const unsubscribe = subscribeServiceEvents((incoming) => {
+      let event = incoming;
+      if (event.type === "snapshot.required") {
+        const snapshot = event.payload.snapshot;
+        if (typeof snapshot !== "object" || snapshot === null) return;
+        const pending = (snapshot as { pending_confirmation?: unknown }).pending_confirmation;
+        if (pending === undefined) return;
+        if (pending === null) {
+          pendingConfirmationRef.current = null;
+          resolvingConfirmationTokenRef.current = null;
+          setPendingConfirmation(null);
+          return;
+        }
+        if (typeof pending !== "object") return;
+        event = { ...event, ...pending, type: "confirmation.requested" } as ServiceEvent;
+      }
       if (event.type === "confirmation.requested") {
         const next = parseConfirmationEvent(event);
         if (next === null || pendingConfirmationRef.current?.token === next.token) return;
@@ -450,8 +465,15 @@ export default function App() {
               && event.seq > cursor.seq + 1
               && event.type !== "snapshot.required"
             ) {
-              const resync = { ...event, type: "snapshot.required", workspace_id: null, session_id: null, run_id: null };
-              for (const listener of eventListenersRef.current) listener(resync);
+              const activeConnection = eventStreamRef.current;
+              if (activeConnection !== null) {
+                void activeConnection.sendCommand({
+                  request_id: createRequestId(), type: "subscribe", workspace_id: null,
+                  session_id: null, claim_version: null,
+                  payload: { last_seq: null, stream_id: event.stream_id },
+                }).catch(() => activeConnection.close());
+              }
+              return;
             }
             eventCursorRef.current = {
               serviceInstanceId: event.service_instance_id,
@@ -733,13 +755,20 @@ function ConfirmationDialog({
 }: ConfirmationDialogProps) {
   const { t } = useTranslation();
   const declineRef = useRef<HTMLButtonElement | null>(null);
+  const lastConfirmationOriginRef = useRef<ConfirmationOrigin | null>(null);
+  useEffect(() => {
+    if (confirmation !== null) lastConfirmationOriginRef.current = confirmation.origin;
+  }, [confirmation]);
   const project = confirmation?.projectId === null
     ? undefined
     : projects.find((item) => item.project_id === confirmation?.projectId);
 
   function restoreFocus() {
-    const target = triggerRef.current ?? document.getElementById("main-content");
+    const target = triggerRef.current
+      ?? (lastConfirmationOriginRef.current === "foreground" ? document.querySelector("textarea") : null)
+      ?? document.getElementById("main-content");
     if (!(target instanceof HTMLElement) || !target.isConnected) return;
+    if (target instanceof HTMLTextAreaElement) triggerRef.current = target;
     if (target instanceof HTMLTextAreaElement && target.disabled) {
       document.getElementById("main-content")?.focus();
       return;
@@ -4635,6 +4664,7 @@ interface LiveRun {
   tools: ToolActivity[];
   error: string | null;
   cancelRequested: boolean;
+  cancellable: boolean;
 }
 
 interface PendingSubmission {
@@ -4678,7 +4708,60 @@ function newLiveRun(
     tools: [],
     error: null,
     cancelRequested: false,
+    cancellable: true,
   };
+}
+
+function reduceLiveRunEvent(runs: LiveRun[], event: ServiceEvent): LiveRun[] {
+  if (event.run_id === null) return runs;
+  const runId = event.run_id;
+  const requestId = typeof event.payload.request_id === "string" ? event.payload.request_id : null;
+  const index = runs.findIndex((run) => run.runId === runId
+    || (event.type === "input.accepted" && requestId !== null && run.localId === requestId));
+  const current = index >= 0 ? runs[index] : newLiveRun(requestId ?? `event-${runId}`, runId,
+    typeof event.payload.text === "string" ? event.payload.text : "", "accepted");
+  let next = { ...current, runId };
+  if (event.type === "input.accepted") {
+    next.prompt = typeof event.payload.text === "string" ? event.payload.text : next.prompt;
+    if (next.status === "submitting") next.status = "accepted";
+  } else if (event.type === "run.output") {
+    const message = event.payload.message;
+    if (typeof message !== "object" || message === null || Array.isArray(message)) return runs;
+    const value = message as Record<string, unknown>;
+    const metadata = typeof value.metadata === "object" && value.metadata !== null
+      ? value.metadata as Record<string, unknown> : {};
+    const content = typeof value.content === "string" ? value.content : "";
+    if (!isLiveRunActive(next)) return runs;
+    next.status = "running";
+    if (value.type === "model_response" && metadata._stream_delta === true) {
+      next.assistantContent += content;
+    } else if (value.type === "tool_call" && typeof metadata.tool_call_id === "string") {
+      const toolId = metadata.tool_call_id;
+      const tool = next.tools.find((item) => item.toolCallId === toolId);
+      const status: ToolStatus = metadata.status === "success" ? "completed"
+        : metadata.status === "error" ? "failed" : metadata.status === "refused" ? "rejected"
+          : metadata.status === "cancelled" || metadata.status === "canceled" ? "canceled" : "running";
+      next.tools = tool === undefined ? [...next.tools, { toolCallId: toolId, name: content,
+        arguments: typeof metadata.arguments === "string" ? metadata.arguments : "", status }]
+        : next.tools.map((item) => item.toolCallId === toolId ? { ...item, status } : item);
+    } else if (value.type === "system_control" && metadata._streamed === true) {
+      next.status = metadata.finish_reason === "cancelled" ? "canceled" : "failed";
+      next.error = content || null;
+    }
+  } else if (["run.completed", "run.failed", "run.cancelled"].includes(event.type)) {
+    const finish = event.payload.finish_reason ?? (event.type === "run.cancelled" ? "cancelled"
+      : event.type === "run.failed" ? "failed" : "completed");
+    next.status = current.status === "canceled" || finish === "cancelled" ? "canceled"
+      : finish === "completed" ? "completed" : "failed";
+    next.cancellable = false;
+  } else {
+    return runs;
+  }
+  if (next.status === "canceled") {
+    next = { ...next, tools: next.tools.map((tool) => tool.status === "running"
+      ? { ...tool, status: "canceled" } : tool) };
+  }
+  return index < 0 ? [...runs, next] : runs.map((run, i) => i === index ? next : run);
 }
 
 function isLiveRunActive(run: LiveRun): boolean {
@@ -4866,7 +4949,7 @@ function LiveRunView({
       {run.tools.length > 0 ? <ToolActivityGroup tools={run.tools} t={t} /> : null}
       {run.assistantContent ? <MarkdownContent content={run.assistantContent} /> : active ? <p className={styles.pendingAnswer}>{t("conversation.assistantPending")}</p> : null}
       {run.error ? <p className={styles.runError}>{run.error}</p> : null}
-      {active && run.runId !== null ? (
+      {active && run.runId !== null && run.cancellable ? (
         <button
           className={styles.cancelRunButton}
           type="button"
@@ -4980,6 +5063,7 @@ function ProjectSessionsContent({
   const selectedSessionRef = useRef<string | null>(null);
   const workspaceIdRef = useRef<string | null>(null);
   const sessionRequestRef = useRef(0);
+  const sessionSelectionVersionRef = useRef(0);
   const refreshSessionsRef = useRef<((cursor?: string | null, append?: boolean) => Promise<void>) | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const renameTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -4998,6 +5082,34 @@ function ProjectSessionsContent({
   const needsReclaimRef = useRef(false);
   const attemptedRestoreRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
+  const snapshotReadsRef = useRef(new Set<ServiceEvent[]>());
+  const snapshotEventsRef = useRef(new WeakMap<SessionSnapshot, ServiceEvent[]>());
+  const sessionCursorRef = useRef<Record<string, { streamId: string; seq: number }>>({});
+
+  const readWithEvents = useCallback(async <T,>(
+    read: () => Promise<T>, extract: (response: T) => SessionSnapshot,
+  ): Promise<T> => {
+    const events: ServiceEvent[] = [];
+    const clientId = pendingClientIdRef.current;
+    snapshotReadsRef.current.add(events);
+    try {
+      const response = await read();
+      if (clientId !== pendingClientIdRef.current) throw new ServiceCommandError(null, false);
+      snapshotEventsRef.current.set(extract(response), events);
+      return response;
+    } finally {
+      snapshotReadsRef.current.delete(events);
+    }
+  }, []);
+
+  const readClaimSnapshot = useCallback((sessionId: string) => readWithEvents(
+    () => claimProjectSession(projectId, sessionId), (response) => response.snapshot,
+  ), [projectId, readWithEvents]);
+
+  const readRunSnapshot = useCallback((currentClaim: SessionClaim) => readWithEvents(
+    () => getProjectSession(projectId, currentClaim.session_id,
+      currentClaim.claim_version, currentClaim.reconnect_credential), (response) => response,
+  ), [projectId, readWithEvents]);
 
   const clearPendingDeletion = useCallback(() => {
     pendingDeletionRef.current = null;
@@ -5145,6 +5257,11 @@ function ProjectSessionsContent({
           ? { ...run, status: "failed", error: null } : run));
       }
       pendingSubmissionsRef.current = [];
+      claimsBySessionRef.current = {};
+      snapshotsBySessionRef.current = {};
+      sessionCursorRef.current = {};
+      liveRunsRef.current = {};
+      setLiveRunsBySession({});
       return;
     }
     for (const pending of [...pendingSubmissionsRef.current]) {
@@ -5168,6 +5285,33 @@ function ProjectSessionsContent({
 
   const adoptSnapshot = useCallback((nextSnapshot: SessionSnapshot) => {
     const sessionId = nextSnapshot.session_id;
+    const live = nextSnapshot.live_state;
+    if (live !== undefined && live !== null) {
+      const previous = snapshotsBySessionRef.current[sessionId]?.live_state;
+      if (previous?.stream_id === live.stream_id && previous.seq > live.seq) return false;
+      const events = (snapshotEventsRef.current.get(nextSnapshot) ?? []).filter((event) => (
+        event.session_id === sessionId && event.stream_id === live.stream_id && event.seq > live.seq
+      ));
+      const recovered = live.runs.map((run): LiveRun => ({
+        ...newLiveRun(run.request_id, run.run_id, run.prompt, run.status),
+        assistantContent: run.assistant_content,
+        tools: run.tools.map((tool) => ({ toolCallId: tool.tool_call_id, name: tool.name,
+          arguments: tool.arguments, status: tool.status })),
+        cancelRequested: run.cancel_requested, cancellable: run.cancellable,
+      }));
+      const requestIds = new Set(live.runs.map((run) => run.request_id));
+      pendingSubmissionsRef.current = pendingSubmissionsRef.current.filter(
+        (pending) => !requestIds.has(pending.command.request_id),
+      );
+      updateLiveRuns(sessionId, (runs) => events.reduce(reduceLiveRunEvent, [
+        ...recovered, ...runs.filter((run) => run.status === "submitting"
+          && !requestIds.has(run.localId)),
+      ]));
+      const cursor = sessionCursorRef.current[sessionId];
+      if (cursor?.streamId !== live.stream_id || cursor.seq < live.seq) {
+        sessionCursorRef.current[sessionId] = { streamId: live.stream_id, seq: live.seq };
+      }
+    }
     const previousCount = snapshotsBySessionRef.current[sessionId]?.messages.length ?? 0;
     const committedPrompts = new Set(nextSnapshot.messages.slice(previousCount)
       .filter((message) => message.role === "user" && typeof message.content === "string")
@@ -5177,17 +5321,20 @@ function ProjectSessionsContent({
       snapshotRef.current = nextSnapshot;
       setSnapshot(nextSnapshot);
     }
-    if (committedPrompts.size > 0) {
+    if ((live === undefined || live === null) && committedPrompts.size > 0) {
       updateLiveRuns(sessionId, (runs) => runs.filter((run) => !committedPrompts.has(run.prompt)));
     }
+    return true;
   }, [updateLiveRuns]);
 
   const rememberSession = useCallback((nextClaim: SessionClaim, nextSnapshot: SessionSnapshot) => {
+    const existingClaim = claimsBySessionRef.current[nextClaim.session_id];
+    if (existingClaim !== undefined && existingClaim.claim_version > nextClaim.claim_version) return;
     claimsBySessionRef.current[nextClaim.session_id] = nextClaim;
     adoptSnapshot(nextSnapshot);
     claimRef.current = nextClaim;
     setClaim(nextClaim);
-    setSnapshot(nextSnapshot);
+    setSnapshot(snapshotsBySessionRef.current[nextClaim.session_id] ?? nextSnapshot);
   }, [adoptSnapshot]);
 
   const refreshSessions = useCallback(async (cursor: string | null = null, append = false) => {
@@ -5236,9 +5383,16 @@ function ProjectSessionsContent({
         onRestoreConsumed();
         if (claimRef.current === null) {
           try {
-            const restored = await claimProjectSession(projectId, registeredClient.current_session_id);
+            const selectionVersion = sessionSelectionVersionRef.current;
+            const restored = await readClaimSnapshot(registeredClient.current_session_id);
             if (!mountedRef.current) {
               releaseOrphanClaim(restored.claim);
+              return;
+            }
+            if (selectionVersion !== sessionSelectionVersionRef.current) {
+              if (claimsBySessionRef.current[restored.claim.session_id] === undefined) {
+                releaseOrphanClaim(restored.claim);
+              }
               return;
             }
             rememberSession(restored.claim, restored.snapshot);
@@ -5265,7 +5419,7 @@ function ProjectSessionsContent({
       if (currentClaim !== null && shouldReclaim
         && pendingDeletionRef.current?.claim.session_id !== currentClaim.session_id) {
         try {
-          const restored = await claimProjectSession(projectId, currentClaim.session_id);
+          const restored = await readClaimSnapshot(currentClaim.session_id);
           if (!mountedRef.current) {
             releaseOrphanClaim(restored.claim);
             return;
@@ -5298,7 +5452,7 @@ function ProjectSessionsContent({
       setLoadState("error");
       setActionError(sessionErrorKey(error));
     }
-  }, [authState, clearClaimState, clearPendingDeletion, connectionState, deferredSessionSearch, onRestoreConsumed, projectId, registeredClient, releaseOrphanClaim, rememberPendingDeletion, rememberSession]);
+  }, [authState, clearClaimState, clearPendingDeletion, connectionState, deferredSessionSearch, onRestoreConsumed, projectId, registeredClient, releaseOrphanClaim, rememberPendingDeletion, rememberSession, readClaimSnapshot]);
 
   useEffect(() => {
     if (connectionState !== "online") needsReclaimRef.current = true;
@@ -5307,6 +5461,14 @@ function ProjectSessionsContent({
   useEffect(() => {
     void refreshSessions();
   }, [refreshSessions, refreshVersion]);
+
+  useEffect(() => {
+    if (connectionState !== "online" || sessions?.workspace_id === undefined) return;
+    void sendServiceCommand({
+      request_id: createRequestId(), type: "subscribe", workspace_id: null,
+      session_id: null, claim_version: null, payload: { last_seq: null },
+    }).catch(() => {});
+  }, [connectionState, sessions?.workspace_id, sendServiceCommand]);
 
   useEffect(() => {
     refreshSessionsRef.current = refreshSessions;
@@ -5319,14 +5481,12 @@ function ProjectSessionsContent({
 
   const refreshRunSnapshot = useCallback(async (sessionId: string, runId: string) => {
     const currentClaim = claimsBySessionRef.current[sessionId];
-    if (currentClaim === undefined) return;
+    if (currentClaim === undefined) {
+      void refreshSessionsRef.current?.();
+      return;
+    }
     try {
-      const nextSnapshot = await getProjectSession(
-        projectId,
-        sessionId,
-        currentClaim.claim_version,
-        currentClaim.reconnect_credential,
-      );
+      const nextSnapshot = await readRunSnapshot(currentClaim);
       if (!mountedRef.current || claimsBySessionRef.current[sessionId] !== currentClaim) return;
       adoptSnapshot(nextSnapshot);
       updateLiveRuns(sessionId, (runs) => runs.filter((run) => run.runId !== runId));
@@ -5334,9 +5494,10 @@ function ProjectSessionsContent({
     } catch {
       // Keep the terminal live projection visible when persistence is still settling.
     }
-  }, [adoptSnapshot, projectId, updateLiveRuns]);
+  }, [adoptSnapshot, readRunSnapshot, updateLiveRuns]);
 
   const handleServiceEvent = useCallback((event: ServiceEvent) => {
+    for (const events of snapshotReadsRef.current) events.push(event);
     if (event.type === "snapshot.required") {
       const restored = new Set<string>();
       const snapshotPayload = event.payload.snapshot;
@@ -5354,20 +5515,33 @@ function ProjectSessionsContent({
             || !Array.isArray(nextSnapshot.messages)
           ) continue;
           const currentClaim = claimsBySessionRef.current[nextSnapshot.session_id];
-          if (currentClaim?.workspace_id !== entry.workspace_id
-            || currentClaim.claim_version !== entry.claim_version) continue;
+          if (entry.workspace_id !== workspaceIdRef.current) continue;
+          if (currentClaim !== undefined && (currentClaim.workspace_id !== entry.workspace_id
+            || currentClaim.claim_version !== entry.claim_version)) continue;
           adoptSnapshot(nextSnapshot as SessionSnapshot);
+          if (nextSnapshot.messages.length === 0
+            && (nextSnapshot.live_state?.runs.length ?? 0) > 0) {
+            const sessionId = nextSnapshot.session_id;
+            setDraftSessionIds((ids) => ids.includes(sessionId) ? ids : [...ids, sessionId]);
+          }
           restored.add(nextSnapshot.session_id);
+        }
+      }
+      if (Array.isArray(sessions) && workspaceIdRef.current !== null
+        && typeof snapshotPayload === "object" && snapshotPayload !== null
+        && "pending_confirmation" in snapshotPayload) {
+        for (const sessionId of Object.keys(liveRunsRef.current)) {
+          const cursor = sessionCursorRef.current[sessionId];
+          if (restored.has(sessionId)
+            || (cursor?.streamId === event.stream_id && cursor.seq > event.seq)) continue;
+          updateLiveRuns(sessionId, () => []);
+          delete snapshotsBySessionRef.current[sessionId];
+          delete sessionCursorRef.current[sessionId];
         }
       }
       for (const currentClaim of Object.values(claimsBySessionRef.current)) {
         if (restored.has(currentClaim.session_id)) continue;
-        void getProjectSession(
-          projectId,
-          currentClaim.session_id,
-          currentClaim.claim_version,
-          currentClaim.reconnect_credential,
-        ).then((nextSnapshot) => {
+        void readRunSnapshot(currentClaim).then((nextSnapshot) => {
           if (mountedRef.current && claimsBySessionRef.current[currentClaim.session_id] === currentClaim) {
             adoptSnapshot(nextSnapshot);
           }
@@ -5382,6 +5556,9 @@ function ProjectSessionsContent({
     const sessionId = event.session_id;
     if (event.type === "session.released") {
       delete claimsBySessionRef.current[sessionId];
+      delete snapshotsBySessionRef.current[sessionId];
+      delete sessionCursorRef.current[sessionId];
+      updateLiveRuns(sessionId, () => []);
       return;
     }
     if (event.type === "session.metadata_updated") {
@@ -5397,114 +5574,19 @@ function ProjectSessionsContent({
       void refreshSessionsRef.current?.();
       return;
     }
-    if (event.type === "input.accepted") {
-      if (event.run_id === null) return;
-      const acceptedText = typeof event.payload.text === "string" ? event.payload.text : "";
-      updateLiveRuns(sessionId, (runs) => {
-        const directIndex = runs.findIndex((run) => run.runId === event.run_id);
-        if (directIndex >= 0) {
-          return runs.map((run, index) => index === directIndex
-            ? { ...run, status: run.status === "submitting" ? "accepted" : run.status }
-            : run);
-        }
-        const pendingIndex = runs.findIndex(
-          (run) => run.runId === null && run.status === "submitting" && run.prompt === acceptedText,
-        );
-        if (pendingIndex >= 0) {
-          const pendingLocalId = runs[pendingIndex].localId;
-          pendingSubmissionsRef.current = pendingSubmissionsRef.current.filter(
-            (item) => item.localId !== pendingLocalId,
-          );
-          return runs.map((run, index) => index === pendingIndex
-            ? { ...run, runId: event.run_id, status: "accepted" }
-            : run);
-        }
-        return [...runs, newLiveRun(`event-${event.run_id}`, event.run_id, acceptedText, "accepted")];
-      });
-      return;
+    const cursor = sessionCursorRef.current[sessionId];
+    if (cursor?.streamId === event.stream_id && event.seq <= cursor.seq) return;
+    sessionCursorRef.current[sessionId] = { streamId: event.stream_id, seq: event.seq };
+    if (event.type === "input.accepted" && typeof event.payload.request_id === "string") {
+      pendingSubmissionsRef.current = pendingSubmissionsRef.current.filter(
+        (pending) => pending.command.request_id !== event.payload.request_id,
+      );
     }
-    if (event.run_id === null) return;
-    const runId = event.run_id;
-    if (event.type === "run.output") {
-      const message = event.payload.message;
-      if (typeof message !== "object" || message === null || Array.isArray(message)) return;
-      const messageValue = message as Record<string, unknown>;
-      const metadata = messageValue.metadata;
-      const metadataValue = typeof metadata === "object" && metadata !== null && !Array.isArray(metadata)
-        ? metadata as Record<string, unknown>
-        : {};
-      const messageType = messageValue.type;
-      const content = typeof messageValue.content === "string" ? messageValue.content : "";
-      updateLiveRuns(sessionId, (runs) => {
-        const index = runs.findIndex((run) => run.runId === runId);
-        const current = index >= 0 ? runs[index] : newLiveRun(`event-${runId}`, runId, "", "running");
-        const next = { ...current, status: current.status === "canceled" ? "canceled" : "running" as RunStatus };
-        if (messageType === "model_response" && metadataValue._stream_delta === true) {
-          next.assistantContent = `${next.assistantContent}${content}`;
-        } else if (messageType === "tool_call") {
-          const toolCallId = typeof metadataValue.tool_call_id === "string" ? metadataValue.tool_call_id : "";
-          if (!toolCallId) return runs;
-          const toolIndex = next.tools.findIndex((tool) => tool.toolCallId === toolCallId);
-          const rawStatus = metadataValue.status;
-          const mappedStatus = rawStatus === "success"
-            ? "completed"
-            : rawStatus === "error"
-              ? "failed"
-              : rawStatus === "refused"
-                ? "rejected"
-                : null;
-          if (toolIndex < 0 && mappedStatus === null) {
-            next.tools = [...next.tools, {
-              toolCallId,
-              name: content,
-              arguments: typeof metadataValue.arguments === "string" ? metadataValue.arguments : "",
-              status: "running",
-            }];
-          } else if (toolIndex >= 0 && mappedStatus !== null) {
-            next.tools = next.tools.map((tool, toolIndexValue) => toolIndexValue === toolIndex
-              ? { ...tool, status: mappedStatus }
-              : tool);
-          }
-        } else if (messageType === "system_control" && metadataValue._streamed === true) {
-          next.status = metadataValue.finish_reason === "cancelled" ? "canceled" : "failed";
-          next.error = content || null;
-          if (next.status === "canceled") {
-            next.tools = next.tools.map((tool) => tool.status === "running" ? { ...tool, status: "canceled" } : tool);
-          }
-        }
-        if (index < 0) return [...runs, next];
-        return runs.map((run, runIndex) => runIndex === index ? next : run);
-      });
-      return;
+    updateLiveRuns(sessionId, (runs) => reduceLiveRunEvent(runs, event));
+    if (event.run_id !== null && (event.type === "run.completed" || event.type === "run.failed")) {
+      void refreshRunSnapshot(sessionId, event.run_id);
     }
-    if (event.type === "run.cancelled" || event.type === "run.failed" || event.type === "run.completed") {
-      const finishReason = typeof event.payload.finish_reason === "string"
-        ? event.payload.finish_reason
-        : event.type === "run.cancelled" ? "cancelled" : event.type === "run.failed" ? "failed" : "completed";
-      updateLiveRuns(sessionId, (runs) => {
-        const index = runs.findIndex((run) => run.runId === runId);
-        const current = index >= 0 ? runs[index] : newLiveRun(`event-${runId}`, runId, "", "running");
-        const status: RunStatus = current.status === "canceled" || finishReason === "cancelled"
-          ? "canceled"
-          : finishReason === "completed" ? "completed" : "failed";
-        const next: LiveRun = {
-          ...current,
-          status,
-          error: status === "failed" && typeof event.payload.message === "string" ? event.payload.message : current.error,
-          tools: status === "canceled"
-            ? current.tools.map((tool) => tool.status !== "running"
-              ? tool
-              : { ...tool, status: "canceled" })
-            : current.tools,
-        };
-        if (index < 0) return [...runs, next];
-        return runs.map((run, runIndex) => runIndex === index ? next : run);
-      });
-      if (event.type !== "run.cancelled" && finishReason !== "cancelled") {
-        void refreshRunSnapshot(sessionId, runId);
-      }
-    }
-  }, [adoptSnapshot, projectId, refreshRunSnapshot, updateLiveRuns]);
+  }, [adoptSnapshot, readRunSnapshot, refreshRunSnapshot, updateLiveRuns]);
 
   useEffect(() => subscribeServiceEvents(handleServiceEvent), [handleServiceEvent, subscribeServiceEvents]);
 
@@ -5519,12 +5601,13 @@ function ProjectSessionsContent({
   async function openSession(sessionId: string, isDraft: boolean, allowBusy = false) {
     if (pendingDeletionRef.current?.attempted && pendingDeletionRef.current.claim.session_id === sessionId) return;
     if (busySessionId !== null && !allowBusy) return;
+    sessionSelectionVersionRef.current += 1;
     setManagementOpen(false);
     const previousSessionId = claimRef.current?.session_id;
     setBusySessionId(sessionId);
     setActionError(null);
     try {
-      const response = await claimProjectSession(projectId, sessionId);
+      const response = await readClaimSnapshot(sessionId);
       if (!mountedRef.current) {
         releaseOrphanClaim(response.claim);
         return;
@@ -5549,6 +5632,7 @@ function ProjectSessionsContent({
 
   async function createDraft() {
     if (busySessionId !== null) return;
+    sessionSelectionVersionRef.current += 1;
     setBusySessionId("new");
     setActionError(null);
     try {
@@ -5609,13 +5693,13 @@ function ProjectSessionsContent({
     if (pendingDeletionRef.current?.attempted && pendingDeletionRef.current.claim.session_id === sessionId) return;
     const activeRun = (liveRunsRef.current[sessionId] ?? []).some(isLiveRunActive);
     if (activeRun || connectionState !== "online") return;
-    const localId = `local-${createRequestId()}`;
+    const localId = createRequestId();
     confirmationTriggerRef.current = inputRef.current;
     const pending: PendingSubmission = {
       localId,
       sessionId,
       command: {
-        request_id: createRequestId(),
+        request_id: localId,
         type: "input",
         workspace_id: currentClaim.workspace_id,
         session_id: currentClaim.session_id,
@@ -5626,7 +5710,7 @@ function ProjectSessionsContent({
     pendingSubmissionsRef.current.push(pending);
     updateLiveRuns(sessionId, (runs) => [
       ...runs,
-      newLiveRun(localId, null, text, "submitting"),
+      newLiveRun(pending.command.request_id, null, text, "submitting"),
     ]);
     setInputText("");
     delete draftsBySessionRef.current[sessionId];
@@ -5775,12 +5859,7 @@ function ProjectSessionsContent({
       setRestoreNotice(executed.result);
       setPendingRestoreFailure(executed.result.file_results.some((item) => item.status === "failed")
         && !executed.result.failure_notification_acknowledged ? executed.result : null);
-      const nextSnapshot = await getProjectSession(
-        projectId,
-        nextClaim.session_id,
-        nextClaim.claim_version,
-        nextClaim.reconnect_credential,
-      );
+      const nextSnapshot = await readRunSnapshot(nextClaim);
       if (!mountedRef.current || claimRef.current !== nextClaim) return;
       rememberSession(nextClaim, nextSnapshot);
       restoreFocusPendingRef.current = true;

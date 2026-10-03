@@ -167,6 +167,53 @@ async def test_concurrent_duplicate_http_renames_return_same_ack_and_write_once(
 
 
 @pytest.mark.asyncio
+async def test_concurrent_distinct_http_renames_with_same_version_commit_once(tmp_path: Path) -> None:
+    async with _metadata_service(tmp_path) as harness:
+        results = await asyncio.gather(
+            harness.patch(request_id="first-rename"),
+            harness.patch(request_id="second-rename"),
+        )
+        assert sorted(status for status, _body in results) == [200, 409]
+        conflict = next(body for status, body in results if status == 409)
+        assert conflict["code"] == "metadata_conflict"
+        assert harness.session.metadata_version == 1
+        loaded = Session.load(harness.session.workspace_state, harness.session.session_id)
+        assert loaded.metadata == harness.session.metadata
+        assert loaded.has_manual_title
+
+
+@pytest.mark.asyncio
+async def test_http_rename_rechecks_automatic_title_version_after_snapshot_drain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _metadata_service(tmp_path) as harness:
+        started, release = asyncio.Event(), asyncio.Event()
+        session = harness.session
+        wait_for_pending = session.wait_for_pending_persist
+
+        async def blocked_drain() -> None:
+            started.set()
+            await release.wait()
+            await wait_for_pending()
+
+        monkeypatch.setattr(session, "wait_for_pending_persist", blocked_drain)
+        request = asyncio.create_task(harness.patch())
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+            session.update_automatic_title("Automatic winner")
+            session.persist()
+        finally:
+            release.set()
+        status, error = await asyncio.wait_for(request, timeout=5)
+        assert status == 409
+        assert error["code"] == "metadata_conflict"
+        loaded = Session.load(session.workspace_state, session.session_id)
+        assert loaded.metadata["title"] == "Automatic winner"
+        assert loaded.metadata_version == 1
+        assert not loaded.has_manual_title
+
+
+@pytest.mark.asyncio
 async def test_http_rename_revalidates_claim_after_snapshot_drain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

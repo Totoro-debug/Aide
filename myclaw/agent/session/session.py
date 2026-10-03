@@ -546,11 +546,6 @@ class Session:
             return
         self.update_metadata(title=title, **updates, _title_version=self.metadata_version + 1)
 
-    async def rename(self, title: str, *, expected_metadata_version: int) -> None:
-        """Drain pending saves before strictly renaming this Session."""
-        await self.wait_for_pending_persist()
-        self.rename_durably(title, expected_metadata_version=expected_metadata_version)
-
     def rename_durably(self, title: str, *, expected_metadata_version: int) -> None:
         """Persist a user title after checking its optimistic metadata version."""
         self._ensure_not_abandoned()

@@ -4328,7 +4328,8 @@ async def test_manual_title_wins_over_a_late_automatic_title(tmp_path: Path) -> 
     try:
         await collect_foreground_outbound(_bus, "First input.")
         await router.title_started.wait()
-        await session.rename("Manual title", expected_metadata_version=0)
+        await session.wait_for_pending_persist()
+        session.rename_durably("Manual title", expected_metadata_version=0)
         assert session.metadata["title"] == "Manual title"
         assert session.metadata_version == 1
 

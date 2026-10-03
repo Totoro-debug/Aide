@@ -13,6 +13,11 @@ CREATED_AT = datetime(2026, 10, 1, tzinfo=UTC)
 RENAMED_AT = CREATED_AT + timedelta(seconds=10)
 
 
+async def _rename_session(session: Session, title: str, *, expected_metadata_version: int) -> None:
+    await session.wait_for_pending_persist()
+    session.rename_durably(title, expected_metadata_version=expected_metadata_version)
+
+
 async def _persisted_session(workspace: Path) -> Session:
     session = Session.create(WorkspaceState(workspace), now=lambda: CREATED_AT)
     session.commit_agent_run(
@@ -40,7 +45,7 @@ async def test_legacy_jsonl_defaults_title_version_and_survives_rename(workspace
     assert loaded.metadata_version == 0
     assert not loaded.has_manual_title
     assert _path(session).read_bytes() == raw
-    await loaded.rename("Manual legacy title", expected_metadata_version=0)
+    await _rename_session(loaded, "Manual legacy title", expected_metadata_version=0)
 
     reloaded = Session.load(session.workspace_state, session.session_id)
     assert reloaded.metadata["title"] == "Manual legacy title"
@@ -66,7 +71,7 @@ async def test_failed_strict_rename_preserves_disk_and_memory_and_can_retry(
 
     monkeypatch.setattr(session, "_write_content", fail_write)
     with pytest.raises(OSError, match="Controlled write failure"):
-        await session.rename("Must not publish", expected_metadata_version=0)
+        await _rename_session(session, "Must not publish", expected_metadata_version=0)
 
     assert session.metadata == before_metadata
     assert session.messages == before_messages
@@ -75,7 +80,7 @@ async def test_failed_strict_rename_preserves_disk_and_memory_and_can_retry(
     assert not session.has_manual_title
     assert _path(session).read_bytes() == before_raw
     monkeypatch.setattr(session, "_write_content", write_content)
-    await session.rename("Successful retry", expected_metadata_version=0)
+    await _rename_session(session, "Successful retry", expected_metadata_version=0)
     assert session.updated_at == RENAMED_AT
     assert Session.load(session.workspace_state, session.session_id).metadata["title"] == (
         "Successful retry"
@@ -107,7 +112,7 @@ async def test_rename_drains_queued_old_snapshot_before_publishing_manual_title(
     session.persist()
     await old_write_started.wait()
     monkeypatch.setattr(session, "wait_for_pending_persist", observe_wait)
-    rename = asyncio.create_task(session.rename("Manual winner", expected_metadata_version=0))
+    rename = asyncio.create_task(_rename_session(session, "Manual winner", expected_metadata_version=0))
     try:
         await rename_wait_started.wait()
         assert not rename.done()
@@ -127,8 +132,8 @@ async def test_rename_drains_queued_old_snapshot_before_publishing_manual_title(
 async def test_concurrent_renames_with_same_version_commit_exactly_once(workspace: Path) -> None:
     session = await _persisted_session(workspace)
     results = await asyncio.gather(
-        session.rename("First candidate", expected_metadata_version=0),
-        session.rename("Second candidate", expected_metadata_version=0),
+        _rename_session(session, "First candidate", expected_metadata_version=0),
+        _rename_session(session, "Second candidate", expected_metadata_version=0),
         return_exceptions=True,
     )
     assert sum(result is None for result in results) == 1
@@ -152,10 +157,10 @@ async def test_automatic_title_invalidates_old_rename_version(workspace: Path) -
 
     assert session.metadata_version == 1
     with pytest.raises(ValueError, match="stale"):
-        await session.rename("Stale manual edit", expected_metadata_version=0)
+        await _rename_session(session, "Stale manual edit", expected_metadata_version=0)
     assert _path(session).read_bytes() == before
     assert session.metadata["title"] == "Automatic title"
-    await session.rename("Current manual edit", expected_metadata_version=1)
+    await _rename_session(session, "Current manual edit", expected_metadata_version=1)
     assert session.metadata_version == 2
 
 
@@ -174,7 +179,7 @@ async def test_title_changed_during_snapshot_drain_rejects_waiting_rename(
         await wait_for_pending()
 
     monkeypatch.setattr(session, "wait_for_pending_persist", blocked_drain)
-    rename = asyncio.create_task(session.rename("Stale edit", expected_metadata_version=0))
+    rename = asyncio.create_task(_rename_session(session, "Stale edit", expected_metadata_version=0))
     try:
         await rename_wait_started.wait()
         session.update_automatic_title("Title resolved while waiting")
@@ -193,7 +198,7 @@ async def test_title_changed_during_snapshot_drain_rejects_waiting_rename(
 @pytest.mark.asyncio
 async def test_late_automatic_title_preserves_manual_title_after_reload(workspace: Path) -> None:
     session = await _persisted_session(workspace)
-    await session.rename("Untitled session", expected_metadata_version=0)
+    await _rename_session(session, "Untitled session", expected_metadata_version=0)
     loaded = Session.load(session.workspace_state, session.session_id)
     loaded.update_automatic_title("Late automatic title")
     loaded.persist()
@@ -212,7 +217,7 @@ async def test_rename_empty_draft_never_materializes_history(workspace: Path) ->
     before = copy.deepcopy(session.metadata)
 
     with pytest.raises(ValueError):
-        await session.rename("Must remain a draft", expected_metadata_version=0)
+        await _rename_session(session, "Must remain a draft", expected_metadata_version=0)
 
     assert session.metadata == before
     assert session.updated_at == CREATED_AT

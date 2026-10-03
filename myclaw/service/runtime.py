@@ -3850,7 +3850,7 @@ class LocalService:
             self._project_removals[project_id] = operation
             task = asyncio.create_task(self._run_project_removal(operation))
             operation.task = task
-            task.add_done_callback(self._project_removal_finished)
+            task.add_done_callback(_consume_task_result)
             try:
                 await self.emit(
                     "project.removal.started",
@@ -3903,9 +3903,6 @@ class LocalService:
             or client.current_workspace_id == workspace_id
             or any(candidate_workspace == workspace_id for candidate_workspace, _ in client.claimed)
         )
-
-    def _project_removal_finished(self, task: asyncio.Task[None]) -> None:
-        _consume_task_result(task)
 
     async def _run_project_removal(self, operation: _ProjectRemoval) -> None:
         try:

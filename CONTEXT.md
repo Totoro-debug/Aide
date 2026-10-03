@@ -25,7 +25,7 @@ Persistent Personal Agent state owned by exactly one Workspace rather than by th
 _Avoid_: Agent Home, project source, global state, cache
 
 **Message Bus**:
-The transient Inbound and Outbound queues for one foreground conversation lane, connecting an Agent Loop or Command-line Conversation to its local service adapter.
+The transient Inbound and Outbound queues for one foreground conversation lane, connecting a Command-line Conversation to the Agent Service.
 _Avoid_: persistent event log, broadcast bus, Schedule queue
 
 **Inbound Message**:
@@ -33,7 +33,7 @@ One ordinary user input waiting in the Message Bus for serial foreground process
 _Avoid_: Management Command, Tool Confirmation, cancellation command, Agent Event
 
 **Outbound Message**:
-One transient presentation message emitted by an Agent Loop for its Command-line Conversation.
+One transient presentation message emitted by the Agent Service for a Command-line Conversation.
 _Avoid_: Agent Event, Session message, diagnostic log, broadcast event
 
 **Agent Run Activity Group**:
@@ -48,17 +48,13 @@ _Avoid_: Terminal session, shell command, chat channel, one-shot command, plain 
 The local-browser entry for one person to converse with and manage the Personal Agent.
 _Avoid_: remote service, multi-user platform, read-only dashboard
 
-**Local Service**:
-The shared local authority through which CLI and Web clients operate the Personal Agent, coordinating Workspace runtimes, Session Claims, and Tool Confirmation.
-_Avoid_: always-on daemon, remote service, separate CLI runtime
+**Agent Service**:
+The shared local authority through which CLI and Web clients operate the Personal Agent, owning shared capabilities and scheduling Agent Runs across Conversation Sessions while coordinating Workspace-owned state, Session Claims, and Tool Confirmation.
+_Avoid_: Local Service, Agent Loop, Workspace Runtime, always-on daemon, remote service, separate CLI runtime
 
 **Client**:
-One CLI or Web participant in the Local Service, with its own foreground permission selection and exclusive claims on loaded Conversation Sessions.
+One CLI or Web participant in the Agent Service, with its own foreground permission selection and exclusive claims on loaded Conversation Sessions.
 _Avoid_: operating-system account, Conversation Session, Project, Model Provider client
-
-**Workspace Runtime**:
-The shared runtime authority for one Workspace, coordinating its Memory System, Schedule, and independently active Conversation Sessions.
-_Avoid_: Client, Runtime Lifetime, Conversation Session, separate process per Session
 
 **Management Command**:
 An explicit user command for inspecting or changing runtime-managed state without relying on natural-language conversation.
@@ -69,24 +65,16 @@ The boundary through which Management Commands use runtime capabilities without 
 _Avoid_: Message Bus, direct file access, admin API
 
 **Runtime Lifetime**:
-The lifetime of one Local Service instance, including the Clients, Workspace runtimes, and Runtime Generations it coordinates over time.
+The lifetime of one Agent Service instance and the Clients, shared capabilities, Workspace-owned state, and Conversation Sessions it coordinates.
 _Avoid_: Detached mode, daemon mode, persistent background process, one-shot command
-
-**Runtime Generation**:
-One replaceable set of runtime components within a Workspace Runtime, including the components bound to its active Conversation Sessions.
-_Avoid_: Runtime Lifetime, Conversation Session, Agent Run
 
 **Session Log**:
 Workspace-owned technical diagnostics associated with one Conversation Session rather than with the whole installation.
 _Avoid_: Runtime Log, Conversation log, chat transcript, audit log, activity feed
 
-**Agent Loop**:
-The Session-scoped product orchestrator that serializes accepted input, invokes Agent Runs, and publishes conversation output through its foreground lane.
-_Avoid_: Agent Runner, Runtime Lifetime, model loop, Schedule Service
-
 **Agent Runner**:
 A reusable, Session-independent engine that performs one bounded model-and-Tool ReAct loop for any request that requires ReAct.
-_Avoid_: Agent Loop, Conversation Session, Runtime Lifetime, Provider retry loop, single model call
+_Avoid_: Agent Service, Conversation Session, Runtime Lifetime, Provider retry loop, single model call
 
 **Agent Run**:
 One complete Agent execution for one input against one Conversation Session, from input acceptance through its final outcome and persistence request.
@@ -141,7 +129,7 @@ The ordered set of valid Skill metadata presented for discovery without exposing
 _Avoid_: Tool Catalog, command list, loaded Skill content
 
 **Skill Snapshot**:
-The immutable set of validated Skill metadata and complete instructions captured and exposed by the Skill Loader at one successful load, retained until another successful reload or Runtime Generation replacement.
+The immutable set of validated Skill metadata and complete instructions published by one successful global load. An Agent Run retains its captured snapshot while a later successful reload supplies the snapshot for subsequent Runs.
 _Avoid_: live Skill directory, Tool Catalog, Runtime Lifetime cache
 
 **Skill Invocation**:
@@ -153,7 +141,7 @@ A Skill Invocation initiated by an exact available Skill slash name at the begin
 _Avoid_: Autonomous Skill Invocation, always-loaded Skill, Management Command
 
 **Conversation Session**:
-A durable conversational thread owned by one Workspace and represented by one active in-memory Session authority during foreground execution.
+A durable conversational thread owned by one Workspace, with one authoritative in-memory Session retained after loading for the Agent Service lifetime.
 _Avoid_: Chat ID, terminal session, Workspace, runtime checkpoint, background task
 
 **Session Claim**:
@@ -261,15 +249,15 @@ The single User Configuration item keyed by `mcp_name` that declares an MCP Serv
 _Avoid_: MCP endpoint, MCP profile, Server Tool
 
 **MCP Runtime Manager**:
-The Workspace Runtime component that connects configured MCP Servers, retains healthy connections, prepares MCP Tool Snapshots, and closes the connections when its generation retires.
-_Avoid_: Tool Gateway, MCP registry, Agent Loop
+The Agent Service-owned manager of MCP Server connections and discovered Tools, with one HTTP connection per configured Server across the service and one stdio connection per configured Server within each Workspace.
+_Avoid_: Tool Gateway, MCP registry, Workspace Runtime
 
 **MCP Tool**:
 A Tool capability discovered from an MCP Server and included in a Tool Catalog with the same invocation semantics as a Built-in Tool, while retaining its external origin.
 _Avoid_: Built-in Tool, Plugin Tool, direct MCP call
 
 **MCP Tool Snapshot**:
-The immutable ordered set of MCP Tools successfully discovered for one Runtime Generation.
+The immutable ordered set of successfully discovered MCP Tools published together.
 _Avoid_: live MCP registry, mutable Tool Catalog, MCP Server list
 
 **Tool Artifact**:
@@ -297,11 +285,11 @@ A Schedule Job created and maintained by the Personal Agent for internal Runtime
 _Avoid_: User Schedule Job, public Schedule, shell cron job
 
 **Dream Schedule Job**:
-The unique System Schedule Job that invokes Dream through its dedicated execution path without creating a Schedule Session or entering an Agent Loop.
+The unique System Schedule Job for one Workspace that invokes Dream through its dedicated execution path without creating a Schedule Session or a foreground Agent Run.
 _Avoid_: User Schedule Job, Memory Task scheduler, scheduled Agent Run
 
 **Schedule Service**:
-The sole management and execution boundary for Schedule Jobs within one Workspace Runtime.
+The Agent Service-owned authority for managing and executing Schedule Jobs while preserving each Job's Workspace ownership.
 _Avoid_: Schedule, Schedule Job, detached background process
 
 **Tool Permission Level**:
@@ -329,5 +317,5 @@ A configured backend that implements model calls for one or more Model Routes.
 _Avoid_: Model Route, model string, gateway
 
 **User Configuration**:
-The single account-global configuration that selects runtime, model, and memory behavior for a Personal Agent installation.
+The single account-global persisted configuration that selects runtime, model, and memory behavior at Agent Service startup. Editing it saves settings for the next startup without replacing the current service's active configuration.
 _Avoid_: Agent profile, Session override, per-chat settings, identity prompt, repair mode

@@ -313,6 +313,7 @@ class AgentLoop:
         self._max_iterations = configuration.runtime.max_iterations
         self._bus = bus
         self._generation_started_at: float | None = None
+        self._foreground_consumer_enabled = True
         self._consumer_task: asyncio.Task[None] | None = None
         self._execution_task: asyncio.Task[None] | None = None
         self._foreground_commit_gate = asyncio.Lock()
@@ -472,6 +473,14 @@ class AgentLoop:
         self.preflight()
         self._activate_prepared()
 
+    def disable_foreground_consumer(self) -> None:
+        """Keep activation compatible while reserving execution for run_foreground."""
+        if self._closed or self._aborted or self._closing or self._close_task is not None:
+            raise RuntimeError("Agent Loop is closed")
+        if self._started:
+            raise RuntimeError("Agent Loop is already started")
+        self._foreground_consumer_enabled = False
+
     async def _pause_for_replacement(self) -> None:
         """Freeze new foreground admission and the final Session commit point."""
         if self._replacement_barrier_held:
@@ -552,13 +561,14 @@ class AgentLoop:
         if not self._preflighted:
             raise RuntimeError("Agent Loop was not preflighted")
         started_at = self._monotonic_now()
-        consumer = self._consume_foreground()
-        try:
-            consumer_task = asyncio.create_task(consumer)
-        except BaseException:
-            consumer.close()
-            raise
-        self._consumer_task = consumer_task
+        if self._foreground_consumer_enabled:
+            consumer = self._consume_foreground()
+            try:
+                consumer_task = asyncio.create_task(consumer)
+            except BaseException:
+                consumer.close()
+                raise
+            self._consumer_task = consumer_task
         self._generation_started_at = started_at
         self._started = True
 
@@ -738,6 +748,32 @@ class AgentLoop:
             return
         active.cancel()
         await asyncio.gather(active, return_exceptions=True)
+
+    async def run_foreground(self, inbound: InboundMessage) -> None:
+        """Execute one foreground input without owning a persistent consumer."""
+        if self._closed or self._aborted or self._closing or self._close_task is not None:
+            raise RuntimeError("Agent Loop is closed")
+        if not self._started:
+            raise RuntimeError("Agent Loop is not started")
+        consumer = self._consumer_task
+        if consumer is not None and not consumer.done():
+            raise RuntimeError("Agent Loop foreground consumer is active")
+        if self._execution_task is not None and not self._execution_task.done():
+            raise RuntimeError("Agent Loop already has an active foreground Run")
+        execution_ready = asyncio.Event()
+        execution = asyncio.create_task(
+            self._execute_foreground(inbound, execution_ready=execution_ready)
+        )
+        self._execution_task = execution
+        self._execution_ready = execution_ready
+        try:
+            await execution
+        finally:
+            if self._execution_task is execution:
+                self._execution_task = None
+            if self._execution_ready is execution_ready:
+                self._execution_ready = None
+            self._cancel_requested = False
 
     async def run_schedule_job(
         self,

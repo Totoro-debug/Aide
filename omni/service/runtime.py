@@ -428,7 +428,10 @@ class _LoopState:
     run_ids: deque[str] = field(default_factory=deque)
     live_runs: dict[str, dict[str, Any]] = field(default_factory=dict)
     completed_user_count: int | None = None
-    output_task: asyncio.Task[None] | None = None
+    output_task: asyncio.Task[bool] | None = None
+    processor_task: asyncio.Task[None] | None = None
+    coordination_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    processor_stopping: bool = False
     release_task: asyncio.Task[None] | None = None
     schedule: bool = False
 
@@ -993,6 +996,7 @@ class WorkspaceServiceRuntime:
         if loop_state is not None and (
             loop_state.loop.has_active_run
             or loop_state.run_ids
+            or loop_state.output_task is not None
             or await loop_state.bus.inbound_snapshot()
         ):
             raise service_error(
@@ -1010,7 +1014,12 @@ class WorkspaceServiceRuntime:
         )
         if loop_state is not None and loop_state.owner_client_id == client_id:
             loop_state.owner_client_id = None
-        if close_idle and loop_state is not None and not loop_state.loop.has_active_run:
+        if (
+            close_idle
+            and loop_state is not None
+            and not loop_state.loop.has_active_run
+            and loop_state.output_task is None
+        ):
             await self._close_loop(session_id)
 
     def clear_claims_for_removal(self) -> tuple[SessionClaim, ...]:
@@ -1392,6 +1401,7 @@ class WorkspaceServiceRuntime:
             if loop_state is not None and (
                 loop_state.loop.has_active_run
                 or loop_state.run_ids
+                or loop_state.output_task is not None
                 or await loop_state.bus.inbound_snapshot()
             ):
                 raise service_error(
@@ -1428,6 +1438,7 @@ class WorkspaceServiceRuntime:
                     if (
                         loop_state.loop.has_active_run
                         or loop_state.run_ids
+                        or loop_state.output_task is not None
                         or await loop_state.bus.inbound_snapshot()
                     ):
                         raise service_error(
@@ -1581,6 +1592,8 @@ class WorkspaceServiceRuntime:
                 if (
                     self._restore_owner is not None
                     or loop.has_active_run
+                    or state.run_ids
+                    or state.output_task is not None
                     or await state.bus.inbound_snapshot()
                 ):
                     raise ManagementError(
@@ -1770,19 +1783,143 @@ class WorkspaceServiceRuntime:
                 )
             state = self._loops[session_id]
             client = self.service.client(client_id)
-            async with client.delivery_lock:
-                if not state.live_runs:
-                    state.completed_user_count = sum(
-                        message.get("role") == "user" for message in state.loop.session.messages
+            async with state.coordination_lock:
+                async with client.delivery_lock:
+                    if not state.live_runs:
+                        state.completed_user_count = sum(
+                            message.get("role") == "user" for message in state.loop.session.messages
+                        )
+                    state.run_ids.append(run_id)
+                    state.live_runs[run_id] = {
+                        "run_id": run_id, "request_id": request_id or run_id, "prompt": text,
+                        "status": "accepted", "assistant_content": "", "tools": [],
+                        "cancel_requested": False, "cancellable": False,
+                    }
+                    await state.bus.put_inbound(
+                        InboundMessage(
+                            content=text,
+                            metadata={"run_id": run_id, "request_id": request_id or run_id},
+                        )
                     )
-                state.run_ids.append(run_id)
-                state.live_runs[run_id] = {
-                    "run_id": run_id, "request_id": request_id or run_id, "prompt": text,
-                    "status": "accepted", "assistant_content": "", "tools": [],
-                    "cancel_requested": False, "cancellable": False,
-                }
-                await state.bus.put_inbound(InboundMessage(content=text))
+                self._ensure_processor(state)
             return claim
+
+    def _ensure_processor(self, state: _LoopState) -> None:
+        """Start one Session processor while preserving the enqueue boundary."""
+        if state.processor_stopping:
+            raise service_error(
+                "admission_closed", "Conversation input is temporarily unavailable."
+            )
+        processor = state.processor_task
+        if processor is not None and not processor.done():
+            return
+        processor = asyncio.create_task(self._process_session(state))
+        state.processor_task = processor
+
+        def processor_finished(completed: asyncio.Task[None]) -> None:
+            self._processor_finished(state, completed)
+
+        processor.add_done_callback(processor_finished)
+
+    def _processor_finished(self, state: _LoopState, task: asyncio.Task[None]) -> None:
+        if state.processor_task is task:
+            state.processor_task = None
+        _consume_task_result(task)
+
+    async def _process_session(self, state: _LoopState) -> None:
+        """Run accepted foreground inputs serially until the Session queue is empty."""
+        current = asyncio.current_task()
+        if current is None:
+            return
+        release_when_idle = False
+        while True:
+            async with state.coordination_lock:
+                if state.processor_stopping:
+                    if state.processor_task is current:
+                        state.processor_task = None
+                    return
+                if not await state.bus.inbound_snapshot():
+                    if state.processor_task is current:
+                        state.processor_task = None
+                    release_when_idle = not self._closed and state.owner_client_id is not None
+                    break
+                inbound = await state.bus.get_inbound()
+                run_id = inbound.metadata.get("run_id")
+                if not isinstance(run_id, str):
+                    run_id = state.run_ids[0] if state.run_ids else None
+
+            output_task = asyncio.create_task(self._forward_output(state, run_id))
+            state.output_task = output_task
+            terminal_forwarded = False
+            execution_failed = False
+            try:
+                try:
+                    await state.loop.run_foreground(inbound)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    execution_failed = True
+                    if not output_task.done():
+                        output_task.cancel()
+                        await asyncio.gather(output_task, return_exceptions=True)
+                    if run_id is not None:
+                        await self._emit_unexpected_run_failure(state, run_id)
+                        terminal_forwarded = True
+                if not execution_failed and not output_task.done():
+                    terminal_forwarded = await output_task
+                elif not execution_failed:
+                    terminal_forwarded = bool(output_task.result())
+                if not terminal_forwarded and run_id is not None:
+                    await self._emit_unexpected_run_failure(state, run_id)
+            finally:
+                if not output_task.done():
+                    output_task.cancel()
+                    await asyncio.gather(output_task, return_exceptions=True)
+                if state.output_task is output_task:
+                    state.output_task = None
+
+        if release_when_idle and (
+            state.release_task is None or state.release_task.done()
+        ):
+            state.release_task = asyncio.create_task(
+                self._release_switched_claim_when_idle(state.loop.session.session_id, state)
+            )
+            state.release_task.add_done_callback(_consume_task_result)
+
+    async def _emit_unexpected_run_failure(self, state: _LoopState, run_id: str) -> None:
+        """Keep one accepted Run from stranding when an execution boundary fails."""
+        try:
+            await self.service.emit(
+                "run.output",
+                workspace_id=self.workspace_id,
+                session_id=state.loop.session.session_id,
+                run_id=run_id,
+                payload={
+                    "message": {
+                        "type": "system_control",
+                        "content": "The Agent Run failed unexpectedly.",
+                        "metadata": {
+                            "finish_reason": "failed",
+                            "error_code": "model_failed",
+                            "_streamed": True,
+                        },
+                    }
+                },
+            )
+            await self.service.emit(
+                "run.completed",
+                workspace_id=self.workspace_id,
+                session_id=state.loop.session.session_id,
+                run_id=run_id,
+                payload={"finish_reason": "failed"},
+            )
+        except Exception:
+            pass
+        finally:
+            try:
+                state.run_ids.remove(run_id)
+            except ValueError:
+                pass
 
     async def cancel(self, client_id: str, session_id: str, version: int, run_id: str) -> None:
         claim = self.require_claim(client_id, session_id, version)
@@ -1823,8 +1960,6 @@ class WorkspaceServiceRuntime:
         )
         state = _LoopState(loop=loop, bus=bus, owner_client_id=client_id)
         self._loops[loop.session.session_id] = state
-        if client_id is not None:
-            state.output_task = asyncio.create_task(self._forward_output(state))
         return state
 
     async def _create_agent_loop(
@@ -1868,6 +2003,7 @@ class WorkspaceServiceRuntime:
                 else AgentLoop(**loop_kwargs)
             )
         loop.bind_confirmation_requester(self.service.confirmation.request)
+        loop.disable_foreground_consumer()
         loop.preflight()
         await loop.start()
         return loop, selected_bus
@@ -1899,6 +2035,7 @@ class WorkspaceServiceRuntime:
                         or (state.owner_client_id is not None and (owner is None or owner.expired))
                         or state.loop.has_active_run
                         or bool(state.run_ids)
+                        or (state.processor_task is not None and not state.processor_task.done())
                         or bool(await state.bus.inbound_snapshot())
                     )
                     await state.loop.wait_for_restore_idle()
@@ -2075,8 +2212,6 @@ class WorkspaceServiceRuntime:
             claim = claims_by_session.get(session_id)
             if claim is not None:
                 claim.loop = new_loop
-            if state.owner_client_id is not None:
-                state.output_task = asyncio.create_task(self._forward_output(state))
         for job_id, _old_state, new_loop, new_bus in old_schedule_loops:
             state = _LoopState(new_loop, new_bus, None, schedule=True)
             self._loops[state.loop.session.session_id] = state
@@ -2099,17 +2234,17 @@ class WorkspaceServiceRuntime:
             raise ExceptionGroup("Runtime generation retirement failed", errors)
         self._retired_generations.remove(retired)
 
-    async def _forward_output(self, state: _LoopState) -> None:
+    async def _forward_output(self, state: _LoopState, run_id: str | None = None) -> bool:
         session_id = state.loop.session.session_id
         try:
             while not self._closed and self._loops.get(session_id) is state:
                 message = await state.bus.get_outbound()
-                run_id = state.run_ids[0] if state.run_ids else None
+                current_run_id = run_id or (state.run_ids[0] if state.run_ids else None)
                 await self.service.emit(
                     "run.output",
                     workspace_id=self.workspace_id,
                     session_id=session_id,
-                    run_id=run_id,
+                    run_id=current_run_id,
                     payload={
                         "message": {
                             "type": message.type,
@@ -2118,8 +2253,13 @@ class WorkspaceServiceRuntime:
                         }
                     },
                 )
-                if message.metadata.get("_streamed") is True and state.run_ids:
-                    completed = state.run_ids.popleft()
+                if message.metadata.get("_streamed") is True:
+                    completed = current_run_id
+                    if completed is not None:
+                        try:
+                            state.run_ids.remove(completed)
+                        except ValueError:
+                            pass
                     await self.service.emit(
                         "run.completed",
                         workspace_id=self.workspace_id,
@@ -2129,15 +2269,12 @@ class WorkspaceServiceRuntime:
                             "finish_reason": message.metadata.get("finish_reason", "completed")
                         },
                     )
-                    if state.release_task is None or state.release_task.done():
-                        state.release_task = asyncio.create_task(
-                            self._release_switched_claim_when_idle(session_id, state)
-                        )
-                        state.release_task.add_done_callback(_consume_task_result)
+                    return True
         except asyncio.CancelledError:
             raise
         except Exception:
-            return
+            return False
+        return False
 
     async def _release_switched_claim_when_idle(self, session_id: str, state: _LoopState) -> None:
         while True:
@@ -2147,7 +2284,7 @@ class WorkspaceServiceRuntime:
                 active = state.loop.has_active_run
             except RuntimeError:
                 return
-            if not active and not state.run_ids:
+            if not active and not state.run_ids and state.output_task is None:
                 break
             await asyncio.sleep(0.01)
         claim = self._claims.get(session_id)
@@ -2176,7 +2313,12 @@ class WorkspaceServiceRuntime:
         try:
             if session_deletion_pending(self.workspace_state, session_id):
                 return
-            if state.loop.has_active_run or state.run_ids or await state.bus.inbound_snapshot():
+            if (
+                state.loop.has_active_run
+                or state.run_ids
+                or state.output_task is not None
+                or await state.bus.inbound_snapshot()
+            ):
                 return
         except RuntimeError:
             return
@@ -2189,16 +2331,30 @@ class WorkspaceServiceRuntime:
             if release_task is not asyncio.current_task():
                 release_task.cancel()
                 await asyncio.gather(release_task, return_exceptions=True)
+        async with state.coordination_lock:
+            state.processor_stopping = True
+        processor = state.processor_task
+        if abort:
+            await self.service.confirmation.cancel_generation(state.loop.generation_id)
+            await state.loop.abort()
+        else:
+            try:
+                active = state.loop.has_active_run
+            except RuntimeError:
+                active = False
+            if active:
+                await state.loop.cancel_active_run()
+        if processor is not None and processor is not asyncio.current_task():
+            if not processor.done():
+                processor.cancel()
+            await asyncio.gather(processor, return_exceptions=True)
         if state.output_task is not None:
             output_task = state.output_task
             state.output_task = None
             if output_task is not asyncio.current_task():
                 output_task.cancel()
                 await asyncio.gather(output_task, return_exceptions=True)
-        if abort:
-            await self.service.confirmation.cancel_generation(state.loop.generation_id)
-            await state.loop.abort()
-        else:
+        if not abort:
             await state.loop.close()
             await self.service.confirmation.cancel_generation(state.loop.generation_id)
 

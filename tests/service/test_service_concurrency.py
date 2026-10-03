@@ -16,6 +16,7 @@ from aiohttp.test_utils import TestServer
 
 import omni.service.runtime as service_runtime
 from omni.agent.memory.manager import MemoryManager
+from omni.agent.message_bus import InboundMessage
 from omni.agent.session.session import Session, SessionStoragePartition
 from omni.agent.workspace_state import WorkspaceState
 from omni.config.agent_home import AgentHome
@@ -516,8 +517,9 @@ async def test_claim_race_denies_loser_content_over_http_events_and_reconnect(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cross_workspace", [False, True])
 async def test_distinct_sessions_run_in_parallel_and_cancel_is_scoped(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cross_workspace: bool
 ) -> None:
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
@@ -536,20 +538,22 @@ async def test_distinct_sessions_run_in_parallel_and_cancel_is_scoped(
         first = await service.register_client("cli")
         second = await service.register_client("cli")
         workspace = await service.attach_workspace(first.client_id, workspace_path)
-        await service.attach_workspace(second.client_id, workspace_path)
+        second_path = tmp_path / "second-workspace" if cross_workspace else workspace_path
+        second_path.mkdir(exist_ok=True)
+        second_workspace = await service.attach_workspace(second.client_id, second_path)
         await service.connect_client(first.client_id, first_sink)
         await service.connect_client(second.client_id, second_sink)
 
         session_a = await workspace.create_draft(first.client_id)
-        session_b = await workspace.create_draft(second.client_id)
+        session_b = await second_workspace.create_draft(second.client_id)
         claim_a = await service.claim(first.client_id, workspace.workspace_id, session_a)
-        claim_b = await service.claim(second.client_id, workspace.workspace_id, session_b)
+        claim_b = await service.claim(second.client_id, second_workspace.workspace_id, session_b)
         version_a = _claim_version(claim_a)
         version_b = _claim_version(claim_b)
 
         await workspace.input(first.client_id, session_a, version_a, "session-a", "run-a")
         await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
-        await workspace.input(second.client_id, session_b, version_b, "session-b", "run-b")
+        await second_workspace.input(second.client_id, session_b, version_b, "session-b", "run-b")
         await asyncio.wait_for(provider.session_b_started.wait(), timeout=2)
 
         await workspace.cancel(first.client_id, session_a, version_a, "run-a")
@@ -561,7 +565,7 @@ async def test_distinct_sessions_run_in_parallel_and_cancel_is_scoped(
         assert not any(event.get("type") == "run.cancelled" for event in second_sink.events)
 
         history_a = Session.load(workspace.workspace_state, session_a)
-        history_b = Session.load(workspace.workspace_state, session_b)
+        history_b = Session.load(second_workspace.workspace_state, session_b)
         content_a = [str(message["content"]) for message in history_a.messages]
         content_b = [str(message["content"]) for message in history_b.messages]
         assert "session-a" in content_a
@@ -569,6 +573,297 @@ async def test_distinct_sessions_run_in_parallel_and_cancel_is_scoped(
         assert "session-b" in content_b
         assert "answer from session B" in content_b
         assert set(content_a).isdisjoint(content_b)
+
+        for _ in range(100):
+            state_a = workspace.loops[session_a]
+            state_b = second_workspace.loops[session_b]
+            if (
+                state_a.processor_task is None
+                and state_a.output_task is None
+                and state_b.processor_task is None
+                and state_b.output_task is None
+            ):
+                break
+            await asyncio.sleep(0)
+        assert workspace.loops[session_a].processor_task is None
+        assert workspace.loops[session_a].output_task is None
+        assert second_workspace.loops[session_b].processor_task is None
+        assert second_workspace.loops[session_b].output_task is None
+        assert workspace.loops[session_a].loop._consumer_task is None
+        assert second_workspace.loops[session_b].loop._consumer_task is None
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_returns_without_waiting_for_the_next_queued_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ConcurrentProvider(block_b=True)
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    sink = _CollectingSink()
+    try:
+        client = await service.register_client("cli")
+        workspace = await service.attach_workspace(client.client_id, workspace_path)
+        await service.connect_client(client.client_id, sink)
+        session_id = await workspace.create_draft(client.client_id)
+        claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
+        version = _claim_version(claim)
+        await workspace.input(client.client_id, session_id, version, "session-a", "queued-a")
+        await asyncio.wait_for(provider.session_a_started.wait(), timeout=5)
+        await workspace.input(client.client_id, session_id, version, "session-b", "queued-b")
+
+        await asyncio.wait_for(
+            workspace.cancel(client.client_id, session_id, version, "queued-a"), timeout=2
+        )
+        await asyncio.wait_for(provider.session_b_started.wait(), timeout=5)
+        assert not provider.session_b_cancelled.is_set()
+        with pytest.raises(ServiceError, match="no longer active"):
+            await workspace.cancel(client.client_id, session_id, version, "queued-a")
+        provider.release_b.set()
+        await asyncio.wait_for(sink.wait_for("run.completed", "queued-b"), timeout=5)
+        completed = [
+            event["run_id"] for event in sink.events if event.get("type") == "run.completed"
+        ]
+        assert completed == ["queued-a", "queued-b"]
+    finally:
+        provider.release_a.set()
+        provider.release_b.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("abort", [False, True])
+async def test_closing_session_drains_its_processor_and_run_tasks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, abort: bool
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ConcurrentProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        workspace = await service.attach_workspace(client.client_id, workspace_path)
+        await service.connect_client(client.client_id, _CollectingSink())
+        session_id = await workspace.create_draft(client.client_id)
+        claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
+        await workspace.input(
+            client.client_id, session_id, _claim_version(claim), "session-a", "closing-run"
+        )
+        await asyncio.wait_for(provider.session_a_started.wait(), timeout=5)
+        state = workspace.loops[session_id]
+        processor = state.processor_task
+        execution = state.loop._execution_task
+        output = state.output_task
+        assert processor is not None and execution is not None and output is not None
+        assert processor is not execution
+        await asyncio.wait_for(workspace._close_loop(session_id, abort=abort), timeout=5)
+        assert processor.done() and execution.done() and output.done()
+        assert state.processor_task is None
+        assert state.output_task is None
+        assert session_id not in workspace.loops
+    finally:
+        provider.release_a.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_input_during_processor_retirement_is_not_stranded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ConcurrentProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    sink = _CollectingSink()
+    try:
+        client = await service.register_client("cli")
+        workspace = await service.attach_workspace(client.client_id, workspace_path)
+        await service.connect_client(client.client_id, sink)
+        session_id = await workspace.create_draft(client.client_id)
+        claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
+        version = _claim_version(claim)
+        state = workspace.loops[session_id]
+        snapshot = state.bus.inbound_snapshot
+        empty_observed = asyncio.Event()
+        retire = asyncio.Event()
+
+        async def hold_empty_snapshot() -> tuple[InboundMessage, ...]:
+            pending = await snapshot()
+            if asyncio.current_task() is state.processor_task and not pending:
+                empty_observed.set()
+                await retire.wait()
+            return pending
+
+        monkeypatch.setattr(state.bus, "inbound_snapshot", hold_empty_snapshot)
+        await workspace.input(client.client_id, session_id, version, "first", "retire-first")
+        await asyncio.wait_for(empty_observed.wait(), timeout=5)
+        enqueue = asyncio.create_task(
+            workspace.input(client.client_id, session_id, version, "second", "retire-second")
+        )
+        await asyncio.sleep(0)
+        assert not enqueue.done()
+        retire.set()
+        await asyncio.wait_for(enqueue, timeout=5)
+        await asyncio.wait_for(sink.wait_for("run.completed", "retire-second"), timeout=5)
+        await state.loop.wait_for_restore_idle()
+        assert state.processor_task is None
+        assert not await snapshot()
+        completed = [
+            event["run_id"] for event in sink.events if event.get("type") == "run.completed"
+        ]
+        assert completed == ["retire-first", "retire-second"]
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_session_processor_preserves_fifo_and_retires_when_idle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ConcurrentProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    sink = _CollectingSink()
+    try:
+        client = await service.register_client("cli")
+        workspace = await service.attach_workspace(client.client_id, workspace_path)
+        await service.connect_client(client.client_id, sink)
+        session_id = await workspace.create_draft(client.client_id)
+        claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
+        version = _claim_version(claim)
+        run_ids = [f"fifo-{index}" for index in range(20)]
+        loop = workspace.loops[session_id].loop
+        run_foreground = loop.run_foreground
+        active_runs = 0
+        peak_runs = 0
+        started = 0
+
+        async def observe_run(inbound: InboundMessage) -> None:
+            nonlocal active_runs, peak_runs, started
+            # Every previous input must have reached the authoritative commit boundary.
+            assert (
+                sum(message.get("role") == "user" for message in loop.session.messages) == started
+            )
+            started += 1
+            active_runs += 1
+            peak_runs = max(peak_runs, active_runs)
+            try:
+                await run_foreground(inbound)
+            finally:
+                active_runs -= 1
+
+        monkeypatch.setattr(loop, "run_foreground", observe_run)
+
+        for index, run_id in enumerate(run_ids):
+            await workspace.input(
+                client.client_id,
+                session_id,
+                version,
+                f"fifo input {index}",
+                run_id,
+            )
+
+        for run_id in run_ids:
+            await asyncio.wait_for(sink.wait_for("run.completed", run_id), timeout=5)
+
+        completed = [
+            event["run_id"]
+            for event in sink.events
+            if event.get("type") == "run.completed"
+            and isinstance(event.get("run_id"), str)
+            and event["run_id"] in run_ids
+        ]
+        assert completed == run_ids
+        assert started == 20
+        assert peak_runs == 1
+
+        for _ in range(100):
+            state = workspace.loops[session_id]
+            if state.processor_task is None and state.output_task is None:
+                break
+            await asyncio.sleep(0)
+        state = workspace.loops[session_id]
+        assert state.processor_task is None
+        assert state.output_task is None
+        assert state.loop._consumer_task is None
+
+        history = Session.load(workspace.workspace_state, session_id)
+        users = [
+            str(message["content"]) for message in history.messages if message.get("role") == "user"
+        ]
+        assert users == [f"fifo input {index}" for index in range(20)]
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_loaded_sessions_leave_no_on_demand_processor_when_idle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ConcurrentProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    await service.start()
+    sink = _CollectingSink()
+    try:
+        workspace = None
+        sessions: list[tuple[str, str, int, str]] = []
+        for index in range(30):
+            client = await service.register_client("cli")
+            workspace = await service.attach_workspace(client.client_id, workspace_path)
+            await service.connect_client(client.client_id, sink)
+            session_id = await workspace.create_draft(client.client_id, reuse_startup_session=False)
+            claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
+            sessions.append(
+                (client.client_id, session_id, _claim_version(claim), f"loaded-run-{index}")
+            )
+        assert workspace is not None
+
+        await asyncio.gather(
+            *(
+                workspace.input(
+                    client_id,
+                    session_id,
+                    version,
+                    f"loaded input {index}",
+                    run_id,
+                )
+                for index, (client_id, session_id, version, run_id) in enumerate(sessions)
+            )
+        )
+        await asyncio.gather(
+            *(sink.wait_for("run.completed", run_id) for _, _, _, run_id in sessions)
+        )
+
+        completed = {
+            event.get("run_id") for event in sink.events if event.get("type") == "run.completed"
+        }
+        assert completed >= {run_id for _, _, _, run_id in sessions}
+        for _, session_id, _, _ in sessions:
+            state = workspace.loops[session_id]
+            await state.loop.wait_for_restore_idle()
+            assert state.processor_task is None
+            assert state.output_task is None
+            assert state.loop._consumer_task is None
     finally:
         await service.stop()
 

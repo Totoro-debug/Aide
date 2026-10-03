@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from loguru import logger
 
@@ -45,6 +45,9 @@ class MCPConnectionAdapter(Protocol):
 
 
 type MCPConnectionFactory = Callable[[MCPServerConfiguration, Path], MCPConnectionAdapter]
+type _ScopedMCPConnectionFactory = Callable[
+    [MCPServerConfiguration, Path | None], MCPConnectionAdapter
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,19 +135,35 @@ def _skipped_tool_count(connection: MCPConnectionAdapter) -> int:
 
 
 class MCPRuntimeManager:
-    """Connect configured MCP Servers and prepare immutable generation snapshots."""
+    """Own MCP connections for one runtime scope and prepare tool snapshots.
+
+    A manager with no Workspace owns the service-global HTTP connections. The
+    historical Path-based form continues to own all configured transports and
+    is retained for direct callers while Workspace Runtime migration is staged.
+    """
 
     def __init__(
         self,
-        workspace: Path,
+        workspace: Path | None,
         *,
-        connection_factory: MCPConnectionFactory | None = None,
+        connection_factory: MCPConnectionFactory | _ScopedMCPConnectionFactory | None = None,
         built_in_names: Iterable[str] = (),
+        _transports: Iterable[str] | None = None,
     ) -> None:
-        if not isinstance(workspace, Path):
-            raise TypeError("MCP Runtime Manager requires a Path workspace")
+        if workspace is not None and not isinstance(workspace, Path):
+            raise TypeError("MCP Runtime Manager requires a Path workspace or None")
         self._workspace = workspace
-        self._connection_factory = connection_factory or _default_connection_factory
+        self._connection_factory = cast(
+            _ScopedMCPConnectionFactory,
+            connection_factory or _default_connection_factory,
+        )
+        if _transports is None:
+            transports = None if workspace is not None else frozenset({"streamable-http"})
+        else:
+            transports = frozenset(_transports)
+            if not transports.issubset({"stdio", "streamable-http"}):
+                raise ValueError("MCP Runtime Manager transport selection is invalid")
+        self._transports = transports
         names = list(built_in_names)
         if any(not isinstance(name, str) or not name for name in names):
             raise ValueError("Built-in Tool names must be non-empty strings")
@@ -158,6 +177,7 @@ class MCPRuntimeManager:
         self._failures: dict[str, MCPServerFailure] = {}
         self._skipped_tool_counts: dict[str, int] = {}
         self._snapshot: MCPToolSnapshot = ()
+        self._startup_report: MCPStartupReport | None = None
         self._pending_report: MCPSnapshotReport | None = None
         self._started = False
 
@@ -166,7 +186,7 @@ class MCPRuntimeManager:
         configuration: Mapping[str, MCPServerConfiguration],
     ) -> MCPStartupReport:
         """Connect enabled Servers and activate the initial generation snapshot."""
-        normalized = _normalize_configuration(configuration)
+        normalized = _select_transports(_normalize_configuration(configuration), self._transports)
         if self._started or self._connections:
             await self.close()
         self._pending_report = None
@@ -214,12 +234,14 @@ class MCPRuntimeManager:
         self._failures = failures
         self._started = True
         self._snapshot = self._build_snapshot()
-        return MCPStartupReport(
+        report = MCPStartupReport(
             snapshot=self._snapshot,
             failed_servers=tuple(sorted(self._failed_servers)),
             failures=self._failure_report(),
             skipped_tool_counts=self._skipped_tool_report(),
         )
+        self._startup_report = report
+        return report
 
     async def prepare_generation(self) -> MCPSnapshotReport:
         """Prepare a candidate snapshot while retaining the active snapshot.
@@ -299,6 +321,12 @@ class MCPRuntimeManager:
         if report is not self._pending_report:
             raise ValueError("MCP snapshot report is not the current prepared candidate")
         self._snapshot = report.snapshot
+        self._startup_report = MCPStartupReport(
+            snapshot=report.snapshot,
+            failed_servers=report.failed_servers,
+            failures=report.failures,
+            skipped_tool_counts=report.skipped_tool_counts,
+        )
         self._pending_report = None
         return self._snapshot
 
@@ -312,9 +340,26 @@ class MCPRuntimeManager:
         self._failures = {}
         self._skipped_tool_counts = {}
         self._snapshot = ()
+        self._startup_report = None
         self._pending_report = None
         self._started = False
         await _close_connections(connections)
+
+    @property
+    def started(self) -> bool:
+        return self._started
+
+    @property
+    def snapshot(self) -> MCPToolSnapshot:
+        if not self._started:
+            raise RuntimeError("MCP Runtime Manager has not been started")
+        return self._snapshot
+
+    @property
+    def startup_report(self) -> MCPStartupReport:
+        if self._startup_report is None:
+            raise RuntimeError("MCP Runtime Manager has not been started")
+        return self._startup_report
 
     async def _connect_many(
         self,
@@ -410,13 +455,148 @@ class MCPRuntimeManager:
         )
 
 
+class MCPWorkspaceRuntimeManager:
+    """Own one Workspace's Stdio MCP connections and compose its Tool view."""
+
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        shared_runtime: MCPRuntimeManager,
+        connection_factory: MCPConnectionFactory | _ScopedMCPConnectionFactory | None = None,
+        built_in_names: Iterable[str] = (),
+    ) -> None:
+        if not isinstance(workspace, Path):
+            raise TypeError("Workspace MCP Runtime Manager requires a Path workspace")
+        if not isinstance(shared_runtime, MCPRuntimeManager):
+            raise TypeError("Workspace MCP Runtime Manager requires a shared MCP Runtime Manager")
+        self._shared_runtime = shared_runtime
+        self._stdio_runtime = MCPRuntimeManager(
+            workspace,
+            connection_factory=connection_factory,
+            built_in_names=built_in_names,
+            _transports=("stdio",),
+        )
+        self._snapshot: MCPToolSnapshot = ()
+        self._startup_report: MCPStartupReport | None = None
+        self._pending_report: MCPSnapshotReport | None = None
+        self._pending_stdio_report: MCPSnapshotReport | None = None
+        self._started = False
+
+    async def start(
+        self,
+        configuration: Mapping[str, MCPServerConfiguration],
+    ) -> MCPStartupReport:
+        """Start only this Workspace's Stdio connections and publish its view."""
+        if not self._shared_runtime.started:
+            raise RuntimeError("Shared MCP Runtime Manager has not been started")
+        local_report = await self._stdio_runtime.start(configuration)
+        candidate = self._merge_report(local_report)
+        report = MCPStartupReport(
+            snapshot=candidate.snapshot,
+            failed_servers=candidate.failed_servers,
+            failures=candidate.failures,
+            skipped_tool_counts=candidate.skipped_tool_counts,
+        )
+        self._snapshot = report.snapshot
+        self._startup_report = report
+        self._pending_report = None
+        self._pending_stdio_report = None
+        self._started = True
+        return report
+
+    async def prepare_generation(self) -> MCPSnapshotReport:
+        """Prepare a new Stdio view while retaining the active Workspace view."""
+        if not self._started:
+            raise RuntimeError("Workspace MCP Runtime Manager has not been started")
+        local_report = await self._stdio_runtime.prepare_generation()
+        report = self._merge_report(local_report)
+        self._pending_stdio_report = local_report
+        self._pending_report = report
+        return report
+
+    def activate_generation(self, report: MCPSnapshotReport) -> MCPToolSnapshot:
+        """Publish a prepared Workspace view after the caller selects it."""
+        if not isinstance(report, MCPSnapshotReport):
+            raise TypeError("MCP generation activation requires an MCP snapshot report")
+        if not self._started:
+            raise RuntimeError("Workspace MCP Runtime Manager has not been started")
+        if report is not self._pending_report or self._pending_stdio_report is None:
+            raise ValueError("MCP snapshot report is not the current prepared candidate")
+        self._stdio_runtime.activate_generation(self._pending_stdio_report)
+        self._snapshot = report.snapshot
+        self._startup_report = MCPStartupReport(
+            snapshot=report.snapshot,
+            failed_servers=report.failed_servers,
+            failures=report.failures,
+            skipped_tool_counts=report.skipped_tool_counts,
+        )
+        self._pending_report = None
+        self._pending_stdio_report = None
+        return self._snapshot
+
+    async def close(self) -> None:
+        """Close this Workspace's Stdio connections without touching HTTP."""
+        await self._stdio_runtime.close()
+        self._snapshot = ()
+        self._startup_report = None
+        self._pending_report = None
+        self._pending_stdio_report = None
+        self._started = False
+
+    @property
+    def started(self) -> bool:
+        return self._started
+
+    @property
+    def snapshot(self) -> MCPToolSnapshot:
+        if not self._started:
+            raise RuntimeError("Workspace MCP Runtime Manager has not been started")
+        return self._snapshot
+
+    @property
+    def startup_report(self) -> MCPStartupReport:
+        if self._startup_report is None:
+            raise RuntimeError("Workspace MCP Runtime Manager has not been started")
+        return self._startup_report
+
+    def _merge_report(
+        self, local_report: MCPStartupReport | MCPSnapshotReport
+    ) -> MCPSnapshotReport:
+        global_report = self._shared_runtime.startup_report
+        snapshot, collision_counts = _compose_workspace_snapshot(
+            global_report.snapshot,
+            local_report.snapshot,
+            self._stdio_runtime._built_in_names,
+        )
+        skipped_tool_counts = _merge_skipped_tool_counts(
+            global_report.skipped_tool_counts,
+            local_report.skipped_tool_counts,
+            collision_counts,
+        )
+        failures = tuple(
+            sorted(
+                (*global_report.failures, *local_report.failures),
+                key=lambda failure: (failure.mcp_name, failure.phase, failure.exception_type),
+            )
+        )
+        return MCPSnapshotReport(
+            snapshot=snapshot,
+            failed_servers=tuple(
+                sorted(set(global_report.failed_servers) | set(local_report.failed_servers))
+            ),
+            failures=failures,
+            skipped_tool_counts=skipped_tool_counts,
+        )
+
+
 def _default_connection_factory(
     configuration: MCPServerConfiguration,
-    workspace: Path,
+    workspace: Path | None,
 ) -> MCPServerConnection:
     return MCPServerConnection(
         configuration,
-        workspace,
+        Path(".") if workspace is None else workspace,
         model_name_for=lambda remote_name: (
             allocate_mcp_tool_name(
                 configuration.mcp_name,
@@ -445,19 +625,68 @@ def _normalize_configuration(
     return normalized
 
 
+def _select_transports(
+    configuration: Mapping[str, MCPServerConfiguration],
+    transports: frozenset[str] | None,
+) -> dict[str, MCPServerConfiguration]:
+    if transports is None:
+        return dict(configuration)
+    return {
+        mcp_name: server_configuration
+        for mcp_name, server_configuration in configuration.items()
+        if server_configuration.transport in transports
+    }
+
+
+def _compose_workspace_snapshot(
+    global_snapshot: Sequence[MCPTool],
+    local_snapshot: Sequence[MCPTool],
+    built_in_names: frozenset[str],
+) -> tuple[MCPToolSnapshot, dict[str, int]]:
+    """Compose global and local Tools with the original deterministic ordering."""
+    used_names = set(built_in_names)
+    snapshot: list[MCPTool] = []
+    collision_counts: dict[str, int] = {}
+    candidates = [(tool, False) for tool in global_snapshot]
+    candidates.extend((tool, True) for tool in local_snapshot)
+    for tool, is_local in sorted(candidates, key=lambda item: _tool_sort_key(item[0])):
+        if tool.name in used_names:
+            collision_counts[tool.server_name] = collision_counts.get(tool.server_name, 0) + 1
+            _log_skipped_tool(
+                tool.server_name,
+                phase="tool_name" if is_local else "workspace_tool_name",
+                exception_type="ToolNameCollision",
+            )
+            continue
+        used_names.add(tool.name)
+        snapshot.append(tool)
+    return tuple(snapshot), collision_counts
+
+
+def _tool_sort_key(tool: MCPTool) -> tuple[str, str, str, str, str]:
+    return (
+        tool.server_name,
+        tool.remote_name,
+        tool.description,
+        tool.name,
+        json.dumps(tool.parameters, sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _merge_skipped_tool_counts(
+    *reports: tuple[tuple[str, int], ...] | Mapping[str, int],
+) -> tuple[tuple[str, int], ...]:
+    counts: dict[str, int] = {}
+    for report in reports:
+        entries = report.items() if isinstance(report, Mapping) else report
+        for mcp_name, count in entries:
+            counts[mcp_name] = counts.get(mcp_name, 0) + count
+    return tuple((mcp_name, counts[mcp_name]) for mcp_name in sorted(counts) if counts[mcp_name])
+
+
 def _sorted_tools(tools: Sequence[MCPTool]) -> tuple[MCPTool, ...]:
     valid_tools = tuple(tool for tool in tools if isinstance(tool, MCPTool))
-    return tuple(
-        sorted(
-            valid_tools,
-            key=lambda tool: (
-                tool.remote_name,
-                tool.description,
-                tool.name,
-                json.dumps(tool.parameters, sort_keys=True, separators=(",", ":")),
-            ),
-        )
-    )
+    return tuple(sorted(valid_tools, key=_tool_sort_key))
 
 
 async def _close_connections(connections: Iterable[MCPConnectionAdapter]) -> None:
@@ -484,5 +713,6 @@ __all__ = [
     "MCPSnapshotReport",
     "MCPStartupReport",
     "MCPToolSnapshot",
+    "MCPWorkspaceRuntimeManager",
     "allocate_mcp_tool_name",
 ]

@@ -18,6 +18,7 @@ from omni.agent.tools.mcp import MCPServerConnection, MCPTool, MCPToolSpec
 from omni.agent.tools.mcp_runtime import (
     MCPRuntimeManager,
     MCPToolSnapshot,
+    MCPWorkspaceRuntimeManager,
     allocate_mcp_tool_name,
 )
 from omni.agent.tools.tool_gateway import ModelToolCall, ToolGateway
@@ -397,6 +398,110 @@ def _manager(
         built_in_names=built_in_names,
         connection_factory=lambda configuration, workspace: connections[configuration.mcp_name],
     )
+
+
+@pytest.mark.asyncio
+async def test_service_http_connections_are_reused_by_workspace_stdio_managers(
+    tmp_path: Path,
+) -> None:
+    http_configuration = replace(
+        _configuration("http"), transport="streamable-http", url="https://mcp.example"
+    )
+    stdio_configuration = _configuration("stdio")
+    configurations = {"http": http_configuration, "stdio": stdio_configuration}
+    calls: list[tuple[str, Path | None]] = []
+    connections: list[_FakeConnection] = []
+
+    def factory(configuration: MCPServerConfiguration, workspace: Path | None) -> _FakeConnection:
+        calls.append((configuration.mcp_name, workspace))
+        tool = _tool(configuration.mcp_name, "echo")
+        connection = _FakeConnection(configuration, (tool,))
+        connections.append(connection)
+        return connection
+
+    service_runtime = MCPRuntimeManager(
+        None,
+        connection_factory=factory,
+    )
+    await service_runtime.start(configurations)
+    first = MCPWorkspaceRuntimeManager(
+        tmp_path / "first",
+        shared_runtime=service_runtime,
+        connection_factory=factory,
+    )
+    second = MCPWorkspaceRuntimeManager(
+        tmp_path / "second",
+        shared_runtime=service_runtime,
+        connection_factory=factory,
+    )
+
+    try:
+        first_report, second_report = await asyncio.gather(
+            first.start(configurations),
+            second.start(configurations),
+        )
+
+        assert calls == [
+            ("http", None),
+            ("stdio", tmp_path / "first"),
+            ("stdio", tmp_path / "second"),
+        ]
+        assert [tool.server_name for tool in service_runtime.snapshot] == ["http"]
+        assert [tool.server_name for tool in first_report.snapshot] == ["http", "stdio"]
+        assert [tool.server_name for tool in second_report.snapshot] == ["http", "stdio"]
+
+        await first.close()
+        assert [connection.close_calls for connection in connections] == [0, 1, 0]
+    finally:
+        await second.close()
+        await service_runtime.close()
+
+    assert [connection.close_calls for connection in connections] == [1, 1, 1]
+
+
+@pytest.mark.asyncio
+async def test_workspace_snapshot_keeps_stdio_discovery_and_http_collisions_scoped(
+    tmp_path: Path,
+) -> None:
+    http_name = "z" * 60
+    stdio_name = "a" * 60
+    configurations = {
+        http_name: replace(
+            _configuration(http_name), transport="streamable-http", url="https://mcp.example"
+        ),
+        stdio_name: _configuration(stdio_name),
+    }
+    discovered: dict[Path | None, tuple[MCPTool, ...]] = {}
+
+    def factory(configuration: MCPServerConfiguration, workspace: Path | None) -> _FakeConnection:
+        tools: tuple[MCPTool, ...] = (_tool(configuration.mcp_name, "echo"),)
+        if workspace is not None:
+            tools += (_tool(configuration.mcp_name, workspace.name),)
+        discovered[workspace] = tools
+        return _FakeConnection(configuration, tools)
+
+    shared = MCPRuntimeManager(None, connection_factory=factory)
+    await shared.start(configurations)
+    first = MCPWorkspaceRuntimeManager(
+        tmp_path / "first", shared_runtime=shared, connection_factory=factory
+    )
+    second = MCPWorkspaceRuntimeManager(
+        tmp_path / "second", shared_runtime=shared, connection_factory=factory
+    )
+    try:
+        reports = await asyncio.gather(first.start(configurations), second.start(configurations))
+        for workspace, report in zip(
+            (tmp_path / "first", tmp_path / "second"), reports, strict=True
+        ):
+            assert [tool.remote_name for tool in report.snapshot] == ["echo", workspace.name]
+            assert report.snapshot == discovered[workspace]
+            assert report.skipped_tool_counts == ((http_name, 1),)
+        assert shared.snapshot == discovered[None]
+        assert shared.startup_report.skipped_tool_counts == ()
+    finally:
+        await first.close()
+        await second.close()
+        await shared.close()
 
 
 @pytest.mark.asyncio

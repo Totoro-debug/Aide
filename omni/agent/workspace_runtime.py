@@ -30,6 +30,7 @@ from omni.agent.tools.mcp_runtime import (
     MCPRuntimeManager,
     MCPStartupReport,
     MCPToolSnapshot,
+    MCPWorkspaceRuntimeManager,
 )
 from omni.agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES
 from omni.agent.workspace_state import WorkspaceState, normalize_workspace_path
@@ -54,6 +55,7 @@ ProviderFactory = Callable[[ProviderConfiguration], ModelProvider]
 ForegroundCloser = Callable[[], Awaitable[None]]
 RuntimeFactory = Callable[..., Any]
 RuntimeResource = TypeVar("RuntimeResource")
+MCPRuntimeResource = MCPRuntimeManager | MCPWorkspaceRuntimeManager
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +138,7 @@ class WorkspaceRuntime:
         factories: WorkspaceRuntimeFactories,
         registry: WorkspaceRuntimeRegistry,
         shared_router: ModelRouter | None,
+        shared_mcp_runtime: MCPRuntimeManager | None,
     ) -> None:
         self.workspace_path = workspace_path
         self.agent_home = agent_home
@@ -153,12 +156,13 @@ class WorkspaceRuntime:
         self._factories = factories
         self._runtime_registry = registry
         self._shared_router = shared_router
+        self._shared_mcp_runtime = shared_mcp_runtime
         self._router_owned = shared_router is None
         self._lifecycle_lock = asyncio.Lock()
 
         self._workspace_state: WorkspaceState | None = None
         self._restore_result: RestoreResult | None = None
-        self._mcp_manager: MCPRuntimeManager | None = None
+        self._mcp_manager: MCPRuntimeResource | None = None
         self._mcp_startup_report: MCPStartupReport | None = None
         self._mcp_snapshot: MCPToolSnapshot = ()
         self._mcp_keywords: Mapping[str, tuple[str, ...]] = MappingProxyType({})
@@ -192,6 +196,7 @@ class WorkspaceRuntime:
         factories: WorkspaceRuntimeFactories | None = None,
         registry: WorkspaceRuntimeRegistry | None = None,
         shared_router: ModelRouter | None = None,
+        shared_mcp_runtime: MCPRuntimeManager | None = None,
     ) -> Self:
         """Return the sole active Runtime for one resolved Workspace path."""
         workspace_path = _resolve_workspace_identity(workspace)
@@ -241,6 +246,7 @@ class WorkspaceRuntime:
                 factories=WorkspaceRuntimeFactories() if factories is None else factories,
                 registry=selected_registry,
                 shared_router=shared_router,
+                shared_mcp_runtime=shared_mcp_runtime,
             )
             selected_registry.runtimes[key] = runtime
             return runtime
@@ -288,13 +294,24 @@ class WorkspaceRuntime:
     async def _start_resources(self) -> None:
         """Start generation-owned resources against an already selected Workspace state."""
         state = self.workspace_state
-        manager = cast(
-            MCPRuntimeManager,
-            self._factories.mcp_runtime(
+        if self._shared_mcp_runtime is None:
+            manager = self._factories.mcp_runtime(
                 self.workspace_path,
                 built_in_names=self._built_in_names,
-            ),
-        )
+            )
+        elif self._factories.mcp_runtime is MCPRuntimeManager:
+            manager = MCPWorkspaceRuntimeManager(
+                self.workspace_path,
+                shared_runtime=self._shared_mcp_runtime,
+                built_in_names=self._built_in_names,
+            )
+        else:
+            manager = self._factories.mcp_runtime(
+                self.workspace_path,
+                built_in_names=self._built_in_names,
+                shared_runtime=self._shared_mcp_runtime,
+            )
+        manager = cast(MCPRuntimeResource, manager)
         self._mcp_manager = manager
         startup_report = await manager.start(self.configuration.mcp)
         self._mcp_startup_report = startup_report
@@ -379,6 +396,7 @@ class WorkspaceRuntime:
             factories=self._factories,
             registry=self._runtime_registry,
             shared_router=self._shared_router,
+            shared_mcp_runtime=self._shared_mcp_runtime,
         )
 
     async def start_replacement(self, previous: WorkspaceRuntime) -> Self:
@@ -445,8 +463,8 @@ class WorkspaceRuntime:
         return None if result is None else result.session_id
 
     @property
-    def mcp_manager(self) -> MCPRuntimeManager:
-        return self._require(self._mcp_manager, "MCP Runtime Manager")
+    def mcp_manager(self) -> MCPRuntimeResource:
+        return cast(MCPRuntimeResource, self._require(self._mcp_manager, "MCP Runtime Manager"))
 
     @property
     def mcp_startup_report(self) -> MCPStartupReport:

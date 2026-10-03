@@ -44,7 +44,7 @@ from omni.agent.session.restore import RestoreManager, RestoreRecoveryRequired, 
 from omni.agent.session.session import Session, SessionStoragePartition
 from omni.agent.tools.core.exec_host import ExecHost, create_exec_host, resolve_exec_shell
 from omni.agent.tools.mcp_keywords import MCPKeywordPreparer
-from omni.agent.tools.mcp_runtime import MCPRuntimeManager
+from omni.agent.tools.mcp_runtime import MCPRuntimeManager, MCPWorkspaceRuntimeManager
 from omni.agent.tools.tool_gateway import (
     BUILT_IN_TOOL_NAMES,
     BuiltInToolCatalog,
@@ -710,10 +710,11 @@ class WorkspaceServiceRuntime:
                 built_in_names=BUILT_IN_TOOL_NAMES,
                 registry=self.service._workspace_registry,
                 shared_router=self.service._model_router,
+                shared_mcp_runtime=self.service.mcp_manager,
                 factories=WorkspaceRuntimeFactories(
                     workspace_state=WorkspaceState,
                     restore_manager=RestoreManager,
-                    mcp_runtime=MCPRuntimeManager,
+                    mcp_runtime=MCPWorkspaceRuntimeManager,
                     router=ModelRouter,
                     mcp_keyword_preparer=MCPKeywordPreparer,
                     memory_manager=MemoryManager,
@@ -2259,6 +2260,7 @@ class LocalService:
         self._workspace_registry = WorkspaceRuntimeRegistry()
         self._skill_loader: SkillLoader | None = None
         self._model_router: ModelRouter | None = None
+        self._mcp_manager: MCPRuntimeManager | None = None
         self._exec_host: ExecHost | None = None
         self._built_in_tool_catalog: BuiltInToolCatalog | None = None
         self._initial_configuration_candidates: list[WorkspaceServiceRuntime] = []
@@ -2266,6 +2268,7 @@ class LocalService:
         self._stop_task: asyncio.Task[None] | None = None
         self._stop_failed = False
         self._closed = asyncio.Event()
+        self._start_lock = asyncio.Lock()
         self._lock = asyncio.Lock()
         self._schedule_admission_lock = asyncio.Lock()
         self._schedule_mutation_lock = asyncio.Lock()
@@ -2296,6 +2299,10 @@ class LocalService:
         self.projects = ProjectCatalog(agent_home)
 
     async def start(self) -> None:
+        async with self._start_lock:
+            await self._start_owned()
+
+    async def _start_owned(self) -> None:
         if self.state != "starting":
             return
         self.agent_home.initialize()
@@ -2313,6 +2320,8 @@ class LocalService:
             self._config_active_revision = snapshot.revision
             self._config_status = "active"
             self._initialize_shared_resources(snapshot.configuration)
+            assert self._mcp_manager is not None
+            await self._mcp_manager.start(snapshot.configuration.mcp)
         else:
             self.configuration = None
             self._config_saved_configuration = None
@@ -2352,6 +2361,12 @@ class LocalService:
         return self._model_router
 
     @property
+    def mcp_manager(self) -> MCPRuntimeManager:
+        if self._mcp_manager is None:
+            raise RuntimeError("MCP Runtime Manager is unavailable")
+        return self._mcp_manager
+
+    @property
     def exec_host(self) -> ExecHost:
         if self._exec_host is None:
             raise RuntimeError("Exec Host is unavailable")
@@ -2384,6 +2399,11 @@ class LocalService:
             self._built_in_tool_catalog = BuiltInToolCatalog(
                 skill_root=self.skill_loader.root,
                 exec_host=self._exec_host,
+            )
+        if self._mcp_manager is None:
+            self._mcp_manager = MCPRuntimeManager(
+                None,
+                built_in_names=BUILT_IN_TOOL_NAMES,
             )
 
     def reload_skills(self) -> tuple[SkillMetadata, ...]:
@@ -2688,6 +2708,15 @@ class LocalService:
                 errors.append(result)
             else:
                 self._initial_configuration_candidates.remove(runtime)
+        if (
+            self.configuration is None
+            and self._mcp_manager is not None
+            and self._mcp_manager.started
+        ):
+            try:
+                await self._mcp_manager.close()
+            except Exception as error:
+                errors.append(error)
         if errors:
             raise service_error(
                 "runtime_generation_cleanup_failed",
@@ -2704,6 +2733,12 @@ class LocalService:
             self.config_view()
             if target_revision != self._config_saved_revision:
                 return False
+        if self._mcp_manager is None:
+            self._initialize_shared_resources(target)
+        if self._mcp_manager is None:
+            raise RuntimeError("MCP Runtime Manager could not be initialized")
+        if not self._mcp_manager.started:
+            await self._mcp_manager.start(target.mcp)
         created: list[tuple[str, WorkspaceServiceRuntime]] = []
         try:
             seen: set[str] = set()
@@ -4552,6 +4587,11 @@ class LocalService:
         for workspace in tuple(self._workspaces.values()):
             try:
                 await workspace.close()
+            except Exception as error:
+                errors.append(error)
+        if self._mcp_manager is not None:
+            try:
+                await self._mcp_manager.close()
             except Exception as error:
                 errors.append(error)
         if self._model_router is not None:

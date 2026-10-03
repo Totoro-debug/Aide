@@ -20,7 +20,7 @@ from myclaw.management.commands import (
     ManagementCommandDispatcher,
     ManagementCommandResult,
 )
-from myclaw.management.service import RuntimeStatusInput
+from myclaw.management.service import ManagementError, RuntimeStatusInput
 from myclaw.skills.catalog import SkillMetadata
 from tests.fixtures.diagnostic_capture import capture_diagnostics, configured_process_logging
 from tests.fixtures.session import seed_session_state
@@ -149,13 +149,13 @@ class _TypedManagement(_EffortManagement):
 
 
 @pytest.mark.asyncio
-async def test_typed_management_projections_do_not_parse_slash_commands() -> None:
+async def test_status_projection_and_read_commands_return_typed_selections() -> None:
     management = _TypedManagement(effort="high", permission="read-only")
     dispatcher = ManagementCommandDispatcher(cast(Any, management))
 
     status = await dispatcher.status()
-    permission = await dispatcher.permission_level()
-    effort = await dispatcher.reasoning_effort()
+    permission = await dispatcher.dispatch("/permission")
+    effort = await dispatcher.dispatch("/effort")
 
     assert status.handled is True
     assert cast(Any, status.status_view) == "typed-status"
@@ -163,6 +163,26 @@ async def test_typed_management_projections_do_not_parse_slash_commands() -> Non
     assert permission.permission_selection == "read-only"
     assert effort.handled is True
     assert effort.effort_selection == "high"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["/effort", "/permission"])
+async def test_read_selection_commands_render_management_errors_without_a_selection(
+    command: str,
+) -> None:
+    class UnavailableManagement:
+        async def reasoning_effort(self) -> str:
+            raise ManagementError(ErrorInfo("route_unavailable", "Runtime Generation is unavailable."))
+
+        async def permission_level(self) -> str:
+            raise ManagementError(ErrorInfo("route_unavailable", "Runtime Generation is unavailable."))
+
+    dispatcher = ManagementCommandDispatcher(cast(Any, UnavailableManagement()))
+    result = await dispatcher.dispatch(command)
+    assert result.handled is True
+    assert result.output == "route_unavailable: Runtime Generation is unavailable."
+    assert result.effort_selection is None
+    assert result.permission_selection is None
 
 
 @pytest.mark.asyncio

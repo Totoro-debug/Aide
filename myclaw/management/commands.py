@@ -397,30 +397,6 @@ class ManagementCommandDispatcher:
                 skill_metadata=metadata,
             )
 
-    async def reasoning_effort(self) -> ManagementCommandResult:
-        """Return the typed current Reasoning Effort projection."""
-        with without_session_log():
-            try:
-                effort = await self._management.reasoning_effort()
-            except ManagementError as management_error:
-                return ManagementCommandResult(
-                    handled=True,
-                    output=f"{management_error.error.code}: {management_error.error.message}",
-                )
-            return ManagementCommandResult(handled=True, output=None, effort_selection=effort)
-
-    async def permission_level(self) -> ManagementCommandResult:
-        """Return the typed current client Permission Level projection."""
-        with without_session_log():
-            try:
-                level = await self._management.permission_level()
-            except ManagementError as management_error:
-                return ManagementCommandResult(
-                    handled=True,
-                    output=f"{management_error.error.code}: {management_error.error.message}",
-                )
-            return ManagementCommandResult(handled=True, output=None, permission_selection=level)
-
     async def update_permission_level(
         self,
         level: ToolPermissionLevel,

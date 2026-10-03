@@ -160,7 +160,7 @@ export type ConfigSecretChange =
 
 export type ConfigSecrets = Record<string, ConfigSecretChange>;
 
-export type ConfigApplicationStatus = "active" | "pending" | "pending-repair" | "failed-to-apply";
+export type ConfigApplicationStatus = "active" | "restart-required" | "pending-repair";
 
 export type ConfigProjectionState = "active" | "missing" | "invalid" | "malformed";
 
@@ -176,9 +176,7 @@ export interface ConfigApplication {
   status: ConfigApplicationStatus;
   saved_revision: string;
   active_revision: string | null;
-  pending_revision: string | null;
-  waiting_for: string[];
-  error: { code: string; message: string } | null;
+  restart_required: boolean;
 }
 
 export interface ConfigResponse {

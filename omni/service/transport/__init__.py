@@ -128,7 +128,6 @@ class LocalServiceTransport:
         app.router.add_get(f"{_API_PREFIX}/config", self._config)
         app.router.add_patch(f"{_API_PREFIX}/config", self._patch_config)
         app.router.add_post(f"{_API_PREFIX}/config/repair", self._repair_config)
-        app.router.add_post(f"{_API_PREFIX}/config/retry", self._retry_config)
         app.router.add_post(f"{_API_PREFIX}/clients", self._register_client)
         app.router.add_post(f"{_API_PREFIX}/workspaces/attach", self._attach_workspace)
         app.router.add_get(f"{_API_PREFIX}/projects", self._list_projects)
@@ -425,27 +424,6 @@ class LocalServiceTransport:
             )
         result = await self.service.update_configuration(
             request_id, revision, fields, secrets, client_id=context.client_id
-        )
-        return web.json_response({"request_id": request_id, **result})
-
-    async def _retry_config(self, request: web.Request) -> web.Response:
-        context = self._authenticate(request, mutation=True, client_required=True)
-        body = await _json_object(request)
-        if set(body) != {"request_id", "revision"}:
-            raise service_error(
-                "validation_error", "Configuration retry fields are invalid.", status=422
-            )
-        request_id = _require_request_id(body)
-        revision = body.get("revision")
-        if not isinstance(revision, str) or not revision:
-            raise service_error(
-                "validation_error",
-                "Configuration revision is required.",
-                status=422,
-                field_errors={"revision": "must be a nonempty string"},
-            )
-        result = await self.service.retry_configuration(
-            request_id, revision, client_id=context.client_id
         )
         return web.json_response({"request_id": request_id, **result})
 

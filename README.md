@@ -103,11 +103,11 @@ MCP Server 可在 `[mcp.servers.<name>.tool_keywords]` 下按远端 Tool 原名�
 
 每次 Agent Run 捕获固定权限快照，批准只作用于一次工具调用。Exec 在低权限级别只直接执行满足固定命令、参数、身份和路径规则的调用；灾难性操作或检查不确定时，所有级别都需确认。Web Search 始终直接执行，Web Fetch 在低权限级别访问非公网或无法确定的地址时需确认。Full-Access 不提供 OS sandbox，也不绕过参数校验、能力错误、业务拒绝或执行错误。详细规则见 [ADR-0026](docs/adr/0026-tool-permission-levels-and-foreground-snapshots.md)。
 
-`[runtime].exec_shell` 接受 `auto`、`powershell` 和 `pwsh`，默认 `auto`。`auto` 优先选择 PowerShell 7，否则使用 Windows PowerShell 5.1；显式选择不会交叉回退。检查和执行均禁用 Profile。所选 Shell 缺失时显示安全诊断，Exec 调用返回能力错误。用户定时任务使用生效 Workspace generation 的配置权限和 Shell，不继承客户端的临时权限选择。
+`[runtime].exec_shell` 接受 `auto`、`powershell` 和 `pwsh`，默认 `auto`。`auto` 优先选择 PowerShell 7，否则使用 Windows PowerShell 5.1；显式选择不会交叉回退。检查和执行均禁用 Profile。所选 Shell 缺失时显示安全诊断，Exec 调用返回能力错误。用户定时任务使用服务启动配置中的权限和 Shell，不继承客户端的临时权限选择。
 
 可选字段缺失时使用默认值，显式非法值回退到默认值并产生脱敏诊断；未知字段被忽略，加载不会自动改写原始 TOML。`compact_ratio` 默认 `0.9`，有效范围为 `0.5` 至 `0.95`。`omni config` 与 `/config` 显示有效值、诊断和脱敏配置；完整默认值合同见 [ADR-0025](docs/adr/0025-ignore-unknown-user-configuration-fields.md)。
 
-Web Settings 提供 Runtime、Memory、模型、路由和 MCP 的结构化编辑。已有 API Key 和 MCP 凭据不会回传浏览器，修改时需明确替换或清空。无效或版本冲突的保存不会覆盖原文件；有效保存等待当前工作完成后生效，失败时可重试。缺失或损坏配置可在设置页面初始化或修复。
+Web Settings 提供 Runtime、Memory、模型、路由和 MCP 的结构化编辑。已有 API Key 和 MCP 凭据不会回传浏览器，修改时需明确替换或清空。无效或版本冲突的保存不会覆盖原文件；有效保存、读盘发现的外部修改和配置修复均在下次服务启动时生效，不中断当前工作或替换连接。缺失或损坏配置可在设置页面初始化或修复，随后重启 Omni 才能运行。Web Settings 与 CLI `/config` 分别显示保存版本、启动版本和重启要求；`/permission` 与全局 chat `/effort` 保持即时运行时控制。
 
 ## 项目启动
 

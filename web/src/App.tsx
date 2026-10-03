@@ -84,7 +84,6 @@ import {
   triggerRuntimeDream,
   patchConfig,
   repairConfig,
-  retryConfig,
   updateRuntimeEffort,
   updateRuntimePermission,
 } from "./api";
@@ -1559,7 +1558,7 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
       setDirty(false);
       setFieldErrors({});
       setConflict(false);
-      setNotice(next.application.status === "pending" ? t("settings.pending") : t("settings.saved"));
+      setNotice(next.application.restart_required ? t("settings.restartRequired") : t("settings.saved"));
     } catch (error) {
       if (requestSequence.current !== sequence) return;
       if (error instanceof ApiError && error.body?.code === "config_revision_conflict") {
@@ -1602,28 +1601,6 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
       if (requestSequence.current === sequence) {
         setSubmitError(error instanceof ApiError ? error.message : t("settings.unavailable"));
       }
-    } finally {
-      if (requestSequence.current === sequence) {
-        mutationInFlight.current = false;
-        setSaving(false);
-      }
-    }
-  };
-
-  const retryApplication = async () => {
-    if (response === null || saving || connectionState !== "online") return;
-    setSaving(true);
-    mutationInFlight.current = true;
-    const sequence = ++requestSequence.current;
-    setSubmitError(null);
-    try {
-      const next = await retryConfig(response.revision);
-      if (requestSequence.current !== sequence) return;
-      applyResponse(next);
-      setNotice(t("settings.pending"));
-    } catch (error) {
-      if (requestSequence.current !== sequence) return;
-      setSubmitError(error instanceof ApiError ? error.message : t("settings.unavailable"));
     } finally {
       if (requestSequence.current === sequence) {
         mutationInFlight.current = false;
@@ -1718,12 +1695,10 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
             <span>
               {saving
                 ? t("settings.saving")
-                : response.application.status === "pending"
-                  ? t("settings.pending")
+                : response.application.status === "restart-required"
+                  ? t("settings.restartRequired")
                   : response.application.status === "pending-repair"
                     ? t("settings.pendingRepair")
-                  : response.application.status === "failed-to-apply"
-                    ? t("settings.failed")
                     : t("settings.active")}
             </span>
           </div>
@@ -1734,12 +1709,6 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
         <dl className={styles.settingsVersions} aria-label={t("settings.versions")}>
           <div><dt>{t("settings.savedVersion")}</dt><dd>{response.application.saved_revision}</dd></div>
           <div><dt>{t("settings.activeVersion")}</dt><dd>{response.application.active_revision ?? "-"}</dd></div>
-          {response.application.pending_revision !== null ? (
-            <div><dt>{t("settings.pendingVersion")}</dt><dd>{response.application.pending_revision}</dd></div>
-          ) : null}
-          {response.application.status === "pending" && response.application.waiting_for.length > 0 ? (
-            <div><dt>{t("settings.waitingFor")}</dt><dd>{response.application.waiting_for.map((reason) => t(`settings.waitingReasons.${reason}`, { defaultValue: reason })).join(", ")}</dd></div>
-          ) : null}
         </dl>
       ) : null}
 
@@ -1750,17 +1719,6 @@ function SettingsView({ authState, connectionState }: SettingsViewProps) {
           <button className={styles.secondaryButton} type="button" onClick={() => void loadSettings()}>
             <RefreshCw size={14} aria-hidden="true" />
             {t("controls.retry")}
-          </button>
-        </div>
-      ) : null}
-
-      {response?.application.status === "failed-to-apply" ? (
-        <div className={styles.errorBanner} role="alert">
-          <TriangleAlert size={17} aria-hidden="true" />
-          <span>{t("settings.failed")}{response.application.error !== null ? ` (${response.application.error.code})` : ""}</span>
-          <button className={styles.secondaryButton} type="button" disabled={controlDisabled} onClick={() => void retryApplication()}>
-            <RefreshCw size={14} aria-hidden="true" />
-            {t("settings.retry")}
           </button>
         </div>
       ) : null}

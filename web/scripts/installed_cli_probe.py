@@ -644,17 +644,11 @@ async def _run_joint_scenario(
         await _wait_for_observation(observation_path, settings_prompt)
         await _wait_for_file(Path(os.environ["OMNI_CLI_SETTINGS_RELEASE"]))
         await _wait_for_prompt_completion(settings_session_path, settings_prompt)
-        deadline = asyncio.get_running_loop().time() + 90
-        while asyncio.get_running_loop().time() < deadline:
-            config = await client._http_request("GET", "/api/v1/config")
-            application = config.get("application")
-            if isinstance(application, dict) and application.get("status") == "active":
-                break
-            await asyncio.sleep(0.05)
-        else:
-            raise AssertionError(
-                "saved configuration did not activate after natural foreground completion"
-            )
+        config = await client._http_request("GET", "/api/v1/config")
+        application = config.get("application")
+        assert isinstance(application, dict)
+        assert application["status"] == "restart-required"
+        assert application["active_revision"] != application["saved_revision"]
         new_prompt = "installed new generation response"
         await client.bus.put_inbound(InboundMessage(new_prompt))
         await _wait_for_prompt_completion(settings_session_path, new_prompt)
@@ -670,17 +664,17 @@ async def _run_joint_scenario(
         result = next(
             record for record in records[new_input + 1 :] if record.get("role") == "assistant"
         )
-        assert result["context_usage"]["model"] == "installed-new-model", result
+        assert result["context_usage"]["model"] == "small-model", result
         await _wait_for_observation(observation_path, new_prompt)
         observations = [
             json.loads(line) for line in observation_path.read_text(encoding="utf-8").splitlines()
         ]
         assert any(
             new_prompt in str(observation.get("prompt", ""))
-            and observation.get("model") == "installed-new-model"
+            and observation.get("model") == "small-model"
             and observation.get("tools")
             for observation in observations
-        ), "new generation did not execute the new model at the provider boundary"
+        ), "saved settings changed the startup model before restart"
         settings_done_path.write_text(
             json.dumps(
                 {

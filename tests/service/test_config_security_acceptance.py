@@ -174,9 +174,9 @@ async def test_config_http_idempotency_body_action_and_client_reuse(
             server.make_url("/api/v1/config"), headers=second, json=payload
         )
         other_action = await http.post(
-            server.make_url("/api/v1/config/retry"),
+            server.make_url("/api/v1/config/repair"),
             headers=first,
-            json={"request_id": payload["request_id"], "revision": saved["revision"]},
+            json={**payload, "revision": saved["revision"]},
         )
         assert changed_body.status == other_client.status == other_action.status == 409
         assert (service.agent_home.path / "config.toml").read_bytes() == before

@@ -138,6 +138,23 @@ async def _status(case: ManagementCase, **kwargs: Any) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
+async def test_cli_config_reports_saved_and_startup_versions_and_restart_requirement(
+    management_case: ManagementCase,
+) -> None:
+    case = management_case
+    revision = cast(str, case.service.config_view()["revision"])
+    saved = await case.service.update_configuration(
+        "config-cli", revision, {"memory": {"batch_size": 17}},
+    )
+    result = await _request(case, "dispatch", command="/config")
+    output = cast(str, result["output"])
+    assert f"Saved version: {saved['revision']}" in output
+    assert f"Startup version: {revision}" in output
+    assert "Restart required: yes" in output
+    assert "minimal-secret" not in output
+
+
+@pytest.mark.asyncio
 async def test_status_matches_selected_session_without_private_content_or_credentials(
     management_case: ManagementCase,
 ) -> None:
@@ -413,7 +430,7 @@ async def test_invalid_effort_does_not_publish_or_persist_and_preserves_cli_erro
 
 
 @pytest.mark.asyncio
-async def test_effort_is_workspace_runtime_setting_with_shared_cli_and_persistence_contract(
+async def test_effort_is_global_runtime_control_with_shared_cli_and_persistence_contract(
     management_case: ManagementCase,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -436,7 +453,7 @@ async def test_effort_is_workspace_runtime_setting_with_shared_cli_and_persisten
     claim = await workspace.claim(case.first.client_id, draft)
     assert (await _status(case, workspace=workspace, claim=claim))[
         "chat_reasoning_effort"
-    ] == "medium"
+    ] == "high"
     original = (case.service.agent_home.path / "config.toml").read_bytes()
 
     def fail_save(_loader: ConfigLoader, _effort: object) -> None:
@@ -448,6 +465,7 @@ async def test_effort_is_workspace_runtime_setting_with_shared_cli_and_persisten
     assert failed_save["output"] == "Chat reasoning effort: max"
     assert (await _status(case))["chat_reasoning_effort"] == "max"
     assert (await cli.dispatch("/effort")).effort_selection == "max"
+    assert (await _status(case, workspace=workspace, claim=claim))["chat_reasoning_effort"] == "max"
     assert (case.service.agent_home.path / "config.toml").read_bytes() == original
 
 

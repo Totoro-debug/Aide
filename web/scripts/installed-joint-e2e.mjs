@@ -464,17 +464,17 @@ try {
   const saveResponse = await saveResponsePromise;
   assert.equal(saveResponse.status(), 200, await saveResponse.text());
   const pending = await saveResponse.json();
-  assert.equal(pending.application.status, "pending");
-  assert.notEqual(pending.application.pending_revision, null);
-  assert.notEqual(pending.application.pending_revision, pending.application.active_revision);
+  assert.equal(pending.application.status, "restart-required");
+  assert.notEqual(pending.application.restart_required, false);
+  assert.notEqual(pending.application.saved_revision, pending.application.active_revision);
   assert.equal((await listSchedule(context.request, secondWorkspaceId)).status.active_job_count, 1);
   await writeFile(settingsReleasePath, "release\n", "utf8");
   await expect.poll(async () => (await configResponse(context.request)).application.status, {
     timeout: 90_000,
-  }).toBe("active");
+  }).toBe("restart-required");
   const active = await configResponse(context.request);
-  assert.equal(active.application.active_revision, pending.application.pending_revision);
-  assert.equal(active.application.pending_revision, null);
+  assert.equal(active.application.active_revision, pending.application.active_revision);
+  assert.equal(active.application.restart_required, true);
   await persistedTerminal(join(workspace, ".omni", "schedule-sessions", `schedule_${settingsJobId}.jsonl`), settingsPrompt, "completed");
   const cliSettings = await waitForJson(cliSettingsDonePath);
   const cliDone = await waitForJson(cliDonePath);
@@ -486,7 +486,7 @@ try {
   assert.equal(cliDone.settings_generation_completed, true);
   assert.equal(cliDone.project_removal_terminal, true);
   assert.equal(cliDone.claim_released, true);
-  assert.equal(cliSettings.new_generation_model, "installed-new-model");
+  assert.equal(cliSettings.new_generation_model, "small-model");
   assert.equal((await context.request.get(`${baseUrl}/api/v1/service`)).status(), 200);
   assert.equal(await readFile(join(workspace, "fixture.txt"), "utf8"), "joint user file\n");
   assert.equal(settingsListing.status.admitted, false);
@@ -514,9 +514,9 @@ try {
       project_id: secondProjectId,
       workspace_id: secondWorkspaceId,
       settings_job_id: settingsJobId,
-      pending_revision: pending.application.pending_revision,
+      saved_revision: pending.application.saved_revision,
       active_revision: active.application.active_revision,
-      final_status: "active",
+      final_status: "restart-required",
       foreground_and_schedule_observed: true,
       foreground_completed_persisted: true,
       schedule_completed_persisted: true,

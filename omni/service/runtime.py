@@ -9,12 +9,11 @@ import os
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass, field, fields, is_dataclass, replace
+from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 from time import monotonic
-from types import MappingProxyType
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
@@ -1674,7 +1673,7 @@ class WorkspaceServiceRuntime:
             schedule_status=lambda: self.schedule_service.status_snapshot().to_dict(),
             now=local_now,
             monotonic=monotonic,
-            reasoning_effort_control=runtime.router,
+            reasoning_effort_control=self.service,
             permission_control=self.service.client_permission(client_id),
             restore_listing=restore_listing,
             restore_inspect=restore_inspect,
@@ -1687,6 +1686,7 @@ class WorkspaceServiceRuntime:
         )
         management.bind_runtime_admission(lambda: self._require_admitted())
         management.bind_reasoning_effort_persistence(self.service.persist_reasoning_effort)
+        management.bind_configuration_status(self.service.configuration_status_text)
         management.bind_restore_acknowledge_failure(restore_acknowledge_failure)
         return ManagementCommandDispatcher(management)
 
@@ -2268,6 +2268,7 @@ class LocalService:
         self._config_error: dict[str, str] | None = None
         self._config_apply_task: asyncio.Task[None] | None = None
         self._configuration_transition_active = False
+        self._chat_effort_override: ReasoningEffort | None = None
         self.projects = ProjectCatalog(agent_home)
 
     async def start(self) -> None:
@@ -2327,52 +2328,26 @@ class LocalService:
         )
 
     def config_view(self) -> dict[str, object]:
-        """Return the safe persisted projection and active-generation status."""
+        """Read saved settings without changing this service's startup configuration."""
         snapshot = self._config_loader.web_snapshot()
+        self._config_saved_revision = snapshot.revision
+        self._config_saved_configuration = (
+            snapshot.configuration if snapshot.state == "active" else None
+        )
         self._config_state = snapshot.state
         self._config_repair_required = snapshot.repair_required
         self._config_backup_required = snapshot.backup_required
         self._config_requires_secret_reentry = snapshot.requires_secret_reentry
         self._config_projection_error = None if snapshot.error is None else dict(snapshot.error)
         self._config_fields = {section: dict(values) for section, values in snapshot.fields.items()}
-        if snapshot.state != "active":
-            self._config_saved_revision = snapshot.revision
-            self._config_pending_revision = snapshot.revision
-            self._config_waiting_for = tuple(self._workspaces)
-            if self.configuration is None or self._config_active_revision is None:
-                self._config_saved_configuration = None
-                self._config_status = "pending-repair"
-            else:
-                self._config_status = "failed-to-apply"
-                self._config_error = dict(snapshot.error or _CONFIG_INVALID_ERROR)
-            self._configuration_transition_active = False
-            return self._config_response()
-
-        if self._config_saved_revision is None:
-            self._config_saved_revision = snapshot.revision
-        elif snapshot.revision != self._config_saved_revision:
-            self._config_saved_revision = snapshot.revision
-            self._config_saved_configuration = snapshot.configuration
-            self._config_pending_revision = snapshot.revision
-            self._config_status = "pending"
-            self._config_error = None
-            self._config_waiting_for = tuple(self._workspaces)
-            self._configuration_transition_active = True
-            self._start_configuration_application()
-        elif self._config_saved_configuration is None:
-            self._config_saved_configuration = snapshot.configuration
-            self._config_pending_revision = snapshot.revision
-            self._config_status = "pending"
-            self._configuration_transition_active = True
-            self._start_configuration_application()
+        self._config_status = (
+            "pending-repair"
+            if snapshot.repair_required
+            else "active"
+            if snapshot.revision == self._config_active_revision
+            else "restart-required"
+        )
         return self._config_response()
-
-    def _start_configuration_application(self) -> None:
-        if self.state in {"draining", "stopped"}:
-            return
-        if self._config_apply_task is None or self._config_apply_task.done():
-            self._config_apply_task = asyncio.create_task(self._apply_configuration_loop())
-            self._config_apply_task.add_done_callback(_consume_task_result)
 
     def _configuration_request_result(
         self, request_id: str, fingerprint: str
@@ -2407,40 +2382,22 @@ class LocalService:
                 "status": self._config_status,
                 "saved_revision": saved_revision,
                 "active_revision": self._config_active_revision,
-                "pending_revision": self._config_pending_revision,
-                "waiting_for": self._configuration_waiting_reasons(),
-                "error": None if self._config_error is None else dict(self._config_error),
+                "restart_required": (
+                    not self._config_repair_required
+                    and saved_revision != self._config_active_revision
+                ),
             },
         }
 
-    def _configuration_waiting_reasons(self) -> list[str]:
-        if self._config_status != "pending":
-            return []
-        reasons: set[str] = set()
-        for workspace in self._workspaces.values():
-            if workspace.runtime is None:
-                continue
-            if workspace.schedule_service.has_pending_work:
-                reasons.add("schedule")
-            if workspace.runtime.dream.is_running:
-                reasons.add("dream")
-            if workspace._restore_owner is not None or workspace._restore_commit_task is not None:
-                reasons.add("restore")
-            for state in workspace.loops.values():
-                try:
-                    active_run = state.loop.has_active_run
-                except RuntimeError:
-                    active_run = False
-                if active_run or state.run_ids:
-                    reasons.add("schedule" if state.schedule else "foreground")
-                if state.loop.has_pending_title:
-                    reasons.add("title")
-                if state.bus.has_pending_input:
-                    reasons.add("queued-input")
-                client = self._clients.get(state.owner_client_id or "")
-                if state.owner_client_id is not None and (client is None or client.expired):
-                    reasons.add("client-cleanup")
-        return sorted(reasons) if reasons else ["preparing"]
+    def configuration_status_text(self) -> str:
+        """Render the same save/restart state for Command-line management."""
+        application = cast(dict[str, object], self.config_view()["application"])
+        restart = "yes" if application["restart_required"] else "no"
+        return (
+            f"Saved version: {application['saved_revision']}\n"
+            f"Startup version: {application['active_revision'] or '-'}\n"
+            f"Restart required: {restart}\n"
+        )
 
     async def update_configuration(
         self,
@@ -2451,7 +2408,7 @@ class LocalService:
         *,
         client_id: str | None = None,
     ) -> dict[str, object]:
-        """Persist one safe configuration patch and queue generation application."""
+        """Persist one safe configuration patch for the next service startup."""
         if not request_id:
             raise service_error("validation_error", "Request ID is required.", status=422)
         if client_id is not None:
@@ -2510,13 +2467,9 @@ class LocalService:
             self._config_backup_required = False
             self._config_requires_secret_reentry = False
             self._config_projection_error = None
-            self._config_pending_revision = (
-                None if result.revision == self._config_active_revision else result.revision
+            self._config_status = (
+                "active" if result.revision == self._config_active_revision else "restart-required"
             )
-            self._config_status = "active" if self._config_pending_revision is None else "pending"
-            self._config_error = None
-            self._config_waiting_for = tuple(self._workspaces)
-            self._configuration_transition_active = self._config_status == "pending"
             response = self._config_response()
             self._config_request_results[request_id] = response
             self._config_request_fingerprints[request_id] = fingerprint
@@ -2524,12 +2477,6 @@ class LocalService:
                 oldest = next(iter(self._config_request_results))
                 self._config_request_results.pop(oldest, None)
                 self._config_request_fingerprints.pop(oldest, None)
-            if self._config_pending_revision is not None and (
-                self._config_apply_task is None or self._config_apply_task.done()
-            ):
-                self._config_apply_task = asyncio.create_task(self._apply_configuration_loop())
-                self._config_apply_task.add_done_callback(_consume_task_result)
-        await self._reconcile_schedule_admission()
         await self._emit_configuration_event()
         return response
 
@@ -2542,7 +2489,7 @@ class LocalService:
         *,
         client_id: str | None = None,
     ) -> dict[str, object]:
-        """Persist a first-use or malformed-file repair before activating a generation."""
+        """Persist a first-use or malformed-file repair for the next service startup."""
         if not request_id:
             raise service_error("validation_error", "Request ID is required.", status=422)
         if client_id is not None:
@@ -2601,13 +2548,9 @@ class LocalService:
             self._config_backup_required = False
             self._config_requires_secret_reentry = False
             self._config_projection_error = None
-            self._config_pending_revision = (
-                None if result.revision == self._config_active_revision else result.revision
+            self._config_status = (
+                "active" if result.revision == self._config_active_revision else "restart-required"
             )
-            self._config_status = "active" if self._config_pending_revision is None else "pending"
-            self._config_error = None
-            self._config_waiting_for = tuple(self._workspaces)
-            self._configuration_transition_active = self._config_status == "pending"
             response = {
                 "backup_id": result.backup_id,
                 **self._config_response(),
@@ -2618,124 +2561,30 @@ class LocalService:
                 oldest = next(iter(self._config_request_results))
                 self._config_request_results.pop(oldest, None)
                 self._config_request_fingerprints.pop(oldest, None)
-            if self._config_pending_revision is not None and (
-                self._config_apply_task is None or self._config_apply_task.done()
-            ):
-                self._config_apply_task = asyncio.create_task(self._apply_configuration_loop())
-                self._config_apply_task.add_done_callback(_consume_task_result)
-        await self._reconcile_schedule_admission()
         await self._emit_configuration_event()
         return response
 
-    async def retry_configuration(
-        self, request_id: str, revision: str, *, client_id: str | None = None
-    ) -> dict[str, object]:
-        """Retry the latest saved candidate after a failed generation application."""
-        if not request_id:
-            raise service_error("validation_error", "Request ID is required.", status=422)
-        if client_id is not None:
-            self._require_client(client_id)
-        if self.state in {"draining", "stopped"}:
-            raise service_error("admission_closed", "The local service is stopping.")
-        fingerprint = json.dumps([client_id, "retry", revision])
-        async with self._config_lock:
-            existing = self._configuration_request_result(request_id, fingerprint)
-            if existing is not None:
-                return existing
-            self.config_view()
-            if revision != self._config_saved_revision:
-                raise service_error(
-                    "config_revision_conflict",
-                    "The saved User Configuration revision is no longer current.",
-                    status=409,
-                    retryable=True,
-                )
-            if self._config_saved_configuration is None:
-                raise service_error(
-                    "config_invalid", "User Configuration is unavailable.", status=422
-                )
-            snapshot = self._config_loader.web_snapshot()
-            if snapshot.state != "active":
-                raise service_error(
-                    "config_invalid", "The complete User Configuration is invalid.", status=422
-                )
-            self._config_status = "pending"
-            self._config_pending_revision = revision
-            self._config_error = None
-            self._configuration_transition_active = True
-            self._config_waiting_for = tuple(self._workspaces)
-            response = self._config_response()
-            self._config_request_results[request_id] = response
-            self._config_request_fingerprints[request_id] = fingerprint
-            if len(self._config_request_results) > 256:
-                oldest = next(iter(self._config_request_results))
-                self._config_request_results.pop(oldest, None)
-                self._config_request_fingerprints.pop(oldest, None)
-            if self._config_apply_task is None or self._config_apply_task.done():
-                self._config_apply_task = asyncio.create_task(self._apply_configuration_loop())
-                self._config_apply_task.add_done_callback(_consume_task_result)
-        await self._reconcile_schedule_admission()
-        await self._emit_configuration_event()
-        return response
+    @property
+    def reasoning_effort(self) -> ReasoningEffort:
+        """Return the global chat control independently of saved configuration."""
+        if self._chat_effort_override is not None:
+            return self._chat_effort_override
+        if self.configuration is None:
+            raise service_error("config_invalid", "User Configuration is unavailable.", status=422)
+        return self.configuration.resolve_route("chat").route.reasoning_effort
+
+    def set_reasoning_effort(self, effort: ReasoningEffort) -> None:
+        """Publish to every current Router; later Workspaces inherit the override."""
+        self._chat_effort_override = effort
+        for workspace in self._workspaces.values():
+            if workspace.runtime is not None:
+                workspace.runtime.router.set_reasoning_effort(effort)
 
     async def persist_reasoning_effort(self, effort: ReasoningEffort) -> None:
-        """Persist the legacy chat-effort control through the global config revision."""
+        """Best-effort persistence does not activate other saved settings."""
         async with self._config_lock:
-            was_pending = self._configuration_transition_active or self._config_status in {
-                "pending",
-                "failed-to-apply",
-            }
             self._config_loader.update_reasoning_effort(effort)
-            snapshot = self._config_loader.editable_snapshot()
-            saved = snapshot.configuration
-            if self.configuration is not None:
-                active_routes = {
-                    name: replace(route, reasoning_effort=effort)
-                    if name in {"default", "chat"}
-                    else route
-                    for name, route in self.configuration.models.routes.items()
-                }
-                effort_only_configuration = replace(
-                    self.configuration,
-                    models=replace(
-                        self.configuration.models, routes=MappingProxyType(active_routes)
-                    ),
-                )
-                was_pending = was_pending or saved != effort_only_configuration
-            self._config_saved_configuration = saved
-            self._config_saved_revision = snapshot.revision
-            self._config_fields = {
-                section: dict(values) for section, values in snapshot.fields.items()
-            }
-            try:
-                snapshot.require_valid_candidate()
-            except ConfigError:
-                candidate_valid = False
-            else:
-                candidate_valid = True
-            if not candidate_valid:
-                self._config_status = "failed-to-apply"
-                self._config_pending_revision = snapshot.revision
-                self._config_error = {
-                    "code": "config_invalid",
-                    "message": "The saved User Configuration contains invalid fields.",
-                }
-                self._configuration_transition_active = False
-            elif not was_pending:
-                self._config_status = "active"
-                self._config_pending_revision = None
-                self._configuration_transition_active = False
-            else:
-                self._config_status = "pending"
-                self._config_pending_revision = self._config_saved_revision
-                self._config_waiting_for = tuple(self._workspaces)
-                self._configuration_transition_active = True
-                if self._config_apply_task is None or self._config_apply_task.done():
-                    self._config_apply_task = asyncio.create_task(self._apply_configuration_loop())
-                    self._config_apply_task.add_done_callback(_consume_task_result)
-            if self._config_status == "active":
-                self._config_active_revision = self._config_saved_revision
-        await self._reconcile_schedule_admission()
+            self.config_view()
         await self._emit_configuration_event()
 
     async def _activate_initial_configuration(
@@ -3204,6 +3053,9 @@ class LocalService:
                 self, path, self.configuration, workspace_id=workspace_id
             )
             await runtime.start()
+            if self._chat_effort_override is not None:
+                assert runtime.runtime is not None
+                runtime.runtime.router.set_reasoning_effort(self._chat_effort_override)
             self._workspace_keys[key] = workspace_id
             self._workspaces[workspace_id] = runtime
             return runtime

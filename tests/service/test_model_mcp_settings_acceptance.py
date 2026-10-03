@@ -19,16 +19,14 @@ from omni.config.agent_home import AgentHome
 from omni.config.config import ConfigLoader
 from omni.schedule.model import JobSchedule, ScheduleJob
 from omni.service.client import ServiceClient
-from omni.service.errors import ServiceError
 from omni.service.runtime import LocalService
 from tests.configuration.test_config_editing import FULL_EDITABLE_CONFIG
 from tests.fixtures.mcp_wire import WireServer, wire_result, wire_tool
-from tests.service.test_config_generation_acceptance import _wait_closed, _wait_status
 from tests.service.test_service_concurrency import _client_output, _serve
 
 
 @pytest.mark.asyncio
-async def test_model_and_http_mcp_change_drains_foreground_and_schedule(
+async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existing_resources(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     observed: list[str] = []
@@ -255,28 +253,25 @@ async def test_model_and_http_mcp_change_drains_foreground_and_schedule(
                 saved = await response.json()
                 observed.append(json.dumps(saved))
                 assert response.status == 200, saved
-                assert saved["application"]["status"] == "pending"
+                assert saved["application"]["status"] == "restart-required"
                 assert workspace.runtime is old and old is not None and not old._closed
-                with pytest.raises(ServiceError):
-                    await cli.submit_input("new work must wait")
                 gates["foreground-old"].set()
                 assert "foreground-old finished" in await _client_output(cli)
                 assert workspace.runtime is old and not old._closed
                 assert (
                     cast(dict[str, Any], service.config_view()["application"])["status"]
-                    == "pending"
+                    == "restart-required"
                 )
                 assert not any(version == "new" for version, _, _ in header_calls)
                 gates["scheduled-old"].set()
-                await _wait_status(service, "active")
-                await _wait_closed([old])
+                assert workspace.runtime is old and not old._closed
                 async with asyncio.timeout(10):
                     while True:
                         event = await ws.receive_json()
                         observed.append(json.dumps(event))
                         if (
                             event.get("type") == "config.application"
-                            and event["payload"]["status"] == "active"
+                            and event["payload"]["status"] == "restart-required"
                         ):
                             break
                 assert not ws.closed
@@ -327,8 +322,8 @@ async def test_model_and_http_mcp_change_drains_foreground_and_schedule(
         for user, model in (
             ("foreground-old", "small-model"),
             ("scheduled-old", "small-model"),
-            ("foreground-new", "large-model"),
-            ("scheduled-new", "large-model"),
+            ("foreground-new", "small-model"),
+            ("scheduled-new", "small-model"),
         ):
             calls = [item for item in model_calls if item["user"] == user and item["tools"]]
             assert calls and all(item["model"] == model and item["key_matches"] for item in calls)
@@ -340,8 +335,9 @@ async def test_model_and_http_mcp_change_drains_foreground_and_schedule(
                     and item["effort"] == "high"
                     for item in calls
                 )
-        for version in wires:
-            assert sum(item["method"] == "tools/call" for item in wires[version].requests) == 2
+        assert sum(item["method"] == "tools/call" for item in wires["old"].requests) == 4
+        assert sum(item["method"] == "initialize" for item in wires["old"].requests) == 1
+        assert wires["new"].requests == []
         assert all(matches for _, _, matches in header_calls)
         assert cancelled == []
         assert workspace.workspace_state is state

@@ -194,7 +194,7 @@
         }
       }
     },
-    "config_application_status": {"enum": ["active", "pending", "pending-repair", "failed-to-apply"]},
+    "config_application_status": {"enum": ["active", "restart-required", "pending-repair"]},
     "config_projection_state": {"enum": ["active", "missing", "invalid", "malformed"]},
     "config_projection": {
       "type": "object", "additionalProperties": false,
@@ -213,18 +213,12 @@
     },
     "config_application": {
       "type": "object", "additionalProperties": false,
-      "required": ["status", "saved_revision", "active_revision", "pending_revision", "waiting_for", "error"],
+      "required": ["status", "saved_revision", "active_revision", "restart_required"],
       "properties": {
         "status": {"$ref": "#/$defs/config_application_status"},
         "saved_revision": {"type": "string"},
         "active_revision": {"type": ["string", "null"]},
-        "pending_revision": {"type": ["string", "null"]},
-        "waiting_for": {"type": "array", "items": {"type": "string"}},
-        "error": {"anyOf": [
-          {"type": "null"},
-          {"type": "object", "additionalProperties": false, "required": ["code", "message"],
-            "properties": {"code": {"type": "string"}, "message": {"type": "string"}}}
-        ]}
+        "restart_required": {"type": "boolean"}
       }
     },
     "config_response": {

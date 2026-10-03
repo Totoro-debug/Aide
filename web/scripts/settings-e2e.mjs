@@ -4,9 +4,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect } from "@playwright/test";
 
-async function waitForActiveGeneration(target) {
+async function waitForSavedSettings(target) {
   try {
-    await expect(target.locator('[role="status"][data-state="active"]')).toBeVisible({ timeout: 30000 });
+    await expect(target.locator('[role="status"][data-state="active"], [role="status"][data-state="restart-required"]')).toBeVisible({ timeout: 30000 });
   } catch (error) {
     const statuses = await target.getByRole("status").allTextContents();
     const alerts = await target.getByRole("alert").allTextContents();
@@ -70,7 +70,7 @@ export async function settingsConfirmationAcceptance({ page, control }) {
   await page.getByRole("button", { name: "Save settings", exact: true }).click();
   const saved = await savedResponse;
   assert.equal(saved.status(), 200);
-  assert.equal((await saved.json()).application.status, "pending");
+  assert.equal((await saved.json()).application.status, "restart-required");
   await control.command("settings-release");
   const dialog = page.getByRole("dialog", { name: "Tool Confirmation", exact: true });
   await expect(dialog).toBeVisible();
@@ -85,7 +85,7 @@ export async function settingsConfirmationAcceptance({ page, control }) {
   assert.equal(restored?.payload.token, original.payload.token);
   await dialog.getByRole("button", { name: "Approve", exact: true }).click();
   await expect(dialog).toBeHidden();
-  await waitForActiveGeneration(page);
+  await waitForSavedSettings(page);
   console.log("Settings pending generation: existing browser Run Tool confirmation remains usable and finishes naturally after save");
   return acceptedRun.run_id;
 }
@@ -226,7 +226,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await field(page, "settings-mcp-fixture-cwd").fill("");
 
   await save(page);
-  await waitForActiveGeneration(page);
+  await waitForSavedSettings(page);
   let savedText = await readFile(configPath, "utf8");
   assert.match(savedText, /expanded-model-302/);
   assert.match(savedText, /e2e-provider-secret-replaced-302/);
@@ -237,7 +237,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await retiredApiKeyAction(page).selectOption("clear");
   await remoteHeaderAction(page).selectOption("clear");
   await save(page);
-  await waitForActiveGeneration(page);
+  await waitForSavedSettings(page);
   savedText = await readFile(configPath, "utf8");
   assert.match(savedText, /e2e-provider-secret-replaced-302/);
   assert.match(savedText, /e2e-prototype-header-canary-302/);
@@ -263,13 +263,13 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await field(page, "settings-models-providers-review-provider-302-base_url").fill("http://127.0.0.1:1/models");
   // An unreferenced provider may keep an empty model list and cleared key.
   await save(page);
-  await waitForActiveGeneration(page);
+  await waitForSavedSettings(page);
   const addedProvider = await openSettings(secondPage);
   assert.equal(addedProvider.fields.models.providers["review-provider-302"].protocol, "anthropic");
   assert.deepEqual(addedProvider.fields.models.providers["review-provider-302"].models, []);
   await field(page, "settings-models-providers-review-provider-302").getByRole("button", { name: "Remove provider", exact: true }).click();
   await save(page);
-  await waitForActiveGeneration(page);
+  await waitForSavedSettings(page);
 
   // Editable new names keep a stable row while typing; list values are lossless.
   await page.getByRole("button", { name: "Add MCP server", exact: true }).click();
@@ -285,7 +285,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
     await customArgs.getByRole("textbox").last().fill(argument);
   }
   await save(page);
-  await waitForActiveGeneration(page);
+  await waitForSavedSettings(page);
   let readback = await openSettings(secondPage);
   assert.deepEqual(readback.fields.mcp[customName].args, exactArgs);
   assert.equal(readback.fields.mcp[customName].cwd, null);
@@ -297,7 +297,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await field(page, `settings-mcp-${customName}-headers-Authorization-action`).selectOption("replace");
   await field(page, `settings-mcp-${customName}-headers-Authorization-value`).fill("custom-header-canary-302");
   await save(page);
-  await waitForActiveGeneration(page);
+  await waitForSavedSettings(page);
   readback = await openSettings(secondPage);
   assert.deepEqual(readback.fields.mcp[customName].headers, { "X-Api-Key": { configured: true } });
   for (const [name, row, secret] of [["X.Test", "Authorization", "dot-header-canary-302"], ["X-Test", "X-Header-2", "dash-header-canary-302"]]) {
@@ -307,7 +307,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
     await field(page, `settings-mcp-${customName}-headers-${row}-value`).fill(secret);
   }
   await save(page);
-  await waitForActiveGeneration(page);
+  await waitForSavedSettings(page);
   await field(page, `settings-mcp-${customName}-headers-X%2ETest-action`).selectOption("replace");
   await page.getByRole("button", { name: "Save settings", exact: true }).click();
   const headerSummary = page.getByRole("alert").filter({ hasText: "Settings need attention" });
@@ -318,12 +318,12 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await field(page, `settings-mcp-${customName}-transport`).selectOption("stdio");
   await field(page, `settings-mcp-${customName}-command`).fill("python");
   await save(page);
-  await waitForActiveGeneration(page);
+  await waitForSavedSettings(page);
   readback = await openSettings(secondPage);
   assert.deepEqual(readback.fields.mcp[customName].headers, {});
   await customCard.getByRole("button", { name: "Remove MCP server", exact: true }).click();
   await save(page);
-  await waitForActiveGeneration(page);
+  await waitForSavedSettings(page);
 
   const keywordsBefore = await readFile(configPath);
   const keywordInput = field(page, "settings-mcp-fixture-tool_keywords-0").getByRole("textbox").first();
@@ -349,7 +349,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await openSettings(secondPage);
   await field(secondPage, "settings-models-routes-chat-temperature").fill("0.1");
   await save(secondPage);
-  await waitForActiveGeneration(secondPage);
+  await waitForSavedSettings(secondPage);
   const beforeConflict = await readFile(configPath);
   await save(page, 409);
   await expect(page.getByText("These settings changed elsewhere. Your edits are still here.", { exact: true })).toBeVisible();
@@ -360,8 +360,12 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await defaultModel(page).fill("large-model");
   await chatModel(page).fill("large-model");
   const conflictResolved = await save(page);
-  await waitForActiveGeneration(page);
+  await waitForSavedSettings(page);
 
+  const v1Startup = await control.restart();
+  await page.goto(`${v1Startup.url}/#ticket=${encodeURIComponent(v1Startup.ticket)}`);
+  await secondPage.goto(`${v1Startup.url}/#ticket=${encodeURIComponent(v1Startup.second_ticket)}`);
+  await openSettings(page);
   console.log("Settings model/provider/route/MCP E2E: starting old-generation v1 barrier");
   await control.command("model-mcp-arm");
   await openProject(page);
@@ -385,12 +389,19 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await field(page, "settings-mcp-fixture-tool_keywords").getByRole("textbox", { name: "Tool name", exact: true }).fill("fixture_echo_v2");
   console.log("Settings model/provider/route/MCP E2E: saving new model and v2 MCP while v1 is active");
   const pending = await save(page);
-  assert.equal(pending.application.status, "pending");
+  assert.equal(pending.application.status, "restart-required");
   assert.equal(pending.application.active_revision, conflictResolved.revision);
-  assert.notEqual(pending.application.pending_revision, null);
+  assert.notEqual(pending.application.restart_required, false);
   await control.command("model-mcp-release");
-  await waitForActiveGeneration(page);
-  console.log("Settings model/provider/route/MCP E2E: old generation released and new generation active");
+  await waitForSavedSettings(page);
+  assert.equal((await readJsonLines(providerObservationPath)).some((observation) => (
+    observation.tools.some((name) => name.endsWith("fixture_echo_v2"))
+  )), false, "Saved MCP settings activated before restart");
+  const v2Startup = await control.restart();
+  await page.goto(`${v2Startup.url}/#ticket=${encodeURIComponent(v2Startup.ticket)}`);
+  await secondPage.goto(`${v2Startup.url}/#ticket=${encodeURIComponent(v2Startup.second_ticket)}`);
+  await openSettings(page);
+  console.log("Settings model/provider/route/MCP E2E: explicit restart activated v2 settings");
 
   await openProject(page);
   await createDraft(page);
@@ -466,7 +477,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
     assert.equal(bodies.some((body) => body.includes(secret)), false, `Config response leaked ${secret}`);
     assert.equal(JSON.stringify(events).includes(secret), false, `Browser event leaked ${secret}`);
   }
-  console.log("Settings model/provider/route/MCP E2E: structured safe readback, secret replace/keep/clear, invalid bytes, stale CAS, pending active Run, and real old/new model plus stdio MCP resources passed");
+  console.log("Settings model/provider/route/MCP E2E: structured safe readback, secret replace/keep/clear, invalid bytes, stale CAS, saved settings with an active Run, and real old/new model plus stdio MCP resources passed");
 }
 
 export default async function settingsAcceptance({ page, secondPage, control, output, viewports }) {
@@ -502,7 +513,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   await secondPage.getByLabel("Memory batch size", { exact: true }).fill("12");
   const competing = await save(secondPage);
   await page.bringToFront();
-  await expect(page.getByRole("definition").filter({ hasText: competing.revision })).toHaveCount(2);
+  await expect(page.getByRole("definition").filter({ hasText: competing.revision })).toHaveCount(1);
   await expect(page.getByLabel("Maximum iterations", { exact: true })).toHaveValue("61");
   const beforeConflict = await readFile(configPath);
   await save(page, 409);
@@ -512,7 +523,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   await expect(page.getByLabel("Memory batch size", { exact: true })).toHaveValue("12");
   await page.getByLabel("Maximum iterations", { exact: true }).fill("62");
   const saved = await save(page);
-  await waitForActiveGeneration(page);
+  await waitForSavedSettings(page);
   assert.match(await readFile(configPath, "utf8"), /max_iterations = 62/);
   assert.match(await readFile(configPath, "utf8"), /large-model/);
 
@@ -520,15 +531,15 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   await page.evaluate(() => { window.__settingsSocketBefore = window.__omniTestSocket; });
   await page.getByLabel("Memory batch size", { exact: true }).fill("13");
   const pending = await save(page);
-  assert.equal(pending.application.status, "pending");
-  assert.equal(pending.application.active_revision, saved.revision);
-  await expect(page.getByText("Waiting for", { exact: true })).toBeVisible();
+  assert.equal(pending.application.status, "restart-required");
+  assert.equal(pending.application.active_revision, saved.application.active_revision);
+  await expect(page.getByText("Saved; restart Omni to use these settings.", { exact: true }).first()).toBeVisible();
   await page.getByRole("navigation").getByRole("link", { name: "Status", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Service status", exact: true })).toBeVisible();
   await settings(page);
   const released = await control.command("settings-release");
   assert.equal(released.pid, hold.pid, "Configuration application restarted the service");
-  await waitForActiveGeneration(page);
+  await waitForSavedSettings(page);
   assert.equal(await page.evaluate(() => window.__settingsSocketBefore === window.__omniTestSocket), true,
     "Configuration application replaced the browser connection");
 
@@ -538,15 +549,9 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
     await writeFile(memoryPath, Buffer.from([0xff, 0xfe]));
     await page.getByLabel("Maximum iterations", { exact: true }).fill("63");
     const failedSave = await save(page);
-    await expect(page.getByRole("button", { name: "Retry application", exact: true })).toBeVisible({ timeout: 15000 });
-    const versions = page.getByRole("definition");
-    await expect(versions.filter({ hasText: failedSave.revision })).toHaveCount(2);
-    await expect(versions.filter({ hasText: pending.revision })).toHaveCount(1);
-    await writeFile(memoryPath, memory);
-    const retryResponse = page.waitForResponse((response) => response.url().endsWith("/api/v1/config/retry"));
-    await page.getByRole("button", { name: "Retry application", exact: true }).click();
-    assert.equal((await retryResponse).status(), 200);
-    await waitForActiveGeneration(page);
+    assert.equal(failedSave.application.status, "restart-required");
+    assert.equal(failedSave.application.active_revision, pending.application.active_revision);
+    await expect(page.getByRole("button", { name: "Retry application", exact: true })).toHaveCount(0);
   } finally {
     await writeFile(memoryPath, memory);
   }
@@ -613,7 +618,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   await expect(saveButton).toBeEnabled({ timeout: 10000 });
   await expect(page.getByLabel("Maximum iterations", { exact: true })).toHaveValue("67");
   await save(page);
-  await waitForActiveGeneration(page);
+  await waitForSavedSettings(page);
 
   await mkdir(output, { recursive: true });
   for (const language of ["en", "zh-CN"]) {
@@ -633,5 +638,5 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   }
   await page.setViewportSize(viewports[0]);
   await page.getByRole("button", { name: "EN", exact: true }).click();
-  console.log("Settings production CSP E2E: global without Claim, invalid bytes, cross-client stale CAS and explicit reload, dirty late poll, real active Run pending/activation with same PID/WS, real candidate resource failure/retry, versions, keyboard and 4 locale/theme x 4 viewports passed");
+  console.log("Settings production CSP E2E: global without Claim, invalid bytes, cross-client stale CAS and explicit reload, dirty late poll, real active Run save/restart with same PID/WS, save remains independent of resource preparation, versions, keyboard and 4 locale/theme x 4 viewports passed");
 }

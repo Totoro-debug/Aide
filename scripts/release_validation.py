@@ -742,7 +742,7 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         (
             "tests/service/test_restore_management.py::test_restore_plan_and_cancel_are_bound_to_inspected_session",
             "tests/service/test_restore_management.py::test_other_client_cannot_inspect_execute_read_or_ack_restore",
-            "tests/service/test_config_generation_acceptance.py::test_save_waits_for_real_restore_transaction_and_preserves_restored_session",
+            "tests/service/test_config_generation_acceptance.py::test_save_preserves_real_restore_transaction",
         ),
         (
             "Restore inspect/execute/cancel are Claim and Session scoped",
@@ -808,29 +808,29 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
     ),
     AcceptanceScenario(
         "R13",
-        "Config updates drain active foreground/Schedule work, activate a new generation, and preserve the old one on failure.",
+        "Config saves preserve startup resources and accepted work; saved settings activate after restart.",
         ("backend_service", "production_browser"),
         (
-            "tests/service/test_config_generation_acceptance.py::test_http_save_drains_real_foreground_schedule_and_confirmation_without_disconnect",
-            "tests/service/test_config_generation_lifecycle.py::test_active_configuration_status_waits_for_workspace_admission",
-            "tests/service/test_config_generation_acceptance.py::test_save_waits_for_real_dream_and_blocks_new_dream_until_activation",
-            "tests/service/test_config_generation_acceptance.py::test_save_waits_for_real_restore_transaction_and_preserves_restored_session",
-            "tests/service/test_config_transport.py::test_config_patch_reports_pending_then_active_and_stale_conflict",
-            "tests/service/test_config_generation_lifecycle.py::test_invalid_external_configuration_retains_active_generation",
+            "tests/service/test_config_generation_acceptance.py::test_http_save_preserves_foreground_schedule_confirmation_and_admission",
+            "tests/service/test_config_generation_lifecycle.py::test_external_changes_preserve_resources_and_admission",
+            "tests/service/test_config_generation_acceptance.py::test_save_preserves_dream_and_subsequent_dream_uses_startup_settings",
+            "tests/service/test_config_generation_acceptance.py::test_save_preserves_real_restore_transaction",
+            "tests/service/test_config_transport.py::test_config_patch_reports_restart_required_and_stale_conflict",
+            "tests/service/test_config_transport.py::test_config_save_preserves_workspace_and_later_activation_uses_startup_settings",
         ),
         (
-            "pending save leaves active work and WebSocket connected",
-            "new generation becomes active only after drains; failed candidate retains old generation",
+            "save leaves active work and WebSocket connected",
+            "saved settings require restart; active resources and admission remain usable",
             "stale revision is rejected without byte mutation",
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/settings-e2e.mjs keeps an active Tool confirmation through pending save",
-            "web/scripts/settings-e2e.mjs records real active-run pending/activation with same PID/WS",
+            "web/scripts/settings-e2e.mjs keeps an active Tool confirmation through save",
+            "web/scripts/settings-e2e.mjs records save/restart with real model and MCP resources",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
-            "installed joint save holds real foreground/Schedule requests, releases after pending save, verifies both naturally completed, final active_revision equals saved revision, and the next CLI Run uses installed-new-model on the same service",
+            "installed joint save holds real foreground/Schedule requests, verifies natural completion, saved and active revisions remain distinct, and the next CLI Run retains the startup model",
         ),
     ),
     AcceptanceScenario(

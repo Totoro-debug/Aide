@@ -86,6 +86,10 @@ async function startHarness(state, root) {
     const line = await readLine();
     return {
       details: JSON.parse(line),
+      async restart() {
+        child.stdin.write("restart\n");
+        return JSON.parse(await readLine());
+      },
       async shutdown() {
         if (child.exitCode !== null) return;
         child.stdin.end("stop\n");
@@ -274,7 +278,7 @@ async function conversationAfterRepair(page, details, beforeSocket) {
     ready: window.__startupSocket.readyState,
   })), { created: 1, closed: 0, ready: 1 });
   const firstActiveService = await fetchJson(page, "/service");
-  assert.equal(firstActiveService.body.active_workspace_count, 2, "Available Projects were not activated before Session open");
+  assert.equal(firstActiveService.body.active_workspace_count, 1, "Available Projects were not activated before Session open");
 
   await keyboardActivate(page.getByRole("navigation").getByRole("link", { name: "Status", exact: true }));
   await expect(page.locator("#status-heading")).toBeVisible();
@@ -301,7 +305,17 @@ async function conversationAfterRepair(page, details, beforeSocket) {
   );
   const prompt = `startup repair conversation ${details.state}`;
   await page.getByLabel("Message input", { exact: true }).press("Enter");
-  await expect(page.getByRole("heading", { name: "Fixture response.", exact: true })).toBeVisible({ timeout: 30000 });
+  try {
+    await expect(page.getByRole("heading", { name: "Fixture response.", exact: true })).toBeVisible({ timeout: 30000 });
+  } catch (error) {
+    console.error(`Conversation diagnostics: ${JSON.stringify({
+      state: details.state,
+      text: await page.locator("body").innerText(),
+      events: await page.evaluate(() => window.__startupMessages.slice(-20)),
+      config: (await readConfig(page)).body,
+    })}`);
+    throw error;
+  }
   await expect.poll(async () => page.evaluate((text) => {
     const messages = window.__startupMessages ?? [];
     const accepted = messages.find((event) => event.type === "input.accepted" && event.payload?.text === text);
@@ -336,7 +350,7 @@ async function runState(browser, state) {
   let failure;
   try {
     harness = await startHarness(state, root);
-    const details = harness.details;
+    let details = harness.details;
     assert.equal(details.state, state);
     assert.equal(details.initial_service.active_workspace_count, 0);
     assert.ok(details.cold_launch_url.startsWith(`${details.url}/#ticket=`), "Cold production Web startup was bypassed");
@@ -396,7 +410,7 @@ async function runState(browser, state) {
         }
       };
     });
-    const page = await context.newPage();
+    let page = await context.newPage();
     const configBodies = [];
     page.on("response", (response) => {
       if (response.url().includes("/api/v1/config")) {
@@ -448,6 +462,39 @@ async function runState(browser, state) {
     }
     const repaired = await saveRepair(page, 200);
     if (state === "malformed") assert.match(repaired.backup_id, /^sha256:/);
+    assert.equal(repaired.application.status, "restart-required");
+    assert.equal(repaired.application.active_revision, null);
+    await assertAdmissionClosed(page, details.project_id);
+    await expect(page.getByText("Saved; restart Omni to use these settings.", { exact: true }).first()).toBeVisible();
+    assert.equal(await page.evaluate(() => window.__startupSocketBefore === window.__startupSocket), true);
+    const oldPid = details.pid;
+    await context.close();
+    details = await harness.restart();
+    assert.notEqual(details.pid, oldPid);
+    context = await browser.newContext({ locale: "en", reducedMotion: "reduce" });
+    await context.addInitScript(() => {
+      window.__startupMessages = [];
+      window.__startupSocketCount = 0;
+      window.__startupSocketCloseCount = 0;
+      const OriginalWebSocket = window.WebSocket;
+      window.WebSocket = class extends OriginalWebSocket {
+        constructor(...args) {
+          super(...args);
+          window.__startupControlCredential = Array.isArray(args[1]) ? args[1][1] : null;
+          window.__startupSocket = this;
+          window.__startupSocketCount += 1;
+          this.addEventListener("close", () => { window.__startupSocketCloseCount += 1; });
+          this.addEventListener("message", (event) => { window.__startupMessages.push(JSON.parse(event.data)); });
+        }
+      };
+    });
+    const restartedPage = await context.newPage();
+    await restartedPage.goto(details.cold_launch_url);
+    await expect(restartedPage.locator("#status-heading")).toBeVisible();
+    await restartedPage.getByRole("navigation").getByRole("link", { name: "Settings", exact: true }).click();
+    await expect(restartedPage.getByLabel("Maximum iterations", { exact: true })).toBeEnabled();
+    page = restartedPage;
+    await page.evaluate(() => { window.__startupSocketBefore = window.__startupSocket; });
     const active = await waitForActiveConfig(page);
     assert.equal(active.configuration.state, "active");
     assert.equal(JSON.stringify(active).includes(details.malformed_secret), false);
@@ -490,7 +537,7 @@ async function runState(browser, state) {
     const oldActive = await readConfig(page);
     assert.equal(oldActive.body.configuration.state, "malformed");
     assert.equal(oldActive.body.application.active_revision, active.revision);
-    assert.equal(oldActive.body.application.status, "failed-to-apply");
+    assert.equal(oldActive.body.application.status, "pending-repair");
     await writeFile(configPath, savedBytes);
     await context.close();
     context = null;
@@ -516,7 +563,7 @@ try {
   for (const state of states) urls.push(await runState(browser, state));
   console.log(
     `Config startup production E2E: missing, semantic-invalid, malformed TOML, backup failure/exact bytes, `
-    + `bare CLI errors, active workspace admission, awaiting_resume Schedule state, same PID/port/WebSocket, `
+    + `bare CLI errors, active workspace admission, awaiting_resume Schedule state, repair preserves PID/WebSocket and explicit restart activates settings, `
     + `keyboard fixture conversation, cold production Web startup, CSP, and en/zh-CN light/dark 390/768/1024/1440 screenshots passed; URLs=${urls.join(",")}`,
   );
 } finally {

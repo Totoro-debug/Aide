@@ -33,7 +33,6 @@ from omni.provider.models import (
 )
 from omni.schedule.model import JobSchedule, ScheduleJob
 from omni.service.client import ServiceClient
-from omni.service.errors import ServiceError
 from omni.service.runtime import LocalService
 from tests.service.test_restore_management import _restore_request
 from tests.service.test_service_concurrency import (
@@ -262,7 +261,7 @@ async def _wait_closed(runtimes: Sequence[WorkspaceRuntime | None]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_http_save_drains_real_foreground_schedule_and_confirmation_without_disconnect(
+async def test_http_save_preserves_foreground_schedule_confirmation_and_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = _configured_home(tmp_path / "home")
@@ -335,14 +334,13 @@ async def test_http_save_drains_real_foreground_schedule_and_confirmation_withou
                 )
                 saved = await response.json()
                 assert response.status == 200, saved
-                assert saved["application"]["status"] == "pending"
+                assert saved["application"]["status"] == "restart-required"
                 assert saved["application"]["active_revision"] == revision
                 assert not old_provider.closed
-                with pytest.raises(ServiceError, match="admission"):
-                    await cli.submit_input("new work must wait")
+                await cli.submit_input("new work continues")
                 old_provider.release_a.set()
                 await asyncio.wait_for(confirmation.presented.wait(), 5)
-                assert _application(service)["status"] == "pending"
+                assert _application(service)["status"] == "restart-required"
                 assert not old_provider.closed
                 assert confirmation.respond is not None
                 assert confirmation.respond(confirmation.token, "approved")
@@ -350,43 +348,43 @@ async def test_http_save_drains_real_foreground_schedule_and_confirmation_withou
                 assert (project / "generation.txt").read_text(
                     encoding="utf-8"
                 ) == "old Run survived"
-                assert _application(service)["status"] == "pending"
+                assert _application(service)["status"] == "restart-required"
                 assert not old_provider.closed
                 old_provider.release_schedule.set()
-                await _wait_status(service, "active")
-                await _wait_closed([old_runtime])
+                assert _application(service)["status"] == "restart-required"
                 assert not web_socket.closed
                 await web_socket.ping(b"still-connected")
                 assert service.client(browser.client_id).connected
         assert old_provider.tool_completed.is_set()
         assert not old_provider.session_a_cancelled.is_set()
         assert not old_provider.schedule_cancelled.is_set()
-        assert old_provider.closed
-        assert workspace.runtime is not old_runtime
+        assert not old_provider.closed
+        assert workspace.runtime is old_runtime
         assert workspace.workspace_state is old_state
-        assert workspace.configuration.runtime.max_iterations == 81
-        assert workspace.configuration.memory.batch_size == 11
+        assert workspace.configuration.runtime.max_iterations == 50
+        assert workspace.configuration.memory.batch_size == 10
         assert (cli.session_id, cli.claim_version, cli.claim_credential) == claim
         assert cli._socket is socket and socket is not None and not socket.closed
         assert os.getpid() == pid and service.service_instance_id == identity
         assert service.client_permission(cli.client_id).current() == "read-only"
-        assert service.client_permission(cli.client_id).configured() == "full-access"
+        assert service.client_permission(cli.client_id).configured() == "workspace-write"
         assert (
             workspace.loops[
                 cli.session_id
             ].loop._tool_gateway._permission_context.configured_schedule_level
-            == "full-access"
+            == "workspace-write"
         )
         assert (
             workspace._schedule_loops[job.job_id].loop._permission_control.configured()
-            == "full-access"
+            == "workspace-write"
         )
         jobs = await workspace.schedule_service.public_snapshot()
         assert next(item for item in jobs if item.job_id == job.job_id).state.last_status == "ok"
         assert len(workspace._schedule_loops) == 1
+        assert "answer from session B" in await _client_output(cli)
         await cli.submit_input("session-b")
         assert "answer from session B" in await _client_output(cli)
-        assert len(providers) == 2
+        assert len(providers) == 1
         persisted = Session.load(cast(Any, old_state), cli.session_id)
         assert any(
             message.get("content") == "old generation tool completed"
@@ -406,166 +404,7 @@ async def test_http_save_drains_real_foreground_schedule_and_confirmation_withou
 
 
 @pytest.mark.asyncio
-async def test_multi_workspace_prepare_failure_keeps_every_old_generation_then_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    home = _configured_home(tmp_path / "home")
-    monkeypatch.setattr(
-        service_runtime, "create_provider", lambda _configuration: _GenerationProvider()
-    )
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
-    await service.start()
-    client = await service.register_client("cli")
-    sink = _CollectingSink()
-    await service.connect_client(client.client_id, sink)
-    staged: list[WorkspaceRuntime] = []
-    original = WorkspaceRuntime.start_replacement
-    fail = True
-
-    async def start_candidate(
-        candidate: WorkspaceRuntime, previous: WorkspaceRuntime
-    ) -> WorkspaceRuntime:
-        staged.append(candidate)
-        result = await original(candidate, previous)
-        if fail and candidate.workspace_path.name == "second":
-            raise RuntimeError("injected resource preparation failure: canary-secret")
-        return result
-
-    monkeypatch.setattr(WorkspaceRuntime, "start_replacement", start_candidate)
-    try:
-        workspaces = []
-        claims = []
-        for name in ("first", "second"):
-            path = tmp_path / name
-            path.mkdir()
-            workspace = await service.attach_workspace(client.client_id, path)
-            session = await workspace.create_draft(client.client_id)
-            claims.append(await workspace.claim(client.client_id, session))
-            workspaces.append(workspace)
-        old = [workspace.runtime for workspace in workspaces]
-        revision = cast(str, service.config_view()["revision"])
-        await service.update_configuration(
-            "prepare-failure", revision, {"memory": {"batch_size": 13}}
-        )
-        await _wait_status(service, "failed-to-apply")
-        assert [workspace.runtime for workspace in workspaces] == old
-        assert all(runtime is not None and not runtime._closed for runtime in old)
-        assert len(staged) == 2 and all(candidate._closed for candidate in staged)
-        assert _application(service)["active_revision"] == revision
-        assert "canary-secret" not in str(service.config_view())
-        assert all(workspace.configuration.memory.batch_size != 13 for workspace in workspaces)
-        for index, (workspace, claim) in enumerate(zip(workspaces, claims, strict=True)):
-            run_id = f"old-generation-after-failure-{index}"
-            await workspace.input(
-                client.client_id, claim.session_id, claim.version, "session-b", run_id
-            )
-            async with asyncio.timeout(5):
-                while not any(
-                    message.get("content") == "answer from session B"
-                    for message in claim.loop.session.messages
-                ):
-                    await asyncio.sleep(0.01)
-            await claim.loop.session.wait_for_pending_persist()
-            persisted = Session.load(
-                cast(WorkspaceState, workspace.workspace_state), claim.session_id
-            )
-            assert any(
-                message.get("content") == "answer from session B" for message in persisted.messages
-            )
-        fail = False
-        saved_revision = cast(str, service.config_view()["revision"])
-        await service.retry_configuration("retry-prepare", saved_revision)
-        await _wait_status(service, "active")
-        assert _application(service)["active_revision"] == saved_revision
-        assert all(workspace.configuration.memory.batch_size == 13 for workspace in workspaces)
-        await _wait_closed(old)
-        assert all(runtime is not None and runtime._closed for runtime in old)
-    finally:
-        await service.stop()
-
-
-@pytest.mark.asyncio
-async def test_save_and_cli_effort_supersede_candidate_preparing_resources(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    home = _configured_home(tmp_path / "home")
-    project = tmp_path / "project"
-    project.mkdir()
-    monkeypatch.setattr(
-        service_runtime, "create_provider", lambda _configuration: _GenerationProvider()
-    )
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
-    server, port = await _serve(service, home)
-    cli: ServiceClient | None = None
-    prepared = asyncio.Event()
-    release = asyncio.Event()
-    staged: list[WorkspaceRuntime] = []
-    published: list[WorkspaceRuntime] = []
-    original_start = WorkspaceRuntime.start_replacement
-    original_publish = WorkspaceRuntime.publish_replacements
-
-    async def start_candidate(
-        candidate: WorkspaceRuntime, previous: WorkspaceRuntime
-    ) -> WorkspaceRuntime:
-        result = await original_start(candidate, previous)
-        staged.append(candidate)
-        if candidate.configuration.runtime.max_iterations == 80:
-            prepared.set()
-            await release.wait()
-        return result
-
-    def publish_candidates(
-        cls: type[WorkspaceRuntime],
-        replacements: tuple[tuple[WorkspaceRuntime, WorkspaceRuntime], ...],
-    ) -> None:
-        published.extend(candidate for _previous, candidate in replacements)
-        original_publish(replacements)
-
-    monkeypatch.setattr(WorkspaceRuntime, "start_replacement", start_candidate)
-    monkeypatch.setattr(WorkspaceRuntime, "publish_replacements", classmethod(publish_candidates))
-    try:
-        cli = await ServiceClient.connect_or_start(home, project, port=port)
-        workspace = service.workspace(cli.workspace_id)
-        old = workspace.runtime
-        await service.update_configuration(
-            "first-save",
-            cast(str, service.config_view()["revision"]),
-            {"runtime": {"max_iterations": 80}},
-        )
-        await asyncio.wait_for(prepared.wait(), 5)
-        await service.update_configuration(
-            "latest-save",
-            cast(str, service.config_view()["revision"]),
-            {"runtime": {"max_iterations": 82}},
-        )
-        before_effort = service.config_view()["revision"]
-        result = await cli.management("effort", {"effort": "high"})
-        assert result["published_effort"] == "high", result
-        latest_revision = service.config_view()["revision"]
-        assert latest_revision != before_effort
-        assert old is not None and old.router.reasoning_effort == "high"
-        assert not old._closed and workspace.runtime is old
-        release.set()
-        await _wait_status(service, "active")
-        assert len(staged) == 2 and staged[0]._closed
-        assert published == [staged[1]]
-        assert workspace.runtime is staged[1]
-        assert workspace.configuration.runtime.max_iterations == 82
-        assert workspace.runtime.router.reasoning_effort == "high"
-        assert _application(service)["active_revision"] == latest_revision
-        loaded = ConfigLoader(home).load_for_startup()
-        assert loaded.runtime.max_iterations == 82
-        assert loaded.resolve_route("chat").route.reasoning_effort == "high"
-    finally:
-        release.set()
-        if cli is not None:
-            await cli.close()
-        await server.close()
-        await service.stop()
-
-
-@pytest.mark.asyncio
-async def test_save_waits_for_real_dream_and_blocks_new_dream_until_activation(
+async def test_save_preserves_dream_and_subsequent_dream_uses_startup_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = _configured_home(tmp_path / "home")
@@ -604,28 +443,24 @@ async def test_save_waits_for_real_dream_and_blocks_new_dream_until_activation(
             cast(str, service.config_view()["revision"]),
             {"memory": {"batch_size": 17}},
         )
-        assert _application(service)["status"] == "pending"
-        assert "dream" in _application(service)["waiting_for"]
+        assert _application(service)["status"] == "restart-required"
+        assert _application(service)["restart_required"] is True
         assert not old_provider.closed and not dream_task.done()
-        with pytest.raises(ServiceError) as rejected:
-            await other.management("dream", {})
-        assert rejected.value.code == "admission_closed"
         assert workspace.runtime is old_runtime and not old_runtime._closed
         old_provider.release_background.set()
         result = await asyncio.wait_for(dream_task, 5)
         dream_result = cast(dict[str, object], result["dream_result"])
         assert dream_result["processed_count"] == 1 and dream_result["cursor"] == 1
-        await _wait_status(service, "active")
-        await _wait_closed([old_runtime])
-        assert not old_provider.background_cancelled.is_set() and old_provider.closed
-        assert workspace.runtime is not None and workspace.runtime is not old_runtime
+        assert _application(service)["status"] == "restart-required"
+        assert not old_provider.background_cancelled.is_set() and not old_provider.closed
+        assert workspace.runtime is not None and workspace.runtime is old_runtime
         await workspace.runtime.memory_manager.append_summary(
             "Another preference.", datetime.now(UTC)
         )
         next_result = await cli.management("dream", {})
         assert cast(dict[str, object], next_result["dream_result"])["processed_count"] == 1
-        assert len(providers) == 2 and providers[1].dream_started.is_set()
-        assert workspace.configuration.memory.batch_size == 17
+        assert len(providers) == 1 and providers[0].dream_started.is_set()
+        assert workspace.configuration.memory.batch_size == 10
     finally:
         for provider in providers:
             provider.release_background.set()
@@ -640,7 +475,7 @@ async def test_save_waits_for_real_dream_and_blocks_new_dream_until_activation(
 
 
 @pytest.mark.asyncio
-async def test_save_drains_real_auto_title_after_foreground_run_has_finished(
+async def test_save_preserves_auto_title_after_foreground_run_has_finished(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = _configured_home(tmp_path / "home")
@@ -677,33 +512,26 @@ async def test_save_drains_real_auto_title_after_foreground_run_has_finished(
         assert not title_task.done()
         await old_loop.session.wait_for_pending_persist()
         run_updated_at = old_loop.session.updated_at
-        persisted_run_updated_at = Session.load(
-            cast(WorkspaceState, workspace.workspace_state), cli.session_id
-        ).updated_at
         await service.update_configuration(
             "save-during-title",
             cast(str, service.config_view()["revision"]),
             {"runtime": {"max_iterations": 85}},
         )
-        assert _application(service)["status"] == "pending"
-        assert "title" in _application(service)["waiting_for"]
+        assert _application(service)["status"] == "restart-required"
+        assert _application(service)["restart_required"] is True
         assert workspace.runtime is old_runtime and not old_provider.closed
-        with pytest.raises(ServiceError) as rejected:
-            await cli.submit_input("new work waits for title resource")
-        assert rejected.value.code == "admission_closed"
         assert not title_task.done() and not old_runtime._closed
         old_provider.release_background.set()
         await asyncio.wait_for(asyncio.shield(title_task), 5)
-        await _wait_status(service, "active")
-        await _wait_closed([old_runtime])
-        assert not old_provider.background_cancelled.is_set() and old_provider.closed
+        assert _application(service)["status"] == "restart-required"
+        assert not old_provider.background_cancelled.is_set() and not old_provider.closed
         current = workspace.loops[cli.session_id].loop.session
         assert current.metadata["title"] == "Completed background title"
         assert current.updated_at == run_updated_at
+        await workspace.release(cli.client_id, cli.session_id)
         persisted = Session.load(cast(WorkspaceState, workspace.workspace_state), cli.session_id)
         assert persisted.metadata["title"] == "Completed background title"
-        assert persisted.updated_at == persisted_run_updated_at
-        assert workspace.configuration.runtime.max_iterations == 85
+        assert workspace.configuration.runtime.max_iterations == 50
     finally:
         for provider in providers:
             provider.release_background.set()
@@ -714,7 +542,7 @@ async def test_save_drains_real_auto_title_after_foreground_run_has_finished(
 
 
 @pytest.mark.asyncio
-async def test_save_waits_for_real_restore_transaction_and_preserves_restored_session(
+async def test_save_preserves_real_restore_transaction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = _configured_home(tmp_path / "home")
@@ -789,19 +617,18 @@ async def test_save_waits_for_real_restore_transaction_and_preserves_restored_se
             cast(str, service.config_view()["revision"]),
             {"runtime": {"max_iterations": 86}},
         )
-        assert _application(service)["status"] == "pending"
-        assert "restore" in _application(service)["waiting_for"]
+        assert _application(service)["status"] == "restart-required"
+        assert _application(service)["restart_required"] is True
         assert workspace.runtime is old_runtime and not old_runtime._closed
         assert not restore_task.done() and target.read_bytes() == b"current branch"
         release.set()
         result = await asyncio.wait_for(restore_task, 5)
         assert result.get("restore_result") is not None
-        await _wait_status(service, "active")
-        await _wait_closed([old_runtime])
+        assert _application(service)["status"] == "restart-required"
         assert not cancelled.is_set()
         assert target.read_bytes() == b"before restore"
         assert not RestoreManager(state, session.session_id).has_pending_transaction()
-        assert workspace.configuration.runtime.max_iterations == 86
+        assert workspace.configuration.runtime.max_iterations == 50
         assert workspace.loops[session.session_id].loop is claim.loop
         assert claim.loop.session.session_id == session.session_id
     finally:

@@ -26,7 +26,6 @@ from omni.service.client import ServiceClient
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures.cli_service import cli_service
 from tests.fixtures.mcp_wire import ObservedLifetimes, stdio_wire_configuration, wire_tool
-from tests.service.test_config_generation_lifecycle import _applied
 from tests.service.test_service_concurrency import _client_output, _ConcurrentProvider
 
 
@@ -78,9 +77,9 @@ class _EchoProvider(_ConcurrentProvider):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("closed_before_reload", [False, True])
+@pytest.mark.parametrize("save_before_next_run", [False, True])
 async def test_cli_real_mcp_flow_persists_result_reuses_session_snapshot_and_closes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, closed_before_reload: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, save_before_next_run: bool
 ) -> None:
     observed = ObservedLifetimes(monkeypatch)
     tasks_before = asyncio.all_tasks()
@@ -126,17 +125,16 @@ async def test_cli_real_mcp_flow_persists_result_reuses_session_snapshot_and_clo
             assert workspace.runtime is original
             assert original.mcp_snapshot[0] is old_tools[0]
             assert len(observed.processes) == 1
-            if closed_before_reload:
-                await observed.stop(0)
+            if save_before_next_run:
                 await service.update_configuration(
                     "reconnect-cli-mcp",
                     cast(str, service.config_view()["revision"]),
                     {"runtime": {"max_iterations": 83}},
                 )
-                await _applied(service)
-                assert workspace.runtime is not original
+                assert cast(dict[str, object], service.config_view()["application"])["status"] == "restart-required"
+                assert workspace.runtime is original
                 assert [tool.to_schema() for tool in old_tools] == schemas
-                assert len(observed.processes) == 2
+                assert len(observed.processes) == 1
             await client.submit_input("second echo")
             assert "done" in await _client_output(client)
             claim = workspace.require_claim(

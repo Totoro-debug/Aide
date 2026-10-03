@@ -208,6 +208,21 @@ async def _run(state: StartupState, root: Path) -> None:
             command = await asyncio.to_thread(sys.stdin.readline)
             if not command or command.strip() == "stop":
                 break
+            if command.strip() == "restart":
+                port = client.discovery.port
+                await client.close()
+                await _stop_service(home, port)
+                cold_launch_url = await _launch_web(root, cli_workspace)
+                client = await ServiceClient.connect_or_start(home, cli_workspace, attach_workspace=False)
+                await client._open_socket()
+                details.update({
+                    "url": client.base_url,
+                    "cold_launch_url": cold_launch_url,
+                    "pid": client.discovery.pid,
+                    "port": client.discovery.port,
+                })
+                print(json.dumps(details), flush=True)
+                continue
             if command.strip() == "service":
                 print(json.dumps(await client._http_request("GET", "/api/v1/service")), flush=True)
     finally:

@@ -188,16 +188,6 @@ export function repairConfig(
   });
 }
 
-export function retryConfig(
-  revision: string,
-  requestId: string = createRequestId(),
-): Promise<ConfigPatchResponse> {
-  return request<ConfigPatchResponse>("/config/retry", {
-    method: "POST",
-    mutation: true,
-    body: { request_id: requestId, revision },
-  });
-}
 
 export async function getRuntimeStatus(
   workspaceId: string,

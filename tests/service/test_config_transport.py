@@ -121,7 +121,7 @@ async def test_config_patch_rejects_invalid_values_without_writing(
 
 
 @pytest.mark.asyncio
-async def test_config_patch_reports_pending_then_active_and_stale_conflict(
+async def test_config_patch_reports_restart_required_and_stale_conflict(
     config_http: ConfigHttp,
 ) -> None:
     service, server, client_id, control = config_http
@@ -159,8 +159,12 @@ async def test_config_patch_reports_pending_then_active_and_stale_conflict(
 
     assert response.status == 200
     assert saved["fields"]["runtime"]["max_iterations"] == 80
-    assert saved["application"]["status"] in {"pending", "active"}
-    assert active["application"]["status"] == "active"
+    assert saved["application"]["status"] == "restart-required"
+    assert saved["application"]["restart_required"] is True
+    assert active["application"]["status"] == "restart-required"
+    assert active["application"]["active_revision"] == revision
+    assert service.configuration is not None
+    assert service.configuration.runtime.max_iterations == 50
     assert active["fields"]["runtime"]["max_iterations"] == 80
     assert conflict_response.status == 409
     assert conflict["code"] == "config_revision_conflict"
@@ -178,51 +182,44 @@ async def live_service(tmp_path: Path) -> AsyncIterator[tuple[LocalService, Path
 
 
 @pytest.mark.asyncio
-async def test_config_application_replaces_workspace_generation(
+async def test_config_save_preserves_workspace_and_later_activation_uses_startup_settings(
     live_service: tuple[LocalService, Path],
 ) -> None:
     service, workspace_path = live_service
     workspace_path.mkdir()
     client = await service.register_client("cli")
     workspace = await service.attach_workspace(client.client_id, workspace_path)
-    session_id = await workspace.create_draft(client.client_id)
-    claim = await workspace.claim(client.client_id, session_id)
-    schedule_state = await workspace._get_schedule_loop("config-test-job")
-    old_schedule_loop = schedule_state.loop
-    schedule_session_id = old_schedule_loop.session.session_id
-    assert schedule_session_id in workspace.loops
     old_runtime = workspace.runtime
-    old_state = workspace.workspace_state
-    current = service.config_view()
-    revision = cast(str, current["revision"])
-
-    await service.update_configuration(
+    revision = cast(str, service.config_view()["revision"])
+    saved = await service.update_configuration(
         "workspace-config-edit",
         revision,
         {"runtime": {"max_iterations": 81}, "memory": {"batch_size": 11}},
     )
-    for _ in range(100):
-        application = cast(dict[str, object], service.config_view()["application"])
-        if application["status"] == "active":
-            break
-        await asyncio.sleep(0.01)
-
-    application = cast(dict[str, object], service.config_view()["application"])
-    assert application["status"] == "active"
-    assert workspace.runtime is not old_runtime
-    assert workspace.workspace_state is old_state
-    assert workspace.configuration.runtime.max_iterations == 81
-    assert workspace.configuration.memory.batch_size == 11
-    assert claim.loop.session.session_id == session_id
-    assert workspace.loops[session_id].loop is claim.loop
-    assert workspace._schedule_loops["config-test-job"].loop is not old_schedule_loop
-    assert (
-        workspace._schedule_loops["config-test-job"].loop.session.session_id == schedule_session_id
-    )
-    assert (
-        workspace._schedule_loops["config-test-job"].loop._configuration.runtime.max_iterations
-        == 81
-    )
+    second_path = workspace_path.parent / "later-workspace"
+    second_path.mkdir()
+    later = await service.attach_workspace(client.client_id, second_path)
+    assert saved["application"] == {
+        "status": "restart-required",
+        "saved_revision": saved["revision"],
+        "active_revision": revision,
+        "restart_required": True,
+    }
+    assert workspace.runtime is old_runtime
+    for owner in (workspace, later):
+        assert owner.configuration.runtime.max_iterations == 50
+        assert owner.configuration.memory.batch_size == 10
+    await service.stop()
+    restarted = LocalService(service.agent_home, reconnect_timeout=3600)
+    try:
+        await restarted.start()
+        new_client = await restarted.register_client("cli")
+        reopened = await restarted.attach_workspace(new_client.client_id, workspace_path)
+        assert reopened.configuration.runtime.max_iterations == 81
+        assert reopened.configuration.memory.batch_size == 11
+        assert cast(dict[str, object], restarted.config_view()["application"])["status"] == "active"
+    finally:
+        await restarted.stop()
 
 
 @pytest_asyncio.fixture

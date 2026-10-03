@@ -1,7 +1,7 @@
 """Concrete read-only views exposed through the Management Port."""
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -282,7 +282,12 @@ class ManagementViewService:
         )
         self._ensure_runtime_admission = self._ensure_management_mutation_allowed
         self._persist_reasoning_effort: Callable[[ReasoningEffort], Awaitable[None]] | None = None
+        self._configuration_status: Callable[[], str] = lambda: ""
         self._aborted = False
+
+    def bind_configuration_status(self, callback: Callable[[], str]) -> None:
+        """Attach the service's saved/startup configuration status to CLI views."""
+        self._configuration_status = callback
 
     def bind_runtime_admission(self, callback: Callable[[], None]) -> None:
         """Bind the generation-wide admission gate after construction."""
@@ -333,7 +338,7 @@ class ManagementViewService:
         self._ensure_active()
         try:
             self._config.ensure_default()
-            return self._config.view()
+            return replace(self._config.view(), service_status_text=self._configuration_status())
         except (OSError, UnicodeError) as error:
             raise ManagementError(
                 ErrorInfo(

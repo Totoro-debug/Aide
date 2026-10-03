@@ -300,6 +300,7 @@ class ConfigView:
     effective_compact_ratio: float | None = None
     effective_permission_level: PermissionLevel | None = None
     effective_exec_shell: ExecShell | None = None
+    service_status_text: str = ""
 
     def diagnostics_text(self) -> str:
         return "".join(f"{diagnostic.message}\n" for diagnostic in self.diagnostics)
@@ -322,7 +323,7 @@ class ConfigView:
         if self.error is not None:
             error_text = f"{self.error.code}: {self.error.message}\n"
         return (
-            f"{error_text}{self.effective_values_text()}{self.diagnostics_text()}"
+            f"{self.service_status_text}{error_text}{self.effective_values_text()}{self.diagnostics_text()}"
             f"Path: {self.path}\n"
         )
 

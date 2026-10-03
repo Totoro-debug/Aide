@@ -28,7 +28,6 @@ from myclaw.agent.session.restore import RestoreManager, RestoreResult
 from myclaw.agent.tools.mcp_keywords import MCPKeywordPreparer
 from myclaw.agent.tools.mcp_runtime import (
     MCPRuntimeManager,
-    MCPSnapshotReport,
     MCPStartupReport,
     MCPToolSnapshot,
 )
@@ -212,7 +211,7 @@ class WorkspaceRuntime:
             cls._registry[key] = runtime
             return runtime
 
-    async def start(self, *, after_mcp_start: Callable[[], None] | None = None) -> Self:
+    async def start(self) -> Self:
         """Initialize all shared resources once and return this Runtime."""
         async with self._lifecycle_lock:
             if self._closed:
@@ -243,7 +242,7 @@ class WorkspaceRuntime:
                     except Exception as error:
                         raise WorkspaceRuntimeRestoreError from error
 
-                await self._start_resources(after_mcp_start=after_mcp_start)
+                await self._start_resources()
                 return self
             except BaseException as error:
                 cleanup_errors = await self._close_owned_resources()
@@ -252,7 +251,7 @@ class WorkspaceRuntime:
                     raise error from _cleanup_exception(cleanup_errors)
                 raise
 
-    async def _start_resources(self, *, after_mcp_start: Callable[[], None] | None = None) -> None:
+    async def _start_resources(self) -> None:
         """Start generation-owned resources against an already selected Workspace state."""
         state = self.workspace_state
         manager = cast(
@@ -266,8 +265,6 @@ class WorkspaceRuntime:
         startup_report = await manager.start(self.configuration.mcp)
         self._mcp_startup_report = startup_report
         self._mcp_snapshot = startup_report.snapshot
-        if after_mcp_start is not None:
-            after_mcp_start()
 
         router = cast(
             ModelRouter,
@@ -398,30 +395,6 @@ class WorkspaceRuntime:
         """Preflight a replacement dispatcher without changing persistent Job state."""
         self.schedule_service._prepare_start()
         self._schedule_prepared = True
-
-    async def prepare_mcp_generation(
-        self,
-    ) -> tuple[MCPSnapshotReport, Mapping[str, tuple[str, ...]]]:
-        """Prepare a later MCP generation without publishing it."""
-        if not self._started:
-            raise RuntimeError("Workspace Runtime has not been started")
-        report = await self.mcp_manager.prepare_generation()
-        keywords = await self.mcp_keyword_preparer.prepare(
-            report.snapshot,
-            self.configuration.mcp,
-        )
-        return report, keywords
-
-    def activate_mcp_generation(
-        self,
-        report: MCPSnapshotReport,
-        keywords: Mapping[str, tuple[str, ...]],
-    ) -> MCPToolSnapshot:
-        """Publish a prepared MCP generation and retain its immutable snapshot."""
-        snapshot = self.mcp_manager.activate_generation(report)
-        self._mcp_snapshot = snapshot
-        self._mcp_keywords = keywords
-        return snapshot
 
     @property
     def workspace_state(self) -> WorkspaceState:

@@ -61,7 +61,6 @@ from myclaw.agent.tools.tool_gateway import (
 )
 from myclaw.agent.workspace_state import WorkspaceState
 from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader
 from myclaw.errors import ErrorInfo
 from myclaw.management.commands import (
     MANAGEMENT_COMMANDS,
@@ -82,6 +81,7 @@ from myclaw.provider.models import (
     ReasoningEffort,
     TextDelta,
 )
+from myclaw.service.client import RemoteManagementCommandDispatcher
 from myclaw.skills.catalog import SkillMetadata
 from myclaw.templates import render_template
 from myclaw.terminal.conversation import (
@@ -100,6 +100,7 @@ from tests.agent.test_fixed_catalog import _agent_loop as _direct_agent_loop
 from tests.agent.test_fixed_catalog import _FixedCatalogProvider, _response
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import ProviderCall, TaskFramingRouterAdapter
+from tests.fixtures.cli_service import cli_service
 from tests.fixtures.session import seed_session_state
 
 NOW = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
@@ -451,6 +452,7 @@ class CancellableProvider(_FixedCatalogProvider):
     def __init__(self) -> None:
         super().__init__(())
         self.first_delta_emitted = asyncio.Event()
+        self.cancelled = asyncio.Event()
         self._chat_calls = 0
 
     async def stream(
@@ -497,7 +499,11 @@ class CancellableProvider(_FixedCatalogProvider):
         if self._chat_calls == 1:
             yield TextDelta(delta="partial runtime response")
             self.first_delta_emitted.set()
-            await asyncio.Event().wait()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
             return
         yield ModelCompleted(response=_response(content="Recovered runtime response."))
 
@@ -1005,7 +1011,6 @@ async def _run_cli_terminal_case(
     home = AgentHome(agent_home)
     home.initialize()
     (agent_home / "config.toml").write_text(VALID_CONFIG, encoding="utf-8")
-    configuration = ConfigLoader(home).load()
     selected_provider = provider or _FixedCatalogProvider(())
 
     class DeterministicAgentLoop(AgentLoop):
@@ -1019,14 +1024,13 @@ async def _run_cli_terminal_case(
             async with self.run_test(size=size) as pilot:
                 await scenario(self, pilot)
 
-    monkeypatch.setattr(cli, "AgentLoop", DeterministicAgentLoop)
+    monkeypatch.setattr("myclaw.service.runtime.AgentLoop", DeterministicAgentLoop)
     monkeypatch.setattr(cli, "TerminalConversationApp", ScenarioApp)
-    monkeypatch.setattr(cli, "create_provider", lambda _configuration: selected_provider)
-    await cli._run_cli_conversation(
-        agent_home=home,
-        workspace=workspace,
-        configuration=configuration,
+    monkeypatch.setattr(
+        "myclaw.service.runtime.create_provider", lambda _configuration: selected_provider
     )
+    async with cli_service(home):
+        await cli._run_service_cli_conversation(agent_home=home, workspace=workspace)
 
 
 def _tool_call(
@@ -2155,18 +2159,13 @@ async def test_restore_failure_notification_acknowledgement_survives_restart(
     monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_bytes", fail_blocked_restore)
 
     async def restore_with_failure(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
-        initial = cast(AgentLoop, app._control)
-        session = initial.session
-        session_ids.append(session.session_id)
-        run_token = UUID("550e8400-e29b-41d4-a716-446655440005")
-        restore_before = session.capture_restore_before()
-        session.commit_agent_run(
-            [{"role": "user", "content": discarded_input}],
-            pending_last_compacted=session.last_compacted,
-            pending_action_summary="",
-            restore_before=restore_before,
-            restore_run_token=run_token,
+        await pilot.press(*list(discarded_input), "enter")
+        await _wait_for_turn(app)
+        session = Session.load(
+            WorkspaceState(workspace), app._control.project_foreground_conversation().session_id
         )
+        session_ids.append(session.session_id)
+        run_token = session.restore_candidates()[0].run_token
         store = FileBackupStore(session.workspace_state, session.session_id)
         for target, tool_content, later_content in (
             (blocked, b"blocked by tool", b"blocked later"),
@@ -2180,7 +2179,6 @@ async def test_restore_failure_notification_acknowledgement_survives_restart(
         await session.wait_for_pending_persist()
 
         input_area = app.query_one("#conversation-input", _ConversationInput)
-        input_area.remember_submission(discarded_input)
         await pilot.press(*list("/restore"), "enter")
         await _wait_for_screen_id(app, pilot, "restore-anchor-picker")
         await pilot.press("enter")
@@ -2201,9 +2199,12 @@ async def test_restore_failure_notification_acknowledgement_survives_restart(
         assert f"Failed: {blocked}" in notification_details
         assert f"Restored conflict: {successful_conflict}" in notification_details
         assert input_area.read_only is True
+        async with asyncio.timeout(3):
+            while discarded_input in input_area._history:
+                await pilot.pause()
         assert discarded_input not in input_area._history
         assert "/restore" in input_area._history
-        assert cast(AgentLoop, app._control).session.session_id == session.session_id
+        assert app._control.project_foreground_conversation().session_id == session.session_id
         assert Session.load(session.workspace_state, session.session_id).messages == []
         assert blocked.read_bytes() == b"blocked later"
         assert successful_conflict.read_bytes() == b"conflict before"
@@ -2218,6 +2219,7 @@ async def test_restore_failure_notification_acknowledgement_survives_restart(
         workspace=workspace,
         monkeypatch=monkeypatch,
         scenario=restore_with_failure,
+        provider=_FixedCatalogProvider((_response(content="Completed before restore."),)),
         size=(100, 30),
     )
 
@@ -2281,9 +2283,9 @@ async def test_resume_picker_orders_sessions_and_cancellation_preserves_display(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
-        initial = cast(AgentLoop, app._control)
+        initial = app._control
         older = Session.create(
-            initial.session.workspace_state,
+            WorkspaceState(workspace),
             now=lambda: NOW.replace(hour=10),
             new_uuid=lambda: UUID("f47ac10b-58cc-4372-a567-0e02b2c3d479"),
         )
@@ -2310,7 +2312,7 @@ async def test_resume_picker_orders_sessions_and_cancellation_preserves_display(
         )
         older.close()
         target = Session.create(
-            initial.session.workspace_state,
+            WorkspaceState(workspace),
             now=lambda: NOW,
             new_uuid=lambda: UUID("550e8400-e29b-41d4-a716-446655440000"),
         )
@@ -2378,9 +2380,8 @@ async def test_resume_selection_rebinds_sanitized_session_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
-        initial = cast(AgentLoop, app._control)
         target = Session.create(
-            initial.session.workspace_state,
+            WorkspaceState(workspace),
             now=lambda: NOW,
             new_uuid=lambda: UUID("6fa459ea-ee8a-4ca4-894e-db77e160355e"),
         )
@@ -2516,7 +2517,7 @@ async def test_resume_selection_rebinds_sanitized_session_projection(
 
         async with asyncio.timeout(3):
             while (
-                cast(AgentLoop, app._control).session.session_id != target.session_id
+                app._control.project_foreground_conversation().session_id != target.session_id
                 or "Persisted model failure." not in _visible_screen_text(app)
             ):
                 await pilot.pause()
@@ -2567,10 +2568,10 @@ async def test_active_resume_decline_then_force_rebinds_the_same_bus(
     provider = CancellableProvider()
 
     async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
-        old = cast(AgentLoop, app._control)
+        old = app._control
         shared_bus = app._bus
         target = Session.create(
-            old.session.workspace_state,
+            WorkspaceState(workspace),
             now=lambda: datetime(2027, 1, 1, tzinfo=UTC),
             new_uuid=uuid4,
         )
@@ -2610,7 +2611,7 @@ async def test_active_resume_decline_then_force_rebinds_the_same_bus(
         await pilot.press("escape")
         await pilot.pause()
         assert app._control is old
-        assert old.control.has_active_run
+        assert old.has_active_run
 
         await pilot.press(*list("/resume"), "enter")
         await _wait_for_session_picker(app, pilot)
@@ -2621,13 +2622,13 @@ async def test_active_resume_decline_then_force_rebinds_the_same_bus(
         await pilot.press("right", "enter")
 
         async with asyncio.timeout(3):
-            while app._control is old:
+            while app._control.project_foreground_conversation().session_id != target.session_id:
                 await pilot.pause()
         selected = app._control
-        assert selected.session.session_id == target.session_id
+        assert selected.project_foreground_conversation().session_id == target.session_id
         assert app._bus is shared_bus
-        assert old._aborted
-        assert old._execution_task is None
+        assert not selected.has_active_run
+        assert not provider.cancelled.is_set()
         await pilot.pause(0.1)
 
     await _run_cli_terminal_case(
@@ -2637,6 +2638,7 @@ async def test_active_resume_decline_then_force_rebinds_the_same_bus(
         scenario=scenario,
         provider=provider,
     )
+    assert provider.cancelled.is_set()
 
 
 @pytest.mark.asyncio
@@ -2646,9 +2648,8 @@ async def test_resume_picker_mouse_selection_rebinds_the_clicked_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
-        initial = cast(AgentLoop, app._control)
         target = Session.create(
-            initial.session.workspace_state,
+            WorkspaceState(workspace),
             now=lambda: datetime(2027, 1, 1, tzinfo=UTC),
             new_uuid=uuid4,
         )
@@ -2681,7 +2682,7 @@ async def test_resume_picker_mouse_selection_rebinds_the_clicked_session(
 
         async with asyncio.timeout(3):
             while (
-                cast(AgentLoop, app._control).session.session_id != target.session_id
+                app._control.project_foreground_conversation().session_id != target.session_id
                 or "Mouse-selected content." not in _visible_screen_text(app)
             ):
                 await pilot.pause()
@@ -2706,11 +2707,10 @@ async def test_resume_picker_scrolls_in_management_order_and_selects_by_keyboard
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
-        initial = cast(AgentLoop, app._control)
         sessions: list[Session] = []
         for index in range(50):
             session = Session.create(
-                initial.session.workspace_state,
+                WorkspaceState(workspace),
                 now=_constant_datetime(datetime(2027, 1, 1, 0, index, tzinfo=UTC)),
                 new_uuid=_constant_uuid(UUID(f"00000000-0000-4000-8000-{index + 1:012x}")),
             )
@@ -2757,7 +2757,7 @@ async def test_resume_picker_scrolls_in_management_order_and_selects_by_keyboard
         await pilot.press(*(("down",) * 50), "enter")
 
         async with asyncio.timeout(3):
-            while cast(AgentLoop, app._control).session.session_id != sessions[
+            while app._control.project_foreground_conversation().session_id != sessions[
                 0
             ].session_id or "Content 00." not in _visible_screen_text(app):
                 await pilot.pause()
@@ -2780,9 +2780,8 @@ async def test_resume_serializes_input_until_cli_rebind_finishes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
-        initial = cast(AgentLoop, app._control)
         target = Session.create(
-            initial.session.workspace_state,
+            WorkspaceState(workspace),
             now=lambda: datetime(2027, 1, 1, tzinfo=UTC),
             new_uuid=uuid4,
         )
@@ -2848,7 +2847,7 @@ async def test_resume_serializes_input_until_cli_rebind_finishes(
         assert resume_errors == []
         async with asyncio.timeout(3):
             while (
-                cast(AgentLoop, app._control).session.session_id != target.session_id
+                app._control.project_foreground_conversation().session_id != target.session_id
                 or input_area.read_only
                 or "Delayed restored content." not in _visible_screen_text(app)
             ):
@@ -2873,9 +2872,8 @@ async def test_resumed_long_history_starts_latest_and_preserves_input_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
-        initial = cast(AgentLoop, app._control)
         target = Session.create(
-            initial.session.workspace_state,
+            WorkspaceState(workspace),
             now=lambda: datetime(2027, 1, 1, tzinfo=UTC),
             new_uuid=uuid4,
         )
@@ -2909,7 +2907,7 @@ async def test_resumed_long_history_starts_latest_and_preserves_input_history(
         display = app.query_one("#conversation-display")
         async with asyncio.timeout(3):
             while (
-                cast(AgentLoop, app._control).session.session_id != target.session_id
+                app._control.project_foreground_conversation().session_id != target.session_id
                 or not display.is_vertical_scroll_end
                 or "Restored line 59" not in _visible_screen_text(app)
             ):
@@ -2940,9 +2938,8 @@ async def test_resume_projects_unknown_reversed_and_unclassifiable_history_safel
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
-        initial = cast(AgentLoop, app._control)
         target = Session.create(
-            initial.session.workspace_state,
+            WorkspaceState(workspace),
             now=lambda: datetime(2027, 1, 1, tzinfo=UTC),
             new_uuid=uuid4,
         )
@@ -3082,9 +3079,9 @@ async def test_resume_stale_selection_preserves_current_display_and_interaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
-        initial = cast(AgentLoop, app._control)
+        initial = app._control
         target = Session.create(
-            initial.session.workspace_state,
+            WorkspaceState(workspace),
             now=lambda: NOW,
             new_uuid=lambda: UUID("550e8400-e29b-41d4-a716-446655440000"),
         )
@@ -3146,14 +3143,18 @@ async def test_fatal_resume_failure_exits_without_rendering_private_error(
     private_error = "reset secret C:\\sensitive\\bus"
     visible_after_failure = ""
 
-    async def fail_reset(_bus: MessageBus) -> None:
-        raise RuntimeError(private_error)
+    async def fail_resume(
+        _dispatcher: RemoteManagementCommandDispatcher, _session_id: str, *, force: bool = False
+    ) -> ManagementCommandResult:
+        del force
+        raise FatalManagementError(
+            ErrorInfo("persistence_error", "Runtime Session replacement could not be completed.")
+        ) from RuntimeError(private_error)
 
     async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
         nonlocal visible_after_failure
-        initial = cast(AgentLoop, app._control)
         target = Session.create(
-            initial.session.workspace_state,
+            WorkspaceState(workspace),
             now=lambda: NOW,
             new_uuid=lambda: UUID("6fa459ea-ee8a-4ca4-894e-db77e160355e"),
         )
@@ -3189,7 +3190,7 @@ async def test_fatal_resume_failure_exits_without_rendering_private_error(
         visible_after_failure = _visible_screen_text(app)
         assert isinstance(app.fatal_management_error, FatalManagementError)
 
-    monkeypatch.setattr(MessageBus, "reset", fail_reset)
+    monkeypatch.setattr(RemoteManagementCommandDispatcher, "resume", fail_resume)
     with pytest.raises(FatalManagementError) as raised:
         await _run_cli_terminal_case(
             agent_home=agent_home,
@@ -3202,7 +3203,6 @@ async def test_fatal_resume_failure_exits_without_rendering_private_error(
     assert private_error not in str(raised.value)
     assert private_error not in visible_after_failure
     assert "Must not be rendered after fatal replacement failure." not in visible_after_failure
-
 
 @pytest.mark.asyncio
 async def test_terminal_conversation_starts_blank_and_focuses_input() -> None:
@@ -7885,10 +7885,10 @@ async def test_effort_persistence_failure_does_not_interrupt_active_run_or_next_
     monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_text", fail_config_replace)
 
     async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
-        initial = cast(AgentLoop, app._control)
+        initial = app._control
         submission = asyncio.create_task(pilot.press(*list("active work"), "enter"))
         await asyncio.wait_for(provider.first_delta_emitted.wait(), timeout=2)
-        assert initial.control.has_active_run
+        assert initial.has_active_run
 
         await pilot.press(*list("/effort"), "enter")
         await pilot.pause()
@@ -7897,7 +7897,7 @@ async def test_effort_persistence_failure_does_not_interrupt_active_run_or_next_
         await pilot.press("right", "enter")
         await pilot.pause()
 
-        assert initial.control.has_active_run
+        assert initial.has_active_run
         assert _visible_screen_text(app).count("Chat reasoning effort: high") == 1
 
         await pilot.press(*list("/status"), "enter")
@@ -7906,7 +7906,7 @@ async def test_effort_persistence_failure_does_not_interrupt_active_run_or_next_
             "chat_reasoning_effort: high" in str(cast(Static, row).content)
             for row in app.query(".management-row")
         )
-        assert initial.control.has_active_run
+        assert initial.has_active_run
 
         await pilot.press("ctrl+c")
         await asyncio.wait_for(submission, timeout=2)

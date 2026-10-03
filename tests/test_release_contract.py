@@ -119,26 +119,6 @@ def _named_call_lines(tree: ast.AST, names: set[str]) -> tuple[int, ...]:
     )
 
 
-def _assignment_lines(
-    tree: ast.AST,
-    target: str,
-    value: str | None,
-) -> tuple[int, ...]:
-    lines: list[int] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        if not any(
-            isinstance(candidate, ast.Name) and candidate.id == target for candidate in node.targets
-        ):
-            continue
-        if value is None and isinstance(node.value, ast.Constant) and node.value.value is None:
-            lines.append(node.lineno)
-        if value is not None and isinstance(node.value, ast.Name) and node.value.id == value:
-            lines.append(node.lineno)
-    return tuple(lines)
-
-
 # The tracked corpus uses these simple inline/reference target forms. This is not a
 # complete CommonMark parser, and deliberately does not claim to be one.
 _INLINE_MARKDOWN_LINK = re.compile(
@@ -506,7 +486,7 @@ def test_mcp_transport_evidence_uses_local_fixtures() -> None:
     ):
         assert test_name in mcp_tests
 
-    full_flow_test = "test_cli_real_mcp_flow_persists_result_reuses_connection_and_closes"
+    full_flow_test = "test_cli_real_mcp_flow_persists_result_reuses_session_snapshot_and_closes"
     assert full_flow_test in cli_mcp_tests
 
 
@@ -634,65 +614,14 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
     )
 
 
-def test_cli_source_records_cutover_and_shutdown_order() -> None:
+def test_cli_source_uses_service_client_and_runtime_resource_shutdown_order() -> None:
     cli_tree = _source_ast(ROOT / "myclaw" / "terminal" / "cli.py")
-    replacement = _source_function(cli_tree, "replace_agent_loop")
-    restore = _source_function(cli_tree, "rebuild_after_restore")
-    handover = _source_function(cli_tree, "handover_prepared_generation")
-    preflight_lines = _attribute_call_lines(replacement, "target", "preflight")
-    quiesce_lines = _attribute_call_lines(handover, "terminal_app", "quiesce_for_rebind")
-    pause_lines = _attribute_call_lines(handover, "schedule_service", "pause_and_drain")
-    reset_lines = _attribute_call_lines(handover, "bus", "reset")
-    rebind_lines = _attribute_call_lines(handover, "terminal_app", "rebind_agent_loop")
-    start_lines = _attribute_call_lines(handover, "target", "start")
-    activate_lines = _attribute_call_lines(handover, "runtime", "activate_mcp_generation")
-    resume_lines = _attribute_call_lines(replacement, "schedule_service", "resume")
-    current_none_lines = _assignment_lines(handover, "current_loop", None)
-    current_target_lines = _assignment_lines(handover, "current_loop", "target")
-    old_abort_lines = _named_call_lines(handover, {"abort_loop_once"})
-
-    cutover = (
-        min(quiesce_lines),
-        min(pause_lines),
-        min(line for line in current_none_lines if line > min(pause_lines)),
-        min(old_abort_lines),
-        min(reset_lines),
-        min(rebind_lines),
-        min(start_lines),
-        min(activate_lines),
-        min(current_target_lines),
-    )
-    assert cutover == tuple(sorted(cutover))
-    for path in (replacement, restore):
-        assert min(_attribute_call_lines(path, "target", "preflight")) < min(
-            _named_call_lines(path, {"cancel_old_generation_confirmations"})
-        ) < min(_named_call_lines(path, {"handover_prepared_generation"}))
-    assert min(preflight_lines) < min(
-        _named_call_lines(replacement, {"handover_prepared_generation"})
-    ) < min(resume_lines)
-    assert min(_named_call_lines(restore, {"handover_prepared_generation"})) < min(
-        _attribute_call_lines(restore, "old_loop", "_release_replacement_barrier")
-    ) < min(_attribute_call_lines(restore, "schedule_service", "resume"))
-
-    conversation = _source_function(cli_tree, "_run_cli_conversation")
-    shutdown = next(
-        node for node in conversation.body if isinstance(node, ast.Try) and node.finalbody
-    )
-    final_tree = ast.Module(body=shutdown.finalbody, type_ignores=[])
-    runtime_close_lines = _attribute_call_lines(final_tree, "runtime", "close")
-    assert len(runtime_close_lines) == 1
-    assert _attribute_call_lines(conversation, "runtime", "close") == runtime_close_lines
-    foreground_close = _source_function(conversation, "close_foreground_loops")
-    close_lines = _attribute_call_lines(foreground_close, "active_loop", "close")
-    assert len(close_lines) == 1
-    abort_lines = _named_call_lines(foreground_close, {"abort_loop_once"})
-    assert abort_lines
-    shutdown_events = (
-        min(_attribute_call_lines(final_tree, "runtime", "drain_confirmation_aborts")),
-        min(_attribute_call_lines(final_tree, "management", "deactivate")),
-        min(runtime_close_lines),
-    )
-    assert shutdown_events == tuple(sorted(shutdown_events))
+    conversation = _source_function(cli_tree, "_run_service_cli_conversation")
+    assert _attribute_call_lines(conversation, "ServiceClient", "connect_or_start")
+    assert _attribute_call_lines(conversation, "client", "close")
+    assert not _named_call_lines(cli_tree, {"AgentLoop", "WorkspaceRuntime", "ScheduleService"})
+    main = _source_function(cli_tree, "main")
+    assert _named_call_lines(main, {"_run_service_cli_conversation"})
 
     runtime_tree = _source_ast(ROOT / "myclaw" / "agent" / "workspace_runtime.py")
     runtime_shutdown = _source_function(runtime_tree, "_close_owned_resources")

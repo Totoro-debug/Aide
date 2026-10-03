@@ -1048,7 +1048,7 @@ def test_agent_modules_do_not_depend_on_terminal_presentation() -> None:
     assert violations == []
 
 
-def test_runtime_roots_exclusively_own_the_confirmation_coordinator() -> None:
+def test_service_runtime_exclusively_owns_the_confirmation_coordinator() -> None:
     constructor_sites: list[Path] = []
     for path in _python_files(PACKAGE_ROOT):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -1065,10 +1065,7 @@ def test_runtime_roots_exclusively_own_the_confirmation_coordinator() -> None:
         ):
             constructor_sites.append(path.relative_to(PROJECT_ROOT))
 
-    assert set(constructor_sites) == {
-        _CLI_PATH,
-        Path("myclaw/service/runtime.py"),
-    }
+    assert set(constructor_sites) == {Path("myclaw/service/runtime.py")}
 
     loop_path = PACKAGE_ROOT / "agent" / "loop.py"
     terminal_path = PACKAGE_ROOT / "terminal" / "conversation.py"

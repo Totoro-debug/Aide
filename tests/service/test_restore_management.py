@@ -649,3 +649,209 @@ async def test_restore_management_http_requires_csrf_and_claim_headers(tmp_path:
     finally:
         await server.close()
         await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("queued", [False, True])
+async def test_restore_listing_rejects_selected_active_and_queued_input(
+    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    restore_provider: _ConcurrentProvider,
+    queued: bool,
+) -> None:
+    service, workspace, owner, claim, target = restore_case
+    state = workspace.loops[claim.session_id]
+    if queued:
+        await state.bus.pause_inbound_delivery()
+    await workspace.input(owner, claim.session_id, claim.version, "session-b", "restore-busy")
+    if not queued:
+        await asyncio.wait_for(restore_provider.session_b_started.wait(), timeout=5)
+    try:
+        result = await _restore_request(
+            service, workspace, owner, claim, "dispatch", "restore-busy-list", command="/restore"
+        )
+        assert result.get("restore_listing") is None
+        assert str(result["output"]).startswith("model_invalid_request:")
+        assert claim.loop.foreground_input_admitted()
+        assert target.read_bytes() == b"current branch"
+    finally:
+        restore_provider.release_b.set()
+        if queued:
+            await state.bus.resume_inbound_delivery()
+
+
+@pytest.mark.asyncio
+async def test_restore_double_listing_and_cancel_preserve_claim_and_durable_branch(
+    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+) -> None:
+    service, workspace, owner, claim, target = restore_case
+    before = Session.load(workspace.workspace_state, claim.session_id).messages
+    first = await _restore_request(
+        service, workspace, owner, claim, "dispatch", "first-list", command="/restore"
+    )
+    assert first.get("restore_listing") is not None
+    assert not claim.loop.foreground_input_admitted()
+    second = await _restore_request(
+        service, workspace, owner, claim, "dispatch", "second-list", command="/restore"
+    )
+    assert second.get("restore_listing") is None
+    assert not claim.loop.foreground_input_admitted()
+    await _restore_request(service, workspace, owner, claim, "restore/cancel", "cancel-list")
+    assert claim.loop.foreground_input_admitted()
+    assert workspace.require_claim(owner, claim.session_id, claim.version) is claim
+    assert Session.load(workspace.workspace_state, claim.session_id).messages == before
+    assert target.read_bytes() == b"current branch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["cancel", "readiness", "inspect", "execute"])
+async def test_restore_precommit_failures_release_input_and_schedule_without_mutation(
+    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    service, workspace, owner, claim, target = restore_case
+    before = Session.load(workspace.workspace_state, claim.session_id).messages
+    if failure == "cancel":
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def wait() -> None:
+            started.set()
+            await release.wait()
+
+        monkeypatch.setattr(claim.loop, "wait_for_restore_idle", wait)
+        pending = asyncio.create_task(
+            _restore_request(
+                service, workspace, owner, claim, "dispatch", "cancel-wait", command="/restore"
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+    else:
+        if failure != "readiness":
+            await _restore_request(
+                service, workspace, owner, claim, "dispatch", "prepare-list", command="/restore"
+            )
+
+        def fail(*_args: Any, **_kwargs: Any) -> Any:
+            raise OSError("PRIVATE_RESTORE_FAILURE")
+
+        async def fail_async(*_args: Any, **_kwargs: Any) -> Any:
+            return fail()
+
+        payload: dict[str, object]
+        if failure == "readiness":
+            monkeypatch.setattr(claim.loop, "wait_for_restore_idle", fail_async)
+            action, payload = "dispatch", {"command": "/restore"}
+        elif failure == "inspect":
+            monkeypatch.setattr(RestoreManager, "inspect", fail)
+            action, payload = "restore/inspect", {"anchor_id": 1}
+        else:
+            await _restore_request(
+                service, workspace, owner, claim, "restore/inspect", "prepare-inspect", anchor_id=1
+            )
+            monkeypatch.setattr(RestoreManager, "execute", fail_async)
+            action, payload = "restore/execute", {"plan": {"anchor_id": 1}, "mode": "files"}
+        with pytest.raises(ServiceError if failure == "execute" else OSError) as raised:
+            await _restore_request(
+                service, workspace, owner, claim, action, "failed-restore", **payload
+            )
+        if failure == "execute":
+            assert "PRIVATE" not in str(raised.value)
+    assert claim.loop.foreground_input_admitted()
+    assert workspace.schedule_admitted
+    assert Session.load(workspace.workspace_state, claim.session_id).messages == before
+    assert target.read_bytes() == b"current branch"
+    assert not RestoreManager(workspace.workspace_state, claim.session_id).has_pending_transaction()
+
+
+@pytest.mark.asyncio
+async def test_restore_stale_durable_plan_preserves_new_branch_and_releases_barrier(
+    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+) -> None:
+    service, workspace, owner, claim, target = restore_case
+    await _restore_request(
+        service, workspace, owner, claim, "restore/inspect", "inspect-stale", anchor_id=1
+    )
+    changed = Session.load(workspace.workspace_state, claim.session_id)
+    changed.commit_agent_run(
+        [{"role": "user", "content": "new persisted branch"}],
+        pending_last_compacted=changed.last_compacted,
+        pending_action_summary="",
+    )
+    await changed.wait_for_pending_persist()
+    result = await _restore_request(
+        service,
+        workspace,
+        owner,
+        claim,
+        "restore/execute",
+        "execute-stale",
+        plan={"anchor_id": 1},
+        mode="files",
+    )
+    assert result.get("restore_result") is None
+    assert "stale" in str(result["output"])
+    assert claim.loop.foreground_input_admitted()
+    assert workspace.schedule_admitted
+    assert Session.load(workspace.workspace_state, claim.session_id).messages == changed.messages
+    assert target.read_bytes() == b"current branch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_point", ["constructor", "binding", "preflight", "start"])
+async def test_restore_rebuild_failure_keeps_durable_result_and_closes_admission(
+    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    from myclaw.agent.loop import AgentLoop
+
+    service, workspace, owner, claim, target = restore_case
+    await _restore_request(
+        service, workspace, owner, claim, "restore/inspect", "inspect-rebuild", anchor_id=1
+    )
+    old = claim.loop
+    method = {
+        "constructor": "__init__",
+        "binding": "bind_confirmation_requester",
+        "preflight": "preflight",
+        "start": "start",
+    }[failure_point]
+
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("PRIVATE_REBUILD_FAILURE")
+
+    async def fail_async(*_args: Any, **_kwargs: Any) -> None:
+        fail()
+
+    with monkeypatch.context() as patched:
+        # Restore this injected failure state on scope exit so the fixture can drain its owner.
+        patched.setattr(workspace, "_restore_blocked", False)
+        patched.setattr(AgentLoop, method, fail_async if method == "start" else fail)
+        with pytest.raises(ServiceError) as raised:
+            await _restore_request(
+                service,
+                workspace,
+                owner,
+                claim,
+                "restore/execute",
+                "execute-rebuild",
+                plan={"anchor_id": 1},
+                mode="files",
+            )
+        assert raised.value.code == "restore_failed"
+        assert "PRIVATE" not in raised.value.message
+        assert workspace._restore_blocked
+        assert not workspace.schedule_admitted
+        assert old._aborted
+        assert target.read_bytes() == b"before restore"
+        assert Session.load(workspace.workspace_state, claim.session_id).messages == []
+        result = RestoreManager(workspace.workspace_state, claim.session_id).completed_result()
+        assert result is not None and result.session_id == claim.session_id
+        with pytest.raises(ServiceError) as blocked:
+            await workspace.input(
+                owner, claim.session_id, claim.version, "no new work", "blocked-restore"
+            )
+        assert blocked.value.code == "admission_closed"

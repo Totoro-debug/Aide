@@ -10,16 +10,16 @@ from typing import Any
 
 import pytest
 
-from myclaw.agent.tools.tool_gateway import ModelToolCall
-from myclaw.config.config import ProviderConfiguration
-from myclaw.provider.errors import ModelCallError
-from myclaw.provider.models import (
+from omni.agent.tools.tool_gateway import ModelToolCall
+from omni.config.config import ProviderConfiguration
+from omni.provider.errors import ModelCallError
+from omni.provider.models import (
     ModelCompleted,
     ModelContinuation,
     ReasoningDelta,
     TextDelta,
 )
-from myclaw.provider.openai_compatible import OpenAICompatibleProvider
+from omni.provider.openai_compatible import OpenAICompatibleProvider
 from tests.fixtures.provider import error_info_fields, model_response_fields
 
 READ_FILE_SCHEMA: dict[str, Any] = {

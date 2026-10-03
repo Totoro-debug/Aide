@@ -3,7 +3,7 @@ from string import Formatter
 
 import pytest
 
-from myclaw.templates import load_template, render_template
+from omni.templates import load_template, render_template
 
 TEMPLATE_NAMES = {
     "blackboard-system-prompt.md",
@@ -49,7 +49,7 @@ def _template_fields(source: str) -> tuple[str, ...]:
 
 
 def test_all_versioned_templates_are_package_resources() -> None:
-    root = files("myclaw.templates")
+    root = files("omni.templates")
     names = {
         resource.name
         for resource in root.iterdir()
@@ -60,7 +60,7 @@ def test_all_versioned_templates_are_package_resources() -> None:
 
 
 def test_assembly_only_templates_are_not_packaged() -> None:
-    root = files("myclaw.templates")
+    root = files("omni.templates")
 
     assert [
         name for name in sorted(ASSEMBLY_ONLY_TEMPLATE_NAMES) if root.joinpath(name).is_file()

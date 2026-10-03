@@ -7,9 +7,9 @@ from typing import cast
 
 import pytest
 
-from myclaw.agent.tools.base import BaseTool
-from myclaw.agent.tools.core.grep import GrepTool
-from myclaw.agent.tools.tool_gateway import (
+from omni.agent.tools.base import BaseTool
+from omni.agent.tools.core.grep import GrepTool
+from omni.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ConfirmationRequester,

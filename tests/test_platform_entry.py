@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from myclaw.utils import platform
+from omni.utils import platform
 
 
 @pytest.mark.parametrize("host", ["posix", "unknown"])
@@ -20,8 +20,8 @@ def test_runtime_host_check_accepts_only_windows(
 @pytest.mark.parametrize(
     "module_name, entry, exits",
     [
-        ("myclaw.terminal.process_entry", "run", True),
-        ("myclaw.service.process", "run", False),
+        ("omni.terminal.process_entry", "run", True),
+        ("omni.service.process", "run", False),
         ("scripts.release_validation", "main", False),
         ("scripts.installed_web_validation", "main", True),
     ],
@@ -37,7 +37,7 @@ def test_unsupported_host_stops_before_initialization(
     module = importlib.import_module(module_name)
     monkeypatch.setattr(module, "is_windows_host", lambda: False)
     monkeypatch.chdir(tmp_path)
-    if module_name == "myclaw.terminal.process_entry":
+    if module_name == "omni.terminal.process_entry":
         def forbidden_logging() -> None:
             pytest.fail("Platform refusal must precede logging initialization")
 

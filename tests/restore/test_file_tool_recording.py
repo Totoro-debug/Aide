@@ -9,19 +9,19 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from myclaw.agent.permission import PermissionSnapshot
-from myclaw.agent.session.backup_store import FileBackupStore
-from myclaw.agent.tools.base import BaseTool
-from myclaw.agent.tools.core.edit_file import EditFileTool
-from myclaw.agent.tools.core.exec_host import resolve_exec_shell
-from myclaw.agent.tools.core.write_file import WriteFileTool
-from myclaw.agent.tools.permission import PermissionContext, ToolPermissionLevel, ToolRunOrigin
-from myclaw.agent.tools.tool_gateway import (
+from omni.agent.permission import PermissionSnapshot
+from omni.agent.session.backup_store import FileBackupStore
+from omni.agent.tools.base import BaseTool
+from omni.agent.tools.core.edit_file import EditFileTool
+from omni.agent.tools.core.exec_host import resolve_exec_shell
+from omni.agent.tools.core.write_file import WriteFileTool
+from omni.agent.tools.permission import PermissionContext, ToolPermissionLevel, ToolRunOrigin
+from omni.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ModelToolCall,
     ToolGateway,
 )
-from myclaw.agent.workspace_state import WorkspaceState
+from omni.agent.workspace_state import WorkspaceState
 
 SESSION_ID = "20260926-120000-123456_12345678-1234-4234-8234-123456789abc"
 
@@ -253,7 +253,7 @@ async def test_protected_restore_state_is_rejected_before_authorization_or_recor
     result = await gateway.call(
         _call(
             "write_file",
-            {"path": ".myclaw/restore/session/state.json", "content": "unsafe"},
+            {"path": ".omni/restore/session/state.json", "content": "unsafe"},
         ),
         file_mutation_recorder=recorder,
         run_token=uuid4(),
@@ -262,7 +262,7 @@ async def test_protected_restore_state_is_rejected_before_authorization_or_recor
     assert result.status == "refused"
     assert "protected" in result.content.lower()
     assert recorder.before_calls == []
-    assert not (workspace / ".myclaw" / "restore" / "session" / "state.json").exists()
+    assert not (workspace / ".omni" / "restore" / "session" / "state.json").exists()
 
 
 @pytest.mark.parametrize("fail_on_complete", [False, True])

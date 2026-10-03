@@ -11,14 +11,14 @@ from typing import Literal
 
 import pytest
 
-from myclaw.agent.tools.core.exec import ExecTool
-from myclaw.agent.tools.core.exec_host import (
+from omni.agent.tools.core.exec import ExecTool
+from omni.agent.tools.core.exec_host import (
     ExecProcessSpec,
     PowerShellExecHost,
     create_exec_host,
     resolve_exec_shell,
 )
-from myclaw.agent.tools.core.exec_policy import (
+from omni.agent.tools.core.exec_policy import (
     POWERSHELL_READ_CANDIDATES,
     POWERSHELL_WRITE_CANDIDATES,
     ExecAssessment,
@@ -26,8 +26,8 @@ from myclaw.agent.tools.core.exec_policy import (
     ExecOutcome,
     catastrophic_matches,
 )
-from myclaw.agent.tools.permission import PermissionContext, PermissionSnapshot
-from myclaw.agent.tools.tool_gateway import (
+from omni.agent.tools.permission import PermissionContext, PermissionSnapshot
+from omni.agent.tools.tool_gateway import (
     ConfirmationRequest,
     ModelToolCall,
     ToolGateway,

@@ -14,13 +14,13 @@ import pytest
 from aiohttp import web
 from loguru import logger
 
-from myclaw.agent.session.session import Session
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader
-from myclaw.schedule.model import JobSchedule, ScheduleJob
-from myclaw.service.client import ServiceClient
-from myclaw.service.errors import ServiceError
-from myclaw.service.runtime import LocalService
+from omni.agent.session.session import Session
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader
+from omni.schedule.model import JobSchedule, ScheduleJob
+from omni.service.client import ServiceClient
+from omni.service.errors import ServiceError
+from omni.service.runtime import LocalService
 from tests.configuration.test_config_editing import FULL_EDITABLE_CONFIG
 from tests.fixtures.mcp_wire import WireServer, wire_result, wire_tool
 from tests.service.test_config_generation_acceptance import _wait_closed, _wait_status

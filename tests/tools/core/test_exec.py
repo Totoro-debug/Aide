@@ -8,16 +8,16 @@ from typing import cast
 
 import pytest
 
-from myclaw.agent.tools import base as tool_base_module
-from myclaw.agent.tools.core.exec import ExecTool
-from myclaw.agent.tools.core.exec_host import (
+from omni.agent.tools import base as tool_base_module
+from omni.agent.tools.core.exec import ExecTool
+from omni.agent.tools.core.exec_host import (
     ExecProcessSpec,
     PowerShellExecHost,
     resolve_exec_shell,
 )
-from myclaw.agent.tools.core.exec_policy import ExecAssessment, ExecOutcome, assess_command
-from myclaw.agent.tools.network_safety import DNSResolver
-from myclaw.agent.tools.tool_gateway import (
+from omni.agent.tools.core.exec_policy import ExecAssessment, ExecOutcome, assess_command
+from omni.agent.tools.network_safety import DNSResolver
+from omni.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ConfirmationRequester,

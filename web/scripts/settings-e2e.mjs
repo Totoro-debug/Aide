@@ -91,7 +91,7 @@ export async function settingsConfirmationAcceptance({ page, control }) {
 }
 
 export async function settingsModelMcpAcceptance({ page, secondPage, control, output }) {
-  const configPath = resolve(control.details.home_root, ".myclaw", "config.toml");
+  const configPath = resolve(control.details.home_root, ".omni", "config.toml");
   const providerObservationPath = process.env.MYCLAW_E2E_PROVIDER_OBSERVATION_PATH;
   const mcpV1Path = process.env.MYCLAW_E2E_MCP_V1_PATH;
   const mcpV2Path = process.env.MYCLAW_E2E_MCP_V2_PATH;
@@ -485,7 +485,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
     assert.equal(response.status(), expectedStatus);
     return response.json();
   };
-  const configPath = resolve(control.details.home_root, ".myclaw", "config.toml");
+  const configPath = resolve(control.details.home_root, ".omni", "config.toml");
   await settings(page);
   const original = await readFile(configPath);
   await page.getByLabel("Maximum iterations", { exact: true }).fill("1");
@@ -532,7 +532,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   assert.equal(await page.evaluate(() => window.__settingsSocketBefore === window.__myclawTestSocket), true,
     "Configuration application replaced the browser connection");
 
-  const memoryPath = resolve(control.details.cli_workspace, ".myclaw", "memory", "memory.md");
+  const memoryPath = resolve(control.details.cli_workspace, ".omni", "memory", "memory.md");
   const memory = await readFile(memoryPath);
   try {
     await writeFile(memoryPath, Buffer.from([0xff, 0xfe]));

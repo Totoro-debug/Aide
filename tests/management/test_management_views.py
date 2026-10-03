@@ -4,20 +4,20 @@ from uuid import UUID
 
 import pytest
 
-from myclaw.agent.memory.dream import DreamResult
-from myclaw.agent.memory.manager import MemoryManager
-from myclaw.agent.permission import RuntimePermissionControl
-from myclaw.agent.session.session import Session
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.errors import ErrorInfo
-from myclaw.management.service import (
+from omni.agent.memory.dream import DreamResult
+from omni.agent.memory.manager import MemoryManager
+from omni.agent.permission import RuntimePermissionControl
+from omni.agent.session.session import Session
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.errors import ErrorInfo
+from omni.management.service import (
     ManagementError,
     RuntimeStatus,
     RuntimeStatusInput,
 )
-from myclaw.provider.models import ReasoningEffort
-from myclaw.utils.host_filesystem import HOST_FILESYSTEM
+from omni.provider.models import ReasoningEffort
+from omni.utils.host_filesystem import HOST_FILESYSTEM
 from tests.fixtures.diagnostic_capture import capture_diagnostics
 from tests.fixtures.session import seed_session_state
 from tests.management.factories import management_service
@@ -331,7 +331,7 @@ async def test_memory_view_reads_complete_latest_utf8_content_on_every_call(
     home = AgentHome(agent_home)
     home.initialize()
     state = WorkspaceState(workspace)
-    state.initialize(agent_home_root=Path.home() / ".myclaw")
+    state.initialize(agent_home_root=Path.home() / ".omni")
     memory_path = state.long_term_memory_path
     memory_path.write_text("initial memory\n", encoding="utf-8")
     service = management_service(
@@ -359,7 +359,7 @@ async def test_memory_view_converts_decode_failure_to_safe_persistence_error(
     home = AgentHome(agent_home)
     home.initialize()
     state = WorkspaceState(workspace)
-    state.initialize(agent_home_root=Path.home() / ".myclaw")
+    state.initialize(agent_home_root=Path.home() / ".omni")
     memory_manager = MemoryManager(state)
     state.long_term_memory_path.write_bytes(b"raw-secret\xff")
 
@@ -386,7 +386,7 @@ async def test_memory_view_converts_read_failure_to_safe_persistence_error(
     home = AgentHome(agent_home)
     home.initialize()
     state = WorkspaceState(workspace)
-    state.initialize(agent_home_root=Path.home() / ".myclaw")
+    state.initialize(agent_home_root=Path.home() / ".omni")
     memory_manager = MemoryManager(state)
     state.long_term_memory_path.unlink()
 

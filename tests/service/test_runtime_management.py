@@ -17,17 +17,17 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
-from myclaw.agent.loop import AgentLoop
-from myclaw.agent.memory.dream import DreamResult
-from myclaw.agent.tools.permission import PermissionContext
-from myclaw.agent.tools.tool_gateway import ModelToolCall
-from myclaw.config.config import ConfigLoader
-from myclaw.provider.models import ModelCompleted, ModelStreamEvent
-from myclaw.schedule.model import JobSchedule, ScheduleJob
-from myclaw.service.discovery import create_credential
-from myclaw.service.errors import ServiceError
-from myclaw.service.runtime import ClientState, LocalService, SessionClaim, WorkspaceServiceRuntime
-from myclaw.service.transport import create_app
+from omni.agent.loop import AgentLoop
+from omni.agent.memory.dream import DreamResult
+from omni.agent.tools.permission import PermissionContext
+from omni.agent.tools.tool_gateway import ModelToolCall
+from omni.config.config import ConfigLoader
+from omni.provider.models import ModelCompleted, ModelStreamEvent
+from omni.schedule.model import JobSchedule, ScheduleJob
+from omni.service.discovery import create_credential
+from omni.service.errors import ServiceError
+from omni.service.runtime import ClientState, LocalService, SessionClaim, WorkspaceServiceRuntime
+from omni.service.transport import create_app
 from tests.fixtures import FakeClock
 from tests.memory.test_dream import _response
 from tests.service.test_protocol_contract import _validator
@@ -70,7 +70,7 @@ async def management_case(
         wake_timer.clear()
 
     provider = _ConcurrentProvider()
-    monkeypatch.setattr("myclaw.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("omni.service.runtime.create_provider", lambda *_args: provider)
     service = LocalService(
         home,
         ConfigLoader(home).load_for_startup(),

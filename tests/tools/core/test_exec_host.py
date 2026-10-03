@@ -9,22 +9,22 @@ from typing import Any
 
 import pytest
 
-from myclaw.agent.tools.core.exec import ExecTool
-from myclaw.agent.tools.core.exec_host import (
+from omni.agent.tools.core.exec import ExecTool
+from omni.agent.tools.core.exec_host import (
     EXEC_CAPABILITY_ERROR,
     ExecProcessSpec,
     PowerShellExecHost,
     create_exec_host,
     resolve_exec_shell,
 )
-from myclaw.agent.tools.core.exec_policy import (
+from omni.agent.tools.core.exec_policy import (
     ExecAssessment,
     ExecCommandIdentity,
     ExecOutcome,
     ExecShellSelector,
     catastrophic_matches,
 )
-from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolResult
+from omni.agent.tools.tool_gateway import ModelToolCall, ToolResult
 from tests.fixtures import SingleToolGateway
 
 

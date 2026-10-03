@@ -13,11 +13,11 @@ import aiohttp
 import pytest
 from aiohttp.test_utils import TestServer
 
-from myclaw.agent.session.session import Session
-from myclaw.config.config import ConfigLoader
-from myclaw.service.discovery import create_credential
-from myclaw.service.runtime import ClientState, LocalService, SessionClaim, WorkspaceServiceRuntime
-from myclaw.service.transport import create_app
+from omni.agent.session.session import Session
+from omni.config.config import ConfigLoader
+from omni.service.discovery import create_credential
+from omni.service.runtime import ClientState, LocalService, SessionClaim, WorkspaceServiceRuntime
+from omni.service.transport import create_app
 from tests.service.test_service_transport import _persist_session, _prepare_agent_home
 
 

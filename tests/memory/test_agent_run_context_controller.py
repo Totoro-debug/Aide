@@ -9,25 +9,25 @@ from typing import Any, Literal, cast
 
 import pytest
 
-from myclaw.agent.context.budget import (
+from omni.agent.context.budget import (
     estimate_request_tokens,
     estimate_run_slice_tokens,
     request_fits_model_context,
 )
-from myclaw.agent.context.run_context import (
+from omni.agent.context.run_context import (
     AgentRunContextController,
     AgentRunContextRequestPreparer,
     AgentRunContextSnapshot,
     agent_run_attempt_guard,
     latest_main_agent_usage_anchor,
 )
-from myclaw.agent.memory.manager import MemoryManager
-from myclaw.agent.run_errors import CommittableAgentRunError
-from myclaw.agent.runner import AgentRunner
-from myclaw.agent.session.session import Session
-from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolResult
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.config import (
+from omni.agent.memory.manager import MemoryManager
+from omni.agent.run_errors import CommittableAgentRunError
+from omni.agent.runner import AgentRunner
+from omni.agent.session.session import Session
+from omni.agent.tools.tool_gateway import ModelToolCall, ToolResult
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.config import (
     MemoryConfiguration,
     ModelsConfiguration,
     ProviderConfiguration,
@@ -35,10 +35,10 @@ from myclaw.config.config import (
     RuntimeConfiguration,
     UserConfiguration,
 )
-from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
-from myclaw.provider.errors import ModelCallError
-from myclaw.provider.model_router import ModelRouter, ModelRouteStatus, RunModelRouter
-from myclaw.provider.models import (
+from omni.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
+from omni.provider.errors import ModelCallError
+from omni.provider.model_router import ModelRouter, ModelRouteStatus, RunModelRouter
+from omni.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,
@@ -110,7 +110,7 @@ def _router_configuration(
 
 def _state(workspace: Path) -> WorkspaceState:
     state = WorkspaceState(workspace)
-    state.initialize(agent_home_root=Path.home() / ".myclaw")
+    state.initialize(agent_home_root=Path.home() / ".omni")
     return state
 
 

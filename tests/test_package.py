@@ -3,10 +3,10 @@ from importlib.metadata import distribution, version
 
 
 def test_installed_package_exposes_its_version() -> None:
-    import myclaw
+    import omni
 
-    assert myclaw.__version__ == "0.1.0"
-    assert version("myclaw") == myclaw.__version__
+    assert omni.__version__ == "0.1.0"
+    assert version("myclaw") == omni.__version__
 
 
 def test_installed_distribution_declares_and_bundles_apache_2_license() -> None:

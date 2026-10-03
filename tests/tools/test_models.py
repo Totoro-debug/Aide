@@ -1,7 +1,7 @@
 import pytest
 
-from myclaw.agent.tools.base import ArtifactReference
-from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolResult
+from omni.agent.tools.base import ArtifactReference
+from omni.agent.tools.tool_gateway import ModelToolCall, ToolResult
 
 SESSION_ID = "20260711-153012-123456_550e8400-e29b-41d4-a716-446655440000"
 
@@ -14,7 +14,7 @@ def test_normalized_tool_result_serializes_the_exact_artifact_shape() -> None:
         content="preview",
         artifact=ArtifactReference(
             path=(
-                ".myclaw/artifacts/20260711-153012-123456_550e8400-e29b-41d4-a716-446655440000/call_123.txt"
+                ".omni/artifacts/20260711-153012-123456_550e8400-e29b-41d4-a716-446655440000/call_123.txt"
             ),
             total_chars=73421,
             preview_chars=2000,
@@ -28,7 +28,7 @@ def test_normalized_tool_result_serializes_the_exact_artifact_shape() -> None:
         "content": "preview",
         "artifact": {
             "path": (
-                ".myclaw/artifacts/20260711-153012-123456_550e8400-e29b-41d4-a716-446655440000/call_123.txt"
+                ".omni/artifacts/20260711-153012-123456_550e8400-e29b-41d4-a716-446655440000/call_123.txt"
             ),
             "total_chars": 73421,
             "preview_chars": 2000,
@@ -53,7 +53,7 @@ def test_tool_records_reject_values_outside_the_normalized_contract() -> None:
         ArtifactReference(path="C:/secret.txt", total_chars=10, preview_chars=10)
     with pytest.raises(ValueError, match="preview_chars"):
         ArtifactReference(
-            path=f".myclaw/artifacts/{SESSION_ID}/call.txt",
+            path=f".omni/artifacts/{SESSION_ID}/call.txt",
             total_chars=10,
             preview_chars=11,
         )
@@ -82,9 +82,9 @@ def test_tool_records_reject_values_outside_the_normalized_contract() -> None:
         f"artifacts\\{SESSION_ID}\\call_123.txt",
         f"results/{SESSION_ID}/call_123.txt",
         "artifacts/session-id/call_123.txt",
-        f".myclaw/artifacts/{SESSION_ID}/call:123.txt",
-        f".myclaw/artifacts/{SESSION_ID}/.txt",
-        f".myclaw/artifacts/{SESSION_ID}/%43.txt",
+        f".omni/artifacts/{SESSION_ID}/call:123.txt",
+        f".omni/artifacts/{SESSION_ID}/.txt",
+        f".omni/artifacts/{SESSION_ID}/%43.txt",
     ],
 )
 def test_artifact_reference_rejects_paths_outside_the_exact_persisted_shape(path: str) -> None:
@@ -94,7 +94,7 @@ def test_artifact_reference_rejects_paths_outside_the_exact_persisted_shape(path
 
 def test_artifact_reference_accepts_legal_ascii_filename() -> None:
     reference = ArtifactReference(
-        path=f".myclaw/artifacts/{SESSION_ID}/CON.txt",
+        path=f".omni/artifacts/{SESSION_ID}/CON.txt",
         total_chars=10,
         preview_chars=10,
     )
@@ -102,7 +102,7 @@ def test_artifact_reference_accepts_legal_ascii_filename() -> None:
     assert reference.path.endswith("/CON.txt")
     with pytest.raises(ValueError, match="artifact path contract"):
         ArtifactReference(
-            path=f".myclaw/artifacts/{SESSION_ID}/%43.txt",
+            path=f".omni/artifacts/{SESSION_ID}/%43.txt",
             total_chars=10,
             preview_chars=10,
         )

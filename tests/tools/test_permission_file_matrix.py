@@ -9,15 +9,15 @@ from typing import Any
 
 import pytest
 
-from myclaw.agent.tools.base import BaseTool, ToolError
-from myclaw.agent.tools.core.edit_file import EditFileTool
-from myclaw.agent.tools.core.exec_host import resolve_exec_shell
-from myclaw.agent.tools.core.glob import GlobTool
-from myclaw.agent.tools.core.grep import GrepTool
-from myclaw.agent.tools.core.list_dir import ListDirTool
-from myclaw.agent.tools.core.read_file import ReadFileTool
-from myclaw.agent.tools.core.write_file import WriteFileTool
-from myclaw.agent.tools.permission import (
+from omni.agent.tools.base import BaseTool, ToolError
+from omni.agent.tools.core.edit_file import EditFileTool
+from omni.agent.tools.core.exec_host import resolve_exec_shell
+from omni.agent.tools.core.glob import GlobTool
+from omni.agent.tools.core.grep import GrepTool
+from omni.agent.tools.core.list_dir import ListDirTool
+from omni.agent.tools.core.read_file import ReadFileTool
+from omni.agent.tools.core.write_file import WriteFileTool
+from omni.agent.tools.permission import (
     PermissionContext,
     PermissionSnapshot,
     RuntimePermissionControl,
@@ -26,7 +26,7 @@ from myclaw.agent.tools.permission import (
     ToolPermissionLevel,
     ToolPermissionPolicy,
 )
-from myclaw.agent.tools.tool_gateway import (
+from omni.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ModelToolCall,

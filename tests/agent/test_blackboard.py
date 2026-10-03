@@ -7,14 +7,14 @@ from typing import Any
 
 import pytest
 
-from myclaw.agent.blackboard import (
+from omni.agent.blackboard import (
     Blackboard,
     FramingResult,
 )
-from myclaw.agent.runner import AgentRunnerRoute
-from myclaw.errors import ErrorInfo
-from myclaw.provider.errors import ModelCallError
-from myclaw.provider.models import (
+from omni.agent.runner import AgentRunnerRoute
+from omni.errors import ErrorInfo
+from omni.provider.errors import ModelCallError
+from omni.provider.models import (
     AssistantModelMessage,
     ModelContinuation,
     ModelMessages,
@@ -22,7 +22,7 @@ from myclaw.provider.models import (
     ModelStreamEvent,
     ModelUsage,
 )
-from myclaw.templates import render_template
+from omni.templates import render_template
 
 
 class _FakeRouter:

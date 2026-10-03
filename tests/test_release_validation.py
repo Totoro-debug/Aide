@@ -238,9 +238,9 @@ def test_quality_runs_complete_sequence_and_requires_platform_evidence(
 
     assert suites == ["targeted", "full"]
     assert commands[:3] == [
-        [sys.executable, "-m", "ruff", "check", "myclaw", "tests", "scripts"],
+        [sys.executable, "-m", "ruff", "check", "omni", "tests", "scripts"],
         ["git", "diff", "--check"],
-        [sys.executable, "-m", "mypy", "myclaw", "tests", "scripts"],
+        [sys.executable, "-m", "mypy", "omni", "tests", "scripts"],
     ]
     assert commands[3][2:4] == ["build", "--no-isolation"]
     assert report["build"] == {"artifacts": ["myclaw-test.whl"]}
@@ -336,7 +336,7 @@ def test_artifact_smoke_uses_platform_venv_paths(
             json.dumps(
                 {
                     "marker": "ARTIFACT_CONFIG_SMOKE_OK",
-                    "module_path": str(Path(arguments[0]).parents[1] / "site-packages" / "myclaw"),
+                    "module_path": str(Path(arguments[0]).parents[1] / "site-packages" / "omni"),
                     "environment_prefix": str(Path(arguments[0]).parents[1]),
                 }
             ),

@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from myclaw.agent.confirmation import (
+from omni.agent.confirmation import (
     BackgroundConfirmationOwner,
     ConfirmationAborted,
     ConfirmationDecision,
@@ -17,7 +17,7 @@ from myclaw.agent.confirmation import (
     ForegroundConfirmationOwner,
     ToolConfirmationCoordinator,
 )
-from myclaw.agent.tools.tool_gateway import ConfirmationRequest
+from omni.agent.tools.tool_gateway import ConfirmationRequest
 
 GENERATION_ONE = UUID("00000000-0000-4000-8000-000000000001")
 GENERATION_TWO = UUID("00000000-0000-4000-8000-000000000002")

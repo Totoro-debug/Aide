@@ -1,5 +1,5 @@
-myclaw/web_assets/assets/* -text -diff
+omni/web_assets/assets/* -text -diff
 # Published resources must retain the exact bytes recorded in manifest.json.
-myclaw/web_assets/** -text
+omni/web_assets/** -text
 # The Windows manifest writer uses CRLF; preserve its published bytes.
-myclaw/web_assets/manifest.json whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+omni/web_assets/manifest.json whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

@@ -4,23 +4,23 @@ from uuid import uuid4
 
 import pytest
 
-from myclaw.agent.loop import AgentLoop
-from myclaw.agent.memory.manager import MemoryManager
-from myclaw.agent.message_bus import MessageBus
-from myclaw.agent.permission import RuntimePermissionControl
-from myclaw.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
-from myclaw.agent.tools.tool_gateway import ModelToolCall
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader
-from myclaw.provider.model_router import ModelRouter
-from myclaw.provider.models import (
+from omni.agent.loop import AgentLoop
+from omni.agent.memory.manager import MemoryManager
+from omni.agent.message_bus import MessageBus
+from omni.agent.permission import RuntimePermissionControl
+from omni.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
+from omni.agent.tools.tool_gateway import ModelToolCall
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader
+from omni.provider.model_router import ModelRouter
+from omni.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelResponse,
     ModelUsage,
 )
-from myclaw.schedule.service import ScheduleService
+from omni.schedule.service import ScheduleService
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import (
     FakeClock,

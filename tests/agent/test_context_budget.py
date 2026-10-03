@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from myclaw.agent.context.budget import (
+from omni.agent.context.budget import (
     CONTEXT_ESTIMATOR_VERSION,
     ContextBudget,
     ContextProjection,

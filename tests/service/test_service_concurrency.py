@@ -14,13 +14,13 @@ from uuid import uuid4
 import pytest
 from aiohttp.test_utils import TestServer
 
-import myclaw.service.runtime as service_runtime
-from myclaw.agent.memory.manager import MemoryManager
-from myclaw.agent.session.session import Session, SessionStoragePartition
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader, ProviderConfiguration
-from myclaw.provider.models import (
+import omni.service.runtime as service_runtime
+from omni.agent.memory.manager import MemoryManager
+from omni.agent.session.session import Session, SessionStoragePartition
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader, ProviderConfiguration
+from omni.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelMessages,
@@ -29,14 +29,14 @@ from myclaw.provider.models import (
     ModelUsage,
     TextDelta,
 )
-from myclaw.schedule.model import JobSchedule, ScheduleJob
-from myclaw.schedule.store import WorkspaceScheduleStore
-from myclaw.service.client import ServiceClient
-from myclaw.service.discovery import ServiceDiscovery, create_credential, write_discovery
-from myclaw.service.errors import ServiceError
-from myclaw.service.projects import ProjectCatalog
-from myclaw.service.runtime import LocalService
-from myclaw.service.transport import create_app
+from omni.schedule.model import JobSchedule, ScheduleJob
+from omni.schedule.store import WorkspaceScheduleStore
+from omni.service.client import ServiceClient
+from omni.service.discovery import ServiceDiscovery, create_credential, write_discovery
+from omni.service.errors import ServiceError
+from omni.service.projects import ProjectCatalog
+from omni.service.runtime import LocalService
+from omni.service.transport import create_app
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
 from tests.fixtures.project_removal import complete_project_removal
@@ -743,7 +743,7 @@ async def test_cancelled_delete_preserves_writer_fence_and_retry(
 
 @pytest.mark.asyncio
 async def test_completed_restore_result_does_not_block_session_deletion(tmp_path: Path) -> None:
-    from myclaw.agent.session.restore import RestoreManager, RestoreMode
+    from omni.agent.session.restore import RestoreManager, RestoreMode
 
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"

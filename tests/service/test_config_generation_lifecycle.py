@@ -10,13 +10,13 @@ from typing import cast
 import pytest
 import pytest_asyncio
 
-from myclaw.agent.loop import AgentLoop
-from myclaw.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRequest, ModelToolCall
-from myclaw.agent.workspace_runtime import WorkspaceRuntime
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader, UserConfiguration
-from myclaw.schedule.store import WorkspaceScheduleStore
-from myclaw.service.runtime import LocalService, _PreparedWorkspaceGeneration
+from omni.agent.loop import AgentLoop
+from omni.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRequest, ModelToolCall
+from omni.agent.workspace_runtime import WorkspaceRuntime
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader, UserConfiguration
+from omni.schedule.store import WorkspaceScheduleStore
+from omni.service.runtime import LocalService, _PreparedWorkspaceGeneration
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures.project_removal import complete_project_removal
 
@@ -551,7 +551,7 @@ async def test_invalid_external_configuration_retains_active_generation(
     tmp_path: Path,
     invalid_configuration: str,
 ) -> None:
-    from myclaw.service.errors import ServiceError
+    from omni.service.errors import ServiceError
 
     service = generation_service
     client = await service.register_client("cli")

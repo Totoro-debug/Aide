@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from myclaw.config.agent_home import AgentHome
+from omni.config.agent_home import AgentHome
 
 
 def test_production_agent_home_is_fixed(agent_home: Path) -> None:

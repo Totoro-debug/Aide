@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
-from myclaw.schedule.store import (
+from omni.agent.workspace_state import WorkspaceState
+from omni.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
+from omni.schedule.store import (
     ScheduleStaleRemovalError,
     ScheduleStateError,
     ScheduleStoreFaultedError,
@@ -22,7 +22,7 @@ SYSTEM_ID = "dream"
 
 def _state(path: Path) -> WorkspaceState:
     state = WorkspaceState(path)
-    state.initialize(agent_home_root=Path.home() / ".myclaw")
+    state.initialize(agent_home_root=Path.home() / ".omni")
     return state
 
 

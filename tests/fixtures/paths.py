@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.agent.workspace_state import normalize_workspace_path
+from omni.agent.workspace_state import normalize_workspace_path
 
 
 @pytest.fixture
@@ -14,7 +14,7 @@ def agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     user_home.mkdir()
     monkeypatch.setenv("HOME", str(user_home))
     monkeypatch.setenv("USERPROFILE", str(user_home))
-    return user_home / ".myclaw"
+    return user_home / ".omni"
 
 
 @pytest.fixture

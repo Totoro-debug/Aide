@@ -8,20 +8,20 @@ from uuid import UUID, uuid4
 import pytest
 from loguru import logger
 
-from myclaw.agent.memory.dream import DreamResult
-from myclaw.agent.memory.manager import MemoryManager
-from myclaw.agent.session.session import Session
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.errors import ErrorInfo
-from myclaw.management.commands import (
+from omni.agent.memory.dream import DreamResult
+from omni.agent.memory.manager import MemoryManager
+from omni.agent.session.session import Session
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.errors import ErrorInfo
+from omni.management.commands import (
     MANAGEMENT_COMMANDS,
     RESUME_MANAGEMENT_COMMAND,
     ManagementCommandDispatcher,
     ManagementCommandResult,
 )
-from myclaw.management.service import ManagementError, RuntimeStatusInput
-from myclaw.skills.catalog import SkillMetadata
+from omni.management.service import ManagementError, RuntimeStatusInput
+from omni.skills.catalog import SkillMetadata
 from tests.fixtures.diagnostic_capture import capture_diagnostics, configured_process_logging
 from tests.fixtures.session import seed_session_state
 from tests.management.factories import management_service
@@ -688,7 +688,7 @@ async def test_memory_command_returns_renderable_complete_disk_text(
     home = AgentHome(agent_home)
     home.initialize()
     state = WorkspaceState(workspace)
-    state.initialize(agent_home_root=Path.home() / ".myclaw")
+    state.initialize(agent_home_root=Path.home() / ".omni")
     content = "# Long-term Memory\n\n## Lesson\n\u5b8c\u6574\u5185\u5bb9\n" + (
         "memory-line\n" * 8_000
     )
@@ -797,7 +797,7 @@ async def test_memory_command_renders_safe_persistence_failure(
     home = AgentHome(agent_home)
     home.initialize()
     state = WorkspaceState(workspace)
-    state.initialize(agent_home_root=Path.home() / ".myclaw")
+    state.initialize(agent_home_root=Path.home() / ".omni")
     memory_manager = MemoryManager(state)
     state.long_term_memory_path.unlink()
     dispatcher = ManagementCommandDispatcher(
@@ -993,7 +993,7 @@ async def test_management_commands_bypass_conversation_and_provider(
     home = AgentHome(agent_home)
     home.initialize()
     state = WorkspaceState(workspace)
-    state.initialize(agent_home_root=Path.home() / ".myclaw")
+    state.initialize(agent_home_root=Path.home() / ".omni")
     (agent_home / "config.toml").write_text(CONFIG_CONTENT, encoding="utf-8")
     state.long_term_memory_path.write_text("current memory\n", encoding="utf-8")
     reload_loop = _ReloadableLoop()

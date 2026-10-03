@@ -10,13 +10,13 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 
-from myclaw.agent.workspace_runtime import WorkspaceRuntime
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.schedule.model import JobSchedule, ScheduleJob
-from myclaw.schedule.store import WorkspaceScheduleStore
-from myclaw.service.errors import ServiceError
-from myclaw.service.runtime import LocalService
+from omni.agent.workspace_runtime import WorkspaceRuntime
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.schedule.model import JobSchedule, ScheduleJob
+from omni.schedule.store import WorkspaceScheduleStore
+from omni.service.errors import ServiceError
+from omni.service.runtime import LocalService
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures.project_removal import complete_project_removal
 from tests.service.test_service_concurrency import _CollectingSink

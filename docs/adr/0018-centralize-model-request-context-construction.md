@@ -10,6 +10,6 @@ status: accepted
 
 `Blackboard` owns Task Framing generation, prompt construction, model invocation, parsing, and reduction through an asynchronous class method. Conversation Compactor and Dream retain locally owned System Prompt and request assembly because they are separate execution responsibilities. `AgentRunner` remains independent from `ContextBuilder`, consumes complete initial messages, and owns ReAct transcript increments and repair messages. Tool schemas remain owned by Tool Gateway and request/status call sites rather than Context Builder.
 
-Model-visible structural wrappers use Markdown. Substantive versioned System Prompt content remains in the `myclaw.templates` package and is not asserted verbatim by tests; single-use assembly-only templates are inlined at their construction sites. Tests verify message roles, ordering, dynamic projection, isolation, escaping, Markdown structure, and execution behavior instead of static prompt wording.
+Model-visible structural wrappers use Markdown. Substantive versioned System Prompt content remains in the `omni.templates` package and is not asserted verbatim by tests; single-use assembly-only templates are inlined at their construction sites. Tests verify message roles, ordering, dynamic projection, isolation, escaping, Markdown structure, and execution behavior instead of static prompt wording.
 
 Requirements: [context construction and Skill reload](https://github.com/Totoro-debug/OmniAgent/issues/203).

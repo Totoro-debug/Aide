@@ -161,7 +161,7 @@ used.
 
 Foreground model File Tools do not inherit the Skill Root exemption used by
 internal Skill loading. A foreground model-issued File access beneath
-`~/.myclaw/skills` is an ordinary external access unless it is also beneath
+`~/.omni/skills` is an ordinary external access unless it is also beneath
 the Workspace. User Schedule Agent Runs use their admission snapshot for the
 same canonical File policy. Dream's private memory Tool and Runtime persistence
 writes remain outside this model File policy.

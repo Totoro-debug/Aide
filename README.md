@@ -67,7 +67,7 @@ python scripts/release_validation.py --phase all
 
 ## 项目最小配置
 
-执行 `myclaw config` 生成默认配置，再将 `~/.myclaw/config.toml` 的内容替换为以下配置。已有配置不会被该命令覆盖。`~` 表示当前用户主目录，Windows 下通常为 `C:\Users\<用户名>`。
+执行 `myclaw config` 生成默认配置，再将 `~/.omni/config.toml` 的内容替换为以下配置。已有配置不会被该命令覆盖。`~` 表示当前用户主目录，Windows 下通常为 `C:\Users\<用户名>`。
 
 选择支持工具调用的模型，替换服务地址、API Key 和两处模型 ID。按模型实际限制设置 `context_window` 与 `max_output`，单位均为 token，后者必须小于前者；`timeout` 单位为秒。
 
@@ -89,7 +89,7 @@ timeout = 120
 
 `protocol` 支持 `openai-compatible` 和 `anthropic`。只配置 `default` 路由即可供对话、记忆和定时任务使用，其余配置采用默认值。
 
-API Key 直接保存在配置文件中，当前不支持环境变量引用；`myclaw config` 显示时会脱敏。更多可选配置及 MCP 示例见[配置模板](myclaw/templates/default-config.md)。
+API Key 直接保存在配置文件中，当前不支持环境变量引用；`myclaw config` 显示时会脱敏。更多可选配置及 MCP 示例见[配置模板](omni/templates/default-config.md)。
 
 MCP Server 可在 `[mcp.servers.<name>.tool_keywords]` 下按远端 Tool 原名配置英文关键词；缺失或为空的关键词会在启动时通过现有 `chat` Model Route 生成并尽力保存。生成失败时，当前进程使用对应的远端 Tool 原名；生成成功但保存失败时，当前进程继续使用已生成的内存关键词。两类失败都不会阻止 Agent 启动。
 
@@ -120,7 +120,9 @@ myclaw
 
 新开终端后需重新激活安装目录中的虚拟环境，或使用其中 `myclaw` 可执行文件的绝对路径。启动需要交互式输入、输出，不能通过管道运行。
 
-启动目录即 CLI Workspace，不会自动切换到 Git 根目录。运行状态保存在该目录的 `.myclaw/` 中；定时任务的运行条件见前面的“Web 界面与服务生命周期”。
+启动目录即 CLI Workspace，不会自动切换到 Git 根目录。运行状态保存在该目录的 `.omni/` 中；定时任务的运行条件见前面的“Web 界面与服务生命周期”。
+
+从使用 `.myclaw/` 的版本升级时，先执行 `myclaw service stop` 并退出客户端，再将用户主目录和各 Workspace 下的 `.myclaw/` 整体重命名为 `.omni/`，保留目录内所有文件。若目标 `.omni/` 已存在，请先核对两处数据，避免覆盖。应用启动后使用 `.omni/`，不会自动迁移旧目录。
 
 Schedule Tool 和 Web Schedule 页面可创建、查看及删除任务；已有任务不能直接编辑。任务可以指定 `title`，省略时从消息的第一条非空行派生，并规范化为最多 60 个 Unicode code points。每个用户任务有独立的 Schedule Session，Web 中的历史按 occurrence 分组。持久化格式见 [ADR-0001](docs/adr/0001-file-first-local-persistence.md)。
 
@@ -138,7 +140,7 @@ Schedule Tool 和 Web Schedule 页面可创建、查看及删除任务；已有�
 | `/effort` | 选择对话模型的推理强度 |
 | `/memory` | 查看长期记忆 |
 | `/dream` | 将待处理的会话摘要整理为长期记忆 |
-| `/reload_skill` | 重新加载 `~/.myclaw/skills/` 中的 Skill |
+| `/reload_skill` | 重新加载 `~/.omni/skills/` 中的 Skill |
 
 ## Session Restore
 
@@ -159,7 +161,7 @@ CLI 交互恢复成功后会将 anchor 的完整原文回填为未提交草稿�
 
 本地服务负责客户端身份、Project 注册、Session Claim、事件分发和确认协调。每个 Workspace 共用 Memory、Dream、Schedule、Model Router 和 MCP 连接；不同 Session 有独立 Agent Loop、消息队列和运行上下文。输入经服务到达 Session Loop，由 Agent Runner 调用模型与工具，输出经事件通道返回 CLI 或 Web。
 
-全局配置、Skill、Project 注册和服务发现状态位于 `~/.myclaw/`；会话、记忆、定时任务、工具产物、日志和恢复记录归各 Workspace 的 `.myclaw/` 所有。详细所有权及生命周期见 [ADR-0029](docs/adr/0029-host-cli-and-web-through-one-local-service.md)，存储边界见 [ADR-0001](docs/adr/0001-file-first-local-persistence.md)。
+全局配置、Skill、Project 注册和服务发现状态位于 `~/.omni/`；会话、记忆、定时任务、工具产物、日志和恢复记录归各 Workspace 的 `.omni/` 所有。详细所有权及生命周期见 [ADR-0029](docs/adr/0029-host-cli-and-web-through-one-local-service.md)，存储边界见 [ADR-0001](docs/adr/0001-file-first-local-persistence.md)。
 
 ## 文档与行为合同
 

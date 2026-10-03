@@ -12,17 +12,17 @@ from uuid import uuid4
 
 import pytest
 
-import myclaw.agent.session.deletion as deletion
-import myclaw.utils._owned_deletion as native_deletion
-from myclaw.agent.session.deletion import (
+import omni.agent.session.deletion as deletion
+import omni.utils._owned_deletion as native_deletion
+from omni.agent.session.deletion import (
     SessionDeletionPending,
     begin_session_deletion,
     delete_session_data,
     recover_session_deletions,
     session_deletion_pending,
 )
-from myclaw.agent.session.session import Session
-from myclaw.agent.workspace_state import WorkspaceState
+from omni.agent.session.session import Session
+from omni.agent.workspace_state import WorkspaceState
 
 
 async def _persist_session(tmp_path: Path) -> tuple[WorkspaceState, str]:

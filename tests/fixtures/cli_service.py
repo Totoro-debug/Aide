@@ -6,11 +6,11 @@ from contextlib import asynccontextmanager
 
 from aiohttp.test_utils import TestServer
 
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader
-from myclaw.service.discovery import ServiceDiscovery, create_credential, write_discovery
-from myclaw.service.runtime import LocalService
-from myclaw.service.transport import create_app
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader
+from omni.service.discovery import ServiceDiscovery, create_credential, write_discovery
+from omni.service.runtime import LocalService
+from omni.service.transport import create_app
 
 
 @asynccontextmanager

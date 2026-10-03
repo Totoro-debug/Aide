@@ -10,17 +10,17 @@ from uuid import uuid4
 
 import pytest
 
-from myclaw.agent.session import backup_store as backup_store_module
-from myclaw.agent.session._restore_persistence import canonical_json_bytes, sha256_hex
-from myclaw.agent.session.backup_store import (
+from omni.agent.session import backup_store as backup_store_module
+from omni.agent.session._restore_persistence import canonical_json_bytes, sha256_hex
+from omni.agent.session.backup_store import (
     BackupGap,
     BackupIntegrityError,
     BackupIntegrityIssue,
     BackupStoreError,
     FileBackupStore,
 )
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.utils.host_filesystem import HOST_FILESYSTEM
+from omni.agent.workspace_state import WorkspaceState
+from omni.utils.host_filesystem import HOST_FILESYSTEM
 
 SESSION_ID = "20260926-120000-123456_12345678-1234-4234-8234-123456789abc"
 
@@ -143,7 +143,7 @@ def test_linked_target_keeps_its_original_canonical_destination(workspace: Path)
 
 def test_restore_state_subtree_is_not_recorded_as_a_file_target(workspace: Path) -> None:
     store = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
-    protected = workspace / ".myclaw" / "restore" / "other-session" / "protected.txt"
+    protected = workspace / ".omni" / "restore" / "other-session" / "protected.txt"
     protected.parent.mkdir(parents=True)
     protected.write_bytes(b"internal state")
 
@@ -163,7 +163,7 @@ def test_hard_link_to_restore_blob_is_not_recorded_as_an_ordinary_target(
     store.after_write(first_ticket)
     first_entry = store.inspect().entries[0]
     assert first_entry.before.blob_name is not None
-    blob = workspace / ".myclaw" / "restore" / SESSION_ID / "blobs" / first_entry.before.blob_name
+    blob = workspace / ".omni" / "restore" / SESSION_ID / "blobs" / first_entry.before.blob_name
     alias = workspace.parent / "protected-blob-alias.bin"
     try:
         os.link(blob, alias)
@@ -203,7 +203,7 @@ def test_new_restore_directories_enter_the_durability_sync_path(
 
     store.before_write(uuid4(), workspace.parent / "new-target.bin")
 
-    restore_root = workspace / ".myclaw" / "restore"
+    restore_root = workspace / ".omni" / "restore"
     session_root = restore_root / SESSION_ID
     expected = {
         restore_root.resolve(),
@@ -238,7 +238,7 @@ def test_failed_directory_sync_is_retried_without_blocking_the_caller(
     assert first_ticket is None
     assert second_ticket is not None
     assert second_ticket.recorded is True
-    restore_root = (workspace / ".myclaw" / "restore").resolve()
+    restore_root = (workspace / ".omni" / "restore").resolve()
     assert attempts.count(restore_root) == 2
     reopened = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
     assert reopened.read_backup(second_ticket.operation_id) is None
@@ -364,7 +364,7 @@ def test_integrity_check_reports_missing_or_corrupt_blob(
     assert ticket is not None
     entry = store.inspect().entries[0]
     assert entry.before.blob_name is not None
-    blob = workspace / ".myclaw" / "restore" / SESSION_ID / "blobs" / entry.before.blob_name
+    blob = workspace / ".omni" / "restore" / SESSION_ID / "blobs" / entry.before.blob_name
     if damage == "missing":
         blob.unlink()
         reason = "missing_or_unsafe_blob"
@@ -380,7 +380,7 @@ def test_integrity_check_reports_missing_or_corrupt_blob(
     assert b"sensitive backup bytes" not in repr(store.inspect()).encode("utf-8")
     assert (
         b"sensitive backup bytes"
-        not in (workspace / ".myclaw" / "restore" / SESSION_ID / "entries" / "1.json").read_bytes()
+        not in (workspace / ".omni" / "restore" / SESSION_ID / "entries" / "1.json").read_bytes()
     )
 
 
@@ -391,7 +391,7 @@ def test_integrity_check_reports_missing_journal_entry_after_reopen(workspace: P
     run_token = uuid4()
     ticket = store.before_write(run_token, target)
     assert ticket is not None
-    entry = workspace / ".myclaw" / "restore" / SESSION_ID / "entries" / "1.json"
+    entry = workspace / ".omni" / "restore" / SESSION_ID / "entries" / "1.json"
     entry.unlink()
 
     reopened = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
@@ -411,7 +411,7 @@ def test_corrupt_journal_entry_is_reported_as_unreadable_after_reopen(workspace:
     run_token = uuid4()
     ticket = store.before_write(run_token, target)
     assert ticket is not None
-    entry = workspace / ".myclaw" / "restore" / SESSION_ID / "entries" / "1.json"
+    entry = workspace / ".omni" / "restore" / SESSION_ID / "entries" / "1.json"
     entry.write_bytes(b"not valid journal JSON")
 
     reopened = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
@@ -434,7 +434,7 @@ def test_journal_identity_mismatch_uses_authoritative_store_token(
     run_token = uuid4()
     ticket = store.before_write(run_token, target)
     assert ticket is not None
-    entry = workspace / ".myclaw" / "restore" / SESSION_ID / "entries" / "1.json"
+    entry = workspace / ".omni" / "restore" / SESSION_ID / "entries" / "1.json"
     replacement: object = 2 if mismatch_field == "operation_id" else str(uuid4())
     _rewrite_signed_json(entry, **{mismatch_field: replacement})
 
@@ -455,7 +455,7 @@ def test_v1_state_without_entry_uses_unknown_scope_and_upgrades_to_v2(
     target.write_bytes(b"before")
     ticket = store.before_write(uuid4(), target)
     assert ticket is not None
-    root = workspace / ".myclaw" / "restore" / SESSION_ID
+    root = workspace / ".omni" / "restore" / SESSION_ID
     (root / "entries" / "1.json").unlink()
     _write_signed_json(
         root / "state.json",
@@ -486,7 +486,7 @@ def test_v1_state_recovers_entry_token_and_upgrades_to_v2(workspace: Path) -> No
     run_token = uuid4()
     ticket = store.before_write(run_token, target)
     assert ticket is not None
-    root = workspace / ".myclaw" / "restore" / SESSION_ID
+    root = workspace / ".omni" / "restore" / SESSION_ID
     _write_signed_json(
         root / "state.json",
         {
@@ -591,8 +591,8 @@ def test_backup_can_be_reopened_and_read_in_a_new_process(workspace: Path) -> No
     assert continued.operation_id == ticket.operation_id + 1
     script = (
         "import hashlib, sys; from pathlib import Path; "
-        "from myclaw.agent.session.backup_store import FileBackupStore; "
-        "from myclaw.agent.workspace_state import WorkspaceState; "
+        "from omni.agent.session.backup_store import FileBackupStore; "
+        "from omni.agent.workspace_state import WorkspaceState; "
         "store = FileBackupStore(WorkspaceState(Path(sys.argv[1])), sys.argv[2]); "
         "data = store.read_backup(int(sys.argv[3])); "
         "print(len(data), hashlib.sha256(data).hexdigest())"
@@ -668,7 +668,7 @@ def test_post_write_replace_failure_is_reported_as_gap_after_reopen(
     target.write_bytes(b"before")
     ticket = store.before_write(uuid4(), target)
     assert ticket is not None
-    entry_path = workspace / ".myclaw" / "restore" / SESSION_ID / "entries" / "1.json"
+    entry_path = workspace / ".omni" / "restore" / SESSION_ID / "entries" / "1.json"
     replace = HOST_FILESYSTEM.atomic_replace_bytes
 
     def fail_entry_replace(path: Path, content: bytes) -> None:

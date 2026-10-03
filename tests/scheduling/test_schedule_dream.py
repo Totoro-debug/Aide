@@ -8,17 +8,17 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.agent.memory.dream import Dream, DreamResult
-from myclaw.agent.memory.manager import MemoryManager
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.errors import ErrorInfo
-from myclaw.logging.session import session_log
-from myclaw.provider.model_router import ModelRouteStatus
-from myclaw.provider.models import AssistantModelMessage, ModelResponse, ModelUsage
-from myclaw.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
-from myclaw.schedule.service import ScheduleService
-from myclaw.schedule.store import ScheduleStateError, WorkspaceScheduleStore
-from myclaw.utils.host_filesystem import HOST_FILESYSTEM
+from omni.agent.memory.dream import Dream, DreamResult
+from omni.agent.memory.manager import MemoryManager
+from omni.agent.workspace_state import WorkspaceState
+from omni.errors import ErrorInfo
+from omni.logging.session import session_log
+from omni.provider.model_router import ModelRouteStatus
+from omni.provider.models import AssistantModelMessage, ModelResponse, ModelUsage
+from omni.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
+from omni.schedule.service import ScheduleService
+from omni.schedule.store import ScheduleStateError, WorkspaceScheduleStore
+from omni.utils.host_filesystem import HOST_FILESYSTEM
 from tests.fixtures import ScriptedFakeProvider, ScriptedFakeRouter
 
 _FAKE_MEMORY_ROUTE_STATUS = ModelRouteStatus(

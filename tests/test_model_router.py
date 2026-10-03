@@ -7,9 +7,9 @@ from typing import Any, cast
 
 import pytest
 
-from myclaw.agent.runner import AgentRunner
-from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolResult
-from myclaw.config.config import (
+from omni.agent.runner import AgentRunner
+from omni.agent.tools.tool_gateway import ModelToolCall, ToolResult
+from omni.config.config import (
     MemoryConfiguration,
     ModelsConfiguration,
     ProviderConfiguration,
@@ -17,13 +17,13 @@ from myclaw.config.config import (
     RuntimeConfiguration,
     UserConfiguration,
 )
-from myclaw.errors import (
+from omni.errors import (
     ErrorCode,
     ErrorInfo,
 )
-from myclaw.provider.errors import ModelCallError
-from myclaw.provider.model_router import ModelRouter, ModelRouteStatus
-from myclaw.provider.models import (
+from omni.provider.errors import ModelCallError
+from omni.provider.model_router import ModelRouter, ModelRouteStatus
+from omni.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,
@@ -495,7 +495,7 @@ async def test_model_router_records_only_consumed_retry_attempts(
     capture.close()
 
     records = [
-        line for line in capture.text.splitlines() if "myclaw.provider.model_router:" in line
+        line for line in capture.text.splitlines() if "omni.provider.model_router:" in line
     ]
     assert len(records) == 4
     for attempt, delay, record in zip(
@@ -885,7 +885,7 @@ async def test_model_router_records_failed_attempt_and_default_fallback_separate
 
     assert observed == [completed("Recovered")]
     records = [
-        line for line in capture.text.splitlines() if "myclaw.provider.model_router:" in line
+        line for line in capture.text.splitlines() if "omni.provider.model_router:" in line
     ]
     assert len(records) == 2
     assert "Provider attempt failed" in records[0]
@@ -1132,7 +1132,7 @@ async def test_model_router_records_static_default_fallback_without_provider_att
 
     assert observed == [completed("Static fallback")]
     records = [
-        line for line in capture.text.splitlines() if "myclaw.provider.model_router:" in line
+        line for line in capture.text.splitlines() if "omni.provider.model_router:" in line
     ]
     assert len(records) == 1
     assert " WARNING " in records[0]

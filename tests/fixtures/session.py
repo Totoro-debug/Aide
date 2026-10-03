@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
-from myclaw.agent.session.session import Session
+from omni.agent.session.session import Session
 
 
 def seed_session_state(

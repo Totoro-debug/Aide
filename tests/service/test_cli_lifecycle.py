@@ -7,11 +7,11 @@ from typing import Any, cast
 
 import pytest
 
-from myclaw.agent.loop import AgentLoop
-from myclaw.agent.session.session import Session
-from myclaw.agent.workspace_runtime import WorkspaceRuntime
-from myclaw.config.agent_home import AgentHome
-from myclaw.service.client import ServiceClient, ServiceStartupError
+from omni.agent.loop import AgentLoop
+from omni.agent.session.session import Session
+from omni.agent.workspace_runtime import WorkspaceRuntime
+from omni.config.agent_home import AgentHome
+from omni.service.client import ServiceClient, ServiceStartupError
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures.cli_service import cli_service
 from tests.service.test_service_concurrency import _client_output, _ConcurrentProvider
@@ -29,7 +29,7 @@ async def test_cli_failed_target_preparation_preserves_selected_claim_and_resour
     directory = tmp_path / "workspace"
     directory.mkdir()
     provider = _ConcurrentProvider()
-    monkeypatch.setattr("myclaw.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("omni.service.runtime.create_provider", lambda *_args: provider)
     target = await _persist_session(
         directory,
         home=home,
@@ -86,7 +86,7 @@ async def test_cli_disconnect_leaves_other_client_runtime_and_schedule_alive(
     directory = tmp_path / "workspace"
     directory.mkdir()
     provider = _ConcurrentProvider()
-    monkeypatch.setattr("myclaw.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("omni.service.runtime.create_provider", lambda *_args: provider)
     async with cli_service(home) as service:
         first = await ServiceClient.connect_or_start(home, directory)
         second = await ServiceClient.connect_or_start(home, directory)
@@ -120,7 +120,7 @@ async def test_same_cli_session_waits_for_queued_snapshot_and_keeps_live_authori
     directory = tmp_path / "workspace"
     directory.mkdir()
     monkeypatch.setattr(
-        "myclaw.service.runtime.create_provider", lambda *_args: _ConcurrentProvider()
+        "omni.service.runtime.create_provider", lambda *_args: _ConcurrentProvider()
     )
     async with cli_service(home) as service:
         client = await ServiceClient.connect_or_start(home, directory)

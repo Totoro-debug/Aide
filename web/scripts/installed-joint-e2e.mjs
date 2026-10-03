@@ -75,7 +75,7 @@ async function waitForPersistedConfirmationResult(workspacePath) {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     try {
-      const sessionDirectory = join(workspacePath, ".myclaw", "schedule-sessions");
+      const sessionDirectory = join(workspacePath, ".omni", "schedule-sessions");
       const names = await readdir(sessionDirectory);
       for (const name of names) {
         if (!name.endsWith(".jsonl")) continue;
@@ -357,7 +357,7 @@ try {
   await secondDialog.waitFor({ state: "hidden" });
   const persistedConfirmation = await waitForPersistedConfirmationResult(workspace);
   assert.match(persistedConfirmation.content, /confirmation fixture content/);
-  const toolRecords = (await readFile(join(workspace, ".myclaw", "schedule-sessions", `schedule_${backgroundJobId}.jsonl`), "utf8"))
+  const toolRecords = (await readFile(join(workspace, ".omni", "schedule-sessions", `schedule_${backgroundJobId}.jsonl`), "utf8"))
     .split("\n").filter(Boolean).map((line) => JSON.parse(line));
   assert.equal(toolRecords.filter((record) => record.role === "tool" && record.tool_call_id === "call-confirmation").length, 1);
   await secondPage.close();
@@ -429,9 +429,9 @@ try {
   assert.equal(cliRemoval.claim_released, true);
   assert.equal(cliRemoval.terminal_state, "cancelled");
   assert.equal(cliRemoval.notification_received, true);
-  await persistedTerminal(join(workspace, ".myclaw", "schedule-sessions", `schedule_${removalJobId}.jsonl`), removalPrompt, "cancelled");
+  await persistedTerminal(join(workspace, ".omni", "schedule-sessions", `schedule_${removalJobId}.jsonl`), removalPrompt, "cancelled");
   assert.equal(await readFile(join(workspace, "fixture.txt"), "utf8"), "joint user file\n");
-  const savedSchedule = JSON.parse(await readFile(join(workspace, ".myclaw", "schedule.json"), "utf8"));
+  const savedSchedule = JSON.parse(await readFile(join(workspace, ".omni", "schedule.json"), "utf8"));
   assert.match(JSON.stringify(savedSchedule), /Project removal preserved Job/);
   assert.match(JSON.stringify(savedSchedule), new RegExp(removalSavedJobId));
 
@@ -475,7 +475,7 @@ try {
   const active = await configResponse(context.request);
   assert.equal(active.application.active_revision, pending.application.pending_revision);
   assert.equal(active.application.pending_revision, null);
-  await persistedTerminal(join(workspace, ".myclaw", "schedule-sessions", `schedule_${settingsJobId}.jsonl`), settingsPrompt, "completed");
+  await persistedTerminal(join(workspace, ".omni", "schedule-sessions", `schedule_${settingsJobId}.jsonl`), settingsPrompt, "completed");
   const cliSettings = await waitForJson(cliSettingsDonePath);
   const cliDone = await waitForJson(cliDonePath);
   assert.equal(cliSettings.foreground_terminal, true);

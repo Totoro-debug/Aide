@@ -10,20 +10,20 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from myclaw.agent.confirmation import BackgroundConfirmationOwner
-from myclaw.agent.loop import AgentLoop
-from myclaw.agent.memory.manager import MemoryManager
-from myclaw.agent.message_bus import MessageBus
-from myclaw.agent.permission import RuntimePermissionControl
-from myclaw.agent.session.session import Session, SessionStoragePartition
-from myclaw.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
-from myclaw.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader
-from myclaw.errors import ErrorInfo
-from myclaw.provider.model_router import ModelRouter
-from myclaw.provider.models import (
+from omni.agent.confirmation import BackgroundConfirmationOwner
+from omni.agent.loop import AgentLoop
+from omni.agent.memory.manager import MemoryManager
+from omni.agent.message_bus import MessageBus
+from omni.agent.permission import RuntimePermissionControl
+from omni.agent.session.session import Session, SessionStoragePartition
+from omni.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
+from omni.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader
+from omni.errors import ErrorInfo
+from omni.provider.model_router import ModelRouter
+from omni.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,
@@ -33,11 +33,11 @@ from myclaw.provider.models import (
     ModelUsage,
     ReasoningEffort,
 )
-from myclaw.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
-from myclaw.schedule.service import ScheduleJobExecutionError, ScheduleOccurrence, ScheduleService
-from myclaw.schedule.store import WorkspaceScheduleStore
-from myclaw.utils import scheduler as scheduler_module
-from myclaw.utils.scheduler import AsyncioSchedulerClock
+from omni.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
+from omni.schedule.service import ScheduleJobExecutionError, ScheduleOccurrence, ScheduleService
+from omni.schedule.store import WorkspaceScheduleStore
+from omni.utils import scheduler as scheduler_module
+from omni.utils.scheduler import AsyncioSchedulerClock
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import (
     ProviderCall,

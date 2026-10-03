@@ -19,9 +19,9 @@ from pathlib import Path
 import aiohttp
 
 import web.scripts.e2e_service as fixture_service
-from myclaw.config.agent_home import AgentHome
-from myclaw.service.discovery import read_credential, read_discovery
-from myclaw.utils.platform import WINDOWS_REQUIRED_ERROR, is_windows_host
+from omni.config.agent_home import AgentHome
+from omni.service.discovery import read_credential, read_discovery
+from omni.utils.platform import WINDOWS_REQUIRED_ERROR, is_windows_host
 from scripts.release_validation import (
     ROOT,
     _artifact_environment,
@@ -113,7 +113,7 @@ def _prepare_cli_scenario(
     environment: dict[str, str],
 ) -> tuple[AgentHome, Path, dict[str, str]]:
     profile = root / "用户配置"
-    home_path = profile / ".myclaw"
+    home_path = profile / ".omni"
     workspace = root / "workspace"
     home_path.mkdir(parents=True)
     workspace.mkdir()
@@ -687,7 +687,7 @@ async def validate_install(wheel: Path, root: Path, node: str) -> dict[str, obje
     entry = str(installed["entry_point"])
     python = Path(entry).parent / "python.exe"
     profile = root / "用户配置"
-    home = profile / ".myclaw"
+    home = profile / ".omni"
     home.mkdir(parents=True)
     workspace = root / "workspace"
     workspace.mkdir()
@@ -856,7 +856,7 @@ timeout = 120
         assert cli_evidence["marker"] == "INSTALLED_CLI_CONNECT_OK"
         assert json.loads(discovery_path.read_text(encoding="utf-8")) == discovery
         await stop_install(entry, workspace, environment, discovery_path)
-        transcripts = list((workspace / ".myclaw/sessions").glob("*.jsonl"))
+        transcripts = list((workspace / ".omni/sessions").glob("*.jsonl"))
         messages = [
             json.loads(line)
             for path in transcripts

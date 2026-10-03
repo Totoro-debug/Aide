@@ -6,16 +6,16 @@ from typing import Any
 
 import pytest
 
-from myclaw.agent.confirmation import ConfirmationAborted
-from myclaw.agent.permission import ToolPermissionLevel
-from myclaw.agent.tools.base import BaseTool, ToolError
-from myclaw.agent.tools.core.exec_policy import (
+from omni.agent.confirmation import ConfirmationAborted
+from omni.agent.permission import ToolPermissionLevel
+from omni.agent.tools.base import BaseTool, ToolError
+from omni.agent.tools.core.exec_policy import (
     ExecAssessment,
     ExecCommandIdentity,
     ExecShellSelector,
     ResolvedExecShell,
 )
-from myclaw.agent.tools.permission import (
+from omni.agent.tools.permission import (
     NetworkAssessment,
     NetworkTargetRisk,
     NormalizedNetworkTarget,
@@ -26,7 +26,7 @@ from myclaw.agent.tools.permission import (
     ToolInvocationFacts,
     ToolPermissionPolicy,
 )
-from myclaw.agent.tools.tool_gateway import (
+from omni.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ModelToolCall,

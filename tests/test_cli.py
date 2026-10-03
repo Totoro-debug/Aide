@@ -10,16 +10,16 @@ from typing import Any, cast
 import pytest
 from typer.testing import CliRunner
 
-import myclaw.terminal.cli as cli
-from myclaw.agent.loop import ModelContextOverflowError
-from myclaw.agent.workspace_state import WorkspaceStateError
-from myclaw.config.agent_home import AgentHome
-from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
-from myclaw.management.service import (
+import omni.terminal.cli as cli
+from omni.agent.loop import ModelContextOverflowError
+from omni.agent.workspace_state import WorkspaceStateError
+from omni.config.agent_home import AgentHome
+from omni.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
+from omni.management.service import (
     FatalManagementError,
 )
-from myclaw.service.client import ServiceClient, ServiceStartupError
-from myclaw.service.errors import ServiceError
+from omni.service.client import ServiceClient, ServiceStartupError
+from omni.service.errors import ServiceError
 from tests.configuration.test_config import (
     EXPECTED_DEFAULT_CONFIG,
     EXPECTED_REDACTED_CONFIG,
@@ -32,8 +32,8 @@ from tests.configuration.test_config import (
 
 
 def test_legacy_runtime_module_is_not_discoverable() -> None:
-    legacy_module = ".".join(("myclaw", "agent", "runtime"))
-    assert not (Path(__file__).resolve().parents[1] / "myclaw" / "agent" / "runtime.py").exists()
+    legacy_module = ".".join(("omni", "agent", "runtime"))
+    assert not (Path(__file__).resolve().parents[1] / "omni" / "agent" / "runtime.py").exists()
     assert importlib.util.find_spec(legacy_module) is None
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module(legacy_module)
@@ -366,7 +366,7 @@ def test_installed_myclaw_generates_missing_configuration_and_stops(
     assert "edit" in result.stdout.lower()
     assert result.stderr == ""
     assert "configuration gate passed" not in result.stdout
-    assert not (workspace / ".myclaw").exists()
+    assert not (workspace / ".omni").exists()
     assert not (agent_home / "logs").exists()
 
 
@@ -403,7 +403,7 @@ def test_installed_config_command_generates_and_displays_missing_configuration(
     assert EXPECTED_DEFAULT_CONFIG in result.stdout
     assert "configuration gate passed" not in result.stdout
     assert not (agent_home / "logs").exists()
-    assert not (workspace / ".myclaw").exists()
+    assert not (workspace / ".omni").exists()
 
 
 def test_installed_config_command_redacts_valid_configuration(
@@ -420,7 +420,7 @@ def test_installed_config_command_redacts_valid_configuration(
     assert f"Path: {agent_home / 'config.toml'}" in result.stdout
     assert_plaintext_absent(result.stdout + result.stderr, "plaintext-primary-key")
     assert not (agent_home / "logs").exists()
-    assert not (workspace / ".myclaw").exists()
+    assert not (workspace / ".omni").exists()
 
 
 def test_installed_config_command_reports_mcp_diagnostics_without_secrets(
@@ -455,7 +455,7 @@ headers = { Authorization = "Bearer installed-header-secret" }
     assert "installed-header-secret" not in visible
     assert "***REDACTED***" in visible
     assert not (agent_home / "logs").exists()
-    assert not (workspace / ".myclaw").exists()
+    assert not (workspace / ".omni").exists()
 
 
 def test_installed_config_command_keeps_fallback_diagnostic_before_later_fatal_error(
@@ -502,7 +502,7 @@ def test_installed_config_command_shows_safe_malformed_configuration(
         "second-plaintext-key",
     )
     assert not (agent_home / "logs").exists()
-    assert not (workspace / ".myclaw").exists()
+    assert not (workspace / ".omni").exists()
 
 
 def test_installed_config_command_hides_invalid_utf8_and_traceback(
@@ -541,7 +541,7 @@ def test_installed_config_command_ignores_undefined_content_fields(
     assert "runtime.misspelled_setting" not in result.stdout
     assert "misspelled_setting = true" in result.stdout
     assert_plaintext_absent(result.stdout + result.stderr, "plaintext-primary-key")
-    assert not (workspace / ".myclaw").exists()
+    assert not (workspace / ".omni").exists()
 
 
 def test_installed_myclaw_rejects_valid_configuration_without_a_tty(
@@ -558,7 +558,7 @@ def test_installed_myclaw_rejects_valid_configuration_without_a_tty(
     assert "configuration gate passed" not in result.stdout
     assert_plaintext_absent(result.stdout + result.stderr, "sk-ant-secret")
     assert not (agent_home / "logs").exists()
-    assert not (workspace / ".myclaw").exists()
+    assert not (workspace / ".omni").exists()
 
 
 def test_installed_myclaw_stops_only_on_parse_failure(
@@ -591,7 +591,7 @@ def test_installed_myclaw_stops_only_on_parse_failure(
     assert "configuration gate passed" not in parse_result.stdout
     assert "interactive_terminal_required" in schema_result.stdout
     assert "interactive_terminal_required" in default_result.stdout
-    assert not (workspace / ".myclaw").exists()
+    assert not (workspace / ".omni").exists()
     combined_output = "".join(
         result.stdout + result.stderr for result in (parse_result, schema_result, default_result)
     )
@@ -611,7 +611,7 @@ def test_installed_myclaw_rejects_non_tty_before_unsafe_workspace_state(
 ) -> None:
     agent_home.mkdir(parents=True)
     (agent_home / "config.toml").write_text(VALID_CONFIG, encoding="utf-8")
-    state_path = workspace / ".myclaw"
+    state_path = workspace / ".omni"
     state_path.write_text("private collision content", encoding="utf-8")
 
     result = run_installed_myclaw(agent_home, workspace=workspace)
@@ -633,7 +633,7 @@ def test_installed_myclaw_rejects_non_tty_before_corrupt_schedule_state(
 ) -> None:
     agent_home.mkdir(parents=True)
     (agent_home / "config.toml").write_text(VALID_CONFIG, encoding="utf-8")
-    state_path = workspace / ".myclaw"
+    state_path = workspace / ".omni"
     state_path.mkdir()
     schedule_path = state_path / "schedule.json"
     schedule_path.write_text("{corrupt", encoding="utf-8")

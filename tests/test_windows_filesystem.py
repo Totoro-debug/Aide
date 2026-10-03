@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.utils.host_filesystem import HOST_FILESYSTEM
+from omni.utils.host_filesystem import HOST_FILESYSTEM
 
 
 def test_require_owned_directory_returns_normalized_owned_path(tmp_path: Path) -> None:

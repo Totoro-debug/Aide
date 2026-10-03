@@ -294,7 +294,7 @@ try {
   await page.getByRole("button", { name: /Cancel run|取消运行/, exact: true }).click();
   await expect.poll(() => events.some((event) => event.type === "run.completed"
     && event.run_id === acceptedCancel.run_id)).toBe(true);
-  const canceledRecords = (await readFile(join(workspace, ".myclaw", "sessions",
+  const canceledRecords = (await readFile(join(workspace, ".omni", "sessions",
     `${canceledSession.session_id}.jsonl`), "utf8")).split("\n").filter(Boolean).map(JSON.parse);
   assert.equal(canceledRecords.filter((record) => record.role === "user" && record.content === cancelPrompt).length, 1);
 

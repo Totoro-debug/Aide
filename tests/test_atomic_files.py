@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.utils.host_filesystem import HOST_FILESYSTEM
+from omni.utils.host_filesystem import HOST_FILESYSTEM
 
 
 def test_path_for_io_normalizes_windows_local_and_unc_paths(tmp_path: Path) -> None:

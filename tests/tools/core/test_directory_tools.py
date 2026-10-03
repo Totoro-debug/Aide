@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.agent.tools.base import BaseTool
-from myclaw.agent.tools.core.glob import GlobTool
-from myclaw.agent.tools.core.list_dir import ListDirTool
-from myclaw.agent.tools.tool_gateway import (
+from omni.agent.tools.base import BaseTool
+from omni.agent.tools.core.glob import GlobTool
+from omni.agent.tools.core.list_dir import ListDirTool
+from omni.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ConfirmationRequester,
@@ -39,8 +39,8 @@ async def test_list_dir_is_stable_recursive_hidden_state_aware_and_limited(
     (workspace / ".hidden").write_text("hidden", encoding="utf-8")
     (workspace / "nested" / "child.txt").parent.mkdir()
     (workspace / "nested" / "child.txt").write_text("child", encoding="utf-8")
-    (workspace / ".myclaw" / "state.txt").parent.mkdir()
-    (workspace / ".myclaw" / "state.txt").write_text("state", encoding="utf-8")
+    (workspace / ".omni" / "state.txt").parent.mkdir()
+    (workspace / ".omni" / "state.txt").write_text("state", encoding="utf-8")
     (workspace / "node_modules" / "ignored.txt").parent.mkdir()
     (workspace / "node_modules" / "ignored.txt").write_text("ignored", encoding="utf-8")
     (workspace / ".gitignore").write_text("z.txt\n", encoding="utf-8")
@@ -53,10 +53,10 @@ async def test_list_dir_is_stable_recursive_hidden_state_aware_and_limited(
     limited = await gateway.call(_call("list_dir", {"max_entries": 2}, call_id="call_limited"))
 
     assert shallow.status == "success"
-    assert shallow.content == ".gitignore\n.hidden\n.myclaw/\na.txt\nnested/\nz.txt"
+    assert shallow.content == ".gitignore\n.hidden\n.omni/\na.txt\nnested/\nz.txt"
     assert recursive.status == "success"
     assert recursive.content == (
-        ".gitignore\n.hidden\n.myclaw/\n.myclaw/state.txt\na.txt\nnested/\nnested/child.txt\nz.txt"
+        ".gitignore\n.hidden\n.omni/\n.omni/state.txt\na.txt\nnested/\nnested/child.txt\nz.txt"
     )
     assert limited.content == ".gitignore\n.hidden"
 

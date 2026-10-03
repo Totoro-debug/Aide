@@ -32,18 +32,18 @@ from textual.pilot import Pilot
 from textual.widget import Widget
 from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
 
-import myclaw.terminal.cli as cli
-from myclaw.agent.confirmation import (
+import omni.terminal.cli as cli
+from omni.agent.confirmation import (
     BackgroundConfirmationOwner,
     ConfirmationAborted,
     ConfirmationEnvelope,
     ToolConfirmationCoordinator,
 )
-from myclaw.agent.loop import AgentLoop, ConfirmationRequestView, ForegroundConversationProjection
-from myclaw.agent.memory.dream import DreamResult
-from myclaw.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
-from myclaw.agent.session.backup_store import BackupGap, FileBackupStore
-from myclaw.agent.session.restore import (
+from omni.agent.loop import AgentLoop, ConfirmationRequestView, ForegroundConversationProjection
+from omni.agent.memory.dream import DreamResult
+from omni.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
+from omni.agent.session.backup_store import BackupGap, FileBackupStore
+from omni.agent.session.restore import (
     RestoreFileResult,
     RestoreFileStatus,
     RestoreManager,
@@ -52,28 +52,28 @@ from myclaw.agent.session.restore import (
     RestoreResult,
     RestoreTarget,
 )
-from myclaw.agent.session.session import RestoreAnchor, Session, SessionRestoreResult
-from myclaw.agent.tools.permission import MCPToolIdentity
-from myclaw.agent.tools.tool_gateway import (
+from omni.agent.session.session import RestoreAnchor, Session, SessionRestoreResult
+from omni.agent.tools.permission import MCPToolIdentity
+from omni.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ModelToolCall,
 )
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.errors import ErrorInfo
-from myclaw.management.commands import (
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.errors import ErrorInfo
+from omni.management.commands import (
     MANAGEMENT_COMMANDS,
     ManagementCommandDispatcher,
     ManagementCommandResult,
 )
-from myclaw.management.service import (
+from omni.management.service import (
     FatalManagementError,
     ManagementError,
     RestoreListingReport,
     RuntimeStatus,
 )
-from myclaw.provider.models import (
+from omni.provider.models import (
     ModelCompleted,
     ModelContinuation,
     ModelStreamEvent,
@@ -81,21 +81,21 @@ from myclaw.provider.models import (
     ReasoningEffort,
     TextDelta,
 )
-from myclaw.service.client import RemoteManagementCommandDispatcher
-from myclaw.skills.catalog import SkillMetadata
-from myclaw.templates import render_template
-from myclaw.terminal.conversation import (
+from omni.service.client import RemoteManagementCommandDispatcher
+from omni.skills.catalog import SkillMetadata
+from omni.templates import render_template
+from omni.terminal.conversation import (
     TerminalConversationApp,
     _ConversationInput,
     _format_activity_duration,
     _RestoreConfirmationScreen,
     _RestoreModeScreen,
 )
-from myclaw.terminal.conversation import (
+from omni.terminal.conversation import (
     _MessageBusRunProjection as _AgentRunProjection,
 )
-from myclaw.utils.host_filesystem import HOST_FILESYSTEM
-from myclaw.utils.json_types import JsonObject
+from omni.utils.host_filesystem import HOST_FILESYSTEM
+from omni.utils.json_types import JsonObject
 from tests.agent.test_fixed_catalog import _agent_loop as _direct_agent_loop
 from tests.agent.test_fixed_catalog import _FixedCatalogProvider, _response
 from tests.configuration.test_config import VALID_CONFIG
@@ -1024,10 +1024,10 @@ async def _run_cli_terminal_case(
             async with self.run_test(size=size) as pilot:
                 await scenario(self, pilot)
 
-    monkeypatch.setattr("myclaw.service.runtime.AgentLoop", DeterministicAgentLoop)
+    monkeypatch.setattr("omni.service.runtime.AgentLoop", DeterministicAgentLoop)
     monkeypatch.setattr(cli, "TerminalConversationApp", ScenarioApp)
     monkeypatch.setattr(
-        "myclaw.service.runtime.create_provider", lambda _configuration: selected_provider
+        "omni.service.runtime.create_provider", lambda _configuration: selected_provider
     )
     async with cli_service(home):
         await cli._run_service_cli_conversation(agent_home=home, workspace=workspace)

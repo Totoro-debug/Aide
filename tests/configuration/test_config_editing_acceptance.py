@@ -7,16 +7,16 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigError, ConfigLoader
-from myclaw.utils.host_filesystem import HOST_FILESYSTEM
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigError, ConfigLoader
+from omni.utils.host_filesystem import HOST_FILESYSTEM
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
 _WORKER = """
 import sys, time
 from pathlib import Path
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader, ConfigRevisionConflict
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader, ConfigRevisionConflict
 home, ready, go, revision, operation = sys.argv[1:]
 loader = ConfigLoader(AgentHome(Path(home)))
 Path(ready).touch()

@@ -11,10 +11,10 @@ from typing import Any, cast
 
 import pytest
 
-from myclaw.agent.session.session import Session
-from myclaw.agent.tools.tool_gateway import ModelToolCall
-from myclaw.config.agent_home import AgentHome
-from myclaw.provider.models import (
+from omni.agent.session.session import Session
+from omni.agent.tools.tool_gateway import ModelToolCall
+from omni.config.agent_home import AgentHome
+from omni.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelResponse,
@@ -22,7 +22,7 @@ from myclaw.provider.models import (
     ModelUsage,
     TextDelta,
 )
-from myclaw.service.client import ServiceClient
+from omni.service.client import ServiceClient
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures.cli_service import cli_service
 from tests.fixtures.mcp_wire import ObservedLifetimes, stdio_wire_configuration, wire_tool
@@ -110,7 +110,7 @@ async def test_cli_real_mcp_flow_persists_result_reuses_session_snapshot_and_clo
     )
     (home.path / "config.toml").write_text(content, encoding="utf-8")
     provider = _EchoProvider()
-    monkeypatch.setattr("myclaw.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("omni.service.runtime.create_provider", lambda *_args: provider)
     async with cli_service(home) as service:
         client = await ServiceClient.connect_or_start(home, directory)
         try:
@@ -195,7 +195,7 @@ async def test_cli_workspace_wire_discovery_retains_safe_aggregate_skip_report(
     directory = tmp_path / "workspace"
     directory.mkdir()
     monkeypatch.setattr(
-        "myclaw.service.runtime.create_provider", lambda *_args: _ConcurrentProvider()
+        "omni.service.runtime.create_provider", lambda *_args: _ConcurrentProvider()
     )
     observed = ObservedLifetimes(monkeypatch)
     async with cli_service(home) as service:

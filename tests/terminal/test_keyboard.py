@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from myclaw.terminal.keyboard import EnhancedKeyboardAction, EnhancedKeyboardAdapter
+from omni.terminal.keyboard import EnhancedKeyboardAction, EnhancedKeyboardAdapter
 
 
 class RecordingTerminal:

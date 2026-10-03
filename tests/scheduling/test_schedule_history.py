@@ -10,9 +10,9 @@ from uuid import UUID
 
 import pytest
 
-from myclaw.agent.session.session import Session, SessionStoragePartition
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.schedule.history import (
+from omni.agent.session.session import Session, SessionStoragePartition
+from omni.agent.workspace_state import WorkspaceState
+from omni.schedule.history import (
     ScheduleHistoryPersistenceError,
     ScheduleHistoryRequestError,
     read_schedule_history,

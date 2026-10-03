@@ -14,15 +14,15 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
-from myclaw.agent.session.backup_store import FileBackupStore
-from myclaw.agent.session.restore import RestoreManager
-from myclaw.agent.session.session import Session
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.config import ConfigLoader
-from myclaw.service.discovery import create_credential
-from myclaw.service.errors import ServiceError
-from myclaw.service.runtime import LocalService, SessionClaim, WorkspaceServiceRuntime
-from myclaw.service.transport import create_app
+from omni.agent.session.backup_store import FileBackupStore
+from omni.agent.session.restore import RestoreManager
+from omni.agent.session.session import Session
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.config import ConfigLoader
+from omni.service.discovery import create_credential
+from omni.service.errors import ServiceError
+from omni.service.runtime import LocalService, SessionClaim, WorkspaceServiceRuntime
+from omni.service.transport import create_app
 from tests.service.test_service_concurrency import _CollectingSink, _ConcurrentProvider
 from tests.service.test_service_transport import _persist_session, _prepare_agent_home
 
@@ -30,7 +30,7 @@ from tests.service.test_service_transport import _persist_session, _prepare_agen
 @pytest.fixture
 def restore_provider(monkeypatch: pytest.MonkeyPatch) -> _ConcurrentProvider:
     provider = _ConcurrentProvider(block_b=True)
-    monkeypatch.setattr("myclaw.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("omni.service.runtime.create_provider", lambda *_args: provider)
     return provider
 
 
@@ -806,7 +806,7 @@ async def test_restore_rebuild_failure_keeps_durable_result_and_closes_admission
     monkeypatch: pytest.MonkeyPatch,
     failure_point: str,
 ) -> None:
-    from myclaw.agent.loop import AgentLoop
+    from omni.agent.loop import AgentLoop
 
     service, workspace, owner, claim, target = restore_case
     await _restore_request(

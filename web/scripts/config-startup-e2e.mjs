@@ -22,7 +22,7 @@ function startupCli(homeRoot, command) {
   const argv = JSON.stringify(["myclaw", ...command]);
   const source = [
     "import sys, webbrowser",
-    "from myclaw.terminal.process_entry import run",
+    "from omni.terminal.process_entry import run",
     "webbrowser.open_new_tab = lambda _url: False",
     `sys.argv = ${argv}`,
     "run()",
@@ -346,8 +346,8 @@ async function runState(browser, state) {
     try {
       const source = join(details.home_root, "config.toml");
       if (state !== "missing") {
-        await mkdir(join(bareRoot, ".myclaw"));
-        await writeFile(join(bareRoot, ".myclaw", "config.toml"), await readFile(source));
+        await mkdir(join(bareRoot, ".omni"));
+        await writeFile(join(bareRoot, ".omni", "config.toml"), await readFile(source));
       }
       const bare = startupCli(bareRoot, []);
       assert.equal(bare.status, 2, `Bare CLI unexpectedly started for ${state}: ${bare.stdout}`);

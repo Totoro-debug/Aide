@@ -8,27 +8,27 @@ from typing import Any
 import pytest
 from mcp.types import CallToolResult
 
-from myclaw.agent.context.run_context import (
+from omni.agent.context.run_context import (
     AgentRunContextController,
     AgentRunContextRequestPreparer,
     AgentRunContextSnapshot,
     agent_run_attempt_guard,
 )
-from myclaw.agent.memory.manager import MemoryManager
-from myclaw.agent.runner import AgentRunner, AgentRunnerResult
-from myclaw.agent.session.session import Session
-from myclaw.agent.tools.mcp import MCPTool, MCPToolSpec
-from myclaw.agent.tools.tool_gateway import ToolGateway
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.provider.model_router import ModelRouteStatus, RunModelRouter
-from myclaw.provider.models import (
+from omni.agent.memory.manager import MemoryManager
+from omni.agent.runner import AgentRunner, AgentRunnerResult
+from omni.agent.session.session import Session
+from omni.agent.tools.mcp import MCPTool, MCPToolSpec
+from omni.agent.tools.tool_gateway import ToolGateway
+from omni.agent.workspace_state import WorkspaceState
+from omni.provider.model_router import ModelRouteStatus, RunModelRouter
+from omni.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelResponse,
     ModelRoute,
     ModelUsage,
 )
-from myclaw.schedule.service import ScheduleService
+from omni.schedule.service import ScheduleService
 from tests.fixtures import FakeClock, ScriptedFakeProvider, ScriptedFakeRouter, StreamScript
 from tests.fixtures.session import seed_session_state
 

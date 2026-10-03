@@ -89,7 +89,7 @@ try {
   const url = process.env.MYCLAW_E2E_URL;
   const launch = spawnSync("python", ["-c", [
     "import sys, webbrowser",
-    "from myclaw.terminal.process_entry import run",
+    "from omni.terminal.process_entry import run",
     "webbrowser.open_new_tab = lambda _url: False",
     "sys.argv = ['myclaw', 'web']",
     "run()",
@@ -919,7 +919,7 @@ try {
   await page.getByRole("button", { name: "Review restore failure" }).click();
   await failedRestoreNotice.getByRole("button", { name: "Acknowledge" }).click();
   await page.getByRole("button", { name: "Review restore failure" }).waitFor({ state: "hidden" });
-  const durableRestore = JSON.parse(await readFile(resolve(firstProject, ".myclaw", "restore", control.details.failure_restore_session_id, "pending.json"), "utf8"));
+  const durableRestore = JSON.parse(await readFile(resolve(firstProject, ".omni", "restore", control.details.failure_restore_session_id, "pending.json"), "utf8"));
   assert.equal(durableRestore.failure_notification_acknowledged, true);
 
   const draftResponsePromise = page.waitForResponse((response) => (
@@ -935,7 +935,7 @@ try {
   await sessionPanel.getByText("Empty draft", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Release session" }).click();
   await sessionPanel.getByText("Empty draft", { exact: true }).waitFor({ state: "detached" });
-  const sessionFiles = await readdir(resolve(firstProject, ".myclaw", "sessions"));
+  const sessionFiles = await readdir(resolve(firstProject, ".omni", "sessions"));
   assert.equal(sessionFiles.includes(`${draftId}.jsonl`), false, "Released empty draft was persisted");
 
   await sessionList.getByRole("button", { name: /Web available history/ }).click();
@@ -1177,11 +1177,11 @@ try {
   await managementDialog.getByText("Client permission updated.", { exact: true }).waitFor();
   await managementDialog.press("Escape");
 
-  const memoryPath = resolve(firstProject, ".myclaw", "memory", "memory.md");
+  const memoryPath = resolve(firstProject, ".omni", "memory", "memory.md");
   const originalMemory = await readFile(memoryPath, "utf8");
   const longMemory = `# Inspected memory\n<script>window.__unsafeMemory = true</script>\n${"unbroken-memory".repeat(1500)}\n`;
   await writeFile(memoryPath, longMemory, "utf8");
-  const skillRoot = resolve(control.details.home_root, ".myclaw", "skills");
+  const skillRoot = resolve(control.details.home_root, ".omni", "skills");
   for (const [directory, document] of [
     ["web-review", "---\nname: web-review\ndescription: Browser reload metadata\n---\nPrivate instructions excluded from metadata.\n"],
     ["invalid", "---\nname: INVALID\ndescription: PRIVATE_BAD_SKILL_SECRET\n---\nPrivate bad document.\n"],
@@ -1317,7 +1317,7 @@ try {
   let persistedConversation;
   for (let attempt = 0; attempt < 50; attempt += 1) {
     try {
-      const records = (await readFile(resolve(firstProject, ".myclaw", "sessions", `${conversationSessionId}.jsonl`), "utf8"))
+      const records = (await readFile(resolve(firstProject, ".omni", "sessions", `${conversationSessionId}.jsonl`), "utf8"))
         .trim().split("\n").map((line) => JSON.parse(line));
       if (records.some((record) => record.role === "assistant" && String(record.content).includes("Persisted Markdown"))) {
         persistedConversation = records;
@@ -1636,7 +1636,7 @@ try {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     persistedConfirmationResults = [];
     for (const sessionId of new Set(confirmationRuns.map((run) => run.sessionId))) {
-      const records = (await readFile(resolve(firstProject, ".myclaw", "sessions", `${sessionId}.jsonl`), "utf8"))
+      const records = (await readFile(resolve(firstProject, ".omni", "sessions", `${sessionId}.jsonl`), "utf8"))
         .trim().split("\n").map((line) => JSON.parse(line));
       persistedConfirmationResults.push(...records.filter((record) => (
         record.role === "tool" && record.tool_call_id === "call-confirmation"
@@ -1839,7 +1839,7 @@ try {
           await titleDialog.getByRole("button", { name: "Save", exact: true }).click();
           await page.getByRole("heading", { name: "A".repeat(60), exact: true }).waitFor();
         }
-        const ownedRoot = resolve(firstProject, ".myclaw");
+        const ownedRoot = resolve(firstProject, ".omni");
         const artifactRoot = resolve(ownedRoot, "artifacts", deleteId);
         const restoreRoot = resolve(ownedRoot, "restore", deleteId);
         await mkdir(artifactRoot, { recursive: true });
@@ -2245,7 +2245,7 @@ try {
   await removalDialog.waitFor({ state: "hidden" });
   await page.getByText("Project registration removed. The directory and saved work remain on disk.").waitFor();
   await removableProject.waitFor({ state: "detached" });
-  await readdir(resolve(firstProject, ".myclaw"));
+  await readdir(resolve(firstProject, ".omni"));
 
   await registerProject(firstProject, "project-one");
   await page.getByText("Schedule paused for review").waitFor();

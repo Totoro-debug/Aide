@@ -1,6 +1,6 @@
 """Reusable AgentLoop public-seam helpers."""
 
-from myclaw.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
+from omni.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
 
 
 async def collect_foreground_outbound(

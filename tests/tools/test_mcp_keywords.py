@@ -7,12 +7,12 @@ from typing import Any, cast
 
 import pytest
 
-import myclaw.config.config as config_module
-from myclaw.agent.tools.mcp import MCPTool, MCPToolSpec
-from myclaw.agent.tools.mcp_keywords import MCPKeywordPreparer
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader, MCPServerConfiguration
-from myclaw.provider.models import (
+import omni.config.config as config_module
+from omni.agent.tools.mcp import MCPTool, MCPToolSpec
+from omni.agent.tools.mcp_keywords import MCPKeywordPreparer
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader, MCPServerConfiguration
+from omni.provider.models import (
     AssistantModelMessage,
     ModelResponse,
     ModelUsage,

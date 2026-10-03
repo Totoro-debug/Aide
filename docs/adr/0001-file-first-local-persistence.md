@@ -8,12 +8,12 @@ MyClaw stores configuration, Project registrations, and Workspace-owned state as
 
 ## Agent Home and Workspace boundaries
 
-Agent Home is fixed at `~/.myclaw/` for the current operating-system account, without profiles or configurable data roots. It owns global `config.toml`, user-authored `skills/`, the durable `projects.json` catalog, and service discovery and locking state. Project registrations are references to existing directories, not copies of Workspace data. Legacy Agent Home Runtime Log files remain untouched.
+Agent Home is fixed at `~/.omni/` for the current operating-system account, without profiles or configurable data roots. It owns global `config.toml`, user-authored `skills/`, the durable `projects.json` catalog, and service discovery and locking state. Project registrations are references to existing directories, not copies of Workspace data. Legacy Agent Home Runtime Log files remain untouched.
 
-Each Workspace owns its non-global persistent state under `<workspace>/.myclaw/`. CLI startup selects the current directory; Web selects a registered Project directory. Directory identity is normalized and resolved for shared runtime ownership. MyClaw does not infer a Git root, search ancestors, or fall back to Agent Home or temporary storage when Workspace State cannot be initialized safely.
+Each Workspace owns its non-global persistent state under `<workspace>/.omni/`. CLI startup selects the current directory; Web selects a registered Project directory. Directory identity is normalized and resolved for shared runtime ownership. MyClaw does not infer a Git root, search ancestors, or fall back to Agent Home or temporary storage when Workspace State cannot be initialized safely.
 
 ```text
-.myclaw/
+.omni/
   .gitignore
   memory/
     memory.md
@@ -36,4 +36,4 @@ Each store defines its publication guarantees: Conversation Sessions and other d
 
 Each persisted Schedule Job has a strict canonical object shape with a required `title`. The decoder accepts a document containing only the exact pre-title shape and derives titles using Session title normalization. The in-memory Jobs become canonical immediately; the next successful Store mutation rewrites the file. Mixed versions, partial hybrids, and unknown fields are rejected; a failed write leaves the previous document authoritative.
 
-Fixed File Tools can access Workspace State through normal path resolution and [ADR-0026](0026-tool-permission-levels-and-foreground-snapshots.md) authorization. Direct writes to the protected `.myclaw/restore/` subtree are rejected under [ADR-0028](0028-session-restore-architecture.md). The Skill Loader's internal reads follow [ADR-0016](0016-use-agent-home-skill-catalog-and-progressive-loading.md); Agent Home as a whole grants no exemption from external-path Tool Confirmation.
+Fixed File Tools can access Workspace State through normal path resolution and [ADR-0026](0026-tool-permission-levels-and-foreground-snapshots.md) authorization. Direct writes to the protected `.omni/restore/` subtree are rejected under [ADR-0028](0028-session-restore-architecture.md). The Skill Loader's internal reads follow [ADR-0016](0016-use-agent-home-skill-catalog-and-progressive-loading.md); Agent Home as a whole grants no exemption from external-path Tool Confirmation.

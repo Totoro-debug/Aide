@@ -10,7 +10,7 @@ import pytest
 from anthropic import APIConnectionError
 from httpx import Request
 
-from myclaw.config.config import (
+from omni.config.config import (
     MemoryConfiguration,
     ModelsConfiguration,
     ProviderConfiguration,
@@ -18,11 +18,11 @@ from myclaw.config.config import (
     RuntimeConfiguration,
     UserConfiguration,
 )
-from myclaw.errors import ErrorInfo
-from myclaw.provider.anthropic import AnthropicProvider
-from myclaw.provider.errors import ModelCallError
-from myclaw.provider.model_router import ModelRouter
-from myclaw.provider.models import (
+from omni.errors import ErrorInfo
+from omni.provider.anthropic import AnthropicProvider
+from omni.provider.errors import ModelCallError
+from omni.provider.model_router import ModelRouter
+from omni.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,
@@ -32,7 +32,7 @@ from myclaw.provider.models import (
     ModelUsage,
     ReasoningEffort,
 )
-from myclaw.provider.openai_compatible import OpenAICompatibleProvider
+from omni.provider.openai_compatible import OpenAICompatibleProvider
 
 READ_FILE_SCHEMA: dict[str, Any] = {
     "type": "function",

@@ -43,16 +43,16 @@ dev = [
 ]
 
 [project.scripts]
-myclaw = "myclaw.terminal.process_entry:run"
+myclaw = "omni.terminal.process_entry:run"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["myclaw*"]
+include = ["omni*"]
 
 [tool.setuptools.package-data]
-"myclaw.templates" = ["*.md"]
-"myclaw.service.protocol" = ["*.json"]
-"myclaw.web_assets" = [
+"omni.templates" = ["*.md"]
+"omni.service.protocol" = ["*.json"]
+"omni.web_assets" = [
     "*.html",
     "*.json",
     "*.js",
@@ -76,6 +76,6 @@ target-version = "py312"
 select = ["B", "E4", "E7", "E9", "F", "I", "RUF", "UP"]
 
 [tool.mypy]
-files = ["myclaw", "tests"]
+files = ["omni", "tests"]
 python_version = "3.12"
 strict = true

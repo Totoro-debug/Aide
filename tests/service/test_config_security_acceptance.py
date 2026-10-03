@@ -13,12 +13,12 @@ from aiohttp.test_utils import BaseTestServer, TestServer
 from jsonschema import Draft202012Validator
 from loguru import logger
 
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader
-from myclaw.service.discovery import create_credential
-from myclaw.service.runtime import LocalService
-from myclaw.service.transport import create_app
-from myclaw.utils.host_filesystem import HOST_FILESYSTEM
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader
+from omni.service.discovery import create_credential
+from omni.service.runtime import LocalService
+from omni.service.transport import create_app
+from omni.utils.host_filesystem import HOST_FILESYSTEM
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
 SecurityHttp = tuple[LocalService, BaseTestServer, dict[str, str], dict[str, str]]
@@ -59,7 +59,7 @@ def _patch(service: LocalService, request_id: str = "security-save") -> dict[str
 
 
 def _assert_schema(response: dict[str, object]) -> None:
-    path = Path(__file__).resolve().parents[2] / "myclaw/service/protocol/v1.schema.json"
+    path = Path(__file__).resolve().parents[2] / "omni/service/protocol/v1.schema.json"
     schema = json.loads(path.read_text(encoding="utf-8"))
     name = "config_mutation_response" if "request_id" in response else "config_response"
     Draft202012Validator({"$ref": f"#/$defs/{name}", "$defs": schema["$defs"]}).validate(response)

@@ -11,18 +11,18 @@ from typing import cast
 import pytest
 from aiohttp import ClientConnectorCertificateError
 
-from myclaw.agent.permission import ToolPermissionLevel
-from myclaw.agent.tools.base import ToolError
-from myclaw.agent.tools.core.web_fetch import (
+from omni.agent.permission import ToolPermissionLevel
+from omni.agent.tools.base import ToolError
+from omni.agent.tools.core.web_fetch import (
     AioHttpWebFetchClient,
     HTTPClientBoundary,
     HTTPResponseBoundary,
     WebFetchTool,
 )
-from myclaw.agent.tools.core.web_search import WebSearchTool
-from myclaw.agent.tools.network_safety import DNSResolver
-from myclaw.agent.tools.permission import PermissionContext
-from myclaw.agent.tools.tool_gateway import (
+from omni.agent.tools.core.web_search import WebSearchTool
+from omni.agent.tools.network_safety import DNSResolver
+from omni.agent.tools.permission import PermissionContext
+from omni.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ConfirmationRequester,
@@ -824,7 +824,7 @@ async def test_web_search_is_direct_with_unchanged_schema_and_result(
         calls.append((query, count))
         return [{"title": "Result", "href": "https://example.test/", "body": "Body"}]
 
-    monkeypatch.setattr("myclaw.agent.tools.core.web_search._search_sync", search)
+    monkeypatch.setattr("omni.agent.tools.core.web_search._search_sync", search)
     tool = WebSearchTool()
     gateway = ToolGateway._for_memory(
         (tool,),

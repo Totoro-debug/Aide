@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from myclaw.agent.memory.records import SummaryEntry
+from omni.agent.memory.records import SummaryEntry
 
 LOCAL_OFFSET = timezone(timedelta(hours=8))
 

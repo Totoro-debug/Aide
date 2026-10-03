@@ -10,11 +10,11 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import BaseTestServer, TestServer
 
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader
-from myclaw.service.discovery import create_credential
-from myclaw.service.runtime import LocalService
-from myclaw.service.transport import create_app
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader
+from omni.service.discovery import create_credential
+from omni.service.runtime import LocalService
+from omni.service.transport import create_app
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
 ConfigHttp = tuple[LocalService, BaseTestServer, str, str]

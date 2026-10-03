@@ -6,11 +6,11 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from myclaw.config.config import ProviderConfiguration
-from myclaw.errors import ErrorInfo
-from myclaw.provider.errors import ModelCallError
-from myclaw.provider.model_router import ModelAttemptGuard, ModelRouteStatus
-from myclaw.provider.models import (
+from omni.config.config import ProviderConfiguration
+from omni.errors import ErrorInfo
+from omni.provider.errors import ModelCallError
+from omni.provider.model_router import ModelAttemptGuard, ModelRouteStatus
+from omni.provider.models import (
     ModelContinuation,
     ModelProvider,
     ModelResponse,
@@ -18,7 +18,7 @@ from myclaw.provider.models import (
     ModelStreamEvent,
     ReasoningEffort,
 )
-from myclaw.templates import render_template
+from omni.templates import render_template
 
 
 def unexpected_provider_factory(configuration: ProviderConfiguration) -> ModelProvider:

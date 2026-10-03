@@ -10,8 +10,8 @@ from uuid import uuid4
 import pytest
 from loguru import logger
 
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.logging.session import session_log, without_session_log
+from omni.agent.workspace_state import WorkspaceState
+from omni.logging.session import session_log, without_session_log
 
 
 def _session_id() -> str:
@@ -346,7 +346,7 @@ def test_session_log_write_failure_does_not_stop_work(
 def test_session_log_rotation_failure_does_not_stop_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import myclaw.logging.session as session_logging
+    import omni.logging.session as session_logging
 
     state = _state(tmp_path)
     state.logs_directory.mkdir(parents=True)

@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import (
+from omni.config.agent_home import AgentHome
+from omni.config.config import (
     ConfigLoader,
     DefaultValueDiagnostic,
     RuntimeConfiguration,

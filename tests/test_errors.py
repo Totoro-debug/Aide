@@ -2,14 +2,14 @@ from typing import Any, cast
 
 import pytest
 
-from myclaw.errors import (
+from omni.errors import (
     MODEL_CONTEXT_OVERFLOW_MESSAGE,
     STABLE_ERROR_CODES,
     TURN_CANCELLED_MESSAGE,
     ErrorCode,
     ErrorInfo,
 )
-from myclaw.provider.errors import (
+from omni.provider.errors import (
     ModelCallError,
     model_context_overflow_error,
     parse_retry_after_seconds,

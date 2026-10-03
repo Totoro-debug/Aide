@@ -12,26 +12,26 @@ from uuid import UUID
 import pytest
 from mcp.types import CallToolResult
 
-import myclaw.agent.context.run_context as compactor_module
-from myclaw.agent.loop import AgentLoop
-from myclaw.agent.memory.manager import MemoryManager
-from myclaw.agent.message_bus import InboundMessage, MessageBus
-from myclaw.agent.permission import PermissionSnapshot, RuntimePermissionControl
-from myclaw.agent.run_errors import CommittableAgentRunError
-from myclaw.agent.runner import AgentRunner, AgentRunnerResult
-from myclaw.agent.session.session import Session, SessionStoragePartition
-from myclaw.agent.tools.base import BaseTool
-from myclaw.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
-from myclaw.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
-from myclaw.agent.tools.mcp import MCPTool, MCPToolSpec
-from myclaw.agent.tools.permission import PermissionContext
-from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolGateway, ToolResult
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader
-from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
-from myclaw.provider.errors import ModelCallError
-from myclaw.provider.models import (
+import omni.agent.context.run_context as compactor_module
+from omni.agent.loop import AgentLoop
+from omni.agent.memory.manager import MemoryManager
+from omni.agent.message_bus import InboundMessage, MessageBus
+from omni.agent.permission import PermissionSnapshot, RuntimePermissionControl
+from omni.agent.run_errors import CommittableAgentRunError
+from omni.agent.runner import AgentRunner, AgentRunnerResult
+from omni.agent.session.session import Session, SessionStoragePartition
+from omni.agent.tools.base import BaseTool
+from omni.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
+from omni.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
+from omni.agent.tools.mcp import MCPTool, MCPToolSpec
+from omni.agent.tools.permission import PermissionContext
+from omni.agent.tools.tool_gateway import ModelToolCall, ToolGateway, ToolResult
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader
+from omni.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
+from omni.provider.errors import ModelCallError
+from omni.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,
@@ -39,9 +39,9 @@ from myclaw.provider.models import (
     ModelStreamEvent,
     ModelUsage,
 )
-from myclaw.schedule.model import DREAM_JOB_ID, JobSchedule, ScheduleJob
-from myclaw.schedule.service import ScheduleJobExecutionError, ScheduleService
-from myclaw.skills.catalog import SkillLoader
+from omni.schedule.model import DREAM_JOB_ID, JobSchedule, ScheduleJob
+from omni.schedule.service import ScheduleJobExecutionError, ScheduleService
+from omni.skills.catalog import SkillLoader
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import TaskFramingRouterAdapter, collect_foreground_outbound
 from tests.fixtures.session import seed_session_state
@@ -1239,7 +1239,7 @@ async def test_schedule_oversized_result_uses_canonical_schedule_artifact_sessio
         message for message in schedule_session.messages if message["role"] == "tool"
     )
     artifact = tool_message["artifact"]
-    assert artifact["path"].startswith(f".myclaw/artifacts/schedule_{JOB_ID}/")
+    assert artifact["path"].startswith(f".omni/artifacts/schedule_{JOB_ID}/")
     assert (state.workspace_path / artifact["path"]).exists()
 
 

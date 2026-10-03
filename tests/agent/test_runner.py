@@ -10,9 +10,9 @@ from uuid import uuid4
 
 import pytest
 
-from myclaw.agent.confirmation import ConfirmationAborted
-from myclaw.agent.run_errors import CommittableAgentRunError
-from myclaw.agent.runner import (
+from omni.agent.confirmation import ConfirmationAborted
+from omni.agent.run_errors import CommittableAgentRunError
+from omni.agent.runner import (
     AgentRunner,
     AgentRunnerResponseSegmentEnd,
     AgentRunnerResult,
@@ -20,16 +20,16 @@ from myclaw.agent.runner import (
     AgentRunnerToolCallFinished,
     AgentRunnerToolCallStarted,
 )
-from myclaw.agent.tools.base import ArtifactReference
-from myclaw.agent.tools.tool_gateway import (
+from omni.agent.tools.base import ArtifactReference
+from omni.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ModelToolCall,
     ToolResult,
 )
-from myclaw.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
-from myclaw.provider.errors import ModelCallError
-from myclaw.provider.models import (
+from omni.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
+from omni.provider.errors import ModelCallError
+from omni.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,
@@ -1564,7 +1564,7 @@ async def test_runner_externalizes_tool_result() -> None:
             result,
             content="preview",
             artifact=ArtifactReference(
-                path=".myclaw/artifacts/session/call.txt",
+                path=".omni/artifacts/session/call.txt",
                 total_chars=5,
                 preview_chars=5,
             ),
@@ -1584,7 +1584,7 @@ async def test_runner_externalizes_tool_result() -> None:
     assert result.finish_reason == "completed"
     assert result.messages[1]["content"] == "preview"
     assert result.messages[1]["artifact"] == {
-        "path": ".myclaw/artifacts/session/call.txt",
+        "path": ".omni/artifacts/session/call.txt",
         "total_chars": 5,
         "preview_chars": 5,
     }

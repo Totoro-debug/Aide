@@ -9,23 +9,23 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.agent.context.builder import ContextBuilder
+from omni.agent.context.builder import ContextBuilder
 
 PROJECT_ROOT = Path(__file__).parents[2]
-PACKAGE_ROOT = PROJECT_ROOT / "myclaw"
-_CLI_PATH = Path("myclaw/terminal/cli.py")
+PACKAGE_ROOT = PROJECT_ROOT / "omni"
+_CLI_PATH = Path("omni/terminal/cli.py")
 _CLI_TOOL_IMPORTS = frozenset(
     {
-        ("myclaw.agent.tools.mcp_runtime", "MCPRuntimeManager"),
-        ("myclaw.agent.tools.mcp_runtime", "MCPServerFailure"),
-        ("myclaw.agent.tools.mcp_runtime", "MCPSnapshotReport"),
-        ("myclaw.agent.tools.mcp_runtime", "MCPStartupReport"),
-        ("myclaw.agent.tools.mcp_runtime", "MCPToolSnapshot"),
-        ("myclaw.agent.tools.mcp_keywords", "MCPKeywordPreparer"),
-        ("myclaw.agent.tools.tool_gateway", "BUILT_IN_TOOL_NAMES"),
-        ("myclaw.agent.tools.core.exec_host", "EXEC_CAPABILITY_ERROR"),
-        ("myclaw.agent.tools.core.exec_host", "create_exec_host"),
-        ("myclaw.agent.tools.core.exec_host", "resolve_exec_shell"),
+        ("omni.agent.tools.mcp_runtime", "MCPRuntimeManager"),
+        ("omni.agent.tools.mcp_runtime", "MCPServerFailure"),
+        ("omni.agent.tools.mcp_runtime", "MCPSnapshotReport"),
+        ("omni.agent.tools.mcp_runtime", "MCPStartupReport"),
+        ("omni.agent.tools.mcp_runtime", "MCPToolSnapshot"),
+        ("omni.agent.tools.mcp_keywords", "MCPKeywordPreparer"),
+        ("omni.agent.tools.tool_gateway", "BUILT_IN_TOOL_NAMES"),
+        ("omni.agent.tools.core.exec_host", "EXEC_CAPABILITY_ERROR"),
+        ("omni.agent.tools.core.exec_host", "create_exec_host"),
+        ("omni.agent.tools.core.exec_host", "resolve_exec_shell"),
     }
 )
 _TOOL_EXECUTION_DISPATCH_METHODS = frozenset(
@@ -46,11 +46,11 @@ def test_retired_prompt_and_session_assembly_modules_are_absent() -> None:
     assert not (PACKAGE_ROOT / "agent" / "prompts.py").exists()
     assert not (PACKAGE_ROOT / "session" / "projection.py").exists()
     assert not (PACKAGE_ROOT / "agent" / "session" / "projection.py").exists()
-    agent_prompt_module = ".".join(("myclaw", "agent", "prompts"))
+    agent_prompt_module = ".".join(("omni", "agent", "prompts"))
     assert importlib.util.find_spec(agent_prompt_module) is None
     for session_projection_module in (
-        ".".join(("myclaw", "session", "projection")),
-        ".".join(("myclaw", "agent", "session", "projection")),
+        ".".join(("omni", "session", "projection")),
+        ".".join(("omni", "agent", "session", "projection")),
     ):
         try:
             spec = importlib.util.find_spec(session_projection_module)
@@ -69,7 +69,7 @@ def test_agent_owned_packages_have_no_top_level_compatibility_exports() -> None:
             "-c",
             (
                 "import importlib.util\n"
-                "modules = ('myclaw.memory', 'myclaw.session', 'myclaw.tools')\n"
+                "modules = ('omni.memory', 'omni.session', 'omni.tools')\n"
                 "assert all(importlib.util.find_spec(module) is None for module in modules)\n"
             ),
         ],
@@ -165,7 +165,7 @@ def _imported_module_names(reference: _StaticImport) -> tuple[str, ...]:
 
 def _is_tools_dependency(reference: _StaticImport) -> bool:
     return any(
-        module == "myclaw.agent.tools" or module.startswith("myclaw.agent.tools.")
+        module == "omni.agent.tools" or module.startswith("omni.agent.tools.")
         for module in _imported_module_names(reference)
     )
 
@@ -366,7 +366,7 @@ def _retired_mcp_runtime_import_violations(sources: Mapping[Path, str]) -> tuple
         ):
             imported_modules = _imported_module_names(reference)
             if not any(
-                module == "myclaw.mcp_runtime" or module.startswith("myclaw.mcp_runtime.")
+                module == "omni.mcp_runtime" or module.startswith("omni.mcp_runtime.")
                 for module in imported_modules
             ):
                 continue
@@ -375,25 +375,25 @@ def _retired_mcp_runtime_import_violations(sources: Mapping[Path, str]) -> tuple
 
 
 def _is_blackboard_module(module: str) -> bool:
-    return module == "myclaw.agent.blackboard" or module.startswith("myclaw.agent.blackboard.")
+    return module == "omni.agent.blackboard" or module.startswith("omni.agent.blackboard.")
 
 
 @pytest.mark.parametrize(
     "source",
     [
-        "import myclaw.agent.blackboard",
-        "from myclaw.agent.blackboard import Blackboard",
-        "from myclaw.agent import blackboard",
+        "import omni.agent.blackboard",
+        "from omni.agent.blackboard import Blackboard",
+        "from omni.agent import blackboard",
         "from .blackboard import Blackboard",
         "from . import blackboard",
-        "def load():\n    import myclaw.agent.blackboard",
+        "def load():\n    import omni.agent.blackboard",
         "if TYPE_CHECKING:\n    from . import blackboard",
     ],
 )
 def test_import_scanner_resolves_blackboard_dependency_forms(source: str) -> None:
     assert any(
         _is_blackboard_module(module)
-        for module, _ in _resolved_imports(source, package=("myclaw", "agent"))
+        for module, _ in _resolved_imports(source, package=("omni", "agent"))
     )
 
 
@@ -402,7 +402,7 @@ def test_production_code_does_not_import_removed_contracts_package() -> None:
         f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
         for path in _python_files(PACKAGE_ROOT)
         for module, line in _imports(path)
-        if module == "myclaw.contracts" or module.startswith("myclaw.contracts.")
+        if module == "omni.contracts" or module.startswith("omni.contracts.")
     ]
 
     assert violations == []
@@ -481,7 +481,7 @@ def test_shared_tools_store_no_permission_or_authorization_runtime_state() -> No
 
 @pytest.mark.parametrize("method", sorted(_TOOL_EXECUTION_DISPATCH_METHODS))
 def test_tool_execution_dispatch_checker_rejects_gateway_bypasses(method: str) -> None:
-    path = Path("myclaw/agent/bypass.py")
+    path = Path("omni/agent/bypass.py")
     source = f"async def bypass(tool):\n    await tool.{method}({{}})"
 
     assert _tool_execution_dispatch_violations(
@@ -491,7 +491,7 @@ def test_tool_execution_dispatch_checker_rejects_gateway_bypasses(method: str) -
 
 
 def test_tool_execution_dispatch_checker_allows_unrelated_execute_methods() -> None:
-    path = Path("myclaw/agent/host_adapter.py")
+    path = Path("omni/agent/host_adapter.py")
     source = "async def run(adapter):\n    await adapter.execute()"
 
     assert (
@@ -504,7 +504,7 @@ def test_tool_execution_dispatch_checker_allows_unrelated_execute_methods() -> N
 
 
 def test_tool_execution_dispatch_checker_uses_tool_types_not_only_names() -> None:
-    path = Path("myclaw/agent/bypass.py")
+    path = Path("omni/agent/bypass.py")
     source = "async def bypass(candidate: BaseTool):\n    await candidate.execute()"
 
     assert _tool_execution_dispatch_violations(
@@ -515,7 +515,7 @@ def test_tool_execution_dispatch_checker_uses_tool_types_not_only_names() -> Non
 
 @pytest.mark.parametrize("attribute", ["_permission_context", "_authorization_session"])
 def test_shared_tool_state_checker_rejects_permission_runtime_state(attribute: str) -> None:
-    path = Path("myclaw/agent/unsafe_tool.py")
+    path = Path("omni/agent/unsafe_tool.py")
     source = (
         "class UnsafeTool(BaseTool):\n"
         "    def __init__(self, value):\n"
@@ -528,7 +528,7 @@ def test_shared_tool_state_checker_rejects_permission_runtime_state(attribute: s
 
 
 def test_prepare_contract_checker_rejects_tuple_and_subclass_override() -> None:
-    path = Path("myclaw/agent/unsafe_tool.py")
+    path = Path("omni/agent/unsafe_tool.py")
     source = (
         "class BaseTool:\n"
         "    async def prepare(self, arguments) -> tuple[dict, str | None]: ...\n"
@@ -542,12 +542,12 @@ def test_prepare_contract_checker_rejects_tuple_and_subclass_override() -> None:
 @pytest.mark.parametrize("root", [PACKAGE_ROOT / "utils", PACKAGE_ROOT / "errors.py"])
 def test_foundation_modules_do_not_import_domain_modules(root: Path) -> None:
     files = (root,) if root.is_file() else _python_files(root)
-    allowed = {"myclaw.errors", "myclaw.utils"}
+    allowed = {"omni.errors", "omni.utils"}
     violations = [
         f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
         for path in files
         for module, line in _imports(path)
-        if module.startswith("myclaw.")
+        if module.startswith("omni.")
         and not any(module == prefix or module.startswith(f"{prefix}.") for prefix in allowed)
     ]
 
@@ -555,7 +555,7 @@ def test_foundation_modules_do_not_import_domain_modules(root: Path) -> None:
 
 
 def test_tools_do_not_depend_on_provider() -> None:
-    forbidden = {"myclaw.provider"}
+    forbidden = {"omni.provider"}
     violations = [
         f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
         for path in _python_files(PACKAGE_ROOT / "agent" / "tools")
@@ -596,7 +596,7 @@ def test_terminal_tool_import_checker_allows_each_cli_symbol(
 @pytest.mark.parametrize(
     "source",
     [
-        "from myclaw.agent.tools.mcp_runtime import MCPRuntimeManager as Manager",
+        "from omni.agent.tools.mcp_runtime import MCPRuntimeManager as Manager",
         "from ..agent.tools.mcp_runtime import MCPRuntimeManager",
         "from ..agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES as BUILT_INS",
     ],
@@ -614,26 +614,26 @@ def test_terminal_tool_import_checker_resolves_allowed_aliases_and_relative_impo
 
 def test_terminal_tool_import_checker_retains_original_symbol_form_and_line() -> None:
     references = _resolved_static_imports(
-        "\nfrom myclaw.agent.tools.mcp_runtime import MCPRuntimeManager as Manager",
-        package=("myclaw", "terminal"),
+        "\nfrom omni.agent.tools.mcp_runtime import MCPRuntimeManager as Manager",
+        package=("omni", "terminal"),
     )
 
     assert references == (
-        _StaticImport("myclaw.agent.tools.mcp_runtime", "MCPRuntimeManager", "from", 2),
+        _StaticImport("omni.agent.tools.mcp_runtime", "MCPRuntimeManager", "from", 2),
     )
 
 
 @pytest.mark.parametrize(
     "path",
     [
-        Path("myclaw/terminal/conversation.py"),
-        Path("myclaw/terminal/process_entry.py"),
-        Path("myclaw/terminal/internal/loader.py"),
+        Path("omni/terminal/conversation.py"),
+        Path("omni/terminal/process_entry.py"),
+        Path("omni/terminal/internal/loader.py"),
     ],
 )
 def test_terminal_tool_import_checker_rejects_cli_symbols_outside_cli(path: Path) -> None:
     violations = _terminal_tool_import_violations(
-        {path: "from myclaw.agent.tools.mcp_runtime import MCPRuntimeManager"},
+        {path: "from omni.agent.tools.mcp_runtime import MCPRuntimeManager"},
         allowed_symbols={_CLI_PATH: _CLI_TOOL_IMPORTS},
     )
 
@@ -643,17 +643,17 @@ def test_terminal_tool_import_checker_rejects_cli_symbols_outside_cli(path: Path
 @pytest.mark.parametrize(
     "source",
     [
-        "from myclaw.agent.tools.tool_gateway import ToolGateway",
-        "from myclaw.agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES, ToolGateway",
-        "from myclaw.agent.tools.mcp_runtime import allocate_mcp_tool_name",
-        "import myclaw.agent.tools.mcp_runtime",
-        "import myclaw.agent.tools.mcp_runtime as runtime",
-        "from myclaw.agent.tools import mcp_runtime",
-        "from myclaw.agent.tools.mcp_runtime import *",
-        "from myclaw.agent.tools.tool_gateway import ToolGateway as Gateway",
+        "from omni.agent.tools.tool_gateway import ToolGateway",
+        "from omni.agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES, ToolGateway",
+        "from omni.agent.tools.mcp_runtime import allocate_mcp_tool_name",
+        "import omni.agent.tools.mcp_runtime",
+        "import omni.agent.tools.mcp_runtime as runtime",
+        "from omni.agent.tools import mcp_runtime",
+        "from omni.agent.tools.mcp_runtime import *",
+        "from omni.agent.tools.tool_gateway import ToolGateway as Gateway",
         "from ..agent.tools.tool_gateway import ToolGateway",
-        "def load():\n    from myclaw.agent.tools.mcp_runtime import allocate_mcp_tool_name",
-        "if TYPE_CHECKING:\n    from myclaw.agent.tools.mcp_runtime import allocate_mcp_tool_name",
+        "def load():\n    from omni.agent.tools.mcp_runtime import allocate_mcp_tool_name",
+        "if TYPE_CHECKING:\n    from omni.agent.tools.mcp_runtime import allocate_mcp_tool_name",
     ],
 )
 def test_terminal_tool_import_checker_rejects_unapproved_tool_imports(source: str) -> None:
@@ -669,7 +669,7 @@ def test_terminal_tool_import_checker_rejects_unapproved_tool_imports(source: st
     "source",
     [
         "import asyncio",
-        "from myclaw.management.service import ManagementViewService",
+        "from omni.management.service import ManagementViewService",
         "from .conversation import TerminalConversationApp",
     ],
 )
@@ -689,7 +689,7 @@ def test_retired_mcp_runtime_export_is_absent() -> None:
         [
             sys.executable,
             "-c",
-            "import importlib.util; print(importlib.util.find_spec('myclaw.mcp_runtime'))",
+            "import importlib.util; print(importlib.util.find_spec('omni.mcp_runtime'))",
         ],
         cwd=PROJECT_ROOT,
         check=True,
@@ -703,9 +703,9 @@ def test_retired_mcp_runtime_export_is_absent() -> None:
 @pytest.mark.parametrize(
     "source",
     [
-        "import myclaw.mcp_runtime",
-        "from myclaw.mcp_runtime import MCPRuntimeManager",
-        "from myclaw import mcp_runtime",
+        "import omni.mcp_runtime",
+        "from omni.mcp_runtime import MCPRuntimeManager",
+        "from omni import mcp_runtime",
         "from ..mcp_runtime import MCPRuntimeManager",
         "from .. import mcp_runtime",
     ],
@@ -755,9 +755,9 @@ def test_mcp_keyword_module_does_not_import_private_configuration_implementation
         reference
         for reference in _resolved_static_imports(
             source,
-            package=("myclaw", "agent", "tools"),
+            package=("omni", "agent", "tools"),
         )
-        if reference.source_module == "myclaw.config.config"
+        if reference.source_module == "omni.config.config"
         and reference.symbol is not None
         and reference.symbol.startswith("_")
     ]
@@ -768,9 +768,9 @@ def test_mcp_keyword_module_does_not_import_private_configuration_implementation
 def test_context_builder_does_not_import_model_request_runtime_boundaries() -> None:
     path = PACKAGE_ROOT / "agent" / "context" / "builder.py"
     forbidden_prefixes = (
-        "myclaw.provider",
-        "myclaw.router",
-        "myclaw.agent.tools",
+        "omni.provider",
+        "omni.router",
+        "omni.agent.tools",
     )
     violations = [
         f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
@@ -1032,7 +1032,7 @@ def test_runner_summary_and_dream_keep_context_builder_out_of_their_boundaries()
         f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
         for path in paths
         for module, line in _imports(path)
-        if module == "myclaw.agent.context.builder"
+        if module == "omni.agent.context.builder"
     ]
     assert violations == []
 
@@ -1042,7 +1042,7 @@ def test_agent_modules_do_not_depend_on_terminal_presentation() -> None:
         f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
         for path in _python_files(PACKAGE_ROOT / "agent")
         for module, line in _imports(path)
-        if module == "myclaw.terminal" or module.startswith("myclaw.terminal.")
+        if module == "omni.terminal" or module.startswith("omni.terminal.")
     ]
 
     assert violations == []
@@ -1065,7 +1065,7 @@ def test_service_runtime_exclusively_owns_the_confirmation_coordinator() -> None
         ):
             constructor_sites.append(path.relative_to(PROJECT_ROOT))
 
-    assert set(constructor_sites) == {Path("myclaw/service/runtime.py")}
+    assert set(constructor_sites) == {Path("omni/service/runtime.py")}
 
     loop_path = PACKAGE_ROOT / "agent" / "loop.py"
     terminal_path = PACKAGE_ROOT / "terminal" / "conversation.py"
@@ -1151,7 +1151,7 @@ def test_package_initializers_do_not_create_aggregate_import_entries() -> None:
             violations.extend(
                 f"{path.relative_to(PROJECT_ROOT)}:{node.lineno} imports {module}"
                 for module in modules
-                if module == "myclaw" or module.startswith("myclaw.")
+                if module == "omni" or module.startswith("omni.")
             )
 
     assert violations == []
@@ -1159,8 +1159,8 @@ def test_package_initializers_do_not_create_aggregate_import_entries() -> None:
 
 def test_host_checks_are_confined_to_runtime_entry_and_exec_resolution() -> None:
     expected = {
-        Path("myclaw/utils/platform.py"),
-        Path("myclaw/agent/tools/core/exec_host.py"),
+        Path("omni/utils/platform.py"),
+        Path("omni/agent/tools/core/exec_host.py"),
     }
     actual = {
         path.relative_to(PROJECT_ROOT)
@@ -1179,16 +1179,16 @@ def test_host_checks_are_confined_to_runtime_entry_and_exec_resolution() -> None
 
 def test_superseded_tool_modules_are_absent() -> None:
     removed = (
-        Path("myclaw/agent/tools/files/__init__.py"),
-        Path("myclaw/agent/tools/files/file_tools.py"),
-        Path("myclaw/agent/tools/security.py"),
-        Path("myclaw/agent/tools/shell/__init__.py"),
-        Path("myclaw/agent/tools/shell/owned_process.py"),
-        Path("myclaw/agent/tools/shell/shell_tool.py"),
-        Path("myclaw/agent/tools/web/__init__.py"),
-        Path("myclaw/agent/tools/web/web_fetch.py"),
-        Path("myclaw/agent/tools/web/web_search.py"),
-        Path("myclaw/agent/tools/tool_artifacts.py"),
+        Path("omni/agent/tools/files/__init__.py"),
+        Path("omni/agent/tools/files/file_tools.py"),
+        Path("omni/agent/tools/security.py"),
+        Path("omni/agent/tools/shell/__init__.py"),
+        Path("omni/agent/tools/shell/owned_process.py"),
+        Path("omni/agent/tools/shell/shell_tool.py"),
+        Path("omni/agent/tools/web/__init__.py"),
+        Path("omni/agent/tools/web/web_fetch.py"),
+        Path("omni/agent/tools/web/web_search.py"),
+        Path("omni/agent/tools/tool_artifacts.py"),
     )
 
     assert all(not (PROJECT_ROOT / path).exists() for path in removed)
@@ -1207,8 +1207,8 @@ def test_file_tools_and_runner_do_not_import_backup_store() -> None:
             package=tuple(path.relative_to(PROJECT_ROOT).parent.parts),
         )
         for module in _imported_module_names(reference)
-        if module == "myclaw.agent.session.backup_store"
-        or module.startswith("myclaw.agent.session.backup_store.")
+        if module == "omni.agent.session.backup_store"
+        or module.startswith("omni.agent.session.backup_store.")
     ]
 
     assert violations == []

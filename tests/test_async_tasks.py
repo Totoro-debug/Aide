@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from myclaw.utils.async_tasks import await_task_preserving_cancellation
+from omni.utils.async_tasks import await_task_preserving_cancellation
 
 
 @pytest.mark.asyncio

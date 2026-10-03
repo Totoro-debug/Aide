@@ -14,13 +14,13 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.schedule.model import JobSchedule, ScheduleJob
-from myclaw.schedule.store import WorkspaceScheduleStore
-from myclaw.service.client import ServiceClient
-from myclaw.service.discovery import DEFAULT_SERVICE_PORT, discovery_path, read_discovery
-from myclaw.service.projects import ProjectCatalog
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.schedule.model import JobSchedule, ScheduleJob
+from omni.schedule.store import WorkspaceScheduleStore
+from omni.service.client import ServiceClient
+from omni.service.discovery import DEFAULT_SERVICE_PORT, discovery_path, read_discovery
+from omni.service.projects import ProjectCatalog
 from web.scripts.e2e_service import _start_fixture_provider
 
 StartupState = Literal["missing", "invalid", "malformed"]
@@ -33,7 +33,7 @@ async def _launch_web(root: Path, workspace: Path) -> str:
         listener.bind(("127.0.0.1", DEFAULT_SERVICE_PORT))
     source = (
         "import sys, webbrowser; "
-        "from myclaw.terminal.process_entry import run; "
+        "from omni.terminal.process_entry import run; "
         "webbrowser.open_new_tab = lambda _url: False; "
         "sys.argv = ['myclaw', 'web']; run()"
     )
@@ -155,7 +155,7 @@ def _parse_args() -> argparse.Namespace:
 
 async def _run(state: StartupState, root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
-    home = AgentHome(root / ".myclaw")
+    home = AgentHome(root / ".omni")
     home.initialize()
     cli_workspace = root / "cli-workspace"
     cli_workspace.mkdir()

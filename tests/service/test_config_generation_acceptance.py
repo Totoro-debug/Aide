@@ -14,16 +14,16 @@ from uuid import uuid4
 import aiohttp
 import pytest
 
-import myclaw.service.runtime as service_runtime
-from myclaw.agent.confirmation import ConfirmationDecision, ConfirmationEnvelope
-from myclaw.agent.session.backup_store import FileBackupStore
-from myclaw.agent.session.restore import RestoreManager
-from myclaw.agent.session.session import Session
-from myclaw.agent.tools.tool_gateway import ModelToolCall
-from myclaw.agent.workspace_runtime import WorkspaceRuntime
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.config import ConfigLoader
-from myclaw.provider.models import (
+import omni.service.runtime as service_runtime
+from omni.agent.confirmation import ConfirmationDecision, ConfirmationEnvelope
+from omni.agent.session.backup_store import FileBackupStore
+from omni.agent.session.restore import RestoreManager
+from omni.agent.session.session import Session
+from omni.agent.tools.tool_gateway import ModelToolCall
+from omni.agent.workspace_runtime import WorkspaceRuntime
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.config import ConfigLoader
+from omni.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelMessages,
@@ -31,10 +31,10 @@ from myclaw.provider.models import (
     ModelStreamEvent,
     ModelUsage,
 )
-from myclaw.schedule.model import JobSchedule, ScheduleJob
-from myclaw.service.client import ServiceClient
-from myclaw.service.errors import ServiceError
-from myclaw.service.runtime import LocalService
+from omni.schedule.model import JobSchedule, ScheduleJob
+from omni.service.client import ServiceClient
+from omni.service.errors import ServiceError
+from omni.service.runtime import LocalService
 from tests.service.test_restore_management import _restore_request
 from tests.service.test_service_concurrency import (
     _client_output,

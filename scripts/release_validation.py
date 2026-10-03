@@ -24,17 +24,17 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, Final, Literal, cast
 
-from myclaw.agent.permission import PermissionSnapshot
-from myclaw.agent.tools.core.exec import ExecTool
-from myclaw.agent.tools.core.exec_host import (
+from omni.agent.permission import PermissionSnapshot
+from omni.agent.tools.core.exec import ExecTool
+from omni.agent.tools.core.exec_host import (
     PowerShellExecHost,
     ResolvedExecShell,
     resolve_exec_shell,
 )
-from myclaw.agent.tools.core.exec_policy import ExecAssessment
-from myclaw.agent.tools.permission import PermissionContext
-from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolGateway
-from myclaw.utils.platform import WINDOWS_REQUIRED_ERROR, is_windows_host
+from omni.agent.tools.core.exec_policy import ExecAssessment
+from omni.agent.tools.permission import PermissionContext
+from omni.agent.tools.tool_gateway import ModelToolCall, ToolGateway
+from omni.utils.platform import WINDOWS_REQUIRED_ERROR, is_windows_host
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 COMMAND_TIMEOUT_SECONDS: Final[int] = 1_800
@@ -362,7 +362,7 @@ def _source_identity() -> dict[str, object]:
         identity["working_tree"] = _working_tree_identity()
     except (OSError, subprocess.SubprocessError) as error:
         identity["working_tree"] = {"error": _exception_payload(error)}
-    manifest = ROOT / "myclaw" / "web_assets" / "manifest.json"
+    manifest = ROOT / "omni" / "web_assets" / "manifest.json"
     if manifest.is_file():
         identity["web_asset_manifest"] = {
             "path": str(manifest),
@@ -386,7 +386,7 @@ def _working_tree_identity() -> dict[str, object]:
         for relative in result.stdout.decode("utf-8").split("\0"):
             if relative and (
                 selector == "--cached"
-                or relative.split("/", 1)[0] in {"myclaw", "scripts", "tests", "web", ".github"}
+                or relative.split("/", 1)[0] in {"omni", "scripts", "tests", "web", ".github"}
             ):
                 paths.add(relative)
     records: list[dict[str, object]] = []
@@ -1842,9 +1842,9 @@ def _run_quality(host_results: Sequence[Mapping[str, object]] | None = None) -> 
                 path_evidence=path_evidence,
                 passed_nodes=full.passed_nodes,
             )
-            _run_command([sys.executable, "-m", "ruff", "check", "myclaw", "tests", "scripts"])
+            _run_command([sys.executable, "-m", "ruff", "check", "omni", "tests", "scripts"])
             _run_command(["git", "diff", "--check"])
-            _run_command([sys.executable, "-m", "mypy", "myclaw", "tests", "scripts"])
+            _run_command([sys.executable, "-m", "mypy", "omni", "tests", "scripts"])
             build_dir = report_dir / "build"
             build_dir.mkdir()
             _run_command(
@@ -1910,14 +1910,14 @@ from importlib.resources import files
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import myclaw
+import omni
 import tomlkit
 
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigError, ConfigLoader
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigError, ConfigLoader
 
 
-module_path = Path(myclaw.__file__).resolve()
+module_path = Path(omni.__file__).resolve()
 environment_prefix = Path(sys.prefix).resolve()
 source_root = Path(os.environ["MYCLAW_SOURCE_ROOT"]).resolve()
 assert module_path.is_relative_to(environment_prefix)
@@ -1925,7 +1925,7 @@ assert not module_path.is_relative_to(source_root)
 assert shutil.which("node") is None
 assert shutil.which("npm") is None
 
-asset_root = files("myclaw.web_assets")
+asset_root = files("omni.web_assets")
 manifest = json.loads((asset_root / "manifest.json").read_text(encoding="utf-8"))
 assert manifest["schema_version"] == 1
 assert manifest["entry"] == "index.html"
@@ -2019,7 +2019,7 @@ def _artifact_environment() -> dict[str, str]:
 
 
 def _source_web_asset_bytes() -> dict[str, bytes]:
-    asset_root = ROOT / "myclaw" / "web_assets"
+    asset_root = ROOT / "omni" / "web_assets"
     validator_module = cast(
         Any,
         import_module("scripts.validate_web_assets" if __package__ else "validate_web_assets"),
@@ -2034,7 +2034,7 @@ def _source_web_asset_bytes() -> dict[str, bytes]:
 
 
 def _assert_wheel_web_assets(wheel: Path, expected: Mapping[str, bytes]) -> None:
-    prefix = "myclaw/web_assets/"
+    prefix = "omni/web_assets/"
     with zipfile.ZipFile(wheel) as archive:
         names = {name.replace("\\", "/") for name in archive.namelist()}
         if any("/web/" in name or "node_modules/" in name for name in names):
@@ -2052,7 +2052,7 @@ def _assert_wheel_web_assets(wheel: Path, expected: Mapping[str, bytes]) -> None
 
 
 def _assert_sdist_web_assets(sdist: Path, expected: Mapping[str, bytes]) -> None:
-    marker = "/myclaw/web_assets/"
+    marker = "/omni/web_assets/"
     with tarfile.open(sdist, "r:gz") as archive:
         members = {member.name.replace("\\", "/"): member for member in archive.getmembers()}
         if any("/web/" in name or "node_modules/" in name for name in members):

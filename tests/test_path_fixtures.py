@@ -7,7 +7,7 @@ from tests.fixtures.paths import create_workspace
 def test_agent_home_fixture_redirects_the_fixed_home_without_precreating_it(
     agent_home: Path,
 ) -> None:
-    assert agent_home == Path.home() / ".myclaw"
+    assert agent_home == Path.home() / ".omni"
     assert agent_home.is_absolute()
     assert not agent_home.exists()
 

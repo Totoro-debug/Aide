@@ -11,11 +11,11 @@ import aiohttp
 import pytest
 from aiohttp.test_utils import BaseTestServer, TestServer
 
-from myclaw.config.config import ConfigLoader
-from myclaw.provider.models import ModelResponse
-from myclaw.service.discovery import create_credential, read_credential
-from myclaw.service.runtime import ClientState, LocalService, SessionClaim, WorkspaceServiceRuntime
-from myclaw.service.transport import create_app
+from omni.config.config import ConfigLoader
+from omni.provider.models import ModelResponse
+from omni.service.discovery import create_credential, read_credential
+from omni.service.runtime import ClientState, LocalService, SessionClaim, WorkspaceServiceRuntime
+from omni.service.transport import create_app
 from tests.memory.test_dream import _response
 from tests.service.test_protocol_contract import _validator
 from tests.service.test_runtime_management import ManagementCase

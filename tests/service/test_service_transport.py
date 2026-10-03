@@ -19,17 +19,17 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from yarl import URL
 
-import myclaw.service.transport as service_transport
-import myclaw.terminal.cli as cli
-from myclaw.agent.session.restore import RestoreMode
-from myclaw.agent.session.session import Session
-from myclaw.agent.workspace_runtime import WorkspaceRuntime
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader
-from myclaw.management.commands import ManagementCommandDispatcher
-from myclaw.schedule.model import JobSchedule, ScheduleJob
-from myclaw.service.client import (
+import omni.service.transport as service_transport
+import omni.terminal.cli as cli
+from omni.agent.session.restore import RestoreMode
+from omni.agent.session.session import Session
+from omni.agent.workspace_runtime import WorkspaceRuntime
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader
+from omni.management.commands import ManagementCommandDispatcher
+from omni.schedule.model import JobSchedule, ScheduleJob
+from omni.service.client import (
     RemoteConfirmationCoordinator,
     RemoteControl,
     RemoteManagementCommandDispatcher,
@@ -37,7 +37,7 @@ from myclaw.service.client import (
     ServiceClient,
     ServiceStartupError,
 )
-from myclaw.service.discovery import (
+from omni.service.discovery import (
     ServiceDiscovery,
     create_credential,
     identity_proof,
@@ -45,11 +45,11 @@ from myclaw.service.discovery import (
     read_discovery,
     write_discovery,
 )
-from myclaw.service.errors import ServiceError
-from myclaw.service.projects import ProjectCatalog
-from myclaw.service.runtime import LocalService
-from myclaw.service.transport import _project_job_summary, create_app
-from myclaw.terminal.conversation import TerminalConversationApp, _ConversationInput
+from omni.service.errors import ServiceError
+from omni.service.projects import ProjectCatalog
+from omni.service.runtime import LocalService
+from omni.service.transport import _project_job_summary, create_app
+from omni.terminal.conversation import TerminalConversationApp, _ConversationInput
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
 
@@ -1326,8 +1326,8 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from myclaw.config.agent_home import AgentHome
-from myclaw.service.client import ServiceClient
+from omni.config.agent_home import AgentHome
+from omni.service.client import ServiceClient
 
 async def main():
     client = await ServiceClient.connect_or_start(

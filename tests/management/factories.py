@@ -4,17 +4,17 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from myclaw.agent.memory.dream import DreamResult
-from myclaw.agent.memory.manager import MemoryManager
-from myclaw.agent.permission import RuntimePermissionControl
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.management.service import (
+from omni.agent.memory.dream import DreamResult
+from omni.agent.memory.manager import MemoryManager
+from omni.agent.permission import RuntimePermissionControl
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.management.service import (
     ManagementViewService,
     RuntimeStatusInput,
 )
-from myclaw.provider.models import ReasoningEffort
-from myclaw.skills.catalog import SkillMetadata
+from omni.provider.models import ReasoningEffort
+from omni.skills.catalog import SkillMetadata
 
 
 class _DefaultLoop:

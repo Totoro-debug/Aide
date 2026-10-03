@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from myclaw.management.service import RuntimeStatus, SessionListingEntry
+from omni.management.service import RuntimeStatus, SessionListingEntry
 
 LOCAL_OFFSET = timezone(timedelta(hours=8))
 

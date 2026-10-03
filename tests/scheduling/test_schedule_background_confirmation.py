@@ -8,15 +8,15 @@ from uuid import UUID
 
 import pytest
 
-from myclaw.agent.confirmation import (
+from omni.agent.confirmation import (
     BackgroundConfirmationOwner,
     ConfirmationAborted,
     ConfirmationEnvelope,
 )
-from myclaw.agent.permission import PermissionSnapshot, ToolPermissionLevel
-from myclaw.agent.session.session import Session
-from myclaw.agent.tools.core.exec_policy import ExecAssessment, ResolvedExecShell
-from myclaw.agent.tools.permission import (
+from omni.agent.permission import PermissionSnapshot, ToolPermissionLevel
+from omni.agent.session.session import Session
+from omni.agent.tools.core.exec_policy import ExecAssessment, ResolvedExecShell
+from omni.agent.tools.permission import (
     FileAccess,
     MCPToolIdentity,
     NetworkAssessment,
@@ -25,11 +25,11 @@ from myclaw.agent.tools.permission import (
     ToolInvocationFacts,
     ToolPermissionPolicy,
 )
-from myclaw.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRequest
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.schedule.model import JobSchedule, ScheduleJob
-from myclaw.schedule.service import ScheduleOccurrence, ScheduleService
-from myclaw.schedule.store import ScheduleStoreFaultedError
+from omni.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRequest
+from omni.agent.workspace_state import WorkspaceState
+from omni.schedule.model import JobSchedule, ScheduleJob
+from omni.schedule.service import ScheduleOccurrence, ScheduleService
+from omni.schedule.store import ScheduleStoreFaultedError
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
 

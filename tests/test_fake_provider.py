@@ -4,8 +4,8 @@ from typing import Any
 
 import pytest
 
-from myclaw.agent.tools.tool_gateway import ModelToolCall
-from myclaw.provider.models import (
+from omni.agent.tools.tool_gateway import ModelToolCall
+from omni.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelResponse,

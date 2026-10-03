@@ -1,9 +1,9 @@
 import pytest
 
-from myclaw.config.config import ProviderConfiguration
-from myclaw.provider.anthropic import AnthropicProvider
-from myclaw.provider.factory import create_provider
-from myclaw.provider.openai_compatible import OpenAICompatibleProvider
+from omni.config.config import ProviderConfiguration
+from omni.provider.anthropic import AnthropicProvider
+from omni.provider.factory import create_provider
+from omni.provider.openai_compatible import OpenAICompatibleProvider
 
 
 @pytest.mark.asyncio

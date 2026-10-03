@@ -9,12 +9,12 @@ from typing import Any, Literal
 import pytest
 from markdown_it import MarkdownIt
 
-from myclaw.agent.memory.dream import Dream, DreamResult
-from myclaw.agent.memory.manager import MemoryManager
-from myclaw.agent.tools.tool_gateway import ModelToolCall
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import (
+from omni.agent.memory.dream import Dream, DreamResult
+from omni.agent.memory.manager import MemoryManager
+from omni.agent.tools.tool_gateway import ModelToolCall
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.config.config import (
     ConfigLoader,
     MemoryConfiguration,
     ModelsConfiguration,
@@ -23,16 +23,16 @@ from myclaw.config.config import (
     RuntimeConfiguration,
     UserConfiguration,
 )
-from myclaw.errors import ErrorInfo
-from myclaw.provider.errors import ModelCallError
-from myclaw.provider.model_router import ModelAttemptGuard, ModelRouter, ModelRouteStatus
-from myclaw.provider.models import (
+from omni.errors import ErrorInfo
+from omni.provider.errors import ModelCallError
+from omni.provider.model_router import ModelAttemptGuard, ModelRouter, ModelRouteStatus
+from omni.provider.models import (
     AssistantModelMessage,
     ModelMessages,
     ModelResponse,
     ModelUsage,
 )
-from myclaw.templates import render_template
+from omni.templates import render_template
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import FakeClock, ScriptedFakeProvider, ScriptedFakeRouter
 from tests.fixtures.diagnostic_capture import capture_diagnostics
@@ -55,7 +55,7 @@ def _manager(agent_home: Path) -> MemoryManager:
     workspace = agent_home.parent / "dream-workspace"
     workspace.mkdir()
     state = WorkspaceState(workspace)
-    state.initialize(agent_home_root=Path.home() / ".myclaw")
+    state.initialize(agent_home_root=Path.home() / ".omni")
     return MemoryManager(state)
 
 
@@ -213,7 +213,7 @@ async def test_dream_uses_the_memory_route_with_static_default_fallback(
     home = AgentHome(agent_home)
     home.initialize()
     state = WorkspaceState(workspace)
-    state.initialize(agent_home_root=Path.home() / ".myclaw")
+    state.initialize(agent_home_root=Path.home() / ".omni")
     (agent_home / "config.toml").write_text(VALID_CONFIG, encoding="utf-8")
     configuration = ConfigLoader(home).load()
     manager = MemoryManager(state)

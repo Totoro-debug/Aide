@@ -7,8 +7,8 @@ from typing import Any, Self, cast
 import pytest
 from loguru import logger
 
-from myclaw.management.commands import MANAGEMENT_COMMANDS
-from myclaw.skills.catalog import LoadedSkill, SkillLoader
+from omni.management.commands import MANAGEMENT_COMMANDS
+from omni.skills.catalog import LoadedSkill, SkillLoader
 
 
 def _loader(

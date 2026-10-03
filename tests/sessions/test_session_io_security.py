@@ -6,10 +6,10 @@ from uuid import UUID
 
 import pytest
 
-from myclaw.agent.session.session import Session
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.management.service import ManagementError
+from omni.agent.session.session import Session
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.management.service import ManagementError
 from tests.fixtures.session import seed_session_state
 from tests.management.factories import management_service
 

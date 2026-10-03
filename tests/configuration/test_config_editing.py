@@ -6,8 +6,8 @@ from typing import cast
 
 import pytest
 
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigError, ConfigLoader, ConfigRevisionConflict
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigError, ConfigLoader, ConfigRevisionConflict
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
 FULL_EDITABLE_CONFIG = """# preserve this comment

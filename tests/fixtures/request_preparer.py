@@ -6,7 +6,7 @@ from collections.abc import Callable, Sequence
 from copy import deepcopy
 from typing import Any
 
-from myclaw.provider.models import ModelContinuation, ModelResponse
+from omni.provider.models import ModelContinuation, ModelResponse
 
 
 class DetachedRequestPreparer:

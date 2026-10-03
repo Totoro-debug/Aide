@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.agent.session.session import Session
-from myclaw.agent.workspace_state import WorkspaceState
+from omni.agent.session.session import Session
+from omni.agent.workspace_state import WorkspaceState
 
 CREATED_AT = datetime(2026, 10, 1, tzinfo=UTC)
 RENAMED_AT = CREATED_AT + timedelta(seconds=10)

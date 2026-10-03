@@ -20,16 +20,16 @@ from uuid import uuid4
 
 import aiohttp
 
-import myclaw
-import myclaw.terminal.cli as cli
-from myclaw.agent.message_bus import InboundMessage
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.schedule.store import WorkspaceScheduleStore
-from myclaw.service.client import ServiceClient
-from myclaw.service.discovery import read_credential, read_discovery
-from myclaw.service.errors import ServiceError
-from myclaw.terminal.conversation import TerminalConversationApp
+import omni
+import omni.terminal.cli as cli
+from omni.agent.message_bus import InboundMessage
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.schedule.store import WorkspaceScheduleStore
+from omni.service.client import ServiceClient
+from omni.service.discovery import read_credential, read_discovery
+from omni.service.errors import ServiceError
+from omni.terminal.conversation import TerminalConversationApp
 
 
 class _ProcessExitWitness:
@@ -234,7 +234,7 @@ async def _run_competition_scenario(
     await client.switch_session(session_id)
     discovery = read_discovery(AgentHome.production())
     assert discovery is not None
-    session_path = Path.cwd() / ".myclaw" / "sessions" / f"{session_id}.jsonl"
+    session_path = Path.cwd() / ".omni" / "sessions" / f"{session_id}.jsonl"
     ready_path.write_text(
         json.dumps(
             {
@@ -367,7 +367,7 @@ async def _run_last_client_grace_scenario(
         assert observed_job["state"]["last_status"] is None, observed_job
         assert datetime.now(UTC) > due_time
         assert not (
-            Path.cwd() / ".myclaw" / "schedule-sessions" / f"schedule_{job_id}.jsonl"
+            Path.cwd() / ".omni" / "schedule-sessions" / f"schedule_{job_id}.jsonl"
         ).exists()
 
         reconnected = await ServiceClient.connect_or_start(
@@ -388,7 +388,7 @@ async def _run_last_client_grace_scenario(
             assert status_after_reconnect["admitted"] is True, schedule_after_reconnect
             expiry_prompt = "installed expiry barrier"
             expiry_session_path = (
-                Path.cwd() / ".myclaw" / "sessions" / f"{reconnected.session_id}.jsonl"
+                Path.cwd() / ".omni" / "sessions" / f"{reconnected.session_id}.jsonl"
             )
             await reconnected.bus.put_inbound(InboundMessage(expiry_prompt))
             await _wait_for_observation(
@@ -591,7 +591,7 @@ async def _run_joint_scenario(
         notice = "Project registration was removed; its work has stopped."
         assert notice in notices, notices
         await _wait_for_cancelled_session(
-            Path.cwd() / ".myclaw" / "sessions" / f"{initial_session_id}.jsonl", removal_prompt
+            Path.cwd() / ".omni" / "sessions" / f"{initial_session_id}.jsonl", removal_prompt
         )
         removal_done_path.write_text(
             json.dumps(
@@ -627,7 +627,7 @@ async def _run_joint_scenario(
         new_session_id = new_draft.get("session_id")
         assert isinstance(new_session_id, str), new_draft
         await client.switch_session(new_session_id)
-        settings_session_path = Path.cwd() / ".myclaw" / "sessions" / f"{new_session_id}.jsonl"
+        settings_session_path = Path.cwd() / ".omni" / "sessions" / f"{new_session_id}.jsonl"
         settings_ready_path.write_text(
             json.dumps(
                 {
@@ -808,7 +808,7 @@ async def headless_terminal(self: Any, **_kwargs: object) -> None:
                 await _wait_for_observation(
                     Path(os.environ["MYCLAW_PROVIDER_OBSERVATION_PATH"]), prompt
                 )
-                session_path = Path.cwd() / ".myclaw" / "sessions" / f"{client.session_id}.jsonl"
+                session_path = Path.cwd() / ".omni" / "sessions" / f"{client.session_id}.jsonl"
                 ready_path.write_text(
                     json.dumps(
                         {
@@ -855,7 +855,7 @@ async def headless_terminal(self: Any, **_kwargs: object) -> None:
         self.exit()
 
 
-assert Path(myclaw.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+assert Path(omni.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
 assert shutil.which("node") is None and shutil.which("npm") is None
 scenario = os.environ.get("MYCLAW_CLI_SCENARIO")
 before = read_discovery(AgentHome.production())

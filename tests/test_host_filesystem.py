@@ -10,7 +10,7 @@ from typing import cast
 
 import pytest
 
-from myclaw.utils.host_filesystem import (
+from omni.utils.host_filesystem import (
     HOST_FILESYSTEM,
     WINDOWS_HOST_FILESYSTEM,
     host_path_is_within,
@@ -20,7 +20,7 @@ _LOCK_PROCESS_SCRIPT = """
 import sys
 from pathlib import Path
 
-from myclaw.utils.host_filesystem import HOST_FILESYSTEM
+from omni.utils.host_filesystem import HOST_FILESYSTEM
 
 print("started", flush=True)
 try:

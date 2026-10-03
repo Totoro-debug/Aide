@@ -4,7 +4,7 @@ from typing import Any, cast
 
 import pytest
 
-from myclaw.agent.tools.schema import Schema, SchemaError
+from omni.agent.tools.schema import Schema, SchemaError
 
 
 def test_schema_builders_export_restricted_detached_json_schema() -> None:

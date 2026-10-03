@@ -15,15 +15,15 @@ from uuid import uuid4
 
 from aiohttp import web
 
-from myclaw.agent.session.backup_store import FileBackupStore
-from myclaw.agent.session.session import Session
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.schedule.model import JobSchedule, ScheduleJob
-from myclaw.schedule.store import WorkspaceScheduleStore
-from myclaw.service.client import ServiceClient
-from myclaw.service.discovery import discovery_path
-from myclaw.service.errors import ServiceError
+from omni.agent.session.backup_store import FileBackupStore
+from omni.agent.session.session import Session
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.schedule.model import JobSchedule, ScheduleJob
+from omni.schedule.store import WorkspaceScheduleStore
+from omni.service.client import ServiceClient
+from omni.service.discovery import discovery_path
+from omni.service.errors import ServiceError
 
 CONFIRMATION_PATH: str | None = None
 SETTINGS_ENTERED = asyncio.Event()
@@ -399,7 +399,7 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
             (
                 "call-rejected",
                 "write_file",
-                {"path": ".myclaw/restore/protected.txt", "content": "must not write"},
+                {"path": ".omni/restore/protected.txt", "content": "must not write"},
             ),
             (
                 "call-cancelled",
@@ -744,7 +744,7 @@ async def _run_e2e(provider_base_url: str) -> None:
         )
         mcp_command = Path(sys.executable).as_posix()
         mcp_args = [mcp_wire_path.as_posix(), mcp_v1_path.as_posix()]
-        home = AgentHome(path / ".myclaw")
+        home = AgentHome(path / ".omni")
         home.initialize()
         (home.path / "config.toml").write_text(
             _config(

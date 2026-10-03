@@ -64,7 +64,7 @@ followed to a different target during replay.
 Restore records are Workspace State under one Session-specific directory:
 
 ```text
-.myclaw/restore/<session_id>/
+.omni/restore/<session_id>/
   state.json                  # next operation number, coverage, active branch
   entries/<operation>.json    # run token, canonical target, before/after state
   blobs/<opaque-name>.bin
@@ -187,11 +187,11 @@ MCP operation itself.
 ### Protected restore state
 
 [ADR-0001](0001-file-first-local-persistence.md) permits the fixed File Tools to access Workspace State through normal
-Workspace path resolution. The protected `.myclaw/restore/` subtree is an
+Workspace path resolution. The protected `.omni/restore/` subtree is an
 explicit write-side exception: Built-in File Tools must reject direct writes
 there, so a recorder cannot journal its own journal or corrupt a pending
 transaction. The restore recorder and transaction manager own the internal
-restore records. Other `.myclaw` runtime-owned files remain subject to their
+restore records. Other `.omni` runtime-owned files remain subject to their
 existing rules; a target owned by a live runtime store is restored only when it
 can be safely reloaded, otherwise it is reported as a file failure.
 

@@ -11,25 +11,25 @@ from uuid import uuid4
 
 import pytest
 
-import myclaw.service.runtime as service_runtime
-from myclaw.agent.confirmation import (
+import omni.service.runtime as service_runtime
+from omni.agent.confirmation import (
     BackgroundConfirmationOwner,
     ConfirmationAborted,
     ConfirmationEnvelope,
     ForegroundConfirmationOwner,
 )
-from myclaw.agent.loop import AgentLoop
-from myclaw.agent.session.restore import RestoreManager, RestoreMode
-from myclaw.agent.session.session import Session
-from myclaw.agent.tools.tool_gateway import ConfirmationRequest
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader
-from myclaw.schedule.model import JobSchedule, ScheduleJob
-from myclaw.schedule.service import ScheduleOccurrence, ScheduleService
-from myclaw.schedule.store import WorkspaceScheduleStore
-from myclaw.service.client import RemoteControl, ServiceClient
-from myclaw.service.discovery import (
+from omni.agent.loop import AgentLoop
+from omni.agent.session.restore import RestoreManager, RestoreMode
+from omni.agent.session.session import Session
+from omni.agent.tools.tool_gateway import ConfirmationRequest
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader
+from omni.schedule.model import JobSchedule, ScheduleJob
+from omni.schedule.service import ScheduleOccurrence, ScheduleService
+from omni.schedule.store import WorkspaceScheduleStore
+from omni.service.client import RemoteControl, ServiceClient
+from omni.service.discovery import (
     SERVICE_PROTOCOL_VERSION,
     ServiceDiscovery,
     create_credential,
@@ -38,9 +38,9 @@ from myclaw.service.discovery import (
     startup_lock,
     write_discovery,
 )
-from myclaw.service.errors import ServiceError
-from myclaw.service.projects import ProjectCatalog, ProjectCatalogError
-from myclaw.service.runtime import LocalService, WorkspaceServiceRuntime
+from omni.service.errors import ServiceError
+from omni.service.projects import ProjectCatalog, ProjectCatalogError
+from omni.service.runtime import LocalService, WorkspaceServiceRuntime
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
 from tests.fixtures.project_removal import complete_project_removal, wait_for_project_removal

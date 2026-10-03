@@ -8,14 +8,14 @@ from typing import cast
 
 import pytest
 
-from myclaw.agent.tools.core.web_fetch import (
+from omni.agent.tools.core.web_fetch import (
     HTTPClientBoundary,
     HTTPResponseBoundary,
     WebFetchTool,
 )
-from myclaw.agent.tools.network_safety import DNSResolver
-from myclaw.agent.tools.permission import PermissionContext
-from myclaw.agent.tools.tool_gateway import (
+from omni.agent.tools.network_safety import DNSResolver
+from omni.agent.tools.permission import PermissionContext
+from omni.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ConfirmationRequester,
@@ -643,7 +643,7 @@ async def test_web_fetch_whole_call_timeout_is_bounded(monkeypatch: pytest.Monke
             await release.wait()
             raise AssertionError("unreachable")
 
-    monkeypatch.setattr("myclaw.agent.tools.core.web_fetch.TOTAL_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr("omni.agent.tools.core.web_fetch.TOTAL_TIMEOUT_SECONDS", 0.01)
     resolver = FakeResolver(("93.184.216.34",))
     result = await _gateway(
         resolver=resolver,

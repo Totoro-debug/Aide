@@ -11,12 +11,12 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import BaseTestServer, TestServer
 
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader
-from myclaw.service.discovery import create_credential
-from myclaw.service.errors import ServiceError
-from myclaw.service.runtime import LocalService
-from myclaw.service.transport import create_app
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader
+from omni.service.discovery import create_credential
+from omni.service.errors import ServiceError
+from omni.service.runtime import LocalService
+from omni.service.transport import create_app
 
 REPAIRABLE_CONFIG = b"""[models.providers.old]
 protocol = \"openai-compatible\"
@@ -113,7 +113,7 @@ async def test_missing_configuration_keeps_service_online_but_blocks_runtime(
         projects = await listed.json()
     assert listed.status == 200
     assert projects["projects"][0]["saved_jobs"] == []
-    assert not (project / ".myclaw").exists()
+    assert not (project / ".omni").exists()
 
 
 @pytest.mark.asyncio
@@ -185,7 +185,7 @@ async def test_malformed_repair_backup_failure_leaves_original_bytes_untouched(
         raise OSError("injected backup failure")
 
     monkeypatch.setattr(
-        "myclaw.config.config._create_private_backup",
+        "omni.config.config._create_private_backup",
         fail_backup,
     )
 

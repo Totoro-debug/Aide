@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigError, ConfigLoader
-from myclaw.utils.host_filesystem import HOST_FILESYSTEM
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigError, ConfigLoader
+from omni.utils.host_filesystem import HOST_FILESYSTEM
 
 EXPECTED_DEFAULT_CONFIG = """[runtime]
 max_tool_result_chars = 4096

@@ -19,30 +19,30 @@ from uuid import UUID, uuid4
 import pytest
 from loguru import logger
 
-import myclaw.agent.context.run_context as compactor_module
-import myclaw.agent.loop as loop_module
-from myclaw.agent.blackboard import Blackboard
-from myclaw.agent.context.budget import estimate_request_tokens
-from myclaw.agent.loop import AgentLoop, ConfirmationRequestView, ModelContextOverflowError
-from myclaw.agent.memory.manager import MemoryManager
-from myclaw.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
-from myclaw.agent.permission import PermissionSnapshot, RuntimePermissionControl
-from myclaw.agent.run_errors import CommittableAgentRunError
-from myclaw.agent.runner import AgentRunner, AgentRunnerResult, AgentRunnerRouter
-from myclaw.agent.session.backup_store import FileBackupStore
-from myclaw.agent.session.session import Session
-from myclaw.agent.tools.base import BaseTool
-from myclaw.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
-from myclaw.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
-from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolGateway
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader
-from myclaw.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
-from myclaw.logging.session import session_log as real_session_log
-from myclaw.provider.errors import ModelCallError
-from myclaw.provider.model_router import ModelRouter
-from myclaw.provider.models import (
+import omni.agent.context.run_context as compactor_module
+import omni.agent.loop as loop_module
+from omni.agent.blackboard import Blackboard
+from omni.agent.context.budget import estimate_request_tokens
+from omni.agent.loop import AgentLoop, ConfirmationRequestView, ModelContextOverflowError
+from omni.agent.memory.manager import MemoryManager
+from omni.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
+from omni.agent.permission import PermissionSnapshot, RuntimePermissionControl
+from omni.agent.run_errors import CommittableAgentRunError
+from omni.agent.runner import AgentRunner, AgentRunnerResult, AgentRunnerRouter
+from omni.agent.session.backup_store import FileBackupStore
+from omni.agent.session.session import Session
+from omni.agent.tools.base import BaseTool
+from omni.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
+from omni.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
+from omni.agent.tools.tool_gateway import ModelToolCall, ToolGateway
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader
+from omni.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
+from omni.logging.session import session_log as real_session_log
+from omni.provider.errors import ModelCallError
+from omni.provider.model_router import ModelRouter
+from omni.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,
@@ -52,9 +52,9 @@ from myclaw.provider.models import (
     ReasoningDelta,
     TextDelta,
 )
-from myclaw.schedule.model import ScheduleJob
-from myclaw.schedule.service import ScheduleService
-from myclaw.skills.catalog import (
+from omni.schedule.model import ScheduleJob
+from omni.schedule.service import ScheduleService
+from omni.skills.catalog import (
     LoadedSkill,
     SkillLoader,
     SkillMetadata,
@@ -1902,7 +1902,7 @@ def test_skill_budget_uses_public_status_projection_and_complete_tools(
     empty_candidate: bool,
     over_budget: bool,
 ) -> None:
-    monkeypatch.setattr("myclaw.agent.context.builder.datetime", _FrozenDateTime)
+    monkeypatch.setattr("omni.agent.context.builder.datetime", _FrozenDateTime)
     instruction = tmp_path / "agent-home" / "skills" / "planner" / "SKILL.md"
     instruction.parent.mkdir(parents=True)
     instruction.write_text(
@@ -3383,7 +3383,7 @@ async def test_slow_title_keeps_one_session_log_owner_across_the_next_fifo_turn(
         finally:
             active_contexts -= 1
 
-    monkeypatch.setattr("myclaw.agent.loop.session_log", observed_session_log)
+    monkeypatch.setattr("omni.agent.loop.session_log", observed_session_log)
     await loop.start()
     try:
         await _bus.put_inbound(InboundMessage("first input"))

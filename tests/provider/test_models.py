@@ -1,8 +1,8 @@
 import pytest
 
-from myclaw.agent.tools.tool_gateway import ModelToolCall
-from myclaw.provider.errors import EmptyModelResponseError
-from myclaw.provider.models import (
+from omni.agent.tools.tool_gateway import ModelToolCall
+from omni.provider.errors import EmptyModelResponseError
+from omni.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,

@@ -10,18 +10,18 @@ from uuid import UUID
 import pytest
 from textual.widgets import Input, OptionList, Static
 
-from myclaw.agent.loop import AgentLoop, ForegroundConversationProjection
-from myclaw.agent.message_bus import MessageBus
-from myclaw.agent.session.session import RestoreAnchor
-from myclaw.management.commands import (
+from omni.agent.loop import AgentLoop, ForegroundConversationProjection
+from omni.agent.message_bus import MessageBus
+from omni.agent.session.session import RestoreAnchor
+from omni.management.commands import (
     ManagementCommandDispatcher,
     ManagementPort,
     format_restore_preview,
 )
-from myclaw.management.service import (
+from omni.management.service import (
     RestoreListingReport,
 )
-from myclaw.terminal.conversation import TerminalConversationApp
+from omni.terminal.conversation import TerminalConversationApp
 
 SESSION_ID = "20260926-120000-000000_550e8400-e29b-41d4-a716-446655440000"
 ANCHOR_TOKEN = UUID("550e8400-e29b-41d4-a716-446655440001")

@@ -11,16 +11,16 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from myclaw.agent.memory.manager import MemoryManager
-from myclaw.agent.session.deletion import begin_session_deletion
-from myclaw.agent.session.restore import RestoreResult
-from myclaw.agent.session.session import Session
-from myclaw.agent.tools.mcp_runtime import MCPStartupReport
-from myclaw.agent.workspace_runtime import WorkspaceRuntime, WorkspaceRuntimeFactories
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.schedule.model import JobSchedule, ScheduleJob
-from myclaw.schedule.service import ScheduleService
+from omni.agent.memory.manager import MemoryManager
+from omni.agent.session.deletion import begin_session_deletion
+from omni.agent.session.restore import RestoreResult
+from omni.agent.session.session import Session
+from omni.agent.tools.mcp_runtime import MCPStartupReport
+from omni.agent.workspace_runtime import WorkspaceRuntime, WorkspaceRuntimeFactories
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.schedule.model import JobSchedule, ScheduleJob
+from omni.schedule.service import ScheduleService
 from tests.fixtures import FakeClock
 
 

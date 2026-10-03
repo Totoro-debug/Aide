@@ -15,19 +15,19 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
-import myclaw.service.runtime as service_runtime
-from myclaw.agent.confirmation import BackgroundConfirmationOwner
-from myclaw.agent.session.session import Session, SessionStoragePartition
-from myclaw.agent.tools.core.read_file import ReadFileTool
-from myclaw.agent.tools.tool_gateway import ModelToolCall
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader
-from myclaw.schedule.store import WorkspaceScheduleStore
-from myclaw.service.client import ServiceClient
-from myclaw.service.discovery import create_credential
-from myclaw.service.runtime import LocalService
-from myclaw.service.transport import create_app
+import omni.service.runtime as service_runtime
+from omni.agent.confirmation import BackgroundConfirmationOwner
+from omni.agent.session.session import Session, SessionStoragePartition
+from omni.agent.tools.core.read_file import ReadFileTool
+from omni.agent.tools.tool_gateway import ModelToolCall
+from omni.agent.workspace_state import WorkspaceState
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader
+from omni.schedule.store import WorkspaceScheduleStore
+from omni.service.client import ServiceClient
+from omni.service.discovery import create_credential
+from omni.service.runtime import LocalService
+from omni.service.transport import create_app
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.scheduling.test_schedule_agent_loop import _response, _ScheduleProvider
 

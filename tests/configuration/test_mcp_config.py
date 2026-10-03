@@ -6,15 +6,15 @@ from typing import Any, cast
 
 import pytest
 
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import (
+from omni.config.agent_home import AgentHome
+from omni.config.config import (
     ConfigError,
     ConfigLoader,
     ConfigurationDiagnostic,
     MCPServerConfiguration,
 )
-from myclaw.management.commands import ManagementCommandDispatcher
-from myclaw.utils.host_filesystem import HOST_FILESYSTEM
+from omni.management.commands import ManagementCommandDispatcher
+from omni.utils.host_filesystem import HOST_FILESYSTEM
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.management.factories import management_service
 

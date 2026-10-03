@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from myclaw.utils.json import strict_json_loads
+from omni.utils.json import strict_json_loads
 
 
 def test_strict_json_loads_preserves_unicode_and_nested_values() -> None:

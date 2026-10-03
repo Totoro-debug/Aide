@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from myclaw.logging.process import configure_process_logging
+from omni.logging.process import configure_process_logging
 
 if TYPE_CHECKING:
     from loguru import Message

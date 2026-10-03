@@ -2,7 +2,7 @@
 
 import asyncio
 
-from myclaw.service.runtime import LocalService
+from omni.service.runtime import LocalService
 
 
 async def wait_for_project_removal(

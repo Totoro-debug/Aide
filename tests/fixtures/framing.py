@@ -9,10 +9,10 @@ from collections.abc import AsyncIterator, Sequence
 from copy import deepcopy
 from typing import Any, cast
 
-from myclaw.agent.runner import AgentRunnerRoute, AgentRunnerRouter
-from myclaw.config.config import UserConfiguration
-from myclaw.provider.model_router import ModelAttemptGuard, ModelRouteStatus
-from myclaw.provider.models import (
+from omni.agent.runner import AgentRunnerRoute, AgentRunnerRouter
+from omni.config.config import UserConfiguration
+from omni.provider.model_router import ModelAttemptGuard, ModelRouteStatus
+from omni.provider.models import (
     ModelContinuation,
     ModelMessages,
     ModelResponse,

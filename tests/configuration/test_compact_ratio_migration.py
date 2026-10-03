@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.config.agent_home import AgentHome
-from myclaw.config.config import ConfigLoader, DefaultValueDiagnostic
+from omni.config.agent_home import AgentHome
+from omni.config.config import ConfigLoader, DefaultValueDiagnostic
 
 VALID_CONFIG = """[runtime]
 max_tool_result_chars = 4096

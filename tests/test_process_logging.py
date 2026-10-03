@@ -8,11 +8,11 @@ from typing import TYPE_CHECKING
 import pytest
 from loguru import logger
 
-from myclaw.agent.tools.mcp import MCPTool
-from myclaw.agent.tools.mcp_runtime import MCPRuntimeManager
-from myclaw.config.config import MCPServerConfiguration
-from myclaw.logging.process import configure_process_logging
-from myclaw.terminal.process_entry import run
+from omni.agent.tools.mcp import MCPTool
+from omni.agent.tools.mcp_runtime import MCPRuntimeManager
+from omni.config.config import MCPServerConfiguration
+from omni.logging.process import configure_process_logging
+from omni.terminal.process_entry import run
 
 if TYPE_CHECKING:
     from loguru import Record

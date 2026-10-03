@@ -7,17 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from myclaw.agent.tools.tool_gateway import ModelToolCall, ToolGateway
-from myclaw.agent.workspace_state import WorkspaceState
-from myclaw.errors import ErrorInfo
-from myclaw.schedule.model import JobSchedule, ScheduleJob
-from myclaw.schedule.service import (
+from omni.agent.tools.tool_gateway import ModelToolCall, ToolGateway
+from omni.agent.workspace_state import WorkspaceState
+from omni.errors import ErrorInfo
+from omni.schedule.model import JobSchedule, ScheduleJob
+from omni.schedule.service import (
     DreamExecutor,
     ScheduleJobExecutionError,
     ScheduleJobExecutor,
     ScheduleService,
 )
-from myclaw.schedule.store import WorkspaceScheduleStore
+from omni.schedule.store import WorkspaceScheduleStore
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
 

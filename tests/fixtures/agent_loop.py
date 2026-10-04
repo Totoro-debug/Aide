@@ -5,6 +5,21 @@ from typing import Any
 
 from omni.agent.loop import AgentRunExecutor
 from omni.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
+from omni.config.agent_home import AgentHome
+from omni.config.config import UserConfiguration
+from omni.management.commands import MANAGEMENT_COMMANDS
+from omni.skills.catalog import SkillLoader
+
+
+def loaded_skill_loader(home: AgentHome, configuration: UserConfiguration) -> SkillLoader:
+    """Create the injected Skill snapshot at a test composition point."""
+    loader = SkillLoader(
+        root=home.skills_directory,
+        reserved_names=tuple(command.token for command in MANAGEMENT_COMMANDS),
+        enable_always_load=configuration.runtime.enable_skill_always_load,
+    )
+    loader.load()
+    return loader
 
 
 async def collect_foreground_outbound(

@@ -1924,8 +1924,7 @@ class WorkspaceRecord:
             "exec_host": exec_host,
             "permission_control": permission_control,
             "configured_schedule_level": configuration.runtime.permission_level,
-            "skill_loader": self.service._skill_loader,
-            "reload_skills": self.service.reload_skills,
+            "skill_loader": self.service.skill_loader,
             "built_in_catalog": self.service.built_in_tool_catalog,
         }
         authority = session

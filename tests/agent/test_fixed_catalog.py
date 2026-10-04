@@ -44,6 +44,7 @@ from omni.templates import render_template
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import TaskFramingRouterAdapter, collect_foreground_outbound
 from tests.fixtures.agent_loop import DrivenExecutor as AgentRunExecutor
+from tests.fixtures.agent_loop import loaded_skill_loader
 from tests.fixtures.provider import ProviderCall
 
 NOW = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
@@ -228,6 +229,7 @@ def _agent_loop(
         exec_host=create_exec_host(resolve_exec_shell(configuration.runtime.exec_shell)),
         permission_control=RuntimePermissionControl(configuration.runtime.permission_level),
         mcp_tools=mcp_tools,
+        skill_loader=loaded_skill_loader(home, configuration),
     )
     return loop, router, schedule, bus
 

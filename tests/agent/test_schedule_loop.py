@@ -44,6 +44,7 @@ from omni.skills.catalog import SkillLoader
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import TaskFramingRouterAdapter, collect_foreground_outbound
 from tests.fixtures.agent_loop import DrivenExecutor as AgentRunExecutor
+from tests.fixtures.agent_loop import loaded_skill_loader
 from tests.fixtures.session import seed_session_state
 
 NOW = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
@@ -376,6 +377,7 @@ def _loop(
         exec_host=create_exec_host(resolve_exec_shell(configuration.runtime.exec_shell)),
         permission_control=RuntimePermissionControl(configuration.runtime.permission_level),
         mcp_tools=mcp_tools,
+        skill_loader=loaded_skill_loader(agent_home, configuration) if skill_loader is None else skill_loader,
     )
     if skill_loader is not None:
         loop._skill_loader = skill_loader
@@ -1396,6 +1398,7 @@ async def test_schedule_run_uses_isolated_catalog_during_concurrent_foreground_r
         monotonic_now=lambda: 0.0,
         exec_host=create_exec_host(resolve_exec_shell(configuration.runtime.exec_shell)),
         permission_control=RuntimePermissionControl(configuration.runtime.permission_level),
+        skill_loader=loaded_skill_loader(agent_home, configuration),
     )
     await loop.start()
     schedule_task = asyncio.create_task(loop.run_schedule_job(_job()))

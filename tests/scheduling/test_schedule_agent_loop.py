@@ -53,6 +53,7 @@ from tests.fixtures import (
     collect_foreground_outbound,
 )
 from tests.fixtures.agent_loop import DrivenExecutor as AgentRunExecutor
+from tests.fixtures.agent_loop import loaded_skill_loader
 from tests.fixtures.diagnostic_capture import capture_diagnostics
 from tests.fixtures.session import seed_session_state
 from tests.management.factories import management_service
@@ -319,6 +320,7 @@ def _agent_loop(
         monotonic_now=schedule_clock.monotonic,
         exec_host=create_exec_host(resolve_exec_shell(configuration.runtime.exec_shell)),
         permission_control=RuntimePermissionControl(configuration.runtime.permission_level),
+        skill_loader=loaded_skill_loader(home, configuration),
     )
     dispatcher = ManagementCommandDispatcher(
         management_service(

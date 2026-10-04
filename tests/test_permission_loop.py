@@ -28,6 +28,7 @@ from tests.fixtures import (
     collect_foreground_outbound,
 )
 from tests.fixtures.agent_loop import DrivenExecutor as AgentRunExecutor
+from tests.fixtures.agent_loop import loaded_skill_loader
 
 NOW = datetime(2026, 7, 11, 15, 30, 12, 123000, tzinfo=timezone(timedelta(hours=8)))
 
@@ -75,6 +76,7 @@ def _agent_loop(
         monotonic_now=lambda: 0.0,
         exec_host=create_exec_host(resolve_exec_shell(configuration.runtime.exec_shell)),
         permission_control=RuntimePermissionControl(configuration.runtime.permission_level),
+        skill_loader=loaded_skill_loader(home, configuration),
     )
     return loop, router, schedule, bus
 

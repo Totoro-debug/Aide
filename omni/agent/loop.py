@@ -79,7 +79,6 @@ from omni.errors import (
     ErrorInfo,
 )
 from omni.logging.session import session_log
-from omni.management.commands import MANAGEMENT_COMMANDS
 from omni.management.service import RuntimeStatusInput
 from omni.provider.errors import ModelCallError
 from omni.provider.model_router import ModelRouterDelegate, ModelRouteStatus, RunModelRouter
@@ -232,8 +231,7 @@ class AgentRunExecutor:
         configured_schedule_level: ToolPermissionLevel | None = None,
         mcp_tools: Sequence[BaseTool] = (),
         mcp_keywords: Mapping[str, Sequence[str]] | None = None,
-        skill_loader: SkillLoader | None = None,
-        reload_skills: Callable[[], tuple[SkillMetadata, ...]] | None = None,
+        skill_loader: SkillLoader,
         session: Session | None = None,
         built_in_catalog: BuiltInToolCatalog | None = None,
     ) -> None:
@@ -243,13 +241,6 @@ class AgentRunExecutor:
             raise ValueError("Agent Loop Memory Manager must belong to the Workspace State")
 
         # Build every generation-local collaborator before publishing any Loop field.
-        if skill_loader is None:
-            skill_loader = SkillLoader(
-                root=agent_home.skills_directory,
-                reserved_names=tuple(command.token for command in MANAGEMENT_COMMANDS),
-                enable_always_load=configuration.runtime.enable_skill_always_load,
-            )
-            skill_loader.load()
         context_builder = ContextBuilder(
             workspace_path,
             schedule_service.context_timezone_name() or get_localzone_name(),
@@ -304,7 +295,6 @@ class AgentRunExecutor:
         self._configuration = configuration
         self._session = active_session
         self._skill_loader = skill_loader
-        self._reload_skills = reload_skills
         self._schedule_service = schedule_service
         self._context_builder = context_builder
         self._memory_manager = memory_manager
@@ -359,15 +349,6 @@ class AgentRunExecutor:
 
     @property
     def skill_metadata(self) -> tuple[SkillMetadata, ...]:
-        return self._skill_loader.metadata
-
-    def reload_skill(self) -> tuple[SkillMetadata, ...]:
-        """Reload and publish Skills after validating the complete candidate state."""
-        if self._closed or self._aborted or self._closing or self._close_task is not None:
-            raise RuntimeError("Agent Loop is closed")
-        if self._reload_skills is not None:
-            return self._reload_skills()
-        self._skill_loader.load(validate=self._validate_model_context_budget)
         return self._skill_loader.metadata
 
     @property

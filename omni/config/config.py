@@ -337,10 +337,6 @@ class ConfigEditableSnapshot:
     configuration: UserConfiguration
     diagnostics: tuple[ConfigurationDiagnosticValue, ...] = ()
 
-    def require_valid_candidate(self) -> None:
-        """Reject startup fallbacks when publishing a runtime generation."""
-        _require_complete_candidate(self.configuration, self.diagnostics)
-
 
 @dataclass(frozen=True, slots=True)
 class ConfigWebSnapshot:

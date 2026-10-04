@@ -2138,17 +2138,6 @@ class WorkspaceRecord:
             if candidate is state:
                 self._schedule_loops.pop(job_id, None)
 
-    async def _close_schedule_loop(
-        self, job_id: str, *, expected: _LoopState | None = None, abort: bool = False
-    ) -> None:
-        state = self._schedule_loops.get(job_id)
-        if state is None or (expected is not None and state is not expected):
-            return
-        await self._close_loop_state(state, abort=abort)
-        if self._loops.get(state.loop.session.session_id) is state:
-            self._loops.pop(state.loop.session.session_id, None)
-        self._schedule_loops.pop(job_id, None)
-
     async def close(self) -> None:
         # Claim release may hold this lock while awaiting a title naturally.
         for state in tuple(self._loops.values()):

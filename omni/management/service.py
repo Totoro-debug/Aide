@@ -283,7 +283,6 @@ class ManagementViewService:
         self._ensure_runtime_admission = self._ensure_management_mutation_allowed
         self._persist_reasoning_effort: Callable[[ReasoningEffort], Awaitable[None]] | None = None
         self._configuration_status: Callable[[], str] = lambda: ""
-        self._aborted = False
 
     def bind_configuration_status(self, callback: Callable[[], str]) -> None:
         """Attach the service's saved/startup configuration status to CLI views."""
@@ -301,7 +300,6 @@ class ManagementViewService:
 
     async def reload_skill(self) -> tuple[SkillMetadata, ...]:
         """Reload the current Agent Loop Skill state and return published metadata."""
-        self._ensure_active()
         self._ensure_runtime_admission()
         try:
             current_agent_loop = self._current_agent_loop()
@@ -320,22 +318,11 @@ class ManagementViewService:
                 ErrorInfo("skill_reload_failed", "Skill reload failed.")
             ) from error
 
-    def deactivate(self) -> None:
-        """Reject new Management work after its Runtime Generation is detached."""
-        self._aborted = True
-
-    def _ensure_active(self) -> None:
-        if self._aborted:
-            raise ManagementError(
-                ErrorInfo("route_unavailable", "Runtime Generation is no longer active.")
-            )
-
     def _ensure_current_generation(self) -> None:
         self._current_agent_loop()
 
     async def config_view(self) -> ConfigView:
         """Return complete redacted User Configuration content."""
-        self._ensure_active()
         try:
             self._config.ensure_default()
             return replace(self._config.view(), service_status_text=self._configuration_status())
@@ -349,7 +336,6 @@ class ManagementViewService:
 
     async def memory_view(self) -> str:
         """Return the complete current Long-term Memory file."""
-        self._ensure_active()
         self._ensure_current_generation()
         try:
             return await self._memory_reader.read_long_term()
@@ -362,14 +348,12 @@ class ManagementViewService:
 
     async def dream(self) -> DreamResult:
         """Run one foreground Memory Task and return its safe summary."""
-        self._ensure_active()
         self._ensure_runtime_admission()
         self._ensure_current_generation()
         return await self._dream.run()
 
     async def reasoning_effort(self) -> ReasoningEffort:
         """Return the current Runtime-Lifetime chat Reasoning Effort."""
-        self._ensure_active()
         effort = self._reasoning_effort_control.reasoning_effort
         if effort not in REASONING_EFFORT_LEVELS:
             raise ManagementError(
@@ -379,7 +363,6 @@ class ManagementViewService:
 
     async def update_reasoning_effort(self, effort: ReasoningEffort) -> ReasoningEffort:
         """Publish one validated Runtime-Lifetime chat Reasoning Effort."""
-        self._ensure_active()
         self._ensure_management_mutation_allowed()
         if effort not in REASONING_EFFORT_LEVELS:
             raise ManagementError(
@@ -397,12 +380,10 @@ class ManagementViewService:
 
     async def permission_level(self) -> ToolPermissionLevel:
         """Return the current process-local foreground Tool Permission Level."""
-        self._ensure_active()
         return self._permission_control.current()
 
     async def update_permission_level(self, level: ToolPermissionLevel) -> ToolPermissionLevel:
         """Select a foreground level without changing User Configuration."""
-        self._ensure_active()
         self._ensure_management_mutation_allowed()
         try:
             validated = validate_permission_level(level)
@@ -415,7 +396,6 @@ class ManagementViewService:
 
     async def status(self) -> RuntimeStatus:
         """Return all required runtime and current-session status fields."""
-        self._ensure_active()
         try:
             projection = self._current_agent_loop().runtime_status_input()
             chat_reasoning_effort = await self.reasoning_effort()
@@ -482,7 +462,6 @@ class ManagementViewService:
 
     async def resumable_listing(self) -> SessionListingReport:
         """Return one atomic Session picker result including skipped diagnostics."""
-        self._ensure_active()
         self._ensure_current_generation()
         return await self._resumable_listing()
 
@@ -541,7 +520,6 @@ class ManagementViewService:
 
     async def resume(self, session_id: str, *, force: bool = False) -> ResumeResult:
         """Revalidate and select one Session from the current Workspace."""
-        self._ensure_active()
         self._ensure_management_mutation_allowed()
         self._ensure_current_generation()
         await self._prepare_session_resume(session_id)
@@ -559,12 +537,10 @@ class ManagementViewService:
 
     async def restore_listing(self) -> RestoreListingReport:
         """Return persisted Restore Anchors for the active foreground Session."""
-        self._ensure_active()
         return await self._restore_listing()
 
     async def restore_inspect(self, anchor_id: int) -> RestorePlan:
         """Freeze restore admission and inspect one persisted Restore Anchor."""
-        self._ensure_active()
         return await self._restore_inspect(anchor_id)
 
     async def restore_commit(
@@ -573,17 +549,14 @@ class ManagementViewService:
         mode: RestoreMode | str,
     ) -> RestoreResult:
         """Commit one previously inspected Session Restore plan."""
-        self._ensure_active()
         return await self._restore_commit(plan, mode)
 
     async def restore_result(self) -> RestoreResult | None:
         """Return the latest completed restore result, if one is available."""
-        self._ensure_active()
         return await self._restore_result()
 
     async def restore_cancel(self) -> None:
         """Cancel a pre-confirmation restore and release its admission barriers."""
-        self._ensure_active()
         await self._restore_cancel()
 
     def bind_restore_acknowledge_failure(
@@ -595,7 +568,6 @@ class ManagementViewService:
 
     async def restore_acknowledge_failure(self) -> RestoreResult | None:
         """Persist acknowledgement of the latest File Restore failure notice."""
-        self._ensure_active()
         return await self._restore_acknowledge_failure()
 
 

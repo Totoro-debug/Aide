@@ -247,12 +247,6 @@ def _application(service: AgentService) -> dict[str, Any]:
     return cast(dict[str, Any], service.config_view()["application"])
 
 
-async def _wait_status(service: AgentService, status: str) -> None:
-    async with asyncio.timeout(10):
-        while _application(service)["status"] != status:
-            await asyncio.sleep(0.01)
-
-
 @pytest.mark.asyncio
 async def test_http_save_preserves_foreground_schedule_confirmation_and_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -472,10 +472,6 @@ class ScheduleService:
         return job_id in self._active_job_ids
 
     @property
-    def has_pending_work(self) -> bool:
-        return any(not task.done() for task in (*self._run_tasks, *self._terminal_commit_tasks))
-
-    @property
     def admission_paused(self) -> bool:
         return self._paused
 

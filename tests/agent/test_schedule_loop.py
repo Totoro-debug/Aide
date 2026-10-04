@@ -1130,7 +1130,7 @@ async def test_schedule_confirmation_required_tool_is_refused_without_foreground
     )
     loop, state, _, _bus = _loop(tmp_path, router)
     confirmation_requests: list[object] = []
-    loop.bind_confirmation_callback(confirmation_requests.append)
+    loop.control.bind_confirmation_callback(confirmation_requests.append)
 
     await loop.run_schedule_job(_job())
 
@@ -1174,7 +1174,7 @@ async def test_schedule_agent_reads_known_skill_path_via_shared_gateway(tmp_path
         skill_loader=skill_loader,
     )
     confirmation_requests: list[object] = []
-    loop.bind_confirmation_callback(confirmation_requests.append)
+    loop.control.bind_confirmation_callback(confirmation_requests.append)
 
     await loop.run_schedule_job(_job())
 

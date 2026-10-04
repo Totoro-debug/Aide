@@ -141,7 +141,7 @@ async def test_foreground_mutations_execute_without_a_permission_pause(
     (agent_home / "config.toml").write_text(VALID_CONFIG, encoding="utf-8")
     loop, router, schedule, bus = _agent_loop(home, workspace, provider)
     confirmations: list[object] = []
-    loop.bind_confirmation_callback(confirmations.append)
+    loop.control.bind_confirmation_callback(confirmations.append)
     try:
         await loop.start()
         messages = await collect_foreground_outbound(bus, "Change the files.")

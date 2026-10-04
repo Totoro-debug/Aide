@@ -607,7 +607,7 @@ def _reload_runtime(
     service._skill_loader = loop._skill_loader
     workspace = WorkspaceRecord(service, session.workspace_state.workspace_path, loop._configuration)
     handle = SessionExecution(
-        session, bus, lambda: loop, service.reload_skills, loop.runtime_status_input
+        session, bus, lambda: loop, service.reload_skills, loop.execution.runtime_status_input
     )
     workspace._loops[session.session_id] = service_runtime._LoopState(loop=handle, bus=bus, owner_client_id=None)
     service._workspaces[workspace.workspace_id] = workspace
@@ -652,7 +652,7 @@ def test_agent_loop_reload_returns_the_current_loader_metadata_and_reuses_genera
 
     metadata = service.reload_skills()
 
-    assert loop is loop.control
+    assert loop.session is loop.execution.session
     assert loop.session is initial_session is session
     assert loop._bus is bus
     assert loop._skill_loader is loader is initial_context_loader
@@ -971,7 +971,7 @@ def test_skill_budget_uses_public_status_projection_and_complete_tools(
         budget_messages,
     )
     if not over_budget:
-        ordinary_status = loop.runtime_status_input()
+        ordinary_status = loop.execution.runtime_status_input()
         assert ordinary_status.projected_messages == tuple(budget_messages)
         assert ordinary_status.projected_tools == tuple(budget_tools)
         assert estimate_request_tokens(

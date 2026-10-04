@@ -266,14 +266,14 @@ async def test_agent_loop_uses_fixed_catalog_for_provider_confirmation_and_persi
     )
     loop, router, schedule, bus = _agent_loop(agent_home, workspace, provider)
     confirmations: list[ConfirmationRequestView] = []
-    loop.bind_confirmation_callback(confirmations.append)
+    loop.control.bind_confirmation_callback(confirmations.append)
     try:
         await loop.start()
         turn = asyncio.create_task(collect_foreground_outbound(bus, "Read the file."))
         while not confirmations:
             await asyncio.sleep(0)
         confirmation = confirmations[0]
-        loop.respond_to_confirmation(confirmation.confirmation_id, "approved")
+        loop.control.respond_to_confirmation(confirmation.confirmation_id, "approved")
         messages = await turn
     finally:
         await _close_loop(loop, router, schedule)
@@ -465,9 +465,9 @@ async def test_agent_loop_reads_known_skill_path_with_model_file_confirmation(
 
     def approve(request: ConfirmationRequestView) -> None:
         confirmations.append(request)
-        loop.respond_to_confirmation(request.confirmation_id, "approved")
+        loop.control.respond_to_confirmation(request.confirmation_id, "approved")
 
-    loop.bind_confirmation_callback(approve)
+    loop.control.bind_confirmation_callback(approve)
     try:
         await loop.start()
         await collect_foreground_outbound(bus, "Read the skill.")
@@ -535,9 +535,9 @@ async def test_agent_loop_advertises_and_persists_multiple_autonomous_skill_read
 
     def approve(request: ConfirmationRequestView) -> None:
         confirmations.append(request)
-        loop.respond_to_confirmation(request.confirmation_id, "approved")
+        loop.control.respond_to_confirmation(request.confirmation_id, "approved")
 
-    loop.bind_confirmation_callback(approve)
+    loop.control.bind_confirmation_callback(approve)
     try:
         await loop.start()
         messages = await collect_foreground_outbound(bus, "Use both Skills.")

@@ -17,7 +17,6 @@ from tzlocal import get_localzone_name
 from omni.agent.blackboard import Blackboard
 from omni.agent.confirmation import (
     BackgroundConfirmationOwner,
-    CallbackConfirmationRequester,
     ConfirmationAborted,
     ConfirmationEnvelope,
     ConfirmationUnavailable,
@@ -89,7 +88,7 @@ from omni.schedule.service import (
     ScheduleOccurrence,
     ScheduleService,
 )
-from omni.skills.catalog import LoadedSkill, ManualSkillInvocation, SkillLoader, SkillMetadata
+from omni.skills.catalog import LoadedSkill, ManualSkillInvocation, SkillLoader
 from omni.utils.async_tasks import await_task_preserving_cancellation
 from omni.utils.text import normalize_title, normalize_title_candidate
 
@@ -312,31 +311,19 @@ class AgentRunExecutor:
         self._bus = bus
         self._generation_started_at: float | None = None
         self._execution_task: asyncio.Task[None] | None = None
-        self._foreground_commit_gate = asyncio.Lock()
-        self._replacement_barrier_held = False
         self._schedule_tasks: set[asyncio.Task[None]] = set()
         self._aborted_tasks: set[asyncio.Task[Any]] = set()
         self._abort_task: asyncio.Task[None] | None = None
-        self._close_task: asyncio.Task[None] | None = None
         self._execution_ready: asyncio.Event | None = None
         self._title_work: dict[str, _TitleWork] = {}
-        self._confirmation_callback: ConfirmationCallback | None = None
-        self._legacy_confirmation_requester: CallbackConfirmationRequester | None = None
         self._confirmation_requester: RuntimeConfirmationRequester | None = None
         self._active_foreground_owner: ForegroundConfirmationOwner | None = None
         self._cancel_requested = False
-        self._closing = False
-        self._closed = False
         self._aborted = False
         self._started = False
         self._preflighted = False
         self._preflight_error: Exception | None = None
-        self._session_closed = False
         self._session_abandoned = False
-
-    @property
-    def control(self) -> TerminalAgentRunExecutorControl:
-        return self
 
     @property
     def session(self) -> Session:
@@ -346,10 +333,6 @@ class AgentRunExecutor:
     def generation_id(self) -> UUID:
         """Return the immutable identity of this Runtime Generation."""
         return self._generation_id
-
-    @property
-    def skill_metadata(self) -> tuple[SkillMetadata, ...]:
-        return self._skill_loader.metadata
 
     @property
     def tool_schemas(self) -> tuple[dict[str, Any], ...]:
@@ -370,19 +353,6 @@ class AgentRunExecutor:
             permission_context=permission_context,
         )
 
-    @property
-    def has_active_run(self) -> bool:
-        if self._aborted:
-            raise RuntimeError("Agent Loop is no longer active")
-        task = self._execution_task
-        return task is not None and not task.done()
-
-    def foreground_input_admitted(self) -> bool:
-        """Return whether a new ordinary foreground input may be queued."""
-        return not (
-            self._aborted or self._closing or self._closed or self._replacement_barrier_held
-        )
-
     async def wait_for_restore_idle(self) -> None:
         """Drain title work before the strict Session restore write."""
         if self._aborted:
@@ -399,87 +369,27 @@ class AgentRunExecutor:
             if not any(not work.task.done() for work in self._title_work.values()):
                 return
 
-    @property
-    def has_pending_title(self) -> bool:
-        return any(not work.task.done() for work in self._title_work.values())
-
-    def project_foreground_conversation(self) -> ForegroundConversationProjection:
-        """Return presentation data without exposing the owned Session."""
-        if self._aborted:
-            raise RuntimeError("Agent Loop is no longer active")
-        return ForegroundConversationProjection(
-            session_id=self._session.session_id,
-            messages=tuple(
-                _project_terminal_message(message) for message in self._session.messages
-            ),
-        )
-
-    def bind_confirmation_callback(self, callback: ConfirmationCallback) -> None:
-        """Bind the synchronous foreground confirmation callback exactly once."""
-        if self._confirmation_callback is not None:
-            raise RuntimeError("Agent Loop confirmation callback is already bound")
-        if self._closed or self._aborted:
-            raise RuntimeError("Agent Loop is closed")
-        if not callable(callback):
-            raise TypeError("confirmation callback must be callable")
-        self._confirmation_callback = callback
-        self._legacy_confirmation_requester = CallbackConfirmationRequester(callback)
-
     def bind_confirmation_requester(self, requester: RuntimeConfirmationRequester) -> None:
         """Bind the Runtime Lifetime requester without taking ownership of its queue."""
         if self._confirmation_requester is not None:
             raise RuntimeError("Agent Loop confirmation requester is already bound")
-        if self._closed or self._aborted:
+        if self._aborted:
             raise RuntimeError("Agent Loop is closed")
         if not callable(requester):
             raise TypeError("confirmation requester must be callable")
         self._confirmation_requester = requester
 
-    def unbind_confirmation_callback(self, callback: ConfirmationCallback) -> None:
-        """Clear a callback only when it is still bound to this control surface."""
-        if self._confirmation_callback is callback:
-            legacy = self._legacy_confirmation_requester
-            if legacy is not None:
-                legacy.unbind(callback)
-            self._confirmation_callback = None
-            self._legacy_confirmation_requester = None
-
     async def start(self) -> None:
-        if self._closed or self._aborted or self._closing or self._close_task is not None:
+        if self._aborted:
             raise RuntimeError("Agent Loop is closed")
         if self._started:
             return
         self.preflight()
         self._activate_prepared()
 
-    async def _pause_for_replacement(self) -> None:
-        """Freeze new foreground admission and the final Session commit point."""
-        if self._replacement_barrier_held:
-            raise RuntimeError("Agent Loop replacement barrier is already held")
-        await self._bus.pause_inbound_delivery()
-        try:
-            await self._foreground_commit_gate.acquire()
-        except BaseException as error:
-            resume = asyncio.create_task(self._bus.resume_inbound_delivery())
-            try:
-                await await_task_preserving_cancellation(resume)
-            except BaseException as cleanup_error:
-                raise error from cleanup_error
-            raise
-        self._replacement_barrier_held = True
-
-    async def _release_replacement_barrier(self, *, resume_inbound: bool) -> None:
-        """Release a barrier after rejection or after the target is published."""
-        if self._replacement_barrier_held:
-            self._replacement_barrier_held = False
-            self._foreground_commit_gate.release()
-        if resume_inbound:
-            resume = asyncio.create_task(self._bus.resume_inbound_delivery())
-            await await_task_preserving_cancellation(resume)
-
     def preflight(self) -> None:
         """Validate this generation synchronously without external side effects."""
-        if self._closed or self._aborted or self._closing or self._close_task is not None:
+        if self._aborted:
             raise RuntimeError("Agent Loop is closed")
         if self._started:
             return
@@ -525,7 +435,7 @@ class AgentRunExecutor:
 
     def _activate_prepared(self) -> None:
         """Sample uptime and atomically publish the preflighted Loop activation."""
-        if self._closed or self._aborted or self._closing or self._close_task is not None:
+        if self._aborted:
             raise RuntimeError("Agent Loop is closed")
         if self._started:
             return
@@ -534,31 +444,6 @@ class AgentRunExecutor:
         started_at = self._monotonic_now()
         self._generation_started_at = started_at
         self._started = True
-
-    async def close(self) -> None:
-        if self._aborted:
-            if self._abort_task is not None:
-                await await_task_preserving_cancellation(self._abort_task)
-            return
-        task = self._close_task
-        if task is None:
-            task = asyncio.create_task(self._finish_close())
-            self._close_task = task
-        try:
-            try:
-                await await_task_preserving_cancellation(task)
-            except asyncio.CancelledError:
-                if not self._aborted:
-                    raise
-                abort_task = self._abort_task
-                if abort_task is None:
-                    abort_task = asyncio.create_task(self._finish_abort())
-                    self._abort_task = abort_task
-                await await_task_preserving_cancellation(abort_task)
-        finally:
-            if not self._aborted:
-                self._close_session()
-                await self._session.wait_for_pending_persist()
 
     async def abort(self) -> None:
         """Cancel and await every Session-scoped task before abandoning the Session."""
@@ -581,22 +466,14 @@ class AgentRunExecutor:
         if self._aborted:
             return
         self._aborted = True
-        self._closing = True
-        self._cancel_pending_confirmation()
-        self._confirmation_callback = None
-        self._legacy_confirmation_requester = None
         self._confirmation_requester = None
         self._active_foreground_owner = None
         if not self._started:
             self._abandon_session()
-            self._closed = True
         try:
             current = asyncio.current_task()
         except RuntimeError:
             current = None
-        closing = self._close_task
-        if closing is not None and closing is not current and not closing.done():
-            closing.cancel()
         for task in self._owned_tasks():
             if task is current or task.done():
                 continue
@@ -609,22 +486,6 @@ class AgentRunExecutor:
             await self._session.wait_for_pending_persist()
         finally:
             self._clear_owned_task_references()
-            self._closed = True
-
-    async def _finish_close(self) -> None:
-        if self._aborted:
-            return
-        self._closing = True
-        self._cancel_pending_confirmation()
-        if self._execution_task is not None and not self._execution_task.done():
-            await self.cancel_active_run()
-        current = asyncio.current_task()
-        for task in self._owned_tasks():
-            if task is not current and not task.done():
-                task.cancel()
-        await self._drain_owned_tasks()
-        self._clear_owned_task_references()
-        self._closed = True
 
     def _owned_tasks(self) -> tuple[asyncio.Task[Any], ...]:
         tasks: list[asyncio.Task[Any]] = []
@@ -659,18 +520,8 @@ class AgentRunExecutor:
         self._schedule_tasks.clear()
         self._aborted_tasks.clear()
 
-    def _close_session(self) -> None:
-        if self._session_closed or self._session_abandoned:
-            return
-        try:
-            self._session.close()
-        except BaseException as error:
-            logger.warning("Agent Loop Session close failed type={}", type(error).__name__)
-        finally:
-            self._session_closed = True
-
     def _abandon_session(self) -> None:
-        if self._session_abandoned or self._session_closed:
+        if self._session_abandoned:
             return
         self._session.abandon()
         self._session_abandoned = True
@@ -701,7 +552,6 @@ class AgentRunExecutor:
         if active is None or active.done():
             return
         self._cancel_requested = True
-        self._cancel_pending_confirmation()
         ready = self._execution_ready
         if ready is not None and not ready.is_set():
             await ready.wait()
@@ -713,7 +563,7 @@ class AgentRunExecutor:
 
     async def run_foreground(self, inbound: InboundMessage) -> None:
         """Execute one foreground input without owning a persistent consumer."""
-        if self._closed or self._aborted or self._closing or self._close_task is not None:
+        if self._aborted:
             raise RuntimeError("Agent Loop is closed")
         if not self._started:
             raise RuntimeError("Agent Loop is not started")
@@ -740,7 +590,7 @@ class AgentRunExecutor:
         occurrence: ScheduleOccurrence | None = None,
     ) -> None:
         """Execute one Schedule Job without using foreground state or output."""
-        if self._aborted or self._closing or self._closed:
+        if self._aborted:
             raise RuntimeError("Agent Loop is no longer active")
         if job.source != "user":
             raise ScheduleJobExecutionError(
@@ -1142,16 +992,6 @@ class AgentRunExecutor:
             job=job,
         )
 
-    def respond_to_confirmation(
-        self,
-        confirmation_id: UUID,
-        decision: ConfirmationDecision,
-    ) -> None:
-        legacy = self._legacy_confirmation_requester
-        if self._aborted or legacy is None:
-            raise ValueError("Confirmation response is late or unknown")
-        legacy.respond(confirmation_id, decision)
-
     async def _execute_foreground(
         self,
         inbound: InboundMessage,
@@ -1450,36 +1290,35 @@ class AgentRunExecutor:
             metadata_updates = {"blackboard": staged_blackboard.to_dict()}
             metadata_removals = ()
 
-        async with self._foreground_commit_gate:
-            try:
-                if self._aborted:
-                    return False
-                self._commit_agent_run(
-                    active_session,
-                    run_context,
-                    [deepcopy(current_user), *deepcopy(result.messages)],
-                    usage_delta=framing_usage,
-                    metadata_updates=metadata_updates,
-                    metadata_removals=metadata_removals,
-                    restore_before=restore_before,
-                    restore_run_token=restore_run_token,
-                )
-            except (OSError, UnicodeError) as failure:
-                _runtime_logger().error(
-                    "Agent Run Session increment failed code=persistence_error type={}",
-                    type(failure).__name__,
-                )
-                await self._publish_commit_failure()
+        try:
+            if self._aborted:
                 return False
-            except Exception as failure:
-                _runtime_logger().error(
-                    "Agent Run Session increment contract failed type={}",
-                    type(failure).__name__,
-                )
-                await self._publish_preparation_failure(
-                    ErrorInfo("model_failed", "The model request failed.")
-                )
-                return False
+            self._commit_agent_run(
+                active_session,
+                run_context,
+                [deepcopy(current_user), *deepcopy(result.messages)],
+                usage_delta=framing_usage,
+                metadata_updates=metadata_updates,
+                metadata_removals=metadata_removals,
+                restore_before=restore_before,
+                restore_run_token=restore_run_token,
+            )
+        except (OSError, UnicodeError) as failure:
+            _runtime_logger().error(
+                "Agent Run Session increment failed code=persistence_error type={}",
+                type(failure).__name__,
+            )
+            await self._publish_commit_failure()
+            return False
+        except Exception as failure:
+            _runtime_logger().error(
+                "Agent Run Session increment contract failed type={}",
+                type(failure).__name__,
+            )
+            await self._publish_preparation_failure(
+                ErrorInfo("model_failed", "The model request failed.")
+            )
+            return False
         await self._publish_terminal(result)
         return True
 
@@ -1499,29 +1338,28 @@ class AgentRunExecutor:
         if self._aborted:
             return False
         try:
-            async with self._foreground_commit_gate:
-                if self._aborted:
-                    return False
-                self._commit_agent_run(
-                    active_session,
-                    context,
-                    [
-                        deepcopy(current_user),
-                        _build_assistant_repair_message(
-                            content=(
-                                TURN_CANCELLED_MESSAGE if error.code == "turn_cancelled" else ""
-                            ),
-                            status="interrupted" if error.code == "turn_cancelled" else "error",
-                            error=error,
-                            model_calls=0,
+            if self._aborted:
+                return False
+            self._commit_agent_run(
+                active_session,
+                context,
+                [
+                    deepcopy(current_user),
+                    _build_assistant_repair_message(
+                        content=(
+                            TURN_CANCELLED_MESSAGE if error.code == "turn_cancelled" else ""
                         ),
-                    ],
-                    usage_delta=framing_usage,
-                    metadata_updates=metadata_updates,
-                    metadata_removals=metadata_removals,
-                    restore_before=restore_before,
-                    restore_run_token=restore_run_token,
-                )
+                        status="interrupted" if error.code == "turn_cancelled" else "error",
+                        error=error,
+                        model_calls=0,
+                    ),
+                ],
+                usage_delta=framing_usage,
+                metadata_updates=metadata_updates,
+                metadata_removals=metadata_removals,
+                restore_before=restore_before,
+                restore_run_token=restore_run_token,
+            )
         except (OSError, UnicodeError) as failure:
             _runtime_logger().error(
                 "Agent Run preparation commit failed code=persistence_error type={}",
@@ -1540,15 +1378,6 @@ class AgentRunExecutor:
             return False
         await self._publish_preparation_failure(error)
         return True
-
-    def runtime_status_input(self) -> RuntimeStatusInput:
-        return session_runtime_status_input(
-            self._session,
-            configuration=self._configuration,
-            context_builder=self._context_builder,
-            tool_schemas=self.tool_schemas,
-            generation_started_at=self._generation_started_at,
-        )
 
     def _result_externalizer_for(
         self,
@@ -1682,7 +1511,7 @@ class AgentRunExecutor:
         self,
         request: ConfirmationRequest,
     ) -> ConfirmationDecision:
-        if self._aborted or self._closing:
+        if self._aborted:
             raise asyncio.CancelledError()
         requester = self._confirmation_requester
         if requester is not None:
@@ -1696,15 +1525,7 @@ class AgentRunExecutor:
                     owner=owner,
                 )
             )
-        legacy = self._legacy_confirmation_requester
-        if legacy is None:
-            raise RuntimeError("Agent Loop confirmation requester is not bound")
-        return await legacy.request(request)
-
-    def _cancel_pending_confirmation(self) -> None:
-        legacy = self._legacy_confirmation_requester
-        if legacy is not None:
-            legacy.cancel()
+        raise RuntimeError("Agent Loop confirmation requester is not bound")
 
     def _start_title_if_needed(
         self,
@@ -1712,8 +1533,7 @@ class AgentRunExecutor:
         content: str,
     ) -> _TitleWork | None:
         if (
-            self._closing
-            or self._aborted
+            self._aborted
             or not content.strip()
             or session.metadata.get("title") != "Untitled session"
             or session.has_manual_title

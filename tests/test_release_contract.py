@@ -727,8 +727,9 @@ def test_runtime_status_uses_the_canonical_usage_anchor_and_configured_chat_rout
     ]
     assert len(controller_anchor_calls) == 1
 
-    loop = _source_class(loop_tree, "AgentRunExecutor")
-    assert _direct_method(loop, "runtime_status_input")
+    execution_tree = _source_ast(ROOT / "omni" / "service" / "execution.py")
+    execution = _source_class(execution_tree, "SessionExecution")
+    assert _direct_method(execution, "runtime_status_input")
     runtime_status = _source_function(loop_tree, "session_runtime_status_input")
     status_anchor_calls = [
         node

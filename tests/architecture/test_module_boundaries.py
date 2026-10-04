@@ -991,11 +991,12 @@ def test_issue_243_production_model_calls_use_one_explicit_run_context_seam() ->
         and node.func.id == "_foreground_runtime_status_input"
         for node in ast.walk(methods["_validate_model_context_budget"])
     )
+    service_tree = ast.parse((PACKAGE_ROOT / "service" / "runtime.py").read_text(encoding="utf-8"))
     assert any(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "session_runtime_status_input"
-        for node in ast.walk(methods["runtime_status_input"])
+        for node in ast.walk(service_tree)
     )
     assert any(
         isinstance(node, ast.Call)

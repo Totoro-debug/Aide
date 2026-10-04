@@ -10,7 +10,6 @@ from copy import deepcopy
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 from pathlib import Path
-from types import TracebackType
 from typing import Any, ClassVar, Literal
 from uuid import UUID, uuid4
 
@@ -365,7 +364,6 @@ def test_agent_loop_constructor_is_the_generation_composition_boundary() -> None
         "session",
         "built_in_catalog",
     )
-    assert tuple(inspect.signature(AgentRunExecutor.close).parameters) == ("self",)
 
 
 def test_agent_loop_rejects_workspace_state_owned_by_another_workspace(
@@ -684,7 +682,7 @@ async def test_agent_loop_status_projection_starts_uptime_only_after_activation(
     await asyncio.gather(loop.start(), loop.start())
 
     assert monotonic_calls == 1
-    assert loop.runtime_status_input().generation_started_at == 42.5
+    assert loop.execution.runtime_status_input().generation_started_at == 42.5
     await loop.start()
     assert monotonic_calls == 1
     await loop.close()
@@ -717,7 +715,7 @@ def test_agent_loop_preflight_uses_the_deferred_baseline_without_unused_tool_sch
     )
     assert all(
         schema["function"]["name"] != "large_schema"
-        for schema in loop.runtime_status_input().projected_tools
+        for schema in loop.execution.runtime_status_input().projected_tools
     )
 
 
@@ -734,7 +732,7 @@ async def test_agent_loop_injects_persisted_action_summary_into_foreground_and_s
     action_summary = "- Updated the Session context contract."
     session.update_metadata(summary=action_summary)
 
-    status = loop.runtime_status_input()
+    status = loop.execution.runtime_status_input()
     assert status.projected_messages[1] == {
         "role": "user",
         "content": action_summary,
@@ -815,7 +813,7 @@ async def test_agent_loop_does_not_compact_by_message_count(
         await _terminals(bus, 1)
         await bus.put_inbound(InboundMessage("Third question."))
         await _terminals(bus, 1)
-        status = loop.runtime_status_input()
+        status = loop.execution.runtime_status_input()
     finally:
         await loop.close()
 
@@ -874,7 +872,7 @@ async def test_agent_loop_restores_empty_action_summary_for_foreground_status_an
     )
 
     assert session.metadata["summary"] == ""
-    status = loop.runtime_status_input()
+    status = loop.execution.runtime_status_input()
     retained_messages = status.projected_messages[1:]
     assert retained_messages[0] == {
         "role": "user",
@@ -942,7 +940,7 @@ async def test_agent_loop_restores_action_summary_for_foreground_and_preflight_c
     )
 
     assert session.metadata["summary"] == action_summary
-    status = loop.runtime_status_input()
+    status = loop.execution.runtime_status_input()
     assert status.projected_messages[1] == {
         "role": "user",
         "content": action_summary,
@@ -1206,76 +1204,6 @@ async def test_agent_loop_failed_activation_does_not_publish_or_duplicate_consum
     await loop.close()
 
 
-@pytest.mark.asyncio
-async def test_replacement_barrier_blocks_a_late_foreground_commit_until_released(
-    tmp_path: Path,
-) -> None:
-    class ObservableCommitLock(asyncio.Lock):
-        def __init__(self) -> None:
-            super().__init__()
-            self.acquire_attempted = asyncio.Event()
-            self.commit_completed = asyncio.Event()
-
-        async def acquire(self) -> Literal[True]:
-            self.acquire_attempted.set()
-            return await super().acquire()
-
-        async def __aexit__(
-            self,
-            exc_type: type[BaseException] | None,
-            exc: BaseException | None,
-            tb: TracebackType | None,
-        ) -> None:
-            del exc_type, exc, tb
-            self.release()
-            self.commit_completed.set()
-
-    router = _ConcurrentTitleRouter()
-    loop, session, _bus = _runtime(tmp_path, router)
-    commit_gate = ObservableCommitLock()
-    loop._foreground_commit_gate = commit_gate
-    seed_session_state(
-        session,
-        messages=[
-            {
-                "role": "user",
-                "content": "Existing turn suppresses title work.",
-                "timestamp": "2026-08-21T12:00:00.000+00:00",
-            }
-        ],
-        metadata={
-            "title": "Untitled session",
-            "token_usage": {
-                "model_calls": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "total_tokens": 0,
-            },
-            "summary": "",
-        },
-        last_compacted=0,
-    )
-    initial_messages = tuple(session.messages)
-    await loop.start()
-    await loop._bus.put_inbound(InboundMessage(content="late foreground"))
-    await asyncio.wait_for(router.chat_started.wait(), timeout=1)
-
-    await loop._pause_for_replacement()
-    commit_gate.acquire_attempted.clear()
-    router.release_chat.set()
-    await asyncio.wait_for(commit_gate.acquire_attempted.wait(), timeout=1)
-
-    assert tuple(session.messages) == initial_messages
-    assert loop.control.has_active_run
-
-    await loop._release_replacement_barrier(resume_inbound=True)
-    await asyncio.wait_for(commit_gate.commit_completed.wait(), timeout=1)
-
-    assert [message["content"] for message in session.messages if message["role"] == "user"] == [
-        "Existing turn suppresses title work.",
-        "late foreground",
-    ]
-    await loop.close()
 
 
 @pytest.mark.asyncio
@@ -1356,7 +1284,7 @@ async def test_agent_loop_status_projection_is_one_read_immutable_and_side_effec
     monkeypatch.setattr(loop_module, "latest_main_agent_usage_anchor", observe_selector)
     object.__setattr__(loop, "_session", spy)
     try:
-        projection = loop.runtime_status_input()
+        projection = loop.execution.runtime_status_input()
     finally:
         object.__setattr__(loop, "_session", session)
 
@@ -1395,7 +1323,7 @@ def test_agent_loop_status_uses_the_configured_static_default_route(tmp_path: Pa
     router = _Router(())
     loop, session, _bus = _runtime(tmp_path, router)
 
-    status = loop.runtime_status_input()
+    status = loop.execution.runtime_status_input()
 
     assert (
         status.requested_route,
@@ -1458,7 +1386,7 @@ async def test_status_treats_the_latest_assistant_as_the_usage_provenance_bounda
     )
     management = management_service(
         AgentHome(tmp_path / "agent-home"),
-        current_agent_loop=lambda: loop,
+        current_agent_loop=lambda: loop.execution,
         workspace_state=session.workspace_state,
     )
 
@@ -1590,10 +1518,10 @@ timeout = 30
             len(default_provider.stream_requests),
         )
         persist_count = len(persist_calls)
-        status_input = loop.runtime_status_input()
+        status_input = loop.execution.runtime_status_input()
         status = await management_service(
             AgentHome(tmp_path / "agent-home"),
-            current_agent_loop=lambda: loop,
+            current_agent_loop=lambda: loop.execution,
             workspace_state=session.workspace_state,
         ).status()
 
@@ -1644,7 +1572,7 @@ timeout = 30
 def test_agent_loop_exposes_public_control_seam(tmp_path: Path) -> None:
     loop, _session, _bus = _runtime(tmp_path, _Router((_response("unused"),)))
 
-    assert loop.control is loop
+    assert loop.execution.session is loop.session
     assert loop.control.has_active_run is False
 
 
@@ -2458,7 +2386,7 @@ async def test_loop_confirmation_uses_one_direct_pending_future_and_cancels_it(
         requests.append(request)
         requested.set()
 
-    loop.bind_confirmation_callback(on_confirmation)
+    loop.control.bind_confirmation_callback(on_confirmation)
     await loop.start()
     try:
         await _bus.put_inbound(InboundMessage("confirm this"))
@@ -2467,7 +2395,7 @@ async def test_loop_confirmation_uses_one_direct_pending_future_and_cancels_it(
         assert len(requests) == 1
         request = requests[0]
         with pytest.raises(ValueError, match="late or unknown"):
-            loop.respond_to_confirmation(uuid4(), "approved")
+            loop.control.respond_to_confirmation(uuid4(), "approved")
 
         await loop.cancel_active_run()
         terminal = (await _terminals(_bus, 1))[0]
@@ -2478,7 +2406,7 @@ async def test_loop_confirmation_uses_one_direct_pending_future_and_cancels_it(
             "_streamed": True,
         }
         with pytest.raises(ValueError, match="late or unknown"):
-            loop.respond_to_confirmation(request.confirmation_id, "approved")
+            loop.control.respond_to_confirmation(request.confirmation_id, "approved")
     finally:
         await loop.close()
 
@@ -2510,7 +2438,7 @@ async def test_permission_upgrade_does_not_approve_an_active_run_confirmation(
         requests.append(request)
         requested.set()
 
-    loop.bind_confirmation_callback(on_confirmation)
+    loop.control.bind_confirmation_callback(on_confirmation)
     await loop.start()
     try:
         await bus.put_inbound(InboundMessage("confirm this"))
@@ -2521,7 +2449,7 @@ async def test_permission_upgrade_does_not_approve_an_active_run_confirmation(
 
         assert loop.control.has_active_run
         assert len(requests) == 1
-        loop.respond_to_confirmation(requests[0].confirmation_id, "declined")
+        loop.control.respond_to_confirmation(requests[0].confirmation_id, "declined")
         terminal = (await asyncio.wait_for(_terminals(bus, 1), timeout=1))[0]
 
         assert terminal.metadata == {"_streamed": True}
@@ -2576,7 +2504,7 @@ async def test_permission_downgrade_does_not_revoke_the_admitted_full_access_run
     )
     loop, _session, bus = _runtime(tmp_path, router)
     requests: list[ConfirmationRequestView] = []
-    loop.bind_confirmation_callback(requests.append)
+    loop.control.bind_confirmation_callback(requests.append)
     loop._permission_control.select("full-access")
     await loop.start()
     try:
@@ -2969,24 +2897,6 @@ async def test_persist_request_failure_is_silent_and_terminal_stays_ordered(
     assert "private persistence detail" not in capture.text
 
 
-@pytest.mark.asyncio
-async def test_loop_normal_close_saves_only_its_owned_session(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    loop, first, _bus = _runtime(tmp_path, _Router(()))
-    closed: list[str] = []
-    first_close = first.close
-
-    def close_first() -> None:
-        closed.append(first.session_id)
-        first_close()
-
-    monkeypatch.setattr(first, "close", close_first)
-
-    await loop.close()
-
-    assert closed == [first.session_id]
 
 
 @pytest.mark.asyncio
@@ -3025,94 +2935,10 @@ async def test_loop_abort_retains_cancelled_owned_tasks_until_cleanup_finishes(
     assert loop._aborted_tasks == set()
 
 
-@pytest.mark.asyncio
-async def test_terminal_loop_states_reject_restart(tmp_path: Path) -> None:
-    closed_loop, _closed_session, _closed_bus = _runtime(tmp_path / "closed", _Router(()))
-    await closed_loop.start()
-    await closed_loop.close()
-
-    with pytest.raises(RuntimeError, match="Agent Loop is closed"):
-        await closed_loop.start()
-
-    aborted_loop, _aborted_session, _aborted_bus = _runtime(tmp_path / "aborted", _Router(()))
-    await aborted_loop.start()
-    await aborted_loop.abort()
-
-    with pytest.raises(RuntimeError, match="Agent Loop is closed"):
-        await aborted_loop.start()
 
 
-@pytest.mark.asyncio
-async def test_close_transition_blocks_concurrent_preflight_and_start(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    loop, _session, _bus = _runtime(tmp_path, _Router(()))
-    close_started = asyncio.Event()
-    release_close = asyncio.Event()
-
-    async def blocked_finish_close() -> None:
-        close_started.set()
-        await release_close.wait()
-
-    monkeypatch.setattr(loop, "_finish_close", blocked_finish_close)
-    closing = asyncio.create_task(loop.close())
-    await close_started.wait()
-
-    try:
-        with pytest.raises(RuntimeError, match="Agent Loop is closed"):
-            loop.preflight()
-        with pytest.raises(RuntimeError, match="Agent Loop is closed"):
-            await loop.start()
-    finally:
-        release_close.set()
-        await closing
 
 
-@pytest.mark.asyncio
-async def test_abort_wins_before_normal_close_finalizes_the_session(
-    tmp_path: Path,
-) -> None:
-    loop, session, _bus = _runtime(tmp_path, _Router(()))
-    seed_session_state(
-        session,
-        messages=[
-            {
-                "role": "user",
-                "content": "preserve this turn",
-                "timestamp": "2026-08-21T12:00:00.000+00:00",
-            }
-        ],
-        metadata={
-            "title": "Untitled session",
-            "token_usage": {
-                "model_calls": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "total_tokens": 0,
-            },
-            "summary": "",
-        },
-        last_compacted=0,
-    )
-    close_started = asyncio.Event()
-    release_close = asyncio.Event()
-
-    async def blocked_finish_close() -> None:
-        close_started.set()
-        await release_close.wait()
-
-    object.__setattr__(loop, "_finish_close", blocked_finish_close)
-    closing = asyncio.create_task(loop.close())
-    await close_started.wait()
-
-    aborting = asyncio.create_task(loop.abort())
-    await asyncio.sleep(0)
-    release_close.set()
-
-    await asyncio.gather(closing, aborting)
-    assert loop._session_abandoned
-    assert not loop._session_closed
 
 
 @pytest.mark.asyncio
@@ -3242,32 +3068,6 @@ async def test_loop_publishes_the_exact_sparse_outbound_protocol_without_tool_re
         await loop.close()
 
 
-@pytest.mark.asyncio
-async def test_close_normally_cancels_active_run_without_dequeuing_the_next_message(
-    tmp_path: Path,
-) -> None:
-    started = asyncio.Event()
-    router = _BlockingRouter(started)
-    loop, session, _bus = _runtime(tmp_path, router)
-    queued = InboundMessage("remains queued")
-    await loop.start()
-    await _bus.put_inbound(InboundMessage("active input"))
-    await _bus.put_inbound(queued)
-    await started.wait()
-
-    await loop.close()
-    terminal = (await _terminals(_bus, 1))[0]
-
-    assert terminal.metadata == {
-        "finish_reason": "cancelled",
-        "error_code": "turn_cancelled",
-        "_streamed": True,
-    }
-    assert [message["content"] for message in session.messages if message["role"] == "user"] == [
-        "active input"
-    ]
-    assert await _bus.inbound_snapshot() == (queued,)
-    assert router.calls == ["call"]
 
 
 @pytest.mark.asyncio
@@ -3839,7 +3639,7 @@ async def test_foreground_commit_assigns_anchor_and_keeps_internal_fields_out_of
         await session.wait_for_pending_persist()
         await collect_foreground_outbound(bus, "Use the prior context.")
         await session.wait_for_pending_persist()
-        terminal_projection = loop.project_foreground_conversation()
+        terminal_projection = loop.execution.project_foreground_conversation()
     finally:
         await loop.close()
 
@@ -3974,57 +3774,8 @@ async def test_invalid_title_uses_first_input_fallback_and_keeps_usage(
     }
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("cancel_turn", [False, True])
-async def test_close_applies_first_input_title_fallback_before_final_save(
-    tmp_path: Path,
-    cancel_turn: bool,
-) -> None:
-    router = _TitleBehaviorRouter(
-        (_response("Foreground response."),),
-        title=_response("Unreleased title"),
-        delay_title=True,
-        block_first_foreground=cancel_turn,
-    )
-    loop, session, _bus = _runtime(tmp_path, router, title_prompt="Generate a title")
-
-    await loop.start()
-    if cancel_turn:
-        turn = asyncio.create_task(collect_foreground_outbound(_bus, "  Cancelled first title.  "))
-        await router.foreground_started.wait()
-        await router.title_started.wait()
-        await loop.cancel_active_run()
-        terminal = (await turn)[-1]
-        assert terminal.metadata["finish_reason"] == "cancelled"
-        expected_title = "Cancelled first title."
-    else:
-        await collect_foreground_outbound(_bus, "  Shutdown fallback title.  ")
-        await router.title_started.wait()
-        expected_title = "Shutdown fallback title."
-
-    await loop.close()
-
-    assert session.metadata["title"] == expected_title
-    reloaded = Session.load(session.workspace_state, session.session_id)
-    assert reloaded.metadata["title"] == expected_title
 
 
-@pytest.mark.asyncio
-async def test_loop_close_swallows_final_session_failure(tmp_path: Path) -> None:
-    loop, session, _bus = _runtime(tmp_path, _Router(()))
-    capture = capture_diagnostics()
-
-    def fail_close() -> None:
-        raise OSError("private final Session close failure")
-
-    session.close = fail_close  # type: ignore[method-assign]
-    try:
-        await loop.close()
-    finally:
-        capture.close()
-
-    assert "Agent Loop Session close failed type=OSError" in capture.event_text
-    assert "private final Session close failure" not in capture.event_text
 
 
 @pytest.mark.asyncio

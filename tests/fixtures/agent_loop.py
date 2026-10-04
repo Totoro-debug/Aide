@@ -2,12 +2,22 @@
 
 import asyncio
 from typing import Any
+from uuid import UUID
 
-from omni.agent.loop import AgentRunExecutor
+from omni.agent.confirmation import CallbackConfirmationRequester, ConfirmationEnvelope
+from omni.agent.loop import (
+    AgentRunExecutor,
+    ConfirmationCallback,
+    ForegroundConversationProjection,
+    session_runtime_status_input,
+)
 from omni.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
+from omni.agent.tools.tool_gateway import ConfirmationDecision
 from omni.config.agent_home import AgentHome
 from omni.config.config import UserConfiguration
 from omni.management.commands import MANAGEMENT_COMMANDS
+from omni.management.service import RuntimeStatusInput
+from omni.service.execution import SessionExecution
 from omni.skills.catalog import SkillLoader
 
 
@@ -43,6 +53,14 @@ class DrivenExecutor(AgentRunExecutor):
         super().__init__(**kwargs)
         self._consumer_task: asyncio.Task[None] | None = None
         self._foreground_consumer_enabled = True
+        self._retired = False
+        self.execution = SessionExecution(
+            self.session, self._bus, lambda: self,
+            lambda: self._skill_loader.metadata, self._status_input,
+        )
+        self.execution._title_work = self._title_work
+        self.control = ExecutorControl(self)
+
 
     def _activate_prepared(self) -> None:
         if self._started:
@@ -71,15 +89,84 @@ class DrivenExecutor(AgentRunExecutor):
 
     def disable_foreground_consumer(self) -> None:
         """Keep activation compatible while reserving execution for run_foreground."""
-        if self._closed or self._aborted or self._closing or self._close_task is not None:
+        if self._retired or self._aborted:
             raise RuntimeError("Agent Loop is closed")
         if self._started:
             raise RuntimeError("Agent Loop is already started")
         self._foreground_consumer_enabled = False
 
     async def _consume_foreground(self) -> None:
-        while not self._closing:
+        while not self._retired and self.execution.foreground_input_admitted():
             inbound = await self._bus.get_inbound()
-            if self._closing:
+            if self._retired:
                 break
             await self.run_foreground(inbound)
+
+    def _status_input(self) -> RuntimeStatusInput:
+        return session_runtime_status_input(
+            self.session, configuration=self._configuration, context_builder=self._context_builder,
+            tool_schemas=self.tool_schemas, generation_started_at=self._generation_started_at,
+        )
+
+    async def start(self) -> None:
+        if self._retired:
+            raise RuntimeError("Agent Loop is closed")
+        await super().start()
+
+    async def run_foreground(self, inbound: InboundMessage) -> None:
+        self.execution._active = self
+        try:
+            await super().run_foreground(inbound)
+        finally:
+            self.execution._active = None
+
+    async def close(self) -> None:
+        """Stop the test input driver and close through the resident Session owner."""
+        self._retired = True
+        if self._aborted:
+            await self.abort()
+            return
+        try:
+            if not self.execution._closed:
+                await self.execution.close()
+        finally:
+            tasks = self._owned_tasks()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._clear_owned_task_references()
+
+
+class ExecutorControl:
+    """Terminal test adapter to SessionExecution and an explicit requester."""
+
+    def __init__(self, executor: DrivenExecutor) -> None:
+        self._executor = executor
+        self._requester: CallbackConfirmationRequester | None = None
+
+    @property
+    def has_active_run(self) -> bool:
+        return self._executor.execution.has_active_run
+
+    def foreground_input_admitted(self) -> bool:
+        return self._executor.execution.foreground_input_admitted()
+
+    async def cancel_active_run(self) -> None:
+        await self._executor.cancel_active_run()
+
+    def project_foreground_conversation(self) -> ForegroundConversationProjection:
+        return self._executor.execution.project_foreground_conversation()
+
+    def bind_confirmation_callback(self, callback: ConfirmationCallback) -> None:
+        self._requester = CallbackConfirmationRequester(callback)
+        self._executor.bind_confirmation_requester(self._request)
+
+    async def _request(self, envelope: ConfirmationEnvelope) -> ConfirmationDecision:
+        assert self._requester is not None
+        return await self._requester.request(envelope.request)
+
+    def respond_to_confirmation(self, confirmation_id: UUID, decision: ConfirmationDecision) -> None:
+        if self._requester is None:
+            raise ValueError("Confirmation response is late or unknown")
+        self._requester.respond(confirmation_id, decision)

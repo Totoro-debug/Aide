@@ -325,7 +325,7 @@ def _agent_loop(
     dispatcher = ManagementCommandDispatcher(
         management_service(
             home,
-            current_agent_loop=lambda: loop,
+            current_agent_loop=lambda: loop.execution,
             workspace_state=state,
             memory_manager=memory_manager,
             dream=dream,
@@ -518,9 +518,9 @@ async def test_foreground_schedule_add_uses_configured_level_and_current_overrid
 
     def approve(request: ConfirmationRequestView) -> None:
         confirmations.append(request)
-        loop.respond_to_confirmation(request.confirmation_id, "approved")
+        loop.control.respond_to_confirmation(request.confirmation_id, "approved")
 
-    loop.bind_confirmation_callback(approve)
+    loop.control.bind_confirmation_callback(approve)
     await loop.start()
     try:
         await collect_foreground_outbound(bus, "Schedule the report.")

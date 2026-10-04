@@ -13,8 +13,8 @@
   left: 8px;
   padding: 8px 12px;
   border-radius: 5px;
-  background: var(--accent-strong);
-  color: white;
+  background: var(--surface-send);
+  color: var(--text-send);
   transform: translateY(-150%);
 }
 
@@ -397,8 +397,8 @@ h1 {
   gap: 8px;
   border: 1px solid var(--accent-strong);
   border-radius: 5px;
-  background: var(--accent-strong);
-  color: white;
+  background: var(--surface-send);
+  color: var(--text-send);
   cursor: pointer;
   font: inherit;
   font-size: 12px;
@@ -956,8 +956,11 @@ h1 {
 }
 
 .sessionsPage {
-  display: grid;
-  gap: 24px;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 16px;
 }
 
 .schedulePage {
@@ -1400,9 +1403,11 @@ h1 {
 .sessionsLayout {
   display: grid;
   min-width: 0;
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: minmax(200px, min(280px, 18vw)) minmax(0, 1fr);
   gap: 16px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .sessionListPanel,
@@ -1414,7 +1419,8 @@ h1 {
 }
 
 .sessionListPanel {
-  overflow: hidden;
+  height: 100%;
+  overflow-y: auto;
 }
 
 .sessionListHeader {
@@ -1648,43 +1654,70 @@ h1 {
 
 .sessionContentPanel {
   display: flex;
-  min-height: 520px;
+  min-height: 0;
+  height: 100%;
   flex-direction: column;
   overflow: hidden;
-  padding: 20px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
 }
 
 .conversationViewport {
-  min-height: 280px;
-  max-height: min(62vh, 640px);
+  width: min(60vw, 100%);
+  min-height: 0;
+  max-height: none;
+  flex: 1;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  margin-inline: auto;
+}
+
+.conversationStage {
+  display: flex;
+  width: 100%;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  overflow: hidden;
+}
+
+.conversationStage[data-empty="true"] {
+  justify-content: center;
+  gap: 20px;
+}
+
+.conversationStage[data-empty="true"] .conversationViewport {
+  min-height: 0;
+  flex: 0 0 auto;
+  overflow: visible;
 }
 
 .emptyConversation {
   display: grid;
-  min-height: 260px;
   place-content: center;
   justify-items: center;
-  gap: 8px;
   color: var(--text-muted);
   text-align: center;
 }
 
-.emptyConversation p {
-  max-width: 320px;
+.emptyBrand {
   margin: 0;
-  font-size: 12px;
-  line-height: 1.5;
+  color: var(--text-primary);
+  font-size: 26px;
+  font-weight: 650;
 }
 
 .messageHistory {
   display: grid;
   min-width: 0;
+  width: 100%;
   grid-template-columns: minmax(0, 1fr);
   gap: 14px;
-  padding: 18px 2px 4px 0;
+  padding: 18px 0 4px;
 }
 
 .historyMessage {
@@ -1694,11 +1727,21 @@ h1 {
 }
 
 .historyMessage[data-role="user"] {
-  border-left-color: var(--accent-strong);
+  width: fit-content;
+  max-width: 70%;
+  justify-self: end;
+  border: 0;
+  border-radius: 8px;
+  background: var(--surface-user-message);
+  padding: 10px 14px;
 }
 
 .historyMessage[data-role="assistant"] {
-  border-left-color: var(--success-text);
+  width: 95%;
+  max-width: 95%;
+  justify-self: start;
+  border: 0;
+  padding: 2px 0;
 }
 
 .historyMessageRole {
@@ -1815,22 +1858,9 @@ h1 {
   min-width: 0;
   grid-template-columns: minmax(0, 1fr);
   gap: 9px;
-  border: 1px solid var(--border-strong);
-  border-left: 3px solid var(--accent-strong);
-  background: var(--surface-app);
-  padding: 12px 13px;
-}
-
-.liveRuncompleted {
-  border-left-color: var(--success-text);
-}
-
-.liveRunfailed {
-  border-left-color: var(--danger-text);
-}
-
-.liveRuncanceled {
-  border-left-color: var(--warning-text);
+  border: 0;
+  background: transparent;
+  padding: 0;
 }
 
 .liveRunHeader,
@@ -1997,15 +2027,20 @@ h1 {
 }
 
 .composer {
-  position: sticky;
-  z-index: 1;
-  bottom: 0;
   display: grid;
+  width: min(60vw, 100%);
+  flex: 0 0 auto;
   gap: 8px;
-  margin: 16px -20px -20px;
+  margin: 0 auto;
   border-top: 1px solid var(--border-subtle);
-  background: var(--surface-panel);
-  padding: 14px 20px 20px;
+  background: var(--surface-app);
+  padding: 14px 0 12px;
+}
+
+.conversationStage[data-empty="true"] .composer {
+  border-top: 0;
+  background: transparent;
+  padding: 0;
 }
 
 .composerInput {
@@ -2014,7 +2049,7 @@ h1 {
   box-sizing: border-box;
   resize: vertical;
   border: 1px solid var(--border-strong);
-  border-radius: 5px;
+  border-radius: 22px;
   background: var(--surface-app);
   color: var(--text-primary);
   font: inherit;
@@ -2121,7 +2156,8 @@ h1 {
 
 .sessionPrompt {
   display: grid;
-  min-height: 320px;
+  min-height: 0;
+  flex: 1;
   place-content: center;
   justify-items: center;
   gap: 9px;
@@ -3031,4 +3067,190 @@ h1 {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
   gap: 8px;
+}
+
+.conversationMainContent {
+  display: flex;
+  width: 100%;
+  max-width: none;
+  height: calc(100dvh - 64px);
+  min-height: 0;
+  flex-direction: column;
+  margin: 0;
+  padding: 16px;
+}
+
+.topbarLeading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+}
+
+.sidebarToggle,
+.sidebarDismiss,
+.sessionListToggle {
+  display: none;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface-app);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.sidebarBackdrop,
+.sessionListBackdrop {
+  display: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+.appShell :global(button:focus-visible),
+.appShell :global(a:focus-visible),
+.appShell :global(input:focus-visible),
+.appShell :global(textarea:focus-visible),
+.appShell :global(select:focus-visible) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+@media (max-width: 1024px) {
+  .appShell {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 100dvh;
+  }
+
+  .mainColumn {
+    min-width: 0;
+  }
+
+  .sidebar {
+    position: fixed;
+    z-index: 50;
+    inset: 0 auto 0 0;
+    width: min(280px, calc(100vw - 48px));
+    height: 100dvh;
+    min-height: 100dvh;
+    overflow-y: auto;
+    border-right: 1px solid var(--border-subtle);
+    border-bottom: 0;
+    padding: 20px 16px;
+    transform: translateX(-102%);
+    transition: transform 160ms ease, visibility 160ms ease;
+    visibility: hidden;
+  }
+
+  .sidebar[data-open="true"] {
+    transform: translateX(0);
+    visibility: visible;
+  }
+
+  .sidebarBackdrop {
+    position: fixed;
+    z-index: 49;
+    inset: 0;
+    display: block;
+    background: rgb(0 0 0 / 42%);
+  }
+
+  .sidebarToggle,
+  .sidebarDismiss,
+  .sessionListToggle {
+    display: inline-flex;
+  }
+
+  .sessionListToggle {
+    flex: 0 0 36px;
+  }
+
+  .sessionsLayout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sessionListPanel {
+    display: none;
+  }
+
+  .sessionsLayout[data-list-open="true"] .sessionListBackdrop {
+    position: fixed;
+    z-index: 61;
+    inset: 0;
+    display: block;
+    background: rgb(0 0 0 / 42%);
+  }
+
+  .sessionsLayout[data-list-open="true"] .sessionListPanel {
+    position: fixed;
+    z-index: 62;
+    inset: 16px auto 16px 16px;
+    display: block;
+    width: min(320px, calc(100vw - 32px));
+    height: auto;
+    overflow-y: auto;
+    background: var(--surface-panel);
+  }
+}
+
+@media (max-width: 1023px) {
+  .conversationViewport,
+  .composer {
+    width: min(100%, calc(100vw - 32px));
+  }
+
+  .conversationViewport {
+    max-height: none;
+  }
+}
+
+@media (max-width: 680px) {
+  .topbar {
+    min-height: 56px;
+    align-items: center;
+    flex-direction: row;
+    gap: 8px;
+    padding: 0 12px;
+  }
+
+  .topbarLeading {
+    gap: 8px;
+  }
+
+  .breadcrumb {
+    gap: 6px;
+    font-size: 12px;
+  }
+
+  .toolbar {
+    width: auto;
+    flex: 0 0 auto;
+    gap: 6px;
+  }
+
+  .toolbarGroup {
+    gap: 1px;
+    padding: 2px;
+  }
+
+  .conversationMainContent {
+    height: calc(100dvh - 56px);
+    min-height: 0;
+    padding: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .appShell :global(*),
+  .appShell :global(*::before),
+  .appShell :global(*::after) {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }

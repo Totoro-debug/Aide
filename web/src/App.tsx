@@ -19,6 +19,7 @@ import {
   LockKeyhole,
   Languages,
   LogOut,
+  Menu,
   MessageSquare,
   Moon,
   Monitor,
@@ -149,6 +150,42 @@ const initialLaunchTicket = readAndClearTicket();
 const PERMISSION_LEVELS: ToolPermissionLevel[] = ["read-only", "workspace-write", "full-access"];
 const REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
 
+function usePanelKeyboard(open: boolean, setOpen: (open: boolean) => void, panelId: string, triggerId: string) {
+  useEffect(() => {
+    if (!open || !window.matchMedia("(max-width: 1024px)").matches) return;
+    const panel = document.getElementById(panelId);
+    const trigger = document.getElementById(triggerId);
+    if (panel === null) return;
+    const controls = () => Array.from(panel.querySelectorAll<HTMLElement>(
+      'a[href], button:not(:disabled), input:not(:disabled), [tabindex="0"]',
+    )).filter((element) => element.getClientRects().length > 0);
+    controls()[0]?.focus();
+    const handleKey = (event: KeyboardEvent) => {
+      if (!window.matchMedia("(max-width: 1024px)").matches) return;
+      if (event.defaultPrevented || document.querySelector('[role="dialog"]') !== null) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        trigger?.focus();
+        setOpen(false);
+      } else if (event.key === "Tab") {
+        const items = controls();
+        const first = items[0];
+        const last = items.at(-1);
+        if (!panel.contains(document.activeElement)
+          || (event.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+          event.preventDefault();
+          (event.shiftKey ? last : first)?.focus();
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => {
+      window.removeEventListener("keydown", handleKey);
+      if (panel.contains(document.activeElement) || document.activeElement === document.body) trigger?.focus();
+    };
+  }, [open, setOpen, panelId, triggerId]);
+}
+
 export default function App() {
   const { i18n, t } = useTranslation();
   const location = useLocation();
@@ -162,6 +199,7 @@ export default function App() {
   const [projectsLoadState, setProjectsLoadState] = useState<ProjectsLoadState>("idle");
   const [projectsError, setProjectsError] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(() => readThemePreference());
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [sessionEventVersion, setSessionEventVersion] = useState(0);
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
@@ -243,6 +281,8 @@ export default function App() {
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
+
+  usePanelKeyboard(sidebarOpen, setSidebarOpen, "app-sidebar", "app-sidebar-toggle");
 
   useEffect(() => {
     if (authState === "ready") void refreshProjects();
@@ -520,12 +560,21 @@ export default function App() {
     return t("status.offline");
   }, [connectionState, t]);
 
+  const isProjectSessionRoute = /^\/projects\/[^/]+$/.test(location.pathname);
   return (
     <div className={styles.appShell}>
       <a className={styles.skipLink} href="#main-content">
         {t("nav.status")}
       </a>
-      <aside className={styles.sidebar} aria-label={t("app.name")}>
+      {sidebarOpen ? (
+        <button
+          className={styles.sidebarBackdrop}
+          type="button"
+          aria-label={t("controls.closeNavigation")}
+          onClick={() => setSidebarOpen(false)}
+        />
+      ) : null}
+      <aside className={styles.sidebar} id="app-sidebar" aria-label={t("app.name")} data-open={sidebarOpen}>
         <div className={styles.brandBlock}>
           <div className={styles.brandMark} aria-hidden="true">
             <Activity size={18} strokeWidth={2.2} />
@@ -534,17 +583,25 @@ export default function App() {
             <div className={styles.brandName}>{t("app.name")}</div>
             <div className={styles.brandSubtitle}>{t("app.subtitle")}</div>
           </div>
+          <button
+            className={`${styles.iconButton} ${styles.sidebarDismiss}`}
+            type="button"
+            aria-label={t("controls.closeNavigation")}
+            onClick={() => setSidebarOpen(false)}
+          >
+            <X size={17} aria-hidden="true" />
+          </button>
         </div>
         <nav className={styles.navigation} aria-label={t("app.name")}>
-          <NavLink className={({ isActive }) => isActive ? `${styles.navLink} ${styles.navLinkActive}` : styles.navLink} to="/status">
+          <NavLink className={({ isActive }) => isActive ? `${styles.navLink} ${styles.navLinkActive}` : styles.navLink} to="/status" onClick={() => setSidebarOpen(false)}>
             <Activity size={16} aria-hidden="true" />
             <span>{t("nav.status")}</span>
           </NavLink>
-          <NavLink className={({ isActive }) => isActive ? `${styles.navLink} ${styles.navLinkActive}` : styles.navLink} to="/projects">
+          <NavLink className={({ isActive }) => isActive ? `${styles.navLink} ${styles.navLinkActive}` : styles.navLink} to="/projects" onClick={() => setSidebarOpen(false)}>
             <FolderOpen size={16} aria-hidden="true" />
             <span>{t("nav.projects")}</span>
           </NavLink>
-          <NavLink className={({ isActive }) => isActive ? `${styles.navLink} ${styles.navLinkActive}` : styles.navLink} to="/settings">
+          <NavLink className={({ isActive }) => isActive ? `${styles.navLink} ${styles.navLinkActive}` : styles.navLink} to="/settings" onClick={() => setSidebarOpen(false)}>
             <Settings2 size={16} aria-hidden="true" />
             <span>{t("nav.settings")}</span>
           </NavLink>
@@ -556,6 +613,7 @@ export default function App() {
                 className={styles.projectNavigationLink}
                 key={project.project_id}
                 to={`/projects/${project.project_id}`}
+                onClick={() => setSidebarOpen(false)}
               >
                 <span className={styles.projectNavigationDot} data-available={project.available} />
                 <span>{project.name || project.path}</span>
@@ -568,20 +626,33 @@ export default function App() {
 
       <div className={styles.mainColumn}>
         <header className={styles.topbar}>
-          <div className={styles.breadcrumb}>
-            <span className={styles.breadcrumbMuted}>{t("app.name")}</span>
-            <span className={styles.breadcrumbDivider} aria-hidden="true">
-              /
-            </span>
-            <span>
-              {location.pathname === "/settings"
-                ? t("nav.settings")
-                : location.pathname.startsWith("/projects/")
-                ? location.pathname.includes("/schedule")
-                  ? t("nav.schedule")
-                  : t("nav.sessions")
-                : t(location.pathname === "/projects" ? "nav.projects" : "nav.status")}
-            </span>
+          <div className={styles.topbarLeading}>
+            <button
+              className={styles.sidebarToggle}
+              id="app-sidebar-toggle"
+              type="button"
+              aria-label={sidebarOpen ? t("controls.closeNavigation") : t("controls.openNavigation")}
+              aria-controls="app-sidebar"
+              aria-expanded={sidebarOpen}
+              onClick={() => setSidebarOpen((open) => !open)}
+            >
+              {sidebarOpen ? <X size={18} aria-hidden="true" /> : <Menu size={18} aria-hidden="true" />}
+            </button>
+            <div className={styles.breadcrumb}>
+              <span className={styles.breadcrumbMuted}>{t("app.name")}</span>
+              <span className={styles.breadcrumbDivider} aria-hidden="true">
+                /
+              </span>
+              <span>
+                {location.pathname === "/settings"
+                  ? t("nav.settings")
+                  : location.pathname.startsWith("/projects/")
+                  ? location.pathname.includes("/schedule")
+                    ? t("nav.schedule")
+                    : t("nav.sessions")
+                  : t(location.pathname === "/projects" ? "nav.projects" : "nav.status")}
+              </span>
+            </div>
           </div>
           <div className={styles.toolbar}>
             <div className={styles.toolbarGroup} aria-label={t("controls.language")}>
@@ -635,7 +706,11 @@ export default function App() {
           </div>
         </header>
 
-        <main id="main-content" className={styles.mainContent} tabIndex={-1}>
+        <main
+          id="main-content"
+          className={isProjectSessionRoute ? `${styles.mainContent} ${styles.conversationMainContent}` : styles.mainContent}
+          tabIndex={-1}
+        >
           <Routes>
             <Route
               path="/"
@@ -4895,30 +4970,35 @@ function LiveRunView({
 }) {
   const active = isLiveRunActive(run);
   return (
-    <article className={`${styles.liveRun} ${styles[`liveRun${run.status}`]}`} data-run-id={run.runId ?? run.localId}>
-      <div className={styles.liveRunHeader}>
-        <span className={styles.historyMessageRole}>{t("sessions.userMessage")}</span>
-        <span className={`${styles.statusBadge} ${styles[`status${run.status}`]}`} role="status" aria-live="polite">
-          {statusIcon(run.status)}
-          {t(runStatusKey(run.status))}
-        </span>
+    <article className={styles.liveRun} data-run-id={run.runId ?? run.localId}>
+      <div className={styles.historyMessage} data-role="user">
+        <div className={styles.historyMessageRole}>{t("sessions.userMessage")}</div>
+        <div className={styles.livePrompt}>{run.prompt}</div>
       </div>
-      <div className={styles.livePrompt}>{run.prompt}</div>
-      {run.tools.length > 0 ? <ToolActivityGroup tools={run.tools} t={t} /> : null}
-      {run.assistantContent ? <MarkdownContent content={run.assistantContent} /> : active ? <p className={styles.pendingAnswer}>{t("conversation.assistantPending")}</p> : null}
-      {run.error ? <p className={styles.runError}>{run.error}</p> : null}
-      {active && run.runId !== null && run.cancellable ? (
-        <button
-          className={styles.cancelRunButton}
-          type="button"
-          aria-label={t("controls.cancelRun")}
-          disabled={run.cancelRequested}
-          onClick={() => onCancel(run)}
-        >
-          <Square size={14} aria-hidden="true" />
-          {run.cancelRequested ? t("controls.cancelingRun") : t("controls.cancelRun")}
-        </button>
-      ) : null}
+      <div className={styles.historyMessage} data-role="assistant">
+        <div className={styles.liveRunHeader}>
+          <span className={styles.historyMessageRole}>{t("sessions.assistantMessage")}</span>
+          <span className={`${styles.statusBadge} ${styles[`status${run.status}`]}`} role="status" aria-live="polite">
+            {statusIcon(run.status)}
+            {t(runStatusKey(run.status))}
+          </span>
+        </div>
+        {run.tools.length > 0 ? <ToolActivityGroup tools={run.tools} t={t} /> : null}
+        {run.assistantContent ? <MarkdownContent content={run.assistantContent} /> : active ? <p className={styles.pendingAnswer}>{t("conversation.assistantPending")}</p> : null}
+        {run.error ? <p className={styles.runError}>{run.error}</p> : null}
+        {active && run.runId !== null && run.cancellable ? (
+          <button
+            className={styles.cancelRunButton}
+            type="button"
+            aria-label={t("controls.cancelRun")}
+            disabled={run.cancelRequested}
+            onClick={() => onCancel(run)}
+          >
+            <Square size={14} aria-hidden="true" />
+            {run.cancelRequested ? t("controls.cancelingRun") : t("controls.cancelRun")}
+          </button>
+        ) : null}
+      </div>
     </article>
   );
 }
@@ -4985,6 +5065,7 @@ function ProjectSessionsContent({
   const [sessionNextCursor, setSessionNextCursor] = useState<string | null>(null);
   const [loadState, setLoadState] = useState<SessionLoadState>("idle");
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [sessionListOpen, setSessionListOpen] = useState(false);
   const [claim, setClaim] = useState<SessionClaim | null>(null);
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null);
   const [draft, setDraft] = useState(false);
@@ -5162,6 +5243,8 @@ function ProjectSessionsContent({
     if (trigger?.isConnected && !trigger.disabled) trigger.focus();
     else document.getElementById("sessions-heading")?.focus();
   }, [restoreOpen]);
+
+  usePanelKeyboard(sessionListOpen, setSessionListOpen, "project-session-list", "project-session-list-toggle");
 
   useEffect(() => {
     selectedSessionRef.current = selectedSessionId;
@@ -6034,6 +6117,18 @@ function ProjectSessionsContent({
           {project !== undefined ? <p className={styles.pageDescription}>{project.path}</p> : null}
         </div>
         <div className={styles.pageActions}>
+          <button
+            className={styles.sessionListToggle}
+            id="project-session-list-toggle"
+            type="button"
+            aria-label={t("sessions.listTitle")}
+            aria-controls="project-session-list"
+            aria-expanded={sessionListOpen}
+            title={t("sessions.listTitle")}
+            onClick={() => setSessionListOpen((open) => !open)}
+          >
+            {sessionListOpen ? <X size={17} aria-hidden="true" /> : <Menu size={17} aria-hidden="true" />}
+          </button>
           {pendingDeletion?.attempted ? (
             <button
               className={styles.dangerButton}
@@ -6067,7 +6162,10 @@ function ProjectSessionsContent({
             className={styles.primaryButton}
             type="button"
             disabled={authUnavailable || project?.available !== true || busySessionId !== null}
-            onClick={() => void createDraft()}
+            onClick={() => {
+              setSessionListOpen(false);
+              void createDraft();
+            }}
           >
             <Plus size={16} aria-hidden="true" />
             {t("controls.newSession")}
@@ -6161,8 +6259,20 @@ function ProjectSessionsContent({
           <div><h2>{t("sessions.loadError")}</h2><button className={styles.secondaryButton} type="button" onClick={() => void refreshSessions()}>{t("controls.retry")}</button></div>
         </div>
       ) : (
-        <div className={styles.sessionsLayout}>
-          <aside className={styles.sessionListPanel} aria-label={t("sessions.listLabel")}>
+        <div className={styles.sessionsLayout} data-list-open={sessionListOpen}>
+          {sessionListOpen ? (
+            <button
+              className={styles.sessionListBackdrop}
+              type="button"
+              aria-label={t("controls.close")}
+              onClick={() => setSessionListOpen(false)}
+            />
+          ) : null}
+          <aside
+            className={styles.sessionListPanel}
+            id="project-session-list"
+            aria-label={t("sessions.listLabel")}
+          >
             <div className={styles.sessionListHeader}>
               <h2>{t("sessions.listTitle")}</h2>
               <span>{(sessions?.sessions.length ?? 0) + draftSessionIds.length}</span>
@@ -6190,7 +6300,10 @@ function ProjectSessionsContent({
                   key={draftId}
                   aria-current={selectedSessionId === draftId ? "true" : undefined}
                   disabled={busySessionId !== null}
-                  onClick={() => void openSession(draftId, true)}
+                  onClick={() => {
+                    setSessionListOpen(false);
+                    void openSession(draftId, true);
+                  }}
                 >
                   <span className={styles.sessionRowMain}>
                     <MessageSquare size={15} aria-hidden="true" />
@@ -6218,7 +6331,10 @@ function ProjectSessionsContent({
                         type="button"
                         aria-current={isSelected ? "true" : undefined}
                         disabled={busySessionId !== null}
-                        onClick={() => void openSession(item.id, false)}
+                        onClick={() => {
+                          setSessionListOpen(false);
+                          void openSession(item.id, false);
+                        }}
                       >
                         <span className={styles.sessionRowMain}>
                           {occupiedByOther ? <LockKeyhole size={15} aria-hidden="true" /> : <MessageSquare size={15} aria-hidden="true" />}
@@ -6249,7 +6365,10 @@ function ProjectSessionsContent({
             ) : null}
           </aside>
 
-          <section className={styles.sessionContentPanel}>
+          <section
+            className={styles.sessionContentPanel}
+            aria-label={t("sessions.conversation")}
+          >
             {claim !== null && snapshot !== null ? (
               <>
                 <div className={styles.sessionContentHeader}>
@@ -6332,24 +6451,27 @@ function ProjectSessionsContent({
                     </button>
                   </div>
                 </div>
-                <div className={styles.conversationViewport} role="log" aria-live="off" aria-label={t("sessions.historyLabel")}>
-                  {snapshot.messages.length === 0 && selectedLiveRuns.length === 0 ? (
-                    <div className={styles.emptyConversation} role="status">
-                      <MessageSquare size={20} aria-hidden="true" />
-                      <p>{draft ? t("conversation.emptyDraft") : t("sessions.noMessages")}</p>
-                    </div>
-                  ) : (
-                    <div className={styles.messageHistory}>
-                      {snapshot.messages.map((message, index) => (
-                        <HistoryMessageView key={`history-${index}-${String(message.role)}`} message={message} index={index} t={t} />
-                      ))}
-                      {selectedLiveRuns.map((run) => (
-                        <LiveRunView key={run.localId} run={run} t={t} onCancel={(candidate) => void cancelRun(candidate)} />
-                      ))}
-                    </div>
-                  )}
-                </div>
-                <form className={styles.composer} onSubmit={(event) => void submitInput(event)}>
+                <div
+                  className={styles.conversationStage}
+                  data-empty={snapshot.messages.length === 0 && selectedLiveRuns.length === 0}
+                >
+                  <div className={styles.conversationViewport} role="log" aria-live="off" aria-label={t("sessions.historyLabel")}>
+                    {snapshot.messages.length === 0 && selectedLiveRuns.length === 0 ? (
+                      <div className={styles.emptyConversation} role="status">
+                        <h2 className={styles.emptyBrand}>Omni</h2>
+                      </div>
+                    ) : (
+                      <div className={styles.messageHistory}>
+                        {snapshot.messages.map((message, index) => (
+                          <HistoryMessageView key={`history-${index}-${String(message.role)}`} message={message} index={index} t={t} />
+                        ))}
+                        {selectedLiveRuns.map((run) => (
+                          <LiveRunView key={run.localId} run={run} t={t} onCancel={(candidate) => void cancelRun(candidate)} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <form className={styles.composer} onSubmit={(event) => void submitInput(event)}>
                   <label className={styles.srOnly} htmlFor="conversation-input">{t("conversation.inputLabel")}</label>
                   <textarea
                     ref={inputRef}
@@ -6383,7 +6505,8 @@ function ProjectSessionsContent({
                       {t("controls.send")}
                     </button>
                   </div>
-                </form>
+                  </form>
+                </div>
               </>
             ) : (
               <div className={styles.sessionPrompt}>
@@ -6859,21 +6982,17 @@ function readAndClearTicket(): string | null {
 function readThemePreference(): Theme {
   try {
     const value = window.localStorage.getItem(THEME_KEY);
-    if (value === "light" || value === "dark") return value;
+    if (value === "light" || value === "dark" || value === "system") return value;
   } catch {
-    // Use the system default when storage is unavailable.
+    // Theme preference is optional when storage is unavailable.
   }
-  return "system";
+  return "light";
 }
 
 function applyTheme(theme: Theme): void {
   document.documentElement.dataset.theme = theme;
   try {
-    if (theme === "system") {
-      window.localStorage.removeItem(THEME_KEY);
-    } else {
-      window.localStorage.setItem(THEME_KEY, theme);
-    }
+    window.localStorage.setItem(THEME_KEY, theme);
   } catch {
     // Theme preference is optional when storage is unavailable.
   }

@@ -19,11 +19,70 @@ const viewports = [
   { width: 1024, height: 768 },
   { width: 768, height: 1024 },
 ];
+const conversationViewports = [
+  { width: 1920, height: 1080 },
+  { width: 1280, height: 900 },
+  { width: 900, height: 700 },
+  { width: 480, height: 800 },
+];
 const output = resolve("test-results");
 let control;
 let browser;
 let secondContext;
 let acceptanceError;
+
+async function verifyConversationMessages(page, viewport) {
+  const messages = await page.getByRole("log").evaluate((log) => {
+    const area = log.getBoundingClientRect();
+    return Array.from(log.querySelectorAll('[data-role="user"], [data-role="assistant"]')).map((element) => {
+      const bounds = element.getBoundingClientRect();
+      return {
+        role: element.dataset.role,
+        width: bounds.width,
+        areaWidth: area.width,
+        leftGap: bounds.left - area.left,
+        rightGap: area.right - bounds.right,
+        background: window.getComputedStyle(element).backgroundColor,
+      };
+    });
+  });
+  assert.ok(messages.some((message) => message.role === "user"), "Conversation had no user message");
+  assert.ok(messages.some((message) => message.role === "assistant"), "Conversation had no assistant message");
+  for (const message of messages) {
+    const user = message.role === "user";
+    assert.ok(message.width <= message.areaWidth * (user ? 0.7 : 0.95) + 1,
+      `${message.role} message too wide at ${viewport.width}px: ${JSON.stringify(message)}`);
+    const gap = user ? message.rightGap : message.leftGap;
+    assert.ok(gap >= -1 && gap <= 20, `${message.role} message was misaligned at ${viewport.width}px`);
+    if (!user) assert.ok(message.background === "rgba(0, 0, 0, 0)" || message.background === "transparent",
+      `Assistant response had a bubble at ${viewport.width}px`);
+  }
+}
+
+async function verifyTextContrast(page) {
+  const contrast = await page.evaluate(() => {
+    const luminance = (color) => {
+      const channels = color.match(/[\d.]+/g).slice(0, 3).map(Number).map((value) => {
+        const channel = value / 255;
+        return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+      });
+      return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+    };
+    const ratio = (element) => {
+      const foreground = luminance(window.getComputedStyle(element).color);
+      let backgroundElement = element;
+      while (window.getComputedStyle(backgroundElement).backgroundColor === "rgba(0, 0, 0, 0)"
+        && backgroundElement.parentElement) backgroundElement = backgroundElement.parentElement;
+      const background = luminance(window.getComputedStyle(backgroundElement).backgroundColor);
+      return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
+    };
+    return Array.from(document.querySelectorAll(
+      'a[href="#main-content"], [role="log"] [data-role="user"], [role="log"] [data-role="assistant"], form button[type="submit"]',
+    )).map((element) => ({ text: element.textContent.slice(0, 40), ratio: ratio(element) }));
+  });
+  for (const item of contrast) assert.ok(item.ratio >= 4.5,
+    `Text contrast below 4.5:1: ${JSON.stringify(item)}`);
+}
 
 async function shutdownControl() {
   try {
@@ -117,6 +176,7 @@ try {
   await page.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
   await page.getByRole("status").first().getByText(/Online|在线/).waitFor();
   assert.match(page.url(), /\/status$/);
+  assert.equal(await page.locator("html").getAttribute("data-theme"), "light", "First-use theme should be light");
   secondContext = await browser.newContext();
   await secondContext.addInitScript(() => {
     const OriginalWebSocket = window.WebSocket;
@@ -161,9 +221,27 @@ try {
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
         await page.getByRole("main").waitFor();
-        await page.getByRole("navigation").getByRole("link", {
+        const statusNavigationLink = page.getByRole("navigation").getByRole("link", {
           name: language === "en" ? "Status" : "状态",
-        }).waitFor();
+        });
+        if (viewport.width <= 1024) {
+          const openNavigation = page.getByRole("button", {
+            name: language === "en" ? "Open navigation" : "打开导航",
+          });
+          await expect(openNavigation).toHaveAttribute("aria-expanded", "false");
+          await openNavigation.click();
+          const closeNavigation = page.getByRole("banner").getByRole("button", {
+            name: language === "en" ? "Close navigation" : "关闭导航",
+          });
+          await expect(closeNavigation).toHaveAttribute("aria-expanded", "true");
+          await expect(statusNavigationLink).toBeVisible();
+          await page.keyboard.press("Escape");
+          await expect(openNavigation).toHaveAttribute("aria-expanded", "false");
+          await expect(openNavigation).toBeFocused();
+          await expect(statusNavigationLink).toBeHidden();
+        } else {
+          await statusNavigationLink.waitFor();
+        }
         const layout = await page.evaluate(() => {
           const aside = document.querySelector("aside").getBoundingClientRect();
           const main = document.querySelector("main").getBoundingClientRect();
@@ -177,8 +255,27 @@ try {
     }
   }
 
+  await page.setViewportSize(viewports[0]);
   const statusLink = page.getByRole("navigation").getByRole("link", { name: "状态" });
   await statusLink.focus();
+  const statusFocusOutline = await statusLink.evaluate((element) => {
+    const style = window.getComputedStyle(element);
+    return { style: style.outlineStyle, width: Number.parseFloat(style.outlineWidth) };
+  });
+  assert.notEqual(statusFocusOutline.style, "none", "Keyboard focus should be visible on navigation links");
+  assert.ok(statusFocusOutline.width >= 2, "Keyboard focus ring should be at least 2px wide");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.setViewportSize({ width: 768, height: 1024 });
+  const reducedMotionTransition = await page.locator("aside[data-open]").evaluate((element) => (
+    window.getComputedStyle(element).transitionDuration.split(",").map((duration) => {
+      const value = Number.parseFloat(duration);
+      return duration.trim().endsWith("ms") ? value / 1000 : value;
+    })
+  ));
+  assert.ok(reducedMotionTransition.every((duration) => duration <= 0.001),
+    `Reduced-motion navigation transition remained animated: ${reducedMotionTransition.join(", ")}`);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.setViewportSize(viewports[0]);
   await statusLink.press("Enter");
   assert.match(page.url(), /\/status$/);
 
@@ -194,7 +291,14 @@ try {
   await page.getByRole("heading", { name: "服务状态" }).waitFor();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
   await page.getByRole("status").first().getByText("在线").waitFor();
+  await page.getByRole("button", { name: /跟随系统|System/ }).click();
+  assert.equal(await page.locator("html").getAttribute("data-theme"), "system");
+  await page.reload();
+  await page.getByRole("heading", { name: "服务状态" }).waitFor();
+  assert.equal(await page.locator("html").getAttribute("data-theme"), "system");
+  await page.getByRole("button", { name: /深色|Dark/ }).click();
 
+  await page.setViewportSize(viewports[0]);
   await page.getByRole("button", { name: "EN", exact: true }).click();
   await page.getByRole("link", { name: "Projects" }).click();
   await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
@@ -376,6 +480,7 @@ try {
       }
     }
   }
+  await page.setViewportSize(viewports[0]);
   await page.getByRole("button", { name: "EN", exact: true }).click();
   await page.getByRole("link", { name: "Back to Schedule Jobs", exact: true }).first().click();
   await page.getByRole("heading", { name: "Schedule Jobs", exact: true }).waitFor();
@@ -690,6 +795,7 @@ try {
       }
     }
   }
+  await page.setViewportSize(viewports[0]);
   await page.getByRole("button", { name: "EN", exact: true }).click();
 
   let notifyOldScheduleLoad;
@@ -984,6 +1090,33 @@ try {
   assert.equal(typeof conversationSessionId, "string");
   assert.equal(typeof conversationWorkspaceId, "string");
   await page.getByText("Empty draft", { exact: true }).waitFor();
+  await page.getByRole("main").getByText("Omni", { exact: true }).waitFor();
+  for (const viewport of conversationViewports) {
+    await page.setViewportSize(viewport);
+    const input = page.getByLabel("Message input");
+    const send = page.getByRole("button", { name: "Send", exact: true });
+    await expect(input).toBeVisible();
+    await expect(send).toBeVisible();
+    const bounds = await page.evaluate(() => ({
+      width: document.documentElement.scrollWidth,
+      brand: document.querySelector("section[aria-label='Conversation'] [role='log'] h2").getBoundingClientRect(),
+      input: document.querySelector("textarea").getBoundingClientRect(),
+      send: document.querySelector("form button[type='submit']").getBoundingClientRect(),
+    }));
+    assert.ok(bounds.width <= viewport.width, `Empty session overflow at ${viewport.width}x${viewport.height}`);
+    assert.ok(bounds.brand.width > 0 && bounds.input.width > 0 && bounds.send.width > 0,
+      `Empty session controls missing at ${viewport.width}x${viewport.height}`);
+    const emptyLayout = await page.getByRole("log").evaluate((log) => {
+      const stage = log.parentElement.getBoundingClientRect();
+      const brand = log.getBoundingClientRect();
+      const form = log.parentElement.querySelector("form").getBoundingClientRect();
+      return { center: stage.top + stage.height / 2, groupCenter: (brand.top + form.bottom) / 2 };
+    });
+    assert.ok(Math.abs(emptyLayout.center - emptyLayout.groupCenter) <= 1,
+      `Empty conversation was not vertically centered at ${viewport.width}px`);
+    await page.screenshot({ path: resolve(output, `empty-session-${viewport.width}.png`) });
+  }
+  await page.setViewportSize(viewports[0]);
   const managementTrigger = page.getByRole("button", { name: "Runtime status and controls", exact: true });
   await managementTrigger.click();
   const managementDialog = page.getByRole("dialog", { name: "Runtime status", exact: true });
@@ -1245,7 +1378,9 @@ try {
   await page.getByLabel("Message input").fill("recovery streaming markdown");
   await page.getByLabel("Message input").press("Shift+Enter");
   await page.getByLabel("Message input").type("second line");
-  const multilinePrompt = "recovery streaming markdown\nsecond line";
+  const multilinePrompt = "recovery streaming markdown\nsecond line\n\n"
+    + Array.from({ length: 40 }, (_, index) => `Long conversation paragraph ${index + 1}.`).join("\n\n");
+  await page.getByLabel("Message input").fill(multilinePrompt);
   assert.equal(await page.getByLabel("Message input").inputValue(), multilinePrompt);
   await page.getByLabel("Message input").evaluate((element) => {
     element.dispatchEvent(new element.ownerDocument.defaultView.KeyboardEvent("keydown", {
@@ -1266,6 +1401,7 @@ try {
   await page.evaluate((messages) => {
     window.__omniTestMessages = [...messages, ...window.__omniTestMessages];
   }, beforeStreamRefresh);
+  await page.setViewportSize(viewports[0]);
   await sessionList.getByRole("button", { name: /Web available history/ }).click();
   await expect(page.getByRole("log").getByText("tool states", { exact: true })).toHaveCount(1);
   const backgroundDraft = page.getByRole("button", { name: /New Session draft/ });
@@ -1366,30 +1502,96 @@ try {
     await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
     for (const theme of ["light", "dark"]) {
       await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
-      for (const viewport of viewports) {
+      for (const viewport of conversationViewports) {
         await page.setViewportSize(viewport);
+        if (viewport.width <= 1024) {
+          const sessionListToggle = page.getByRole("button", {
+            name: language === "en" ? "Recent Sessions" : "最近会话",
+          });
+          const sessionPanel = page.getByRole("complementary", {
+            name: language === "en" ? "Conversation Sessions" : "对话会话",
+          });
+          await expect(sessionListToggle).toHaveAttribute("aria-expanded", "false");
+          await sessionListToggle.click();
+          await expect(sessionListToggle).toHaveAttribute("aria-expanded", "true");
+          await expect(sessionPanel).toBeVisible();
+          await page.keyboard.press("Escape");
+          await expect(sessionListToggle).toHaveAttribute("aria-expanded", "false");
+          await expect(sessionListToggle).toBeFocused();
+          await expect(sessionPanel).toBeHidden();
+        }
         const input = page.getByLabel(language === "en" ? "Message input" : "消息输入");
-        await input.scrollIntoViewIfNeeded();
         const send = page.getByRole("button", { name: language === "en" ? "Send" : "发送" });
-        await send.scrollIntoViewIfNeeded();
+        await expect(input).toBeVisible();
+        await expect(send).toBeVisible();
+        const conversation = page.getByRole("region", {
+          name: language === "en" ? "Conversation" : "对话",
+        });
         const bounds = await page.evaluate(() => {
           const input = document.querySelector("textarea").getBoundingClientRect();
           const send = document.querySelector("form button[type='submit']").getBoundingClientRect();
+          const section = document.querySelector("section[aria-label='Conversation'], section[aria-label='对话']").getBoundingClientRect();
+          const log = document.querySelector("[role='log']").getBoundingClientRect();
+          const form = document.querySelector("section[aria-label='Conversation'] form, section[aria-label='对话'] form").getBoundingClientRect();
           return {
             inputWidth: input.width,
             sendWidth: send.width,
             sendBottom: send.bottom,
+            sectionCenter: section.left + section.width / 2,
+            logCenter: log.left + log.width / 2,
+            logWidth: log.width,
+            formCenter: form.left + form.width / 2,
+            formWidth: form.width,
             width: document.documentElement.scrollWidth,
           };
         });
+        await expect(conversation).toBeVisible();
         assert.ok(bounds.width <= viewport.width, `Conversation overflow at ${viewport.width}x${viewport.height}`);
+        assert.equal(await page.evaluate(() => window.scrollY), 0, "Conversation scrolled the entire document");
+        assert.ok(await page.getByRole("log").evaluate((log) => log.scrollHeight > log.clientHeight),
+          "Long conversation did not scroll within the message region");
         assert.ok(bounds.inputWidth > 0 && bounds.sendWidth > 0 && bounds.sendBottom <= viewport.height + 1,
           `Composer unreachable at ${viewport.width}x${viewport.height}`);
+        const expectedLogWidth = viewport.width >= 1024 ? viewport.width * 0.6 : viewport.width - 32;
+        const logWidthTolerance = viewport.width >= 1024 ? 1 : 16;
+        assert.ok(Math.abs(bounds.logWidth - expectedLogWidth) <= logWidthTolerance,
+          `Conversation width ${bounds.logWidth}px did not match ${expectedLogWidth}px at ${viewport.width}px`);
+        assert.ok(Math.abs(bounds.formWidth - bounds.logWidth) <= 1,
+          `Composer width did not match conversation width at ${viewport.width}px`);
+        assert.ok(Math.abs(bounds.logCenter - bounds.sectionCenter) <= 1
+          && Math.abs(bounds.formCenter - bounds.sectionCenter) <= 1,
+        `Conversation content was not centered in its panel at ${viewport.width}px`);
+        const bubbles = await page.evaluate(() => {
+          const log = document.querySelector("[role='log']").getBoundingClientRect();
+          const user = document.querySelector("article[data-role='user']").getBoundingClientRect();
+          const assistant = document.querySelector("article[data-role='assistant']").getBoundingClientRect();
+          return {
+            logWidth: log.width,
+            userWidth: user.width,
+            userRightGap: log.right - user.right,
+            assistantWidth: assistant.width,
+            assistantLeftGap: assistant.left - log.left,
+            assistantBackground: window.getComputedStyle(document.querySelector("article[data-role='assistant']")).backgroundColor,
+          };
+        });
+        assert.ok(bubbles.userWidth <= bubbles.logWidth * 0.7 + 1,
+          `User message exceeded 70% of the conversation at ${viewport.width}px`);
+        assert.ok(bubbles.userRightGap >= -1 && bubbles.userRightGap <= 20,
+          `User message was not right-aligned at ${viewport.width}px`);
+        assert.ok(bubbles.assistantWidth <= bubbles.logWidth * 0.95 + 1,
+          `Assistant message exceeded 95% of the conversation at ${viewport.width}px`);
+        assert.ok(bubbles.assistantLeftGap >= -1 && bubbles.assistantLeftGap <= 20,
+          `Assistant message was not left-aligned at ${viewport.width}px`);
+        assert.ok(bubbles.assistantBackground === "rgba(0, 0, 0, 0)" || bubbles.assistantBackground === "transparent",
+          `Assistant message rendered with a bubble at ${viewport.width}px`);
+        await verifyConversationMessages(page, viewport);
+        await verifyTextContrast(page);
         await page.screenshot({ path: resolve(output, `conversation-${language}-${theme}-${viewport.width}.png`) });
       }
     }
   }
 
+  await page.setViewportSize(viewports[0]);
   await page.getByRole("button", { name: /Web available history/ }).click();
   await page.getByRole("button", { name: /Runtime status and controls|运行状态与控制/, exact: true }).click();
   const activeRuntimeDialog = page.getByRole("dialog", { name: /Runtime status|运行状态/, exact: true });
@@ -1399,25 +1601,51 @@ try {
     await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
     for (const theme of ["light", "dark"]) {
       await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
-      for (const viewport of viewports) {
+      for (const viewport of conversationViewports) {
         await page.setViewportSize(viewport);
+        await verifyConversationMessages(page, viewport);
         const cancel = page.getByRole("button", { name: language === "en" ? "Cancel run" : "取消运行" });
         await cancel.scrollIntoViewIfNeeded();
         const box = await cancel.boundingBox();
         assert.ok(box && box.width > 0 && box.y >= 0 && box.y + box.height <= viewport.height + 1,
           `Cancel unreachable at ${viewport.width}x${viewport.height}`);
+        const composerLayout = await page.locator("section[aria-label='Conversation'] form, section[aria-label='对话'] form")
+          .evaluate((element) => {
+            const bounds = (target) => {
+              const rect = target.getBoundingClientRect();
+              return { top: rect.top, bottom: rect.bottom, height: rect.height };
+            };
+            return {
+              topbar: bounds(document.querySelector("header")),
+              main: bounds(document.querySelector("main")),
+              panel: bounds(element.closest("section[aria-label='Conversation'], section[aria-label='对话']")),
+              stage: bounds(element.closest("[data-empty]")),
+              form: bounds(element),
+              documentHeight: document.documentElement.scrollHeight,
+              scrollY: window.scrollY,
+            };
+          });
+        assert.ok(composerLayout.form.bottom <= viewport.height + 1
+          && viewport.height - composerLayout.form.bottom <= 80,
+        `Active conversation composer layout at ${viewport.width}x${viewport.height}: ${JSON.stringify(composerLayout)}`);
         await page.screenshot({ path: resolve(output, `cancel-${language}-${theme}-${viewport.width}.png`) });
       }
     }
   }
+  await page.setViewportSize(viewports[0]);
   await page.getByRole("button", { name: "EN", exact: true }).click();
-  await page.getByRole("button", { name: "Cancel run" }).click();
-  const canceledGroup = page.locator("article[data-run-id] details").filter({ hasText: /Tool activity|工具活动/ }).first();
-  await canceledGroup.locator("summary").first().click();
-  await canceledGroup.getByText("Canceled", { exact: true }).waitFor();
-  await page.screenshot({ path: resolve(output, "canceled-en-dark-768.png") });
-  await waitForRecordedEvent((messages) => messages.some((event) => event.type === "run.cancelled"),
-    "Tool Run cancellation");
+  const cancelRunButton = page.getByRole("button", { name: "Cancel run" });
+  const canceledRunId = await cancelRunButton.evaluate((element) => element.closest("article[data-run-id]")?.getAttribute("data-run-id"));
+  assert.ok(canceledRunId, "Cancel control had no owning Run");
+  const priorCancellationCount = await page.evaluate((runId) => window.__omniTestMessages.filter((event) => (
+    event.type === "run.cancelled" && event.run_id === runId
+  )).length, canceledRunId);
+  await cancelRunButton.click();
+  await waitForRecordedEvent((messages) => messages.filter((event) => (
+    event.type === "run.cancelled" && event.run_id === canceledRunId
+  )).length > priorCancellationCount, "New Tool Run cancellation event");
+  await expect(cancelRunButton).toBeHidden();
+  await page.screenshot({ path: resolve(output, "canceled-en-dark-1440.png") });
   const acceptedToolRuns = await page.evaluate(() => window.__omniTestMessages.filter((event) => (
     event.type === "input.accepted" && event.payload?.text === "tool states"
   )));
@@ -1435,6 +1663,22 @@ try {
   await canceledHistoryTool.getByText("Canceled", { exact: true }).waitFor();
   assert.equal(await page.getByRole("log").getByText("tool states", { exact: true }).count(), 1,
     "Reload duplicated the persisted Tool Run prompt");
+  await page.getByRole("button", { name: /Light|浅色/ }).click();
+  await page.getByRole("button", { name: "New session", exact: true }).click();
+  await page.getByRole("region", { name: "Conversation", exact: true })
+    .getByRole("heading", { name: "New Session draft", exact: true }).waitFor();
+  await page.getByLabel("Message input").fill("tool states");
+  await page.getByLabel("Message input").press("Enter");
+  await page.getByRole("button", { name: "Cancel run", exact: true }).waitFor();
+  const lightCancel = page.getByRole("button", { name: "Cancel run", exact: true });
+  const lightRunId = await lightCancel.evaluate((element) => element.closest("article[data-run-id]").dataset.runId);
+  await lightCancel.click();
+  await waitForRecordedEvent((messages) => messages.some((event) => (
+    event.type === "run.cancelled" && event.run_id === lightRunId
+  )), "Light-theme Tool Run cancellation");
+  await expect(lightCancel).toBeHidden();
+  await page.getByRole("button", { name: /Web available history/ }).click();
+  await page.getByLabel("Message input").waitFor();
   await page.getByRole("button", { name: /New session/ }).waitFor();
 
   const duplicatePage = await page.context().newPage();
@@ -1583,7 +1827,7 @@ try {
         await page.screenshot({ path: resolve(output, `confirmation-${language}-${theme}-${viewport.width}.png`) });
 
         const combinationIndex = confirmationCombinations.length - 1;
-        if (combinationIndex === 0) {
+        if (combinationIndex === 0 || combinationIndex === viewports.length) {
           await secondaryDialog.getByRole("button", { name: language === "en" ? "Approve" : "批准" }).focus();
           await secondPage.keyboard.press("Enter");
         } else if (combinationIndex === 1) {
@@ -1598,7 +1842,7 @@ try {
         await primaryDialog.waitFor({ state: "hidden" });
         await secondaryDialog.waitFor({ state: "hidden" });
         const completedRun = await waitForConfirmationRunCompletion();
-        const expectedStatus = combinationIndex === 0 ? "success" : "refused";
+        const expectedStatus = combinationIndex === 0 || combinationIndex === viewports.length ? "success" : "refused";
         const finishedStatuses = await page.evaluate((runId) => window.__omniTestMessages
           .filter((event) => event.type === "run.output" && event.run_id === runId
             && event.payload?.message?.type === "tool_call"
@@ -1651,11 +1895,13 @@ try {
     confirmationRuns.map((run) => run.expectedStatus));
   assert.equal(persistedConfirmationResults.filter((result) => (
     result.status === "success" && result.content.includes("confirmation fixture content")
-  )).length, 1, "The approved exact read did not execute exactly once");
+  )).length, 2, "The approved exact read did not execute once in each theme");
   assert.equal(persistedConfirmationResults.filter((result) => (
     result.status === "refused" && result.content.includes("confirmation fixture content")
   )).length, 0, "Declined confirmations exposed Tool output");
 
+  await page.setViewportSize(viewports[0]);
+  await secondPage.setViewportSize(viewports[0]);
   await page.getByRole("button", { name: "EN", exact: true }).click();
   const releaseResponsePromise = page.waitForResponse((response) => (
     response.request().method() === "POST" && response.url().includes("/release")
@@ -1817,7 +2063,8 @@ try {
           && /\/projects\/[^/]+\/sessions$/.test(new URL(response.url()).pathname));
         await page.getByRole("button", { name: language === "en" ? "New session" : "新建会话" }).click();
         const { session_id: deleteId } = await (await creation).json();
-        await page.getByText(language === "en" ? "Empty draft" : "空白草稿", { exact: true }).waitFor();
+        await page.getByRole("region", { name: language === "en" ? "Conversation" : "对话" })
+          .getByRole("heading", { name: language === "en" ? "New Session draft" : "新会话草稿", exact: true }).waitFor();
         await page.getByRole("button", { name: language === "en" ? "Release session" : "释放会话", exact: true }).waitFor();
         const prompt = `retry once delete review ${language} ${theme} ${viewport.width}`;
         await page.getByLabel(language === "en" ? "Message input" : "消息输入").fill(prompt);
@@ -2023,6 +2270,7 @@ try {
       }
     }
   }
+  await page.setViewportSize(viewports[0]);
   await page.getByRole("button", { name: "EN", exact: true }).click();
   await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
   await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
@@ -2072,19 +2320,35 @@ try {
       await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
+        if (viewport.width <= 1024) {
+          await expect(page.getByRole("navigation").getByRole("link", {
+            name: language === "en" ? "Projects" : "项目",
+          })).toBeHidden();
+        }
         const layout = await page.evaluate(() => {
-          const aside = document.querySelector("aside").getBoundingClientRect();
+          const sidebar = document.querySelector("aside[data-open]");
+          const aside = sidebar.getBoundingClientRect();
           const main = document.querySelector("main").getBoundingClientRect();
-          return { width: document.documentElement.scrollWidth, asideRight: aside.right, mainLeft: main.left };
+          return {
+            width: document.documentElement.scrollWidth,
+            innerWidth: window.innerWidth,
+            asideLeft: aside.left,
+            asideRight: aside.right,
+            mainLeft: main.left,
+            visibility: window.getComputedStyle(sidebar).visibility,
+            expanded: document.querySelector("button[aria-controls='app-sidebar']").getAttribute("aria-expanded"),
+          };
         });
         assert.ok(layout.width <= viewport.width, `Project horizontal overflow at ${viewport.width}x${viewport.height}`);
-        assert.ok(layout.mainLeft >= layout.asideRight - 1, `Project sidebar overlaps content at ${viewport.width}x${viewport.height}`);
+        assert.ok(layout.mainLeft >= layout.asideRight - 1,
+          `Project sidebar overlaps content at ${viewport.width}x${viewport.height}: ${JSON.stringify(layout)}`);
         await page.getByRole("button", { name: language === "en" ? "Add project" : "登记项目" }).first().waitFor();
         await mkdir(output, { recursive: true });
         await page.screenshot({ path: resolve(output, `projects-${language}-${theme}-${viewport.width}.png`) });
       }
     }
   }
+  await page.setViewportSize(viewports[0]);
   await page.locator("aside").getByRole("link", { name: "project-one", exact: true }).click();
   await page.getByRole("button", { name: /Renamed available history/ }).click();
   await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
@@ -2121,6 +2385,7 @@ try {
       }
     }
   }
+  await page.setViewportSize(viewports[0]);
   await page.locator("aside").getByRole("link", { name: "project-two", exact: true }).click();
   await page.getByRole("heading", { name: "project-two", exact: true }).waitFor();
   assert.equal(await page.getByText("Available history loaded after a successful Claim", { exact: true }).count(), 0);
@@ -2143,6 +2408,7 @@ try {
   await secondPage.goto(`${restarted.url}/#ticket=${encodeURIComponent(restarted.second_ticket)}`);
   await secondPage.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
   await secondPage.getByRole("status").first().getByText(/Online|在线/).waitFor();
+  await page.setViewportSize(viewports[0]);
   await page.getByRole("link", { name: "Projects" }).click();
   await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
   await page.getByRole("heading", { name: "project-one" }).waitFor();
@@ -2226,6 +2492,7 @@ try {
   const resumedScheduleStatus = page.locator('dl[aria-label="Schedule status"]');
   await expect(resumedScheduleStatus).toContainText("Admitted");
   await expect(resumedScheduleStatus).toContainText("Available");
+  await page.setViewportSize(viewports[0]);
   await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
   await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
 
@@ -2260,6 +2527,7 @@ try {
 
   await settingsModelMcpAcceptance({ page: secondPage, secondPage: page, control, output });
 
+  await page.setViewportSize(viewports[0]);
   await page.getByRole("navigation").getByRole("link", { name: "Status" }).click();
   await page.getByRole("heading", { name: "Service status", exact: true }).waitFor();
   await page.route("**/api/v1/clients", (route) => route.abort());
@@ -2269,7 +2537,7 @@ try {
   await page.unroute("**/api/v1/clients");
   await page.getByRole("status").first().getByText(/Online|在线/).waitFor({ timeout: 10000 });
   assert.deepEqual(browserErrors, [], "Browser JavaScript errors were reported");
-  console.log("Playwright production E2E: 4 locale/theme combinations x 3 viewports; Schedule CRUD, accepted-create lost-ack retry, locked fields, delayed detail focus, simulated status polling, stale page/Project/disconnected responses, keyboard validation and 9999/10000ms feedback; Restore overwrite, cancel, stale responses, refresh, failure acknowledgement; delete, ticket, focus, reconnect passed");
+    console.log("Playwright production E2E: 4 locale/theme combinations x 3 general viewports and 4 conversation viewports; long history scroll, live/history message bounds, empty layout, text contrast, both-theme cancel/approve; Schedule CRUD, accepted-create lost-ack retry, locked fields, delayed detail focus, simulated status polling, stale page/Project/disconnected responses, keyboard validation and 9999/10000ms feedback; Restore overwrite, cancel, stale responses, refresh, failure acknowledgement; delete, ticket, focus, reconnect passed");
 } catch (error) {
   acceptanceError = error;
   throw error;

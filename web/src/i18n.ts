@@ -9,6 +9,7 @@ const resources = {
       chat: {
         configureModels: "Configure models",
         historyLoading: "Loading conversations…",
+        historyDirectoriesUnavailable: "Conversation history is unavailable for these directories: {{directories}}",
         workspaceLoading: "Opening conversation workspace…",
         workspaceUnavailable: "This conversation workspace is unavailable. Check the directory and its permissions, or choose another default workspace in Settings.",
         configurationUnavailable: "The default conversation workspace setting is invalid. Update it in Settings.",
@@ -536,6 +537,7 @@ const resources = {
       chat: {
         configureModels: "配置模型",
         historyLoading: "正在加载对话…",
+        historyDirectoriesUnavailable: "以下目录中的历史对话暂不可访问：{{directories}}",
         workspaceLoading: "正在打开对话工作区…",
         workspaceUnavailable: "对话工作区不可用。请检查目录和权限，或在设置中更换默认工作区。",
         configurationUnavailable: "默认对话工作区设置无效。请在设置中修改。",

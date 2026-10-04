@@ -7,6 +7,7 @@ import json
 import shutil
 import socket
 import sys
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
@@ -376,6 +377,8 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
 
         sessions = first_page["sessions"] + second_page["sessions"]
         assert second_page["next_cursor"] is None
+        assert first_page["unavailable_directories"] == []
+        assert second_page["unavailable_directories"] == []
         assert {item["id"] for item in sessions} == {
             expected_chat_id,
             expected_legacy_chat_id,
@@ -398,6 +401,63 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
             workspace.workspace_path != old_chat.resolve()
             for workspace in service._workspaces.values()
         )
+    finally:
+        await server.close()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("directory_state", ["missing", "unreadable"])
+async def test_chat_history_reports_unavailable_workspace_without_recreating_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    directory_state: str,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    old_chat = tmp_path / "old-chat"
+    old_chat.mkdir()
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service.conversation_workspaces.remember(old_chat)
+    await _persist_session(
+        old_chat,
+        home=home,
+        title="Old conversation",
+        created_at=datetime(2026, 10, 4, 12, 0, tzinfo=UTC),
+        content="old body",
+        creation_scope="chat",
+    )
+    expected_directory = str(old_chat.resolve())
+    if directory_state == "missing":
+        shutil.rmtree(old_chat)
+    else:
+        original_iterdir = Path.iterdir
+
+        def inaccessible_iterdir(directory: Path) -> Iterator[Path]:
+            if directory == old_chat / ".omni" / "sessions":
+                raise PermissionError("History directory cannot be enumerated")
+            return original_iterdir(directory)
+
+        monkeypatch.setattr(Path, "iterdir", inaccessible_iterdir)
+    token = create_credential(home)
+    server = TestServer(create_app(service))
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        await server.start_server()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Omni-Client": client.client_id,
+        }
+        async with aiohttp.ClientSession() as http:
+            async with http.get(
+                server.make_url("/api/v1/chat/sessions"), headers=headers
+            ) as response:
+                assert response.status == 200
+                page = await response.json()
+
+        assert page["sessions"] == []
+        assert page["unavailable_directories"] == [expected_directory]
+        assert old_chat.exists() is (directory_state != "missing")
     finally:
         await server.close()
         await service.stop()

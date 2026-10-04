@@ -5798,6 +5798,13 @@ function ChatSessionsView({
             </button>
           ))}
         </nav>
+        {history !== null && history.unavailable_directories.length > 0 ? (
+          <p className={styles.chatHistoryStatus} role="status" aria-atomic="true">
+            {t("chat.historyDirectoriesUnavailable", {
+              directories: history.unavailable_directories.join("; "),
+            })}
+          </p>
+        ) : null}
         {history?.next_cursor !== null && history !== null ? (
           <button
             className={styles.chatHistoryMore}
@@ -6599,13 +6606,16 @@ function ProjectSessionsContent({
   }, [busySessionId, readClaimSnapshot, refreshSessions, releaseOrphanClaim, rememberSession]);
 
   useEffect(() => {
-    if (initialSessionId == null || loadState !== "ready"
-      || !sessions?.sessions.some((item) => item.id === initialSessionId)) return;
+    if (initialSessionId == null || loadState !== "ready") return;
     const attemptKey = `${sessionScopeId}:${initialSessionId}`;
     if (attemptedHistorySessionRef.current === attemptKey) return;
+    if (!sessions?.sessions.some((item) => item.id === initialSessionId) && sessionNextCursor !== null) {
+      void refreshSessions(sessionNextCursor, true);
+      return;
+    }
     attemptedHistorySessionRef.current = attemptKey;
     void openSession(initialSessionId, false);
-  }, [initialSessionId, loadState, openSession, sessionScopeId, sessions]);
+  }, [initialSessionId, loadState, openSession, refreshSessions, sessionNextCursor, sessionScopeId, sessions]);
 
   const createDraft = useCallback(async () => {
     if (busySessionId !== null) return;

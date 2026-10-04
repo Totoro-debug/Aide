@@ -4103,6 +4103,7 @@ class AgentService:
                 dict[str, object],
             ]
         ] = []
+        unavailable_directories: list[str] = []
         for path in directories:
             directory_identity = os.path.normcase(str(path.resolve(strict=False)))
             state = WorkspaceState(path)
@@ -4110,8 +4111,13 @@ class AgentService:
                 sessions_directory = state.existing_sessions_directory()
                 if sessions_directory is None:
                     continue
-                session_paths = tuple(sessions_directory.glob("*.jsonl"))
+                session_paths = tuple(
+                    session_path
+                    for session_path in sessions_directory.iterdir()
+                    if os.path.normcase(session_path.suffix) == ".jsonl"
+                )
             except (OSError, RuntimeError, ValueError):
+                unavailable_directories.append(str(path))
                 continue
             for session_path in session_paths:
                 session_id = session_path.stem
@@ -4165,7 +4171,11 @@ class AgentService:
             if len(entries) > len(page) and page
             else None
         )
-        return {"sessions": [entry for _key, entry in page], "next_cursor": next_cursor}
+        return {
+            "sessions": [entry for _key, entry in page],
+            "next_cursor": next_cursor,
+            "unavailable_directories": unavailable_directories,
+        }
 
     async def release_claim(
         self,

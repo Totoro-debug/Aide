@@ -622,11 +622,14 @@ async def _seed_session(
     title: str,
     content: str,
     created_at: datetime,
+    creation_scope: str | None = None,
 ) -> str:
     state = WorkspaceState(workspace)
-    state.initialize(agent_home_root=home.path)
+    state.initialize(agent_home_root=home.path, allow_agent_home_chat=True)
     session = Session.create(state, now=lambda: created_at)
     session.update_metadata(title=title)
+    if creation_scope is not None:
+        session.update_metadata(creation_scope=creation_scope)
     session.commit_agent_run(
         [{"role": "user", "content": content}],
         pending_last_compacted=session.last_compacted,
@@ -672,11 +675,13 @@ async def _seed_restore_session(
 
 
 async def _stop_service(home: AgentHome, port: int) -> None:
-    await ServiceClient.stop_existing(home, port=port)
+    accepted = await ServiceClient.stop_existing(home, port=port)
     deadline = time.monotonic() + 15.0
     while discovery_path(home).exists():
         if time.monotonic() >= deadline:
             raise RuntimeError("E2E service did not finish shutting down.")
+        if not accepted:
+            accepted = await ServiceClient.stop_existing(home, port=port)
         await asyncio.sleep(0.05)
 
 
@@ -896,6 +901,35 @@ async def _run_e2e(provider_base_url: str) -> None:
                 if command.strip() == "model-mcp-release":
                     MODEL_MCP_RELEASE.set()
                     print(json.dumps({"released": True}), flush=True)
+                    continue
+                if command.strip() == "chat-history-seed":
+                    history = []
+                    for index in range(101):
+                        title = f"Paginated chat {index:03d}"
+                        session_id = await _seed_session(
+                            home,
+                            home.path / "chat",
+                            title=title,
+                            content=f"{title} body",
+                            created_at=datetime(2026, 1, 1, 0, index // 60, index % 60, tzinfo=UTC),
+                            creation_scope="chat",
+                        )
+                        history.append({"id": session_id, "title": title})
+                    for title, directory, scope in (
+                        ("Legacy chat", home.path / "chat", None),
+                        ("Legacy project", path / "chat-next", None),
+                        ("Explicit project", path / "chat-next", "project"),
+                    ):
+                        session_id = await _seed_session(
+                            home,
+                            directory,
+                            title=title,
+                            content=f"{title} body",
+                            created_at=datetime(2026, 1, 2, tzinfo=UTC),
+                            creation_scope=scope,
+                        )
+                        history.append({"id": session_id, "title": title})
+                    print(json.dumps({"history": history}), flush=True)
                     continue
                 if command.strip() != "restart":
                     continue

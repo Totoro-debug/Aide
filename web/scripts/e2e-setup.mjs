@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 
-export default async function setup() {
+export default async function setup({ shutdownTimeoutMs = 15000 } = {}) {
   const child = spawn("python", ["-u", "-m", "web.scripts.e2e_service"], {
     cwd: resolve(process.cwd(), ".."),
     stdio: ["pipe", "pipe", "pipe"],
@@ -138,7 +138,7 @@ export default async function setup() {
         const timeout = setTimeout(() => {
           child.kill();
           rejectExit(new Error(`E2E service shutdown timed out: ${errors}`));
-        }, 15000);
+        }, shutdownTimeoutMs);
         child.once("exit", (code) => {
           clearTimeout(timeout);
           if (code === 0) resolveExit();

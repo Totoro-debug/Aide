@@ -537,6 +537,7 @@ export interface ChatSessionSummary {
 export interface ChatSessionsResponse {
   sessions: ChatSessionSummary[];
   next_cursor: string | null;
+  unavailable_directories: string[];
 }
 
 export interface ChatWorkspaceEntry {

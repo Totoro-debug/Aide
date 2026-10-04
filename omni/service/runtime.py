@@ -2127,7 +2127,7 @@ class WorkspaceRecord:
             await self._close_loop_state(state, abort=abort, close_loop=not retain_session)
             if retain_session:
                 await state.loop.finish_work()
-                await state.bus.drain_inbound()
+                await state.bus.reset()
                 state.run_ids.clear()
                 state.live_runs.clear()
                 state.completed_user_count = None

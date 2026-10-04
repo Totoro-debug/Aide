@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import weakref
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -11,12 +12,19 @@ import pytest
 from omni.agent.loop import AgentRunExecutor
 from omni.agent.message_bus import InboundMessage
 from omni.agent.permission import PermissionSnapshot, RuntimePermissionControl
+from omni.agent.session.session import Session
 from omni.config.agent_home import AgentHome
 from omni.config.config import ConfigLoader
+from omni.service.errors import ServiceError
 from omni.service.execution import SessionExecution
 from omni.service.runtime import AgentService
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
-from tests.service.test_service_concurrency import _CollectingSink, _ConcurrentProvider
+from tests.fixtures import FakeClock
+from tests.service.test_service_concurrency import (
+    _claim_version,
+    _CollectingSink,
+    _ConcurrentProvider,
+)
 
 
 def _home(path: Path) -> AgentHome:
@@ -24,6 +32,242 @@ def _home(path: Path) -> AgentHome:
     home.initialize()
     (home.path / "config.toml").write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
     return home
+
+
+@pytest.mark.asyncio
+async def test_backpressured_run_survives_reconnect_at_29_seconds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    provider = _ConcurrentProvider(early_a_delta=True)
+    monkeypatch.setattr("omni.service.runtime.create_provider", lambda _config: provider)
+    clock = FakeClock(datetime(2026, 10, 4, tzinfo=UTC))
+    timer_started, wake_timer = asyncio.Event(), asyncio.Event()
+    blocked, release_output = asyncio.Event(), asyncio.Event()
+    output_delivered = asyncio.Event()
+
+    async def sleep(_seconds: float) -> None:
+        timer_started.set()
+        await wake_timer.wait()
+
+    service = AgentService(
+        home,
+        ConfigLoader(home).load_for_startup(),
+        reconnect_timeout=30,
+        monotonic_now=clock.monotonic,
+        sleep=sleep,
+    )
+    sink, restored_sink = _CollectingSink(), _CollectingSink()
+    send_event = sink.send_event
+
+    async def slow_output(event: dict[str, object]) -> None:
+        if event.get("type") == "run.output":
+            message = cast(dict[str, Any], event["payload"])["message"]
+            if message["metadata"].get("_stream_delta") is True:
+                blocked.set()
+                await release_output.wait()
+        await send_event(event)
+        if blocked.is_set():
+            output_delivered.set()
+
+    monkeypatch.setattr(sink, "send_event", slow_output)
+    try:
+        await service.start()
+        client, other = await service.register_client("cli"), await service.register_client("web")
+        await service.connect_client(client.client_id, sink)
+        await service.connect_client(other.client_id, _CollectingSink())
+        workspace = await service.attach_workspace(client.client_id, path)
+        await service.attach_workspace(other.client_id, path)
+        session_id = await workspace.create_draft(client.client_id)
+        claimed = await service.claim(client.client_id, workspace.workspace_id, session_id)
+        state = workspace.loops[session_id]
+        authority = state.loop.session
+        await workspace.input(
+            client.client_id, session_id, _claim_version(claimed), "session-a", "run-a"
+        )
+        await asyncio.wait_for(blocked.wait(), 3)
+        await service.disconnect_client(client.client_id, sink=sink)
+        expiry = client.disconnect_task
+        assert expiry is not None
+        await asyncio.wait_for(timer_started.wait(), 3)
+        clock.advance(29)
+        assert workspace._claims[session_id].status == "reconnecting"
+        with pytest.raises(ServiceError) as occupied:
+            await service.claim(other.client_id, workspace.workspace_id, session_id)
+        assert occupied.value.code == "session_claimed"
+        assert await service.register_client("cli", client.reconnect_credential) is client
+        release_output.set()
+        await asyncio.wait_for(output_delivered.wait(), 3)
+        await service.connect_client(client.client_id, restored_sink)
+        await asyncio.wait_for(expiry, 3)
+        assert workspace._claims[session_id].status == "claimed"
+        restored_claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
+        assert restored_claim["claim"] == claimed["claim"]
+        assert state.loop.session is authority
+        clock.advance(1)
+        wake_timer.set()
+        provider.release_a.set()
+        await asyncio.wait_for(restored_sink.wait_for("run.completed", "run-a"), 3)
+        processor = state.processor_task
+        if processor is not None:
+            await asyncio.wait_for(asyncio.shield(processor), 3)
+        await state.loop.wait_for_restore_idle()
+        assert not provider.session_a_cancelled.is_set()
+        assert not any(event["type"] == "run.cancelled" for event in restored_sink.events)
+        outputs = [
+            cast(dict[str, Any], event["payload"])["message"]
+            for event in restored_sink.events
+            if event["type"] == "run.output"
+        ]
+        assert [
+            message["content"] for message in outputs if message["metadata"].get("_stream_delta")
+        ] == [
+            "early from session A",
+            "answer from session A",
+        ]
+        assert len([message for message in outputs if message["metadata"].get("_streamed")]) == 1
+        terminals = [event for event in restored_sink.events if event["type"] == "run.completed"]
+        assert len(terminals) == 1
+        assert cast(dict[str, object], terminals[0]["payload"])["finish_reason"] == "completed"
+        assert Session.load(workspace.workspace_state, session_id).messages == authority.messages
+        assert [(message["role"], message["content"]) for message in authority.messages] == [
+            ("user", "session-a"),
+            ("assistant", "answer from session A"),
+        ]
+    finally:
+        release_output.set()
+        provider.release_a.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cross_workspace", [False, True])
+async def test_backpressured_client_expiry_preserves_another_active_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cross_workspace: bool
+) -> None:
+    home = _home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    provider = _ConcurrentProvider(block_b=True, early_a_delta=True)
+    monkeypatch.setattr("omni.service.runtime.create_provider", lambda _config: provider)
+    clock = FakeClock(datetime(2026, 10, 4, tzinfo=UTC))
+    timer_started, wake_timer = asyncio.Event(), asyncio.Event()
+    blocked, release_output = asyncio.Event(), asyncio.Event()
+
+    async def sleep(_seconds: float) -> None:
+        timer_started.set()
+        await wake_timer.wait()
+
+    service = AgentService(
+        home,
+        ConfigLoader(home).load_for_startup(),
+        reconnect_timeout=30,
+        monotonic_now=clock.monotonic,
+        sleep=sleep,
+    )
+    first_sink, second_sink = _CollectingSink(), _CollectingSink()
+    send_event = first_sink.send_event
+
+    async def slow_output(event: dict[str, object]) -> None:
+        if event.get("type") == "run.output":
+            message = cast(dict[str, Any], event["payload"])["message"]
+            if message["metadata"].get("_stream_delta") is True:
+                blocked.set()
+                await release_output.wait()
+        await send_event(event)
+
+    monkeypatch.setattr(first_sink, "send_event", slow_output)
+    try:
+        await service.start()
+        first, second = await service.register_client("cli"), await service.register_client("web")
+        await service.connect_client(first.client_id, first_sink)
+        await service.connect_client(second.client_id, second_sink)
+        workspace = await service.attach_workspace(first.client_id, path)
+        second_path = tmp_path / "second-workspace" if cross_workspace else path
+        second_path.mkdir(exist_ok=True)
+        second_workspace = await service.attach_workspace(second.client_id, second_path)
+        # Keep both Workspaces attached so expiry only cleans the target Client's work.
+        await service.attach_workspace(second.client_id, path)
+        session_a = await workspace.create_draft(first.client_id)
+        session_b = await second_workspace.create_draft(second.client_id)
+        claim_a = await service.claim(first.client_id, workspace.workspace_id, session_a)
+        claim_b = await service.claim(second.client_id, second_workspace.workspace_id, session_b)
+        state_a, state_b = workspace.loops[session_a], second_workspace.loops[session_b]
+        authority_b = state_b.loop.session
+        await second_workspace.input(
+            second.client_id, session_b, _claim_version(claim_b), "session-b", "run-b"
+        )
+        await asyncio.wait_for(provider.session_b_started.wait(), 3)
+        await workspace.input(
+            first.client_id, session_a, _claim_version(claim_a), "session-a", "run-a"
+        )
+        await asyncio.wait_for(blocked.wait(), 3)
+        await service.disconnect_client(first.client_id, sink=first_sink)
+        expiry = first.disconnect_task
+        assert expiry is not None
+        await asyncio.wait_for(timer_started.wait(), 3)
+        clock.advance(30)
+        wake_timer.set()
+        await asyncio.wait_for(expiry, 3)
+        assert provider.session_a_cancelled.is_set()
+        assert not provider.session_b_cancelled.is_set()
+        assert state_b.loop.has_active_run
+        assert second_workspace.loops[session_b] is state_b
+        assert state_b.loop.session is authority_b
+        current_claim = await service.claim(
+            second.client_id, second_workspace.workspace_id, session_b
+        )
+        assert current_claim["claim"] == claim_b["claim"]
+        assert session_a not in workspace._claims
+        provider.release_b.set()
+        await asyncio.wait_for(second_sink.wait_for("run.completed", "run-b"), 3)
+        processor = state_b.processor_task
+        if processor is not None:
+            await asyncio.wait_for(asyncio.shield(processor), 3)
+        await state_b.loop.wait_for_restore_idle()
+        run_events = [
+            event for event in second_sink.events if str(event["type"]).startswith("run.")
+        ]
+        assert all(
+            event["run_id"] == "run-b"
+            and event["session_id"] == session_b
+            and event["workspace_id"] == second_workspace.workspace_id
+            for event in run_events
+        )
+        terminals = [event for event in run_events if event["type"] == "run.completed"]
+        assert len(terminals) == 1
+        assert cast(dict[str, object], terminals[0]["payload"])["finish_reason"] == "completed"
+        assert not any(event["type"] == "run.cancelled" for event in run_events)
+        messages = [
+            cast(dict[str, Any], event["payload"])["message"]
+            for event in run_events
+            if event["type"] == "run.output"
+        ]
+        assert [
+            message["content"] for message in messages if message["metadata"].get("_stream_delta")
+        ] == ["answer from session B"]
+        assert len([message for message in messages if message["metadata"].get("_streamed")]) == 1
+        assert [(message["role"], message["content"]) for message in authority_b.messages] == [
+            ("user", "session-b"),
+            ("assistant", "answer from session B"),
+        ]
+        assert (
+            Session.load(second_workspace.workspace_state, session_b).messages
+            == authority_b.messages
+        )
+        assert len(state_a.loop.session.messages) == 2
+        assert state_a.loop.session.messages[-1]["error"]["code"] == "turn_cancelled"
+        assert (
+            Session.load(workspace.workspace_state, session_a).messages
+            == state_a.loop.session.messages
+        )
+    finally:
+        release_output.set()
+        provider.release_a.set()
+        provider.release_b.set()
+        await service.stop()
 
 
 @pytest.mark.asyncio

@@ -1742,6 +1742,183 @@ async def test_client_expiry_keeps_claim_until_cancelled_run_cleanup_finishes(
 
 
 @pytest.mark.asyncio
+async def test_expiry_discards_backpressured_output_before_resident_session_takeover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    inputs: list[str] = []
+
+    class Provider(_ConcurrentProvider):
+        def stream(self, **kwargs: Any) -> AsyncIterator[ModelStreamEvent]:
+            messages = kwargs["messages"]
+            if not messages[0].get("content", "").startswith("Generate a concise title"):
+                inputs.append(
+                    next(
+                        message["content"]
+                        for message in reversed(messages)
+                        if message.get("role") == "user"
+                    )
+                )
+            return super().stream(**kwargs)
+
+    provider = Provider(block_b=True, early_a_delta=True)
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _config: provider)
+    clock = FakeClock(datetime(2026, 10, 4, tzinfo=UTC))
+    timer_started, wake_timer = asyncio.Event(), asyncio.Event()
+    blocked, release_output = asyncio.Event(), asyncio.Event()
+    flushing, release_flush = asyncio.Event(), asyncio.Event()
+
+    async def sleep(_seconds: float) -> None:
+        timer_started.set()
+        await wake_timer.wait()
+
+    service = AgentService(
+        home,
+        ConfigLoader(home).load_for_startup(),
+        reconnect_timeout=30,
+        monotonic_now=clock.monotonic,
+        sleep=sleep,
+    )
+    first_sink, second_sink = _CollectingSink(), _CollectingSink()
+    send_event = first_sink.send_event
+
+    async def slow_output(event: dict[str, object]) -> None:
+        if event.get("type") == "run.output" and event.get("run_id") == "old-run":
+            message = cast(dict[str, Any], event["payload"])["message"]
+            if message["metadata"].get("_stream_delta") is True:
+                blocked.set()
+                await release_output.wait()
+        await send_event(event)
+
+    monkeypatch.setattr(first_sink, "send_event", slow_output)
+    try:
+        await service.start()
+        first, second = await service.register_client("cli"), await service.register_client("cli")
+        await service.connect_client(first.client_id, first_sink)
+        await service.connect_client(second.client_id, second_sink)
+        workspace = await service.attach_workspace(first.client_id, path)
+        await service.attach_workspace(second.client_id, path)
+        session_id = await workspace.create_draft(first.client_id)
+        old_claim = await service.claim(first.client_id, workspace.workspace_id, session_id)
+        old_version = _claim_version(old_claim)
+        state = workspace.loops[session_id]
+        authority = state.loop.session
+        await workspace.input(first.client_id, session_id, old_version, "session-a", "old-run")
+        await workspace.input(first.client_id, session_id, old_version, "old queued", "old-queued")
+        await asyncio.wait_for(blocked.wait(), 3)
+        finish_work = state.loop.finish_work
+
+        async def delayed_flush() -> None:
+            flushing.set()
+            await release_flush.wait()
+            await finish_work()
+
+        monkeypatch.setattr(state.loop, "finish_work", delayed_flush)
+        await service.disconnect_client(first.client_id, sink=first_sink)
+        expiry = first.disconnect_task
+        assert expiry is not None
+        await asyncio.wait_for(timer_started.wait(), 3)
+        clock.advance(30)
+        wake_timer.set()
+        await asyncio.wait_for(flushing.wait(), 3)
+        assert provider.session_a_cancelled.is_set()
+        assert workspace._claims[session_id].status == "draining"
+        with pytest.raises(ServiceError) as draining:
+            await service.claim(second.client_id, workspace.workspace_id, session_id)
+        assert draining.value.code == "session_claimed"
+        release_flush.set()
+        await asyncio.wait_for(expiry, 3)
+        assert session_id not in workspace._claims
+        assert workspace.loops[session_id] is state
+        assert state.loop.session is authority
+        assert len(inputs) == 1
+        assert "session-a" in inputs[0]
+        old_history = list(authority.messages)
+        assert len(old_history) == 2
+        assert old_history[-1]["status"] == "interrupted"
+        assert old_history[-1]["error"]["code"] == "turn_cancelled"
+        new_claim = await service.claim(second.client_id, workspace.workspace_id, session_id)
+        version = _claim_version(new_claim)
+        assert state.loop.session is authority
+        await workspace.input(second.client_id, session_id, version, "session-b", "new-b")
+        await asyncio.wait_for(provider.session_b_started.wait(), 3)
+        with pytest.raises(ServiceError) as stale_claim:
+            await workspace.cancel(second.client_id, session_id, old_version, "new-b")
+        assert stale_claim.value.code == "stale_claim"
+        with pytest.raises(ServiceError) as stale_run:
+            await workspace.cancel(second.client_id, session_id, version, "old-run")
+        assert stale_run.value.code == "stale_run"
+        with pytest.raises(ServiceError) as old_owner:
+            await workspace.cancel(first.client_id, session_id, old_version, "new-b")
+        assert old_owner.value.code == "stale_claim"
+        assert not provider.session_b_cancelled.is_set()
+        provider.release_b.set()
+        completed = await asyncio.wait_for(second_sink.wait_for("run.completed", "new-b"), 3)
+        assert cast(dict[str, object], completed["payload"])["finish_reason"] == "completed"
+        provider.early_a_delta = False
+        provider.release_a.set()
+        await workspace.input(second.client_id, session_id, version, "session-a-new", "new-a")
+        await asyncio.wait_for(second_sink.wait_for("run.completed", "new-a"), 3)
+        processor = state.processor_task
+        if processor is not None:
+            await asyncio.wait_for(asyncio.shield(processor), 3)
+        await state.loop.wait_for_restore_idle()
+        for run_id, answer in (
+            ("new-b", "answer from session B"),
+            ("new-a", "answer from session A"),
+        ):
+            events = [event for event in second_sink.events if event.get("run_id") == run_id]
+            terminal = [event for event in events if event["type"] == "run.completed"]
+            assert len(terminal) == 1
+            assert cast(dict[str, object], terminal[0]["payload"])["finish_reason"] == "completed"
+            messages = [
+                cast(dict[str, Any], event["payload"])["message"]
+                for event in events
+                if event["type"] == "run.output"
+            ]
+            assert [
+                message["content"]
+                for message in messages
+                if message["metadata"].get("_stream_delta")
+            ] == [answer]
+            assert (
+                len([message for message in messages if message["metadata"].get("_streamed")]) == 1
+            )
+            assert all(message["content"] in ("", answer) for message in messages)
+            assert not any(event["type"] == "run.cancelled" for event in events)
+        assert len(inputs) == 3
+        assert all(
+            text in prompt
+            for text, prompt in zip(
+                ("session-a", "session-b", "session-a-new"), inputs, strict=True
+            )
+        )
+        assert all("old queued" not in prompt for prompt in inputs)
+        assert authority.messages[:2] == old_history
+        new_history = authority.messages[2:]
+        assert [(message["role"], message["content"]) for message in new_history] == [
+            ("user", "session-b"),
+            ("assistant", "answer from session B"),
+            ("user", "session-a-new"),
+            ("assistant", "answer from session A"),
+        ]
+        assert all(
+            message["status"] == "completed"
+            for message in new_history
+            if message["role"] == "assistant"
+        )
+        assert Session.load(workspace.workspace_state, session_id).messages == authority.messages
+    finally:
+        release_output.set()
+        release_flush.set()
+        provider.release_a.set()
+        provider.release_b.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
 async def test_event_reconnect_replays_once_and_cache_overflow_requires_snapshot(
     tmp_path: Path,
 ) -> None:

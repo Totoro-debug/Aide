@@ -18,7 +18,6 @@ _CLI_TOOL_IMPORTS = frozenset(
     {
         ("omni.agent.tools.mcp_runtime", "MCPRuntimeManager"),
         ("omni.agent.tools.mcp_runtime", "MCPServerFailure"),
-        ("omni.agent.tools.mcp_runtime", "MCPSnapshotReport"),
         ("omni.agent.tools.mcp_runtime", "MCPStartupReport"),
         ("omni.agent.tools.mcp_runtime", "MCPToolSnapshot"),
         ("omni.agent.tools.mcp_keywords", "MCPKeywordPreparer"),

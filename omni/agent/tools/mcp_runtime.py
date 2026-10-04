@@ -58,17 +58,7 @@ class _ConnectionAttempt:
 
 @dataclass(frozen=True, slots=True)
 class MCPStartupReport:
-    """The initial generation's MCP Tool Snapshot and failure metadata."""
-
-    snapshot: MCPToolSnapshot
-    failed_servers: tuple[str, ...]
-    failures: tuple[MCPServerFailure, ...] = ()
-    skipped_tool_counts: tuple[tuple[str, int], ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class MCPSnapshotReport:
-    """A candidate MCP Tool Snapshot prepared for a later generation."""
+    """The startup MCP Tool Snapshot and failure metadata."""
 
     snapshot: MCPToolSnapshot
     failed_servers: tuple[str, ...]
@@ -178,18 +168,16 @@ class MCPRuntimeManager:
         self._skipped_tool_counts: dict[str, int] = {}
         self._snapshot: MCPToolSnapshot = ()
         self._startup_report: MCPStartupReport | None = None
-        self._pending_report: MCPSnapshotReport | None = None
         self._started = False
 
     async def start(
         self,
         configuration: Mapping[str, MCPServerConfiguration],
     ) -> MCPStartupReport:
-        """Connect enabled Servers and activate the initial generation snapshot."""
+        """Connect enabled Servers and publish the startup snapshot."""
         normalized = _select_transports(_normalize_configuration(configuration), self._transports)
         if self._started or self._connections:
             await self.close()
-        self._pending_report = None
 
         connections: dict[str, MCPConnectionAdapter] = {}
         failed: set[str] = set()
@@ -243,93 +231,6 @@ class MCPRuntimeManager:
         self._startup_report = report
         return report
 
-    async def prepare_generation(self) -> MCPSnapshotReport:
-        """Prepare a candidate snapshot while retaining the active snapshot.
-
-        Healthy connections and their discovered Tool definitions are reused. Only
-        Servers marked unavailable, or whose previous connection attempt failed,
-        are connected again. The caller chooses when to activate the returned
-        candidate through :meth:`activate_generation`.
-        """
-        if not self._started:
-            raise RuntimeError("MCP Runtime Manager has not been started")
-        self._pending_report = None
-
-        self._sync_unavailable_servers()
-        retry_names = tuple(sorted(self._failed_servers))
-        retry_connections: dict[str, MCPConnectionAdapter] = {}
-        retry_failures: dict[str, MCPServerFailure] = {}
-        for mcp_name in retry_names:
-            connection = self._connections.get(mcp_name)
-            if connection is not None:
-                retry_connections[mcp_name] = connection
-                continue
-            server_configuration = self._configuration[mcp_name]
-            try:
-                connection = self._connection_factory(server_configuration, self._workspace)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                retry_failures[mcp_name] = _record_server_failure(
-                    mcp_name,
-                    phase="factory",
-                    error=error,
-                )
-                continue
-            self._connections[mcp_name] = connection
-            retry_connections[mcp_name] = connection
-
-        attempts = await self._connect_many(retry_connections)
-
-        for mcp_name in retry_names:
-            attempt = attempts.get(mcp_name)
-            if attempt is None or attempt.tools is None:
-                self._failed_servers.add(mcp_name)
-                failure = retry_failures.get(mcp_name)
-                if attempt is not None:
-                    failure = attempt.failure or failure
-                if failure is not None:
-                    self._failures[mcp_name] = failure
-                continue
-            self._failed_servers.discard(mcp_name)
-            self._failures.pop(mcp_name, None)
-            self._discovered_tools[mcp_name] = attempt.tools
-
-        candidate = self._build_snapshot()
-        report = MCPSnapshotReport(
-            snapshot=candidate,
-            failed_servers=tuple(sorted(self._failed_servers)),
-            failures=self._failure_report(),
-            skipped_tool_counts=tuple(
-                (mcp_name, count)
-                for mcp_name, count in self._skipped_tool_report()
-                if mcp_name in retry_names
-            ),
-        )
-        self._pending_report = report
-        return report
-
-    def activate_generation(
-        self,
-        report: MCPSnapshotReport,
-    ) -> MCPToolSnapshot:
-        """Publish a previously prepared candidate as the active snapshot."""
-        if not isinstance(report, MCPSnapshotReport):
-            raise TypeError("MCP generation activation requires an MCP snapshot report")
-        if not self._started:
-            raise RuntimeError("MCP Runtime Manager has not been started")
-        if report is not self._pending_report:
-            raise ValueError("MCP snapshot report is not the current prepared candidate")
-        self._snapshot = report.snapshot
-        self._startup_report = MCPStartupReport(
-            snapshot=report.snapshot,
-            failed_servers=report.failed_servers,
-            failures=report.failures,
-            skipped_tool_counts=report.skipped_tool_counts,
-        )
-        self._pending_report = None
-        return self._snapshot
-
     async def close(self) -> None:
         """Close all Runtime-Lifetime MCP connections and clear Manager state."""
         connections = tuple(self._connections.values())
@@ -341,7 +242,6 @@ class MCPRuntimeManager:
         self._skipped_tool_counts = {}
         self._snapshot = ()
         self._startup_report = None
-        self._pending_report = None
         self._started = False
         await _close_connections(connections)
 
@@ -400,11 +300,6 @@ class MCPRuntimeManager:
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
         return dict(results)
-
-    def _sync_unavailable_servers(self) -> None:
-        for mcp_name, connection in self._connections.items():
-            if connection.unavailable:
-                self._failed_servers.add(mcp_name)
 
     def _build_snapshot(self) -> MCPToolSnapshot:
         used_names = set(self._built_in_names)
@@ -479,8 +374,6 @@ class MCPWorkspaceRuntimeManager:
         )
         self._snapshot: MCPToolSnapshot = ()
         self._startup_report: MCPStartupReport | None = None
-        self._pending_report: MCPSnapshotReport | None = None
-        self._pending_stdio_report: MCPSnapshotReport | None = None
         self._started = False
 
     async def start(
@@ -491,57 +384,17 @@ class MCPWorkspaceRuntimeManager:
         if not self._shared_runtime.started:
             raise RuntimeError("Shared MCP Runtime Manager has not been started")
         local_report = await self._stdio_runtime.start(configuration)
-        candidate = self._merge_report(local_report)
-        report = MCPStartupReport(
-            snapshot=candidate.snapshot,
-            failed_servers=candidate.failed_servers,
-            failures=candidate.failures,
-            skipped_tool_counts=candidate.skipped_tool_counts,
-        )
+        report = self._merge_report(local_report)
         self._snapshot = report.snapshot
         self._startup_report = report
-        self._pending_report = None
-        self._pending_stdio_report = None
         self._started = True
         return report
-
-    async def prepare_generation(self) -> MCPSnapshotReport:
-        """Prepare a new Stdio view while retaining the active Workspace view."""
-        if not self._started:
-            raise RuntimeError("Workspace MCP Runtime Manager has not been started")
-        local_report = await self._stdio_runtime.prepare_generation()
-        report = self._merge_report(local_report)
-        self._pending_stdio_report = local_report
-        self._pending_report = report
-        return report
-
-    def activate_generation(self, report: MCPSnapshotReport) -> MCPToolSnapshot:
-        """Publish a prepared Workspace view after the caller selects it."""
-        if not isinstance(report, MCPSnapshotReport):
-            raise TypeError("MCP generation activation requires an MCP snapshot report")
-        if not self._started:
-            raise RuntimeError("Workspace MCP Runtime Manager has not been started")
-        if report is not self._pending_report or self._pending_stdio_report is None:
-            raise ValueError("MCP snapshot report is not the current prepared candidate")
-        self._stdio_runtime.activate_generation(self._pending_stdio_report)
-        self._snapshot = report.snapshot
-        self._startup_report = MCPStartupReport(
-            snapshot=report.snapshot,
-            failed_servers=report.failed_servers,
-            failures=report.failures,
-            skipped_tool_counts=report.skipped_tool_counts,
-        )
-        self._pending_report = None
-        self._pending_stdio_report = None
-        return self._snapshot
 
     async def close(self) -> None:
         """Close this Workspace's Stdio connections without touching HTTP."""
         await self._stdio_runtime.close()
         self._snapshot = ()
         self._startup_report = None
-        self._pending_report = None
-        self._pending_stdio_report = None
         self._started = False
 
     @property
@@ -561,8 +414,8 @@ class MCPWorkspaceRuntimeManager:
         return self._startup_report
 
     def _merge_report(
-        self, local_report: MCPStartupReport | MCPSnapshotReport
-    ) -> MCPSnapshotReport:
+        self, local_report: MCPStartupReport
+    ) -> MCPStartupReport:
         global_report = self._shared_runtime.startup_report
         snapshot, collision_counts = _compose_workspace_snapshot(
             global_report.snapshot,
@@ -580,7 +433,7 @@ class MCPWorkspaceRuntimeManager:
                 key=lambda failure: (failure.mcp_name, failure.phase, failure.exception_type),
             )
         )
-        return MCPSnapshotReport(
+        return MCPStartupReport(
             snapshot=snapshot,
             failed_servers=tuple(
                 sorted(set(global_report.failed_servers) | set(local_report.failed_servers))
@@ -710,7 +563,6 @@ __all__ = [
     "MCPConnectionFactory",
     "MCPRuntimeManager",
     "MCPServerFailure",
-    "MCPSnapshotReport",
     "MCPStartupReport",
     "MCPToolSnapshot",
     "MCPWorkspaceRuntimeManager",

@@ -33,7 +33,7 @@ from tests.fixtures.mcp_wire import (
 
 
 @pytest.mark.asyncio
-async def test_real_idle_stdio_eof_reconnects_on_first_generation_and_ignores_old_tool(
+async def test_real_idle_stdio_eof_invalidates_old_tool_without_reconnecting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -47,21 +47,15 @@ async def test_real_idle_stdio_eof_reconnects_on_first_generation_and_ignores_ol
         original_schemas = [tool.to_schema() for tool in initial.snapshot]
         assert all(r["method"] != "tools/call" for r in stdio_requests(tmp_path))
         await observed.stop(0)
-        candidate = await manager.prepare_generation()
-        assert candidate.failed_servers == ()
-        assert [tool.to_schema() for tool in initial.snapshot] == original_schemas
-        assert candidate.snapshot[0] is not initial.snapshot[0]
-        assert await candidate.snapshot[0].execute_prepared({}) == "wire text"
+        assert [tool.to_schema() for tool in manager.snapshot] == original_schemas
+        assert manager.snapshot[0] is initial.snapshot[0]
         old_result = await ToolGateway._for_memory(initial.snapshot).call(
             ModelToolCall(id="late", name=initial.snapshot[0].name, arguments="{}")
         )
+        assert old_result.status == "error"
         assert old_result.content == "MCP Server connection is unavailable."
-        manager.activate_generation(candidate)
-        next_candidate = await manager.prepare_generation()
-        assert next_candidate.snapshot[0] is candidate.snapshot[0]
-        assert await next_candidate.snapshot[0].execute_prepared({}) == "wire text"
         methods = [r["method"] for r in stdio_requests(tmp_path)]
-        assert methods.count("initialize") == methods.count("tools/list") == 2
+        assert methods.count("initialize") == methods.count("tools/list") == 1
     finally:
         async with asyncio.timeout(10):
             await manager.close()
@@ -70,11 +64,9 @@ async def test_real_idle_stdio_eof_reconnects_on_first_generation_and_ignores_ol
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fail_reconnect", [False, True])
-async def test_real_reconnect_reuses_healthy_server_and_preserves_old_snapshot(
+async def test_real_stdio_disconnect_preserves_healthy_http_and_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    fail_reconnect: bool,
 ) -> None:
     observed = ObservedLifetimes(monkeypatch)
     async with http_wire_server({}) as (healthy, http_configuration):
@@ -96,19 +88,17 @@ async def test_real_reconnect_reuses_healthy_server_and_preserves_old_snapshot(
             )
             assert {tool.server_name for tool in initial.snapshot} == {"healthy", "remote"}
             schemas = [tool.to_schema() for tool in initial.snapshot]
-            if fail_reconnect:
-                (tmp_path / "remote.json").write_text(json.dumps({"pages": {"": {}}}))
             await observed.stop(0)
-            candidate = await manager.prepare_generation()
-            assert candidate.failed_servers == (("remote",) if fail_reconnect else ())
-            assert candidate.snapshot[0] is initial.snapshot[0]
-            assert [tool.to_schema() for tool in initial.snapshot] == schemas
-            assert len(candidate.snapshot) == (1 if fail_reconnect else 2)
-            for tool in candidate.snapshot:
-                assert await tool.execute_prepared({}) == "wire text"
+            assert manager.snapshot is initial.snapshot
+            assert [tool.to_schema() for tool in manager.snapshot] == schemas
+            result = await ToolGateway._for_memory((initial.snapshot[0],)).call(
+                ModelToolCall(id="healthy", name=initial.snapshot[0].name, arguments="{}")
+            )
+            assert result.status == "success"
+            assert result.content == "wire text"
             remote_methods = [r["method"] for r in stdio_requests(tmp_path)]
             healthy_methods = [r["method"] for r in healthy.requests]
-            assert remote_methods.count("initialize") == remote_methods.count("tools/list") == 2
+            assert remote_methods.count("initialize") == remote_methods.count("tools/list") == 1
             assert healthy_methods.count("initialize") == healthy_methods.count("tools/list") == 1
         finally:
             async with asyncio.timeout(10):
@@ -185,7 +175,7 @@ async def test_real_sdk_call_failures_do_not_reconnect_healthy_http_session(
                 if not task.done():
                     task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
-            candidate = await manager.prepare_generation()
+            candidate = manager.startup_report
             assert candidate.snapshot == report.snapshot
             assert not tool.unavailable
             assert [r["method"] for r in server.requests].count("initialize") == 1
@@ -615,7 +605,7 @@ async def test_default_connection_discovers_provider_safe_names_and_reuses_tools
             [] if expected_name is None else [expected_name]
         )
         assert report.skipped_tool_counts == ((("alpha", 1),) if expected_name is None else ())
-        candidate = await manager.prepare_generation()
+        candidate = manager.startup_report
         assert candidate.snapshot == report.snapshot
         if expected_name is not None:
             assert candidate.snapshot[0] is report.snapshot[0]
@@ -740,20 +730,22 @@ async def test_rebuilding_same_configuration_keeps_snapshot_schema_deterministic
 
 
 @pytest.mark.asyncio
-async def test_prepare_generation_reuses_healthy_connection_and_discovered_tools() -> None:
+async def test_current_snapshot_reuses_started_connection_and_discovered_tools() -> None:
     configuration = _configuration("alpha")
     tool = _tool("alpha", "echo")
     connection = _FakeConnection(configuration, (tool,))
     manager = _manager({"alpha": connection})
 
     initial = await manager.start({"alpha": configuration})
-    candidate = await manager.prepare_generation()
+    candidate = manager.startup_report
 
     assert connection.connect_calls == 1
     assert candidate.snapshot == initial.snapshot
     assert candidate.snapshot[0] is initial.snapshot[0]
     assert initial.snapshot[0] is tool
-    assert manager.activate_generation(candidate) is candidate.snapshot
+    assert manager.snapshot is candidate.snapshot
+    await manager.close()
+    assert connection.close_calls == 1
 
 
 @pytest.mark.asyncio
@@ -774,7 +766,7 @@ async def test_timeout_and_is_error_results_do_not_enter_failed_server_set(resul
     outcome = await ToolGateway._for_memory(connection.tools).call(
         ModelToolCall(id="call", name=connection.tools[0].name, arguments="{}")
     )
-    candidate = await manager.prepare_generation()
+    candidate = manager.startup_report
 
     assert outcome.status == "error"
     assert connection.connect_calls == 1
@@ -794,14 +786,14 @@ async def test_timeout_does_not_enter_failed_server_set() -> None:
     outcome = await ToolGateway._for_memory(connection.tools).call(
         ModelToolCall(id="call-timeout", name=connection.tools[0].name, arguments="{}")
     )
-    await manager.prepare_generation()
+    assert manager.startup_report.failed_servers == ()
 
     assert outcome.status == "error"
     assert connection.connect_calls == 1
 
 
 @pytest.mark.asyncio
-async def test_closed_session_enters_failed_set_and_is_retried_for_next_generation() -> None:
+async def test_closed_session_invalidates_tool_without_reconnecting() -> None:
     configuration = _configuration("alpha")
     connection = _FakeConnection(configuration)
 
@@ -823,76 +815,15 @@ async def test_closed_session_enters_failed_set_and_is_retried_for_next_generati
     outcome = await ToolGateway._for_memory(connection.tools).call(
         ModelToolCall(id="call-closed", name=connection.tools[0].name, arguments="{}")
     )
-    candidate = await manager.prepare_generation()
+    candidate = manager.startup_report
 
     assert outcome.status == "error"
-    assert connection.connect_calls == 2
+    assert connection.connect_calls == 1
+    assert connection.unavailable
+    assert candidate.snapshot[0].unavailable
     assert [tool.name for tool in candidate.snapshot] == ["mcp_alpha_echo"]
-
-
-@pytest.mark.asyncio
-async def test_failed_candidate_keeps_previous_snapshot_unchanged() -> None:
-    alpha = _configuration("alpha")
-    beta = _configuration("beta")
-    alpha_connection = _FakeConnection(alpha, (_tool("alpha", "alpha-tool"),))
-    beta_connection = _FakeConnection(beta, (_tool("beta", "beta-tool"),))
-    manager = _manager({"alpha": alpha_connection, "beta": beta_connection})
-
-    initial = await manager.start({"alpha": alpha, "beta": beta})
-    beta_connection.mark_unavailable()
-    beta_connection.fail_connect = RuntimeError("connection failed")
-
-    candidate = await manager.prepare_generation()
-
-    assert initial.snapshot == (
-        initial.snapshot[0],
-        initial.snapshot[1],
-    )
-    assert manager.snapshot == initial.snapshot
-    assert [tool.name for tool in candidate.snapshot] == ["mcp_alpha_alpha-tool"]
-    assert candidate.failed_servers == ("beta",)
-
-
-@pytest.mark.asyncio
-async def test_healthy_collision_loser_can_win_after_previous_server_fails() -> None:
-    long_remote_name = "r" * 59
-    alpha = _configuration("alpha")
-    zulu = _configuration("zulu")
-    alpha_connection = _FakeConnection(alpha, (_tool("alpha", long_remote_name),))
-    zulu_connection = _FakeConnection(zulu, (_tool("zulu", long_remote_name),))
-    manager = _manager({"alpha": alpha_connection, "zulu": zulu_connection})
-
-    initial = await manager.start({"alpha": alpha, "zulu": zulu})
-    assert [tool.name for tool in initial.snapshot] == ["mcp_" + long_remote_name]
-
-    alpha_connection.mark_unavailable()
-    alpha_connection.fail_connect = RuntimeError("alpha is still unavailable")
-    candidate = await manager.prepare_generation()
-
-    assert manager.snapshot == initial.snapshot
-    assert [tool.name for tool in candidate.snapshot] == ["mcp_" + long_remote_name]
-    assert alpha_connection.connect_calls == 2
-    assert zulu_connection.connect_calls == 1
-    assert candidate.failed_servers == ("alpha",)
-
-
-@pytest.mark.asyncio
-async def test_activate_generation_replaces_snapshot_only_after_candidate_is_selected() -> None:
-    configuration = _configuration("alpha")
-    connection = _FakeConnection(configuration, (_tool("alpha", "first"),))
-    manager = _manager({"alpha": connection})
-
-    initial = await manager.start({"alpha": configuration})
-    connection.mark_unavailable()
-    connection._tools = (_tool("alpha", "second"),)
-    candidate = await manager.prepare_generation()
-
-    assert manager.snapshot == initial.snapshot
-    assert [tool.name for tool in candidate.snapshot] == ["mcp_alpha_second"]
-
-    activated = manager.activate_generation(candidate)
-
-    assert activated == candidate.snapshot
+    await manager.close()
+    assert connection.close_calls == 1
 
 
 @pytest.mark.asyncio
@@ -958,51 +889,3 @@ async def test_cancelling_manager_close_waits_for_every_connection_to_finish() -
     assert second.close_completed is True
     assert first.close_cancelled is False
     assert second.close_cancelled is False
-
-
-@pytest.mark.asyncio
-async def test_activate_generation_rejects_a_candidate_from_another_manager() -> None:
-    configuration = _configuration("alpha")
-    first_connection = _FakeConnection(configuration, (_tool("alpha", "first"),))
-    second_connection = _FakeConnection(configuration, (_tool("alpha", "second"),))
-    first_manager = _manager({"alpha": first_connection})
-    second_manager = _manager({"alpha": second_connection})
-    await first_manager.start({"alpha": configuration})
-    initial = await second_manager.start({"alpha": configuration})
-    foreign_candidate = await first_manager.prepare_generation()
-
-    with pytest.raises(ValueError, match="current prepared candidate"):
-        second_manager.activate_generation(foreign_candidate)
-
-    assert second_manager.snapshot is initial.snapshot
-
-
-@pytest.mark.asyncio
-async def test_activate_generation_rejects_a_superseded_candidate() -> None:
-    configuration = _configuration("alpha")
-    connection = _FakeConnection(configuration, (_tool("alpha", "echo"),))
-    manager = _manager({"alpha": connection})
-    initial = await manager.start({"alpha": configuration})
-    stale_candidate = await manager.prepare_generation()
-    current_candidate = await manager.prepare_generation()
-
-    with pytest.raises(ValueError, match="current prepared candidate"):
-        manager.activate_generation(stale_candidate)
-
-    assert manager.snapshot is initial.snapshot
-    assert manager.activate_generation(current_candidate) == current_candidate.snapshot
-
-
-@pytest.mark.asyncio
-async def test_activate_generation_rejects_a_candidate_after_close() -> None:
-    configuration = _configuration("alpha")
-    connection = _FakeConnection(configuration, (_tool("alpha", "echo"),))
-    manager = _manager({"alpha": connection})
-    await manager.start({"alpha": configuration})
-    candidate = await manager.prepare_generation()
-    await manager.close()
-
-    with pytest.raises(RuntimeError, match="has not been started"):
-        manager.activate_generation(candidate)
-
-    assert manager.snapshot == ()

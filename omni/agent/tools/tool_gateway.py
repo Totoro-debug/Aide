@@ -486,10 +486,6 @@ class ToolGateway:
         if tool is None:
             return _result(tool_call, "error", "The requested tool is not available.")
 
-        effective_run_token = run_token
-        if effective_run_token is None and self._tool_context is not None:
-            effective_run_token = self._tool_context.run_token
-
         try:
             if self._tool_context is None:
                 facts = await tool.prepare(cast(dict[str, Any], parsed))
@@ -588,7 +584,7 @@ class ToolGateway:
                 authorization=authorization,
                 confirmation_state=confirmation_state,
                 file_mutation_recorder=file_mutation_recorder,
-                run_token=effective_run_token,
+                run_token=run_token,
                 mutation_target=mutation_target,
                 tool_context=self._tool_context,
             )
@@ -637,7 +633,7 @@ class ToolGateway:
             authorization=authorization,
             confirmation_state=confirmation_state,
             file_mutation_recorder=file_mutation_recorder,
-            run_token=effective_run_token,
+            run_token=run_token,
             mutation_target=mutation_target,
             tool_context=self._tool_context,
         )

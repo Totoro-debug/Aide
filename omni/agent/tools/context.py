@@ -5,10 +5,9 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 if TYPE_CHECKING:
     from omni.agent.tools.core.exec_host import ExecHost
@@ -22,34 +21,9 @@ class ToolRunContext:
     workspace: Path
     schedule_service: ScheduleService | None = None
     exec_host: ExecHost | None = None
-    session_id: str | None = None
-    run_id: str | None = None
-    run_token: UUID | None = None
-
     def __post_init__(self) -> None:
         if not isinstance(self.workspace, Path):
             raise TypeError("Tool Run Context workspace must be a Path")
-        for name in ("session_id", "run_id"):
-            value = getattr(self, name)
-            if value is not None and (not isinstance(value, str) or not value):
-                raise TypeError(f"Tool Run Context {name} must be a non-empty string or None")
-        if self.run_token is not None and not isinstance(self.run_token, UUID):
-            raise TypeError("Tool Run Context run_token must be a UUID or None")
-
-    def for_run(
-        self,
-        *,
-        session_id: str | None = None,
-        run_id: str | None = None,
-        run_token: UUID | None = None,
-    ) -> ToolRunContext:
-        """Return a detached context with the identity of one Agent Run."""
-        return replace(
-            self,
-            session_id=session_id,
-            run_id=run_id,
-            run_token=run_token,
-        )
 
 
 _BOUND_TOOL_RUN_CONTEXT: ContextVar[ToolRunContext | None] = ContextVar(

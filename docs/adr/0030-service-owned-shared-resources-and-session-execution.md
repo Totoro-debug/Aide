@@ -116,6 +116,5 @@ memory use. This decision removes duplicate capability resources and idle
 Session execution tasks; it does not impose a total-memory bound.
 
 [ADR-0029](0029-host-cli-and-web-through-one-local-service.md) records client,
-transport, confirmation, and Project lifecycle decisions. The approved execution
-plan is [archived](../archive/agent-service-phased-execution.md); GitHub and the
-issue discussions retain implementation and verification history.
+transport, confirmation, and Project lifecycle decisions. The implementation requirements and verification history are recorded in
+[#306](https://github.com/Totoro-debug/OmniAgent/issues/306) and its child Issues.

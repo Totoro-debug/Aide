@@ -344,13 +344,6 @@ class AgentRunExecutor:
         self._session_closed = False
         self._session_abandoned = False
 
-    @classmethod
-    def with_session(cls, session: Session, **kwargs: Any) -> AgentRunExecutor:
-        """Compose a generation around an already detached Session state."""
-        kwargs.pop("session_id", None)
-        loop = cls(session_id=None, session=session, **kwargs)
-        return loop
-
     @property
     def control(self) -> TerminalAgentRunExecutorControl:
         return self

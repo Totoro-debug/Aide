@@ -1916,7 +1916,6 @@ class WorkspaceRecord:
             "schedule_service": schedule_service,
             "model_router": runtime.router,
             "memory_manager": runtime.memory_manager,
-            "session_id": session_id,
             "now": local_now,
             "new_uuid": uuid4,
             "monotonic_now": monotonic,
@@ -1943,7 +1942,7 @@ class WorkspaceRecord:
             loop_kwargs["permission_control"] = (
                 self._schedule_permission if owner is None else self.service.client_permission(owner)
             )
-            executor = AgentRunExecutor.with_session(authority, **loop_kwargs)
+            executor = AgentRunExecutor(session=authority, session_id=None, **loop_kwargs)
             executor.bind_confirmation_requester(self.service.confirmation.request)
             return executor
 

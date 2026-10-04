@@ -14,19 +14,6 @@ from omni.agent.context.builder import ContextBuilder
 PROJECT_ROOT = Path(__file__).parents[2]
 PACKAGE_ROOT = PROJECT_ROOT / "omni"
 _CLI_PATH = Path("omni/terminal/cli.py")
-_CLI_TOOL_IMPORTS = frozenset(
-    {
-        ("omni.agent.tools.mcp_runtime", "MCPRuntimeManager"),
-        ("omni.agent.tools.mcp_runtime", "MCPServerFailure"),
-        ("omni.agent.tools.mcp_runtime", "MCPStartupReport"),
-        ("omni.agent.tools.mcp_runtime", "MCPToolSnapshot"),
-        ("omni.agent.tools.mcp_keywords", "MCPKeywordPreparer"),
-        ("omni.agent.tools.tool_gateway", "BUILT_IN_TOOL_NAMES"),
-        ("omni.agent.tools.core.exec_host", "EXEC_CAPABILITY_ERROR"),
-        ("omni.agent.tools.core.exec_host", "create_exec_host"),
-        ("omni.agent.tools.core.exec_host", "resolve_exec_shell"),
-    }
-)
 _TOOL_EXECUTION_DISPATCH_METHODS = frozenset(
     {"execute", "execute_prepared", "execute_authorized", "execute_authorized_for_context"}
 )
@@ -169,26 +156,14 @@ def _is_tools_dependency(reference: _StaticImport) -> bool:
     )
 
 
-def _terminal_tool_import_violations(
-    sources: Mapping[Path, str],
-    *,
-    allowed_symbols: Mapping[Path, frozenset[tuple[str, str]]],
-) -> tuple[str, ...]:
+def _terminal_tool_import_violations(sources: Mapping[Path, str]) -> tuple[str, ...]:
     violations: list[str] = []
     for path in sorted(sources, key=str):
-        allowed_for_path = allowed_symbols.get(path, frozenset())
         for reference in _resolved_static_imports(
             sources[path],
             package=tuple(path.parent.parts),
         ):
             if not _is_tools_dependency(reference):
-                continue
-            is_allowed = (
-                reference.form == "from"
-                and reference.symbol is not None
-                and (reference.source_module, reference.symbol) in allowed_for_path
-            )
-            if is_allowed:
                 continue
             imported = reference.source_module
             if reference.form == "from" and reference.symbol is not None:
@@ -573,39 +548,6 @@ def test_terminal_depends_on_ports_instead_of_tool_implementations() -> None:
 
     violations = _terminal_tool_import_violations(
         sources,
-        allowed_symbols={_CLI_PATH: _CLI_TOOL_IMPORTS},
-    )
-
-    assert violations == ()
-
-
-@pytest.mark.parametrize(("module", "symbol"), sorted(_CLI_TOOL_IMPORTS))
-def test_terminal_tool_import_checker_allows_each_cli_symbol(
-    module: str,
-    symbol: str,
-) -> None:
-    violations = _terminal_tool_import_violations(
-        {_CLI_PATH: f"from {module} import {symbol}"},
-        allowed_symbols={_CLI_PATH: _CLI_TOOL_IMPORTS},
-    )
-
-    assert violations == ()
-
-
-@pytest.mark.parametrize(
-    "source",
-    [
-        "from omni.agent.tools.mcp_runtime import MCPRuntimeManager as Manager",
-        "from ..agent.tools.mcp_runtime import MCPRuntimeManager",
-        "from ..agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES as BUILT_INS",
-    ],
-)
-def test_terminal_tool_import_checker_resolves_allowed_aliases_and_relative_imports(
-    source: str,
-) -> None:
-    violations = _terminal_tool_import_violations(
-        {_CLI_PATH: source},
-        allowed_symbols={_CLI_PATH: _CLI_TOOL_IMPORTS},
     )
 
     assert violations == ()
@@ -625,15 +567,15 @@ def test_terminal_tool_import_checker_retains_original_symbol_form_and_line() ->
 @pytest.mark.parametrize(
     "path",
     [
+        _CLI_PATH,
         Path("omni/terminal/conversation.py"),
         Path("omni/terminal/process_entry.py"),
         Path("omni/terminal/internal/loader.py"),
     ],
 )
-def test_terminal_tool_import_checker_rejects_cli_symbols_outside_cli(path: Path) -> None:
+def test_terminal_tool_import_checker_rejects_tools_in_every_terminal_module(path: Path) -> None:
     violations = _terminal_tool_import_violations(
         {path: "from omni.agent.tools.mcp_runtime import MCPRuntimeManager"},
-        allowed_symbols={_CLI_PATH: _CLI_TOOL_IMPORTS},
     )
 
     assert violations
@@ -651,14 +593,16 @@ def test_terminal_tool_import_checker_rejects_cli_symbols_outside_cli(path: Path
         "from omni.agent.tools.mcp_runtime import *",
         "from omni.agent.tools.tool_gateway import ToolGateway as Gateway",
         "from ..agent.tools.tool_gateway import ToolGateway",
+        "from omni.agent.tools.mcp_runtime import MCPRuntimeManager as Manager",
+        "from ..agent.tools.mcp_runtime import MCPRuntimeManager",
+        "from ..agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES as BUILT_INS",
         "def load():\n    from omni.agent.tools.mcp_runtime import allocate_mcp_tool_name",
         "if TYPE_CHECKING:\n    from omni.agent.tools.mcp_runtime import allocate_mcp_tool_name",
     ],
 )
-def test_terminal_tool_import_checker_rejects_unapproved_tool_imports(source: str) -> None:
+def test_terminal_tool_import_checker_rejects_tool_imports(source: str) -> None:
     violations = _terminal_tool_import_violations(
         {_CLI_PATH: source},
-        allowed_symbols={_CLI_PATH: _CLI_TOOL_IMPORTS},
     )
 
     assert violations
@@ -675,7 +619,6 @@ def test_terminal_tool_import_checker_rejects_unapproved_tool_imports(source: st
 def test_terminal_tool_import_checker_allows_non_tool_dependencies(source: str) -> None:
     violations = _terminal_tool_import_violations(
         {_CLI_PATH: source},
-        allowed_symbols={_CLI_PATH: _CLI_TOOL_IMPORTS},
     )
 
     assert violations == ()

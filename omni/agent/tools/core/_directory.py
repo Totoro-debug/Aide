@@ -11,6 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Final
 
+from omni.agent.tools.base import BaseTool
+from omni.agent.tools.context import ToolRunContext
+from omni.agent.tools.permission import FileAccess
 from omni.utils.host_filesystem import HOST_FILESYSTEM
 
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
@@ -36,6 +39,28 @@ _IGNORED_DIRECTORY_NAMES: Final = frozenset(
 _NORMALIZED_IGNORED_DIRECTORY_NAMES: Final = frozenset(
     os.path.normcase(name) for name in _IGNORED_DIRECTORY_NAMES
 )
+
+
+class DirectoryReadTool(BaseTool):
+    """Collect read facts for a directory Tool's explicit Workspace and root."""
+
+    _contextual = True
+
+    def build_file_accesses_for_context(
+        self,
+        prepared_arguments: dict[str, object],
+        *,
+        context: ToolRunContext,
+    ) -> tuple[FileAccess, ...]:
+        workspace = context.workspace
+        return (
+            self.canonical_file_access(
+                workspace=workspace,
+                base=workspace,
+                requested=str(prepared_arguments["path"]),
+                role="read",
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)

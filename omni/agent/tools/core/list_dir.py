@@ -4,22 +4,21 @@ from __future__ import annotations
 
 from typing import Annotated, Any, cast
 
-from omni.agent.tools.base import BaseTool, ToolError, ToolParam
+from omni.agent.tools.base import ToolError, ToolParam
 from omni.agent.tools.context import ToolRunContext
 from omni.agent.tools.core._directory import (
+    DirectoryReadTool,
     iter_directory_entries,
     report_path,
     requested_path_has_directory_link,
 )
-from omni.agent.tools.permission import FileAccess
 
 
-class ListDirTool(BaseTool):
+class ListDirTool(DirectoryReadTool):
     """List visible files and directories beneath a directory root."""
 
     name = "list_dir"
     description = "List files and directories within a directory root."
-    _contextual = True
 
     path: Annotated[str, ToolParam(description="Directory root.", min_length=1)] = "."
     recursive: Annotated[bool, ToolParam(description="Include nested entries.")] = False
@@ -28,22 +27,6 @@ class ListDirTool(BaseTool):
         ToolParam(description="Maximum entries to return.", minimum=1, maximum=10000),
     ] = 200
 
-
-    def build_file_accesses_for_context(
-        self,
-        prepared_arguments: dict[str, object],
-        *,
-        context: ToolRunContext,
-    ) -> tuple[FileAccess, ...]:
-        workspace = context.workspace
-        return (
-            self.canonical_file_access(
-                workspace=workspace,
-                base=workspace,
-                requested=str(prepared_arguments["path"]),
-                role="read",
-            ),
-        )
 
     async def execute_authorized_for_context(
         self,

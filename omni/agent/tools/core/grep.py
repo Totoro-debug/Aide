@@ -8,16 +8,16 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Final, cast
 
-from omni.agent.tools.base import BaseTool, ToolError, ToolParam
+from omni.agent.tools.base import ToolError, ToolParam
 from omni.agent.tools.context import ToolRunContext
 from omni.agent.tools.core._directory import (
+    DirectoryReadTool,
     is_ignored_directory_name,
     iter_directory_entries,
     matches_glob_pattern,
     normalize_glob_pattern,
     report_path,
 )
-from omni.agent.tools.permission import FileAccess
 
 _OUTPUT_MODES: Final = frozenset({"content", "files_with_matches", "count"})
 _TYPE_PATTERNS: Final = {
@@ -66,13 +66,12 @@ class _FileMatches:
     matching_lines: tuple[int, ...]
 
 
-class GrepTool(BaseTool):
+class GrepTool(DirectoryReadTool):
     """Search UTF-8 text in one file or throughout a directory root."""
 
     name = "grep"
     description = "Search UTF-8 text in a file or directory."
     required = ("pattern",)
-    _contextual = True
 
     pattern: Annotated[
         str, ToolParam(description="Regular expression or fixed text.", min_length=1)
@@ -136,22 +135,6 @@ class GrepTool(BaseTool):
             except re.error as error:
                 return f"Grep pattern is invalid: {error}"
         return None
-
-    def build_file_accesses_for_context(
-        self,
-        prepared_arguments: dict[str, object],
-        *,
-        context: ToolRunContext,
-    ) -> tuple[FileAccess, ...]:
-        workspace = context.workspace
-        return (
-            self.canonical_file_access(
-                workspace=workspace,
-                base=workspace,
-                requested=str(prepared_arguments["path"]),
-                role="read",
-            ),
-        )
 
     async def execute_authorized_for_context(
         self,

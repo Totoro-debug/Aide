@@ -4,25 +4,24 @@ from __future__ import annotations
 
 from typing import Annotated, Any, cast
 
-from omni.agent.tools.base import BaseTool, ToolError, ToolParam
+from omni.agent.tools.base import ToolError, ToolParam
 from omni.agent.tools.context import ToolRunContext
 from omni.agent.tools.core._directory import (
+    DirectoryReadTool,
     iter_directory_entries,
     matches_glob_pattern,
     normalize_glob_pattern,
     report_path,
     requested_path_has_directory_link,
 )
-from omni.agent.tools.permission import FileAccess
 
 
-class GlobTool(BaseTool):
+class GlobTool(DirectoryReadTool):
     """Match files and directories beneath a directory root."""
 
     name = "glob"
     description = "Match files and directories beneath a directory root."
     required = ("pattern",)
-    _contextual = True
 
     pattern: Annotated[str, ToolParam(description="Relative glob pattern.", min_length=1)]
     path: Annotated[str, ToolParam(description="Directory root.", min_length=1)] = "."
@@ -54,22 +53,6 @@ class GlobTool(BaseTool):
         if kind not in {"files", "dirs", "both"}:
             return "Glob kind must be one of files, dirs, or both."
         return None
-
-    def build_file_accesses_for_context(
-        self,
-        prepared_arguments: dict[str, object],
-        *,
-        context: ToolRunContext,
-    ) -> tuple[FileAccess, ...]:
-        workspace = context.workspace
-        return (
-            self.canonical_file_access(
-                workspace=workspace,
-                base=workspace,
-                requested=str(prepared_arguments["path"]),
-                role="read",
-            ),
-        )
 
     async def execute_authorized_for_context(
         self,

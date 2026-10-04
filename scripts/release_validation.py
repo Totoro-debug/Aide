@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Final, Literal, cast
 
 from omni.agent.permission import PermissionSnapshot
+from omni.agent.tools.context import ToolRunContext
 from omni.agent.tools.core.exec import ExecTool
 from omni.agent.tools.core.exec_host import (
     PowerShellExecHost,
@@ -1421,7 +1422,8 @@ async def _exercise_powershell_host(selector: str) -> dict[str, object]:
                 f"{selector} executed in {observed_cwd} instead of requested cwd {workspace}"
             )
         gateway = ToolGateway._for_memory(
-            (ExecTool(workspace=workspace, host=host),),
+            (ExecTool(host=host),),
+            tool_context=ToolRunContext(workspace=workspace, exec_host=host),
             permission_context=PermissionContext.from_snapshot(
                 PermissionSnapshot(level="full-access", exec_shell=shell),
                 workspace_root=workspace,

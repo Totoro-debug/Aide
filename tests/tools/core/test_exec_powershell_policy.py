@@ -11,6 +11,7 @@ from typing import Literal
 
 import pytest
 
+from omni.agent.tools.context import ToolRunContext
 from omni.agent.tools.core.exec import ExecTool
 from omni.agent.tools.core.exec_host import (
     ExecProcessSpec,
@@ -219,7 +220,8 @@ async def test_powershell_alias_requires_confirmation_and_never_executes_on_decl
 
     snapshot = PermissionSnapshot(level="read-only", exec_shell=shell)
     gateway = ToolGateway._for_memory(
-        (ExecTool(workspace=tmp_path, host=Host()),),
+        (ExecTool(host=Host()),),
+                  tool_context=ToolRunContext(workspace=tmp_path),
         permission_context=PermissionContext.from_snapshot(
             snapshot,
             workspace_root=tmp_path,
@@ -297,7 +299,8 @@ async def test_windows_powershell_51_canonical_workspace_read_executes_directly(
 
     snapshot = PermissionSnapshot(level="read-only", exec_shell=shell)
     gateway = ToolGateway._for_memory(
-        (ExecTool(workspace=tmp_path, host=Host()),),
+        (ExecTool(host=Host()),),
+                  tool_context=ToolRunContext(workspace=tmp_path),
         permission_context=PermissionContext.from_snapshot(
             snapshot,
             workspace_root=tmp_path,
@@ -379,7 +382,8 @@ async def test_every_approved_powershell_candidate_has_a_direct_fixture(
 
     snapshot = PermissionSnapshot(level=level, exec_shell=shell)  # type: ignore[arg-type]
     gateway = ToolGateway._for_memory(
-        (ExecTool(workspace=tmp_path, host=Host()),),
+        (ExecTool(host=Host()),),
+                  tool_context=ToolRunContext(workspace=tmp_path),
         permission_context=PermissionContext.from_snapshot(
             snapshot,
             workspace_root=tmp_path,
@@ -459,7 +463,8 @@ async def test_static_data_pipeline_can_write_to_an_explicit_workspace_path(
             raise AssertionError("the pipeline fixture must use Host methods")
 
     gateway = ToolGateway._for_memory(
-        (ExecTool(workspace=tmp_path, host=Host()),),
+        (ExecTool(host=Host()),),
+                  tool_context=ToolRunContext(workspace=tmp_path),
         permission_context=PermissionContext.from_snapshot(
             PermissionSnapshot(level="workspace-write", exec_shell=shell),
             workspace_root=tmp_path,
@@ -566,7 +571,8 @@ async def test_low_permission_powershell_dynamic_or_unknown_calls_confirm_once(
 
     snapshot = PermissionSnapshot(level="read-only", exec_shell=shell)
     gateway = ToolGateway._for_memory(
-        (ExecTool(workspace=tmp_path, host=Host()),),
+        (ExecTool(host=Host()),),
+                  tool_context=ToolRunContext(workspace=tmp_path),
         permission_context=PermissionContext.from_snapshot(snapshot, workspace_root=tmp_path),
     )
     requests: list[ConfirmationRequest] = []
@@ -644,7 +650,8 @@ async def test_full_access_executes_parseable_noncatastrophic_powershell_dynamic
 
     snapshot = PermissionSnapshot(level="full-access", exec_shell=shell)
     gateway = ToolGateway._for_memory(
-        (ExecTool(workspace=tmp_path, host=Host()),),
+        (ExecTool(host=Host()),),
+                  tool_context=ToolRunContext(workspace=tmp_path),
         permission_context=PermissionContext.from_snapshot(snapshot, workspace_root=tmp_path),
     )
 
@@ -764,7 +771,8 @@ async def test_powershell_path_roles_follow_level_and_canonical_containment(
 
     snapshot = PermissionSnapshot(level=level, exec_shell=shell)  # type: ignore[arg-type]
     gateway = ToolGateway._for_memory(
-        (ExecTool(workspace=workspace, host=Host()),),
+        (ExecTool(host=Host()),),
+                  tool_context=ToolRunContext(workspace=workspace),
         permission_context=PermissionContext.from_snapshot(
             snapshot,
             workspace_root=workspace,
@@ -847,7 +855,8 @@ async def test_powershell_read_through_workspace_reparse_point_confirms(
             raise AssertionError("the reparse fixture must use Host methods")
 
     gateway = ToolGateway._for_memory(
-        (ExecTool(workspace=workspace, host=Host()),),
+        (ExecTool(host=Host()),),
+                  tool_context=ToolRunContext(workspace=workspace),
         permission_context=PermissionContext.from_snapshot(
             PermissionSnapshot(level="read-only", exec_shell=shell),
             workspace_root=workspace,
@@ -946,7 +955,8 @@ async def test_every_cross_host_git_read_form_has_a_direct_powershell_fixture(
 
     snapshot = PermissionSnapshot(level="read-only", exec_shell=shell)
     gateway = ToolGateway._for_memory(
-        (ExecTool(workspace=tmp_path, host=Host()),),
+        (ExecTool(host=Host()),),
+                  tool_context=ToolRunContext(workspace=tmp_path),
         permission_context=PermissionContext.from_snapshot(snapshot, workspace_root=tmp_path),
     )
 
@@ -1028,7 +1038,8 @@ async def test_unlisted_git_forms_require_one_confirmation(
 
     snapshot = PermissionSnapshot(level="workspace-write", exec_shell=shell)
     gateway = ToolGateway._for_memory(
-        (ExecTool(workspace=tmp_path, host=Host()),),
+        (ExecTool(host=Host()),),
+                  tool_context=ToolRunContext(workspace=tmp_path),
         permission_context=PermissionContext.from_snapshot(snapshot, workspace_root=tmp_path),
     )
     requests: list[ConfirmationRequest] = []
@@ -1243,7 +1254,8 @@ async def test_catastrophic_powershell_calls_confirm_once_at_every_permission_le
 
     snapshot = PermissionSnapshot(level=level, exec_shell=shell)
     gateway = ToolGateway._for_memory(
-        (ExecTool(workspace=tmp_path, host=Host()),),
+        (ExecTool(host=Host()),),
+                  tool_context=ToolRunContext(workspace=tmp_path),
         permission_context=PermissionContext.from_snapshot(
             snapshot,
             workspace_root=tmp_path,
@@ -1319,7 +1331,8 @@ async def test_shell_present_inspector_uncertainty_confirms_at_every_level(
 
     snapshot = PermissionSnapshot(level=level, exec_shell=shell)
     gateway = ToolGateway._for_memory(
-        (ExecTool(workspace=tmp_path, host=Host()),),
+        (ExecTool(host=Host()),),
+                  tool_context=ToolRunContext(workspace=tmp_path),
         permission_context=PermissionContext.from_snapshot(
             snapshot,
             workspace_root=tmp_path,
@@ -1361,7 +1374,8 @@ async def test_unavailable_selected_powershell_is_a_hard_error_at_every_level(
     for level in ("read-only", "workspace-write", "full-access"):
         snapshot = PermissionSnapshot(level=level, exec_shell=shell)
         gateway = ToolGateway._for_memory(
-            (ExecTool(workspace=tmp_path, host=create_exec_host(shell)),),
+            (ExecTool(host=create_exec_host(shell)),),
+                      tool_context=ToolRunContext(workspace=tmp_path),
             permission_context=PermissionContext.from_snapshot(
                 snapshot,
                 workspace_root=tmp_path,
@@ -1499,7 +1513,8 @@ async def test_noncanonical_powershell_identity_categories_confirm(
 
     snapshot = PermissionSnapshot(level="read-only", exec_shell=shell)
     gateway = ToolGateway._for_memory(
-        (ExecTool(workspace=tmp_path, host=Host()),),
+        (ExecTool(host=Host()),),
+                  tool_context=ToolRunContext(workspace=tmp_path),
         permission_context=PermissionContext.from_snapshot(snapshot, workspace_root=tmp_path),
     )
     requests: list[ConfirmationRequest] = []
@@ -1943,7 +1958,8 @@ async def test_workspace_git_executable_requires_confirmation(
 
     snapshot = PermissionSnapshot(level="read-only", exec_shell=shell)
     gateway = ToolGateway._for_memory(
-        (ExecTool(workspace=tmp_path, host=Host()),),
+        (ExecTool(host=Host()),),
+                  tool_context=ToolRunContext(workspace=tmp_path),
         permission_context=PermissionContext.from_snapshot(snapshot, workspace_root=tmp_path),
     )
 
@@ -1998,7 +2014,8 @@ async def test_schedule_exec_keeps_legacy_authorization_behavior(tmp_path: Path)
             raise AssertionError("the schedule fixture must use Host methods")
 
     gateway = ToolGateway._for_memory(
-        (ExecTool(workspace=tmp_path, host=Host()),),
+        (ExecTool(host=Host()),),
+                  tool_context=ToolRunContext(workspace=tmp_path),
         permission_context=PermissionContext.from_snapshot(
             PermissionSnapshot(level="read-only", exec_shell=shell),
             workspace_root=tmp_path,
@@ -2060,7 +2077,8 @@ async def test_real_powershell_host_inspects_and_executes_canonical_cmdlet(
         assessment=assessment,
     )
     gateway = ToolGateway._for_memory(
-        (ExecTool(workspace=tmp_path, host=host),),
+        (ExecTool(host=host),),
+                  tool_context=ToolRunContext(workspace=tmp_path),
         permission_context=PermissionContext.from_snapshot(
             PermissionSnapshot(level="full-access", exec_shell=shell),
             workspace_root=tmp_path,

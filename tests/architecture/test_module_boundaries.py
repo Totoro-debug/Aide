@@ -29,7 +29,7 @@ _CLI_TOOL_IMPORTS = frozenset(
     }
 )
 _TOOL_EXECUTION_DISPATCH_METHODS = frozenset(
-    {"execute", "execute_prepared", "execute_authorized"}
+    {"execute", "execute_prepared", "execute_authorized", "execute_authorized_for_context"}
 )
 _TOOL_RUNTIME_STATE_MARKERS = ("permission", "authorization")
 

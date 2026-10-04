@@ -12,6 +12,7 @@ import pytest
 from omni.agent.permission import PermissionSnapshot
 from omni.agent.session.backup_store import FileBackupStore
 from omni.agent.tools.base import BaseTool
+from omni.agent.tools.context import ToolRunContext
 from omni.agent.tools.core.edit_file import EditFileTool
 from omni.agent.tools.core.exec_host import resolve_exec_shell
 from omni.agent.tools.core.write_file import WriteFileTool
@@ -42,7 +43,10 @@ def _gateway(
         workspace_root=workspace,
         origin=origin,
     )
-    return ToolGateway._for_memory(tuple(tools), permission_context=context)
+    return ToolGateway._for_memory(
+        tuple(tools), permission_context=context,
+        tool_context=ToolRunContext(workspace=workspace),
+    )
 
 
 @dataclass
@@ -94,7 +98,7 @@ async def test_authorized_foreground_write_persists_one_backup_with_run_token(
     target.write_bytes(b"before")
     token = uuid4()
     store = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
-    gateway = _gateway(workspace, WriteFileTool(workspace=workspace))
+    gateway = _gateway(workspace, WriteFileTool())
 
     result = await gateway.call(
         _call("write_file", {"path": "notes.txt", "content": "after"}),
@@ -120,7 +124,7 @@ async def test_matching_edit_records_once_but_unmatched_and_ambiguous_edits_reco
     target = workspace / "notes.txt"
     target.write_text("needle\n", encoding="utf-8")
     recorder = _RecordingRecorder()
-    gateway = _gateway(workspace, EditFileTool(workspace=workspace))
+    gateway = _gateway(workspace, EditFileTool())
 
     matched = await gateway.call(
         _call(
@@ -166,7 +170,7 @@ async def test_authorized_external_write_records_the_actual_external_target(
     target = workspace.parent / "external.txt"
     target.write_bytes(b"before")
     recorder = _RecordingRecorder()
-    gateway = _gateway(workspace, WriteFileTool(workspace=workspace))
+    gateway = _gateway(workspace, WriteFileTool())
 
     result = await gateway.call(
         _call("write_file", {"path": str(target), "content": "after"}),
@@ -190,7 +194,7 @@ async def test_declined_and_unavailable_file_confirmation_record_zero(
     recorder = _RecordingRecorder()
     gateway = _gateway(
         workspace,
-        WriteFileTool(workspace=workspace),
+        WriteFileTool(),
         level="read-only",
     )
     call = _call("write_file", {"path": str(target), "content": "after"})
@@ -222,7 +226,7 @@ async def test_non_foreground_and_non_file_calls_do_not_record(
     workspace: Path,
 ) -> None:
     recorder = _RecordingRecorder()
-    write = WriteFileTool(workspace=workspace)
+    write = WriteFileTool()
     noop = _NoopTool()
     gateway = _gateway(workspace, write, noop, origin="memory")
 
@@ -248,7 +252,7 @@ async def test_protected_restore_state_is_rejected_before_authorization_or_recor
     workspace: Path,
 ) -> None:
     recorder = _RecordingRecorder()
-    gateway = _gateway(workspace, WriteFileTool(workspace=workspace))
+    gateway = _gateway(workspace, WriteFileTool())
 
     result = await gateway.call(
         _call(
@@ -272,7 +276,7 @@ async def test_backup_recorder_failures_do_not_change_write_result(
     fail_on_complete: bool,
 ) -> None:
     target = workspace / "notes.txt"
-    gateway = _gateway(workspace, WriteFileTool(workspace=workspace))
+    gateway = _gateway(workspace, WriteFileTool())
 
     result = await gateway.call(
         _call("write_file", {"path": "notes.txt", "content": "after"}),
@@ -291,7 +295,7 @@ async def test_write_failure_preserves_tool_error_after_one_recording_attempt(
 ) -> None:
     target = workspace / "notes.txt"
     recorder = _RecordingRecorder()
-    gateway = _gateway(workspace, WriteFileTool(workspace=workspace))
+    gateway = _gateway(workspace, WriteFileTool())
     original_write_bytes = Path.write_bytes
 
     def fail_target_write(path: Path, data: bytes) -> int:
@@ -317,7 +321,7 @@ async def test_recorder_completion_failure_preserves_write_error(
     workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    gateway = _gateway(workspace, WriteFileTool(workspace=workspace))
+    gateway = _gateway(workspace, WriteFileTool())
 
     def fail_target_write(_path: Path, _data: bytes) -> int:
         raise OSError("injected write failure")
@@ -340,7 +344,7 @@ async def test_run_tokens_are_explicit_per_call_and_not_shared_tool_state(
     target = workspace / "notes.txt"
     target.write_bytes(b"before")
     recorder = _RecordingRecorder()
-    gateway = _gateway(workspace, WriteFileTool(workspace=workspace))
+    gateway = _gateway(workspace, WriteFileTool())
     first_token = uuid4()
     second_token = uuid4()
 

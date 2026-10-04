@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 from uuid import UUID
+from weakref import WeakKeyDictionary
 
 from omni.agent.tools.base import BaseTool
+from omni.agent.tools.context import ToolRunContext
 from omni.agent.tools.file_mutation import FileMutationRecorder
 from omni.agent.tools.permission import PermissionContext
 from omni.agent.tools.tool_gateway import (
@@ -15,6 +18,23 @@ from omni.agent.tools.tool_gateway import (
     ToolGateway,
     ToolResult,
 )
+from omni.schedule.service import ScheduleService
+
+_TEST_CONTEXTS: WeakKeyDictionary[BaseTool, ToolRunContext] = WeakKeyDictionary()
+
+
+def contextual_tool[T: BaseTool](
+    tool_type: type[T], *, workspace: Path | None = None,
+    schedule_service: ScheduleService | None = None, **kwargs: Any,
+) -> T:
+    """Compose a test Tool and explicit context without binding production instances."""
+    if workspace is None:
+        if schedule_service is None:
+            raise TypeError("Test Tool composition requires a Workspace")
+        workspace = schedule_service._store.workspace_state.workspace_path
+    tool = tool_type(**kwargs)
+    _TEST_CONTEXTS[tool] = ToolRunContext(workspace=workspace, schedule_service=schedule_service)
+    return tool
 
 
 class SingleToolGateway(ToolGateway):
@@ -27,8 +47,14 @@ class SingleToolGateway(ToolGateway):
         confirmation: ConfirmationRequester | None = None,
         permission_context: PermissionContext | None = None,
     ) -> None:
+        selected_tools = tuple(tools)
+        contexts = {_TEST_CONTEXTS[tool] for tool in selected_tools if tool in _TEST_CONTEXTS}
+        if len(contexts) > 1:
+            raise ValueError("Test Tools require one shared Tool Run Context")
+        context = next(iter(contexts), None)
         self._gateway = ToolGateway._for_memory(
-            tuple(tools),
+            selected_tools,
+            tool_context=context,
             permission_context=permission_context,
         )
         self._confirmation = confirmation

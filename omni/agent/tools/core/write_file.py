@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 from uuid import UUID
 
 from omni.agent.tools.base import BaseTool, ToolError, ToolParam
@@ -30,14 +30,6 @@ class WriteFileTool(BaseTool):
     ]
     content: Annotated[str, ToolParam(description="Complete UTF-8 text content.")]
 
-    _workspace: Path | None
-
-    def __init__(self, *, workspace: Path | None = None) -> None:
-        if workspace is not None:
-            self._workspace = workspace
-
-    def build_file_accesses(self, prepared_arguments: dict[str, object]) -> tuple[FileAccess, ...]:
-        return self._build_file_accesses(prepared_arguments, workspace=self._legacy_workspace())
 
     def build_file_accesses_for_context(
         self,
@@ -45,14 +37,7 @@ class WriteFileTool(BaseTool):
         *,
         context: ToolRunContext,
     ) -> tuple[FileAccess, ...]:
-        return self._build_file_accesses(prepared_arguments, workspace=context.workspace)
-
-    def _build_file_accesses(
-        self,
-        prepared_arguments: dict[str, object],
-        *,
-        workspace: Path,
-    ) -> tuple[FileAccess, ...]:
+        workspace = context.workspace
         return (
             self.canonical_file_access(
                 workspace=workspace,
@@ -61,14 +46,6 @@ class WriteFileTool(BaseTool):
                 role="write",
             ),
         )
-
-    def refusal_reason(self, *, path: str, **arguments: object) -> str | None:
-        del arguments
-        workspace = self._legacy_workspace()
-        target = self.resolve_path_argument(workspace=workspace, requested=path)
-        if is_protected_restore_target(workspace, target):
-            return "Built-in File Tools cannot write to protected restore state."
-        return None
 
     def refusal_reason_for_context(
         self,
@@ -83,39 +60,6 @@ class WriteFileTool(BaseTool):
         if is_protected_restore_target(context.workspace, target):
             return "Built-in File Tools cannot write to protected restore state."
         return None
-
-    async def execute(self, *, path: str, content: str) -> str:
-        target = self.resolve_path_argument(workspace=self._legacy_workspace(), requested=path)
-        return await self._execute_at_target(
-            target=target,
-            content=content,
-            recorder=None,
-            run_token=None,
-        )
-
-    async def execute_authorized(
-        self,
-        arguments: dict[str, Any],
-        authorization: object,
-        *,
-        mutation_recorder: FileMutationRecorder | None = None,
-        run_token: UUID | None = None,
-        mutation_target: Path | None = None,
-    ) -> str:
-        del authorization
-        path = arguments.get("path")
-        content = arguments.get("content")
-        if not isinstance(path, str) or not isinstance(content, str):
-            raise ToolError("Write File arguments are invalid.")
-        target = mutation_target
-        if target is None:
-            target = self.resolve_path_argument(workspace=self._legacy_workspace(), requested=path)
-        return await self._execute_at_target(
-            target=target,
-            content=content,
-            recorder=(mutation_recorder if run_token is not None else None),
-            run_token=(run_token if mutation_recorder is not None else None),
-        )
 
     async def execute_authorized_for_context(
         self,
@@ -136,21 +80,8 @@ class WriteFileTool(BaseTool):
         target = mutation_target
         if target is None:
             target = self.resolve_path_argument(workspace=context.workspace, requested=path)
-        return await self._execute_at_target(
-            target=target,
-            content=content,
-            recorder=(mutation_recorder if run_token is not None else None),
-            run_token=(run_token if mutation_recorder is not None else None),
-        )
-
-    async def _execute_at_target(
-        self,
-        *,
-        target: Path,
-        content: str,
-        recorder: FileMutationRecorder | None,
-        run_token: UUID | None,
-    ) -> str:
+        recorder = mutation_recorder if run_token is not None else None
+        run_token = run_token if mutation_recorder is not None else None
         async def mutation() -> str:
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -165,9 +96,3 @@ class WriteFileTool(BaseTool):
             run_token=run_token,
             target=target,
         )
-
-    def _legacy_workspace(self) -> Path:
-        workspace = getattr(self, "_workspace", None)
-        if not isinstance(workspace, Path):
-            raise RuntimeError("Write File requires an explicit Tool Run Context")
-        return workspace

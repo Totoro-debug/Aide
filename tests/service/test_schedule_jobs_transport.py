@@ -683,7 +683,7 @@ async def test_schedule_http_delete_drains_real_tool_and_preserves_session_termi
     )
     monkeypatch.setattr(service_runtime, "create_provider", lambda _config: provider)
 
-    async def blocked_read(_tool: ReadFileTool, **_kwargs: object) -> str:
+    async def blocked_read(_tool: ReadFileTool, _arguments: object, _authorization: object, **_kwargs: object) -> str:
         started.set()
         try:
             await asyncio.Event().wait()
@@ -692,7 +692,7 @@ async def test_schedule_http_delete_drains_real_tool_and_preserves_session_termi
             raise
         return "unreachable"
 
-    monkeypatch.setattr(ReadFileTool, "execute", blocked_read)
+    monkeypatch.setattr(ReadFileTool, "execute_authorized_for_context", blocked_read)
     home = _prepare_agent_home(tmp_path / "home")
     path = tmp_path / "workspace"
     path.mkdir()

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Annotated, Any, cast
 
 from omni.agent.tools.base import BaseTool, ToolError, ToolParam
-from omni.agent.tools.context import ToolRunContext, bind_tool_run_context, bound_tool_run_context
+from omni.agent.tools.context import ToolRunContext
 from omni.agent.tools.core._directory import (
     iter_directory_entries,
     matches_glob_pattern,
@@ -37,11 +36,6 @@ class GlobTool(BaseTool):
         ToolParam(description="Return files, directories, or both.", min_length=1),
     ] = "files"
 
-    _workspace: Path | None
-
-    def __init__(self, *, workspace: Path | None = None) -> None:
-        if workspace is not None:
-            self._workspace = workspace
 
     def validate_arguments(  # type: ignore[override]
         self,
@@ -61,23 +55,13 @@ class GlobTool(BaseTool):
             return "Glob kind must be one of files, dirs, or both."
         return None
 
-    def build_file_accesses(self, prepared_arguments: dict[str, object]) -> tuple[FileAccess, ...]:
-        return self._build_file_accesses(prepared_arguments, workspace=self._legacy_workspace())
-
     def build_file_accesses_for_context(
         self,
         prepared_arguments: dict[str, object],
         *,
         context: ToolRunContext,
     ) -> tuple[FileAccess, ...]:
-        return self._build_file_accesses(prepared_arguments, workspace=context.workspace)
-
-    def _build_file_accesses(
-        self,
-        prepared_arguments: dict[str, object],
-        *,
-        workspace: Path,
-    ) -> tuple[FileAccess, ...]:
+        workspace = context.workspace
         return (
             self.canonical_file_access(
                 workspace=workspace,
@@ -85,24 +69,6 @@ class GlobTool(BaseTool):
                 requested=str(prepared_arguments["path"]),
                 role="read",
             ),
-        )
-
-    async def execute(
-        self,
-        *,
-        pattern: str,
-        path: str,
-        head_limit: int,
-        offset: int,
-        kind: str,
-    ) -> str:
-        return await self._execute_at_workspace(
-            workspace=self._legacy_workspace(),
-            pattern=pattern,
-            path=path,
-            head_limit=head_limit,
-            offset=offset,
-            kind=kind,
         )
 
     async def execute_authorized_for_context(
@@ -114,25 +80,12 @@ class GlobTool(BaseTool):
         **kwargs: object,
     ) -> str:
         del authorization, kwargs
-        with bind_tool_run_context(context):
-            return await self.execute(
-                pattern=cast(str, arguments["pattern"]),
-                path=cast(str, arguments["path"]),
-                head_limit=cast(int, arguments["head_limit"]),
-                offset=cast(int, arguments["offset"]),
-                kind=cast(str, arguments["kind"]),
-            )
-
-    async def _execute_at_workspace(
-        self,
-        *,
-        workspace: Path,
-        pattern: str,
-        path: str,
-        head_limit: int,
-        offset: int,
-        kind: str,
-    ) -> str:
+        workspace = context.workspace
+        pattern = cast(str, arguments["pattern"])
+        path = cast(str, arguments["path"])
+        head_limit = cast(int, arguments["head_limit"])
+        offset = cast(int, arguments["offset"])
+        kind = cast(str, arguments["kind"])
         if requested_path_has_directory_link(workspace, path):
             return ""
         target = self.resolve_path_argument(workspace=workspace, requested=path)
@@ -156,15 +109,6 @@ class GlobTool(BaseTool):
         else:
             selected = reported[offset : offset + head_limit]
         return "\n".join(selected)
-
-    def _legacy_workspace(self) -> Path:
-        workspace = getattr(self, "_workspace", None)
-        if not isinstance(workspace, Path):
-            context = bound_tool_run_context()
-            if context is not None:
-                return context.workspace
-            raise RuntimeError("Glob requires an explicit Tool Run Context")
-        return workspace
 
 
 def _matches_kind(is_directory: bool, kind: str) -> bool:

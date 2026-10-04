@@ -26,6 +26,7 @@ from omni.agent.tools.core.exec_policy import (
 )
 from omni.agent.tools.tool_gateway import ModelToolCall, ToolResult
 from tests.fixtures import SingleToolGateway
+from tests.fixtures.gateway import contextual_tool
 
 
 def _which(values: dict[str, str]) -> Callable[[str], str | None]:
@@ -266,7 +267,7 @@ def test_unavailable_exec_host_is_cataloguable_but_fails_at_tool_call(
         environment={"PATH": r"C:\private"},
     )
     host = create_exec_host(resolved)
-    tool = ExecTool(workspace=tmp_path, host=host)
+    tool = contextual_tool(ExecTool, workspace=tmp_path, host=host)
 
     assert tool.name == "exec"
     assert host.resolved_shell.available is False
@@ -282,7 +283,7 @@ async def test_missing_shell_is_a_capability_error_without_confirmation(tmp_path
         environment={"PATH": r"C:\private"},
     )
     result = await SingleToolGateway(
-        (ExecTool(workspace=tmp_path, host=create_exec_host(resolved)),)
+        (contextual_tool(ExecTool, workspace=tmp_path, host=create_exec_host(resolved)),)
     ).call(
         ModelToolCall(id="missing-shell", name="exec", arguments='{"command":"pwd"}')
     )
@@ -634,7 +635,7 @@ async def test_host_returns_raw_outcome_and_gateway_constructs_tool_result(tmp_p
             del cwd
             raise AssertionError("the Gateway must use the raw Host methods")
 
-    result = await SingleToolGateway((ExecTool(workspace=tmp_path, host=Host()),)).call(
+    result = await SingleToolGateway((contextual_tool(ExecTool, workspace=tmp_path, host=Host()),)).call(
         ModelToolCall(
             id="raw-boundary",
             name="exec",

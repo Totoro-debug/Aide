@@ -17,6 +17,7 @@ from omni.agent.tools.tool_gateway import (
     ModelToolCall,
 )
 from tests.fixtures import SingleToolGateway
+from tests.fixtures.gateway import contextual_tool
 
 
 def _call(name: str, arguments: dict[str, object], *, call_id: str = "call_1") -> ModelToolCall:
@@ -45,7 +46,7 @@ async def test_list_dir_is_stable_recursive_hidden_state_aware_and_limited(
     (workspace / "node_modules" / "ignored.txt").write_text("ignored", encoding="utf-8")
     (workspace / ".gitignore").write_text("z.txt\n", encoding="utf-8")
 
-    tool = ListDirTool(workspace=workspace)
+    tool = contextual_tool(ListDirTool, workspace=workspace)
     gateway = _gateway(tool)
 
     shallow = await gateway.call(_call("list_dir", {}))
@@ -65,7 +66,7 @@ async def test_list_dir_is_stable_recursive_hidden_state_aware_and_limited(
 async def test_list_dir_defaults_to_200_entries(workspace: Path) -> None:
     for index in range(201):
         (workspace / f"entry-{index:03}.txt").write_text("entry", encoding="utf-8")
-    gateway = _gateway(ListDirTool(workspace=workspace))
+    gateway = _gateway(contextual_tool(ListDirTool, workspace=workspace))
 
     result = await gateway.call(_call("list_dir", {}))
 
@@ -82,7 +83,7 @@ async def test_glob_supports_pattern_dialects_kinds_and_pagination(workspace: Pa
     (workspace / "Sub" / "Deep" / "d.txt").parent.mkdir()
     (workspace / "Sub" / "Deep" / "d.txt").write_text("d", encoding="utf-8")
 
-    tool = GlobTool(workspace=workspace)
+    tool = contextual_tool(GlobTool, workspace=workspace)
     gateway = _gateway(tool)
 
     simple = await gateway.call(_call("glob", {"pattern": "*.txt", "head_limit": 0}))
@@ -117,7 +118,7 @@ async def test_glob_supports_pattern_dialects_kinds_and_pagination(workspace: Pa
 
 @pytest.mark.asyncio
 async def test_glob_enforces_head_limit_and_offset_boundaries(workspace: Path) -> None:
-    gateway = _gateway(GlobTool(workspace=workspace))
+    gateway = _gateway(contextual_tool(GlobTool, workspace=workspace))
 
     maximum = await gateway.call(
         _call("glob", {"pattern": "*", "head_limit": 1000}, call_id="call_maximum")
@@ -143,7 +144,7 @@ async def test_glob_rejects_absolute_drive_and_unc_patterns(
     workspace: Path,
     pattern: str,
 ) -> None:
-    gateway = _gateway(GlobTool(workspace=workspace))
+    gateway = _gateway(contextual_tool(GlobTool, workspace=workspace))
 
     result = await gateway.call(_call("glob", {"pattern": pattern}))
 
@@ -154,7 +155,7 @@ async def test_glob_rejects_absolute_drive_and_unc_patterns(
 @pytest.mark.asyncio
 async def test_directory_tools_reject_explicit_empty_roots(workspace: Path) -> None:
     identity = workspace
-    gateway = _gateway(ListDirTool(workspace=identity), GlobTool(workspace=identity))
+    gateway = _gateway(contextual_tool(ListDirTool, workspace=identity), contextual_tool(GlobTool, workspace=identity))
 
     listing = await gateway.call(_call("list_dir", {"path": ""}, call_id="call_empty_list_root"))
     matches = await gateway.call(
@@ -175,8 +176,8 @@ async def test_ignored_roots_remain_ignored_without_gitignore_parsing(workspace:
     (host_case_variant / "case.txt").write_text("case", encoding="utf-8")
     (workspace / ".gitignore").write_text("kept.txt\n", encoding="utf-8")
     identity = workspace
-    list_gateway = _gateway(ListDirTool(workspace=identity))
-    glob_gateway = _gateway(GlobTool(workspace=identity))
+    list_gateway = _gateway(contextual_tool(ListDirTool, workspace=identity))
+    glob_gateway = _gateway(contextual_tool(GlobTool, workspace=identity))
 
     listing = await list_gateway.call(_call("list_dir", {}))
     ignored_listing = await list_gateway.call(
@@ -220,8 +221,8 @@ async def test_directory_links_are_reported_but_never_traversed(workspace: Path)
             pytest.skip(f"directory links unavailable: {error}")
 
     identity = workspace
-    list_gateway = _gateway(ListDirTool(workspace=identity))
-    glob_gateway = _gateway(GlobTool(workspace=identity))
+    list_gateway = _gateway(contextual_tool(ListDirTool, workspace=identity))
+    glob_gateway = _gateway(contextual_tool(GlobTool, workspace=identity))
 
     listing = await list_gateway.call(_call("list_dir", {"recursive": True}))
     matches = await glob_gateway.call(
@@ -246,8 +247,8 @@ async def test_directory_symlink_roots_are_never_traversed(workspace: Path) -> N
         pytest.skip(f"directory symlinks unavailable: {error}")
 
     identity = workspace
-    list_gateway = _gateway(ListDirTool(workspace=identity))
-    glob_gateway = _gateway(GlobTool(workspace=identity))
+    list_gateway = _gateway(contextual_tool(ListDirTool, workspace=identity))
+    glob_gateway = _gateway(contextual_tool(GlobTool, workspace=identity))
 
     listing = await list_gateway.call(_call("list_dir", {"path": "linked", "recursive": True}))
     matches = await glob_gateway.call(
@@ -275,8 +276,8 @@ async def test_directory_junction_roots_are_never_traversed(workspace: Path) -> 
         pytest.skip(f"directory junctions unavailable: {created.stderr.strip()}")
 
     identity = workspace
-    list_gateway = _gateway(ListDirTool(workspace=identity))
-    glob_gateway = _gateway(GlobTool(workspace=identity))
+    list_gateway = _gateway(contextual_tool(ListDirTool, workspace=identity))
+    glob_gateway = _gateway(contextual_tool(GlobTool, workspace=identity))
 
     listing = await list_gateway.call(_call("list_dir", {"path": "linked", "recursive": True}))
     matches = await glob_gateway.call(
@@ -305,7 +306,7 @@ async def test_inaccessible_descendants_are_skipped_but_roots_fail(
         return original_iterdir(path)
 
     monkeypatch.setattr(Path, "iterdir", fail_descendant)
-    gateway = _gateway(ListDirTool(workspace=workspace))
+    gateway = _gateway(contextual_tool(ListDirTool, workspace=workspace))
 
     result = await gateway.call(_call("list_dir", {"recursive": True}))
 
@@ -338,8 +339,8 @@ async def test_confirmed_external_roots_report_resolved_absolute_posix_paths(
         return "approved"
 
     gateway = _gateway(
-        ListDirTool(workspace=identity),
-        GlobTool(workspace=identity),
+        contextual_tool(ListDirTool, workspace=identity),
+        contextual_tool(GlobTool, workspace=identity),
         confirmation=approve,
     )
     list_result = await gateway.call(
@@ -367,7 +368,7 @@ async def test_external_confirmation_is_bound_to_the_exact_directory_call(
     external = tmp_path / "external"
     external.mkdir()
     (external / "outside.txt").write_text("outside", encoding="utf-8")
-    gateway = _gateway(ListDirTool(workspace=workspace))
+    gateway = _gateway(contextual_tool(ListDirTool, workspace=workspace))
     call = _call("list_dir", {"path": str(external)}, call_id="call_external")
 
     refused = await gateway.call(call)

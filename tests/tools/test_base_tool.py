@@ -9,7 +9,8 @@ from uuid import UUID
 import pytest
 
 from omni.agent.tools.base import BaseTool, ToolError, ToolParam
-from omni.agent.tools.permission import ToolInvocationFacts
+from omni.agent.tools.context import ToolRunContext
+from omni.agent.tools.permission import ToolAuthorizationSession, ToolInvocationFacts
 
 
 class _RepresentativeTool(BaseTool):
@@ -627,3 +628,43 @@ def test_base_tool_result_handler_retains_success_when_artifact_write_fails(
     assert output.artifact is None
     assert len(output.content) <= 40
     assert "artifact write failed" in output.content.lower()
+
+
+@pytest.mark.asyncio
+async def test_context_execution_implementation_is_a_concrete_tool(tmp_path: Path) -> None:
+    class ContextTool(BaseTool):
+        name = "context_fixture"
+        description = "Return the explicit Workspace."
+        _contextual = True
+        parameters: ClassVar[dict[str, Any]] = {"type": "object", "properties": {}}
+
+        async def execute_authorized_for_context(
+            self, arguments: dict[str, Any], authorization: ToolAuthorizationSession,
+            *, context: ToolRunContext, **kwargs: Any,
+        ) -> str:
+            del arguments, authorization, kwargs
+            return str(context.workspace)
+
+    from omni.agent.tools.tool_gateway import ModelToolCall, ToolGateway
+
+    assert not inspect.isabstract(ContextTool)
+    tool = ContextTool()
+    gateway = ToolGateway._for_memory((tool,), tool_context=ToolRunContext(workspace=tmp_path))
+    result = await gateway.call(ModelToolCall("context", tool.name, "{}"))
+    assert result.status == "success"
+    assert result.content == str(tmp_path)
+
+
+@pytest.mark.parametrize("default_alias", [False, True])
+def test_context_declaration_without_execution_remains_abstract(default_alias: bool) -> None:
+    class ContextOnlyTool(BaseTool):
+        name = "context_only"
+        description = "An incomplete context Tool."
+        _contextual = True
+        parameters: ClassVar[dict[str, Any]] = {"type": "object", "properties": {}}
+        if default_alias:
+            execute_authorized_for_context = BaseTool.execute_authorized_for_context
+
+    assert inspect.isabstract(ContextOnlyTool)
+    with pytest.raises(TypeError, match="abstract method 'execute'"):
+        cast(Any, ContextOnlyTool)()

@@ -24,6 +24,7 @@ from omni.agent.tools.tool_gateway import (
     ModelToolCall,
 )
 from tests.fixtures import SingleToolGateway
+from tests.fixtures.gateway import contextual_tool
 
 
 def _call(
@@ -110,7 +111,7 @@ def _gateway(
     resolver: DNSResolver | None = None,
     confirmation: ConfirmationRequester | None = None,
 ) -> SingleToolGateway:
-    tool = ExecTool(workspace=workspace, resolver=resolver, host=_powershell_host())
+    tool = contextual_tool(ExecTool, workspace=workspace, resolver=resolver, host=_powershell_host())
     return SingleToolGateway((tool,), confirmation=confirmation)
 
 
@@ -146,7 +147,7 @@ def _fake_process_factory(
 
 
 def test_exec_schema_declares_host_shell_command_cwd_and_timeout(workspace: Path) -> None:
-    schema = ExecTool(workspace=workspace).to_schema()
+    schema = contextual_tool(ExecTool, workspace=workspace).to_schema()
 
     assert schema == {
         "type": "function",
@@ -273,7 +274,7 @@ async def test_exec_freezes_canonical_cwd_before_inspection_and_execution(
             raise AssertionError(f"unexpected process spec request for {cwd}")
 
     monkeypatch.setattr(tool_base_module, "resolve_tool_path", drifting_resolution)
-    gateway = SingleToolGateway((ExecTool(workspace=workspace, host=Host()),))
+    gateway = SingleToolGateway((contextual_tool(ExecTool, workspace=workspace, host=Host()),))
 
     result = await gateway.call(_call({"command": "Get-Location"}))
 

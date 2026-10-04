@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from pathlib import Path
 from typing import Annotated, Any, Final, Literal
 from urllib.parse import urlsplit
 
@@ -54,24 +53,12 @@ class ExecTool(BaseTool):
     def __init__(
         self,
         *,
-        workspace: Path | None = None,
         resolver: DNSResolver | None = None,
         host: ExecHost | None = None,
     ) -> None:
-        if workspace is not None:
-            self._workspace = workspace
         self._resolver = SocketDNSResolver() if resolver is None else resolver
         self._host = create_exec_host(resolve_exec_shell("auto")) if host is None else host
 
-    _workspace: Path | None
-
-    async def prepare_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Freeze one canonical cwd for validation, inspection, confirmation, and execution."""
-        return await self._prepare_arguments_for_workspace(
-            arguments,
-            workspace=self._legacy_workspace(),
-            host=self._host,
-        )
 
     async def prepare_arguments_for_context(
         self,
@@ -79,19 +66,8 @@ class ExecTool(BaseTool):
         *,
         context: ToolRunContext,
     ) -> dict[str, Any]:
-        return await self._prepare_arguments_for_workspace(
-            arguments,
-            workspace=context.workspace,
-            host=self._host if context.exec_host is None else context.exec_host,
-        )
-
-    async def _prepare_arguments_for_workspace(
-        self,
-        arguments: dict[str, Any],
-        *,
-        workspace: Path,
-        host: ExecHost,
-    ) -> dict[str, Any]:
+        workspace = context.workspace
+        host = self._host if context.exec_host is None else context.exec_host
         prepared = await super().prepare_arguments(arguments)
         if not host.resolved_shell.available:
             return prepared
@@ -101,44 +77,17 @@ class ExecTool(BaseTool):
         prepared["cwd"] = str(self.resolve_path_argument(workspace=workspace, requested=cwd))
         return prepared
 
-    def validate_arguments(  # type: ignore[override]
-        self,
-        *,
-        command: str,
-        cwd: str,
-        timeout: int,
-    ) -> str | None:
-        return self._validate_arguments_for_workspace(
-            command=command,
-            cwd=cwd,
-            timeout=timeout,
-            workspace=self._legacy_workspace(),
-            host=self._host,
-        )
-
     def validate_arguments_for_context(
         self,
         prepared_arguments: dict[str, Any],
         *,
         context: ToolRunContext,
     ) -> str | None:
-        return self._validate_arguments_for_workspace(
-            command=prepared_arguments["command"],
-            cwd=prepared_arguments["cwd"],
-            timeout=prepared_arguments["timeout"],
-            workspace=context.workspace,
-            host=self._host if context.exec_host is None else context.exec_host,
-        )
-
-    def _validate_arguments_for_workspace(
-        self,
-        *,
-        command: object,
-        cwd: object,
-        timeout: object,
-        workspace: Path,
-        host: ExecHost,
-    ) -> str | None:
+        command = prepared_arguments["command"]
+        cwd = prepared_arguments["cwd"]
+        timeout = prepared_arguments["timeout"]
+        workspace = context.workspace
+        host = self._host if context.exec_host is None else context.exec_host
         if not isinstance(command, str) or not isinstance(cwd, str):
             return "Exec arguments are invalid."
         del timeout
@@ -158,37 +107,6 @@ class ExecTool(BaseTool):
             return "Exec working directory must be a directory."
         return None
 
-    async def execute(self, *, command: str, cwd: str, timeout: int) -> str:
-        return await self._execute_host(
-            command=command,
-            cwd=cwd,
-            timeout=timeout,
-            assessment=None,
-            workspace=self._legacy_workspace(),
-            host=self._host,
-        )
-
-    async def execute_authorized(
-        self,
-        arguments: dict[str, Any],
-        authorization: ToolAuthorizationSession,
-    ) -> str:
-        """Execute with the immutable assessment owned by this authorization call."""
-        command = arguments.get("command")
-        cwd = arguments.get("cwd")
-        timeout = arguments.get("timeout")
-        if not isinstance(command, str) or not isinstance(cwd, str) or not isinstance(timeout, int):
-            raise ToolError("Exec arguments are invalid.")
-        assessment = authorization.exec_assessment
-        return await self._execute_host(
-            command=command,
-            cwd=cwd,
-            timeout=timeout,
-            assessment=assessment if isinstance(assessment, ExecAssessment) else None,
-            workspace=self._legacy_workspace(),
-            host=self._host,
-        )
-
     async def execute_authorized_for_context(
         self,
         arguments: dict[str, Any],
@@ -204,25 +122,9 @@ class ExecTool(BaseTool):
         if not isinstance(command, str) or not isinstance(cwd, str) or not isinstance(timeout, int):
             raise ToolError("Exec arguments are invalid.")
         assessment = authorization.exec_assessment
-        return await self._execute_host(
-            command=command,
-            cwd=cwd,
-            timeout=timeout,
-            assessment=assessment if isinstance(assessment, ExecAssessment) else None,
-            workspace=context.workspace,
-            host=self._host if context.exec_host is None else context.exec_host,
-        )
-
-    async def _execute_host(
-        self,
-        *,
-        command: str,
-        cwd: str,
-        timeout: int,
-        assessment: ExecAssessment | None,
-        workspace: Path,
-        host: ExecHost,
-    ) -> str:
+        assessment = assessment if isinstance(assessment, ExecAssessment) else None
+        workspace = context.workspace
+        host = self._host if context.exec_host is None else context.exec_host
         target = self.resolve_path_argument(workspace=workspace, requested=cwd)
         if not target.is_dir():
             raise ToolError("Exec working directory must be a directory.")
@@ -255,36 +157,14 @@ class ExecTool(BaseTool):
             stderr=outcome.stderr,
         )
 
-    async def collect_invocation_facts(
-        self,
-        prepared_arguments: dict[str, Any],
-    ) -> ToolInvocationFacts:
-        """Attach one detached Host assessment to the shared authorization facts."""
-        return await self._collect_invocation_facts_for_workspace(
-            prepared_arguments,
-            workspace=self._legacy_workspace(),
-            host=self._host,
-        )
-
     async def collect_invocation_facts_for_context(
         self,
         prepared_arguments: dict[str, Any],
         *,
         context: ToolRunContext,
     ) -> ToolInvocationFacts:
-        return await self._collect_invocation_facts_for_workspace(
-            prepared_arguments,
-            workspace=context.workspace,
-            host=self._host if context.exec_host is None else context.exec_host,
-        )
-
-    async def _collect_invocation_facts_for_workspace(
-        self,
-        prepared_arguments: dict[str, Any],
-        *,
-        workspace: Path,
-        host: ExecHost,
-    ) -> ToolInvocationFacts:
+        workspace = context.workspace
+        host = self._host if context.exec_host is None else context.exec_host
         command = prepared_arguments["command"]
         cwd = prepared_arguments["cwd"]
         if not isinstance(command, str) or not isinstance(cwd, str):
@@ -322,12 +202,6 @@ class ExecTool(BaseTool):
             exec_assessment=assessment,
             network_targets=network_targets,
         )
-
-    def _legacy_workspace(self) -> Path:
-        workspace = getattr(self, "_workspace", None)
-        if not isinstance(workspace, Path):
-            raise RuntimeError("Exec requires an explicit Tool Run Context")
-        return workspace
 
     async def _assess_url(self, url: str) -> NetworkAssessment:
         try:

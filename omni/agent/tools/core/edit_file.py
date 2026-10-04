@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 from uuid import UUID
 
 from omni.agent.tools.base import BaseTool, ToolError, ToolParam
@@ -34,14 +34,6 @@ class EditFileTool(BaseTool):
     new_text: Annotated[str, ToolParam(description="Replacement text.")]
     replace_all: Annotated[bool, ToolParam(description="Replace every exact match.")] = False
 
-    _workspace: Path | None
-
-    def __init__(self, *, workspace: Path | None = None) -> None:
-        if workspace is not None:
-            self._workspace = workspace
-
-    def build_file_accesses(self, prepared_arguments: dict[str, object]) -> tuple[FileAccess, ...]:
-        return self._build_file_accesses(prepared_arguments, workspace=self._legacy_workspace())
 
     def build_file_accesses_for_context(
         self,
@@ -49,14 +41,7 @@ class EditFileTool(BaseTool):
         *,
         context: ToolRunContext,
     ) -> tuple[FileAccess, ...]:
-        return self._build_file_accesses(prepared_arguments, workspace=context.workspace)
-
-    def _build_file_accesses(
-        self,
-        prepared_arguments: dict[str, object],
-        *,
-        workspace: Path,
-    ) -> tuple[FileAccess, ...]:
+        workspace = context.workspace
         requested = str(prepared_arguments["path"])
         return (
             self.canonical_file_access(
@@ -73,14 +58,6 @@ class EditFileTool(BaseTool):
             ),
         )
 
-    def refusal_reason(self, *, path: str, **arguments: object) -> str | None:
-        del arguments
-        workspace = self._legacy_workspace()
-        target = self.resolve_path_argument(workspace=workspace, requested=path)
-        if is_protected_restore_target(workspace, target):
-            return "Built-in File Tools cannot write to protected restore state."
-        return None
-
     def refusal_reason_for_context(
         self,
         prepared_arguments: dict[str, object],
@@ -94,57 +71,6 @@ class EditFileTool(BaseTool):
         if is_protected_restore_target(context.workspace, target):
             return "Built-in File Tools cannot write to protected restore state."
         return None
-
-    async def execute(
-        self,
-        *,
-        path: str,
-        old_text: str,
-        new_text: str,
-        replace_all: bool,
-    ) -> str:
-        target = self.resolve_path_argument(workspace=self._legacy_workspace(), requested=path)
-        return await self._execute_at_target(
-            target=target,
-            old_text=old_text,
-            new_text=new_text,
-            replace_all=replace_all,
-            recorder=None,
-            run_token=None,
-        )
-
-    async def execute_authorized(
-        self,
-        arguments: dict[str, Any],
-        authorization: object,
-        *,
-        mutation_recorder: FileMutationRecorder | None = None,
-        run_token: UUID | None = None,
-        mutation_target: Path | None = None,
-    ) -> str:
-        del authorization
-        path = arguments.get("path")
-        old_text = arguments.get("old_text")
-        new_text = arguments.get("new_text")
-        replace_all = arguments.get("replace_all")
-        if (
-            not isinstance(path, str)
-            or not isinstance(old_text, str)
-            or not isinstance(new_text, str)
-            or not isinstance(replace_all, bool)
-        ):
-            raise ToolError("Edit File arguments are invalid.")
-        target = mutation_target
-        if target is None:
-            target = self.resolve_path_argument(workspace=self._legacy_workspace(), requested=path)
-        return await self._execute_at_target(
-            target=target,
-            old_text=old_text,
-            new_text=new_text,
-            replace_all=replace_all,
-            recorder=(mutation_recorder if run_token is not None else None),
-            run_token=(run_token if mutation_recorder is not None else None),
-        )
 
     async def execute_authorized_for_context(
         self,
@@ -172,25 +98,8 @@ class EditFileTool(BaseTool):
         target = mutation_target
         if target is None:
             target = self.resolve_path_argument(workspace=context.workspace, requested=path)
-        return await self._execute_at_target(
-            target=target,
-            old_text=old_text,
-            new_text=new_text,
-            replace_all=replace_all,
-            recorder=(mutation_recorder if run_token is not None else None),
-            run_token=(run_token if mutation_recorder is not None else None),
-        )
-
-    async def _execute_at_target(
-        self,
-        *,
-        target: Path,
-        old_text: str,
-        new_text: str,
-        replace_all: bool,
-        recorder: FileMutationRecorder | None,
-        run_token: UUID | None,
-    ) -> str:
+        recorder = mutation_recorder if run_token is not None else None
+        run_token = run_token if mutation_recorder is not None else None
         try:
             raw_content = target.read_bytes()
         except OSError as error:
@@ -227,9 +136,3 @@ class EditFileTool(BaseTool):
             run_token=run_token,
             target=target,
         )
-
-    def _legacy_workspace(self) -> Path:
-        workspace = getattr(self, "_workspace", None)
-        if not isinstance(workspace, Path):
-            raise RuntimeError("Edit File requires an explicit Tool Run Context")
-        return workspace

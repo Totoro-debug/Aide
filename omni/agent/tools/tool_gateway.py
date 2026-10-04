@@ -689,20 +689,6 @@ class ToolGateway:
                     run_token=run_token,
                     mutation_target=mutation_target,
                 )
-            elif (
-                self._permission_context.origin == "foreground"
-                and file_mutation_recorder is not None
-                and run_token is not None
-                and mutation_target is not None
-                and isinstance(tool, (WriteFileTool, EditFileTool))
-            ):
-                content = await tool.execute_authorized(
-                    deepcopy(prepared_arguments),
-                    authorization,
-                    mutation_recorder=file_mutation_recorder,
-                    run_token=run_token,
-                    mutation_target=mutation_target,
-                )
             else:
                 content = await tool.execute_authorized(
                     deepcopy(prepared_arguments),

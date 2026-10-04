@@ -16,6 +16,7 @@ from omni.schedule.model import JobSchedule, ScheduleJob
 from omni.schedule.service import ScheduleService, ScheduleStaleRemovalError
 from omni.schedule.store import WorkspaceScheduleStore
 from tests.fixtures import SingleToolGateway, write_schedule_state
+from tests.fixtures.gateway import contextual_tool
 
 JOB_UUID = UUID("550e8400-e29b-41d4-a716-446655440000")
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
@@ -69,7 +70,7 @@ def test_schema_exposes_the_three_actions_and_optional_schedule_branches(
     workspace: Path,
     agent_home: Path,
 ) -> None:
-    schema = ScheduleTool(schedule_service=_service(_store(workspace, agent_home))).to_schema()[
+    schema = contextual_tool(ScheduleTool, schedule_service=_service(_store(workspace, agent_home))).to_schema()[
         "function"
     ]["parameters"]
 
@@ -97,7 +98,7 @@ async def test_add_uses_the_common_gateway_without_confirmation_and_ignores_lowe
 ) -> None:
     store = _store(workspace, agent_home)
     gateway = _gateway(
-        ScheduleTool(
+        contextual_tool(ScheduleTool,
             schedule_service=_service(store),
             now=lambda: NOW,
             new_uuid=lambda: JOB_UUID,
@@ -152,7 +153,7 @@ async def test_add_confirmation_uses_the_canonical_invocation_and_decline_does_n
 
     gateway = SingleToolGateway(
         (
-            ScheduleTool(
+            contextual_tool(ScheduleTool,
                 schedule_service=_service(store),
                 now=lambda: NOW,
                 new_uuid=lambda: JOB_UUID,
@@ -235,7 +236,7 @@ async def test_schedule_gateway_covers_every_action_and_current_level(
         arguments = {"action": "remove", "job_id": str(JOB_UUID)}
     gateway = SingleToolGateway(
         (
-            ScheduleTool(
+            contextual_tool(ScheduleTool,
                 schedule_service=_service(store),
                 now=lambda: NOW,
                 new_uuid=lambda: JOB_UUID,
@@ -290,7 +291,7 @@ async def test_schedule_gateway_compares_every_configured_and_current_level(
 
     gateway = SingleToolGateway(
         (
-            ScheduleTool(
+            contextual_tool(ScheduleTool,
                 schedule_service=_service(store),
                 now=lambda: NOW,
                 new_uuid=lambda: JOB_UUID,
@@ -352,7 +353,7 @@ async def test_remove_decline_does_not_mutate_the_store(
         return "declined"
 
     gateway = SingleToolGateway(
-        (ScheduleTool(schedule_service=_service(store), now=lambda: NOW),),
+        (contextual_tool(ScheduleTool, schedule_service=_service(store), now=lambda: NOW),),
         confirmation=decline,
         permission_context=PermissionContext(
             level="read-only",
@@ -410,7 +411,7 @@ async def test_approved_remove_stale_failure_is_canonical_and_not_retried(
 
     monkeypatch.setattr(service, "remove_user_job", stale_remove)
     gateway = SingleToolGateway(
-        (ScheduleTool(schedule_service=service, now=lambda: NOW),),
+        (contextual_tool(ScheduleTool, schedule_service=service, now=lambda: NOW),),
         confirmation=approve,
         permission_context=PermissionContext(
             level="read-only",
@@ -441,7 +442,7 @@ async def test_concurrent_schedule_gateways_keep_permission_contexts_isolated(
     agent_home: Path,
 ) -> None:
     store = _store(workspace, agent_home)
-    tool = ScheduleTool(
+    tool = contextual_tool(ScheduleTool,
         schedule_service=_service(store),
         now=lambda: NOW,
         new_uuid=uuid4,
@@ -521,7 +522,7 @@ async def test_known_store_failure_precedes_schedule_confirmation(
         raise AssertionError("A known Store failure must not request confirmation")
 
     gateway = SingleToolGateway(
-        (ScheduleTool(schedule_service=service, now=lambda: NOW),),
+        (contextual_tool(ScheduleTool, schedule_service=service, now=lambda: NOW),),
         confirmation=unexpected,
         permission_context=PermissionContext(
             level="read-only",
@@ -558,7 +559,7 @@ async def test_schedule_hard_errors_precede_permission_at_every_level(
         raise AssertionError("Schedule hard errors must not request confirmation")
 
     gateway = SingleToolGateway(
-        (ScheduleTool(schedule_service=_service(store), now=lambda: NOW),),
+        (contextual_tool(ScheduleTool, schedule_service=_service(store), now=lambda: NOW),),
         confirmation=unexpected,
         permission_context=PermissionContext(
             level=level,  # type: ignore[arg-type]
@@ -630,7 +631,7 @@ async def test_add_normalizes_explicit_title_and_rejects_invalid_explicit_titles
 ) -> None:
     store = _store(workspace, agent_home)
     gateway = _gateway(
-        ScheduleTool(
+        contextual_tool(ScheduleTool,
             schedule_service=_service(store),
             now=lambda: NOW,
             new_uuid=lambda: JOB_UUID,
@@ -692,7 +693,7 @@ async def test_add_normalizes_cron_timezone_and_at_time_without_confirmation(
     store = _store(workspace, agent_home)
     uuids = iter((JOB_UUID, UUID("6fa459ea-ee8a-4ca4-894e-db77e160355e")))
     gateway = _gateway(
-        ScheduleTool(
+        contextual_tool(ScheduleTool,
             schedule_service=_service(store),
             now=lambda: NOW,
             new_uuid=lambda: next(uuids),
@@ -734,7 +735,7 @@ async def test_cron_accepts_valid_iana_timezone_alias(
 ) -> None:
     store = _store(workspace, agent_home)
     gateway = _gateway(
-        ScheduleTool(schedule_service=_service(store), now=lambda: NOW, new_uuid=lambda: JOB_UUID)
+        contextual_tool(ScheduleTool, schedule_service=_service(store), now=lambda: NOW, new_uuid=lambda: JOB_UUID)
     )
 
     result = await gateway.call(
@@ -758,7 +759,7 @@ async def test_cron_defaults_to_utc_and_invalid_at_time_is_rejected(
 ) -> None:
     store = _store(workspace, agent_home)
     gateway = _gateway(
-        ScheduleTool(schedule_service=_service(store), now=lambda: NOW, new_uuid=lambda: JOB_UUID)
+        contextual_tool(ScheduleTool, schedule_service=_service(store), now=lambda: NOW, new_uuid=lambda: JOB_UUID)
     )
 
     cron = await gateway.call(
@@ -797,7 +798,7 @@ async def test_add_rejects_invalid_cron_inputs_without_mutating_the_store(
 ) -> None:
     store = _store(workspace, agent_home)
     gateway = _gateway(
-        ScheduleTool(schedule_service=_service(store), now=lambda: NOW, new_uuid=lambda: JOB_UUID)
+        contextual_tool(ScheduleTool, schedule_service=_service(store), now=lambda: NOW, new_uuid=lambda: JOB_UUID)
     )
 
     result = await gateway.call(
@@ -859,7 +860,7 @@ async def test_list_returns_only_public_jobs_in_creation_then_id_order(
     await store.add_user_job(earlier)
 
     result = await _gateway(
-        ScheduleTool(schedule_service=_service(store), now=lambda: NOW, new_uuid=lambda: JOB_UUID)
+        contextual_tool(ScheduleTool, schedule_service=_service(store), now=lambda: NOW, new_uuid=lambda: JOB_UUID)
     ).call(
         ModelToolCall(
             id="call_list",
@@ -917,7 +918,7 @@ async def test_remove_requires_canonical_uuid_and_hides_unknown_or_system_jobs(
     store = _store(workspace, agent_home, hidden)
     await store.add_user_job(public)
     gateway = _gateway(
-        ScheduleTool(schedule_service=_service(store), now=lambda: NOW, new_uuid=lambda: JOB_UUID)
+        contextual_tool(ScheduleTool, schedule_service=_service(store), now=lambda: NOW, new_uuid=lambda: JOB_UUID)
     )
 
     invalid = await gateway.call(
@@ -977,7 +978,7 @@ async def test_schedule_tool_supports_add_list_and_remove_without_context_guard(
 ) -> None:
     store = _store(workspace, agent_home)
     gateway = _gateway(
-        ScheduleTool(
+        contextual_tool(ScheduleTool,
             schedule_service=_service(store),
             now=lambda: NOW,
             new_uuid=lambda: JOB_UUID,

@@ -17,6 +17,7 @@ from omni.agent.tools.tool_gateway import (
     ModelToolCall,
 )
 from tests.fixtures import SingleToolGateway
+from tests.fixtures.gateway import contextual_tool
 
 type FileToolType = type[ReadFileTool] | type[WriteFileTool] | type[EditFileTool]
 
@@ -34,7 +35,7 @@ def _gateway(
 
 def test_gateway_exports_the_new_path_and_line_contract(workspace: Path) -> None:
     identity = workspace
-    gateway = _gateway(ReadFileTool(workspace=identity))
+    gateway = _gateway(contextual_tool(ReadFileTool, workspace=identity))
 
     assert tuple(gateway.schemas) == (
         {
@@ -77,7 +78,7 @@ async def test_read_file_uses_one_based_windows_and_preserves_line_endings(
 ) -> None:
     target = workspace / "mixed.txt"
     target.write_bytes(b"one\r\ntwo\nthree\r")
-    gateway = _gateway(ReadFileTool(workspace=workspace))
+    gateway = _gateway(contextual_tool(ReadFileTool, workspace=workspace))
 
     first_window = await gateway.call(_call("read_file", {"path": "mixed.txt", "limit": 2}))
     second_line = await gateway.call(
@@ -103,7 +104,7 @@ async def test_read_file_requires_strict_utf8_but_allows_empty_and_nul_content(
     nul.write_bytes(b"before\x00after\n")
     invalid = workspace / "invalid.txt"
     invalid.write_bytes(b"\xff")
-    gateway = _gateway(ReadFileTool(workspace=identity))
+    gateway = _gateway(contextual_tool(ReadFileTool, workspace=identity))
 
     empty_result = await gateway.call(_call("read_file", {"path": "empty.txt"}))
     nul_result = await gateway.call(_call("read_file", {"path": "nul.txt"}, call_id="call_nul"))
@@ -120,7 +121,7 @@ async def test_read_file_requires_strict_utf8_but_allows_empty_and_nul_content(
 @pytest.mark.asyncio
 async def test_write_file_creates_parents_and_writes_exact_utf8_bytes(workspace: Path) -> None:
     identity = workspace
-    gateway = _gateway(WriteFileTool(workspace=identity))
+    gateway = _gateway(contextual_tool(WriteFileTool, workspace=identity))
     content = "line one\r\n中文\n"
 
     result = await gateway.call(
@@ -147,7 +148,7 @@ async def test_edit_file_rejects_zero_and_ambiguous_single_replacements_without_
     identity = workspace
     target = workspace / "notes.txt"
     target.write_bytes(b"same\r\nsame\n")
-    gateway = _gateway(EditFileTool(workspace=identity))
+    gateway = _gateway(contextual_tool(EditFileTool, workspace=identity))
 
     zero = await gateway.call(
         _call(
@@ -194,7 +195,7 @@ async def test_workspace_state_and_absolute_internal_paths_use_host_permissions(
     state_file = workspace / ".omni" / "sessions" / "state.txt"
     state_file.parent.mkdir(parents=True)
     state_file.write_bytes(b"workspace state")
-    gateway = _gateway(ReadFileTool(workspace=identity))
+    gateway = _gateway(contextual_tool(ReadFileTool, workspace=identity))
 
     relative = await gateway.call(_call("read_file", {"path": ".omni/sessions/state.txt"}))
     absolute = await gateway.call(
@@ -222,7 +223,7 @@ async def test_read_file_skill_root_requires_model_file_confirmation(
         return "approved"
 
     gateway = _gateway(
-        ReadFileTool(workspace=identity, skill_root=skill_root),
+        contextual_tool(ReadFileTool, workspace=identity, skill_root=skill_root),
         confirmation=approve,
     )
 
@@ -247,7 +248,7 @@ async def test_read_file_missing_skill_target_requires_confirmation(
         return "declined"
 
     gateway = _gateway(
-        ReadFileTool(workspace=identity, skill_root=skill_root),
+        contextual_tool(ReadFileTool, workspace=identity, skill_root=skill_root),
         confirmation=decline,
     )
 
@@ -275,7 +276,7 @@ async def test_read_file_keeps_other_agent_home_paths_confirmed(
         return "approved"
 
     gateway = _gateway(
-        ReadFileTool(workspace=identity, skill_root=agent_home / "skills"),
+        contextual_tool(ReadFileTool, workspace=identity, skill_root=agent_home / "skills"),
         confirmation=approve,
     )
 
@@ -312,7 +313,7 @@ async def test_read_file_skill_root_escape_requires_confirmation(tmp_path: Path)
         return "approved"
 
     gateway = _gateway(
-        ReadFileTool(workspace=workspace, skill_root=skill_root),
+        contextual_tool(ReadFileTool, workspace=workspace, skill_root=skill_root),
         confirmation=approve,
     )
 
@@ -331,7 +332,7 @@ async def test_external_targets_require_confirmation_and_bind_the_exact_call(
     identity = workspace
     external = tmp_path / "external.txt"
     external.write_bytes(b"outside\n")
-    gateway = _gateway(ReadFileTool(workspace=identity))
+    gateway = _gateway(contextual_tool(ReadFileTool, workspace=identity))
     requested = str(Path("..") / external.name)
     call = _call("read_file", {"path": requested})
 
@@ -379,9 +380,9 @@ async def test_all_file_mutations_support_confirmed_external_paths(tmp_path: Pat
         return "approved"
 
     gateway = _gateway(
-        ReadFileTool(workspace=identity),
-        WriteFileTool(workspace=identity),
-        EditFileTool(workspace=identity),
+        contextual_tool(ReadFileTool, workspace=identity),
+        contextual_tool(WriteFileTool, workspace=identity),
+        contextual_tool(EditFileTool, workspace=identity),
         confirmation=approve,
     )
 
@@ -420,7 +421,7 @@ async def test_expected_filesystem_failures_keep_operation_context_and_original_
         return original_read_bytes(path)
 
     monkeypatch.setattr(Path, "read_bytes", fail_read)
-    gateway = _gateway(ReadFileTool(workspace=identity))
+    gateway = _gateway(contextual_tool(ReadFileTool, workspace=identity))
 
     result = await gateway.call(_call("read_file", {"path": "read-error.txt"}))
 
@@ -474,7 +475,7 @@ async def test_path_failures_keep_resolution_context_and_original_os_error(
         return original_resolve(path, strict=strict)
 
     monkeypatch.setattr(Path, "resolve", fail_resolve)
-    gateway = _gateway(tool_type(workspace=workspace))
+    gateway = _gateway(contextual_tool(tool_type, workspace=workspace))
 
     result = await gateway.call(_call(tool_name, arguments))
 
@@ -501,7 +502,7 @@ async def test_cancellation_while_waiting_for_external_confirmation_propagates(
         return "approved"
 
     gateway = _gateway(
-        WriteFileTool(workspace=workspace),
+        contextual_tool(WriteFileTool, workspace=workspace),
         confirmation=wait_for_decision,
     )
     task = asyncio.create_task(

@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from omni.agent.tools.base import BaseTool, ToolError
+from omni.agent.tools.context import ToolRunContext
 from omni.agent.tools.core.edit_file import EditFileTool
 from omni.agent.tools.core.exec_host import resolve_exec_shell
 from omni.agent.tools.core.glob import GlobTool
@@ -56,6 +57,7 @@ def _gateway(
     )
     return ToolGateway._for_memory(
         (tool,),
+        tool_context=ToolRunContext(workspace=workspace),
         permission_policy=policy,
         permission_context=context,
     )
@@ -84,7 +86,7 @@ def _read_tool_and_arguments(
     if tool_name == "read_file":
         arguments = {"path": str(target_file)}
         return (
-            ReadFileTool(workspace=workspace),
+            ReadFileTool(),
             arguments,
             {
                 **arguments,
@@ -95,7 +97,7 @@ def _read_tool_and_arguments(
     if tool_name == "list_dir":
         arguments = {"path": str(target_root)}
         return (
-            ListDirTool(workspace=workspace),
+            ListDirTool(),
             arguments,
             {
                 **arguments,
@@ -106,7 +108,7 @@ def _read_tool_and_arguments(
     if tool_name == "glob":
         arguments = {"pattern": "*.txt", "path": str(target_root)}
         return (
-            GlobTool(workspace=workspace),
+            GlobTool(),
             arguments,
             {
                 **arguments,
@@ -122,7 +124,7 @@ def _read_tool_and_arguments(
             "fixed_string": True,
         }
         return (
-            GrepTool(workspace=workspace),
+            GrepTool(),
             arguments,
             {
                 **arguments,
@@ -143,16 +145,17 @@ def _record_execution(
     tool: BaseTool,
 ) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
-    execute = tool.execute_authorized
+    execute = tool.execute_authorized_for_context
 
     async def recording_execute(
         arguments: dict[str, Any],
         authorization: ToolAuthorizationSession,
+        **kwargs: Any,
     ) -> str:
         calls.append(arguments)
-        return await execute(arguments, authorization)
+        return await execute(arguments, authorization, **kwargs)
 
-    monkeypatch.setattr(tool, "execute_authorized", recording_execute)
+    monkeypatch.setattr(tool, "execute_authorized_for_context", recording_execute)
     return calls
 
 
@@ -273,7 +276,7 @@ async def test_foreground_file_write_matrix(
     if tool_name == "write_file":
         arguments: dict[str, object] = {"path": str(target), "content": "written\n"}
         normalized_arguments = arguments
-        tool: BaseTool = WriteFileTool(workspace=workspace)
+        tool: BaseTool = WriteFileTool()
     else:
         arguments = {
             "path": str(target),
@@ -281,7 +284,7 @@ async def test_foreground_file_write_matrix(
             "new_text": "edited",
         }
         normalized_arguments = {**arguments, "replace_all": False}
-        tool = EditFileTool(workspace=workspace)
+        tool = EditFileTool()
     original_content = target.read_text(encoding="utf-8")
     executions = _record_execution(monkeypatch, tool)
     requests: list[ConfirmationRequest] = []
@@ -343,7 +346,7 @@ async def test_file_facts_use_canonical_host_paths_and_explicit_roles(tmp_path: 
     gateway = _gateway(
         workspace,
         "workspace-write",
-        ReadFileTool(workspace=workspace),
+        ReadFileTool(),
         policy=policy,
     )
 
@@ -365,7 +368,7 @@ async def test_edit_file_reports_both_read_and_write_facts(tmp_path: Path) -> No
     gateway = _gateway(
         workspace,
         "workspace-write",
-        EditFileTool(workspace=workspace),
+        EditFileTool(),
         policy=policy,
     )
 
@@ -394,7 +397,7 @@ async def test_missing_write_ancestor_is_canonicalized_from_existing_host_parent
     gateway = _gateway(
         workspace,
         "workspace-write",
-        WriteFileTool(workspace=workspace),
+        WriteFileTool(),
         policy=policy,
     )
 
@@ -423,7 +426,7 @@ async def test_sibling_prefix_is_external_instead_of_a_string_prefix_match(tmp_p
     result = await _gateway(
         workspace,
         "workspace-write",
-        ReadFileTool(workspace=workspace),
+        ReadFileTool(),
     ).call(_call("read_file", {"path": str(target)}), confirmation=decline)
 
     assert result.status == "refused"
@@ -452,13 +455,13 @@ async def test_linked_skill_root_and_missing_write_descendant_remain_external(
     read_result = await _gateway(
         workspace,
         "workspace-write",
-        ReadFileTool(workspace=workspace, skill_root=skill_root),
+        ReadFileTool(skill_root=skill_root),
     ).call(_call("read_file", {"path": str(linked / "SKILL.md")}), confirmation=decline)
     missing_target = linked / "new" / "note.txt"
     write_result = await _gateway(
         workspace,
         "workspace-write",
-        WriteFileTool(workspace=workspace),
+        WriteFileTool(),
     ).call(
         _call("write_file", {"path": str(missing_target), "content": "blocked"}),
         confirmation=decline,
@@ -481,7 +484,7 @@ async def test_windows_path_case_uses_host_case_insensitive_containment(tmp_path
     result = await _gateway(
         workspace,
         "workspace-write",
-        ReadFileTool(workspace=workspace),
+        ReadFileTool(),
     ).call(_call("read_file", {"path": str(case_variant)}), confirmation=unexpected_confirmation)
 
     assert (result.status, result.content) == (
@@ -511,7 +514,7 @@ async def test_windows_different_drive_is_external(tmp_path: Path) -> None:
     result = await _gateway(
         workspace,
         "workspace-write",
-        ListDirTool(workspace=workspace),
+        ListDirTool(),
     ).call(_call("list_dir", {"path": str(target)}), confirmation=decline)
 
     assert result.status == "refused"
@@ -541,7 +544,7 @@ async def test_windows_reachable_unc_path_is_classified_by_real_host_semantics(
     result = await _gateway(
         workspace,
         "workspace-write",
-        ReadFileTool(workspace=workspace),
+        ReadFileTool(),
     ).call(_call("read_file", {"path": str(unc_target)}), confirmation=decline)
 
     assert result.status == "refused"
@@ -553,9 +556,10 @@ async def test_windows_reachable_unc_path_is_classified_by_real_host_semantics(
 async def test_concurrent_run_gateways_do_not_share_permission_snapshots(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    tool = WriteFileTool(workspace=workspace)
+    tool = WriteFileTool()
     generation_gateway = ToolGateway._for_memory(
         (tool,),
+        tool_context=ToolRunContext(workspace=workspace),
         permission_context=PermissionContext(workspace_root=workspace),
     )
     read_only = generation_gateway.for_run(
@@ -626,29 +630,29 @@ async def test_hard_errors_are_level_invariant_and_never_confirm(
     expected_status = "error"
     expected_content: str
     if failure == "invalid_json":
-        tool: BaseTool = ReadFileTool(workspace=workspace)
+        tool: BaseTool = ReadFileTool()
         call = ModelToolCall(id="hard-error", name=tool.name, arguments="{")
         expected_content = "could not be parsed"
     elif failure == "unknown_tool":
-        tool = ReadFileTool(workspace=workspace)
+        tool = ReadFileTool()
         call = ModelToolCall(id="hard-error", name="unknown", arguments="{}")
         expected_content = "not available"
     elif failure == "schema":
-        tool = ReadFileTool(workspace=workspace)
+        tool = ReadFileTool()
         call = _call(tool.name, {"path": ""}, call_id="hard-error")
         expected_content = "$.path: must contain at least 1 characters"
     elif failure == "encoding":
         target = workspace / "invalid.bin"
         target.write_bytes(b"\xff")
-        tool = ReadFileTool(workspace=workspace)
+        tool = ReadFileTool()
         call = _call(tool.name, {"path": str(target)}, call_id="hard-error")
         expected_content = "not valid UTF-8"
     elif failure == "absolute_glob":
-        tool = GlobTool(workspace=workspace)
+        tool = GlobTool()
         call = _call(tool.name, {"pattern": "C:\\absolute\\*.txt"}, call_id="hard-error")
         expected_content = "relative"
     elif failure == "io_error":
-        tool = ReadFileTool(workspace=workspace)
+        tool = ReadFileTool()
         call = _call(tool.name, {"path": "missing.txt"}, call_id="hard-error")
         expected_content = "Read File failed"
     elif failure == "business_refusal":
@@ -683,7 +687,7 @@ async def test_full_access_does_not_skip_invalid_utf8_errors(tmp_path: Path) -> 
     workspace, _outside, _workspace_file, _outside_file = _prepare_file_fixture(tmp_path)
     invalid = workspace / "invalid.bin"
     invalid.write_bytes(b"\xff")
-    gateway = _gateway(workspace, "full-access", ReadFileTool(workspace=workspace))
+    gateway = _gateway(workspace, "full-access", ReadFileTool())
 
     async def unexpected_confirmation(request: ConfirmationRequest) -> ConfirmationDecision:
         raise AssertionError(f"unexpected confirmation: {request}")

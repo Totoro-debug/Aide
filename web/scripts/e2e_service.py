@@ -752,7 +752,7 @@ async def _run_e2e(provider_base_url: str) -> None:
                 mcp_command=mcp_command,
                 mcp_args=mcp_args,
                 mcp_cwd=repo_root.as_posix(),
-            ),
+            ) + f'\n[web]\ndefault_chat_workspace = "{(home.path / "chat").as_posix()}"\n',
             encoding="utf-8",
         )
         cli_workspace = path / "cli-workspace"

@@ -110,6 +110,24 @@ def test_editable_snapshot_exposes_all_safe_fields_without_secrets(tmp_path: Pat
     assert "minimal-secret" not in str(snapshot.fields)
 
 
+def test_default_chat_workspace_is_editable_and_persisted(tmp_path: Path) -> None:
+    loader = _loader(tmp_path)
+
+    snapshot = loader.editable_snapshot()
+
+    assert snapshot.fields["web"]["default_chat_workspace"] == "~/.omni/chat"
+    target = tmp_path / "conversations"
+    result = loader.patch_editable_fields(
+        snapshot.revision,
+        {"web": {"default_chat_workspace": str(target)}},
+    )
+
+    assert result.configuration.web.default_chat_workspace == str(target)
+    assert ConfigLoader(loader.agent_home).editable_snapshot().fields["web"][
+        "default_chat_workspace"
+    ] == str(target)
+
+
 def test_valid_patch_preserves_comments_and_unknown_toml(tmp_path: Path) -> None:
     content = "# keep this comment\n" + MINIMAL_VALID_CONFIG + "\n[future]\nvalue = 7\n"
     loader = _loader(tmp_path, content)

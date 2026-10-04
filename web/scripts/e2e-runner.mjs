@@ -146,6 +146,20 @@ try {
     };
   });
   const url = process.env.OMNI_E2E_URL;
+  async function openChatAndStatus(targetPage, targetUrl) {
+    const chatWorkspaceEntry = targetPage.waitForResponse((response) => (
+      response.request().method() === "POST"
+      && response.url().endsWith("/api/v1/chat/workspaces/enter")
+    ));
+    await targetPage.goto("about:blank");
+    await targetPage.goto(targetUrl);
+    assert.equal((await chatWorkspaceEntry).status(), 200, "The default Chat workspace did not open");
+    await targetPage.getByRole("heading", { name: /Conversations|对话/ }).waitFor();
+    assert.equal(new URL(targetPage.url()).pathname, "/", "The default Web route should open Chat");
+    await targetPage.goto(`${new URL(targetPage.url()).origin}/status`);
+    await targetPage.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
+    await targetPage.getByRole("status").first().getByText(/Online|在线/).waitFor();
+  }
   const launch = spawnSync("python", ["-c", [
     "import sys, webbrowser",
     "from omni.terminal.process_entry import run",
@@ -172,9 +186,7 @@ try {
     /default-src 'self'/,
     "The production document did not include the expected CSP",
   );
-  await page.goto(launchUrl);
-  await page.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
-  await page.getByRole("status").first().getByText(/Online|在线/).waitFor();
+  await openChatAndStatus(page, launchUrl);
   assert.match(page.url(), /\/status$/);
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light", "First-use theme should be light");
   secondContext = await browser.newContext();
@@ -197,9 +209,10 @@ try {
     };
   });
   const secondPage = await secondContext.newPage();
-  await secondPage.goto(`${url}/#ticket=${encodeURIComponent(control.details.second_ticket)}`);
-  await secondPage.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
-  await secondPage.getByRole("status").first().getByText(/Online|在线/).waitFor();
+  await openChatAndStatus(
+    secondPage,
+    `${url}/#ticket=${encodeURIComponent(control.details.second_ticket)}`,
+  );
   const replay = await browser.newContext();
   const reusedTicket = await replay.request.post(`${url}/api/v1/web/ticket`, {
     headers: { Origin: url },
@@ -300,7 +313,14 @@ try {
 
   await page.setViewportSize(viewports[0]);
   await page.getByRole("button", { name: "EN", exact: true }).click();
-  await page.getByRole("link", { name: "Projects" }).click();
+  const chatWorkspaceEntry = page.waitForResponse((response) => (
+    response.request().method() === "POST"
+    && response.url().endsWith("/api/v1/chat/workspaces/enter")
+  ));
+  await page.getByRole("link", { name: "New conversation", exact: true }).click();
+  assert.equal((await chatWorkspaceEntry).status(), 200, "The default Chat workspace did not open");
+  await page.getByRole("heading", { name: /Conversations|对话/ }).waitFor();
+  await page.getByRole("link", { name: "Projects", exact: true }).click();
   await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
   await page.getByRole("heading", { name: "No projects registered" }).waitFor();
 
@@ -2003,8 +2023,7 @@ try {
     if (closeWithEscape) await page.keyboard.press("Escape");
     else await renameDialog.getByRole("button", { name: "Cancel" }).click();
     await renameDialog.waitFor({ state: "hidden" });
-    assert.equal(await renameButton.evaluate((element) => element === document.activeElement), true,
-      "Rename dialog did not return focus to its trigger");
+    await expect(renameButton).toBeFocused();
   }
   await renameButton.click();
   await renameDialog.getByLabel("Session title").fill("Renamed available history");
@@ -2429,13 +2448,13 @@ try {
   assert.equal(await page.getByText(cliWorkspace).count(), 0, "unregistered CLI Workspace leaked into Project list");
 
   const restarted = await control.restart();
-  await page.goto(`${restarted.url}/#ticket=${encodeURIComponent(restarted.ticket)}`);
-  await page.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
-  await secondPage.goto(`${restarted.url}/#ticket=${encodeURIComponent(restarted.second_ticket)}`);
-  await secondPage.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
-  await secondPage.getByRole("status").first().getByText(/Online|在线/).waitFor();
+  await openChatAndStatus(page, `${restarted.url}/#ticket=${encodeURIComponent(restarted.ticket)}`);
+  await openChatAndStatus(
+    secondPage,
+    `${restarted.url}/#ticket=${encodeURIComponent(restarted.second_ticket)}`,
+  );
   await page.setViewportSize(viewports[0]);
-  await page.getByRole("link", { name: "Projects" }).click();
+  await page.getByRole("link", { name: "Projects", exact: true }).click();
   await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
   await page.getByRole("heading", { name: "project-one" }).waitFor();
   await page.getByText("Schedule paused for review").waitFor();
@@ -2553,15 +2572,25 @@ try {
 
   await settingsModelMcpAcceptance({ page: secondPage, secondPage: page, control, output });
 
+  await page.bringToFront();
   await page.setViewportSize(viewports[0]);
-  await page.getByRole("navigation").getByRole("link", { name: "Status" }).click();
-  await page.getByRole("heading", { name: "Service status", exact: true }).waitFor();
+  let testSocketReadyState = -1;
+  for (let attempt = 0; attempt < 200 && testSocketReadyState !== 1; attempt += 1) {
+    testSocketReadyState = await page.evaluate(() => window.__omniTestSocket?.readyState ?? -1);
+    if (testSocketReadyState !== 1) await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  }
+  assert.equal(testSocketReadyState, 1, "The test page WebSocket did not open after restart");
+  await page.locator("#app-sidebar").getByRole("link", { name: /Status|状态/ }).click();
+  await page.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
+  await page.getByRole("status").first().getByText(/Online|在线/).waitFor();
   await page.route("**/api/v1/clients", (route) => route.abort());
   await page.evaluate(() => window.__omniTestSocket.close());
   await page.getByRole("status").first().getByText(/Reconnecting|恢复连接中/).waitFor();
   await page.getByRole("status").first().getByText(/Offline|离线/).waitFor({ timeout: 10000 });
   await page.unroute("**/api/v1/clients");
+  const reconnectResumedAt = Date.now();
   await page.getByRole("status").first().getByText(/Online|在线/).waitFor({ timeout: 10000 });
+  console.log(`Final Offline → Online: ${Date.now() - reconnectResumedAt}ms (limit 10000ms)`);
   assert.deepEqual(browserErrors, [], "Browser JavaScript errors were reported");
     console.log("Playwright production E2E: 4 locale/theme combinations x 3 general viewports and 4 conversation viewports; long history scroll, live/history message bounds, empty layout, text contrast, both-theme cancel/approve; Schedule CRUD, accepted-create lost-ack retry, locked fields, delayed detail focus, simulated status polling, stale page/Project/disconnected responses, keyboard validation and 9999/10000ms feedback; Restore overwrite, cancel, stale responses, refresh, failure acknowledgement; delete, ticket, focus, reconnect passed");
 } catch (error) {

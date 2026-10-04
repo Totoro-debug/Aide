@@ -130,6 +130,10 @@ class AgentServiceTransport:
         app.router.add_post(f"{_API_PREFIX}/config/repair", self._repair_config)
         app.router.add_post(f"{_API_PREFIX}/clients", self._register_client)
         app.router.add_post(f"{_API_PREFIX}/workspaces/attach", self._attach_workspace)
+        app.router.add_post(
+            f"{_API_PREFIX}/chat/workspaces/enter", self._enter_conversation_workspace
+        )
+        app.router.add_get(f"{_API_PREFIX}/chat/sessions", self._list_chat_sessions)
         app.router.add_get(f"{_API_PREFIX}/projects", self._list_projects)
         app.router.add_post(f"{_API_PREFIX}/projects", self._register_project)
         app.router.add_delete(f"{_API_PREFIX}/projects/{{project_id}}", self._remove_project)
@@ -184,6 +188,22 @@ class AgentServiceTransport:
         app.router.add_post(
             f"{_API_PREFIX}/workspaces/{{workspace_id}}/sessions",
             self._create_session,
+        )
+        app.router.add_post(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/sessions/{{session_id}}/claim",
+            self._claim_session,
+        )
+        app.router.add_post(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/sessions/{{session_id}}/release",
+            self._release_session,
+        )
+        app.router.add_get(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/sessions/{{session_id}}/deletion-status",
+            self._session_deletion_status,
+        )
+        app.router.add_post(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/sessions/{{session_id}}/deletion-claim",
+            self._claim_session_deletion,
         )
         app.router.add_get(
             f"{_API_PREFIX}/workspaces/{{workspace_id}}/sessions/{{session_id}}",
@@ -586,6 +606,37 @@ class AgentServiceTransport:
             projects.append(project)
         return web.json_response({"projects": projects})
 
+    async def _enter_conversation_workspace(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        body = await _json_object(request)
+        if set(body) - {"request_id", "directory"}:
+            raise service_error(
+                "validation_error", "Conversation Workspace request fields are invalid.", status=422
+            )
+        request_id = _require_request_id(body)
+        directory = body.get("directory")
+        if directory is not None and (not isinstance(directory, str) or not directory):
+            raise service_error(
+                "validation_error",
+                "Conversation Workspace directory must be a nonempty path.",
+                status=422,
+                field_errors={"directory": "must be a nonempty path"},
+            )
+        result = await self.service.enter_default_conversation_workspace(
+            _context_client_id(context), directory=directory
+        )
+        return web.json_response({"request_id": request_id, **result})
+
+    async def _list_chat_sessions(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, client_required=True)
+        page = self.service.list_chat_sessions_page(
+            _context_client_id(context),
+            title=request.query.get("title"),
+            cursor=request.query.get("cursor"),
+            limit=_optional_page_limit(request),
+        )
+        return web.json_response(page)
+
     async def _register_project(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, mutation=True, client_required=True)
         client_id = _context_client_id(context)
@@ -798,7 +849,64 @@ class AgentServiceTransport:
             client_id,
             request.match_info["workspace_id"],
         )
-        return web.json_response({"request_id": request_id, **result})
+        return web.json_response({"request_id": request_id, "project_id": None, **result})
+
+    async def _claim_session(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        client_id = _context_client_id(context)
+        body = await _json_object(request)
+        request_id = _require_request_id(body)
+        workspace_id = request.match_info["workspace_id"]
+        result = await self.service.claim(
+            client_id,
+            workspace_id,
+            request.match_info["session_id"],
+        )
+        return web.json_response(
+            {"request_id": request_id, "project_id": None, "workspace_id": workspace_id, **result}
+        )
+
+    async def _release_session(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        client_id = _context_client_id(context)
+        body = await _json_object(request)
+        request_id = _require_request_id(body)
+        claim_version = body.get("claim_version")
+        if (
+            isinstance(claim_version, bool)
+            or not isinstance(claim_version, int)
+            or claim_version < 1
+        ):
+            raise service_error("validation_error", "claim_version is invalid.", status=422)
+        await self.service.release_claim(
+            client_id,
+            request.match_info["workspace_id"],
+            request.match_info["session_id"],
+            claim_version,
+            _required_header(request, "X-Omni-Claim"),
+        )
+        return web.json_response({"request_id": request_id, "released": True})
+
+    async def _session_deletion_status(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, client_required=True)
+        result = await self.service.session_deletion_status(
+            _context_client_id(context),
+            request.match_info["workspace_id"],
+            request.match_info["session_id"],
+        )
+        return web.json_response({"project_id": None, **result})
+
+    async def _claim_session_deletion(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        client_id = _context_client_id(context)
+        body = await _json_object(request)
+        request_id = _require_request_id(body)
+        result = await self.service.claim_session_deletion(
+            client_id,
+            request.match_info["workspace_id"],
+            request.match_info["session_id"],
+        )
+        return web.json_response({"request_id": request_id, "project_id": None, **result})
 
     async def _get_session(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, client_required=True)

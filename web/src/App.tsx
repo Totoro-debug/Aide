@@ -52,11 +52,17 @@ import {
   deleteProjectSession,
   getProjectSessionDeletionStatus,
   claimProjectSessionDeletion,
+  claimWorkspaceSession,
+  claimWorkspaceSessionDeletion,
   exchangeTicket,
   getProjectRemoval,
   getProjectSession,
   getRestoreResult,
   getProjectSessions,
+  getChatSessions,
+  getWorkspaceSession,
+  getWorkspaceSessionDeletionStatus,
+  getWorkspaceSessions,
   getProjects,
   getRuntimeMemory,
   getRuntimeStatus,
@@ -64,10 +70,15 @@ import {
   getConfig,
   openEventStream,
   releaseProjectSession,
+  releaseWorkspaceSession,
   registerProject,
   registerWebClient,
   reloadRuntimeSkills,
   renameProjectSession,
+  renameWorkspaceSession,
+  createWorkspaceSession,
+  deleteWorkspaceSession,
+  enterChatWorkspace,
   removeProject,
   resumeProjectSchedule,
   acknowledgeRestore,
@@ -93,6 +104,9 @@ import type {
   ConfirmationOrigin,
   DreamResult,
   ProjectSessionsResponse,
+  WorkspaceSessionsResponse,
+  ChatSessionsResponse,
+  ChatSessionSummary,
   RegisteredProject,
   RegisteredClient,
   ReasoningEffort,
@@ -107,6 +121,7 @@ import type {
   ConfigSecretChange,
   ConfigSecrets,
   SessionClaim,
+  SessionClaimResponse,
   SessionSnapshot,
   SessionSummary,
   SkillMetadata,
@@ -131,7 +146,7 @@ type ConnectionState = "checking" | "online" | "offline" | "recovering";
 type Theme = "system" | "light" | "dark";
 type ProjectsLoadState = "idle" | "loading" | "ready" | "error";
 type SettingsSection = "general" | "models" | "runtime" | "memory" | "mcp";
-type PersistedSettingsSection = Exclude<SettingsSection, "general">;
+type PersistedSettingsSection = Exclude<SettingsSection, "general"> | "web";
 type ServiceEventListener = (event: ServiceEvent) => void;
 
 interface SettingsReturnLocation {
@@ -215,6 +230,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [sessionEventVersion, setSessionEventVersion] = useState(0);
+  const [newChatVersion, setNewChatVersion] = useState(0);
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
   const [confirmationNotice, setConfirmationNotice] = useState<string | null>(null);
   const [settingsVisited, setSettingsVisited] = useState(location.pathname === "/settings");
@@ -338,7 +354,7 @@ export default function App() {
   useEffect(() => {
     if (
       configurationNeedsSetup === true
-      && (location.pathname === "/" || location.pathname === "/status")
+      && location.pathname === "/status"
     ) {
       navigate("/settings", { replace: true });
     }
@@ -576,10 +592,13 @@ export default function App() {
   }, [connectionState, t]);
 
   const isProjectSessionRoute = /^\/projects\/[^/]+$/.test(location.pathname);
+  const isChatRoute = location.pathname === "/" || location.pathname === "/chat";
   const settingsReturnLocation = (location.state as SettingsNavigationState | null)?.returnTo;
   const conversationLocation = location.pathname === "/settings"
     && settingsReturnLocation !== undefined
-    && /^\/projects\/[^/]+$/.test(settingsReturnLocation.pathname)
+    && (settingsReturnLocation.pathname === "/"
+      || settingsReturnLocation.pathname === "/chat"
+      || /^\/projects\/[^/]+$/.test(settingsReturnLocation.pathname))
       ? settingsReturnLocation
       : location;
   const openSettings = (event: React.MouseEvent<HTMLAnchorElement>) => {
@@ -601,7 +620,7 @@ export default function App() {
   };
   const returnFromSettings = () => {
     const target = settingsReturnLocation ?? {
-      pathname: "/status",
+      pathname: "/",
       search: "",
       hash: "",
       scrollTop: 0,
@@ -647,6 +666,17 @@ export default function App() {
           </button>
         </div>
         <nav className={styles.navigation} aria-label={t("app.name")}>
+          <Link
+            className={styles.navLink}
+            to="/"
+            onClick={() => {
+              setNewChatVersion((version) => version + 1);
+              setSidebarOpen(false);
+            }}
+          >
+            <MessageSquare size={16} aria-hidden="true" />
+            <span>{t("nav.newChat")}</span>
+          </Link>
           <NavLink className={({ isActive }) => isActive ? `${styles.navLink} ${styles.navLinkActive}` : styles.navLink} to="/status" onClick={() => setSidebarOpen(false)}>
             <Activity size={16} aria-hidden="true" />
             <span>{t("nav.status")}</span>
@@ -700,6 +730,8 @@ export default function App() {
               <span>
                 {location.pathname === "/settings"
                   ? t("nav.settings")
+                  : isChatRoute
+                  ? t("nav.newChat")
                   : location.pathname.startsWith("/projects/")
                   ? location.pathname.includes("/schedule")
                     ? t("nav.schedule")
@@ -762,7 +794,7 @@ export default function App() {
 
         <main
           id="main-content"
-          className={isProjectSessionRoute ? `${styles.mainContent} ${styles.conversationMainContent}` : styles.mainContent}
+          className={isProjectSessionRoute || isChatRoute ? `${styles.mainContent} ${styles.conversationMainContent}` : styles.mainContent}
           ref={mainContentRef}
           tabIndex={-1}
         >
@@ -771,9 +803,37 @@ export default function App() {
               <Route
                 path="/"
                 element={
-                  configurationNeedsSetup === true
-                    ? <Navigate replace to="/settings" />
-                    : <Navigate replace to="/status" />
+                  <ChatSessionsView
+                        configurationNeedsSetup={configurationNeedsSetup}
+                        authState={authState}
+                        connectionState={connectionState}
+                        projects={projects}
+                        registeredClient={registeredClient}
+                        onRestoreConsumed={consumeRegisteredClient}
+                        refreshVersion={sessionEventVersion}
+                        sendServiceCommand={sendServiceCommand}
+                        subscribeServiceEvents={subscribeServiceEvents}
+                        confirmationTriggerRef={confirmationTriggerRef}
+                        newChatVersion={newChatVersion}
+                      />
+                }
+              />
+              <Route
+                path="/chat"
+                element={
+                  <ChatSessionsView
+                        configurationNeedsSetup={configurationNeedsSetup}
+                        authState={authState}
+                        connectionState={connectionState}
+                        projects={projects}
+                        registeredClient={registeredClient}
+                        onRestoreConsumed={consumeRegisteredClient}
+                        refreshVersion={sessionEventVersion}
+                        sendServiceCommand={sendServiceCommand}
+                        subscribeServiceEvents={subscribeServiceEvents}
+                        confirmationTriggerRef={confirmationTriggerRef}
+                        newChatVersion={newChatVersion}
+                      />
                 }
               />
               <Route
@@ -839,7 +899,7 @@ export default function App() {
                   />
                 }
               />
-              <Route path="*" element={<Navigate replace to="/status" />} />
+              <Route path="*" element={<Navigate replace to="/" />} />
             </Routes>
           </div>
           {settingsVisited || location.pathname === "/settings" ? (
@@ -1052,6 +1112,9 @@ interface SettingsForm {
     batch_size: string;
     schedule: string;
   };
+  web: {
+    default_chat_workspace: string;
+  };
   models: {
     providers: Record<string, ProviderForm>;
     routes: Record<string, RouteForm>;
@@ -1117,6 +1180,9 @@ function formFromConfig(fields: ConfigFields, previous: SettingsForm | null = nu
     memory: {
       batch_size: String(fields.memory.batch_size),
       schedule: fields.memory.schedule,
+    },
+    web: {
+      default_chat_workspace: fields.web.default_chat_workspace,
     },
     models: {
       providers: Object.fromEntries(Object.entries(fields.models.providers).map(([id, provider]) => [id, {
@@ -1231,6 +1297,9 @@ function configFromForm(form: SettingsForm): { fields: ConfigPatchFields; secret
       batch_size: Number(form.memory.batch_size),
       schedule: form.memory.schedule.trim(),
     },
+      web: {
+        default_chat_workspace: form.web.default_chat_workspace.trim(),
+      },
       models: { providers, routes },
       mcp,
     },
@@ -1303,7 +1372,7 @@ interface SettingsSaveRequest {
   secrets: ConfigSecrets;
 }
 
-const PERSISTED_SETTINGS_SECTIONS: PersistedSettingsSection[] = ["models", "runtime", "memory", "mcp"];
+const PERSISTED_SETTINGS_SECTIONS: PersistedSettingsSection[] = ["models", "runtime", "memory", "mcp", "web"];
 
 function sameSettingsValue(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;
@@ -1392,6 +1461,7 @@ function configPatchForSection(
   const config = configFromForm(form);
   if (section === "runtime") return { fields: { runtime: config.fields.runtime }, secrets: {} };
   if (section === "memory") return { fields: { memory: config.fields.memory }, secrets: {} };
+  if (section === "web") return { fields: { web: config.fields.web! }, secrets: {} };
   if (section === "models") {
     return {
       fields: { models: config.fields.models! },
@@ -1426,7 +1496,11 @@ function SettingsView({
   theme,
 }: SettingsViewProps) {
   const { t } = useTranslation();
+  const location = useLocation();
   const [activeSection, setActiveSection] = useState<SettingsSection>("general");
+  useEffect(() => {
+    if (location.hash === "#models") setActiveSection("models");
+  }, [location.hash]);
   const [response, setResponse] = useState<ConfigResponse | null>(null);
   const [draft, setDraft] = useState<SettingsForm | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -1519,6 +1593,9 @@ function SettingsView({
   }, []);
 
   const validateField = useCallback((path: string, value: string | boolean): string | null => {
+    if (path === "web.default_chat_workspace" && (typeof value !== "string" || !value.trim())) {
+      return t("settings.required");
+    }
     const integerFields: Record<string, [number, number]> = {
       "runtime.max_tool_result_chars": [1000, 1_000_000],
       "runtime.max_iterations": [50, Number.MAX_SAFE_INTEGER],
@@ -1585,7 +1662,8 @@ function SettingsView({
     setDraft((current) => {
       if (current === null) return current;
       const [section, field] = path.split(".");
-      if (section !== "runtime" && section !== "memory") return current;
+      if (section !== "runtime" && section !== "memory" && section !== "web") return current;
+      if (section === "web" && typeof value !== "string") return current;
       return {
         ...current,
         [section]: { ...current[section], [field]: value },
@@ -1767,6 +1845,7 @@ function SettingsView({
       "runtime.exec_shell": current.runtime.exec_shell,
       "memory.batch_size": current.memory.batch_size,
       "memory.schedule": current.memory.schedule,
+      "web.default_chat_workspace": current.web.default_chat_workspace,
     };
     const errors: SettingsFieldError = {};
     for (const [path, value] of Object.entries(values)) {
@@ -2094,7 +2173,12 @@ function SettingsView({
   const captureSettingsBlur = (event?: React.FocusEvent<HTMLFormElement>) => {
     if (event !== undefined && !(event.target instanceof HTMLInputElement
       || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement)) return;
-    if (activeSection !== "general") enqueueSave(activeSection);
+    if (activeSection === "general") {
+      if (event?.target instanceof HTMLInputElement
+        && event.target.id === fieldId("web.default_chat_workspace")) enqueueSave("web");
+      return;
+    }
+    enqueueSave(activeSection);
   };
   const captureSettingsChange = (event: React.FormEvent<HTMLFormElement>) => {
     const target = event.target;
@@ -2128,7 +2212,8 @@ function SettingsView({
   const fieldError = (path: string) => fieldErrors[path];
   const groupError = (prefix: string) => Object.entries(fieldErrors).find(([path]) => path === prefix || path.startsWith(`${prefix}.`))?.[1];
   const focusError = (path: string, switchSection = true) => {
-    const section = settingsSectionForPath(path);
+    const fieldSection = settingsSectionForPath(path);
+    const section = fieldSection === "web" ? "general" : fieldSection;
     if (switchSection && section !== null && section !== activeSection) {
       setActiveSection(section);
       window.setTimeout(() => focusError(path, false), 0);
@@ -2372,6 +2457,23 @@ function SettingsView({
                         <option value="en">English</option>
                         <option value="zh-CN">简体中文</option>
                       </select>
+                    </label>
+                    <label className={styles.settingsField} htmlFor={fieldId("web.default_chat_workspace")}>
+                      <span className={styles.fieldLabel}>{t("settings.defaultChatWorkspace")}</span>
+                      <input
+                        className={styles.textInput}
+                        id={fieldId("web.default_chat_workspace")}
+                        value={draft?.web.default_chat_workspace ?? "~/.omni/chat"}
+                        disabled={controlDisabled}
+                        aria-invalid={fieldError("web.default_chat_workspace") !== undefined}
+                        aria-describedby={fieldError("web.default_chat_workspace") !== undefined
+                          ? `${fieldId("web.default_chat_workspace")}-error` : undefined}
+                        onChange={(event) => updateField("web.default_chat_workspace", event.currentTarget.value)}
+                        onBlur={() => blurField("web.default_chat_workspace", draft?.web.default_chat_workspace ?? "~/.omni/chat")}
+                      />
+                      <span className={styles.fieldError} id={`${fieldId("web.default_chat_workspace")}-error`}>
+                        {fieldError("web.default_chat_workspace") ?? ""}
+                      </span>
                     </label>
                   </div>
                 </div>
@@ -5561,6 +5663,224 @@ interface ProjectSessionsViewProps {
   confirmationTriggerRef: { current: HTMLElement | null };
 }
 
+function ChatSessionsView({
+  authState,
+  connectionState,
+  projects,
+  registeredClient,
+  onRestoreConsumed,
+  refreshVersion,
+  sendServiceCommand,
+  subscribeServiceEvents,
+  confirmationTriggerRef,
+  newChatVersion,
+  configurationNeedsSetup,
+}: ProjectSessionsViewProps & { newChatVersion: number; configurationNeedsSetup: boolean | null }) {
+  const { t } = useTranslation();
+  const [setupInput, setSetupInput] = useState("");
+  const [workspaceEntry, setWorkspaceEntry] = useState<Awaited<ReturnType<typeof enterChatWorkspace>> | null>(null);
+  const [entryVersion, setEntryVersion] = useState(0);
+  const [initialSessionId, setInitialSessionId] = useState<string | null>(null);
+  const [entryLoadState, setEntryLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [entryError, setEntryError] = useState<string | null>(null);
+  const [history, setHistory] = useState<ChatSessionsResponse | null>(null);
+  const [historyLoadState, setHistoryLoadState] = useState<SessionLoadState>("idle");
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const activationSequenceRef = useRef(0);
+  const historyRequestRef = useRef(0);
+
+  const refreshHistory = useCallback(async (cursor: string | null = null) => {
+    if (authState !== "ready") return;
+    const requestNumber = ++historyRequestRef.current;
+    setHistoryLoadState("loading");
+    setHistoryError(null);
+    try {
+      const response = await getChatSessions({ cursor: cursor ?? undefined, limit: 100 });
+      if (requestNumber !== historyRequestRef.current) return;
+      setHistory((current) => cursor === null || current === null
+        ? response
+        : { ...response, sessions: [...current.sessions, ...response.sessions] });
+      setHistoryLoadState("ready");
+    } catch (error) {
+      if (requestNumber !== historyRequestRef.current) return;
+      setHistoryLoadState("error");
+      setHistoryError(sessionErrorKey(error));
+    }
+  }, [authState]);
+
+  const activateWorkspace = useCallback(async (directory?: string, sessionId: string | null = null) => {
+    if (authState !== "ready" || configurationNeedsSetup !== false) return;
+    const requestNumber = ++activationSequenceRef.current;
+    setWorkspaceEntry(null);
+    setInitialSessionId(null);
+    setEntryLoadState("loading");
+    setEntryError(null);
+    try {
+      const entry = await enterChatWorkspace(directory);
+      if (requestNumber !== activationSequenceRef.current) return;
+      setWorkspaceEntry(entry);
+      setInitialSessionId(sessionId);
+      setEntryVersion((version) => version + 1);
+      setEntryLoadState("ready");
+      void refreshHistory();
+    } catch (error) {
+      if (requestNumber !== activationSequenceRef.current) return;
+      setEntryLoadState("error");
+      setEntryError(error instanceof ApiError && error.body?.code === "config_invalid"
+        ? "chat.configurationUnavailable"
+        : error instanceof ApiError && error.body?.code === "workspace_unavailable"
+          ? "chat.workspaceUnavailable"
+          : error instanceof ApiError && error.body?.code === "not_found" && directory !== undefined
+            ? "chat.workspaceUnavailable"
+            : sessionErrorKey(error));
+    }
+  }, [authState, configurationNeedsSetup, refreshHistory]);
+
+  useEffect(() => {
+    if (authState === "ready") void refreshHistory();
+  }, [authState, refreshVersion, refreshHistory]);
+
+  useEffect(() => {
+    if (authState === "ready" && configurationNeedsSetup === false) void activateWorkspace();
+  }, [authState, configurationNeedsSetup, newChatVersion, activateWorkspace]);
+
+  useEffect(() => subscribeServiceEvents((event) => {
+    if (event.type.startsWith("session.")
+      || ["run.completed", "run.failed", "run.cancelled"].includes(event.type)) {
+      void refreshHistory();
+    }
+  }), [refreshHistory, subscribeServiceEvents]);
+
+  async function startNewConversation() {
+    await activateWorkspace();
+  }
+
+  async function openHistorySession(session: ChatSessionSummary) {
+    if (!session.available || historyBusy) return;
+    setHistoryBusy(true);
+    await activateWorkspace(session.directory, session.id);
+    setHistoryBusy(false);
+  }
+
+  return (
+    <div className={styles.chatWorkspaceLayout}>
+      <aside className={styles.chatHistorySidebar} aria-label={t("nav.chatHistory")}>
+        <button
+          className={styles.primaryButton}
+          type="button"
+          disabled={authState !== "ready" || entryLoadState === "loading"}
+          onClick={() => void startNewConversation()}
+        >
+          <Plus size={16} aria-hidden="true" />
+          {t("controls.newSession")}
+        </button>
+        <h2 className={styles.chatHistoryHeading}>{t("nav.chatHistory")}</h2>
+        {historyLoadState === "loading" && history === null ? (
+          <p className={styles.chatHistoryStatus} role="status">{t("chat.historyLoading")}</p>
+        ) : null}
+        {historyError !== null ? (
+          <p className={styles.chatHistoryError} role="alert">{t(historyError)}</p>
+        ) : null}
+        <nav className={styles.chatHistoryList} aria-label={t("nav.chatHistory")}>
+          {(history?.sessions ?? []).map((session) => (
+            <button
+              className={styles.chatHistoryItem}
+              key={`${session.directory}:${session.id}`}
+              type="button"
+              disabled={!session.available || historyBusy || entryLoadState === "loading"}
+              data-active={session.id === initialSessionId && session.directory === workspaceEntry?.directory}
+              onClick={() => void openHistorySession(session)}
+              title={session.directory}
+            >
+              <span>{session.title}</span>
+              <small>{session.directory}</small>
+            </button>
+          ))}
+        </nav>
+        {history?.next_cursor !== null && history !== null ? (
+          <button
+            className={styles.chatHistoryMore}
+            type="button"
+            disabled={historyLoadState === "loading"}
+            onClick={() => void refreshHistory(history.next_cursor)}
+          >
+            {t("sessions.loadMore")}
+          </button>
+        ) : null}
+        <button
+          className={styles.chatHistoryRefresh}
+          type="button"
+          disabled={historyLoadState === "loading"}
+          onClick={() => void refreshHistory()}
+        >
+          <RefreshCw size={14} aria-hidden="true" />
+          {t("controls.refreshSessions")}
+        </button>
+      </aside>
+      <div className={styles.chatWorkspaceContent}>
+        {configurationNeedsSetup === true ? (
+          <div className={styles.conversationStage} data-empty="true">
+            <div className={styles.conversationViewport}>
+              <div className={styles.emptyConversation}>
+                <h2 className={styles.emptyBrand}>Omni</h2>
+              </div>
+            </div>
+            <form className={styles.composer} onSubmit={(event) => event.preventDefault()}>
+              <label className={styles.srOnly} htmlFor="setup-conversation-input">{t("conversation.inputLabel")}</label>
+              <textarea
+                id="setup-conversation-input"
+                aria-label={t("conversation.inputLabel")}
+                className={styles.composerInput}
+                rows={3}
+                value={setupInput}
+                placeholder={t("conversation.inputPlaceholder")}
+                onChange={(event) => setSetupInput(event.target.value)}
+              />
+              <div className={styles.composerFooter}>
+                <Link
+                  className={styles.secondaryButton}
+                  to="/settings#models"
+                  state={{ returnTo: { pathname: "/", search: "", hash: "", scrollTop: 0 } }}
+                >
+                  {t("chat.configureModels")}
+                </Link>
+                <button className={styles.primaryButton} type="submit" disabled>
+                  <Send size={15} aria-hidden="true" />
+                  {t("controls.send")}
+                </button>
+              </div>
+            </form>
+          </div>
+        ) : workspaceEntry === null ? (
+          <div className={entryLoadState === "error" ? styles.errorBanner : styles.notice} role={entryLoadState === "error" ? "alert" : "status"}>
+            <CircleAlert size={16} aria-hidden="true" />
+            <span>{entryError === null ? t("chat.workspaceLoading") : t(entryError)}</span>
+          </div>
+        ) : (
+          <ProjectSessionsContent
+            key={`${workspaceEntry.workspace_id}:${entryVersion}`}
+            authState={authState}
+            connectionState={connectionState}
+            projects={projects}
+            registeredClient={registeredClient}
+            onRestoreConsumed={onRestoreConsumed}
+            refreshVersion={refreshVersion}
+            sendServiceCommand={sendServiceCommand}
+            subscribeServiceEvents={subscribeServiceEvents}
+            confirmationTriggerRef={confirmationTriggerRef}
+            projectId={null}
+            workspaceId={workspaceEntry.workspace_id}
+            workspaceDirectory={workspaceEntry.directory}
+            initialSessionId={initialSessionId}
+            startInDraft={initialSessionId === null}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ProjectSessionsView({
   authState,
   connectionState,
@@ -5601,10 +5921,23 @@ function ProjectSessionsContent({
   subscribeServiceEvents,
   confirmationTriggerRef,
   projectId,
-}: ProjectSessionsViewProps & { projectId: string }) {
+  workspaceId: initialWorkspaceId,
+  workspaceDirectory,
+  initialSessionId,
+  startInDraft = false,
+}: ProjectSessionsViewProps & {
+  projectId: string | null;
+  workspaceId?: string;
+  workspaceDirectory?: string;
+  initialSessionId?: string | null;
+  startInDraft?: boolean;
+}) {
   const { t, i18n } = useTranslation();
-  const project = projects.find((item) => item.project_id === projectId);
-  const [sessions, setSessions] = useState<ProjectSessionsResponse | null>(null);
+  const isChat = projectId === null;
+  const sessionScopeId = projectId ?? initialWorkspaceId ?? "";
+  const sessionStorageId = projectId ?? workspaceDirectory ?? sessionScopeId;
+  const project = projectId === null ? undefined : projects.find((item) => item.project_id === projectId);
+  const [sessions, setSessions] = useState<ProjectSessionsResponse | WorkspaceSessionsResponse | null>(null);
   const [sessionSummaries, setSessionSummaries] = useState<Record<string, SessionSummary>>({});
   const [sessionSearch, setSessionSearch] = useState("");
   const deferredSessionSearch = useDeferredValue(sessionSearch);
@@ -5634,7 +5967,7 @@ function ProjectSessionsContent({
   const [restoreNotice, setRestoreNotice] = useState<RestoreResult | null>(null);
   const [pendingRestoreFailure, setPendingRestoreFailure] = useState<RestoreResult | null>(null);
   const [managementOpen, setManagementOpen] = useState(false);
-  const [pendingDeletion, setPendingDeletion] = useState<PendingSessionDeletion | null>(() => readPendingDeletion(projectId));
+  const [pendingDeletion, setPendingDeletion] = useState<PendingSessionDeletion | null>(() => readPendingDeletion(sessionStorageId));
   const pendingDeletionRef = useRef(pendingDeletion);
   const deleteBusyRef = useRef(false);
   const [liveRunsBySession, setLiveRunsBySession] = useState<Record<string, LiveRun[]>>({});
@@ -5670,6 +6003,64 @@ function ProjectSessionsContent({
   const snapshotReadsRef = useRef(new Set<ServiceEvent[]>());
   const snapshotEventsRef = useRef(new WeakMap<SessionSnapshot, ServiceEvent[]>());
   const sessionCursorRef = useRef<Record<string, { streamId: string; seq: number }>>({});
+  const attemptedHistorySessionRef = useRef<string | null>(null);
+  const defaultDraftWorkspaceRef = useRef<string | null>(null);
+
+  const listSessions = useCallback((options: { title?: string; cursor?: string; limit?: number } = {}) => (
+    isChat
+      ? getWorkspaceSessions(sessionScopeId, options)
+      : getProjectSessions(sessionScopeId, options)
+  ), [isChat, sessionScopeId]);
+
+  const claimSession = useCallback((sessionId: string): Promise<Pick<SessionClaimResponse, "claim" | "snapshot">> => (
+    isChat
+      ? claimWorkspaceSession(sessionScopeId, sessionId)
+      : claimProjectSession(sessionScopeId, sessionId)
+  ), [isChat, sessionScopeId]);
+
+  const getClaimedSession = useCallback((currentClaim: SessionClaim) => (
+    isChat
+      ? getWorkspaceSession(
+          currentClaim.workspace_id,
+          currentClaim.session_id,
+          currentClaim.claim_version,
+          currentClaim.reconnect_credential,
+        )
+      : getProjectSession(
+          sessionScopeId,
+          currentClaim.session_id,
+          currentClaim.claim_version,
+          currentClaim.reconnect_credential,
+        )
+  ), [isChat, sessionScopeId]);
+
+  const releaseSessionClaim = useCallback((currentClaim: SessionClaim) => (
+    isChat
+      ? releaseWorkspaceSession(
+          currentClaim.workspace_id,
+          currentClaim.session_id,
+          currentClaim.claim_version,
+          currentClaim.reconnect_credential,
+        )
+      : releaseProjectSession(
+          sessionScopeId,
+          currentClaim.session_id,
+          currentClaim.claim_version,
+          currentClaim.reconnect_credential,
+        )
+  ), [isChat, sessionScopeId]);
+
+  const getDeletionStatus = useCallback((sessionId: string) => (
+    isChat
+      ? getWorkspaceSessionDeletionStatus(sessionScopeId, sessionId)
+      : getProjectSessionDeletionStatus(sessionScopeId, sessionId)
+  ), [isChat, sessionScopeId]);
+
+  const claimDeletion = useCallback((sessionId: string) => (
+    isChat
+      ? claimWorkspaceSessionDeletion(sessionScopeId, sessionId)
+      : claimProjectSessionDeletion(sessionScopeId, sessionId)
+  ), [isChat, sessionScopeId]);
 
   const readWithEvents = useCallback(async <T,>(
     read: () => Promise<T>, extract: (response: T) => SessionSnapshot,
@@ -5688,49 +6079,38 @@ function ProjectSessionsContent({
   }, []);
 
   const readClaimSnapshot = useCallback((sessionId: string) => readWithEvents(
-    () => claimProjectSession(projectId, sessionId), (response) => response.snapshot,
-  ), [projectId, readWithEvents]);
+    () => claimSession(sessionId), (response) => response.snapshot,
+  ), [claimSession, readWithEvents]);
 
   const readRunSnapshot = useCallback((currentClaim: SessionClaim) => readWithEvents(
-    () => getProjectSession(projectId, currentClaim.session_id,
-      currentClaim.claim_version, currentClaim.reconnect_credential), (response) => response,
-  ), [projectId, readWithEvents]);
+    () => getClaimedSession(currentClaim), (response) => response,
+  ), [getClaimedSession, readWithEvents]);
 
   const clearPendingDeletion = useCallback(() => {
     pendingDeletionRef.current = null;
     setPendingDeletion(null);
-    try { sessionStorage.removeItem(`omni.session-delete.${projectId}`); } catch { /* Storage can be unavailable. */ }
-  }, [projectId]);
+    try { sessionStorage.removeItem(`omni.session-delete.${sessionStorageId}`); } catch { /* Storage can be unavailable. */ }
+  }, [sessionStorageId]);
 
   const rememberPendingDeletion = useCallback((operation: PendingSessionDeletion) => {
     pendingDeletionRef.current = operation;
     setPendingDeletion(operation);
     try {
-      sessionStorage.setItem(`omni.session-delete.${projectId}`, JSON.stringify(operation));
+      sessionStorage.setItem(`omni.session-delete.${sessionStorageId}`, JSON.stringify(operation));
     } catch { /* In-memory retries remain available when browser storage is unavailable. */ }
-  }, [projectId]);
+  }, [sessionStorageId]);
 
   const releaseOrphanClaim = useCallback((orphan: SessionClaim) => {
-    void releaseProjectSession(
-      projectId,
-      orphan.session_id,
-      orphan.claim_version,
-      orphan.reconnect_credential,
-    ).catch(() => {});
-  }, [projectId]);
+    void releaseSessionClaim(orphan).catch(() => {});
+  }, [releaseSessionClaim]);
 
   const releaseClaims = useCallback(() => {
-    if (!projectId) return;
+    if (!sessionScopeId) return;
     for (const current of Object.values(claimsBySessionRef.current)) {
       if (pendingDeletionRef.current?.attempted && pendingDeletionRef.current.claim.session_id === current.session_id) continue;
-      void releaseProjectSession(
-        projectId,
-        current.session_id,
-        current.claim_version,
-        current.reconnect_credential,
-      ).catch(() => {});
+      void releaseSessionClaim(current).catch(() => {});
     }
-  }, [projectId]);
+  }, [releaseSessionClaim, sessionScopeId]);
 
   useEffect(() => {
     claimRef.current = claim;
@@ -5763,7 +6143,7 @@ function ProjectSessionsContent({
       // A missing result is normal; Claim recovery remains owned by the Session flow.
     });
     return () => { cancelled = true; };
-  }, [claim, connectionState, draft, projectId]);
+  }, [claim, connectionState, draft, sessionScopeId]);
 
   useEffect(() => {
     if (restorePlanClaimRef.current === null || restoreBusyRef.current) return;
@@ -5925,12 +6305,12 @@ function ProjectSessionsContent({
   }, [adoptSnapshot]);
 
   const refreshSessions = useCallback(async (cursor: string | null = null, append = false) => {
-    if (authState !== "ready" || !projectId) return;
+    if (authState !== "ready" || !sessionScopeId) return;
     const requestNumber = sessionRequestRef.current + 1;
     sessionRequestRef.current = requestNumber;
     setLoadState("loading");
     try {
-      const response = await getProjectSessions(projectId, {
+      const response = await listSessions({
         title: deferredSessionSearch.trim() || undefined,
         cursor: cursor ?? undefined,
         limit: 100,
@@ -5941,14 +6321,14 @@ function ProjectSessionsContent({
       let restoreError: string | null = null;
       const deletionOperation = pendingDeletionRef.current;
       if (deletionOperation?.attempted && deletionOperation.claim.workspace_id !== response.workspace_id) {
-        const status = await getProjectSessionDeletionStatus(projectId, deletionOperation.claim.session_id);
+        const status = await getDeletionStatus(deletionOperation.claim.session_id);
         if (!mountedRef.current || requestNumber !== sessionRequestRef.current) return;
         if (status.state === "deleted" || status.state === "present") {
           clearPendingDeletion();
           setDeleteOpen(false);
           if (claimRef.current?.session_id === deletionOperation.claim.session_id) clearClaimState();
         } else {
-          const recovered = await claimProjectSessionDeletion(projectId, deletionOperation.claim.session_id);
+          const recovered = await claimDeletion(deletionOperation.claim.session_id);
           if (!mountedRef.current || requestNumber !== sessionRequestRef.current) return;
           rememberPendingDeletion({ ...deletionOperation, claim: recovered.claim });
           setDeleteError("sessions.deletionInProgressError");
@@ -5992,7 +6372,7 @@ function ProjectSessionsContent({
               setDraftSessionIds((ids) => ids.includes(restored.claim.session_id)
                 ? ids : [...ids, restored.claim.session_id]);
             } else if (!response.sessions.some((item) => item.id === restored.claim.session_id)) {
-              const metadata = await getProjectSessions(projectId);
+              const metadata = await listSessions();
               if (!mountedRef.current) return;
               setSessionSummaries((current) => mergeSessionSummaries(current, metadata.sessions));
             }
@@ -6040,7 +6420,7 @@ function ProjectSessionsContent({
       setLoadState("error");
       setActionError(sessionErrorKey(error));
     }
-  }, [authState, clearClaimState, clearPendingDeletion, connectionState, deferredSessionSearch, onRestoreConsumed, projectId, registeredClient, releaseOrphanClaim, rememberPendingDeletion, rememberSession, readClaimSnapshot]);
+  }, [authState, claimDeletion, clearClaimState, clearPendingDeletion, connectionState, deferredSessionSearch, getDeletionStatus, listSessions, onRestoreConsumed, registeredClient, releaseOrphanClaim, rememberPendingDeletion, rememberSession, readClaimSnapshot, sessionScopeId]);
 
   useEffect(() => {
     if (connectionState !== "online") needsReclaimRef.current = true;
@@ -6184,9 +6564,9 @@ function ProjectSessionsContent({
       mountedRef.current = false;
       releaseClaims();
     };
-  }, [projectId, releaseClaims]);
+  }, [sessionScopeId, releaseClaims]);
 
-  async function openSession(sessionId: string, isDraft: boolean, allowBusy = false) {
+  const openSession = useCallback(async (sessionId: string, isDraft: boolean, allowBusy = false) => {
     if (pendingDeletionRef.current?.attempted && pendingDeletionRef.current.claim.session_id === sessionId) return;
     if (busySessionId !== null && !allowBusy) return;
     sessionSelectionVersionRef.current += 1;
@@ -6216,15 +6596,26 @@ function ProjectSessionsContent({
     } finally {
       setBusySessionId(null);
     }
-  }
+  }, [busySessionId, readClaimSnapshot, refreshSessions, releaseOrphanClaim, rememberSession]);
 
-  async function createDraft() {
+  useEffect(() => {
+    if (initialSessionId == null || loadState !== "ready"
+      || !sessions?.sessions.some((item) => item.id === initialSessionId)) return;
+    const attemptKey = `${sessionScopeId}:${initialSessionId}`;
+    if (attemptedHistorySessionRef.current === attemptKey) return;
+    attemptedHistorySessionRef.current = attemptKey;
+    void openSession(initialSessionId, false);
+  }, [initialSessionId, loadState, openSession, sessionScopeId, sessions]);
+
+  const createDraft = useCallback(async () => {
     if (busySessionId !== null) return;
     sessionSelectionVersionRef.current += 1;
     setBusySessionId("new");
     setActionError(null);
     try {
-      const created = await createProjectSession(projectId);
+      const created = isChat
+        ? await createWorkspaceSession(sessionScopeId)
+        : await createProjectSession(sessionScopeId);
       setDraftSessionIds((ids) => [...ids, created.session_id]);
       setBusySessionId(null);
       await openSession(created.session_id, true, true);
@@ -6233,7 +6624,15 @@ function ProjectSessionsContent({
     } finally {
       setBusySessionId(null);
     }
-  }
+  }, [busySessionId, isChat, openSession, sessionScopeId]);
+
+  useEffect(() => {
+    if (!startInDraft || initialSessionId != null || loadState !== "ready"
+      || !sessionScopeId || selectedSessionRef.current !== null || claimRef.current !== null
+      || defaultDraftWorkspaceRef.current === sessionScopeId) return;
+    defaultDraftWorkspaceRef.current = sessionScopeId;
+    void createDraft();
+  }, [createDraft, initialSessionId, loadState, sessionScopeId, startInDraft]);
 
   async function releaseCurrent() {
     const current = claimRef.current;
@@ -6243,12 +6642,7 @@ function ProjectSessionsContent({
     setBusySessionId(current.session_id);
     setActionError(null);
     try {
-      await releaseProjectSession(
-        projectId,
-        current.session_id,
-        current.claim_version,
-        current.reconnect_credential,
-      );
+      await releaseSessionClaim(current);
       delete claimsBySessionRef.current[current.session_id];
       delete snapshotsBySessionRef.current[current.session_id];
       claimRef.current = null;
@@ -6511,14 +6905,23 @@ function ProjectSessionsContent({
     setRenameBusy(true);
     setRenameError(null);
     try {
-      const response = await renameProjectSession(
-        projectId,
-        currentClaim.session_id,
-        currentClaim.claim_version,
-        currentClaim.reconnect_credential,
-        nextTitle,
-        currentSummary.metadata_version,
-      );
+      const response = isChat
+        ? await renameWorkspaceSession(
+            currentClaim.workspace_id,
+            currentClaim.session_id,
+            currentClaim.claim_version,
+            currentClaim.reconnect_credential,
+            nextTitle,
+            currentSummary.metadata_version,
+          )
+        : await renameProjectSession(
+            sessionScopeId,
+            currentClaim.session_id,
+            currentClaim.claim_version,
+            currentClaim.reconnect_credential,
+            nextTitle,
+            currentSummary.metadata_version,
+          );
       if (!mountedRef.current) return;
       setSessionSummaries((current) => mergeSessionSummaries(current, [response.session]));
       setSessions((current) => current === null ? current : {
@@ -6533,7 +6936,7 @@ function ProjectSessionsContent({
       if (error instanceof ApiError && error.body?.code === "metadata_conflict") {
         await refreshSessions();
         if (!mountedRef.current) return;
-        const metadata = await getProjectSessions(projectId);
+        const metadata = await listSessions();
         if (!mountedRef.current) return;
         setSessionSummaries((current) => mergeSessionSummaries(current, metadata.sessions));
       }
@@ -6568,19 +6971,29 @@ function ProjectSessionsContent({
     setDeleteError(null);
     try {
       try {
-        await deleteProjectSession(
-          projectId,
-          currentClaim.session_id,
-          currentClaim.claim_version,
-          currentClaim.reconnect_credential,
-          operation.requestId,
-        );
+        if (isChat) {
+          await deleteWorkspaceSession(
+            currentClaim.workspace_id,
+            currentClaim.session_id,
+            currentClaim.claim_version,
+            currentClaim.reconnect_credential,
+            operation.requestId,
+          );
+        } else {
+          await deleteProjectSession(
+            sessionScopeId,
+            currentClaim.session_id,
+            currentClaim.claim_version,
+            currentClaim.reconnect_credential,
+            operation.requestId,
+          );
+        }
       } catch (error) {
         if (!(error instanceof ApiError) || !["stale_claim", "not_found", "stale_client", "session_busy", "restore_pending", "validation_error"].includes(error.body?.code ?? "")) throw error;
-        const status = await getProjectSessionDeletionStatus(projectId, currentClaim.session_id);
+        const status = await getDeletionStatus(currentClaim.session_id);
         if (status.state === "deleting") {
           if (["stale_claim", "not_found", "stale_client"].includes(error.body?.code ?? "")) {
-            const recovered = await claimProjectSessionDeletion(projectId, currentClaim.session_id);
+            const recovered = await claimDeletion(currentClaim.session_id);
             rememberPendingDeletion({ ...operation, claim: recovered.claim });
           }
           setDeleteError("sessions.deletionInProgressError");
@@ -6590,7 +7003,7 @@ function ProjectSessionsContent({
           const rejectedOperation = { ...operation, attempted: false };
           pendingDeletionRef.current = rejectedOperation;
           setPendingDeletion(rejectedOperation);
-          try { sessionStorage.removeItem(`omni.session-delete.${projectId}`); } catch { /* Storage can be unavailable. */ }
+          try { sessionStorage.removeItem(`omni.session-delete.${sessionStorageId}`); } catch { /* Storage can be unavailable. */ }
           throw error;
         }
       }
@@ -6652,15 +7065,21 @@ function ProjectSessionsContent({
     <section className={styles.sessionsPage} aria-labelledby="sessions-heading">
       <div className={styles.pageHeading}>
         <div>
-          <Link className={styles.backLink} to="/projects">
-            <ArrowLeft size={15} aria-hidden="true" />
-            {t("controls.backToProjects")}
-          </Link>
-          <p className={styles.eyebrow}>{t("nav.sessions")}</p>
+          {!isChat ? (
+            <Link className={styles.backLink} to="/projects">
+              <ArrowLeft size={15} aria-hidden="true" />
+              {t("controls.backToProjects")}
+            </Link>
+          ) : null}
+          <p className={styles.eyebrow}>{t(isChat ? "nav.chatHistory" : "nav.sessions")}</p>
           <h1 id="sessions-heading" tabIndex={-1}>
-            {project?.name || t("sessions.title")}
+            {project?.name || t(isChat ? "app.name" : "sessions.title")}
           </h1>
-          {project !== undefined ? <p className={styles.pageDescription}>{project.path}</p> : null}
+          {project !== undefined
+            ? <p className={styles.pageDescription}>{project.path}</p>
+            : isChat && workspaceDirectory !== undefined
+              ? <p className={styles.pageDescription}>{workspaceDirectory}</p>
+              : null}
         </div>
         <div className={styles.pageActions}>
           <button
@@ -6700,22 +7119,26 @@ function ProjectSessionsContent({
           >
             <RefreshCw size={16} className={loadState === "loading" ? styles.spin : undefined} aria-hidden="true" />
           </button>
-          <Link className={styles.secondaryButton} to={`/projects/${projectId}/schedule`}>
-            <CalendarClock size={15} aria-hidden="true" />
-            {t("controls.openSchedule")}
-          </Link>
-          <button
-            className={styles.primaryButton}
-            type="button"
-            disabled={authUnavailable || project?.available !== true || busySessionId !== null}
-            onClick={() => {
-              setSessionListOpen(false);
-              void createDraft();
-            }}
-          >
-            <Plus size={16} aria-hidden="true" />
-            {t("controls.newSession")}
-          </button>
+          {!isChat ? (
+            <>
+              <Link className={styles.secondaryButton} to={`/projects/${projectId}/schedule`}>
+                <CalendarClock size={15} aria-hidden="true" />
+                {t("controls.openSchedule")}
+              </Link>
+              <button
+                className={styles.primaryButton}
+                type="button"
+                disabled={authUnavailable || (!isChat && project?.available !== true) || busySessionId !== null}
+                onClick={() => {
+                  setSessionListOpen(false);
+                  void createDraft();
+                }}
+              >
+                <Plus size={16} aria-hidden="true" />
+                {t("controls.newSession")}
+              </button>
+            </>
+          ) : null}
         </div>
       </div>
 
@@ -6789,12 +7212,12 @@ function ProjectSessionsContent({
           <div className={styles.emptyIcon} aria-hidden="true"><Info size={22} /></div>
           <div><h2>{t("sessions.authenticationRequired")}</h2><p>{t("status.unavailable")}</p></div>
         </div>
-      ) : project === undefined ? (
+      ) : !isChat && project === undefined ? (
         <div className={styles.emptyState} role="alert">
           <div className={styles.emptyIcon} aria-hidden="true"><CircleAlert size={22} /></div>
           <div><h2>{t("sessions.notFound")}</h2><Link className={styles.secondaryButton} to="/projects">{t("controls.backToProjects")}</Link></div>
         </div>
-      ) : project.available !== true ? (
+      ) : !isChat && project !== undefined && project.available !== true ? (
         <div className={styles.emptyState} role="status">
           <div className={styles.emptyIcon} aria-hidden="true"><FolderOpen size={22} /></div>
           <div><h2>{t("sessions.projectUnavailable")}</h2><p>{project.path}</p></div>

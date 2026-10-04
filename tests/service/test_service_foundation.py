@@ -28,6 +28,10 @@ from omni.schedule.model import JobSchedule, ScheduleJob
 from omni.schedule.service import ScheduleOccurrence, ScheduleService
 from omni.schedule.store import WorkspaceScheduleStore
 from omni.service.client import RemoteControl, ServiceClient
+from omni.service.conversation_workspaces import (
+    ConversationWorkspaceCatalog,
+    ConversationWorkspaceCatalogError,
+)
 from omni.service.discovery import (
     SERVICE_PROTOCOL_VERSION,
     ServiceDiscovery,
@@ -89,6 +93,30 @@ def test_project_catalog_deduplicates_resolved_aliases_and_preserves_missing_rec
     record = reopened.list()[0]
     assert record.project_id == first.project_id
     assert not record.path.exists()
+
+
+def test_conversation_workspace_catalog_persists_canonical_paths_without_materializing_them(
+    tmp_path: Path,
+) -> None:
+    home = AgentHome(tmp_path / "agent-home")
+    old_chat = tmp_path / "old-chat"
+    current_chat = home.path / "chat"
+    old_chat.mkdir()
+    current_chat.mkdir(parents=True)
+    catalog = ConversationWorkspaceCatalog(home)
+
+    catalog.remember(old_chat)
+    catalog.remember(old_chat / ".")
+    catalog.remember(current_chat)
+
+    assert catalog.list() == (old_chat.resolve(), current_chat.resolve())
+    old_chat.rmdir()
+    assert ConversationWorkspaceCatalog(home).list() == (
+        old_chat.resolve(),
+        current_chat.resolve(),
+    )
+    with pytest.raises(ConversationWorkspaceCatalogError):
+        catalog.remember(home.path / "skills")
 
 
 def test_project_catalog_rejects_agent_home_overlap_and_invalid_file(tmp_path: Path) -> None:

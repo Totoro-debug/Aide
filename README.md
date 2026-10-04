@@ -25,7 +25,7 @@ python -m pip install .
 
 ## Web 界面与服务生命周期
 
-安装 wheel 或 source distribution 后，运行时只需要 Python 及其依赖，不需要 Node.js、npm 或前端源码。直接执行 `omni web`；首次配置或配置需要修复时，会打开对应的设置页面。已有有效配置时，也可运行裸 `omni` 进入 CLI 对话。
+安装 wheel 或 source distribution 后，运行时只需要 Python 及其依赖，不需要 Node.js、npm 或前端源码。直接执行 `omni web` 打开 Omni 对话首页；缺少可用模型时，首页提供配置入口并禁用发送。已有有效配置时，也可运行裸 `omni` 进入 CLI 对话。
 
 ```powershell
 omni web
@@ -38,6 +38,8 @@ omni service stop
 ```
 
 刷新页面或在 30 秒宽限期内重连会恢复已接受的输入、进行中的输出、工具状态和待处理确认；当前运行仍可取消，确认使用原请求。未登记为 Project 的 CLI Workspace 仅在有在线使用者时接收新的 Schedule 执行；最后一个使用者断线后立即暂停新执行，宽限期到期后收尾并释放运行时，保留 Job 和用户文件。已登记且可用的 Project 在服务仍有在线客户端时继续调度。
+
+Web 中未选择 Project 的新对话使用默认目录 `~/.omni/chat`。可在设置的「常规与外观」中修改默认对话目录，离开输入框后自动保存，下一次新建对话立即使用新目录。目录不存在时自动创建；目录无法使用时页面显示错误，可修改设置后重试。旧目录中的历史仍可打开，会话正文与记忆保存在各自 Workspace 中，Agent Home 仅维护目录索引。
 
 Web 中可登记已有目录为 Project，按标题搜索、改名或删除持久化 Session，并查看独立的 Schedule 历史。同一 Workspace 的不同 Session 可以并行运行；同一 Session 只能由一个客户端加载。切换页面后已接受的运行继续执行，空白且未提交的 Session 不保存。移除 Project 会停止其工作并移除登记，目录与运行状态保留；重新登记含用户任务的目录时需显式恢复调度。
 

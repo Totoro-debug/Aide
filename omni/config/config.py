@@ -228,11 +228,17 @@ def _empty_mcp_servers() -> Mapping[str, MCPServerConfiguration]:
 
 
 @dataclass(frozen=True, slots=True)
+class WebConfiguration:
+    default_chat_workspace: str = "~/.omni/chat"
+
+
+@dataclass(frozen=True, slots=True)
 class UserConfiguration:
     runtime: RuntimeConfiguration
     memory: MemoryConfiguration
     models: ModelsConfiguration
     mcp: Mapping[str, MCPServerConfiguration] = field(default_factory=_empty_mcp_servers)
+    web: WebConfiguration = field(default_factory=WebConfiguration)
 
     def resolve_route(self, requested_route: str) -> ResolvedModelRoute:
         """Resolve a Model Route, falling back to a usable default when permitted."""
@@ -1092,6 +1098,17 @@ def _parse_mcp(
     return MappingProxyType(parsed)
 
 
+def _parse_web(document: Mapping[str, object]) -> WebConfiguration:
+    value = document.get("web", {})
+    table = _table(value, "web")
+    default_workspace = table.get("default_chat_workspace", "~/.omni/chat")
+    return WebConfiguration(
+        default_chat_workspace=_string(
+            default_workspace, "web.default_chat_workspace", nonempty=True
+        )
+    )
+
+
 def _parse_configuration(
     document: dict[str, object],
     *,
@@ -1102,6 +1119,7 @@ def _parse_configuration(
         memory=_parse_memory(document, diagnostics=diagnostics),
         models=_parse_models(document, diagnostics=diagnostics),
         mcp=_parse_mcp(document, diagnostics=diagnostics),
+        web=_parse_web(document),
     )
 
 
@@ -1152,6 +1170,7 @@ def _editable_configuration_fields(
         },
         "models": {"providers": providers, "routes": routes},
         "mcp": mcp,
+        "web": {"default_chat_workspace": configuration.web.default_chat_workspace},
     }
 
 
@@ -1209,6 +1228,8 @@ def _editable_field_value(section: str, field: str, value: object) -> object:
             if _parse_default_schedule(value) is None:
                 raise ConfigFieldError(name, "must be a valid five-field cron expression")
             return value
+    elif section == "web" and field == "default_chat_workspace":
+        return _string(value, name, nonempty=True)
     _invalid("config.fields", "contains a field that is not editable")
 
 
@@ -1405,7 +1426,7 @@ def _validate_editable_fields(fields: Mapping[str, object]) -> dict[str, dict[st
         _invalid("config.fields", "must be a table")
     normalized: dict[str, dict[str, object]] = {}
     for section, raw_values in fields.items():
-        if section not in {"runtime", "memory", "models", "mcp"}:
+        if section not in {"runtime", "memory", "models", "mcp", "web"}:
             _invalid("config.fields", "contains a section that is not editable")
         if not isinstance(raw_values, Mapping):
             _invalid(f"config.fields.{section}", "must be a table")
@@ -1725,6 +1746,13 @@ def _safe_web_configuration(document: Mapping[str, object]) -> tuple[UserConfigu
             else:
                 memory[field_name] = memory_value[field_name]
     safe_document["memory"] = memory
+
+    try:
+        web = _parse_web(document)
+    except ConfigError:
+        has_issues = True
+        web = WebConfiguration()
+    safe_document["web"] = {"default_chat_workspace": web.default_chat_workspace}
 
     default_models = _table(default_document.get("models", {}), "models")
     default_providers = _table(default_models.get("providers", {}), "models.providers")

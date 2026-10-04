@@ -36,13 +36,15 @@ async function settingsSection(target, section) {
 async function blurSettingsField(target) {
   await target.evaluate(() => {
     const active = document.activeElement;
+    if (active?.matches('[role="alert"][tabindex="-1"]')) return;
     if (active instanceof globalThis.HTMLInputElement
       || active instanceof globalThis.HTMLTextAreaElement
       || active instanceof globalThis.HTMLSelectElement) {
       active.blur();
       return;
     }
-    const field = document.querySelector("form input:not([type=checkbox]):not(:disabled), form textarea:not(:disabled), form select:not(:disabled)");
+    const field = [...document.querySelectorAll("form input:not([type=checkbox]):not(:disabled), form textarea:not(:disabled), form select:not(:disabled)")]
+      .find((candidate) => candidate.getClientRects().length > 0);
     if (field instanceof globalThis.HTMLElement) {
       field.focus();
       field.blur();
@@ -145,6 +147,15 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   captureConfigResponses(secondPage);
 
   const field = (target, id) => target.locator(`[id="${id}"]`);
+  const openRestartedPage = async (target, launchUrl) => {
+    const exchanged = target.waitForResponse(response => (
+      response.url().endsWith("/api/v1/web/ticket") && response.request().method() === "POST"
+    ));
+    // A new ticket on the same root URL needs a new document to authenticate.
+    await target.goto("about:blank");
+    await target.goto(launchUrl);
+    assert.equal((await exchanged).status(), 200);
+  };
   const openSettings = async (target) => {
     await target.bringToFront();
     await target.getByRole("button", { name: "EN", exact: true }).click();
@@ -410,14 +421,14 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await save(page, 422);
   await expect(page.getByRole("alert").filter({ hasText: "Settings need attention" })).toBeVisible();
   assert.deepEqual(await readFile(configPath), beforeInvalid, "Invalid model candidate changed config bytes");
-  await defaultModel(page).fill("large-model");
 
   let releaseStaleSave;
   let staleSaveArrived;
   const staleSaveGate = new Promise((done) => { releaseStaleSave = done; });
   const staleSaveArrival = new Promise((done) => { staleSaveArrived = done; });
   const delayedStaleSave = async (route) => {
-    if (route.request().method() !== "PATCH") return route.continue();
+    if (route.request().method() !== "PATCH"
+      || route.request().postDataJSON()?.fields?.models?.routes?.chat?.temperature !== 0.8) return route.continue();
     staleSaveArrived();
     await staleSaveGate;
     await route.continue();
@@ -425,18 +436,28 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await page.route("**/api/v1/config", delayedStaleSave);
   const staleResponsePromise = page.waitForResponse((response) => (
     response.url().endsWith("/api/v1/config") && response.request().method() === "PATCH"
+    && response.request().postDataJSON()?.fields?.models?.routes?.chat?.temperature === 0.8
   ));
-  await defaultModel(page).fill("large-model");
-  await chatModel(page).fill("large-model");
+  // Keep the model candidate invalid until all conflicting edits are complete.
   const chatTemperature = field(page, "settings-models-routes-chat-temperature");
   await chatTemperature.fill("0.8");
-  await chatTemperature.press("Tab");
+  await chatModel(page).fill("large-model");
+  await defaultModel(page).fill("large-model");
+  await defaultModel(page).press("Tab");
   await staleSaveArrival;
   await openSettings(secondPage);
+  const competingSave = secondPage.waitForResponse(response => (
+    response.url().endsWith("/api/v1/config") && response.request().method() === "PATCH"
+    && response.request().postDataJSON()?.fields?.models?.routes?.chat?.temperature === 0.1
+  ));
   await field(secondPage, "settings-models-routes-chat-temperature").fill("0.1");
   await save(secondPage);
+  const competingResponse = await competingSave;
+  assert.equal(competingResponse.status(), 200);
+  assert.equal((await competingResponse.json()).fields.models.routes.chat.temperature, 0.1);
   await waitForSavedSettings(secondPage);
   const beforeConflict = await readFile(configPath);
+  await page.bringToFront();
   releaseStaleSave();
   const staleResponse = await staleResponsePromise;
   assert.equal(staleResponse.status(), 409);
@@ -452,8 +473,8 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await waitForSavedSettings(page);
 
   const v1Startup = await control.restart();
-  await page.goto(`${v1Startup.url}/#ticket=${encodeURIComponent(v1Startup.ticket)}`);
-  await secondPage.goto(`${v1Startup.url}/#ticket=${encodeURIComponent(v1Startup.second_ticket)}`);
+  await openRestartedPage(page, `${v1Startup.url}/#ticket=${encodeURIComponent(v1Startup.ticket)}`);
+  await openRestartedPage(secondPage, `${v1Startup.url}/#ticket=${encodeURIComponent(v1Startup.second_ticket)}`);
   await openSettings(page);
   console.log("Settings model/provider/route/MCP E2E: starting old-generation v1 barrier");
   await control.command("model-mcp-arm");
@@ -488,8 +509,8 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
     observation.tools.some((name) => name.endsWith("fixture_echo_v2"))
   )), false, "Saved MCP settings activated before restart");
   const v2Startup = await control.restart();
-  await page.goto(`${v2Startup.url}/#ticket=${encodeURIComponent(v2Startup.ticket)}`);
-  await secondPage.goto(`${v2Startup.url}/#ticket=${encodeURIComponent(v2Startup.second_ticket)}`);
+  await openRestartedPage(page, `${v2Startup.url}/#ticket=${encodeURIComponent(v2Startup.ticket)}`);
+  await openRestartedPage(secondPage, `${v2Startup.url}/#ticket=${encodeURIComponent(v2Startup.second_ticket)}`);
   await openSettings(page);
   console.log("Settings model/provider/route/MCP E2E: explicit restart activated v2 settings");
 

@@ -3388,3 +3388,135 @@ h1 {
     transition-duration: 0.01ms !important;
   }
 }
+
+.chatWorkspaceLayout {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: minmax(170px, 220px) minmax(0, 1fr);
+  gap: 18px;
+}
+
+.chatHistorySidebar {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 10px;
+  border-right: 1px solid var(--border-subtle);
+  padding-right: 12px;
+}
+
+.chatHistoryHeading {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.chatHistoryList {
+  display: grid;
+  min-height: 0;
+  align-content: start;
+  gap: 3px;
+  overflow-y: auto;
+}
+
+.chatHistoryItem {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  font: inherit;
+  padding: 8px;
+  text-align: left;
+}
+
+.chatHistoryItem[data-active="true"],
+.chatHistoryItem:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.chatHistoryItem > span,
+.chatHistoryItem > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatHistoryItem > span {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chatHistoryItem > small {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.chatHistoryItem:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.chatHistoryMore,
+.chatHistoryRefresh {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.chatHistoryRefresh {
+  margin-top: auto;
+}
+
+.chatHistoryStatus,
+.chatHistoryError {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.chatHistoryError {
+  color: var(--danger-text);
+}
+
+.chatWorkspaceContent {
+  min-width: 0;
+  min-height: 0;
+}
+
+@media (max-width: 680px) {
+  .chatWorkspaceLayout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .chatHistorySidebar {
+    max-height: 180px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 0 0 10px;
+  }
+
+  .chatHistoryList {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

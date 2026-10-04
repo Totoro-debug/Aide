@@ -10,6 +10,9 @@ exec_shell = "auto"
 batch_size = 10
 schedule = "0 * * * *"
 
+[web]
+default_chat_workspace = "~/.omni/chat"
+
 # Configure a trusted local MCP Server by uncommenting and editing one item.
 # [mcp.servers.filesystem]
 # enabled = true

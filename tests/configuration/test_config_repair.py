@@ -84,6 +84,17 @@ def test_valid_projection_uses_original_optional_defaults(tmp_path: Path) -> Non
     assert loader.web_snapshot().configuration == loader.load_for_startup()
 
 
+def test_repair_preserves_valid_default_chat_workspace(tmp_path: Path) -> None:
+    content = MINIMAL_VALID_CONFIG + '\n[memory]\nbatch_size = "bad"\n'
+    content += '\n[web]\ndefault_chat_workspace = "D:/custom-chat"\n'
+    loader = _loader(tmp_path, content.encode())
+    snapshot = loader.web_snapshot()
+    assert snapshot.state == "invalid"
+    assert snapshot.fields["web"]["default_chat_workspace"] == "D:/custom-chat"
+    loader.repair_editable_fields(snapshot.revision, _repair_fields(loader))
+    assert loader.load().web.default_chat_workspace == "D:/custom-chat"
+
+
 def test_invalid_untouched_field_never_activates_projection_fallback(tmp_path: Path) -> None:
     loader = _loader(tmp_path, (MINIMAL_VALID_CONFIG + '\n[memory]\nbatch_size = "bad"\n').encode())
     snapshot = loader.web_snapshot()

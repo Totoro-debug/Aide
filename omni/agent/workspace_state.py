@@ -141,19 +141,23 @@ class WorkspaceState:
             return None
         return HOST_FILESYSTEM.require_owned_directory(io_path, within=within)
 
-    def initialize(self, *, agent_home_root: Path) -> None:
+    def initialize(self, *, agent_home_root: Path, allow_agent_home_chat: bool = False) -> None:
         """Create required base state while rejecting redirected known paths."""
         try:
             normalized_agent_home = agent_home_root.resolve(strict=False)
             normalized_state_root = self.path.resolve(strict=False)
-            if normalized_state_root.is_relative_to(
-                normalized_agent_home
-            ) or normalized_agent_home.is_relative_to(normalized_state_root):
-                raise _UnsafeStatePath(self.path)
-
             workspace_root = self.workspace_path.resolve(strict=True)
             if not workspace_root.is_dir():
                 raise _UnsafeStatePath(self.workspace_path)
+
+            overlaps_agent_home = normalized_state_root.is_relative_to(
+                normalized_agent_home
+            ) or normalized_agent_home.is_relative_to(normalized_state_root)
+            chat_exception = allow_agent_home_chat and self._is_agent_home_chat(
+                agent_home_root, normalized_agent_home, workspace_root
+            )
+            if overlaps_agent_home and not chat_exception:
+                raise _UnsafeStatePath(self.path)
 
             self.path.mkdir(exist_ok=True)
             state_root = HOST_FILESYSTEM.require_owned_directory(self.path, within=workspace_root)
@@ -181,3 +185,17 @@ class WorkspaceState:
             raise WorkspaceStateError(affected) from error
         except RuntimeError as error:
             raise WorkspaceStateError(self.path) from error
+
+    def _is_agent_home_chat(
+        self, agent_home_root: Path, normalized_agent_home: Path, workspace_root: Path
+    ) -> bool:
+        agent_home_chat = normalize_workspace_path(agent_home_root) / "chat"
+        workspace_path = normalize_workspace_path(self.workspace_path)
+        if os.path.normcase(str(agent_home_chat)) != os.path.normcase(str(workspace_path)):
+            return False
+        if agent_home_chat.is_symlink() or agent_home_chat.is_junction():
+            return False
+        return (
+            workspace_root == agent_home_chat.resolve(strict=True)
+            and workspace_root.parent == normalized_agent_home
+        )

@@ -36,6 +36,7 @@ from omni.service.client import (
     ServiceClient,
     ServiceStartupError,
 )
+from omni.service.conversation_workspaces import ConversationWorkspaceCatalog
 from omni.service.discovery import (
     ServiceDiscovery,
     create_credential,
@@ -118,11 +119,14 @@ async def _persist_session(
     title: str,
     created_at: datetime,
     content: str,
+    creation_scope: str | None = None,
 ) -> str:
     state = WorkspaceState(workspace)
     state.initialize(agent_home_root=home.path)
     session = Session.create(state, now=lambda: created_at)
     session.update_metadata(title=title)
+    if creation_scope is not None:
+        session.update_metadata(creation_scope=creation_scope)
     session.commit_agent_run(
         [{"role": "user", "content": content}],
         pending_last_compacted=session.last_compacted,
@@ -132,6 +136,271 @@ async def _persist_session(
     )
     await session.wait_for_pending_persist()
     return session.session_id
+
+
+@pytest.mark.asyncio
+async def test_chat_draft_does_not_reuse_or_reclassify_restored_project_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    restored_id = await _persist_session(
+        shared,
+        home=home,
+        title="Project history",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        content="Old history",
+        creation_scope="project",
+    )
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service.projects.register(shared)
+    service.conversation_workspaces.remember(shared)
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        workspace = next(iter(service.workspaces.values()))
+        monkeypatch.setattr(workspace, "_restore_result", SimpleNamespace(session_id=restored_id))
+        created = await service.create_session(client.client_id, workspace.workspace_id)
+        draft_id = cast(str, created["session_id"])
+        assert draft_id != restored_id
+        claimed = await service.claim(client.client_id, workspace.workspace_id, draft_id)
+        assert cast(dict[str, object], claimed["snapshot"])["messages"] == []
+        assert workspace._loops[draft_id].loop.session.metadata["creation_scope"] == "chat"
+        assert not (shared / ".omni" / "sessions" / f"{draft_id}.jsonl").exists()
+        restored = await workspace._create_loop(restored_id, client_id=client.client_id)
+        assert restored.loop.session.metadata["creation_scope"] == "project"
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_connected_web_chat_enters_schedule_admission(tmp_path: Path) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    chat = tmp_path / "chat"
+    config_path = home.path / "config.toml"
+    config_path.write_text(
+        MINIMAL_VALID_CONFIG + f'\n[web]\ndefault_chat_workspace = "{chat.as_posix()}"\n',
+        encoding="utf-8",
+    )
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("web")
+
+        class Sink:
+            async def send_event(self, event: dict[str, object]) -> None:
+                pass
+
+        await service.connect_client(client.client_id, Sink())
+        entry = await service.enter_default_conversation_workspace(client.client_id)
+        workspace = service.workspace(cast(str, entry["workspace_id"]))
+        assert workspace._schedule_admitted
+        await service.disconnect_client(client.client_id)
+        assert not workspace._schedule_admitted
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_web_can_enter_the_default_conversation_workspace_under_agent_home(
+    tmp_path: Path,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    chat = home.path / "chat"
+    (home.path / "config.toml").write_text(
+        MINIMAL_VALID_CONFIG + f'\n[web]\ndefault_chat_workspace = "{chat.as_posix()}"\n',
+        encoding="utf-8",
+    )
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    token = create_credential(home)
+    server = TestServer(create_app(service))
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        await server.start_server()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Omni-Client": client.client_id,
+            "X-Omni-CSRF": token,
+        }
+        async with aiohttp.ClientSession() as http:
+            async with http.post(
+                server.make_url("/api/v1/chat/workspaces/enter"),
+                headers=headers,
+                json={"request_id": "enter-default-chat"},
+            ) as response:
+                assert response.status == 200
+                result = await response.json()
+
+            workspace_id = result["workspace_id"]
+            async with http.post(
+                server.make_url(f"/api/v1/workspaces/{workspace_id}/sessions"),
+                headers=headers,
+                json={"request_id": "create-chat-draft"},
+            ) as response:
+                assert response.status == 200
+                created = await response.json()
+
+            session_id = created["session_id"]
+            session_path = chat / ".omni" / "sessions" / f"{session_id}.jsonl"
+            assert not session_path.exists()
+            workspace = service.workspace(workspace_id)
+            draft = workspace._loops[session_id].loop.session
+            assert draft.metadata["creation_scope"] == "chat"
+
+            async with http.post(
+                server.make_url(f"/api/v1/workspaces/{workspace_id}/sessions/{session_id}/claim"),
+                headers=headers,
+                json={"request_id": "claim-chat-draft"},
+            ) as response:
+                assert response.status == 200
+                claim_response = await response.json()
+            claim = claim_response["claim"]
+
+            draft.commit_agent_run(
+                [{"role": "user", "content": "Persisted from a chat draft"}],
+                pending_last_compacted=draft.last_compacted,
+                pending_action_summary="",
+                restore_before=draft.capture_restore_before(),
+                restore_run_token=uuid4(),
+            )
+            await draft.wait_for_pending_persist()
+            assert (
+                Session.load_header(workspace.workspace_state, session_id).metadata[
+                    "creation_scope"
+                ]
+                == "chat"
+            )
+
+            async with http.post(
+                server.make_url(f"/api/v1/workspaces/{workspace_id}/sessions/{session_id}/release"),
+                headers={**headers, "X-Omni-Claim": claim["reconnect_credential"]},
+                json={"request_id": "release-chat-draft", "claim_version": claim["claim_version"]},
+            ) as response:
+                assert response.status == 200
+                assert (await response.json())["released"] is True
+
+        assert result["directory"] == str(chat.resolve())
+        assert result["project_id"] is None
+        assert (chat / ".omni" / "sessions").is_dir()
+        assert ConversationWorkspaceCatalog(home).list() == (chat.resolve(),)
+        assert service.workspace(result["workspace_id"]).workspace_path == chat.resolve()
+        assert service.projects.list() == ()
+    finally:
+        await server.close()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_chat_history_lists_only_chat_sessions_without_activating_old_workspaces(
+    tmp_path: Path,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    shared = tmp_path / "project-and-chat"
+    old_chat = tmp_path / "old-chat"
+    shared.mkdir()
+    old_chat.mkdir()
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    project_id = service.projects.register(shared).project_id
+    service.conversation_workspaces.remember(shared)
+    service.conversation_workspaces.remember(old_chat)
+    now = datetime(2026, 10, 4, 12, 0, tzinfo=UTC)
+    expected_chat_id = await _persist_session(
+        shared,
+        home=home,
+        title="Chat scoped",
+        created_at=now,
+        content="chat body",
+        creation_scope="chat",
+    )
+    expected_project_id = await _persist_session(
+        shared,
+        home=home,
+        title="Project scoped",
+        created_at=now + timedelta(seconds=1),
+        content="project body",
+        creation_scope="project",
+    )
+    expected_legacy_project_id = await _persist_session(
+        shared,
+        home=home,
+        title="Legacy project",
+        created_at=now + timedelta(seconds=2),
+        content="legacy project body",
+    )
+    expected_legacy_chat_id = await _persist_session(
+        old_chat,
+        home=home,
+        title="Legacy chat",
+        created_at=now + timedelta(seconds=3),
+        content="legacy chat body",
+    )
+    legacy_chat_path = old_chat / ".omni" / "sessions" / f"{expected_legacy_chat_id}.jsonl"
+    legacy_chat_header = legacy_chat_path.read_bytes().split(b"\n", 1)[0]
+    legacy_chat_path.write_bytes(legacy_chat_header + b"\nnot-loaded-by-history-listing\n")
+    token = create_credential(home)
+    server = TestServer(create_app(service))
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        await server.start_server()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Omni-Client": client.client_id,
+        }
+        async with aiohttp.ClientSession() as http:
+            async with http.get(
+                server.make_url("/api/v1/chat/sessions"),
+                headers=headers,
+                params={"limit": "1"},
+            ) as response:
+                assert response.status == 200
+                first_page = await response.json()
+            assert first_page["next_cursor"] is not None
+            async with http.get(
+                server.make_url("/api/v1/chat/sessions"),
+                headers=headers,
+                params={"limit": "1", "cursor": first_page["next_cursor"]},
+            ) as response:
+                assert response.status == 200
+                second_page = await response.json()
+            async with http.get(
+                server.make_url(f"/api/v1/projects/{project_id}/sessions"),
+                headers=headers,
+            ) as response:
+                assert response.status == 200
+                project_page = await response.json()
+
+        sessions = first_page["sessions"] + second_page["sessions"]
+        assert second_page["next_cursor"] is None
+        assert {item["id"] for item in sessions} == {
+            expected_chat_id,
+            expected_legacy_chat_id,
+        }
+        assert {item["title"] for item in sessions} == {
+            "Chat scoped",
+            "Legacy chat",
+        }
+        assert {item["id"] for item in project_page["sessions"]} == {
+            expected_project_id,
+            expected_legacy_project_id,
+        }
+        assert {item["title"] for item in project_page["sessions"]} == {
+            "Project scoped",
+            "Legacy project",
+        }
+        assert all("messages" not in item for item in sessions)
+        assert any(item["directory"] == str(old_chat.resolve()) for item in sessions)
+        assert all(
+            workspace.workspace_path != old_chat.resolve()
+            for workspace in service._workspaces.values()
+        )
+    finally:
+        await server.close()
+        await service.stop()
 
 
 @pytest.mark.asyncio

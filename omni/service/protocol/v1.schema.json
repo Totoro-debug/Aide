@@ -26,6 +26,13 @@
         "schedule": {"type": "string", "minLength": 1}
       }
     },
+    "config_web_fields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["default_chat_workspace"],
+      "properties": {
+        "default_chat_workspace": {"type": "string"}
+      }
+    },
     "config_redacted_secret": {
       "type": "object", "additionalProperties": false,
       "required": ["configured"],
@@ -180,13 +187,14 @@
     },
     "config_fields": {
       "type": "object", "additionalProperties": false,
-      "required": ["runtime", "memory", "models", "mcp"],
+      "required": ["runtime", "memory", "web", "models", "mcp"],
       "properties": {
         "runtime": {
           "$ref": "#/$defs/config_runtime_fields",
           "required": ["max_tool_result_chars", "max_iterations", "enable_skill_always_load", "compact_ratio", "permission_level", "exec_shell"]
         },
         "memory": {"$ref": "#/$defs/config_memory_fields", "required": ["batch_size", "schedule"]},
+        "web": {"$ref": "#/$defs/config_web_fields"},
         "models": {"$ref": "#/$defs/config_models_fields"},
         "mcp": {
           "type": "object",

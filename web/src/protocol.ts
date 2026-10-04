@@ -100,6 +100,9 @@ export interface ConfigFields {
     batch_size: number;
     schedule: string;
   };
+  web: {
+    default_chat_workspace: string;
+  };
   models: ConfigModelsFields;
   mcp: Record<string, ConfigMcpFields>;
 }
@@ -146,6 +149,7 @@ export interface ConfigModelsFields {
 export type ConfigPatchFields = {
   runtime?: Partial<ConfigFields["runtime"]>;
   memory?: Partial<ConfigFields["memory"]>;
+  web?: Partial<ConfigFields["web"]>;
   models?: {
     providers?: Record<string, Partial<Omit<ConfigProviderFields, "api_key">>>;
     routes?: Record<string, Partial<ConfigRouteFields>>;
@@ -513,6 +517,33 @@ export interface ProjectSessionsResponse {
   workspace_id: string;
   sessions: SessionSummary[];
   next_cursor: string | null;
+}
+
+export interface WorkspaceSessionsResponse {
+  workspace_id: string;
+  sessions: SessionSummary[];
+  next_cursor: string | null;
+}
+
+export interface ChatSessionSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  directory: string;
+  available: boolean;
+}
+
+export interface ChatSessionsResponse {
+  sessions: ChatSessionSummary[];
+  next_cursor: string | null;
+}
+
+export interface ChatWorkspaceEntry {
+  request_id: string;
+  workspace_id: string;
+  directory: string;
+  project_id: null;
 }
 
 export interface SessionRenameResponse {

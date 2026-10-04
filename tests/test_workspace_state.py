@@ -140,6 +140,41 @@ def test_initialization_rejects_workspace_beneath_agent_home_without_reading_leg
     assert {path: path.read_bytes() for path in legacy_files} == legacy_files
 
 
+def test_initialization_allows_only_the_explicit_agent_home_chat_workspace(
+    agent_home: Path,
+) -> None:
+    chat = agent_home / "chat"
+    chat.mkdir(parents=True)
+    nested = chat / "nested"
+    nested.mkdir()
+
+    WorkspaceState(chat).initialize(agent_home_root=agent_home, allow_agent_home_chat=True)
+
+    with pytest.raises(WorkspaceStateError):
+        WorkspaceState(nested).initialize(
+            agent_home_root=agent_home, allow_agent_home_chat=True
+        )
+
+
+def test_initialization_does_not_follow_agent_home_chat_redirects(
+    agent_home: Path,
+) -> None:
+    target = agent_home / "skills"
+    target.mkdir(parents=True)
+    chat = agent_home / "chat"
+    try:
+        create_directory_alias(chat, target)
+    except (OSError, subprocess.CalledProcessError) as error:
+        pytest.skip(f"directory junctions are unavailable: {error}")
+
+    with pytest.raises(WorkspaceStateError):
+        WorkspaceState(chat).initialize(
+            agent_home_root=agent_home, allow_agent_home_chat=True
+        )
+
+    assert not (target / ".omni").exists()
+
+
 def test_initialization_rejects_case_and_junction_aliases_of_agent_home(
     agent_home: Path,
     tmp_path: Path,

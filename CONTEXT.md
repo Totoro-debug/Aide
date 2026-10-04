@@ -20,6 +20,10 @@ _Avoid_: Agent Home, install directory, session directory, project ID
 A directory persistently registered in the Web Interface for reuse; it is the Workspace of Conversation Sessions created under it.
 _Avoid_: a copy of Workspace data, Workspace State, backup, project ID
 
+**Default Conversation Workspace**:
+The user-configurable Workspace used for Web Conversation Sessions started without selecting a Project. These Sessions belong to that Workspace and share its Workspace-owned resources.
+_Avoid_: no Workspace, Agent Home, default Project, global Session storage
+
 **Workspace State**:
 Persistent Personal Agent state owned by exactly one Workspace rather than by the installation or operating-system account.
 _Avoid_: Agent Home, project source, global state, cache
@@ -317,5 +321,5 @@ A configured backend that implements model calls for one or more Model Routes.
 _Avoid_: Model Route, model string, gateway
 
 **User Configuration**:
-The single account-global persisted configuration that selects runtime, model, and memory behavior at Agent Service startup. Editing it saves settings for the next startup without replacing the current service's active configuration.
+The single account-global persisted configuration that selects runtime, model, and memory behavior at Agent Service startup. Editing it saves settings for the next startup without replacing the current service's active configuration. The Default Conversation Workspace preference is read from the latest saved configuration when Web starts a new conversation.
 _Avoid_: Agent profile, Session override, per-chat settings, identity prompt, repair mode

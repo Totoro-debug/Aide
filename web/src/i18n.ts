@@ -5,7 +5,14 @@ const resources = {
   en: {
     translation: {
       app: { name: "Omni", subtitle: "Local workbench" },
-      nav: { status: "Status", projects: "Projects", sessions: "Sessions", schedule: "Schedule", settings: "Settings" },
+      nav: { newChat: "New conversation", chatHistory: "Conversations", status: "Status", projects: "Projects", sessions: "Sessions", schedule: "Schedule", settings: "Settings" },
+      chat: {
+        configureModels: "Configure models",
+        historyLoading: "Loading conversations…",
+        workspaceLoading: "Opening conversation workspace…",
+        workspaceUnavailable: "This conversation workspace is unavailable. Check the directory and its permissions, or choose another default workspace in Settings.",
+        configurationUnavailable: "The default conversation workspace setting is invalid. Update it in Settings.",
+      },
       controls: {
         language: "Language",
         theme: "Theme",
@@ -76,6 +83,7 @@ const resources = {
         description: "Runtime, model, route, and MCP controls for the local service.",
         sections: "Settings sections",
         generalAppearance: "General & appearance",
+        defaultChatWorkspace: "Default conversation workspace",
         backToConversation: "Back to conversation",
         keepChanges: "Keep my changes",
         retrySave: "Retry save",
@@ -524,7 +532,14 @@ const resources = {
   "zh-CN": {
     translation: {
       app: { name: "Omni", subtitle: "本地工作台" },
-      nav: { status: "状态", projects: "项目", sessions: "会话", schedule: "调度", settings: "设置" },
+      nav: { newChat: "新建对话", chatHistory: "对话", status: "状态", projects: "项目", sessions: "会话", schedule: "调度", settings: "设置" },
+      chat: {
+        configureModels: "配置模型",
+        historyLoading: "正在加载对话…",
+        workspaceLoading: "正在打开对话工作区…",
+        workspaceUnavailable: "对话工作区不可用。请检查目录和权限，或在设置中更换默认工作区。",
+        configurationUnavailable: "默认对话工作区设置无效。请在设置中修改。",
+      },
       controls: {
         language: "语言",
         theme: "主题",
@@ -595,6 +610,7 @@ const resources = {
         description: "本地服务的运行时、模型、路由与 MCP 控制项。",
         sections: "设置分类",
         generalAppearance: "常规与外观",
+        defaultChatWorkspace: "默认对话工作区",
         backToConversation: "返回对话",
         keepChanges: "保留我的修改",
         retrySave: "重试保存",

@@ -294,7 +294,7 @@ async function conversationAfterRepair(page, details, beforeSocket) {
     ready: window.__startupSocket.readyState,
   })), { created: 1, closed: 0, ready: 1 });
   const firstActiveService = await fetchJson(page, "/service");
-  assert.equal(firstActiveService.body.active_workspace_count, 1, "Available Projects were not activated before Session open");
+  assert.equal(firstActiveService.body.active_workspace_count, 2, "The available Project and default Chat workspace were not activated before Session open");
 
   await keyboardActivate(page.getByRole("navigation").getByRole("link", { name: "Status", exact: true }));
   await expect(page.locator("#status-heading")).toBeVisible();
@@ -340,7 +340,7 @@ async function conversationAfterRepair(page, details, beforeSocket) {
     );
   }, prompt), { timeout: 30000 }).toBe(true);
   const afterService = await fetchJson(page, "/service");
-  assert.equal(afterService.body.active_workspace_count, 2);
+  assert.equal(afterService.body.active_workspace_count, 3);
 }
 
 async function cleanupState(context, harness, root, failure) {
@@ -436,6 +436,11 @@ async function runState(browser, state) {
     const documentResponse = await page.goto(launchUrl);
     assert.equal(documentResponse.status(), 200);
     assert.match(documentResponse.headers()["content-security-policy"] ?? "", /default-src 'self'/);
+    await expect(page.getByRole("heading", { name: "Omni", exact: true }).last()).toBeVisible();
+    await expect(page.getByRole("button", { name: /Send|发送/, exact: true })).toBeDisabled();
+    await page.getByRole("textbox", { name: /Message input|消息输入/, exact: true }).fill("unsent setup draft");
+    await expect(page.getByRole("button", { name: /Send|发送/, exact: true })).toBeDisabled();
+    await page.getByRole("link", { name: /Configure models|配置模型/, exact: true }).click();
     try {
       await page.getByRole("heading", { name: /Settings|设置/, exact: true }).waitFor();
     } catch (error) {
@@ -476,6 +481,8 @@ async function runState(browser, state) {
       await expect(page.locator("#settings-models-providers-openai-local-api_key-value")).toHaveValue("startup-secret-malformed-303");
       await expect(page.locator("#settings-models-providers-openai-local-base_url")).toHaveValue(details.provider_base_url);
       assert.equal((await Promise.all(configBodies)).some((body) => body.includes("startup-secret-malformed-303")), false);
+      // Keep persistence blocked while Tab traverses fields that can auto-save.
+      await keyboardReach(page.getByRole("button", { name: "Retry save", exact: true }));
       await rm(details.backup_blocker, { recursive: true, force: true });
     }
     const repaired = await saveRepair(page, 200);
@@ -508,7 +515,8 @@ async function runState(browser, state) {
     });
     const restartedPage = await context.newPage();
     await restartedPage.goto(details.cold_launch_url);
-    await expect(restartedPage.locator("#status-heading")).toBeVisible();
+    await expect(restartedPage.getByRole("heading", { name: "Omni", exact: true }).last()).toBeVisible();
+    await expect(restartedPage.getByRole("textbox", { name: /Message input|消息输入/, exact: true })).toBeEnabled();
     await restartedPage.getByRole("navigation").getByRole("link", { name: "Settings", exact: true }).click();
     await keyboardActivate(restartedPage.getByRole("navigation", { name: "Settings sections", exact: true })
       .getByRole("button", { name: "Runtime", exact: true }));

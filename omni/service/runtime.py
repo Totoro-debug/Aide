@@ -60,7 +60,7 @@ from omni.agent.tools.tool_gateway import (
     BUILT_IN_TOOL_NAMES,
     BuiltInToolCatalog,
 )
-from omni.agent.workspace_state import WorkspaceState
+from omni.agent.workspace_state import WorkspaceState, WorkspaceStateError
 from omni.config.agent_home import AgentHome
 from omni.config.config import (
     ConfigError,
@@ -90,6 +90,10 @@ from omni.schedule.store import (
     ScheduleStateError,
     ScheduleStoreFaultedError,
     WorkspaceScheduleStore,
+)
+from omni.service.conversation_workspaces import (
+    ConversationWorkspaceCatalog,
+    ConversationWorkspaceCatalogError,
 )
 from omni.service.errors import ServiceError, service_error
 from omni.service.execution import SessionExecution
@@ -319,6 +323,48 @@ def _decode_session_cursor(
     ):
         raise service_error("validation_error", "cursor is invalid.", status=422)
     return updated_at, created_at, session_id
+
+
+def _encode_chat_session_cursor(key: tuple[datetime, datetime, str, str], title_filter: str) -> str:
+    payload = json.dumps(
+        {
+            "title_filter": title_filter,
+            "updated_at": key[0].isoformat(),
+            "created_at": key[1].isoformat(),
+            "id": key[2],
+            "directory": key[3],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_chat_session_cursor(
+    value: str, title_filter: str
+) -> tuple[datetime, datetime, str, str]:
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        payload = json.loads(
+            base64.b64decode(padded, altchars=b"-_", validate=True).decode("utf-8")
+        )
+        if payload["title_filter"] != title_filter:
+            raise ValueError("cursor scope does not match")
+        updated_at = datetime.fromisoformat(payload["updated_at"])
+        created_at = datetime.fromisoformat(payload["created_at"])
+        session_id = payload["id"]
+        directory = payload["directory"]
+    except (KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError) as error:
+        raise service_error("validation_error", "cursor is invalid.", status=422) from error
+    if (
+        updated_at.tzinfo is None
+        or created_at.tzinfo is None
+        or not isinstance(session_id, str)
+        or not session_id
+        or not isinstance(directory, str)
+        or not Path(directory).is_absolute()
+    ):
+        raise service_error("validation_error", "cursor is invalid.", status=422)
+    return updated_at, created_at, session_id, directory
 
 
 def _project_catalog_service_error(error: ProjectCatalogError) -> ServiceError:
@@ -637,11 +683,13 @@ class WorkspaceRecord:
         configuration: UserConfiguration,
         *,
         workspace_id: str | None = None,
+        allow_agent_home_chat: bool = False,
     ) -> None:
         self.service = service
         self.workspace_path = workspace_path
         self.configuration = configuration
         self.workspace_id = workspace_id or str(uuid4())
+        self.allow_agent_home_chat = allow_agent_home_chat
         self.workspace_state: Any = None
         self._restore_result: RestoreResult | None = None
         self._mcp_manager: MCPWorkspaceRuntimeManager | None = None
@@ -749,10 +797,18 @@ class WorkspaceRecord:
         self._schedule_admitted = False
         await self.schedule_service.pause_admission()
 
-    async def create_draft(self, client_id: str, *, reuse_startup_session: bool = True) -> str:
+    async def create_draft(
+        self,
+        client_id: str,
+        *,
+        reuse_startup_session: bool = True,
+        creation_scope: str | None = None,
+    ) -> str:
         if self._closed:
             raise service_error("admission_closed", "Workspace admission is closed.")
-        startup_session_id = None if self._restore_result is None else self._restore_result.session_id
+        startup_session_id = (
+            None if self._restore_result is None else self._restore_result.session_id
+        )
         if (
             reuse_startup_session
             and startup_session_id is not None
@@ -764,6 +820,8 @@ class WorkspaceRecord:
             loop_state = await self._create_loop(None, client_id=client_id)
             is_draft = True
         session_id = loop_state.loop.session.session_id
+        if is_draft and creation_scope is not None:
+            loop_state.loop.session.update_metadata(creation_scope=creation_scope)
         if is_draft:
             self._draft_clients[session_id] = client_id
         return session_id
@@ -1109,6 +1167,8 @@ class WorkspaceRecord:
         title: str | None = None,
         cursor: str | None = None,
         limit: int | None = None,
+        creation_scope: str | None = None,
+        legacy_creation_scope: str | None = None,
     ) -> dict[str, object]:
         """Return a filtered page of durable foreground Session metadata."""
         if limit is not None and (limit < 1 or limit > _MAX_SESSION_PAGE_SIZE):
@@ -1147,6 +1207,10 @@ class WorkspaceRecord:
                 except (OSError, UnicodeError, ValueError):
                     continue
             summary = self._session_summary(session, client_id)
+            if creation_scope is not None:
+                session_scope = session.metadata.get("creation_scope", legacy_creation_scope)
+                if session_scope != creation_scope:
+                    continue
             session_title = cast(str, summary["title"])
             if title_filter and title_filter not in session_title.casefold():
                 continue
@@ -2239,6 +2303,7 @@ class AgentService:
         self._config_projection_error: dict[str, str] | None = None
         self._chat_effort_override: ReasoningEffort | None = None
         self.projects = ProjectCatalog(agent_home)
+        self.conversation_workspaces = ConversationWorkspaceCatalog(agent_home)
 
     async def _activate_workspace(self, workspace: WorkspaceRecord) -> None:
         async with workspace._lock:
@@ -2260,7 +2325,10 @@ class AgentService:
             registered_resources = False
             try:
                 state = WorkspaceState(workspace.workspace_path)
-                state.initialize(agent_home_root=self.agent_home.path)
+                state.initialize(
+                    agent_home_root=self.agent_home.path,
+                    allow_agent_home_chat=workspace.allow_agent_home_chat,
+                )
                 recover_session_deletions(state)
                 restore_manager = RestoreManager(state)
                 workspace._restore_result = await restore_manager.recover_pending()
@@ -2962,7 +3030,9 @@ class AgentService:
         client.reconnect_blocked = False
         return runtime
 
-    async def _get_or_create_workspace(self, path: Path) -> WorkspaceRecord:
+    async def _get_or_create_workspace(
+        self, path: Path, *, allow_agent_home_chat: bool = False
+    ) -> WorkspaceRecord:
         key = os.path.normcase(str(path.resolve(strict=True)))
         async with self._lock:
             workspace_id = self._workspace_keys.get(key)
@@ -2979,7 +3049,11 @@ class AgentService:
                 )
             workspace_id = str(uuid4())
             runtime = WorkspaceRecord(
-                self, path, self.configuration, workspace_id=workspace_id
+                self,
+                path,
+                self.configuration,
+                workspace_id=workspace_id,
+                allow_agent_home_chat=allow_agent_home_chat,
             )
             await runtime.start()
             self._workspace_keys[key] = workspace_id
@@ -3359,6 +3433,8 @@ class AgentService:
                     title=title,
                     cursor=cursor,
                     limit=limit,
+                    creation_scope="project",
+                    legacy_creation_scope="project",
                 ),
             )
 
@@ -3486,10 +3562,84 @@ class AgentService:
                     },
                 }
 
+    async def enter_default_conversation_workspace(
+        self, client_id: str, *, directory: str | None = None
+    ) -> dict[str, object]:
+        client = self._require_client(client_id)
+        if client.kind != "web":
+            raise service_error(
+                "forbidden", "Only Web clients may enter a Conversation Workspace.", status=403
+            )
+        try:
+            known_directories = self.conversation_workspaces.list()
+            if directory is None:
+                configured_path = Path(
+                    self._config_loader.load().web.default_chat_workspace
+                ).expanduser()
+                path = self.conversation_workspaces.validate(configured_path)
+                path.mkdir(parents=True, exist_ok=True)
+            else:
+                requested_path = self.conversation_workspaces.validate(Path(directory))
+                requested_identity = os.path.normcase(str(requested_path))
+                if not any(
+                    os.path.normcase(str(known)) == requested_identity
+                    for known in known_directories
+                ):
+                    raise service_error(
+                        "not_found",
+                        "Conversation Workspace was not found in the saved history.",
+                        status=404,
+                    )
+                path = requested_path
+                if not path.is_dir():
+                    raise service_error(
+                        "not_found", "Conversation Workspace is unavailable.", status=404
+                    )
+            path = path.resolve(strict=True)
+            if not path.is_dir():
+                raise service_error(
+                    "workspace_unavailable",
+                    "The default conversation directory is not a directory.",
+                    status=422,
+                )
+            workspace = await self._get_or_create_workspace(path, allow_agent_home_chat=True)
+            self.conversation_workspaces.remember(path)
+        except ServiceError:
+            raise
+        except ConfigError as error:
+            raise service_error(
+                "config_invalid",
+                "The default conversation directory setting is invalid.",
+                status=422,
+            ) from error
+        except ConversationWorkspaceCatalogError as error:
+            raise service_error(
+                "persistence_error",
+                "The saved Conversation Workspace list could not be read or updated safely.",
+                status=500,
+            ) from error
+        except (OSError, RuntimeError, ValueError, WorkspaceStateError) as error:
+            raise service_error(
+                "workspace_unavailable",
+                "The default conversation directory could not be created or opened. Check its path and permissions.",
+                status=422,
+            ) from error
+        client.attached_workspaces.add(workspace.workspace_id)
+        await self._reconcile_schedule_admission()
+        return {
+            "workspace_id": workspace.workspace_id,
+            "directory": str(path),
+            "project_id": None,
+        }
+
     async def create_project_session(self, client_id: str, project_id: str) -> dict[str, object]:
         async with self._project_lifecycle_lock:
             _record, workspace = await self._project_workspace_owned(client_id, project_id)
-            session_id = await workspace.create_draft(client_id, reuse_startup_session=False)
+            session_id = await workspace.create_draft(
+                client_id,
+                reuse_startup_session=False,
+                creation_scope="project",
+            )
             return {
                 "project_id": project_id,
                 "workspace_id": workspace.workspace_id,
@@ -3813,9 +3963,17 @@ class AgentService:
         return workspace
 
     async def create_session(self, client_id: str, workspace_id: str) -> dict[str, object]:
-        self._require_client(client_id)
+        client = self._require_client(client_id)
         workspace = self.workspace(workspace_id)
-        session_id = await workspace.create_draft(client_id)
+        creation_scope = (
+            "chat"
+            if client.kind == "web"
+            and self.conversation_workspaces.contains(workspace.workspace_path)
+            else None
+        )
+        session_id = await workspace.create_draft(
+            client_id, reuse_startup_session=client.kind != "web", creation_scope=creation_scope
+        )
         return {"workspace_id": workspace_id, "session_id": session_id}
 
     async def claim(
@@ -3878,12 +4036,229 @@ class AgentService:
         client = self._require_client(client_id)
         workspace = self.workspace(workspace_id)
         client.attached_workspaces.add(workspace_id)
+        creation_scope: str | None = None
+        legacy_creation_scope: str | None = None
+        if client.kind == "web" and self.conversation_workspaces.contains(workspace.workspace_path):
+            creation_scope = "chat"
+            workspace_key = os.path.normcase(str(workspace.workspace_path.resolve(strict=False)))
+            legacy_creation_scope = (
+                "project"
+                if any(
+                    os.path.normcase(str(record.path.resolve(strict=False))) == workspace_key
+                    for record in self.projects.list()
+                )
+                else "chat"
+            )
         return await workspace.list_sessions_page(
             client_id,
             title=title,
             cursor=cursor,
             limit=limit,
+            creation_scope=creation_scope,
+            legacy_creation_scope=legacy_creation_scope,
         )
+
+    def list_chat_sessions_page(
+        self,
+        client_id: str,
+        *,
+        title: str | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, object]:
+        client = self._require_client(client_id)
+        if client.kind != "web":
+            raise service_error(
+                "forbidden", "Chat history is only available to Web clients.", status=403
+            )
+        if limit is not None and (
+            isinstance(limit, bool) or limit < 1 or limit > _MAX_SESSION_PAGE_SIZE
+        ):
+            raise service_error(
+                "validation_error",
+                f"limit must be between 1 and {_MAX_SESSION_PAGE_SIZE}.",
+                status=422,
+            )
+        page_limit = 50 if limit is None else limit
+        title_filter = "" if title is None else title.strip().casefold()
+        cursor_key = None if cursor is None else _decode_chat_session_cursor(cursor, title_filter)
+        try:
+            directories = self.conversation_workspaces.list()
+            project_paths = {
+                os.path.normcase(str(record.path.resolve(strict=False)))
+                for record in self.projects.list()
+            }
+        except ProjectCatalogError as error:
+            raise _project_catalog_service_error(error) from error
+        except ConversationWorkspaceCatalogError as error:
+            raise service_error(
+                "persistence_error",
+                "Conversation Workspace history could not be read safely.",
+                status=500,
+            ) from error
+
+        entries: list[
+            tuple[
+                tuple[datetime, datetime, str, str],
+                dict[str, object],
+            ]
+        ] = []
+        for path in directories:
+            directory_identity = os.path.normcase(str(path.resolve(strict=False)))
+            state = WorkspaceState(path)
+            try:
+                sessions_directory = state.existing_sessions_directory()
+                if sessions_directory is None:
+                    continue
+                session_paths = tuple(sessions_directory.glob("*.jsonl"))
+            except (OSError, RuntimeError, ValueError):
+                continue
+            for session_path in session_paths:
+                session_id = session_path.stem
+                try:
+                    if session_deletion_pending(state, session_id):
+                        continue
+                    header = Session.load_header(
+                        state,
+                        session_id,
+                        partition=SessionStoragePartition.FOREGROUND,
+                    )
+                except (OSError, UnicodeError, ValueError, RuntimeError):
+                    continue
+                metadata = header.metadata
+                if "creation_scope" in metadata:
+                    if metadata.get("creation_scope") != "chat":
+                        continue
+                elif directory_identity in project_paths:
+                    continue
+                session_title = metadata.get("title", "Untitled session")
+                if not isinstance(session_title, str):
+                    session_title = "Untitled session"
+                if title_filter and title_filter not in session_title.casefold():
+                    continue
+                key = (
+                    header.updated_at,
+                    header.created_at,
+                    header.session_id,
+                    str(path),
+                )
+                if cursor_key is not None and key >= cursor_key:
+                    continue
+                entries.append(
+                    (
+                        key,
+                        {
+                            "id": header.session_id,
+                            "title": session_title,
+                            "created_at": header.created_at.isoformat(),
+                            "updated_at": header.updated_at.isoformat(),
+                            "directory": str(path),
+                            "available": path.is_dir(),
+                        },
+                    )
+                )
+
+        entries.sort(key=lambda item: item[0], reverse=True)
+        page = entries[:page_limit]
+        next_cursor = (
+            _encode_chat_session_cursor(page[-1][0], title_filter)
+            if len(entries) > len(page) and page
+            else None
+        )
+        return {"sessions": [entry for _key, entry in page], "next_cursor": next_cursor}
+
+    async def release_claim(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+    ) -> None:
+        client = self._require_client(client_id)
+        workspace = self.workspace(workspace_id)
+        client.attached_workspaces.add(workspace_id)
+        workspace.require_claim(client_id, session_id, claim_version, claim_credential)
+        await workspace.release(client_id, session_id)
+
+    async def session_deletion_status(
+        self, client_id: str, workspace_id: str, session_id: str
+    ) -> dict[str, object]:
+        client = self._require_client(client_id)
+        workspace = self.workspace(workspace_id)
+        client.attached_workspaces.add(workspace_id)
+        async with workspace._lock:
+            try:
+                state = session_deletion_status(workspace.workspace_state, session_id)
+            except ValueError as error:
+                raise service_error(
+                    "validation_error", "Session ID is invalid.", status=422
+                ) from error
+            except OSError as error:
+                raise service_error(
+                    "persistence_error",
+                    "Session deletion status could not be read safely.",
+                    status=500,
+                    retryable=True,
+                ) from error
+            if state == "deleted" and session_id in workspace._loops:
+                state = "present"
+            return {
+                "workspace_id": workspace.workspace_id,
+                "session_id": session_id,
+                "state": state,
+            }
+
+    async def claim_session_deletion(
+        self, client_id: str, workspace_id: str, session_id: str
+    ) -> dict[str, object]:
+        client = self._require_client(client_id)
+        workspace = self.workspace(workspace_id)
+        client.attached_workspaces.add(workspace_id)
+        async with workspace._lock:
+            if workspace._closed:
+                raise service_error("admission_closed", "Workspace admission is closed.")
+            try:
+                pending = session_deletion_pending(workspace.workspace_state, session_id)
+            except ValueError as error:
+                raise service_error(
+                    "validation_error", "Session ID is invalid.", status=422
+                ) from error
+            except OSError as error:
+                raise service_error(
+                    "persistence_error",
+                    "Session deletion state could not be read safely.",
+                    status=500,
+                    retryable=True,
+                ) from error
+            if not pending:
+                raise service_error("not_found", "Session deletion is not pending.", status=404)
+            active = workspace._claims.get(session_id)
+            cleanup = workspace._deletion_claims.get(session_id)
+            if active is not None:
+                active = workspace.require_claim(client_id, session_id, active.version)
+                version, credential = active.version, active.credential
+            else:
+                if cleanup is not None and cleanup.client_id != client_id:
+                    raise service_error(
+                        "session_claimed", "Session deletion is claimed by another client."
+                    )
+                if cleanup is None:
+                    version = workspace._claim_versions.get(session_id, 0) + 1
+                    workspace._claim_versions[session_id] = version
+                    cleanup = SessionDeletionClaim(session_id, client_id, version, str(uuid4()))
+                    workspace._deletion_claims[session_id] = cleanup
+                version, credential = cleanup.version, cleanup.credential
+            return {
+                "workspace_id": workspace.workspace_id,
+                "session_id": session_id,
+                "claim": {
+                    "workspace_id": workspace.workspace_id,
+                    "session_id": session_id,
+                    "claim_version": version,
+                    "reconnect_credential": credential,
+                },
+            }
 
     async def rename_session(
         self,

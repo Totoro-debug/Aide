@@ -34,6 +34,7 @@ from omni.utils.validation import (
 __all__ = [
     "RestoreAnchor",
     "Session",
+    "SessionHeader",
     "SessionRestoreBefore",
     "SessionRestoreResult",
     "SessionStoragePartition",
@@ -91,6 +92,16 @@ class SessionRestoreResult:
     anchor_id: int
     removed_messages: int
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class SessionHeader:
+    """Metadata decoded from the first persisted Session record only."""
+
+    session_id: str
+    created_at: datetime
+    updated_at: datetime
+    metadata: dict[str, Any]
 
 
 class Session:
@@ -249,6 +260,45 @@ class Session:
             partition=resolved_partition,
             now=now,
         )
+
+    @classmethod
+    def load_header(
+        cls,
+        workspace_state: WorkspaceState,
+        session_id: str,
+        *,
+        partition: SessionStoragePartition | None = None,
+    ) -> SessionHeader:
+        """Read and validate a persisted Session header without loading its body."""
+        resolved_partition = _resolve_partition(session_id, partition)
+        if resolved_partition is SessionStoragePartition.FOREGROUND:
+            from omni.agent.session.deletion import session_deletion_pending
+
+            if session_deletion_pending(workspace_state, session_id):
+                from omni.agent.session.deletion import SessionDeletionPending
+
+                raise SessionDeletionPending(session_id)
+        sessions_directory = _existing_sessions_directory(workspace_state, resolved_partition)
+        if sessions_directory is None:
+            raise FileNotFoundError(_storage_directory(workspace_state, resolved_partition))
+        path = HOST_FILESYSTEM.require_owned_regular_file(
+            sessions_directory / f"{session_id}.jsonl",
+            within=sessions_directory,
+        )
+        with HOST_FILESYSTEM.path_for_io(path).open("rb") as stream:
+            line = stream.readline()
+        if not line.endswith(b"\n"):
+            raise ValueError("Session JSONL must contain a complete header record")
+        try:
+            header = json.loads(line.decode("utf-8"))
+            if not isinstance(header, dict):
+                raise ValueError("Session header record must be an object")
+            loaded_id, created_at, updated_at, _last_compacted, metadata = _parse_header(header)
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("Session JSONL contains a malformed header") from error
+        if loaded_id != session_id:
+            raise ValueError("Session metadata ID does not match its file name")
+        return SessionHeader(loaded_id, created_at, updated_at, metadata)
 
     @property
     def session_id(self) -> str:

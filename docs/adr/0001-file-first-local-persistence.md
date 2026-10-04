@@ -8,9 +8,11 @@ Omni stores configuration, Project registrations, and Workspace-owned state as i
 
 ## Agent Home and Workspace boundaries
 
-Agent Home is fixed at `~/.omni/` for the current operating-system account, without profiles or configurable data roots. It owns global `config.toml`, user-authored `skills/`, the durable `projects.json` catalog, and service discovery and locking state. Project registrations are references to existing directories, not copies of Workspace data. Legacy Agent Home Runtime Log files remain untouched.
+Agent Home is fixed at `~/.omni/` for the current operating-system account, without profiles or configurable data roots. It owns global `config.toml`, user-authored `skills/`, the durable `projects.json` catalog, the `conversation-workspaces.json` directory index, and service discovery and locking state. Both catalogs contain normalized directory references, not copies of Workspace data or service-lifetime Workspace IDs. Legacy Agent Home Runtime Log files remain untouched.
 
-Each Workspace owns its non-global persistent state under `<workspace>/.omni/`. CLI startup selects the current directory; Web selects a registered Project directory. Directory identity is normalized and resolved for shared runtime ownership. Omni does not infer a Git root, search ancestors, or fall back to Agent Home or temporary storage when Workspace State cannot be initialized safely.
+Each Workspace owns its non-global persistent state under `<workspace>/.omni/`. CLI startup selects the current directory; Web selects a registered Project or the Default Conversation Workspace, initially `~/.omni/chat`. The saved default-directory preference applies to the next non-Project conversation immediately; old Sessions remain in their original directories. Directory identity is normalized and resolved for shared runtime ownership. Omni does not infer a Git root, search ancestors, or fall back to Agent Home or temporary storage when Workspace State cannot be initialized safely.
+
+The dedicated Web entry may create a missing default directory. Workspace State inside Agent Home is permitted only for the direct `chat` directory; symlinks, Windows junctions and redirected state paths cannot widen this exception to other Agent Home management directories. File Tool authorization and protected Restore paths retain their existing rules. History discovery reads Session headers without activating Workspace resources or returning conversation bodies. New Session metadata records immutable `creation_scope` (`chat` or `project`), while legacy Sessions are classified by their normalized directory's current Project registration. Empty drafts stay in memory; Restore preserves creation scope.
 
 ```text
 .omni/

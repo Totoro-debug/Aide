@@ -13,6 +13,9 @@ import type {
   ScheduleJobsResponse,
   RegisteredClient,
   ProjectSessionsResponse,
+  WorkspaceSessionsResponse,
+  ChatSessionsResponse,
+  ChatWorkspaceEntry,
   SessionClaimResponse,
   SessionCreation,
   SessionDeletion,
@@ -70,6 +73,154 @@ export class ServiceCommandError extends Error {
 export interface EventStreamConnection {
   close: () => void;
   sendCommand: (command: ClientCommand) => Promise<ServiceCommandResult>;
+}
+
+type WorkspaceSessionCreation = Omit<SessionCreation, "project_id"> & { project_id: null };
+type WorkspaceSessionClaimResponse = Omit<SessionClaimResponse, "project_id"> & { project_id: null };
+type WorkspaceSessionDeletion = Omit<SessionDeletion, "project_id">;
+type WorkspaceSessionDeletionClaim = Omit<SessionDeletionClaim, "project_id"> & { project_id: null };
+type WorkspaceSessionDeletionStatus = Omit<SessionDeletionStatus, "project_id"> & { project_id: null };
+type WorkspaceSessionRenameResponse = Omit<SessionRenameResponse, "project_id">;
+
+export function enterChatWorkspace(directory?: string): Promise<ChatWorkspaceEntry> {
+  return request<ChatWorkspaceEntry>("/chat/workspaces/enter", {
+    method: "POST",
+    mutation: true,
+    body: { request_id: createRequestId(), ...(directory === undefined ? {} : { directory }) },
+  });
+}
+
+export function getChatSessions(
+  options: { title?: string; cursor?: string; limit?: number } = {},
+): Promise<ChatSessionsResponse> {
+  const query = new URLSearchParams();
+  if (options.title !== undefined) query.set("title", options.title);
+  if (options.cursor !== undefined) query.set("cursor", options.cursor);
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  const queryString = query.toString();
+  return request<ChatSessionsResponse>(`/chat/sessions${queryString ? `?${queryString}` : ""}`);
+}
+
+export async function getWorkspaceSessions(
+  workspaceId: string,
+  options: { title?: string; cursor?: string; limit?: number } = {},
+): Promise<WorkspaceSessionsResponse> {
+  const query = new URLSearchParams();
+  if (options.title !== undefined) query.set("title", options.title);
+  if (options.cursor !== undefined) query.set("cursor", options.cursor);
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  const queryString = query.toString();
+  const response = await request<Omit<WorkspaceSessionsResponse, "workspace_id">>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/sessions${queryString ? `?${queryString}` : ""}`,
+  );
+  return { ...response, workspace_id: workspaceId };
+}
+
+export function createWorkspaceSession(workspaceId: string): Promise<WorkspaceSessionCreation> {
+  return request<WorkspaceSessionCreation>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
+    { method: "POST", mutation: true, body: { request_id: createRequestId() } },
+  );
+}
+
+export function claimWorkspaceSession(
+  workspaceId: string,
+  sessionId: string,
+): Promise<WorkspaceSessionClaimResponse> {
+  return request<WorkspaceSessionClaimResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/claim`,
+    { method: "POST", mutation: true, body: { request_id: createRequestId() } },
+  );
+}
+
+export function getWorkspaceSession(
+  workspaceId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+): Promise<SessionSnapshot> {
+  return request<{ snapshot: SessionSnapshot }>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}?claim_version=${claimVersion}`,
+    { extraHeaders: { "X-Omni-Claim": claimCredential } },
+  ).then((response) => response.snapshot);
+}
+
+export function releaseWorkspaceSession(
+  workspaceId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+): Promise<SessionRelease> {
+  return request<SessionRelease>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/release`,
+    {
+      method: "POST",
+      mutation: true,
+      body: { request_id: createRequestId(), claim_version: claimVersion },
+      extraHeaders: { "X-Omni-Claim": claimCredential },
+    },
+  );
+}
+
+export function renameWorkspaceSession(
+  workspaceId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+  title: string,
+  metadataVersion: number,
+): Promise<WorkspaceSessionRenameResponse> {
+  return request<WorkspaceSessionRenameResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: "PATCH",
+      mutation: true,
+      body: {
+        request_id: createRequestId(),
+        claim_version: claimVersion,
+        metadata_version: metadataVersion,
+        title,
+      },
+      extraHeaders: { "X-Omni-Claim": claimCredential },
+    },
+  );
+}
+
+export function deleteWorkspaceSession(
+  workspaceId: string,
+  sessionId: string,
+  claimVersion: number,
+  claimCredential: string,
+  requestId: string,
+): Promise<WorkspaceSessionDeletion> {
+  return request<WorkspaceSessionDeletion>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: "DELETE",
+      mutation: true,
+      body: { request_id: requestId, claim_version: claimVersion, confirm: true },
+      extraHeaders: { "X-Omni-Claim": claimCredential },
+    },
+  );
+}
+
+export function getWorkspaceSessionDeletionStatus(
+  workspaceId: string,
+  sessionId: string,
+): Promise<WorkspaceSessionDeletionStatus> {
+  return request<WorkspaceSessionDeletionStatus>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/deletion-status`,
+  );
+}
+
+export function claimWorkspaceSessionDeletion(
+  workspaceId: string,
+  sessionId: string,
+): Promise<WorkspaceSessionDeletionClaim> {
+  return request<WorkspaceSessionDeletionClaim>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/deletion-claim`,
+    { method: "POST", mutation: true, body: { request_id: createRequestId() } },
+  );
 }
 
 export function setCsrfToken(value: string): void {

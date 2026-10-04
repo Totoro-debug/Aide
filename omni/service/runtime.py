@@ -2595,6 +2595,36 @@ class AgentService:
         )
         return self._config_response()
 
+    def available_models_view(self) -> dict[str, object]:
+        """Return active provider models with capacities and the active default route."""
+        configuration = self.configuration
+        if configuration is None:
+            return {"models": [], "default_combination": None}
+
+        capacities = configuration.effective_model_context_windows()
+        models = [
+            {
+                "provider_id": provider_id,
+                "model": model,
+                "context_window": capacities[provider_id][model],
+            }
+            for provider_id, provider in configuration.models.providers.items()
+            if provider.is_usable
+            for model in provider.models
+            if model in capacities[provider_id]
+        ]
+        try:
+            default = configuration.resolve_route("default")
+        except ConfigError:
+            default_combination = None
+        else:
+            default_combination = {
+                "provider_id": default.provider.provider_id,
+                "model": default.route.model,
+                "reasoning_effort": default.route.reasoning_effort,
+            }
+        return {"models": models, "default_combination": default_combination}
+
     def _configuration_request_result(
         self, request_id: str, fingerprint: str
     ) -> dict[str, object] | None:

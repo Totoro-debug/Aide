@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import pytest
 
+from omni.agent.context.budget import ContextBudget
 from omni.agent.runner import AgentRunner
 from omni.agent.tools.tool_gateway import ModelToolCall, ToolResult
 from omni.config.config import (
@@ -127,6 +128,35 @@ def same_provider_routed_configuration() -> UserConfiguration:
             routes={**default.models.routes, "chat": chat_route},
         ),
     )
+
+
+def test_model_router_status_and_budget_use_provider_model_context_window() -> None:
+    base = configuration()
+    provider = replace(
+        base.models.providers["default-provider"],
+        model_context_windows={"default-model": 32_000},
+    )
+    config = replace(
+        base,
+        models=replace(base.models, providers={"default-provider": provider}),
+    )
+    router = ModelRouter(
+        configuration=config,
+        provider_factory=lambda _: ScriptedFakeProvider(),
+        clock=FakeClock(NOW),
+        jitter=None,
+    )
+
+    status = router.route_status("chat")
+    budget = ContextBudget(
+        context_window=status.context_window,
+        max_output=status.max_output,
+        compact_ratio=0.9,
+    )
+
+    assert status.context_window == 32_000
+    assert budget.available_context == 27_904
+    assert budget.compact_context_window == 25_114
 
 
 def memory_configuration() -> UserConfiguration:

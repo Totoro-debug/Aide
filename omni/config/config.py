@@ -138,6 +138,16 @@ class ProviderConfiguration:
     base_url: str
     api_key: str
     models: tuple[str, ...]
+    model_context_windows: Mapping[str, int] = field(default_factory=lambda: MappingProxyType({}))
+
+    @property
+    def is_usable(self) -> bool:
+        return (
+            self.protocol in {"anthropic", "openai-compatible"}
+            and _has_absolute_http_url(self.base_url)
+            and bool(self.api_key.strip())
+            and bool(self.models)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,12 +262,41 @@ class UserConfiguration:
         if candidate is None:
             raise _route_unavailable_error(self.models)
         provider, route = candidate
+        context_window = provider.model_context_windows.get(route.model, route.context_window)
+        if context_window != route.context_window:
+            route = replace(route, context_window=context_window)
         return ResolvedModelRoute(
             requested_route=requested_route,
             selected_route=selected_route,
             provider=provider,
             route=route,
             used_default=selected_route != requested_route,
+        )
+
+    def effective_model_context_windows(self) -> Mapping[str, Mapping[str, int]]:
+        """Return explicit capacities plus values recoverable from legacy default/chat routes."""
+        capacities = {
+            provider_id: dict(provider.model_context_windows)
+            for provider_id, provider in self.models.providers.items()
+        }
+        explicit = {
+            (provider_id, model)
+            for provider_id, provider in self.models.providers.items()
+            for model in provider.model_context_windows
+        }
+        for route_name in ("default", "chat"):
+            try:
+                resolved = self.resolve_route(route_name)
+            except ConfigError:
+                continue
+            identity = (resolved.provider.provider_id, resolved.route.model)
+            if identity not in explicit:
+                capacities[identity[0]][identity[1]] = resolved.route.context_window
+        return MappingProxyType(
+            {
+                provider_id: MappingProxyType(provider_capacities)
+                for provider_id, provider_capacities in capacities.items()
+            }
         )
 
 
@@ -506,14 +545,9 @@ def _usable_route(
     if route is None:
         return None
     provider = models.providers.get(route.provider_id)
-    if provider is None or provider.protocol not in {"anthropic", "openai-compatible"}:
+    if provider is None or not provider.is_usable:
         return None
-    if (
-        not _has_absolute_http_url(provider.base_url)
-        or not provider.api_key.strip()
-        or not provider.models
-        or route.model not in provider.models
-    ):
+    if route.model not in provider.models:
         return None
     return provider, route
 
@@ -859,12 +893,26 @@ def _parse_provider(provider_id: str, value: object) -> ProviderConfiguration:
         if model in models:
             _invalid(f"{prefix}.models", "must contain unique model IDs")
         models.append(model)
+    context_values = table.get("model_context_windows", {})
+    if not isinstance(context_values, Mapping):
+        _invalid(f"{prefix}.model_context_windows", "must be a table of model capacities")
+    model_context_windows: dict[str, int] = {}
+    for model_value, context_value in context_values.items():
+        if not isinstance(model_value, str):
+            _invalid(f"{prefix}.model_context_windows", "must contain string model IDs")
+        capacity_field = f"{prefix}.model_context_windows.{model_value}"
+        if model_value not in models:
+            _invalid(capacity_field, "must reference a model in the provider model list")
+        model_context_windows[model_value] = _integer(
+            context_value, capacity_field, 1024, 10_000_000
+        )
     return ProviderConfiguration(
         provider_id=provider_id,
         protocol=_string(_required(table, "protocol", f"{prefix}.protocol"), f"{prefix}.protocol"),
         base_url=_string(_required(table, "base_url", f"{prefix}.base_url"), f"{prefix}.base_url"),
         api_key=_string(_required(table, "api_key", f"{prefix}.api_key"), f"{prefix}.api_key"),
         models=tuple(models),
+        model_context_windows=MappingProxyType(model_context_windows),
     )
 
 
@@ -873,6 +921,7 @@ def _parse_route(
     value: object,
     *,
     diagnostics: list[ConfigurationDiagnosticValue] | None,
+    providers: Mapping[str, ProviderConfiguration] | None = None,
 ) -> RouteConfiguration:
     prefix = f"models.routes.{route_name}"
     if route_name not in _ROUTE_NAMES:
@@ -897,15 +946,20 @@ def _parse_route(
         1,
         9_999_999,
     )
-    if max_output >= context_window:
+    model = _string(
+        _required(table, "model", f"{prefix}.model"), f"{prefix}.model", nonempty=True
+    )
+    provider = providers.get(provider_id) if providers is not None else None
+    effective_context_window = (
+        provider.model_context_windows.get(model, context_window)
+        if provider is not None
+        else context_window
+    )
+    if max_output >= effective_context_window:
         _invalid(f"{prefix}.max_output", "must be less than context_window")
     return RouteConfiguration(
         provider_id=provider_id,
-        model=_string(
-            _required(table, "model", f"{prefix}.model"),
-            f"{prefix}.model",
-            nonempty=True,
-        ),
+        model=model,
         context_window=context_window,
         max_output=max_output,
         temperature=_number(
@@ -945,7 +999,7 @@ def _parse_models(
         for provider_id, provider in provider_tables.items()
     }
     routes = {
-        route_name: _parse_route(route_name, route, diagnostics=diagnostics)
+        route_name: _parse_route(route_name, route, diagnostics=diagnostics, providers=providers)
         for route_name, route in route_tables.items()
         if route_name in _ROUTE_NAMES
     }
@@ -1130,11 +1184,13 @@ def _configuration_revision(content: bytes) -> str:
 def _editable_configuration_fields(
     configuration: UserConfiguration,
 ) -> Mapping[str, Mapping[str, object]]:
+    effective_capacities = configuration.effective_model_context_windows()
     providers = {
         provider_id: {
             "protocol": provider.protocol,
             "base_url": provider.base_url,
             "models": provider.models,
+            "model_context_windows": dict(effective_capacities[provider_id]),
             "api_key": {"configured": bool(provider.api_key)},
         }
         for provider_id, provider in configuration.models.providers.items()
@@ -1266,7 +1322,7 @@ def _validate_provider_fields(provider_id: str, value: object) -> dict[str, obje
     if not _PROVIDER_ID_PATTERN.fullmatch(provider_id):
         _invalid(field, "must use a lowercase kebab-case provider ID")
     table = _editable_table(value, field)
-    _reject_unknown_fields(table, {"protocol", "base_url", "models"}, field)
+    _reject_unknown_fields(table, {"protocol", "base_url", "models", "model_context_windows"}, field)
     normalized: dict[str, object] = {}
     if "protocol" in table:
         protocol = _string(table["protocol"], f"{field}.protocol")
@@ -1280,6 +1336,19 @@ def _validate_provider_fields(provider_id: str, value: object) -> dict[str, obje
         normalized["base_url"] = base_url
     if "models" in table:
         normalized["models"] = _editable_string_array(table["models"], f"{field}.models")
+    if "model_context_windows" in table:
+        context_values = _editable_table(
+            table["model_context_windows"], f"{field}.model_context_windows"
+        )
+        normalized["model_context_windows"] = {
+            model: _integer(
+                context_window,
+                f"{field}.model_context_windows.{model}",
+                1024,
+                10_000_000,
+            )
+            for model, context_window in context_values.items()
+        }
     return normalized
 
 
@@ -1314,9 +1383,6 @@ def _validate_route_fields(route_name: str, value: object) -> dict[str, object]:
         normalized["max_output"] = _integer(
             table["max_output"], f"{field}.max_output", 1, 9_999_999
         )
-    if "context_window" in normalized and "max_output" in normalized:
-        if cast(int, normalized["max_output"]) >= cast(int, normalized["context_window"]):
-            _invalid(f"{field}.max_output", "must be less than context_window")
     if "temperature" in table:
         normalized["temperature"] = _number(table["temperature"], f"{field}.temperature", 0, 2)
     if "reasoning_effort" in table:
@@ -1492,6 +1558,25 @@ def _set_toml_table_value(table: MutableMapping[str, object], key: str, value: o
         table[key] = value
 
 
+def _merge_toml_table_value(
+    table: MutableMapping[str, object], key: str, values: Mapping[str, object]
+) -> None:
+    if not values:
+        table.pop(key, None)
+        return
+    existing = table.get(key)
+    if isinstance(existing, MutableMapping):
+        nested = cast(MutableMapping[str, object], existing)
+    else:
+        nested = tomlkit.table()
+        table[key] = nested
+    for existing_key in tuple(nested):
+        if existing_key not in values:
+            del nested[existing_key]
+    for nested_key, nested_value in values.items():
+        nested[nested_key] = nested_value
+
+
 def _apply_model_fields(
     document: MutableMapping[str, object], values: Mapping[str, object]
 ) -> None:
@@ -1507,7 +1592,10 @@ def _apply_model_fields(
             if "api_key" not in table:
                 table["api_key"] = ""
             for field, value in provider.items():
-                _set_toml_table_value(table, field, value)
+                if field == "model_context_windows" and isinstance(value, Mapping):
+                    _merge_toml_table_value(table, field, cast(Mapping[str, object], value))
+                else:
+                    _set_toml_table_value(table, field, value)
     if "routes" in values:
         routes = _mutable_toml_table(models, "routes", "models.routes")
         route_values = cast(Mapping[str, Mapping[str, object]], values["routes"])
@@ -1697,6 +1785,11 @@ def _safe_projection_row[T](
             if name not in row:
                 raise
             field_value = row[name]
+            if name == "model_context_windows" and nested and isinstance(field_value, Mapping):
+                values = dict(field_value)
+                values.pop(relative.removeprefix("model_context_windows."), None)
+                row[name] = values
+                continue
             if nested and isinstance(field_value, Mapping):
                 values = dict(field_value)
                 values.pop(nested, None)
@@ -1794,7 +1887,13 @@ def _safe_web_configuration(document: Mapping[str, object]) -> tuple[UserConfigu
             has_issues = True
         provider = _safe_projection_row(
             raw_provider,
-            {"protocol": "openai-compatible", "base_url": "", "api_key": "", "models": []},
+            {
+                "protocol": "openai-compatible",
+                "base_url": "",
+                "api_key": "",
+                "models": [],
+                "model_context_windows": {},
+            },
             f"models.providers.{parse_id}",
             partial(_parse_provider, parse_id),
         )
@@ -1806,8 +1905,13 @@ def _safe_web_configuration(document: Mapping[str, object]) -> tuple[UserConfigu
             "base_url": provider.base_url,
             "api_key": provider.api_key,
             "models": list(provider.models),
+            "model_context_windows": dict(provider.model_context_windows),
         }
 
+    parsed_providers = {
+        provider_id: _parse_provider(provider_id, provider)
+        for provider_id, provider in providers.items()
+    }
     routes: dict[str, object] = (
         {
             str(route_name): dict(route)
@@ -1829,7 +1933,7 @@ def _safe_web_configuration(document: Mapping[str, object]) -> tuple[UserConfigu
             raw_route,
             default_route,
             f"models.routes.{route_name}",
-            partial(_parse_route, route_name, diagnostics=[]),
+            partial(_parse_route, route_name, diagnostics=[], providers=parsed_providers),
         )
         routes[route_name] = {
             "provider_id": route.provider_id,

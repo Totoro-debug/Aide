@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -11,7 +12,7 @@ import pytest_asyncio
 from aiohttp.test_utils import BaseTestServer, TestServer
 
 from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
+from omni.config.config import ConfigLoader, ProviderConfiguration
 from omni.service.discovery import create_credential
 from omni.service.runtime import AgentService
 from omni.service.transport import create_app
@@ -85,6 +86,86 @@ async def test_config_get_returns_safe_structured_fields(config_http: ConfigHttp
     assert body["fields"]["models"]["providers"]["primary"]["api_key"] == {"configured": True}
     assert "minimal-secret" not in str(body)
     assert body["application"]["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_available_models_exposes_active_capacity_and_default_without_secrets(
+    config_http: ConfigHttp,
+) -> None:
+    service, server, client_id, control = config_http
+    assert control is not None
+    token = create_credential(service.agent_home)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Omni-Client": client_id,
+        "X-Omni-Control": control,
+    }
+
+    async with aiohttp.ClientSession() as http:
+        initial_response = await http.get(
+            server.make_url("/api/v1/models/available"), headers=headers
+        )
+        initial = await initial_response.json()
+        saved = await service.update_configuration(
+            "save-model-context-window",
+            cast(str, service.config_view()["revision"]),
+            {
+                "models": {
+                    "providers": {
+                        "primary": {
+                            "model_context_windows": {"small-model": 16384}
+                        }
+                    }
+                }
+            },
+            client_id=client_id,
+        )
+        active_response = await http.get(
+            server.make_url("/api/v1/models/available"), headers=headers
+        )
+        active = await active_response.json()
+
+    assert initial_response.status == active_response.status == 200
+    assert initial == {
+        "models": [
+            {"provider_id": "primary", "model": "small-model", "context_window": 8192}
+        ],
+        "default_combination": {
+            "provider_id": "primary",
+            "model": "small-model",
+            "reasoning_effort": "medium",
+        },
+    }
+    assert "minimal-secret" not in str(initial)
+    assert active == initial
+    assert cast(dict[str, object], saved["application"])["restart_required"] is True
+    assert service.configuration is not None
+    assert service.configuration.resolve_route("chat").route.context_window == 8192
+
+
+@pytest.mark.asyncio
+async def test_available_models_excludes_unusable_providers(config_http: ConfigHttp) -> None:
+    service, _server, _client_id, _control = config_http
+    configuration = service.configuration
+    assert configuration is not None
+    provider = configuration.models.providers["primary"]
+    unavailable = {
+        "no-key": replace(provider, provider_id="no-key", api_key=" "),
+        "bad-url": replace(provider, provider_id="bad-url", base_url="invalid"),
+        "bad-protocol": replace(provider, provider_id="bad-protocol", protocol="unsupported"),
+    }
+    known: dict[str, ProviderConfiguration] = {
+        name: replace(value, model_context_windows={"small-model": 16384})
+        for name, value in unavailable.items()
+    }
+    service.configuration = replace(
+        configuration,
+        models=replace(configuration.models, providers={"primary": provider, **known}),
+    )
+
+    assert service.available_models_view()["models"] == [
+        {"provider_id": "primary", "model": "small-model", "context_window": 8192}
+    ]
 
 
 @pytest.mark.asyncio

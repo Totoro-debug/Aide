@@ -255,6 +255,14 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
     const text = await readFile(path, "utf8");
     return text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
   };
+  const availableModels = async (target) => target.evaluate(async () => {
+    const credential = window.__omniTestControlCredential;
+    const response = await globalThis.fetch("/api/v1/models/available", {
+      credentials: "include",
+      headers: credential == null ? {} : { "X-Omni-Control": credential },
+    });
+    return { status: response.status, body: await response.json() };
+  });
   const primaryApiKeyAction = (target) => field(target, "settings-models-providers-primary-api_key-action");
   const primaryApiKeyValue = (target) => field(target, "settings-models-providers-primary-api_key-value");
   const retiredApiKeyAction = (target) => field(target, "settings-models-providers-retired-api_key-action");
@@ -262,10 +270,25 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   const remoteHeaderValue = (target) => field(target, "settings-mcp-remote-headers-Authorization-value");
   const defaultModel = (target) => field(target, "settings-models-routes-default-model");
   const chatModel = (target) => field(target, "settings-models-routes-chat-model");
+  const smallModelContextWindow = (target) => field(target, "settings-models-providers-primary-model_context_windows-small-model");
+  const largeModelContextWindow = (target) => field(target, "settings-models-providers-primary-model_context_windows-large-model");
 
   const initial = await openSettings(page);
   assert.equal(initial.fields.models.providers.primary.models[0], "small-model");
   assert.equal(initial.fields.models.routes.default.model, "small-model");
+  const defaultReasoningEffort = initial.fields.models.routes.default.reasoning_effort;
+  assert.equal(await smallModelContextWindow(page).inputValue(), "8192");
+  assert.equal(await largeModelContextWindow(page).inputValue(), "");
+  const activeModels = await availableModels(page);
+  assert.equal(activeModels.status, 200);
+  assert.deepEqual(activeModels.body.models, [
+    { provider_id: "primary", model: "small-model", context_window: 8192 },
+  ]);
+  assert.deepEqual(activeModels.body.default_combination, {
+    provider_id: "primary",
+    model: "small-model",
+    reasoning_effort: defaultReasoningEffort,
+  });
   assert.equal(initial.fields.mcp.fixture.transport, "stdio");
   assert.equal(initial.fields.mcp.remote.headers.Authorization.configured, true);
   for (const secret of [
@@ -478,6 +501,23 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await page.getByRole("button", { name: "Reload saved values", exact: true }).click();
   await expect(defaultModel(page)).toHaveValue("small-model");
   await expect(chatModel(page)).toHaveValue("small-model");
+  const capacitySave = page.waitForResponse((response) => (
+    response.url().endsWith("/api/v1/config")
+    && response.request().method() === "PATCH"
+    && response.request().postDataJSON()?.fields?.models?.providers?.primary?.model_context_windows?.["large-model"] === 65536
+  ));
+  await largeModelContextWindow(page).fill("65536");
+  await largeModelContextWindow(page).press("Tab");
+  const capacityResponse = await capacitySave;
+  assert.equal(capacityResponse.status(), 200, "Model capacity must save automatically on blur");
+  const capacitySaved = await capacityResponse.json();
+  assert.equal(capacitySaved.fields.models.providers.primary.model_context_windows["large-model"], 65536);
+  assert.equal(capacitySaved.application.status, "restart-required");
+  await waitForSavedSettings(page);
+  const beforeCapacityRestart = await availableModels(page);
+  assert.deepEqual(beforeCapacityRestart.body.models, [
+    { provider_id: "primary", model: "small-model", context_window: 8192 },
+  ], "Saved capacity must not replace the active model projection before restart");
   await defaultModel(page).fill("large-model");
   await chatModel(page).fill("large-model");
   const conflictResolved = await save(page);
@@ -487,6 +527,19 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await openRestartedPage(page, `${v1Startup.url}/#ticket=${encodeURIComponent(v1Startup.ticket)}`);
   await openRestartedPage(secondPage, `${v1Startup.url}/#ticket=${encodeURIComponent(v1Startup.second_ticket)}`);
   await openSettings(page);
+  assert.equal(await largeModelContextWindow(page).inputValue(), "65536");
+  const restartedModels = await availableModels(page);
+  assert.equal(restartedModels.status, 200);
+  assert.deepEqual(restartedModels.body.models, [
+    { provider_id: "primary", model: "small-model", context_window: 8192 },
+    { provider_id: "primary", model: "large-model", context_window: 65536 },
+  ]);
+  assert.deepEqual(restartedModels.body.default_combination, {
+    provider_id: "primary",
+    model: "large-model",
+    reasoning_effort: defaultReasoningEffort,
+  });
+  assert.equal(JSON.stringify(restartedModels).includes("e2e-provider-secret-replaced-302"), false);
   console.log("Settings model/provider/route/MCP E2E: starting old-generation v1 barrier");
   await control.command("model-mcp-arm");
   await openProject(page);
@@ -501,6 +554,21 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
     observation.model === "large-model"
     && observation.tools.includes("tool_search")
   )), "The active generation did not reach the large-model Tool Search request");
+
+  const runtimeResponse = page.waitForResponse((response) => (
+    response.url().endsWith("/management/status") && response.request().method() === "POST"
+  ));
+  await page.getByRole("button", { name: "Runtime status and controls", exact: true }).click();
+  const runtime = await runtimeResponse;
+  assert.equal(runtime.status(), 200);
+  const budget = (await runtime.json()).result.status_view;
+  assert.equal(budget.chat_model, "primary/large-model");
+  assert.equal(budget.context_window, 65536);
+  assert.equal(budget.max_output, conflictResolved.fields.models.routes.chat.max_output);
+  assert.equal(budget.available_context, 65536 - budget.max_output);
+  assert.equal(budget.compact_context_window, Math.ceil(budget.available_context * budget.compact_ratio));
+  assert.equal(budget.compact_ratio, conflictResolved.fields.runtime.compact_ratio);
+  await page.keyboard.press("Escape");
 
   await openSettings(page);
   await defaultModel(page).fill("small-model");

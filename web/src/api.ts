@@ -40,6 +40,7 @@ import type {
   ConfigResponse,
   ConfigPatchFields,
   ConfigSecrets,
+  AvailableModelsResponse,
 } from "./protocol";
 
 const API_PREFIX = "/api/v1";
@@ -311,6 +312,10 @@ export function getServiceStatus(): Promise<ServiceStatus> {
 
 export function getConfig(): Promise<ConfigResponse> {
   return request<ConfigResponse>("/config");
+}
+
+export function getAvailableModels(): Promise<AvailableModelsResponse> {
+  return request<AvailableModelsResponse>("/models/available");
 }
 
 export function patchConfig(

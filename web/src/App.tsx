@@ -1174,6 +1174,7 @@ interface ProviderForm {
   protocol: string;
   base_url: string;
   models: string[];
+  model_context_windows: Record<string, string>;
   api_key: SecretDraft;
 }
 
@@ -1229,6 +1230,7 @@ function formFromConfig(fields: ConfigFields, previous: SettingsForm | null = nu
         protocol: provider.protocol,
         base_url: provider.base_url,
         models: provider.models,
+        model_context_windows: Object.fromEntries(Object.entries(provider.model_context_windows).map(([model, contextWindow]) => [model, String(contextWindow)])),
         api_key: secretDraft(provider.api_key.configured),
       }])),
       routes: Object.fromEntries(Object.entries(fields.models.routes).map(([name, route]) => [name, {
@@ -1275,12 +1277,15 @@ function formFromConfig(fields: ConfigFields, previous: SettingsForm | null = nu
 
 function configFromForm(form: SettingsForm): { fields: ConfigPatchFields; secrets: ConfigSecrets } {
   const secrets: ConfigSecrets = {};
-  const providers: Record<string, { protocol: string; base_url: string; models: string[] }> = {};
+  const providers: Record<string, { protocol: string; base_url: string; models: string[]; model_context_windows: Record<string, number> }> = {};
   for (const provider of Object.values(form.models.providers)) {
     providers[provider.id] = {
       protocol: provider.protocol,
       base_url: provider.base_url,
       models: provider.models,
+      model_context_windows: Object.fromEntries(Object.entries(provider.model_context_windows)
+        .filter(([model, contextWindow]) => provider.models.includes(model) && contextWindow.trim() !== "")
+        .map(([model, contextWindow]) => [model, Number(contextWindow)])),
     };
     secrets[`models.providers.${provider.id}.api_key`] = provider.api_key.action === "replace"
       ? { action: "replace", value: provider.api_key.value }
@@ -1632,6 +1637,12 @@ function SettingsView({
   }, []);
 
   const validateField = useCallback((path: string, value: string | boolean): string | null => {
+    if (path.startsWith("models.providers.") && path.includes(".model_context_windows.")) {
+      if (value === "") return null;
+      const numeric = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+      return !Number.isSafeInteger(numeric) || numeric < 1024 || numeric > 10_000_000
+        ? t("settings.invalidInteger") : null;
+    }
     if (path === "web.default_chat_workspace" && (typeof value !== "string" || !value.trim())) {
       return t("settings.required");
     }
@@ -1772,7 +1783,7 @@ function SettingsView({
         ...form.models,
         providers: {
           ...form.models.providers,
-          [id]: { id, protocol: "openai-compatible", base_url: "", models: [], api_key: secretDraft(false) },
+          [id]: { id, protocol: "openai-compatible", base_url: "", models: [], model_context_windows: {}, api_key: secretDraft(false) },
         },
       },
     }));
@@ -1898,6 +1909,23 @@ function SettingsView({
       }
       if (Object.values(current.models.providers).filter((entry) => entry.id === provider.id).length !== 1) errors[`models.providers.${providerRow}.id`] = t("settings.invalidProviderId");
       if (provider.models.some((model) => !model || model !== model.trim()) || new Set(provider.models).size !== provider.models.length) errors[`${providerPath}.models`] = t("settings.invalidValue");
+      for (const [model, contextWindow] of Object.entries(provider.model_context_windows)) {
+        if (!provider.models.includes(model)) continue;
+        const path = `${providerPath}.model_context_windows.${model}`;
+        const error = validateField(path, contextWindow);
+        if (error !== null) {
+          errors[path] = error;
+          continue;
+        }
+        if (contextWindow === "") continue;
+        const numeric = Number(contextWindow);
+        if (Object.values(current.models.routes).some((route) => (
+          route.provider_id === provider.id
+          && route.model === model
+          && Number.isSafeInteger(Number(route.max_output))
+          && numeric <= Number(route.max_output)
+        ))) errors[path] = t("settings.contextWindowMustExceedOutput");
+      }
       const baseError = validateField(`${providerPath}.url`, provider.base_url);
       if (baseError || !provider.base_url) errors[`${providerPath}.base_url`] = baseError ?? t("settings.required");
       if (provider.api_key.action === "replace" && provider.api_key.value.length === 0) {
@@ -2247,6 +2275,9 @@ function SettingsView({
     return labels[path] ?? path;
   };
   const fieldId = (path: string) => `settings-${path.replaceAll(".", "-")}`;
+  const modelContextWindowFieldId = (providerId: string, model: string) => (
+    `${fieldId(`models.providers.${providerId}.model_context_windows`)}-${encodeURIComponent(model).replaceAll(".", "%2E")}`
+  );
   const headerInputId = (server: string, header: string) => `settings-mcp-${server}-headers-${encodeURIComponent(header).replaceAll(".", "%2E")}`;
   const fieldError = (path: string) => fieldErrors[path];
   const groupError = (prefix: string) => Object.entries(fieldErrors).find(([path]) => path === prefix || path.startsWith(`${prefix}.`))?.[1];
@@ -2281,6 +2312,14 @@ function SettingsView({
           return;
         }
       }
+    }
+    const capacityMarker = ".model_context_windows.";
+    const capacityMarkerIndex = targetPath.indexOf(capacityMarker);
+    if (capacityMarkerIndex >= 0) {
+      const providerId = targetPath.slice("models.providers.".length, capacityMarkerIndex);
+      const model = targetPath.slice(capacityMarkerIndex + capacityMarker.length);
+      document.getElementById(modelContextWindowFieldId(providerId, model))?.focus();
+      return;
     }
     let target = document.getElementById(fieldId(targetPath));
     while (target === null && targetPath.includes(".")) {
@@ -2713,6 +2752,10 @@ function SettingsView({
                         <span className={styles.fieldError} id={`${fieldId(`models.providers.${provider.id}.base_url`)}-error`}>{fieldError(`models.providers.${provider.id}.base_url`) ?? ""}</span>
                       </label>
                       <SettingsListField id={fieldId(`models.providers.${provider.id}.models`)} label={t("settings.modelsList")} values={provider.models} error={groupError(`models.providers.${provider.id}.models`)} disabled={controlDisabled} onChange={(models) => updateProvider(providerRow, { models })} />
+                      {provider.models.filter(Boolean).map((model) => {
+                        const path = `models.providers.${provider.id}.model_context_windows.${model}`;
+                        return <SettingsNumberField key={model} id={modelContextWindowFieldId(provider.id, model)} label={`${t("settings.contextWindow")} · ${model}`} value={provider.model_context_windows[model] ?? ""} error={fieldError(path)} disabled={controlDisabled} step="1" onChange={(value) => updateProvider(providerRow, { model_context_windows: { ...provider.model_context_windows, [model]: value } })} onBlur={() => blurField(path, provider.model_context_windows[model] ?? "")} />;
+                      })}
                       <SecretInput
                         id={fieldId(`models.providers.${provider.id}.api_key`)}
                         label={t("settings.apiKey")}
@@ -2774,7 +2817,6 @@ function SettingsView({
                         />
                         <span className={styles.fieldError}>{fieldError(`models.routes.${route.name}.model`) ?? ""}</span>
                       </label>
-                      <SettingsNumberField id={fieldId(`models.routes.${route.name}.context_window`)} label={t("settings.contextWindow")} value={route.context_window} error={fieldError(`models.routes.${route.name}.context_window`)} disabled={controlDisabled} onChange={(value) => updateRoute(route.name, { context_window: value })} onBlur={() => blurField(`models.routes.${route.name}.context_window`, route.context_window)} />
                       <SettingsNumberField id={fieldId(`models.routes.${route.name}.max_output`)} label={t("settings.maxOutput")} value={route.max_output} error={fieldError(`models.routes.${route.name}.max_output`)} disabled={controlDisabled} onChange={(value) => updateRoute(route.name, { max_output: value })} onBlur={() => blurField(`models.routes.${route.name}.max_output`, route.max_output)} />
                       <SettingsNumberField id={fieldId(`models.routes.${route.name}.temperature`)} label={t("settings.temperature")} value={route.temperature} error={fieldError(`models.routes.${route.name}.temperature`)} disabled={controlDisabled} step="0.1" onChange={(value) => updateRoute(route.name, { temperature: value })} onBlur={() => blurField(`models.routes.${route.name}.temperature`, route.temperature)} />
                       <label className={styles.settingsField} htmlFor={fieldId(`models.routes.${route.name}.reasoning_effort`)}>

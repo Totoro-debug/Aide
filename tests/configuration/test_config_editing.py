@@ -199,6 +199,7 @@ def test_editable_snapshot_projects_all_model_route_and_mcp_fields_without_secre
         "protocol": "openai-compatible",
         "base_url": "https://models.example/v1",
         "models": ("small-model", "large-model"),
+        "model_context_windows": {"small-model": 8192, "large-model": 16384},
         "api_key": {"configured": True},
     }
     assert set(routes) == {"default", "chat", "memory", "schedule"}
@@ -218,6 +219,112 @@ def test_editable_snapshot_projects_all_model_route_and_mcp_fields_without_secre
     }
     assert "provider-secret-canary-302" not in repr(fields)
     assert "mcp-header-canary-302" not in repr(fields)
+
+
+def test_model_context_windows_are_provider_scoped_and_preserve_comments(tmp_path: Path) -> None:
+    content = FULL_EDITABLE_CONFIG + '''
+[models.providers.primary.model_context_windows]
+# Keep the comment with this provider/model capacity.
+"large-model" = 16384
+
+[models.providers.secondary]
+protocol = "openai-compatible"
+base_url = "https://secondary.example/v1"
+api_key = "secondary-secret-302"
+models = ["large-model"]
+
+[models.providers.secondary.model_context_windows]
+"large-model" = 65536
+'''
+    loader = _loader(tmp_path, content)
+    before = loader.editable_snapshot()
+    primary = cast(
+        Mapping[str, object], before.fields["models"]["providers"]
+    )["primary"]
+    assert cast(Mapping[str, object], primary)["model_context_windows"] == {
+        "small-model": 8192,
+        "large-model": 16384,
+    }
+
+    result = loader.patch_editable_fields(
+        before.revision,
+        {
+            "models": {
+                "providers": {
+                    "primary": {
+                        "model_context_windows": {
+                            "small-model": 8192,
+                            "large-model": 32768,
+                        }
+                    },
+                    "secondary": {
+                        "model_context_windows": {"large-model": 65536}
+                    },
+                }
+            }
+        },
+    )
+
+    assert result.configuration.models.providers["primary"].model_context_windows == {
+        "small-model": 8192,
+        "large-model": 32768,
+    }
+    assert result.configuration.models.providers["secondary"].model_context_windows == {
+        "large-model": 65536,
+    }
+    assert result.configuration.resolve_route("chat").route.context_window == 32768
+    saved = loader.path.read_text(encoding="utf-8")
+    assert "# Keep the comment with this provider/model capacity." in saved
+    assert "secondary-secret-302" in saved
+    assert "provider-secret-canary-302" not in repr(result.fields)
+
+
+def test_larger_model_context_window_allows_output_above_legacy_route_capacity(
+    tmp_path: Path,
+) -> None:
+    loader = _loader(tmp_path, FULL_EDITABLE_CONFIG)
+    snapshot = loader.editable_snapshot()
+    result = loader.patch_editable_fields(
+        snapshot.revision,
+        {
+            "models": {
+                "providers": {"primary": {"model_context_windows": {"small-model": 65536}}},
+                "routes": {"default": {"context_window": 8192, "max_output": 16384}},
+            }
+        },
+    )
+
+    resolved = result.configuration.resolve_route("default").route
+    assert resolved.context_window == 65536
+    assert resolved.max_output == 16384
+    restarted = loader.load_for_startup().resolve_route("default").route
+    assert restarted == resolved
+    projected = cast(Mapping[str, object], result.fields["models"]["routes"])["default"]
+    assert cast(Mapping[str, object], projected)["max_output"] == 16384
+
+
+def test_model_context_window_not_greater_than_route_output_keeps_original_bytes(
+    tmp_path: Path,
+) -> None:
+    loader = _loader(tmp_path, FULL_EDITABLE_CONFIG)
+    before = loader.path.read_bytes()
+
+    with pytest.raises(ConfigError) as error:
+        loader.patch_editable_fields(
+            loader.editable_snapshot().revision,
+            {
+                "models": {
+                    "providers": {
+                        "primary": {
+                            "model_context_windows": {"small-model": 1024}
+                        }
+                    }
+                }
+            },
+        )
+
+    assert "models.routes.default.max_output" in error.value.field_errors
+    assert loader.path.read_bytes() == before
 
 
 def test_model_route_mcp_patch_replaces_collections_and_secrets_atomically(tmp_path: Path) -> None:

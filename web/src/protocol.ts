@@ -115,7 +115,23 @@ export interface ConfigProviderFields {
   protocol: string;
   base_url: string;
   models: string[];
+  model_context_windows: Record<string, number>;
   api_key: ConfigRedactedSecret;
+}
+
+export interface AvailableModel {
+  provider_id: string;
+  model: string;
+  context_window: number;
+}
+
+export interface AvailableModelsResponse {
+  models: AvailableModel[];
+  default_combination: {
+    provider_id: string;
+    model: string;
+    reasoning_effort: ReasoningEffort;
+  } | null;
 }
 
 export interface ConfigRouteFields {

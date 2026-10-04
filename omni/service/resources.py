@@ -99,11 +99,6 @@ class WorkspaceResourceManager:
             raise BaseExceptionGroup("Workspace resource cleanup failed", errors)
         self._resources.pop(workspace_id, None)
 
-    async def wait_for_dream_idle(self, workspace_id: str) -> None:
-        resources = self._resources.get(workspace_id)
-        if resources is not None:
-            await resources.dream.wait_until_idle()
-
     async def close(self) -> None:
         errors: list[BaseException] = []
         for workspace_id in tuple(self._resources):

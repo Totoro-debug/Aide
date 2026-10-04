@@ -736,28 +736,6 @@ class ScheduleService:
         self._notify_dispatcher()
         return registered
 
-    def prepare_generation_state(
-        self, previous: ScheduleService, *, schedule: JobSchedule
-    ) -> tuple[ScheduleJob, ...]:
-        """Validate the inherited store and derived Dream definition before publication."""
-        return previous._store._prepare_system_job(
-            _new_dream_job(schedule, now_ms=_epoch_milliseconds(self._clock.now()))
-        )
-
-    def inherit_generation_state(
-        self, previous: ScheduleService, *, jobs: tuple[ScheduleJob, ...]
-    ) -> None:
-        """Transfer the sole idle Schedule store using the prevalidated definition."""
-        self._store = previous._store
-        self._store._apply_prepared_system_jobs(jobs)
-        self._consumed_at_jobs = previous._consumed_at_jobs.copy()
-        self._retry_at_jobs_after_resume = previous._retry_at_jobs_after_resume.copy()
-        self._every_deadlines = previous._every_deadlines.copy()
-        self._cron_cursors = previous._cron_cursors.copy()
-        self._last_wall_timestamp = previous._last_wall_timestamp
-        self._last_monotonic = previous._last_monotonic
-        self._notify_dispatcher()
-
     async def _pause_owned_tasks(self) -> None:
         async with self._reservation_gate:
             self._paused = True

@@ -134,29 +134,6 @@ class WorkspaceScheduleStore:
             self._publish(candidate)
             return copy.deepcopy(reconciled)
 
-    def _prepare_system_job(self, job: ScheduleJob) -> tuple[ScheduleJob, ...]:
-        """Set the config-derived Dream definition at an idle generation commit.
-
-        Configuration is its durable authority. The next normal Schedule mutation
-        persists the derived definition; candidate preparation never writes it.
-        """
-        _require_system_job(job)
-        current = next((item for item in self._jobs if item.job_id == job.job_id), None)
-        if current is not None and current.source != "system":
-            raise ScheduleStateError(self.path)
-        reconciled = _reconcile_system_job(current, job)
-        if reconciled is None:
-            return self._jobs
-        return (
-            (*self._jobs, reconciled)
-            if current is None
-            else tuple(reconciled if item.job_id == job.job_id else item for item in self._jobs)
-        )
-
-    def _apply_prepared_system_jobs(self, jobs: tuple[ScheduleJob, ...]) -> None:
-        self._jobs = jobs
-        self._revision += 1
-
     async def _add_job(self, job: ScheduleJob) -> ScheduleJob:
         if not isinstance(job, ScheduleJob):
             raise TypeError("job must be a ScheduleJob")

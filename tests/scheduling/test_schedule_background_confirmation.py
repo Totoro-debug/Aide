@@ -30,6 +30,7 @@ from omni.agent.workspace_state import WorkspaceState
 from omni.schedule.model import JobSchedule, ScheduleJob
 from omni.schedule.service import ScheduleOccurrence, ScheduleService
 from omni.schedule.store import ScheduleStoreFaultedError
+from tests.fixtures.schedule import wait_until as _wait_until
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
 
@@ -68,16 +69,6 @@ def _snapshot(level: ToolPermissionLevel = "read-only") -> PermissionSnapshot:
 
 async def _noop_dream() -> object:
     return None
-
-
-async def _wait_until(predicate: object) -> None:
-    if not callable(predicate):
-        raise TypeError("predicate must be callable")
-    for _ in range(100):
-        if predicate():
-            return
-        await asyncio.sleep(0)
-    raise AssertionError("condition did not become true")
 
 
 @pytest.mark.asyncio

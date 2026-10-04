@@ -18,6 +18,7 @@ from omni.schedule.service import (
     ScheduleService,
 )
 from omni.schedule.store import WorkspaceScheduleStore
+from tests.fixtures.schedule import wait_until as _wait_until
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
 
@@ -59,16 +60,6 @@ def _service(
         execute_user_job=execute_user_job,
         execute_dream=execute_dream,
     )
-
-
-async def _wait_until(predicate: object) -> None:
-    if not callable(predicate):
-        raise TypeError("predicate must be callable")
-    for _ in range(100):
-        if predicate():
-            return
-        await asyncio.sleep(0)
-    raise AssertionError("condition did not become true")
 
 
 @pytest.mark.asyncio

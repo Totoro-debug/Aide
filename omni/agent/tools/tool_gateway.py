@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Collection, Iterator, Sequence
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -246,24 +244,6 @@ class BuiltInToolCatalog:
         return self._tools
 
 
-_BOUND_BUILT_IN_CATALOG: ContextVar[BuiltInToolCatalog | None] = ContextVar(
-    "omni_bound_builtin_tool_catalog",
-    default=None,
-)
-
-
-@contextmanager
-def bind_built_in_tool_catalog(catalog: BuiltInToolCatalog) -> Iterator[None]:
-    """Bind a service-owned catalog only while composing one Agent Loop."""
-    if not isinstance(catalog, BuiltInToolCatalog):
-        raise TypeError("Bound Built-in Tool Catalog must be a BuiltInToolCatalog")
-    token = _BOUND_BUILT_IN_CATALOG.set(catalog)
-    try:
-        yield
-    finally:
-        _BOUND_BUILT_IN_CATALOG.reset(token)
-
-
 class ToolGateway:
     """Create and invoke the Built-in Tool Catalog."""
 
@@ -310,8 +290,6 @@ class ToolGateway:
         generation_tools = tuple(additional_tools)
         if any(not isinstance(tool, BaseTool) for tool in generation_tools):
             raise TypeError("Additional Tools must be BaseTool instances")
-        if catalog is None:
-            catalog = _BOUND_BUILT_IN_CATALOG.get()
         if catalog is None:
             if workspace is None:
                 raise TypeError("Tool Gateway requires a workspace or shared catalog")
@@ -866,5 +844,4 @@ __all__ = [
     "ToolGateway",
     "ToolResult",
     "ToolResultStatus",
-    "bind_built_in_tool_catalog",
 ]

@@ -8,7 +8,7 @@ from typing import cast
 import pytest
 
 from omni.config.agent_home import AgentHome
-from omni.service.runtime import LocalService
+from omni.service.runtime import AgentService
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.service.test_service_concurrency import _CollectingSink
 
@@ -24,7 +24,7 @@ async def test_external_changes_preserve_resources_and_admission(
     home.initialize()
     config = home.path / "config.toml"
     config.write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
-    service = LocalService(home, reconnect_timeout=3600)
+    service = AgentService(home, reconnect_timeout=3600)
     await service.start()
     try:
         client = await service.register_client("cli")
@@ -32,13 +32,13 @@ async def test_external_changes_preserve_resources_and_admission(
         first_path = tmp_path / "first"
         first_path.mkdir()
         first = await service.attach_workspace(client.client_id, first_path)
-        previous, startup = first.runtime, service.configuration
+        previous, startup = first.resources, service.configuration
         revision = cast(dict[str, object], service.config_view()["application"])["active_revision"]
         config.write_text(external, encoding="utf-8")
         view = service.config_view()
         assert view["revision"] != revision
         assert cast(dict[str, object], view["application"])["active_revision"] == revision
-        assert first.runtime is previous and service.configuration is startup
+        assert first.resources is previous and service.configuration is startup
         assert service.configuration_ready and first.schedule_admitted
         later_path = tmp_path / "later"
         later_path.mkdir()

@@ -39,7 +39,10 @@ from omni.agent.confirmation import (
     ConfirmationEnvelope,
     ToolConfirmationCoordinator,
 )
-from omni.agent.loop import AgentLoop, ConfirmationRequestView, ForegroundConversationProjection
+from omni.agent.loop import (
+    ConfirmationRequestView,
+    ForegroundConversationProjection,
+)
 from omni.agent.memory.dream import DreamResult
 from omni.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
 from omni.agent.session.backup_store import BackupGap, FileBackupStore
@@ -100,6 +103,7 @@ from tests.agent.test_fixed_catalog import _agent_loop as _direct_agent_loop
 from tests.agent.test_fixed_catalog import _FixedCatalogProvider, _response
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import ProviderCall, TaskFramingRouterAdapter
+from tests.fixtures.agent_loop import DrivenExecutor as AgentRunExecutor
 from tests.fixtures.cli_service import cli_service
 from tests.fixtures.session import seed_session_state
 
@@ -593,7 +597,7 @@ class FailingMarkdownStream:
 
 
 class _ScriptedControl:
-    """Final AgentLoop control surface for a scripted MessageBus runtime."""
+    """Final AgentRunExecutor control surface for a scripted MessageBus runtime."""
 
     def __init__(self, source: _ScriptedSource) -> None:
         self._source = source
@@ -859,7 +863,7 @@ class _TerminalTestDriver:
 
 
 class _DirectControl:
-    """Minimal public AgentLoop control seam for direct MessageBus UI tests."""
+    """Minimal public AgentRunExecutor control seam for direct MessageBus UI tests."""
 
     def __init__(self) -> None:
         self.confirmation_callback: Callable[[ConfirmationRequestView], None] | None = None
@@ -955,7 +959,7 @@ def _direct_terminal_loop(
     agent_home: Path,
     workspace: Path,
     provider: _FixedCatalogProvider,
-) -> tuple[AgentLoop, MessageBus]:
+) -> tuple[AgentRunExecutor, MessageBus]:
     loop, router, schedule, bus = _direct_agent_loop(agent_home, workspace, provider)
 
     async def close_components() -> None:
@@ -1013,7 +1017,9 @@ async def _run_cli_terminal_case(
     (agent_home / "config.toml").write_text(VALID_CONFIG, encoding="utf-8")
     selected_provider = provider or _FixedCatalogProvider(())
 
-    class DeterministicAgentLoop(AgentLoop):
+    from omni.agent.loop import AgentRunExecutor as ProductionExecutor
+
+    class DeterministicExecutor(ProductionExecutor):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             kwargs["model_router"] = TaskFramingRouterAdapter(kwargs["model_router"])
             super().__init__(*args, **kwargs)
@@ -1024,7 +1030,7 @@ async def _run_cli_terminal_case(
             async with self.run_test(size=size) as pilot:
                 await scenario(self, pilot)
 
-    monkeypatch.setattr("omni.service.runtime.AgentLoop", DeterministicAgentLoop)
+    monkeypatch.setattr("omni.service.runtime.AgentRunExecutor", DeterministicExecutor)
     monkeypatch.setattr(cli, "TerminalConversationApp", ScenarioApp)
     monkeypatch.setattr(
         "omni.service.runtime.create_provider", lambda _configuration: selected_provider

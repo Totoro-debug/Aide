@@ -114,7 +114,7 @@ async def test_cli_real_mcp_flow_persists_result_reuses_session_snapshot_and_clo
         client = await ServiceClient.connect_or_start(home, directory)
         try:
             workspace = service.workspace(client.workspace_id)
-            original = workspace.runtime
+            original = workspace.resources
             assert original is not None
             old_tools = original.mcp_snapshot
             schemas = [tool.to_schema() for tool in old_tools]
@@ -122,7 +122,7 @@ async def test_cli_real_mcp_flow_persists_result_reuses_session_snapshot_and_clo
             assert "done" in await _client_output(client)
             selected = await client.management_dispatcher.resume(client.session_id)
             assert selected.resumed_session_id == client.session_id
-            assert workspace.runtime is original
+            assert workspace.resources is original
             assert original.mcp_snapshot[0] is old_tools[0]
             assert len(observed.processes) == 1
             if save_before_next_run:
@@ -132,7 +132,7 @@ async def test_cli_real_mcp_flow_persists_result_reuses_session_snapshot_and_clo
                     {"runtime": {"max_iterations": 83}},
                 )
                 assert cast(dict[str, object], service.config_view()["application"])["status"] == "restart-required"
-                assert workspace.runtime is original
+                assert workspace.resources is original
                 assert [tool.to_schema() for tool in old_tools] == schemas
                 assert len(observed.processes) == 1
             await client.submit_input("second echo")
@@ -199,7 +199,7 @@ async def test_cli_workspace_wire_discovery_retains_safe_aggregate_skip_report(
     async with cli_service(home) as service:
         client = await ServiceClient.connect_or_start(home, directory)
         try:
-            runtime = service.workspace(client.workspace_id).runtime
+            runtime = service.workspace(client.workspace_id).resources
             assert runtime is not None
             report = runtime.mcp_startup_report
             assert report.failed_servers == ()

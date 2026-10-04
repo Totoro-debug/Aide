@@ -20,7 +20,6 @@ from omni.agent.session.backup_store import FileBackupStore
 from omni.agent.session.restore import RestoreManager
 from omni.agent.session.session import Session
 from omni.agent.tools.tool_gateway import ModelToolCall
-from omni.agent.workspace_runtime import WorkspaceRuntime
 from omni.agent.workspace_state import WorkspaceState
 from omni.config.config import ConfigLoader
 from omni.provider.models import (
@@ -33,7 +32,7 @@ from omni.provider.models import (
 )
 from omni.schedule.model import JobSchedule, ScheduleJob
 from omni.service.client import ServiceClient
-from omni.service.runtime import LocalService
+from omni.service.runtime import AgentService
 from tests.service.test_restore_management import _restore_request
 from tests.service.test_service_concurrency import (
     _client_output,
@@ -244,19 +243,13 @@ class _BackgroundProvider(_GenerationProvider):
         )
 
 
-def _application(service: LocalService) -> dict[str, Any]:
+def _application(service: AgentService) -> dict[str, Any]:
     return cast(dict[str, Any], service.config_view()["application"])
 
 
-async def _wait_status(service: LocalService, status: str) -> None:
+async def _wait_status(service: AgentService, status: str) -> None:
     async with asyncio.timeout(10):
         while _application(service)["status"] != status:
-            await asyncio.sleep(0.01)
-
-
-async def _wait_closed(runtimes: Sequence[WorkspaceRuntime | None]) -> None:
-    async with asyncio.timeout(10):
-        while not all(runtime is not None and runtime._closed for runtime in runtimes):
             await asyncio.sleep(0.01)
 
 
@@ -275,7 +268,7 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
         return provider
 
     monkeypatch.setattr(service_runtime, "create_provider", provider_factory)
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
     server, port = await _serve(service, home)
     cli: ServiceClient | None = None
     browser = await service.register_client("web")
@@ -284,7 +277,7 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
     try:
         cli = await ServiceClient.connect_or_start(home, project, port=port)
         workspace = service.workspace(cli.workspace_id)
-        old_runtime = workspace.runtime
+        old_runtime = workspace.resources
         assert old_runtime is not None
         old_state = workspace.workspace_state
         socket = cli._socket
@@ -359,7 +352,7 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
         assert not old_provider.session_a_cancelled.is_set()
         assert not old_provider.schedule_cancelled.is_set()
         assert not old_provider.closed
-        assert workspace.runtime is old_runtime
+        assert workspace.resources is old_runtime
         assert workspace.workspace_state is old_state
         assert workspace.configuration.runtime.max_iterations == 50
         assert workspace.configuration.memory.batch_size == 10
@@ -371,13 +364,15 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
         assert (
             workspace.loops[
                 cli.session_id
-            ].loop._tool_gateway._permission_context.configured_schedule_level
+            ].loop._create_executor()._tool_gateway._permission_context.configured_schedule_level
             == "workspace-write"
         )
         assert (
-            workspace._schedule_loops[job.job_id].loop._permission_control.configured()
+            workspace._schedule_loops[job.job_id].loop._create_executor()._permission_control.configured()
             == "workspace-write"
         )
+        await workspace.schedule_service.pause_and_wait_idle()
+        workspace.schedule_service.resume()
         jobs = await workspace.schedule_service.public_snapshot()
         assert next(item for item in jobs if item.job_id == job.job_id).state.last_status == "ok"
         assert len(workspace._schedule_loops) == 1
@@ -418,7 +413,7 @@ async def test_save_preserves_dream_and_subsequent_dream_uses_startup_settings(
         return provider
 
     monkeypatch.setattr(service_runtime, "create_provider", provider_factory)
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
     server, port = await _serve(service, home)
     cli: ServiceClient | None = None
     other: ServiceClient | None = None
@@ -427,7 +422,7 @@ async def test_save_preserves_dream_and_subsequent_dream_uses_startup_settings(
         cli = await ServiceClient.connect_or_start(home, project, port=port)
         other = await ServiceClient.connect_or_start(home, project, port=port)
         workspace = service.workspace(cli.workspace_id)
-        old_runtime = workspace.runtime
+        old_runtime = workspace.resources
         assert old_runtime is not None
         await old_runtime.memory_manager.append_summary(
             "A durable user preference.", datetime.now(UTC)
@@ -446,15 +441,15 @@ async def test_save_preserves_dream_and_subsequent_dream_uses_startup_settings(
         assert _application(service)["status"] == "restart-required"
         assert _application(service)["restart_required"] is True
         assert not old_provider.closed and not dream_task.done()
-        assert workspace.runtime is old_runtime and not old_runtime._closed
+        assert workspace.resources is old_runtime and not workspace._closed
         old_provider.release_background.set()
         result = await asyncio.wait_for(dream_task, 5)
         dream_result = cast(dict[str, object], result["dream_result"])
         assert dream_result["processed_count"] == 1 and dream_result["cursor"] == 1
         assert _application(service)["status"] == "restart-required"
         assert not old_provider.background_cancelled.is_set() and not old_provider.closed
-        assert workspace.runtime is not None and workspace.runtime is old_runtime
-        await workspace.runtime.memory_manager.append_summary(
+        assert workspace.resources is not None and workspace.resources is old_runtime
+        await workspace.resources.memory_manager.append_summary(
             "Another preference.", datetime.now(UTC)
         )
         next_result = await cli.management("dream", {})
@@ -489,13 +484,13 @@ async def test_save_preserves_auto_title_after_foreground_run_has_finished(
         return provider
 
     monkeypatch.setattr(service_runtime, "create_provider", provider_factory)
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
     server, port = await _serve(service, home)
     cli: ServiceClient | None = None
     try:
         cli = await ServiceClient.connect_or_start(home, project, port=port)
         workspace = service.workspace(cli.workspace_id)
-        old_runtime = workspace.runtime
+        old_runtime = workspace.resources
         assert old_runtime is not None
         await cli.submit_input("Complete this foreground message")
         async with asyncio.timeout(5):
@@ -519,8 +514,8 @@ async def test_save_preserves_auto_title_after_foreground_run_has_finished(
         )
         assert _application(service)["status"] == "restart-required"
         assert _application(service)["restart_required"] is True
-        assert workspace.runtime is old_runtime and not old_provider.closed
-        assert not title_task.done() and not old_runtime._closed
+        assert workspace.resources is old_runtime and not old_provider.closed
+        assert not title_task.done() and not workspace._closed
         old_provider.release_background.set()
         await asyncio.wait_for(asyncio.shield(title_task), 5)
         assert _application(service)["status"] == "restart-required"
@@ -570,7 +565,7 @@ async def test_save_preserves_real_restore_transaction(
     monkeypatch.setattr(
         service_runtime, "create_provider", lambda _configuration: _GenerationProvider()
     )
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
     await service.start()
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -593,7 +588,7 @@ async def test_save_preserves_real_restore_transaction(
         await service.connect_client(client.client_id, _CollectingSink())
         workspace = await service.attach_workspace(client.client_id, project)
         claim = await workspace.claim(client.client_id, session.session_id)
-        old_runtime = workspace.runtime
+        old_runtime = workspace.resources
         assert old_runtime is not None
         await _restore_request(
             service, workspace, client.client_id, claim, "restore/inspect", "inspect", anchor_id=1
@@ -619,7 +614,7 @@ async def test_save_preserves_real_restore_transaction(
         )
         assert _application(service)["status"] == "restart-required"
         assert _application(service)["restart_required"] is True
-        assert workspace.runtime is old_runtime and not old_runtime._closed
+        assert workspace.resources is old_runtime and not workspace._closed
         assert not restore_task.done() and target.read_bytes() == b"current branch"
         release.set()
         result = await asyncio.wait_for(restore_task, 5)

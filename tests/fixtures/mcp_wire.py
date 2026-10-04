@@ -8,7 +8,7 @@ import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import mcp.types as types
 import pytest
@@ -17,7 +17,8 @@ from mcp.server.stdio import stdio_server
 from mcp.shared.message import SessionMessage
 from pydantic import TypeAdapter
 
-from omni.config.config import MCPServerConfiguration
+if TYPE_CHECKING:
+    from omni.config.config import MCPServerConfiguration
 
 
 def wire_tool(name: str = "echo", **fields: Any) -> dict[str, Any]:
@@ -106,6 +107,8 @@ class WireServer:
 async def http_wire_server(
     scenario: dict[str, Any],
 ) -> AsyncIterator[tuple[WireServer, MCPServerConfiguration]]:
+    from omni.config.config import MCPServerConfiguration
+
     server = WireServer(scenario)
     app = web.Application()
     app.router.add_route("*", "/mcp", server.http)
@@ -135,6 +138,8 @@ async def http_wire_server(
 def stdio_wire_configuration(
     directory: Path, scenario: dict[str, Any], *, name: str = "remote"
 ) -> MCPServerConfiguration:
+    from omni.config.config import MCPServerConfiguration
+
     scenario_path = directory / f"{name}.json"
     scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
     return MCPServerConfiguration(

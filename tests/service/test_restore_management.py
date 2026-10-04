@@ -21,7 +21,7 @@ from omni.agent.workspace_state import WorkspaceState
 from omni.config.config import ConfigLoader
 from omni.service.discovery import create_credential
 from omni.service.errors import ServiceError
-from omni.service.runtime import LocalService, SessionClaim, WorkspaceServiceRuntime
+from omni.service.runtime import AgentService, SessionClaim, WorkspaceRecord
 from omni.service.transport import create_app
 from tests.service.test_service_concurrency import _CollectingSink, _ConcurrentProvider
 from tests.service.test_service_transport import _persist_session, _prepare_agent_home
@@ -38,7 +38,7 @@ def restore_provider(monkeypatch: pytest.MonkeyPatch) -> _ConcurrentProvider:
 async def restore_case(
     tmp_path: Path,
     restore_provider: _ConcurrentProvider,
-) -> AsyncIterator[tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path]]:
+) -> AsyncIterator[tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path]]:
     home = _prepare_agent_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
@@ -61,7 +61,7 @@ async def restore_case(
     target.write_bytes(b"current branch")
     store.after_write(ticket)
     await session.wait_for_pending_persist()
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     try:
         owner = await service.register_client("web")
@@ -74,8 +74,8 @@ async def restore_case(
 
 
 async def _restore_request(
-    service: LocalService,
-    workspace: WorkspaceServiceRuntime,
+    service: AgentService,
+    workspace: WorkspaceRecord,
     client_id: str,
     claim: SessionClaim,
     action: str,
@@ -95,7 +95,7 @@ async def _restore_request(
 
 @pytest.mark.asyncio
 async def test_restore_plan_and_cancel_are_bound_to_inspected_session(
-    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
 ) -> None:
     service, workspace, owner, claim, target = restore_case
     other_id = await _persist_session(
@@ -132,7 +132,7 @@ async def test_restore_plan_and_cancel_are_bound_to_inspected_session(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["restore/inspect", "restore/result", "restore/acknowledge"])
 async def test_restore_cached_response_rejects_released_claim(
-    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
     action: str,
 ) -> None:
     service, workspace, owner, claim, _target = restore_case
@@ -150,7 +150,7 @@ async def test_restore_cached_response_rejects_released_claim(
     "action", ["restore/inspect", "restore/execute", "restore/result", "restore/acknowledge"]
 )
 async def test_other_client_cannot_inspect_execute_read_or_ack_restore(
-    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
     action: str,
 ) -> None:
     service, workspace, _owner, claim, target = restore_case
@@ -175,7 +175,7 @@ async def test_other_client_cannot_inspect_execute_read_or_ack_restore(
 
 @pytest.mark.asyncio
 async def test_restore_request_id_cannot_be_reused_with_another_anchor_or_credential(
-    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
 ) -> None:
     service, workspace, owner, claim, target = restore_case
     await _restore_request(service, workspace, owner, claim, "restore/inspect", "id", anchor_id=1)
@@ -196,7 +196,7 @@ async def test_restore_request_id_cannot_be_reused_with_another_anchor_or_creden
 
 @pytest.mark.asyncio
 async def test_claim_release_waits_for_the_restore_transaction(
-    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, workspace, owner, claim, target = restore_case
@@ -257,7 +257,7 @@ async def test_claim_release_waits_for_the_restore_transaction(
 
 @pytest.mark.asyncio
 async def test_reading_absent_restore_result_creates_no_restore_storage(
-    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
 ) -> None:
     service, workspace, owner, _claim, _target = restore_case
     other_id = await _persist_session(
@@ -279,7 +279,7 @@ async def test_reading_absent_restore_result_creates_no_restore_storage(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invalidate", ["release", "disconnect"])
 async def test_restore_inspection_revalidates_claim_after_wait(
-    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
     monkeypatch: pytest.MonkeyPatch,
     invalidate: str,
 ) -> None:
@@ -327,7 +327,7 @@ async def test_restore_inspection_revalidates_claim_after_wait(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["conversation-only", "files"])
 async def test_restore_preserves_an_unrelated_active_run(
-    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
     restore_provider: _ConcurrentProvider,
     mode: str,
 ) -> None:
@@ -375,7 +375,7 @@ async def test_restore_preserves_an_unrelated_active_run(
 
 @pytest.mark.asyncio
 async def test_failed_restore_result_and_ack_survive_new_client_and_restart(
-    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
 ) -> None:
     service, workspace, owner, claim, target = restore_case
     await _restore_request(
@@ -404,7 +404,7 @@ async def test_failed_restore_result_and_ack_survive_new_client_and_restart(
     )
     assert fetched["restore_result"] == result
     await service.stop()
-    restarted = LocalService(
+    restarted = AgentService(
         service.agent_home, ConfigLoader(service.agent_home).load_for_startup()
     )
     await restarted.start()
@@ -481,7 +481,7 @@ async def test_restore_management_requires_claim_is_idempotent_and_preserves_oth
         content="Other private conversation",
     )
 
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     try:
         owner = await service.register_client("web")
@@ -592,7 +592,7 @@ async def test_restore_management_http_requires_csrf_and_claim_headers(tmp_path:
     store.after_write(ticket)
     await session.wait_for_pending_persist()
 
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     server = TestServer(create_app(service), host="127.0.0.1")
     try:
@@ -654,7 +654,7 @@ async def test_restore_management_http_requires_csrf_and_claim_headers(tmp_path:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("queued", [False, True])
 async def test_restore_listing_rejects_selected_active_and_queued_input(
-    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
     restore_provider: _ConcurrentProvider,
     queued: bool,
 ) -> None:
@@ -681,7 +681,7 @@ async def test_restore_listing_rejects_selected_active_and_queued_input(
 
 @pytest.mark.asyncio
 async def test_restore_double_listing_and_cancel_preserve_claim_and_durable_branch(
-    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
 ) -> None:
     service, workspace, owner, claim, target = restore_case
     before = Session.load(workspace.workspace_state, claim.session_id).messages
@@ -705,12 +705,13 @@ async def test_restore_double_listing_and_cancel_preserve_claim_and_durable_bran
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["cancel", "readiness", "inspect", "execute"])
 async def test_restore_precommit_failures_release_input_and_schedule_without_mutation(
-    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
     service, workspace, owner, claim, target = restore_case
     before = Session.load(workspace.workspace_state, claim.session_id).messages
+    original_wait = claim.loop.wait_for_restore_idle
     if failure == "cancel":
         started, release = asyncio.Event(), asyncio.Event()
 
@@ -759,6 +760,7 @@ async def test_restore_precommit_failures_release_input_and_schedule_without_mut
             )
         if failure == "execute":
             assert "PRIVATE" not in str(raised.value)
+    monkeypatch.setattr(claim.loop, "wait_for_restore_idle", original_wait)
     assert claim.loop.foreground_input_admitted()
     assert workspace.schedule_admitted
     assert Session.load(workspace.workspace_state, claim.session_id).messages == before
@@ -768,7 +770,7 @@ async def test_restore_precommit_failures_release_input_and_schedule_without_mut
 
 @pytest.mark.asyncio
 async def test_restore_stale_durable_plan_preserves_new_branch_and_releases_barrier(
-    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
 ) -> None:
     service, workspace, owner, claim, target = restore_case
     await _restore_request(
@@ -802,11 +804,11 @@ async def test_restore_stale_durable_plan_preserves_new_branch_and_releases_barr
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure_point", ["constructor", "binding", "preflight", "start"])
 async def test_restore_rebuild_failure_keeps_durable_result_and_closes_admission(
-    restore_case: tuple[LocalService, WorkspaceServiceRuntime, str, SessionClaim, Path],
+    restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
     monkeypatch: pytest.MonkeyPatch,
     failure_point: str,
 ) -> None:
-    from omni.agent.loop import AgentLoop
+    from omni.agent.loop import AgentRunExecutor
 
     service, workspace, owner, claim, target = restore_case
     await _restore_request(
@@ -829,7 +831,7 @@ async def test_restore_rebuild_failure_keeps_durable_result_and_closes_admission
     with monkeypatch.context() as patched:
         # Restore this injected failure state on scope exit so the fixture can drain its owner.
         patched.setattr(workspace, "_restore_blocked", False)
-        patched.setattr(AgentLoop, method, fail_async if method == "start" else fail)
+        patched.setattr(AgentRunExecutor, method, fail_async if method == "start" else fail)
         with pytest.raises(ServiceError) as raised:
             await _restore_request(
                 service,
@@ -845,7 +847,7 @@ async def test_restore_rebuild_failure_keeps_durable_result_and_closes_admission
         assert "PRIVATE" not in raised.value.message
         assert workspace._restore_blocked
         assert not workspace.schedule_admitted
-        assert old._aborted
+        assert old._closed
         assert target.read_bytes() == b"before restore"
         assert Session.load(workspace.workspace_state, claim.session_id).messages == []
         result = RestoreManager(workspace.workspace_state, claim.session_id).completed_result()

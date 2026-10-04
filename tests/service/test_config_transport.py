@@ -13,11 +13,11 @@ from aiohttp.test_utils import BaseTestServer, TestServer
 from omni.config.agent_home import AgentHome
 from omni.config.config import ConfigLoader
 from omni.service.discovery import create_credential
-from omni.service.runtime import LocalService
+from omni.service.runtime import AgentService
 from omni.service.transport import create_app
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
-ConfigHttp = tuple[LocalService, BaseTestServer, str, str]
+ConfigHttp = tuple[AgentService, BaseTestServer, str, str]
 
 FULL_CONFIG = """[models.providers.primary]
 protocol = "openai-compatible"
@@ -55,7 +55,7 @@ async def config_http(tmp_path: Path) -> AsyncIterator[ConfigHttp]:
     home.initialize()
     (home.path / "config.toml").write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
     configuration = ConfigLoader(home).load_for_startup()
-    service = LocalService(home, configuration, reconnect_timeout=3600)
+    service = AgentService(home, configuration, reconnect_timeout=3600)
     await service.start()
     create_credential(home)
     web_client = await service.register_client("web")
@@ -171,11 +171,11 @@ async def test_config_patch_reports_restart_required_and_stale_conflict(
 
 
 @pytest_asyncio.fixture
-async def live_service(tmp_path: Path) -> AsyncIterator[tuple[LocalService, Path]]:
+async def live_service(tmp_path: Path) -> AsyncIterator[tuple[AgentService, Path]]:
     home = AgentHome(tmp_path / "agent-home")
     home.initialize()
     (home.path / "config.toml").write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
     await service.start()
     yield service, tmp_path / "workspace"
     await service.stop()
@@ -183,13 +183,13 @@ async def live_service(tmp_path: Path) -> AsyncIterator[tuple[LocalService, Path
 
 @pytest.mark.asyncio
 async def test_config_save_preserves_workspace_and_later_activation_uses_startup_settings(
-    live_service: tuple[LocalService, Path],
+    live_service: tuple[AgentService, Path],
 ) -> None:
     service, workspace_path = live_service
     workspace_path.mkdir()
     client = await service.register_client("cli")
     workspace = await service.attach_workspace(client.client_id, workspace_path)
-    old_runtime = workspace.runtime
+    old_runtime = workspace.resources
     revision = cast(str, service.config_view()["revision"])
     saved = await service.update_configuration(
         "workspace-config-edit",
@@ -205,12 +205,12 @@ async def test_config_save_preserves_workspace_and_later_activation_uses_startup
         "active_revision": revision,
         "restart_required": True,
     }
-    assert workspace.runtime is old_runtime
+    assert workspace.resources is old_runtime
     for owner in (workspace, later):
         assert owner.configuration.runtime.max_iterations == 50
         assert owner.configuration.memory.batch_size == 10
     await service.stop()
-    restarted = LocalService(service.agent_home, reconnect_timeout=3600)
+    restarted = AgentService(service.agent_home, reconnect_timeout=3600)
     try:
         await restarted.start()
         new_client = await restarted.register_client("cli")
@@ -223,12 +223,18 @@ async def test_config_save_preserves_workspace_and_later_activation_uses_startup
 
 
 @pytest_asyncio.fixture
-async def full_config_http(tmp_path: Path) -> AsyncIterator[ConfigHttp]:
+async def full_config_http(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[ConfigHttp]:
+    from omni.agent.tools.mcp_runtime import MCPRuntimeManager, MCPStartupReport
+
+    async def start(_manager: MCPRuntimeManager, _configuration: object) -> MCPStartupReport:
+        return MCPStartupReport((), ())
+
+    monkeypatch.setattr(MCPRuntimeManager, "start", start)
     home = AgentHome(tmp_path / "agent-home")
     home.initialize()
     (home.path / "config.toml").write_text(FULL_CONFIG, encoding="utf-8")
     configuration = ConfigLoader(home).load_for_startup()
-    service = LocalService(home, configuration, reconnect_timeout=3600)
+    service = AgentService(home, configuration, reconnect_timeout=3600)
     await service.start()
     create_credential(home)
     web_client = await service.register_client("web")

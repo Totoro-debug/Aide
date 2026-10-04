@@ -788,7 +788,7 @@ def test_agent_loop_control_interface_is_consolidated() -> None:
 
     assert [node for node in classes if node.name == "AgentLoopControl"] == []
 
-    terminal_controls = [node for node in classes if node.name == "TerminalAgentLoopControl"]
+    terminal_controls = [node for node in classes if node.name == "TerminalAgentRunExecutorControl"]
     assert len(terminal_controls) == 1
     terminal_control = terminal_controls[0]
     assert len(terminal_control.bases) == 1
@@ -838,7 +838,7 @@ def test_agent_loop_delegates_foreground_context_construction_to_context_builder
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
     agent_loop = next(
-        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AgentLoop"
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AgentRunExecutor"
     )
     methods = {
         node.name: node
@@ -869,7 +869,7 @@ def test_agent_loop_delegates_schedule_context_construction_to_context_builder()
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     agent_loop = next(
-        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AgentLoop"
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AgentRunExecutor"
     )
     prepare_schedule = next(
         node
@@ -893,7 +893,7 @@ def test_agent_loop_request_paths_stay_inside_context_builder() -> None:
     path = PACKAGE_ROOT / "agent" / "loop.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     agent_loop = next(
-        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AgentLoop"
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AgentRunExecutor"
     )
     methods = {
         node.name: node
@@ -931,7 +931,7 @@ def test_issue_243_production_model_calls_use_one_explicit_run_context_seam() ->
     loop_class = next(
         node
         for node in loop_tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "AgentLoop"
+        if isinstance(node, ast.ClassDef) and node.name == "AgentRunExecutor"
     )
     methods = {
         node.name: node
@@ -994,8 +994,14 @@ def test_issue_243_production_model_calls_use_one_explicit_run_context_seam() ->
     assert any(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id == "_foreground_runtime_status_input"
+        and node.func.id == "session_runtime_status_input"
         for node in ast.walk(methods["runtime_status_input"])
+    )
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_foreground_runtime_status_input"
+        for node in ast.walk(functions["session_runtime_status_input"])
     )
     status_helper = functions["_foreground_runtime_status_input"]
     status_builder_calls = {

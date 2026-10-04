@@ -64,6 +64,7 @@ from omni.agent.tools.core.exec_host import ExecHost
 from omni.agent.tools.deferred import build_agent_run_gateway
 from omni.agent.tools.permission import MCPToolIdentity, PermissionContext
 from omni.agent.tools.tool_gateway import (
+    BuiltInToolCatalog,
     ConfirmationDecision,
     ConfirmationRequest,
     ToolGateway,
@@ -138,7 +139,7 @@ class ForegroundConversationProjection:
     messages: tuple[dict[str, Any], ...]
 
 
-class TerminalAgentLoopControl(Protocol):
+class TerminalAgentRunExecutorControl(Protocol):
     """Foreground control surface including Terminal history projection."""
 
     @property
@@ -208,7 +209,7 @@ class _AgentRunContext:
     runner: AgentRunner
 
 
-class AgentLoop:
+class AgentRunExecutor:
     """Own the complete serial foreground execution path."""
 
     def __init__(
@@ -233,6 +234,8 @@ class AgentLoop:
         mcp_keywords: Mapping[str, Sequence[str]] | None = None,
         skill_loader: SkillLoader | None = None,
         reload_skills: Callable[[], tuple[SkillMetadata, ...]] | None = None,
+        session: Session | None = None,
+        built_in_catalog: BuiltInToolCatalog | None = None,
     ) -> None:
         if workspace_state.workspace_path != workspace_path:
             raise ValueError("Agent Loop Workspace State must belong to the Workspace")
@@ -255,6 +258,7 @@ class AgentLoop:
             skill_loader=skill_loader,
         )
         tool_gateway = ToolGateway(
+            catalog=built_in_catalog,
             workspace=workspace_path,
             schedule_service=schedule_service,
             skill_root=skill_loader.root,
@@ -281,13 +285,17 @@ class AgentLoop:
         )
         baseline_tool_schemas = tuple(baseline_gateway.schemas)
         active_session = (
-            Session.create(workspace_state, now=now, new_uuid=new_uuid)
-            if session_id is None
-            else Session.load(
-                workspace_state,
-                session_id,
-                partition=SessionStoragePartition.FOREGROUND,
-                now=now,
+            session
+            if session is not None
+            else (
+                Session.create(workspace_state, now=now, new_uuid=new_uuid)
+                if session_id is None
+                else Session.load(
+                    workspace_state,
+                    session_id,
+                    partition=SessionStoragePartition.FOREGROUND,
+                    now=now,
+                )
             )
         )
 
@@ -313,8 +321,6 @@ class AgentLoop:
         self._max_iterations = configuration.runtime.max_iterations
         self._bus = bus
         self._generation_started_at: float | None = None
-        self._foreground_consumer_enabled = True
-        self._consumer_task: asyncio.Task[None] | None = None
         self._execution_task: asyncio.Task[None] | None = None
         self._foreground_commit_gate = asyncio.Lock()
         self._replacement_barrier_held = False
@@ -339,15 +345,14 @@ class AgentLoop:
         self._session_abandoned = False
 
     @classmethod
-    def with_session(cls, session: Session, **kwargs: Any) -> AgentLoop:
+    def with_session(cls, session: Session, **kwargs: Any) -> AgentRunExecutor:
         """Compose a generation around an already detached Session state."""
         kwargs.pop("session_id", None)
-        loop = cls(session_id=None, **kwargs)
-        loop._session = session
+        loop = cls(session_id=None, session=session, **kwargs)
         return loop
 
     @property
-    def control(self) -> TerminalAgentLoopControl:
+    def control(self) -> TerminalAgentRunExecutorControl:
         return self
 
     @property
@@ -473,14 +478,6 @@ class AgentLoop:
         self.preflight()
         self._activate_prepared()
 
-    def disable_foreground_consumer(self) -> None:
-        """Keep activation compatible while reserving execution for run_foreground."""
-        if self._closed or self._aborted or self._closing or self._close_task is not None:
-            raise RuntimeError("Agent Loop is closed")
-        if self._started:
-            raise RuntimeError("Agent Loop is already started")
-        self._foreground_consumer_enabled = False
-
     async def _pause_for_replacement(self) -> None:
         """Freeze new foreground admission and the final Session commit point."""
         if self._replacement_barrier_held:
@@ -561,14 +558,6 @@ class AgentLoop:
         if not self._preflighted:
             raise RuntimeError("Agent Loop was not preflighted")
         started_at = self._monotonic_now()
-        if self._foreground_consumer_enabled:
-            consumer = self._consume_foreground()
-            try:
-                consumer_task = asyncio.create_task(consumer)
-            except BaseException:
-                consumer.close()
-                raise
-            self._consumer_task = consumer_task
         self._generation_started_at = started_at
         self._started = True
 
@@ -665,7 +654,7 @@ class AgentLoop:
 
     def _owned_tasks(self) -> tuple[asyncio.Task[Any], ...]:
         tasks: list[asyncio.Task[Any]] = []
-        for task in (self._consumer_task, self._execution_task):
+        for task in (self._execution_task,):
             if task is not None:
                 tasks.append(task)
         tasks.extend(work.task for work in self._title_work.values())
@@ -690,7 +679,6 @@ class AgentLoop:
                     )
 
     def _clear_owned_task_references(self) -> None:
-        self._consumer_task = None
         self._execution_task = None
         self._execution_ready = None
         self._title_work.clear()
@@ -755,9 +743,6 @@ class AgentLoop:
             raise RuntimeError("Agent Loop is closed")
         if not self._started:
             raise RuntimeError("Agent Loop is not started")
-        consumer = self._consumer_task
-        if consumer is not None and not consumer.done():
-            raise RuntimeError("Agent Loop foreground consumer is active")
         if self._execution_task is not None and not self._execution_task.done():
             raise RuntimeError("Agent Loop already has an active foreground Run")
         execution_ready = asyncio.Event()
@@ -821,12 +806,15 @@ class AgentLoop:
         with session_log(workspace_state, job.session_id):
             try:
                 try:
-                    schedule_session = Session.load(
-                        workspace_state,
-                        job.session_id,
-                        partition=SessionStoragePartition.SCHEDULE,
-                        now=self._schedule_now,
-                    )
+                    if self._session.session_id == job.session_id:
+                        schedule_session = self._session
+                    else:
+                        schedule_session = Session.load(
+                            workspace_state,
+                            job.session_id,
+                            partition=SessionStoragePartition.SCHEDULE,
+                            now=self._schedule_now,
+                        )
                 except FileNotFoundError:
                     schedule_session = Session.create_schedule(
                         workspace_state,
@@ -850,10 +838,11 @@ class AgentLoop:
             finally:
                 if schedule_session is not None:
                     try:
-                        if self._aborted:
-                            schedule_session.abandon()
-                        else:
-                            schedule_session.close()
+                        if schedule_session is not self._session:
+                            if self._aborted:
+                                schedule_session.abandon()
+                            else:
+                                schedule_session.close()
                         persist_drain = asyncio.create_task(
                             schedule_session.wait_for_pending_persist()
                         )
@@ -1188,36 +1177,6 @@ class AgentLoop:
         if self._aborted or legacy is None:
             raise ValueError("Confirmation response is late or unknown")
         legacy.respond(confirmation_id, decision)
-
-    async def _consume_foreground(self) -> None:
-        try:
-            while not self._closing:
-                inbound = await self._bus.get_inbound()
-                if self._closing:
-                    break
-                execution_ready = asyncio.Event()
-                execution = asyncio.create_task(
-                    self._execute_foreground(inbound, execution_ready=execution_ready)
-                )
-                self._execution_task = execution
-                self._execution_ready = execution_ready
-                try:
-                    await execution
-                except asyncio.CancelledError:
-                    if not self._closing:
-                        raise
-                finally:
-                    if self._execution_task is execution:
-                        self._execution_task = None
-                    if self._execution_ready is execution_ready:
-                        self._execution_ready = None
-                    self._cancel_requested = False
-        except RuntimeError:
-            if not self._closing:
-                raise
-        except asyncio.CancelledError:
-            if not self._closing:
-                raise
 
     async def _execute_foreground(
         self,
@@ -1609,52 +1568,12 @@ class AgentLoop:
         return True
 
     def runtime_status_input(self) -> RuntimeStatusInput:
-        """Return the status token input projected by this generation's Context Builder."""
-        session = self._session
-        route_status = _configured_model_route_status(self._configuration, "chat")
-        session_id = session.session_id
-        messages = session.messages
-        metadata = session.metadata
-        last_compacted = session.last_compacted
-        title = metadata.get("title")
-        if not isinstance(title, str):
-            raise ValueError("Active Session title is malformed")
-        usage_value = metadata.get("token_usage")
-        if not isinstance(usage_value, dict):
-            raise ValueError("Active Session token usage is malformed")
-        summary = _action_summary_from_metadata(metadata)
-        usage_fields = ("model_calls", "input_tokens", "output_tokens", "total_tokens")
-        usage = tuple((field, usage_value.get(field)) for field in usage_fields)
-        if any(isinstance(value, bool) or not isinstance(value, int) for _, value in usage):
-            raise ValueError("Active Session token usage is malformed")
-        usage_anchor = latest_main_agent_usage_anchor(messages)
-        latest_usage_context: ContextUsageSnapshot | None = None
-        latest_reported_usage: tuple[tuple[str, int], ...] = ()
-        if usage_anchor is not None:
-            latest_usage_context, reported_usage = usage_anchor
-            latest_reported_usage = tuple((field, reported_usage[field]) for field in usage_fields)
-        return _foreground_runtime_status_input(
+        return session_runtime_status_input(
+            self._session,
+            configuration=self._configuration,
             context_builder=self._context_builder,
-            history=messages[last_compacted:],
-            session_id=session_id,
             tool_schemas=self.tool_schemas,
-            summary=summary,
-            blackboard=Blackboard.from_dict(metadata.get("blackboard")),
-            session_title=title,
-            session_message_count=len(messages),
-            last_compacted=last_compacted,
-            cumulative_usage=tuple((field, cast(int, value)) for field, value in usage),
-            chat_model=f"{route_status.provider_id}/{route_status.model}",
-            context_window=route_status.context_window,
             generation_started_at=self._generation_started_at,
-            max_output=route_status.max_output,
-            compact_ratio=self._configuration.runtime.compact_ratio,
-            requested_route="chat",
-            selected_route=route_status.selected_route,
-            provider_id=route_status.provider_id,
-            model=route_status.model,
-            latest_usage_context=latest_usage_context,
-            latest_reported_usage=latest_reported_usage,
         )
 
     def _result_externalizer_for(
@@ -1935,8 +1854,64 @@ class AgentLoop:
         )
 
 
+def session_runtime_status_input(
+    session: Session,
+    *,
+    configuration: UserConfiguration,
+    context_builder: ContextBuilder,
+    tool_schemas: tuple[dict[str, Any], ...],
+    generation_started_at: float | None,
+) -> RuntimeStatusInput:
+    """Project resident history for management without constructing an executor."""
+    route_status = _configured_model_route_status(configuration, "chat")
+    session_id = session.session_id
+    messages = session.messages
+    metadata = session.metadata
+    last_compacted = session.last_compacted
+    title = metadata.get("title")
+    if not isinstance(title, str):
+        raise ValueError("Active Session title is malformed")
+    usage_value = metadata.get("token_usage")
+    if not isinstance(usage_value, dict):
+        raise ValueError("Active Session token usage is malformed")
+    summary = _action_summary_from_metadata(metadata)
+    usage_fields = ("model_calls", "input_tokens", "output_tokens", "total_tokens")
+    usage = tuple((field, usage_value.get(field)) for field in usage_fields)
+    if any(isinstance(value, bool) or not isinstance(value, int) for _, value in usage):
+        raise ValueError("Active Session token usage is malformed")
+    usage_anchor = latest_main_agent_usage_anchor(messages)
+    latest_usage_context: ContextUsageSnapshot | None = None
+    latest_reported_usage: tuple[tuple[str, int], ...] = ()
+    if usage_anchor is not None:
+        latest_usage_context, reported_usage = usage_anchor
+        latest_reported_usage = tuple((field, reported_usage[field]) for field in usage_fields)
+    return _foreground_runtime_status_input(
+        context_builder=context_builder,
+        history=messages[last_compacted:],
+        session_id=session_id,
+        tool_schemas=tool_schemas,
+        summary=summary,
+        blackboard=Blackboard.from_dict(metadata.get("blackboard")),
+        session_title=title,
+        session_message_count=len(messages),
+        last_compacted=last_compacted,
+        cumulative_usage=tuple((field, cast(int, value)) for field, value in usage),
+        chat_model=f"{route_status.provider_id}/{route_status.model}",
+        context_window=route_status.context_window,
+        generation_started_at=generation_started_at,
+        max_output=route_status.max_output,
+        compact_ratio=configuration.runtime.compact_ratio,
+        requested_route="chat",
+        selected_route=route_status.selected_route,
+        provider_id=route_status.provider_id,
+        model=route_status.model,
+        latest_usage_context=latest_usage_context,
+        latest_reported_usage=latest_reported_usage,
+    )
+
+
 __all__ = [
-    "AgentLoop",
+    "AgentRunExecutor",
     "ConfirmationCallback",
     "ConfirmationRequestView",
     "ModelContextOverflowError",

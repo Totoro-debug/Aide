@@ -13,7 +13,7 @@ import pytest
 from loguru import logger
 from mcp.types import CallToolResult
 
-from omni.agent.loop import AgentLoop, ConfirmationRequestView
+from omni.agent.loop import ConfirmationRequestView
 from omni.agent.memory.manager import MemoryManager
 from omni.agent.message_bus import MessageBus
 from omni.agent.permission import RuntimePermissionControl
@@ -43,6 +43,7 @@ from omni.schedule.service import ScheduleService
 from omni.templates import render_template
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import TaskFramingRouterAdapter, collect_foreground_outbound
+from tests.fixtures.agent_loop import DrivenExecutor as AgentRunExecutor
 from tests.fixtures.provider import ProviderCall
 
 NOW = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
@@ -184,7 +185,7 @@ def _agent_loop(
     *,
     config_text: str = VALID_CONFIG,
     mcp_tools: Sequence[BaseTool] = (),
-) -> tuple[AgentLoop, ModelRouter, ScheduleService, MessageBus]:
+) -> tuple[AgentRunExecutor, ModelRouter, ScheduleService, MessageBus]:
     home = AgentHome(agent_home)
     home.initialize()
     (agent_home / "config.toml").write_text(config_text, encoding="utf-8")
@@ -195,7 +196,7 @@ def _agent_loop(
         configuration=configuration,
         provider_factory=lambda _configuration: provider,
     )
-    loop: AgentLoop | None = None
+    loop: AgentRunExecutor | None = None
 
     async def execute_user_job(job: object) -> None:
         assert loop is not None
@@ -211,7 +212,7 @@ def _agent_loop(
         execute_dream=execute_dream,
     )
     bus = MessageBus()
-    loop = AgentLoop(
+    loop = AgentRunExecutor(
         workspace_path=workspace,
         workspace_state=state,
         agent_home=home,
@@ -232,7 +233,7 @@ def _agent_loop(
 
 
 async def _close_loop(
-    loop: AgentLoop,
+    loop: AgentRunExecutor,
     router: ModelRouter,
     schedule: ScheduleService,
 ) -> None:

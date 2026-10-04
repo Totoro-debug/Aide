@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from omni.agent.confirmation import BackgroundConfirmationOwner
-from omni.agent.loop import AgentLoop
 from omni.agent.memory.manager import MemoryManager
 from omni.agent.message_bus import MessageBus
 from omni.agent.permission import RuntimePermissionControl
@@ -50,6 +49,7 @@ from tests.fixtures import (
     TaskFramingRouterAdapter,
     collect_foreground_outbound,
 )
+from tests.fixtures.agent_loop import DrivenExecutor as AgentRunExecutor
 from tests.fixtures.diagnostic_capture import capture_diagnostics
 
 JOB_UUID = UUID("550e8400-e29b-41d4-a716-446655440000")
@@ -321,7 +321,7 @@ def _agent_loop(
     *,
     schedule_clock: object,
     config_text: str = VALID_CONFIG,
-) -> tuple[AgentLoop, ModelRouter, ScheduleService, MessageBus]:
+) -> tuple[AgentRunExecutor, ModelRouter, ScheduleService, MessageBus]:
     home = AgentHome(agent_home)
     home.initialize()
     (agent_home / "config.toml").write_text(config_text, encoding="utf-8")
@@ -331,7 +331,7 @@ def _agent_loop(
         configuration=configuration,
         provider_factory=lambda _configuration: provider,
     )
-    loop: AgentLoop | None = None
+    loop: AgentRunExecutor | None = None
 
     async def execute_user_job(job: ScheduleJob) -> None:
         assert loop is not None
@@ -347,7 +347,7 @@ def _agent_loop(
         execute_dream=execute_dream,
     )
     bus = MessageBus()
-    loop = AgentLoop(
+    loop = AgentRunExecutor(
         workspace_path=workspace,
         workspace_state=state,
         agent_home=home,

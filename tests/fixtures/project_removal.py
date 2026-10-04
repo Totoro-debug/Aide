@@ -2,11 +2,11 @@
 
 import asyncio
 
-from omni.service.runtime import LocalService
+from omni.service.runtime import AgentService
 
 
 async def wait_for_project_removal(
-    service: LocalService, client_id: str, project_id: str, operation_id: str
+    service: AgentService, client_id: str, project_id: str, operation_id: str
 ) -> dict[str, object]:
     async with asyncio.timeout(10):
         while True:
@@ -17,7 +17,7 @@ async def wait_for_project_removal(
 
 
 async def complete_project_removal(
-    service: LocalService, client_id: str, project_id: str
+    service: AgentService, client_id: str, project_id: str
 ) -> dict[str, object]:
     started = await service.start_project_removal(client_id, project_id)
     operation_id = started["operation_id"]

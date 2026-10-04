@@ -9,7 +9,7 @@ import pytest
 
 from omni.config.agent_home import AgentHome
 from omni.service.errors import ServiceError
-from omni.service.runtime import LocalService
+from omni.service.runtime import AgentService
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
 
@@ -23,7 +23,7 @@ async def test_external_valid_file_requires_restart_after_invalid_startup(
     config = home.path / "config.toml"
     if initial is not None:
         config.write_text(initial, encoding="utf-8")
-    service = LocalService(home, reconnect_timeout=3600)
+    service = AgentService(home, reconnect_timeout=3600)
     project = tmp_path / "registered"
     project.mkdir()
     service.projects.register(project)
@@ -45,7 +45,7 @@ async def test_external_valid_file_requires_restart_after_invalid_startup(
         assert not (project / ".omni").exists()
     finally:
         await service.stop()
-    restarted = LocalService(home, reconnect_timeout=3600)
+    restarted = AgentService(home, reconnect_timeout=3600)
     try:
         await restarted.start()
         assert restarted.configuration_ready and len(restarted.workspaces) == 1

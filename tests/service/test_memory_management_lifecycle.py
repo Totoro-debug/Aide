@@ -14,7 +14,7 @@ from aiohttp.test_utils import BaseTestServer, TestServer
 from omni.config.config import ConfigLoader
 from omni.provider.models import ModelResponse
 from omni.service.discovery import create_credential, read_credential
-from omni.service.runtime import ClientState, LocalService, SessionClaim, WorkspaceServiceRuntime
+from omni.service.runtime import AgentService, ClientState, SessionClaim, WorkspaceRecord
 from omni.service.transport import create_app
 from tests.memory.test_dream import _response
 from tests.service.test_protocol_contract import _validator
@@ -34,7 +34,7 @@ async def _post(
     *,
     client: ClientState | None = None,
     claim: SessionClaim | None = None,
-    workspace: WorkspaceServiceRuntime | None = None,
+    workspace: WorkspaceRecord | None = None,
 ) -> dict[str, Any]:
     selected = claim or case.claim
     owner = client or case.first
@@ -68,7 +68,7 @@ async def test_http_dream_overlap_and_inflight_replay_make_one_model_request(
     management_case: ManagementCase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     case = management_case
-    runtime = case.workspace.runtime
+    runtime = case.workspace.resources
     assert runtime is not None
     await runtime.memory_manager.append_summary("Pending shared update", case.clock.now())
     started, release, replay_entered = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -140,9 +140,9 @@ async def test_http_dreams_in_different_workspaces_reach_model_concurrently(
     draft = await other.create_draft(case.second.client_id)
     await case.service.claim(case.second.client_id, other.workspace_id, draft)
     other_claim = other._claims[draft]
-    assert case.workspace.runtime is not None and other.runtime is not None
-    await case.workspace.runtime.memory_manager.append_summary("FIRST-WORKSPACE", case.clock.now())
-    await other.runtime.memory_manager.append_summary("SECOND-WORKSPACE", case.clock.now())
+    assert case.workspace.resources is not None and other.resources is not None
+    await case.workspace.resources.memory_manager.append_summary("FIRST-WORKSPACE", case.clock.now())
+    await other.resources.memory_manager.append_summary("SECOND-WORKSPACE", case.clock.now())
     started = {key: asyncio.Event() for key in ("FIRST-WORKSPACE", "SECOND-WORKSPACE")}
     release = asyncio.Event()
     calls: list[str] = []
@@ -188,7 +188,7 @@ async def test_http_dream_shutdown_waits_for_cancel_cleanup_and_releases_workspa
     management_case: ManagementCase, monkeypatch: pytest.MonkeyPatch, stop_service: bool
 ) -> None:
     case = management_case
-    runtime = case.workspace.runtime
+    runtime = case.workspace.resources
     assert runtime is not None
     await runtime.memory_manager.append_summary("Update interrupted by shutdown", case.clock.now())
     started, cancelled, cleanup_release = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -220,7 +220,7 @@ async def test_http_dream_shutdown_waits_for_cancel_cleanup_and_releases_workspa
             outcome = (await asyncio.gather(running, return_exceptions=True))[0]
             assert isinstance(outcome, aiohttp.ServerDisconnectedError)
             assert runtime.dream._task is None
-            assert runtime._closed
+            assert runtime.workspace_id not in case.service.workspace_resources.resources
         finally:
             cleanup_release.set()
             await asyncio.gather(
@@ -231,7 +231,7 @@ async def test_http_dream_shutdown_waits_for_cancel_cleanup_and_releases_workspa
         return _response("New runtime completed")
 
     monkeypatch.setattr(case.provider, "complete", successful)
-    replacement = LocalService(
+    replacement = AgentService(
         case.service.agent_home, ConfigLoader(case.service.agent_home).load_for_startup()
     )
     await replacement.start()
@@ -241,10 +241,10 @@ async def test_http_dream_shutdown_waits_for_cancel_cleanup_and_releases_workspa
         workspace = await replacement.attach_workspace(
             client.client_id, case.workspace.workspace_path
         )
-        assert workspace.runtime is not None and workspace.runtime is not runtime
+        assert workspace.resources is not None and workspace.resources is not runtime
         session = await workspace.create_draft(client.client_id)
         await replacement.claim(client.client_id, workspace.workspace_id, session)
-        await workspace.runtime.memory_manager.append_summary(
+        await workspace.resources.memory_manager.append_summary(
             "Fresh update after restart", case.clock.now()
         )
         async with TestServer(create_app(replacement)) as server, aiohttp.ClientSession() as http:
@@ -269,7 +269,7 @@ async def test_http_memory_failure_and_partial_skill_discovery_do_not_expose_exc
     management_case: ManagementCase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     case = management_case
-    runtime = case.workspace.runtime
+    runtime = case.workspace.resources
     assert runtime is not None
     secret = "PRIVATE-provider-token-keep-hidden"
     root = case.service.agent_home.path / "skills"

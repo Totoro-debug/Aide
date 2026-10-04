@@ -4,12 +4,11 @@ status: accepted
 
 # Agent Service-owned Shared Resources and Session Execution
 
-The current architecture shares expensive resources within each Workspace but
-duplicates them across Workspaces and constructs a persistent Agent Loop for
-each loaded Session. AgentService combines LocalService and AgentLoop into one
-authority for shared capabilities and Agent Run scheduling. The Workspace
-Runtime ownership layer will be removed. This reduces duplicated resource
-construction and separates capability lifetime from conversation lifetime.
+AgentService is the single composition and scheduling authority for CLI and Web.
+It owns shared capabilities across Workspaces and creates execution collaborators
+for each Agent Run. Resident Session history, exclusive Claims, and active work
+have independent lifetimes, reducing duplicate resources and idle tasks while
+preserving asynchronous Session concurrency.
 
 The authoritative requirements and quantified delivery criteria are tracked in
 [#306](https://github.com/Totoro-debug/OmniAgent/issues/306).
@@ -17,12 +16,12 @@ The authoritative requirements and quantified delivery criteria are tracked in
 ## Confirmed decisions
 
 - AgentService owns Skills, Tools, Model Providers, and other shared resources
-  and schedules Agent Runs. LocalService and AgentLoop will be merged; there
-  will be no persistent Agent Loop instance per Session or intermediate
-  Workspace Runtime ownership layer.
+  and schedules Agent Runs. There is no persistent execution object per Session
+  or intermediate Workspace Runtime ownership layer. Workspace records associate
+  data and coordination state; resource creation and closure belong to the service.
 - The optimization targets repeated resource construction across Workspaces
   and the number of persistent per-Session Agent Loop instances. Resource
-  savings have not yet been measured.
+  counts and memory observations are recorded in the [T7 issue discussion](https://github.com/Totoro-debug/OmniAgent/issues/313).
 - Accepted inputs within one Conversation Session execute serially. Distinct
   Conversation Sessions may execute concurrently.
 - There is no global Agent Run concurrency limit.
@@ -56,13 +55,6 @@ The authoritative requirements and quantified delivery criteria are tracked in
   selection changes a Client's later Run snapshots; global chat Reasoning Effort
   selection changes later logical model requests and retains its existing
   best-effort persistence. These controls do not rebuild shared resources.
-
-## Review status
-
-The user accepted the consolidated architecture and implementation plan on
-2026-10-03. Implementation follows the
-[phased execution plan](../plans/agent-service-phased-execution.md). Acceptance
-records the target architecture; it does not mean implementation is complete.
 
 ## Execution structure
 
@@ -123,6 +115,7 @@ Retained conversation history and unconstrained active Runs can still increase
 memory use. This decision removes duplicate capability resources and idle
 Session execution tasks; it does not impose a total-memory bound.
 
-ADR-0029 remains the reference for the existing implementation during migration.
-Once the phased execution is complete, consolidate still-valid decisions into
-the implemented architecture documentation.
+[ADR-0029](0029-host-cli-and-web-through-one-local-service.md) records client,
+transport, confirmation, and Project lifecycle decisions. The approved execution
+plan is [archived](../archive/agent-service-phased-execution.md); GitHub and the
+issue discussions retain implementation and verification history.

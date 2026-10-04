@@ -22,7 +22,7 @@ from ...schedule.model import ScheduleJob
 from ..discovery import identity_proof
 from ..errors import ServiceError, service_error
 from ..projects import ProjectCatalogError
-from ..runtime import LocalService, ServiceSink
+from ..runtime import AgentService, ServiceSink
 
 _API_PREFIX = "/api/v1"
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
@@ -99,10 +99,10 @@ class _WebSocketSink(ServiceSink):
                 await self.socket.send_json(value)
 
 
-class LocalServiceTransport:
+class AgentServiceTransport:
     """Bind HTTP, WebSocket, and safe static routes to one service instance."""
 
-    def __init__(self, service: LocalService) -> None:
+    def __init__(self, service: AgentService) -> None:
         self.service = service
         self._web_tickets: dict[str, float] = {}
         self._web_sessions: dict[str, _WebSession] = {}
@@ -1136,9 +1136,12 @@ class LocalServiceTransport:
             raise service_error("forbidden", "Request Origin must match this service.", status=403)
 
 
-def create_app(service: LocalService) -> web.Application:
+AgentServiceTransport = AgentServiceTransport
+
+
+def create_app(service: AgentService) -> web.Application:
     """Return the single local application used by tests and the service process."""
-    return LocalServiceTransport(service).create_app()
+    return AgentServiceTransport(service).create_app()
 
 
 async def _json_object(request: web.Request) -> dict[str, object]:
@@ -1153,7 +1156,7 @@ async def _json_object(request: web.Request) -> dict[str, object]:
     return value
 
 
-def _read_service_token(service: LocalService) -> str:
+def _read_service_token(service: AgentService) -> str:
     from omni.service.discovery import read_credential
 
     return read_credential(service.agent_home)
@@ -1285,4 +1288,4 @@ def _read_web_asset(asset_path: str) -> bytes:
     return asset.read_bytes()
 
 
-__all__ = ["LocalServiceTransport", "create_app"]
+__all__ = ["AgentServiceTransport", "AgentServiceTransport", "create_app"]

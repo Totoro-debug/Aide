@@ -16,12 +16,12 @@ from loguru import logger
 from omni.config.agent_home import AgentHome
 from omni.config.config import ConfigLoader
 from omni.service.discovery import create_credential
-from omni.service.runtime import LocalService
+from omni.service.runtime import AgentService
 from omni.service.transport import create_app
 from omni.utils.host_filesystem import HOST_FILESYSTEM
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
-SecurityHttp = tuple[LocalService, BaseTestServer, dict[str, str], dict[str, str]]
+SecurityHttp = tuple[AgentService, BaseTestServer, dict[str, str], dict[str, str]]
 
 
 @pytest_asyncio.fixture
@@ -29,7 +29,7 @@ async def security_http(tmp_path: Path) -> AsyncIterator[SecurityHttp]:
     home = AgentHome(tmp_path / "home")
     home.initialize()
     (home.path / "config.toml").write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
     await service.start()
     token = create_credential(home)
     headers = []
@@ -49,7 +49,7 @@ async def security_http(tmp_path: Path) -> AsyncIterator[SecurityHttp]:
     await service.stop()
 
 
-def _patch(service: LocalService, request_id: str = "security-save") -> dict[str, object]:
+def _patch(service: AgentService, request_id: str = "security-save") -> dict[str, object]:
     return {
         "request_id": request_id,
         "revision": service.config_view()["revision"],
@@ -234,7 +234,7 @@ async def test_http_write_failure_keeps_saved_active_status_and_bytes(
     assert "minimal-secret" not in json.dumps(body)
     assert (service.agent_home.path / "config.toml").read_bytes() == before
     assert service.config_view() == status
-    assert service._config_apply_task is None
+    assert not hasattr(service, "_config_apply_task")
 
 
 @pytest.mark.asyncio

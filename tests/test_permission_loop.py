@@ -4,7 +4,6 @@ from uuid import uuid4
 
 import pytest
 
-from omni.agent.loop import AgentLoop
 from omni.agent.memory.manager import MemoryManager
 from omni.agent.message_bus import MessageBus
 from omni.agent.permission import RuntimePermissionControl
@@ -28,6 +27,7 @@ from tests.fixtures import (
     StreamScript,
     collect_foreground_outbound,
 )
+from tests.fixtures.agent_loop import DrivenExecutor as AgentRunExecutor
 
 NOW = datetime(2026, 7, 11, 15, 30, 12, 123000, tzinfo=timezone(timedelta(hours=8)))
 
@@ -36,7 +36,7 @@ def _agent_loop(
     home: AgentHome,
     workspace: Path,
     provider: ScriptedFakeProvider,
-) -> tuple[AgentLoop, ModelRouter, ScheduleService, MessageBus]:
+) -> tuple[AgentRunExecutor, ModelRouter, ScheduleService, MessageBus]:
     state = WorkspaceState(workspace)
     state.initialize(agent_home_root=home.path)
     configuration = ConfigLoader(home).load()
@@ -44,7 +44,7 @@ def _agent_loop(
         configuration=configuration,
         provider_factory=lambda _configuration: provider,
     )
-    loop: AgentLoop | None = None
+    loop: AgentRunExecutor | None = None
 
     async def execute_user_job(job: object) -> None:
         assert loop is not None
@@ -60,7 +60,7 @@ def _agent_loop(
         execute_dream=execute_dream,
     )
     bus = MessageBus()
-    loop = AgentLoop(
+    loop = AgentRunExecutor(
         workspace_path=workspace,
         workspace_state=state,
         agent_home=home,

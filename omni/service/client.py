@@ -29,7 +29,7 @@ from omni.agent.confirmation import (
     ConfirmationPresenter,
     ForegroundConfirmationOwner,
 )
-from omni.agent.loop import ForegroundConversationProjection, TerminalAgentLoopControl
+from omni.agent.loop import ForegroundConversationProjection, TerminalAgentRunExecutorControl
 from omni.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
 from omni.agent.permission import ToolPermissionLevel
 from omni.agent.session.backup_store import BackupGap, BackupIntegrityIssue
@@ -107,7 +107,7 @@ class RemoteMessageBus(MessageBus):
         )
 
 
-class RemoteControl(TerminalAgentLoopControl):
+class RemoteControl(TerminalAgentRunExecutorControl):
     """Foreground control projection for one claimed remote Session."""
 
     def __init__(self, client: ServiceClient) -> None:
@@ -440,7 +440,15 @@ class ServiceClient:
                 headers=headers,
                 json={"request_id": str(uuid4())},
             ) as response:
-                return response.status == 200
+                accepted = response.status == 200
+        if not accepted:
+            return False
+        deadline = asyncio.get_running_loop().time() + 3.0
+        while asyncio.get_running_loop().time() < deadline:
+            if await cls._probe(discovery, token) is None:
+                return True
+            await asyncio.sleep(0.02)
+        return True
 
     @classmethod
     async def _connect(

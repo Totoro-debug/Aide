@@ -53,7 +53,7 @@ from omni.agent.confirmation import (
 from omni.agent.loop import (
     ConfirmationRequestView,
     ForegroundConversationProjection,
-    TerminalAgentLoopControl,
+    TerminalAgentRunExecutorControl,
 )
 from omni.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
 from omni.agent.permission import PERMISSION_LEVELS, ToolPermissionLevel
@@ -2224,7 +2224,7 @@ class _MessageBusRunProjection:
         return self._terminal_seen
 
     def start(self) -> None:
-        """Start elapsed timing when AgentLoop consumes the inbound message."""
+        """Start elapsed timing when AgentRunExecutor consumes the inbound message."""
         self._start_timing()
 
     async def consume(self, outbound: OutboundMessage) -> None:
@@ -2531,7 +2531,7 @@ class TerminalConversationApp(App[None]):
             self,
             request: ConfirmationRequestView,
             *,
-            control: TerminalAgentLoopControl,
+            control: TerminalAgentRunExecutorControl,
             bus: MessageBus,
         ) -> None:
             super().__init__()
@@ -2779,7 +2779,7 @@ class TerminalConversationApp(App[None]):
         self,
         *,
         bus: MessageBus,
-        control: TerminalAgentLoopControl,
+        control: TerminalAgentRunExecutorControl,
         management_dispatcher: ManagementCommandDispatcher,
         monotonic: Callable[[], float] = monotonic_now,
         skill_metadata: tuple[SkillMetadata, ...] = (),
@@ -2830,7 +2830,7 @@ class TerminalConversationApp(App[None]):
         self._bus_callback: Callable[[tuple[InboundMessage, ...]], None] | None = None
         self._bus_callback_bus: MessageBus | None = None
         self._confirmation_callback: Callable[[ConfirmationRequestView], None] | None = None
-        self._confirmation_control: TerminalAgentLoopControl | None = None
+        self._confirmation_control: TerminalAgentRunExecutorControl | None = None
         self._application_error: Exception | None = None
         self._fatal_management_error: FatalManagementError | None = None
 
@@ -3146,7 +3146,7 @@ class TerminalConversationApp(App[None]):
 
     def _bind_confirmation_callback(
         self,
-        control: TerminalAgentLoopControl,
+        control: TerminalAgentRunExecutorControl,
         bus: MessageBus,
     ) -> None:
         def on_confirmation(request: ConfirmationRequestView) -> None:
@@ -3162,7 +3162,7 @@ class TerminalConversationApp(App[None]):
         self._confirmation_control = control
         control.bind_confirmation_callback(on_confirmation)
 
-    def _unbind_confirmation_callback(self, control: TerminalAgentLoopControl) -> None:
+    def _unbind_confirmation_callback(self, control: TerminalAgentRunExecutorControl) -> None:
         callback = self._confirmation_callback
         if callback is None or self._confirmation_control is not control:
             return
@@ -3246,7 +3246,7 @@ class TerminalConversationApp(App[None]):
     async def rebind_agent_loop(
         self,
         *,
-        control: TerminalAgentLoopControl,
+        control: TerminalAgentRunExecutorControl,
         skill_metadata: tuple[SkillMetadata, ...],
         session_projection: ForegroundConversationProjection,
     ) -> None:
@@ -4030,7 +4030,7 @@ class TerminalConversationApp(App[None]):
     async def _request_confirmation(
         self,
         request: ConfirmationRequestView,
-        control: TerminalAgentLoopControl,
+        control: TerminalAgentRunExecutorControl,
         bus: MessageBus,
     ) -> None:
         if (
@@ -4100,7 +4100,7 @@ class TerminalConversationApp(App[None]):
         confirmation_id: UUID,
         decision: ConfirmationDecision,
         *,
-        control: TerminalAgentLoopControl | None = None,
+        control: TerminalAgentRunExecutorControl | None = None,
     ) -> bool:
         try:
             target_control = self._control if control is None else control

@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from omni.agent.memory.dream import Dream
 from omni.agent.memory.manager import MemoryManager
-from omni.agent.workspace_runtime import WorkspaceRuntime
+from omni.agent.tools.mcp_keywords import MCPKeywordPreparer
+from omni.agent.tools.mcp_runtime import (
+    MCPStartupReport,
+    MCPToolSnapshot,
+    MCPWorkspaceRuntimeManager,
+)
 from omni.agent.workspace_state import WorkspaceState
+from omni.provider.model_router import ModelRouter
 from omni.schedule.service import ScheduleDispatcher, ScheduleService
 
 ForegroundCloser = Callable[[], Awaitable[object]]
@@ -23,6 +30,13 @@ class WorkspaceResources:
     memory_manager: MemoryManager
     dream: Dream
     schedule_service: ScheduleService
+    workspace_path: Path
+    mcp_manager: MCPWorkspaceRuntimeManager
+    mcp_startup_report: MCPStartupReport
+    mcp_snapshot: MCPToolSnapshot
+    mcp_keywords: Mapping[str, tuple[str, ...]]
+    mcp_keyword_preparer: MCPKeywordPreparer
+    router: ModelRouter
 
 
 class WorkspaceResourceManager:
@@ -41,44 +55,16 @@ class WorkspaceResourceManager:
     def resources(self) -> Mapping[str, WorkspaceResources]:
         return self._resources
 
-    def register(self, workspace_id: str, runtime: WorkspaceRuntime) -> WorkspaceResources:
+    def register_resources(self, resources: WorkspaceResources) -> WorkspaceResources:
         if self._closed:
             raise RuntimeError("Workspace Resource Manager is closed")
+        workspace_id = resources.workspace_id
         existing = self._resources.get(workspace_id)
         if existing is not None:
-            if existing.workspace_state is not runtime.workspace_state:
+            if existing.workspace_state is not resources.workspace_state:
                 raise RuntimeError("Workspace Resource registration changed its state")
             return existing
-        resources = _resources_from_runtime(workspace_id, runtime)
         self._dispatcher.register(workspace_id, resources.schedule_service)
-        runtime.borrow_execution_resources()
-        self._resources[workspace_id] = resources
-        return resources
-
-    def replace(
-        self,
-        workspace_id: str,
-        *,
-        previous: WorkspaceRuntime,
-        runtime: WorkspaceRuntime,
-    ) -> WorkspaceResources:
-        """Publish a replacement generation without closing its predecessor."""
-        if self._closed:
-            raise RuntimeError("Workspace Resource Manager is closed")
-        current = self.get(workspace_id)
-        if current.schedule_service is not previous.schedule_service:
-            raise RuntimeError("Workspace Resource replacement has a stale predecessor")
-        if runtime is previous:
-            return current
-        resources = _resources_from_runtime(workspace_id, runtime)
-        runtime.borrow_execution_resources()
-        self._dispatcher.unregister(workspace_id, current.schedule_service)
-        try:
-            self._dispatcher.register(workspace_id, resources.schedule_service)
-        except BaseException:
-            runtime.release_execution_resources()
-            self._dispatcher.register(workspace_id, current.schedule_service)
-            raise
         self._resources[workspace_id] = resources
         return resources
 
@@ -107,6 +93,8 @@ class WorkspaceResourceManager:
         if close_foreground is not None:
             await _collect_cleanup(errors, close_foreground)
         await _collect_cleanup(errors, resources.dream.close)
+        if resources.mcp_manager is not None:
+            await _collect_cleanup(errors, resources.mcp_manager.close)
         if errors:
             raise BaseExceptionGroup("Workspace resource cleanup failed", errors)
         self._resources.pop(workspace_id, None)
@@ -140,16 +128,6 @@ async def _collect_cleanup(
         await cleanup()
     except BaseException as error:
         errors.append(error)
-
-
-def _resources_from_runtime(workspace_id: str, runtime: WorkspaceRuntime) -> WorkspaceResources:
-    return WorkspaceResources(
-        workspace_id=workspace_id,
-        workspace_state=runtime.workspace_state,
-        memory_manager=runtime.memory_manager,
-        dream=runtime.dream,
-        schedule_service=runtime.schedule_service,
-    )
 
 
 __all__ = ["WorkspaceResourceManager", "WorkspaceResources"]

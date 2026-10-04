@@ -16,15 +16,15 @@ from aiohttp.test_utils import TestServer
 from omni.agent.session.session import Session
 from omni.config.config import ConfigLoader
 from omni.service.discovery import create_credential
-from omni.service.runtime import ClientState, LocalService, SessionClaim, WorkspaceServiceRuntime
+from omni.service.runtime import AgentService, ClientState, SessionClaim, WorkspaceRecord
 from omni.service.transport import create_app
 from tests.service.test_service_transport import _persist_session, _prepare_agent_home
 
 
 @dataclass
 class MetadataHarness:
-    service: LocalService
-    workspace: WorkspaceServiceRuntime
+    service: AgentService
+    workspace: WorkspaceRecord
     client: ClientState
     claim: SessionClaim
     http: aiohttp.ClientSession
@@ -74,7 +74,7 @@ async def _metadata_service(tmp_path: Path) -> AsyncIterator[MetadataHarness]:
         content="Private conversation body",
     )
     token = create_credential(home)
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=30)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=30)
     await service.start()
     server = TestServer(create_app(service), host="127.0.0.1")
     try:

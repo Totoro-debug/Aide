@@ -13,7 +13,6 @@ import pytest
 from mcp.types import CallToolResult
 
 import omni.agent.context.run_context as compactor_module
-from omni.agent.loop import AgentLoop
 from omni.agent.memory.manager import MemoryManager
 from omni.agent.message_bus import InboundMessage, MessageBus
 from omni.agent.permission import PermissionSnapshot, RuntimePermissionControl
@@ -44,6 +43,7 @@ from omni.schedule.service import ScheduleJobExecutionError, ScheduleService
 from omni.skills.catalog import SkillLoader
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import TaskFramingRouterAdapter, collect_foreground_outbound
+from tests.fixtures.agent_loop import DrivenExecutor as AgentRunExecutor
 from tests.fixtures.session import seed_session_state
 
 NOW = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
@@ -335,7 +335,7 @@ def _loop(
     externalize_result_for: Callable[[Session], Callable[[ToolResult], ToolResult]] | None = None,
     task_framing_router: TaskFramingRouterAdapter | None = None,
     mcp_tools: Sequence[BaseTool] = (),
-) -> tuple[AgentLoop, WorkspaceState, ScheduleService, MessageBus]:
+) -> tuple[AgentRunExecutor, WorkspaceState, ScheduleService, MessageBus]:
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True)
     agent_home = AgentHome(tmp_path / "agent-home")
@@ -360,7 +360,7 @@ def _loop(
     bus = MessageBus()
     model_router = task_framing_router or TaskFramingRouterAdapter(router)
     model_router.bind_configuration(configuration)
-    loop = AgentLoop(
+    loop = AgentRunExecutor(
         workspace_path=workspace,
         workspace_state=state,
         agent_home=agent_home,
@@ -1381,7 +1381,7 @@ async def test_schedule_run_uses_isolated_catalog_during_concurrent_foreground_r
     model_router = TaskFramingRouterAdapter(router)
     model_router.bind_configuration(configuration)
     bus = MessageBus()
-    loop = AgentLoop(
+    loop = AgentRunExecutor(
         workspace_path=workspace,
         workspace_state=state,
         agent_home=agent_home,

@@ -29,7 +29,7 @@ from omni.service.discovery import (
     write_discovery,
 )
 from omni.service.errors import ServiceError
-from omni.service.runtime import LocalService
+from omni.service.runtime import AgentService
 from omni.service.transport import create_app
 from omni.utils.platform import WINDOWS_REQUIRED_ERROR, is_windows_host
 
@@ -46,7 +46,7 @@ async def serve_service(
         raise ServiceError(
             "validation_error", "The local service must bind IPv4 loopback.", status=422
         )
-    service = LocalService(
+    service = AgentService(
         agent_home,
         reconnect_timeout=reconnect_timeout,
     )

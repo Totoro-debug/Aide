@@ -1,4 +1,4 @@
-"""End-to-end Schedule acceptance through AgentLoop boundaries."""
+"""End-to-end Schedule acceptance through AgentRunExecutor boundaries."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import pytest
 
 import omni.agent.context.builder as context
 from omni.agent.context.builder import ContextBuilder
-from omni.agent.loop import AgentLoop, ConfirmationRequestView
+from omni.agent.loop import ConfirmationRequestView
 from omni.agent.memory.dream import Dream
 from omni.agent.memory.manager import MemoryManager
 from omni.agent.message_bus import MessageBus
@@ -52,6 +52,7 @@ from tests.fixtures import (
     TaskFramingRouterAdapter,
     collect_foreground_outbound,
 )
+from tests.fixtures.agent_loop import DrivenExecutor as AgentRunExecutor
 from tests.fixtures.diagnostic_capture import capture_diagnostics
 from tests.fixtures.session import seed_session_state
 from tests.management.factories import management_service
@@ -103,7 +104,7 @@ class _BlockingClock:
 
 
 class _ScheduleProvider:
-    """Route-aware provider transcript used by Schedule and AgentLoop tests."""
+    """Route-aware provider transcript used by Schedule and AgentRunExecutor tests."""
 
     def __init__(
         self,
@@ -266,7 +267,7 @@ def _agent_loop(
     schedule_clock: ScheduleClock,
     config_text: str = VALID_CONFIG,
 ) -> tuple[
-    AgentLoop,
+    AgentRunExecutor,
     ModelRouter,
     ScheduleService,
     Dream,
@@ -290,7 +291,7 @@ def _agent_loop(
         batch_size=configuration.memory.batch_size,
         memory_route_status=router.route_status("memory"),
     )
-    loop: AgentLoop | None = None
+    loop: AgentRunExecutor | None = None
 
     async def execute_user_job(job: ScheduleJob) -> None:
         assert loop is not None
@@ -303,7 +304,7 @@ def _agent_loop(
         execute_dream=dream.run,
     )
     bus = MessageBus()
-    loop = AgentLoop(
+    loop = AgentRunExecutor(
         workspace_path=workspace,
         workspace_state=state,
         agent_home=home,
@@ -346,7 +347,7 @@ def _schedule_state(workspace: Path) -> WorkspaceScheduleStore:
     return WorkspaceScheduleStore(WorkspaceState(workspace))
 
 
-def _tool_json(loop: AgentLoop) -> list[dict[str, object]]:
+def _tool_json(loop: AgentRunExecutor) -> list[dict[str, object]]:
     return [
         cast(dict[str, object], json.loads(cast(str, message["content"])))
         for message in loop.session.messages
@@ -355,7 +356,7 @@ def _tool_json(loop: AgentLoop) -> list[dict[str, object]]:
 
 
 async def _close_components(
-    loop: AgentLoop,
+    loop: AgentRunExecutor,
     router: ModelRouter,
     schedule: ScheduleService,
     dream: Dream,

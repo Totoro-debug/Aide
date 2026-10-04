@@ -15,10 +15,12 @@ import mcp.client.stdio as stdio_client
 import pytest
 from loguru import logger
 
+from omni.agent.tools.tool_gateway import BuiltInToolCatalog
 from omni.config.agent_home import AgentHome
 from omni.config.config import ConfigLoader
 from omni.provider.openai_compatible import OpenAICompatibleProvider
-from omni.service.runtime import LocalService
+from omni.service.runtime import AgentService
+from omni.skills.catalog import SkillLoader
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures.mcp_wire import (
     ObservedLifetimes,
@@ -64,6 +66,21 @@ async def main() -> None:
         root = Path(directory)
         patch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
         lifetime = ObservedLifetimes(patch)
+        skill_loaders = []
+        built_in_catalogs = []
+        original_skill_init = SkillLoader.__init__
+        original_catalog_init = BuiltInToolCatalog.__init__
+
+        def create_skill_loader(self, *args, **kwargs):
+            original_skill_init(self, *args, **kwargs)
+            skill_loaders.append(self)
+
+        def create_catalog(self, *args, **kwargs):
+            original_catalog_init(self, *args, **kwargs)
+            built_in_catalogs.append(self)
+
+        patch.setattr(SkillLoader, "__init__", create_skill_loader)
+        patch.setattr(BuiltInToolCatalog, "__init__", create_catalog)
         stdio_working_directories = []
         observed_spawn = stdio_client._create_platform_compatible_process
 
@@ -121,7 +138,7 @@ args = {json.dumps(list(stdio.args))}
 """
             )
             (home.path / "config.toml").write_text(config, encoding="utf-8")
-            service = LocalService(
+            service = AgentService(
                 home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600
             )
             snapshots = []
@@ -132,6 +149,9 @@ args = {json.dumps(list(stdio.args))}
                 snapshots.append(
                     {
                         "state": label,
+                        "skill_loaders_created": len(skill_loaders),
+                        "current_skill_snapshots": len({id(loader.skills) for loader in skill_loaders}),
+                        "built_in_catalogs_created": len(built_in_catalogs),
                         "sdk_clients_created": sdk_created,
                         "http_initializations": sum(
                             r["method"] == "initialize" for r in wire.requests

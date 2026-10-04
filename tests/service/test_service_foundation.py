@@ -18,7 +18,6 @@ from omni.agent.confirmation import (
     ConfirmationEnvelope,
     ForegroundConfirmationOwner,
 )
-from omni.agent.loop import AgentLoop
 from omni.agent.session.restore import RestoreManager, RestoreMode
 from omni.agent.session.session import Session
 from omni.agent.tools.tool_gateway import ConfirmationRequest
@@ -39,8 +38,9 @@ from omni.service.discovery import (
     write_discovery,
 )
 from omni.service.errors import ServiceError
+from omni.service.execution import SessionExecution
 from omni.service.projects import ProjectCatalog, ProjectCatalogError
-from omni.service.runtime import LocalService, WorkspaceServiceRuntime
+from omni.service.runtime import AgentService, WorkspaceRecord
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
 from tests.fixtures.project_removal import complete_project_removal, wait_for_project_removal
@@ -239,7 +239,7 @@ async def test_registered_projects_start_once_and_removal_releases_claims(tmp_pa
     project = tmp_path / "project"
     project.mkdir()
     record = ProjectCatalog(home).register(project)
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     try:
         assert len(service.workspaces) == 1
@@ -270,7 +270,7 @@ async def test_project_removal_closes_admission_clears_claims_and_blocks_reentry
     home = _configured_home(tmp_path / "agent-home")
     project = tmp_path / "project"
     project.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     client = await service.register_client("cli")
     record, workspace, _jobs = await service.register_project(client.client_id, project)
@@ -356,7 +356,7 @@ async def test_project_removal_notifies_unattached_web_requester_without_blockin
     project = tmp_path / "project"
     project.mkdir()
     record = ProjectCatalog(home).register(project)
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     client = await service.register_client("web")
     try:
@@ -396,7 +396,7 @@ async def test_project_removal_waits_for_restore_transaction(
     )
     await session.wait_for_pending_persist()
     record = ProjectCatalog(home).register(project)
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     client = await service.register_client("cli")
     workspace = await service.attach_workspace(client.client_id, project)
@@ -446,7 +446,7 @@ async def test_project_removal_keeps_failed_loop_for_retry(
     home = _configured_home(tmp_path / "agent-home")
     project = tmp_path / "project"
     project.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     client = await service.register_client("cli")
     record, workspace, _jobs = await service.register_project(client.client_id, project)
@@ -498,7 +498,7 @@ async def test_project_schedule_stays_paused_across_service_restart_until_resume
     )
     await WorkspaceScheduleStore(state).add_user_job(job)
 
-    first_service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    first_service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await first_service.start()
     first_client = await first_service.register_client("web")
 
@@ -519,7 +519,7 @@ async def test_project_schedule_stays_paused_across_service_restart_until_resume
     assert not first_workspace._schedule_admitted
     await first_service.stop()
 
-    second_service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    second_service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await second_service.start()
     second_client = await second_service.register_client("web")
     await second_service.connect_client(second_client.client_id, sink)
@@ -636,7 +636,7 @@ async def test_removed_project_re_registration_keeps_saved_jobs_paused_until_res
         async def send_event(self, event: dict[str, object]) -> None:
             del event
 
-    first_service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    first_service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await first_service.start()
     first_client = await first_service.register_client("web")
     await first_service.connect_client(first_client.client_id, Sink())
@@ -663,7 +663,7 @@ async def test_removed_project_re_registration_keeps_saved_jobs_paused_until_res
     finally:
         await first_service.stop()
 
-    second_service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    second_service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await second_service.start()
     second_client = await second_service.register_client("web")
     await second_service.connect_client(second_client.client_id, Sink())
@@ -737,7 +737,7 @@ async def test_stopped_service_cannot_reopen_project_schedule_admission(tmp_path
     )
     await WorkspaceScheduleStore(state).add_user_job(job)
 
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     client = await service.register_client("web")
 
@@ -771,7 +771,7 @@ async def test_schedule_activation_rechecks_service_gate_after_wait(
         project = tmp_path / name
         project.mkdir()
         ProjectCatalog(home).register(project)
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     client = await service.register_client("web")
     entered = asyncio.Event()
@@ -831,7 +831,7 @@ async def test_other_client_disconnect_preserves_restore_schedule_pause(tmp_path
     )
     await session.wait_for_pending_persist()
     ProjectCatalog(home).register(project)
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
 
     class Sink:
@@ -872,7 +872,7 @@ async def test_project_snapshot_cannot_recreate_a_removed_workspace(
     home = _configured_home(tmp_path / "agent-home")
     project = tmp_path / "project"
     project.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
 
     class Sink:
@@ -912,7 +912,7 @@ async def test_reacquired_claim_rejects_the_previous_version(tmp_path: Path) -> 
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     try:
         client = await service.register_client("cli")
@@ -939,7 +939,7 @@ async def test_foreground_confirmation_is_broadcast_to_workspace_clients_and_res
     workspace_path = tmp_path / "workspace"
     unrelated_workspace_path.mkdir()
     workspace_path.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     try:
         owner = await service.register_client("cli")
@@ -1054,7 +1054,7 @@ async def test_confirmation_resolved_cannot_overtake_requested_for_another_clien
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     requested_started = asyncio.Event()
     release_requested = asyncio.Event()
@@ -1123,7 +1123,7 @@ async def test_background_confirmation_broadcast_has_job_source_without_session_
     unrelated_workspace_path.mkdir()
     workspace_path.mkdir()
     ProjectCatalog(home).register(workspace_path)
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
 
     class Sink:
@@ -1145,16 +1145,17 @@ async def test_background_confirmation_broadcast_has_job_source_without_session_
         await service.attach_workspace(second.client_id, workspace_path)
         await service.connect_client(status_page.client_id, status_sink)
         await service.connect_client(unrelated_cli.client_id, unrelated_sink)
-        schedule_loop = await workspace._get_schedule_loop("job-1")
+        job_id = str(uuid4())
+        schedule_loop = await workspace._get_schedule_loop(job_id)
         envelope = ConfirmationEnvelope(
             request=ConfirmationRequest(uuid4(), "call-1", "exec", "Run scheduled command", {}),
             origin="background",
             owner=BackgroundConfirmationOwner(
                 schedule_loop.loop.generation_id,
-                "job-1",
+                job_id,
                 uuid4(),
             ),
-            job_id="job-1",
+            job_id=job_id,
             title="Nightly maintenance",
         )
         pending = asyncio.create_task(service.confirmation.request(envelope))
@@ -1175,7 +1176,7 @@ async def test_background_confirmation_broadcast_has_job_source_without_session_
         assert event["run_id"] is None
         payload = cast(dict[str, object], event["payload"])
         assert payload["origin"] == "background"
-        assert payload["job_id"] == "job-1"
+        assert payload["job_id"] == job_id
         assert payload["title"] == "Nightly maintenance"
         assert not status_page.claimed
         await service.handle_command(
@@ -1196,7 +1197,7 @@ async def test_service_stop_aborts_confirmation_and_invalidates_token(tmp_path: 
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     try:
         client = await service.register_client("cli")
@@ -1246,7 +1247,7 @@ async def test_project_removal_aborts_pending_confirmation_and_resolves_clients(
     project = tmp_path / "project"
     project.mkdir()
     record = ProjectCatalog(home).register(project)
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     try:
         owner = await service.register_client("cli")
@@ -1284,7 +1285,7 @@ async def test_client_disconnect_expiry_aborts_owned_confirmation(tmp_path: Path
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=0.05)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=0.05)
     await service.start()
 
     class Sink:
@@ -1326,7 +1327,7 @@ async def test_last_client_grace_pauses_and_restarts_schedule(tmp_path: Path) ->
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=0.2)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=0.2)
     await service.start()
     try:
         client = await service.register_client("cli")
@@ -1359,7 +1360,7 @@ async def test_stop_reports_workspace_cleanup_failure_and_releases_waiter(
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     client = await service.register_client("cli")
     workspace = await service.attach_workspace(client.client_id, workspace_path)
@@ -1386,23 +1387,20 @@ async def test_project_removal_failure_keeps_registration_blocked(
     home = _configured_home(tmp_path / "agent-home")
     project = tmp_path / "project"
     project.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     client = await service.register_client("cli")
     record, workspace, _jobs = await service.register_project(client.client_id, project)
-    assert workspace.runtime is not None
-    original_close = workspace.runtime.close
+    assert workspace.resources is not None
+    original_close = service._close_workspace_resources
 
     async def failing_close(
-        *, close_foreground: Any = None, drain_confirmation_aborts: bool = True
+        target: WorkspaceRecord
     ) -> None:
-        await original_close(
-            close_foreground=close_foreground,
-            drain_confirmation_aborts=drain_confirmation_aborts,
-        )
+        await original_close(target)
         raise RuntimeError("injected cleanup failure")
 
-    monkeypatch.setattr(workspace.runtime, "close", failing_close)
+    monkeypatch.setattr(service, "_close_workspace_resources", failing_close)
     operation = await service.start_project_removal(client.client_id, record.project_id)
     status = await wait_for_project_removal(
         service, client.client_id, record.project_id, cast(str, operation["operation_id"])
@@ -1426,7 +1424,7 @@ async def test_project_removal_completion_survives_event_delivery_failure(
     home = _configured_home(tmp_path / "agent-home")
     project = tmp_path / "project"
     project.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
 
     class FailingSink:
@@ -1454,7 +1452,7 @@ async def test_project_removal_admission_failure_is_persisted_and_retryable(
     home = _configured_home(tmp_path / "agent-home")
     project = tmp_path / "project"
     project.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     client = await service.register_client("web")
     record, _workspace, _jobs = await service.register_project(client.client_id, project)
@@ -1491,27 +1489,24 @@ async def test_project_removal_failure_can_retry_same_persisted_operation(
     home = _configured_home(tmp_path / "agent-home")
     project = tmp_path / "project"
     project.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     client = await service.register_client("web")
     record, workspace, _jobs = await service.register_project(client.client_id, project)
-    assert workspace.runtime is not None
-    original_close = workspace.runtime.close
+    assert workspace.resources is not None
+    original_close = service._close_workspace_resources
     failed = False
 
     async def fail_once(
-        *, close_foreground: Any = None, drain_confirmation_aborts: bool = True
+        target: WorkspaceRecord
     ) -> None:
         nonlocal failed
-        await original_close(
-            close_foreground=close_foreground,
-            drain_confirmation_aborts=drain_confirmation_aborts,
-        )
+        await original_close(target)
         if not failed:
             failed = True
             raise RuntimeError("injected cleanup failure")
 
-    monkeypatch.setattr(workspace.runtime, "close", fail_once)
+    monkeypatch.setattr(service, "_close_workspace_resources", fail_once)
     operation = await service.start_project_removal(client.client_id, record.project_id)
     status = await wait_for_project_removal(
         service, client.client_id, record.project_id, cast(str, operation["operation_id"])
@@ -1521,7 +1516,7 @@ async def test_project_removal_failure_can_retry_same_persisted_operation(
     assert failed_record.schedule_state == "removing"
     assert failed_record.removal_operation_id
 
-    monkeypatch.setattr(workspace.runtime, "close", original_close)
+    monkeypatch.setattr(service, "_close_workspace_resources", original_close)
     await complete_project_removal(service, client.client_id, record.project_id)
     assert ProjectCatalog(home).list() == ()
     assert project.is_dir()
@@ -1535,29 +1530,26 @@ async def test_failed_project_removal_stays_blocked_after_service_restart(
     home = _configured_home(tmp_path / "agent-home")
     project = tmp_path / "project"
     project.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     client = await service.register_client("cli")
-    record, workspace, _jobs = await service.register_project(client.client_id, project)
-    original_close = workspace.runtime.close if workspace.runtime is not None else None
+    record, _workspace, _jobs = await service.register_project(client.client_id, project)
+    original_close = service._close_workspace_resources
     assert original_close is not None
 
     async def failing_close(
-        *, close_foreground: Any = None, drain_confirmation_aborts: bool = True
+        target: WorkspaceRecord
     ) -> None:
-        await original_close(
-            close_foreground=close_foreground,
-            drain_confirmation_aborts=drain_confirmation_aborts,
-        )
+        await original_close(target)
         raise RuntimeError("injected cleanup failure")
 
-    monkeypatch.setattr(workspace.runtime, "close", failing_close)
+    monkeypatch.setattr(service, "_close_workspace_resources", failing_close)
     operation = await service.start_project_removal(client.client_id, record.project_id)
     status = await wait_for_project_removal(
         service, client.client_id, record.project_id, cast(str, operation["operation_id"])
     )
     assert status["status"] == "failed"
-    monkeypatch.setattr(workspace.runtime, "close", original_close)
+    monkeypatch.setattr(service, "_close_workspace_resources", original_close)
     await service.stop()
 
     persisted = ProjectCatalog(home).list()
@@ -1566,7 +1558,7 @@ async def test_failed_project_removal_stays_blocked_after_service_restart(
     assert persisted[0].schedule_state == "removing"
     assert persisted[0].removal_operation_id
 
-    restarted = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    restarted = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await restarted.start()
     restarted_client = await restarted.register_client("cli")
     try:
@@ -1590,17 +1582,17 @@ async def test_interrupted_project_removal_is_retryable_after_restart(
     project.mkdir()
     record = ProjectCatalog(home).register(project)
     started = ProjectCatalog(home).begin_removal(record.project_id)
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     client = await service.register_client("web")
     starts: list[Path] = []
-    original_start = WorkspaceServiceRuntime.start
+    original_start = WorkspaceRecord.start
 
-    async def record_start(runtime: WorkspaceServiceRuntime) -> None:
+    async def record_start(runtime: WorkspaceRecord) -> None:
         starts.append(runtime.workspace_path)
         await original_start(runtime)
 
-    monkeypatch.setattr(WorkspaceServiceRuntime, "start", record_start)
+    monkeypatch.setattr(WorkspaceRecord, "start", record_start)
     try:
         assert not service.workspaces
         interrupted = ProjectCatalog(home).list()[0]
@@ -1626,7 +1618,7 @@ async def test_stale_run_id_cannot_cancel_the_next_run(
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     try:
         client = await service.register_client("cli")
@@ -1637,12 +1629,12 @@ async def test_stale_run_id_cannot_cancel_the_next_run(
         workspace.loops[session_id].run_ids.append("current-run")
         cancelled: list[bool] = []
 
-        async def record_cancel(_loop: AgentLoop) -> None:
+        async def record_cancel(_loop: SessionExecution) -> None:
             cancelled.append(True)
 
         with monkeypatch.context() as patched:
-            patched.setattr(AgentLoop, "has_active_run", property(lambda _loop: True))
-            patched.setattr(AgentLoop, "cancel_active_run", record_cancel)
+            patched.setattr(SessionExecution, "has_active_run", property(lambda _loop: True))
+            patched.setattr(SessionExecution, "cancel_active_run", record_cancel)
             with pytest.raises(ServiceError) as stale:
                 await workspace.cancel(client.client_id, session_id, claim.version, "old-run")
             assert stale.value.code == "stale_run"
@@ -1655,7 +1647,7 @@ async def test_stale_run_id_cannot_cancel_the_next_run(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("registered_peer", [False, True])
-async def test_unregistered_workspace_loses_schedule_and_runtime_at_last_user_expiry(
+async def test_unregistered_workspace_pauses_schedule_and_retains_authority_at_last_user_expiry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, registered_peer: bool
 ) -> None:
     home = _configured_home(tmp_path / "home")
@@ -1680,7 +1672,7 @@ async def test_unregistered_workspace_loses_schedule_and_runtime_at_last_user_ex
 
     monkeypatch.setattr(clock, "sleep", sleep)
     monkeypatch.setattr(service_runtime, "ScheduleService", RecordingSchedule)
-    service = LocalService(home, ConfigLoader(home).load_for_startup(),
+    service = AgentService(home, ConfigLoader(home).load_for_startup(),
                            monotonic_now=clock.monotonic, sleep=sleep)
     await service.start()
     try:
@@ -1727,12 +1719,13 @@ async def test_unregistered_workspace_loses_schedule_and_runtime_at_last_user_ex
         assert a.workspace_id in service.workspaces
         clock.advance(1)
         await asyncio.wait_for(cast(asyncio.Task[None], clients[1].disconnect_task), 2)
-        assert a.workspace_id not in service.workspaces
+        assert a.workspace_id in service.workspaces
+        assert not a.schedule_admitted
         assert b.workspace_id in service.workspaces
         assert len(await a.schedule_service.public_snapshot()) == 1
         fresh = await service.register_client("cli")
         reopened = await service.attach_workspace(fresh.client_id, paths[0])
-        assert reopened is not a
+        assert reopened is a
     finally:
         await service.stop()
 
@@ -1745,7 +1738,7 @@ async def test_subscribe_restores_only_valid_original_confirmation(
     home = _configured_home(tmp_path / "home")
     path = tmp_path / "workspace"
     path.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     try:
         client = await service.register_client("web")
@@ -1799,7 +1792,7 @@ async def test_confirmation_snapshot_audience_competing_decision_and_cancel(
     home = _configured_home(tmp_path / "home")
     path = tmp_path / "workspace"
     path.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     try:
         owner = await service.register_client("cli")
@@ -1810,14 +1803,15 @@ async def test_confirmation_snapshot_audience_competing_decision_and_cancel(
         session = await workspace.create_draft(owner.client_id)
         await service.claim(owner.client_id, workspace.workspace_id, session)
         generation = workspace.loops[session].loop.generation_id
+        job_id = str(uuid4())
         if background:
-            generation = (await workspace._get_schedule_loop("job")).loop.generation_id
+            generation = (await workspace._get_schedule_loop(job_id)).loop.generation_id
         envelope = ConfirmationEnvelope(
             request=ConfirmationRequest(uuid4(), "call", "exec", "Exact operation", {}),
             origin="background" if background else "foreground",
-            owner=BackgroundConfirmationOwner(generation, "job", uuid4()) if background
+            owner=BackgroundConfirmationOwner(generation, job_id, uuid4()) if background
             else ForegroundConfirmationOwner(generation, uuid4()),
-            job_id="job" if background else None,
+            job_id=job_id if background else None,
             title="Background operation" if background else None,
         )
         pending = asyncio.create_task(service.confirmation.request(envelope))
@@ -1869,7 +1863,7 @@ async def test_workspace_expiry_serializes_reentry_and_registration(
     release = asyncio.Event()
     async def sleep(_seconds: float) -> None:
         await wake.wait()
-    service = LocalService(home, ConfigLoader(home).load_for_startup(),
+    service = AgentService(home, ConfigLoader(home).load_for_startup(),
         monotonic_now=clock.monotonic, sleep=sleep)
     await service.start()
     try:
@@ -1878,12 +1872,12 @@ async def test_workspace_expiry_serializes_reentry_and_registration(
         await service.connect_client(owner.client_id, _CollectingSink())
         await service.connect_client(other.client_id, _CollectingSink())
         workspace = await service.attach_workspace(owner.client_id, path)
-        original_close = workspace.close
+        original_drain = workspace.schedule_service.pause_and_drain
         async def close() -> None:
             entered.set()
             await release.wait()
-            await original_close()
-        monkeypatch.setattr(workspace, "close", close)
+            await original_drain()
+        monkeypatch.setattr(workspace.schedule_service, "pause_and_drain", close)
         await service.disconnect_client(owner.client_id)
         clock.advance(30)
         wake.set()
@@ -1894,10 +1888,10 @@ async def test_workspace_expiry_serializes_reentry_and_registration(
         assert not reentry.done()
         release.set()
         result = await asyncio.wait_for(reentry, 2)
-        reopened = cast(WorkspaceServiceRuntime, result[1] if isinstance(result, tuple) else result)
-        assert reopened is not workspace
+        reopened = cast(WorkspaceRecord, result[1] if isinstance(result, tuple) else result)
+        assert reopened is workspace
         assert reopened.workspace_id in service.workspaces
-        assert workspace.workspace_id not in service.workspaces
+        assert workspace.workspace_id in service.workspaces
     finally:
         release.set()
         await service.stop()
@@ -1914,7 +1908,7 @@ async def test_workspace_expiry_cleanup_failure_keeps_owned_runtime_and_closes_a
     wake = asyncio.Event()
     async def sleep(_seconds: float) -> None:
         await wake.wait()
-    service = LocalService(home, ConfigLoader(home).load_for_startup(),
+    service = AgentService(home, ConfigLoader(home).load_for_startup(),
         monotonic_now=clock.monotonic, sleep=sleep)
     await service.start()
     original_close = None
@@ -1925,10 +1919,10 @@ async def test_workspace_expiry_cleanup_failure_keeps_owned_runtime_and_closes_a
         await service.connect_client(owner.client_id, _CollectingSink())
         await service.connect_client(other.client_id, sink)
         workspace = await service.attach_workspace(owner.client_id, path)
-        original_close = workspace.close
+        original_close = workspace.schedule_service.pause_and_drain
         async def failing_close() -> None:
             raise RuntimeError("injected cleanup failure")
-        monkeypatch.setattr(workspace, "close", failing_close)
+        monkeypatch.setattr(workspace.schedule_service, "pause_and_drain", failing_close)
         await service.disconnect_client(owner.client_id)
         clock.advance(30)
         wake.set()
@@ -1941,5 +1935,5 @@ async def test_workspace_expiry_cleanup_failure_keeps_owned_runtime_and_closes_a
         assert unavailable.value.code == "admission_closed"
     finally:
         if original_close is not None:
-            monkeypatch.setattr(workspace, "close", original_close)
+            monkeypatch.setattr(workspace.schedule_service, "pause_and_drain", original_close)
         await service.stop()

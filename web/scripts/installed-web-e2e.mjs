@@ -57,13 +57,16 @@ page.on("websocket", (socket) => {
 });
 
 async function createClaimedDraft(button) {
+  const createdResponsePromise = page.waitForResponse((response) => (
+    response.request().method() === "POST" && response.url().endsWith("/sessions")
+  ));
   const responses = Promise.all([
-    page.waitForResponse((response) => (
-      response.request().method() === "POST" && response.url().endsWith("/sessions")
-    )),
-    page.waitForResponse((response) => (
-      response.request().method() === "POST" && response.url().endsWith("/claim")
-    )),
+    createdResponsePromise,
+    page.waitForResponse(async (response) => {
+      if (response.request().method() !== "POST" || !response.url().endsWith("/claim")) return false;
+      const created = await (await createdResponsePromise).json();
+      return response.url().endsWith(`/sessions/${created.session_id}/claim`);
+    }),
   ]);
   await button.click();
   const [createdResponse, claimedResponse] = await responses;
@@ -204,6 +207,16 @@ try {
       )));
     }, { timeout: 30000 }).toBe(true);
     assert.equal(events.some((event) => event.type === "run.completed" && event.run_id === concurrentAccepted.run_id), false);
+    // Exercise Claim recovery while the socket handshake and response overlap.
+    await page.routeWebSocket("**/api/v1/events", async (socket) => {
+      await delay(200);
+      socket.connectToServer();
+    });
+    await page.route("**/api/v1/projects/*/sessions/*/claim", async (route) => {
+      const response = await route.fetch();
+      await delay(750);
+      await route.fulfill({ response });
+    });
     await page.reload();
     await expect(page.getByRole("log").getByText(concurrentPrompt, { exact: true }))
       .toBeVisible({ timeout: 5000 });

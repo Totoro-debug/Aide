@@ -26,7 +26,7 @@ from omni.config.config import ConfigLoader
 from omni.schedule.store import WorkspaceScheduleStore
 from omni.service.client import ServiceClient
 from omni.service.discovery import create_credential
-from omni.service.runtime import LocalService
+from omni.service.runtime import AgentService
 from omni.service.transport import create_app
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.scheduling.test_schedule_agent_loop import _response, _ScheduleProvider
@@ -61,11 +61,11 @@ class _SilentSink:
 @pytest_asyncio.fixture
 async def schedule_http(
     tmp_path: Path,
-) -> AsyncIterator[tuple[LocalService, TestServer, str, dict[str, str]]]:
+) -> AsyncIterator[tuple[AgentService, TestServer, str, dict[str, str]]]:
     home = _prepare_agent_home(tmp_path / "agent-home")
     path = tmp_path / "workspace"
     path.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     server = TestServer(create_app(service))
     await service.start()
     client = await service.register_client("web")
@@ -286,7 +286,7 @@ async def test_schedule_jobs_http_crud_validates_all_kinds_and_is_cross_client_i
 
 @pytest.mark.asyncio
 async def test_schedule_job_history_groups_existing_schedule_session_and_paginates(
-    schedule_http: tuple[LocalService, TestServer, str, dict[str, str]],
+    schedule_http: tuple[AgentService, TestServer, str, dict[str, str]],
 ) -> None:
     service, server, jobs_url, headers = schedule_http
     workspace = next(iter(service.workspaces.values()))
@@ -452,7 +452,7 @@ async def test_schedule_job_http_delete_cancels_a_running_job_and_keeps_deleted_
     workspace_path.mkdir()
     other_workspace_path = tmp_path / "other-workspace"
     other_workspace_path.mkdir()
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=30)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=30)
     server = TestServer(create_app(service))
     release = asyncio.Event()
     started = asyncio.Event()
@@ -565,7 +565,7 @@ async def test_schedule_job_http_delete_cancels_a_running_job_and_keeps_deleted_
     ],
 )
 async def test_schedule_field_errors_leave_disk_unchanged(
-    schedule_http: tuple[LocalService, TestServer, str, dict[str, str]],
+    schedule_http: tuple[AgentService, TestServer, str, dict[str, str]],
     fields: dict[str, object],
     errors: set[str],
 ) -> None:
@@ -584,7 +584,7 @@ async def test_schedule_field_errors_leave_disk_unchanged(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invalidated", ["client", "project"])
 async def test_schedule_queued_retry_rechecks_current_identity(
-    schedule_http: tuple[LocalService, TestServer, str, dict[str, str]],
+    schedule_http: tuple[AgentService, TestServer, str, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
     invalidated: str,
 ) -> None:
@@ -599,7 +599,7 @@ async def test_schedule_queued_retry_rechecks_current_identity(
 
         def record_check(
             client_id: str, workspace_id: str
-        ) -> service_runtime.WorkspaceServiceRuntime:
+        ) -> service_runtime.WorkspaceRecord:
             result = original(client_id, workspace_id)
             checked.set()
             return result
@@ -626,7 +626,7 @@ async def test_schedule_queued_retry_rechecks_current_identity(
 
 @pytest.mark.asyncio
 async def test_schedule_scope_reuse_and_transport_guards(
-    schedule_http: tuple[LocalService, TestServer, str, dict[str, str]],
+    schedule_http: tuple[AgentService, TestServer, str, dict[str, str]],
     tmp_path: Path,
 ) -> None:
     service, server, url, headers = schedule_http
@@ -697,7 +697,7 @@ async def test_schedule_http_delete_drains_real_tool_and_preserves_session_termi
     path = tmp_path / "workspace"
     path.mkdir()
     (path / "task.txt").write_text("user data", encoding="utf-8")
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     server = TestServer(create_app(service))
     await service.start()
     client = await service.register_client("web")

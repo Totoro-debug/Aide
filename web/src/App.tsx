@@ -5331,7 +5331,8 @@ function ProjectSessionsContent({
         onRestoreConsumed();
       }
       if (
-        registeredClient !== null &&
+        connectionState === "online" && registeredClient !== null &&
+        pendingClientIdRef.current === registeredClient.client_id &&
         attemptedRestoreRef.current !== registeredClient.web_control_credential &&
         registeredClient.current_workspace_id === response.workspace_id &&
         registeredClient.current_session_id !== null

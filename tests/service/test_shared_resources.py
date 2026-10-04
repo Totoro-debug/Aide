@@ -29,7 +29,7 @@ from omni.provider.models import (
 )
 from omni.schedule.model import JobSchedule, ScheduleJob
 from omni.service.errors import ServiceError
-from omni.service.runtime import LocalService, SessionClaim, WorkspaceServiceRuntime
+from omni.service.runtime import AgentService, SessionClaim, WorkspaceRecord
 from omni.skills.catalog import LoadedSkill, SkillLoader
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures.project_removal import wait_for_project_removal
@@ -95,7 +95,7 @@ class _CountingProvider:
 
 @dataclass
 class _SessionCase:
-    workspace: WorkspaceServiceRuntime
+    workspace: WorkspaceRecord
     claim: SessionClaim
     client_id: str
     sink: _CollectingSink
@@ -121,7 +121,7 @@ class _SessionCase:
         )
 
 
-async def _session_case(service: LocalService, path: Path) -> _SessionCase:
+async def _session_case(service: AgentService, path: Path) -> _SessionCase:
     path.mkdir(exist_ok=True)
     client = await service.register_client("cli")
     sink = _CollectingSink()
@@ -179,7 +179,7 @@ async def test_service_shares_one_skill_loader_and_model_router_across_workspace
         original_load(loader, validate=validate)
 
     monkeypatch.setattr(SkillLoader, "load", record_load)
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     try:
         cases = [
@@ -200,8 +200,8 @@ async def test_service_shares_one_skill_loader_and_model_router_across_workspace
         assert len(providers) == 1
         assert len({case.claim.session_id for case in cases}) == 30
         for case in cases:
-            assert case.workspace.runtime is not None
-            assert case.workspace.runtime.router is service.model_router
+            assert case.workspace.resources is not None
+            assert case.workspace.resources.router is service.model_router
             assert case.claim.loop.session.messages[-1]["content"] == "ok"
 
         await cases[0].workspace.close()
@@ -243,7 +243,7 @@ async def test_terminal_store_failure_blocks_project_removal_without_stopping_ot
     monkeypatch.setattr(
         service_runtime, "create_provider", lambda _configuration: _CountingProvider()
     )
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     try:
         first = await _session_case(service, tmp_path / "workspace-a")
@@ -341,7 +341,7 @@ timeout = 30
         return provider
 
     monkeypatch.setattr(service_runtime, "create_provider", create_provider)
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     try:
         case = await _session_case(service, tmp_path / "workspace")
@@ -379,8 +379,8 @@ async def test_independent_services_do_not_share_workspace_runtime_registry(
     home = _home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    first = LocalService(home, ConfigLoader(home).load_for_startup())
-    second = LocalService(home, ConfigLoader(home).load_for_startup())
+    first = AgentService(home, ConfigLoader(home).load_for_startup())
+    second = AgentService(home, ConfigLoader(home).load_for_startup())
     await first.start()
     await second.start()
     first_client = await first.register_client("cli")
@@ -389,9 +389,9 @@ async def test_independent_services_do_not_share_workspace_runtime_registry(
     try:
         first_workspace = await first.attach_workspace(first_client.client_id, workspace_path)
         second_workspace = await second.attach_workspace(second_client.client_id, workspace_path)
-        assert first_workspace.runtime is not None
-        assert second_workspace.runtime is not None
-        assert first_workspace.runtime is not second_workspace.runtime
+        assert first_workspace.resources is not None
+        assert second_workspace.resources is not None
+        assert first_workspace.resources is not second_workspace.resources
         assert first.model_router is not second.model_router
     finally:
         await first.stop()
@@ -442,7 +442,7 @@ async def test_global_reload_keeps_active_run_snapshot_and_updates_other_workspa
     _skill(home, "planner", "OLD_SKILL_BODY")
     provider = _ReloadProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     try:
         first = await _session_case(service, tmp_path / "workspace-a")
@@ -491,13 +491,13 @@ async def test_global_reload_rejects_candidate_that_overflows_another_workspace(
     _skill(home, "planner", "old body", always=True)
     provider = _CountingProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     try:
         first = await _session_case(service, tmp_path / "workspace-a")
         second = await _session_case(service, tmp_path / "workspace-b")
-        assert second.workspace.runtime is not None
-        memory = second.workspace.runtime.memory_manager
+        assert second.workspace.resources is not None
+        memory = second.workspace.resources.memory_manager
         await memory.edit_long_term(old=memory.memory_snapshot(), new="B_MEMORY " * 1200)
         snapshot = service.skill_loader.skills
         _skill(home, "reviewer", "candidate " * 850, always=True)
@@ -528,7 +528,7 @@ async def test_service_owns_workspace_memory_dream_and_one_schedule_dispatcher(
     tmp_path: Path,
 ) -> None:
     home = _home(tmp_path / "agent-home")
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     try:
         first = await _session_case(service, tmp_path / "workspace-a")

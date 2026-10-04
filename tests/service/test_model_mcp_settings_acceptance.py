@@ -19,7 +19,7 @@ from omni.config.agent_home import AgentHome
 from omni.config.config import ConfigLoader
 from omni.schedule.model import JobSchedule, ScheduleJob
 from omni.service.client import ServiceClient
-from omni.service.runtime import LocalService
+from omni.service.runtime import AgentService
 from tests.configuration.test_config_editing import FULL_EDITABLE_CONFIG
 from tests.fixtures.mcp_wire import WireServer, wire_result, wire_tool
 from tests.service.test_service_concurrency import _client_output, _serve
@@ -157,7 +157,7 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
     content += '\n[runtime]\npermission_level = "full-access"\n'
     path = home.path / "config.toml"
     path.write_text(content, encoding="utf-8")
-    service = LocalService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
     server, port = await _serve(service, home)
     project = tmp_path / "project"
     project.mkdir()
@@ -166,7 +166,7 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
     try:
         cli = await ServiceClient.connect_or_start(home, project, port=port)
         workspace = service.workspace(cli.workspace_id)
-        old = workspace.runtime
+        old = workspace.resources
         state = workspace.workspace_state
         socket = cli._socket
         claim = (cli.session_id, cli.claim_version, cli.claim_credential)
@@ -254,17 +254,17 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
                 observed.append(json.dumps(saved))
                 assert response.status == 200, saved
                 assert saved["application"]["status"] == "restart-required"
-                assert workspace.runtime is old and old is not None and not old._closed
+                assert workspace.resources is old and old is not None and not workspace._closed
                 gates["foreground-old"].set()
                 assert "foreground-old finished" in await _client_output(cli)
-                assert workspace.runtime is old and not old._closed
+                assert workspace.resources is old and not workspace._closed
                 assert (
                     cast(dict[str, Any], service.config_view()["application"])["status"]
                     == "restart-required"
                 )
                 assert not any(version == "new" for version, _, _ in header_calls)
                 gates["scheduled-old"].set()
-                assert workspace.runtime is old and not old._closed
+                assert workspace.resources is old and not workspace._closed
                 async with asyncio.timeout(10):
                     while True:
                         event = await ws.receive_json()

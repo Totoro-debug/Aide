@@ -38,7 +38,7 @@ async def test_cli_session_selection_preserves_workspace_resources_and_client_se
         client = await ServiceClient.connect_or_start(home, directory)
         try:
             workspace = service.workspace(client.workspace_id)
-            runtime = workspace.runtime
+            runtime = workspace.resources
             schedule = workspace.schedule_service
             await client.management_dispatcher.update_permission_level(permission)
             await client.management_dispatcher.update_reasoning_effort("max")
@@ -53,7 +53,7 @@ async def test_cli_session_selection_preserves_workspace_resources_and_client_se
             assert workspace.require_claim(client.client_id, target, client.claim_version).loop is (
                 first_claim.loop
             )
-            assert workspace.runtime is runtime
+            assert workspace.resources is runtime
             assert workspace.schedule_service is schedule
             selection = await client.management_dispatcher.dispatch("/permission")
             assert selection.permission_selection == permission

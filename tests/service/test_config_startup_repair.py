@@ -15,7 +15,7 @@ from omni.config.agent_home import AgentHome
 from omni.config.config import ConfigLoader
 from omni.service.discovery import create_credential
 from omni.service.errors import ServiceError
-from omni.service.runtime import LocalService
+from omni.service.runtime import AgentService
 from omni.service.transport import create_app
 
 REPAIRABLE_CONFIG = b"""[models.providers.old]
@@ -55,10 +55,10 @@ async def _wait_for_application(
 @pytest_asyncio.fixture
 async def repair_http(
     tmp_path: Path,
-) -> AsyncIterator[tuple[LocalService, BaseTestServer, dict[str, str]]]:
+) -> AsyncIterator[tuple[AgentService, BaseTestServer, dict[str, str]]]:
     home = AgentHome(tmp_path / "agent-home")
     home.initialize()
-    service = LocalService(home, None, reconnect_timeout=3600)
+    service = AgentService(home, None, reconnect_timeout=3600)
     await service.start()
     token = create_credential(home)
     client = await service.register_client("web")
@@ -88,7 +88,7 @@ def _usable_repair_fields(fields: dict[str, Any]) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_missing_configuration_keeps_service_online_but_blocks_runtime(
-    repair_http: tuple[LocalService, BaseTestServer, dict[str, str]],
+    repair_http: tuple[AgentService, BaseTestServer, dict[str, str]],
     tmp_path: Path,
 ) -> None:
     service, server, headers = repair_http
@@ -118,7 +118,7 @@ async def test_missing_configuration_keeps_service_online_but_blocks_runtime(
 
 @pytest.mark.asyncio
 async def test_malformed_configuration_is_repaired_after_exact_private_backup(
-    repair_http: tuple[LocalService, BaseTestServer, dict[str, str]],
+    repair_http: tuple[AgentService, BaseTestServer, dict[str, str]],
 ) -> None:
     service, server, headers = repair_http
     config_path = service.agent_home.path / "config.toml"
@@ -175,7 +175,7 @@ async def test_malformed_configuration_is_repaired_after_exact_private_backup(
 
 @pytest.mark.asyncio
 async def test_malformed_repair_backup_failure_leaves_original_bytes_untouched(
-    repair_http: tuple[LocalService, BaseTestServer, dict[str, str]],
+    repair_http: tuple[AgentService, BaseTestServer, dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, server, headers = repair_http
@@ -223,7 +223,7 @@ async def test_malformed_repair_backup_failure_leaves_original_bytes_untouched(
 
 @pytest.mark.asyncio
 async def test_repair_http_security_validation_cas_and_secret_safe_replay(
-    repair_http: tuple[LocalService, BaseTestServer, dict[str, str]],
+    repair_http: tuple[AgentService, BaseTestServer, dict[str, str]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     service, server, headers = repair_http

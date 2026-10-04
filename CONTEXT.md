@@ -53,7 +53,7 @@ The shared local authority through which CLI and Web clients operate the Persona
 _Avoid_: Local Service, Agent Loop, Workspace Runtime, always-on daemon, remote service, separate CLI runtime
 
 **Client**:
-One CLI or Web participant in the Agent Service, with its own foreground permission selection and exclusive claims on loaded Conversation Sessions.
+One CLI or Web participant in the Agent Service, with its own foreground permission selection and exclusive claims on Conversation Sessions; releasing control does not end Session residency.
 _Avoid_: operating-system account, Conversation Session, Project, Model Provider client
 
 **Management Command**:

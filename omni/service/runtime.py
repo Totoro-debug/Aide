@@ -28,19 +28,30 @@ from omni.agent.confirmation import (
     ForegroundConfirmationOwner,
     ToolConfirmationCoordinator,
 )
-from omni.agent.loop import AgentLoop, ForegroundConversationProjection
+from omni.agent.context.builder import ContextBuilder
+from omni.agent.loop import (
+    AgentRunExecutor,
+    ForegroundConversationProjection,
+    session_runtime_status_input,
+)
 from omni.agent.memory.dream import Dream
 from omni.agent.memory.manager import MemoryManager
 from omni.agent.message_bus import InboundMessage, MessageBus
-from omni.agent.permission import RuntimePermissionControl
+from omni.agent.permission import PermissionSnapshot, RuntimePermissionControl
 from omni.agent.session.deletion import (
     begin_session_deletion,
     delete_session_data,
+    recover_session_deletions,
     session_deletion_pending,
     session_deletion_status,
     session_restore_pending,
 )
-from omni.agent.session.restore import RestoreManager, RestoreRecoveryRequired, StaleRestorePlan
+from omni.agent.session.restore import (
+    RestoreManager,
+    RestoreRecoveryRequired,
+    RestoreResult,
+    StaleRestorePlan,
+)
 from omni.agent.session.session import Session, SessionStoragePartition
 from omni.agent.tools.core.exec_host import ExecHost, create_exec_host, resolve_exec_shell
 from omni.agent.tools.mcp_keywords import MCPKeywordPreparer
@@ -48,12 +59,6 @@ from omni.agent.tools.mcp_runtime import MCPRuntimeManager, MCPWorkspaceRuntimeM
 from omni.agent.tools.tool_gateway import (
     BUILT_IN_TOOL_NAMES,
     BuiltInToolCatalog,
-    bind_built_in_tool_catalog,
-)
-from omni.agent.workspace_runtime import (
-    WorkspaceRuntime,
-    WorkspaceRuntimeFactories,
-    WorkspaceRuntimeRegistry,
 )
 from omni.agent.workspace_state import WorkspaceState
 from omni.config.agent_home import AgentHome
@@ -87,10 +92,12 @@ from omni.schedule.store import (
     WorkspaceScheduleStore,
 )
 from omni.service.errors import ServiceError, service_error
+from omni.service.execution import SessionExecution
 from omni.service.projects import ProjectCatalog, ProjectCatalogError, ProjectRecord
-from omni.service.resources import WorkspaceResourceManager
+from omni.service.resources import WorkspaceResourceManager, WorkspaceResources
 from omni.skills.catalog import LoadedSkill, SkillLoader, SkillMetadata
 from omni.utils.host_filesystem import HOST_FILESYSTEM
+from omni.utils.scheduler import AsyncioSchedulerClock
 from omni.utils.text import normalize_title_candidate
 from omni.utils.time import local_now
 
@@ -415,14 +422,14 @@ class SessionClaim:
     client_id: str
     version: int
     credential: str
-    loop: AgentLoop
+    loop: SessionExecution
     status: str = "claimed"
     disconnected_at: float | None = None
 
 
 @dataclass(slots=True)
 class _LoopState:
-    loop: AgentLoop
+    loop: SessionExecution
     bus: MessageBus
     owner_client_id: str | None
     run_ids: deque[str] = field(default_factory=deque)
@@ -434,28 +441,6 @@ class _LoopState:
     processor_stopping: bool = False
     release_task: asyncio.Task[None] | None = None
     schedule: bool = False
-
-
-@dataclass(slots=True)
-class _PreparedWorkspaceGeneration:
-    """Generation resources prepared before a Workspace pointer is switched."""
-
-    configuration: UserConfiguration
-    previous: WorkspaceRuntime
-    runtime: WorkspaceRuntime
-    exec_host: ExecHost
-    schedule_permission: RuntimePermissionControl
-    schedule: JobSchedule
-    schedule_jobs: tuple[ScheduleJob, ...] = field(init=False)
-    source_loops: tuple[tuple[str, _LoopState, AgentLoop, str | None], ...]
-    loops: list[tuple[_LoopState, AgentLoop, MessageBus]]
-    schedule_loops: list[tuple[str, _LoopState, AgentLoop, MessageBus]]
-
-
-@dataclass(slots=True)
-class _RetiredWorkspaceGeneration:
-    runtime: WorkspaceRuntime
-    loops: tuple[_LoopState, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -483,7 +468,7 @@ class _ProjectRemoval:
 class ServiceConfirmationPresenter(ConfirmationPresenter):
     """Bridge the existing one-shot coordinator to authenticated clients."""
 
-    def __init__(self, service: LocalService) -> None:
+    def __init__(self, service: AgentService) -> None:
         self._service = service
         self._wire_tokens: dict[object, str] = {}
         self._wire_sources: dict[object, tuple[str | None, str | None, str | None]] = {}
@@ -642,12 +627,12 @@ class ServiceConfirmationPresenter(ConfirmationPresenter):
                 "session_id": session_id, "run_id": run_id, "payload": deepcopy(payload)}
 
 
-class WorkspaceServiceRuntime:
-    """Own one WorkspaceRuntime plus independent Session Agent Loops."""
+class WorkspaceRecord:
+    """Compatibility record for one Workspace's data and coordination state."""
 
     def __init__(
         self,
-        service: LocalService,
+        service: AgentService,
         workspace_path: Path,
         configuration: UserConfiguration,
         *,
@@ -657,20 +642,29 @@ class WorkspaceServiceRuntime:
         self.workspace_path = workspace_path
         self.configuration = configuration
         self.workspace_id = workspace_id or str(uuid4())
-        self.runtime: WorkspaceRuntime | None = None
         self.workspace_state: Any = None
+        self._restore_result: RestoreResult | None = None
+        self._mcp_manager: MCPWorkspaceRuntimeManager | None = None
+        self._mcp_startup_report: Any = None
+        self._mcp_snapshot: tuple[Any, ...] = ()
+        self._mcp_keywords: Mapping[str, tuple[str, ...]] = {}
+        self._mcp_keyword_preparer: MCPKeywordPreparer | None = None
+        self._router: ModelRouter | None = None
+        self._memory_manager: MemoryManager | None = None
+        self._dream: Dream | None = None
+        self._schedule_service: ScheduleService | None = None
         self._loops: dict[str, _LoopState] = {}
+        self._retained_session_closes: set[str] = set()
         self._claims: dict[str, SessionClaim] = {}
         self._deletion_claims: dict[str, SessionDeletionClaim] = {}
         self._claim_versions: dict[str, int] = {}
         self._draft_clients: dict[str, str] = {}
         self._schedule_loops: dict[str, _LoopState] = {}
-        self._retired_generations: list[_RetiredWorkspaceGeneration] = []
         self._restore_plans: dict[tuple[str, int], Any] = {}
         self._restore_results: dict[tuple[str, str], Any] = {}
         self._restore_owner: str | None = None
         self._restore_session_id: str | None = None
-        self._restore_loop: AgentLoop | None = None
+        self._restore_loop: SessionExecution | None = None
         self._restore_schedule_paused = False
         self._restore_blocked = False
         self._restore_commit_task: asyncio.Task[Any] | None = None
@@ -683,92 +677,23 @@ class WorkspaceServiceRuntime:
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
-        async with self._lock:
-            if self._closed:
-                raise RuntimeError("Workspace service runtime is closed")
-            if self._started:
-                return
-            if self.service._exec_host is None:
-                resolved_shell = resolve_exec_shell(self.configuration.runtime.exec_shell)
-                self._exec_host = create_exec_host(resolved_shell)
-            else:
-                self._exec_host = self.service.exec_host
-                resolved_shell = self._exec_host.resolved_shell
+        await self.service._activate_workspace(self)
 
-            async def execute_user_job(job: ScheduleJob) -> None:
-                # Admission was checked at reservation; accepted occurrences must drain.
-                loop = await self._get_schedule_loop(job.job_id)
-                await loop.loop.run_schedule_job(job)
-
-            async def execute_user_occurrence(occurrence: ScheduleOccurrence) -> None:
-                loop = await self._get_schedule_loop(occurrence.job.job_id)
-                await loop.loop.run_schedule_job(occurrence.job, occurrence)
-
-            self.runtime = WorkspaceRuntime.acquire(
-                workspace=self.workspace_path,
-                agent_home=self.service.agent_home,
-                configuration=self.configuration,
-                execute_user_job=execute_user_job,
-                execute_user_occurrence=execute_user_occurrence,
-                cancel_confirmation_owner=self.service.confirmation.cancel_owner,
-                configured_schedule_level=self.configuration.runtime.permission_level,
-                resolved_exec_shell=resolved_shell,
-                now=local_now,
-                timezone_name=get_localzone_name(),
-                provider_factory=create_provider,
-                built_in_names=BUILT_IN_TOOL_NAMES,
-                registry=self.service._workspace_registry,
-                shared_router=self.service._model_router,
-                shared_mcp_runtime=self.service.mcp_manager,
-                factories=WorkspaceRuntimeFactories(
-                    workspace_state=WorkspaceState,
-                    restore_manager=RestoreManager,
-                    mcp_runtime=MCPWorkspaceRuntimeManager,
-                    router=ModelRouter,
-                    mcp_keyword_preparer=MCPKeywordPreparer,
-                    memory_manager=MemoryManager,
-                    dream=Dream,
-                    schedule_service=ScheduleService,
-                ),
-            )
-            await self.runtime.start()
-            self.service.workspace_resources.register(self.workspace_id, self.runtime)
-            self.runtime.schedule_service.set_admission_guard(lambda: self.schedule_admitted)
-            self.workspace_state = self.runtime.workspace_state
-            await self.runtime.prepare_schedule(
-                JobSchedule.from_cron_input(
-                    self.configuration.memory.schedule,
-                    get_localzone_name(),
-                )
-            )
-            self._started = True
+    @property
+    def resources(self) -> WorkspaceResources:
+        return self.service.workspace_resources.get(self.workspace_id)
 
     @property
     def schedule_service(self) -> ScheduleService:
-        registered = self.service.workspace_resources.resources.get(self.workspace_id)
-        if registered is not None:
-            return registered.schedule_service
-        if self.runtime is None:
-            raise RuntimeError("Workspace service runtime has not started")
-        return self.runtime.schedule_service
+        return self.resources.schedule_service if self.workspace_id in self.service.workspace_resources.resources else cast(ScheduleService, self._schedule_service)
 
     @property
     def memory_manager(self) -> MemoryManager:
-        registered = self.service.workspace_resources.resources.get(self.workspace_id)
-        if registered is not None:
-            return registered.memory_manager
-        if self.runtime is None:
-            raise RuntimeError("Workspace service runtime has not started")
-        return self.runtime.memory_manager
+        return self.resources.memory_manager
 
     @property
     def dream(self) -> Dream:
-        registered = self.service.workspace_resources.resources.get(self.workspace_id)
-        if registered is not None:
-            return registered.dream
-        if self.runtime is None:
-            raise RuntimeError("Workspace service runtime has not started")
-        return self.runtime.dream
+        return self.resources.dream
 
     @property
     def loops(self) -> Mapping[str, _LoopState]:
@@ -796,7 +721,6 @@ class WorkspaceServiceRuntime:
             and not self._closed
             and not self._restore_schedule_paused
             and not self._restore_blocked
-            and not self.service.configuration_transition_active
             and not self.schedule_service.admission_paused
             and self.service._schedule_admission_open()
             and self.service._schedule_allowed(self)
@@ -811,6 +735,14 @@ class WorkspaceServiceRuntime:
             "active_job_count": status["active_job_count"],
         }
 
+    def _capture_schedule_permission_snapshot(self) -> PermissionSnapshot:
+        if self._exec_host is None:
+            raise RuntimeError("Workspace service runtime is not ready")
+        return PermissionSnapshot(
+            level=self._schedule_permission.configured(),
+            exec_shell=self._exec_host.resolved_shell,
+        )
+
     async def pause_schedule_admission(self) -> None:
         if not self._started or self._closed:
             return
@@ -818,9 +750,9 @@ class WorkspaceServiceRuntime:
         await self.schedule_service.pause_admission()
 
     async def create_draft(self, client_id: str, *, reuse_startup_session: bool = True) -> str:
-        if self._closed or self.service.configuration_transition_active:
+        if self._closed:
             raise service_error("admission_closed", "Workspace admission is closed.")
-        startup_session_id = None if self.runtime is None else self.runtime.startup_session_id
+        startup_session_id = None if self._restore_result is None else self._restore_result.session_id
         if (
             reuse_startup_session
             and startup_session_id is not None
@@ -862,7 +794,7 @@ class WorkspaceServiceRuntime:
 
     async def claim(self, client_id: str, session_id: str) -> SessionClaim:
         async with self._lock:
-            if self._closed or self.service.configuration_transition_active:
+            if self._closed:
                 raise service_error("admission_closed", "Workspace admission is closed.")
             self._ensure_session_available(session_id)
             existing = self._claims.get(session_id)
@@ -975,6 +907,7 @@ class WorkspaceServiceRuntime:
     async def _release_unlocked(
         self, client_id: str, session_id: str, *, close_idle: bool = True
     ) -> None:
+        del close_idle
         if self._restore_owner == client_id and self._restore_session_id == session_id:
             await self._wait_restore_commit()
         if self._restore_owner == client_id and self._restore_session_id == session_id:
@@ -1002,6 +935,12 @@ class WorkspaceServiceRuntime:
             raise service_error(
                 "session_busy", "Conversation Session still has accepted work.", retryable=True
             )
+        if loop_state is not None:
+            try:
+                await loop_state.loop.wait_for_restore_idle()
+                await loop_state.loop.session.persist_pending_automatic_title()
+            except RuntimeError:
+                pass
         self._claims.pop(session_id, None)
         self.service.client_claim_released(client_id, self.workspace_id, session_id)
         await self.service.emit(
@@ -1014,13 +953,6 @@ class WorkspaceServiceRuntime:
         )
         if loop_state is not None and loop_state.owner_client_id == client_id:
             loop_state.owner_client_id = None
-        if (
-            close_idle
-            and loop_state is not None
-            and not loop_state.loop.has_active_run
-            and loop_state.output_task is None
-        ):
-            await self._close_loop(session_id)
 
     def clear_claims_for_removal(self) -> tuple[SessionClaim, ...]:
         """Drop all service-owned Claims after the Workspace has been drained."""
@@ -1060,6 +992,7 @@ class WorkspaceServiceRuntime:
                         await loop_state.loop.cancel_active_run()
                     except RuntimeError:
                         pass
+                    self._retained_session_closes.add(session_id)
                     await self._close_loop(session_id)
             except Exception as error:
                 errors.append(error)
@@ -1538,8 +1471,8 @@ class WorkspaceServiceRuntime:
             RestoreListingReport,
         )
 
-        runtime = self.runtime
-        if runtime is None:
+        runtime = self.resources
+        if not self._started:
             raise RuntimeError("Workspace service runtime is not ready")
         owned_claim = self._claims.get(session_id)
         if owned_claim is None:
@@ -1553,7 +1486,7 @@ class WorkspaceServiceRuntime:
         initial_version = initial_claim.version
         initial_credential = initial_claim.credential
 
-        def current_loop() -> AgentLoop:
+        def current_loop() -> SessionExecution:
             self.service._require_client(client_id)
             self._ensure_session_available(session_id)
             return self.require_claim(
@@ -1749,11 +1682,11 @@ class WorkspaceServiceRuntime:
         return ManagementCommandDispatcher(management)
 
     def _require_admitted(self, *, allow_configuration: bool = False) -> None:
+        del allow_configuration
         if (
             self._closed
             or self._restore_blocked
             or (not self._schedule_admitted and self.service.state in {"draining", "stopped"})
-            or (self.service.configuration_transition_active and not allow_configuration)
         ):
             raise ServiceError("admission_closed", "Workspace admission is closed.")
 
@@ -1943,7 +1876,7 @@ class WorkspaceServiceRuntime:
         )
 
     async def _create_loop(self, session_id: str | None, *, client_id: str | None) -> _LoopState:
-        if self.runtime is None or self.workspace_state is None or self._exec_host is None:
+        if not self._started or self.workspace_state is None or self._exec_host is None:
             raise RuntimeError("Workspace service runtime is not ready")
         permission_control = (
             self.service.client_permission(client_id)
@@ -1951,7 +1884,7 @@ class WorkspaceServiceRuntime:
             else self._schedule_permission
         )
         loop, bus = await self._create_agent_loop(
-            runtime=self.runtime,
+            runtime=self.resources,
             configuration=self.configuration,
             schedule_service=self.schedule_service,
             exec_host=self._exec_host,
@@ -1965,7 +1898,7 @@ class WorkspaceServiceRuntime:
     async def _create_agent_loop(
         self,
         *,
-        runtime: WorkspaceRuntime,
+        runtime: Any,
         configuration: UserConfiguration,
         schedule_service: ScheduleService,
         exec_host: ExecHost,
@@ -1973,7 +1906,7 @@ class WorkspaceServiceRuntime:
         permission_control: RuntimePermissionControl,
         session: Session | None = None,
         bus: MessageBus | None = None,
-    ) -> tuple[AgentLoop, MessageBus]:
+    ) -> tuple[SessionExecution, MessageBus]:
         selected_bus = MessageBus() if bus is None else bus
         loop_kwargs: dict[str, Any] = {
             "workspace_path": self.workspace_path,
@@ -1995,244 +1928,63 @@ class WorkspaceServiceRuntime:
             "configured_schedule_level": configuration.runtime.permission_level,
             "skill_loader": self.service._skill_loader,
             "reload_skills": self.service.reload_skills,
+            "built_in_catalog": self.service.built_in_tool_catalog,
         }
-        with bind_built_in_tool_catalog(self.service.built_in_tool_catalog):
-            loop = (
-                AgentLoop.with_session(session, **loop_kwargs)
-                if session is not None
-                else AgentLoop(**loop_kwargs)
+        authority = session
+        if authority is None:
+            authority = (
+                Session.create(self.workspace_state, now=local_now, new_uuid=uuid4)
+                if session_id is None
+                else Session.load(self.workspace_state, session_id, now=local_now)
             )
-        loop.bind_confirmation_requester(self.service.confirmation.request)
-        loop.disable_foreground_consumer()
-        loop.preflight()
-        await loop.start()
-        return loop, selected_bus
 
-    async def _get_schedule_loop(self, job_id: str) -> _LoopState:
+        def create_executor() -> AgentRunExecutor:
+            state = self._loops.get(authority.session_id)
+            owner = None if state is None else state.owner_client_id
+            loop_kwargs["permission_control"] = (
+                self._schedule_permission if owner is None else self.service.client_permission(owner)
+            )
+            executor = AgentRunExecutor.with_session(authority, **loop_kwargs)
+            executor.bind_confirmation_requester(self.service.confirmation.request)
+            return executor
+
+        prepared = create_executor()
+        prepared.preflight()
+        await prepared.start()
+        tool_schemas = prepared.tool_schemas
+
+        def status_input() -> Any:
+            builder = ContextBuilder(
+                self.workspace_path, self.schedule_service.context_timezone_name() or get_localzone_name(),
+                agent_home=self.service.agent_home.path, memory_manager=self.memory_manager,
+                skill_loader=self.service.skill_loader,
+            )
+            return session_runtime_status_input(
+                authority, configuration=self.configuration, context_builder=builder,
+                tool_schemas=tool_schemas, generation_started_at=self.service._started_at,
+            )
+
+        handle = SessionExecution(authority, selected_bus, create_executor, self.service.reload_skills, status_input)
+        return handle, selected_bus
+
+    async def _get_schedule_loop(self, job_id: str, *, title: str | None = None) -> _LoopState:
         state = self._schedule_loops.get(job_id)
         if state is not None:
             return state
-        state = await self._create_loop(None, client_id=None)
-        state.schedule = True
+        try:
+            session = Session.load(self.workspace_state, Session.schedule_session_id(job_id),
+                                   partition=SessionStoragePartition.SCHEDULE, now=local_now)
+        except FileNotFoundError:
+            session = Session.create_schedule(self.workspace_state, job_id, now=local_now, title=title or "Untitled session")
+        handle, bus = await self._create_agent_loop(
+            runtime=self.resources, configuration=self.configuration,
+            schedule_service=self.schedule_service, exec_host=self.service.exec_host,
+            session_id=None, permission_control=self._schedule_permission, session=session,
+        )
+        state = _LoopState(loop=handle, bus=bus, owner_client_id=None, schedule=True)
+        self._loops[session.session_id] = state
         self._schedule_loops[job_id] = state
         return state
-
-    async def wait_for_generation_idle(self) -> None:
-        """Pause new work and wait for active foreground, Schedule, and Dream work."""
-        if not self._started or self._closed or self.runtime is None:
-            return
-        await self.schedule_service.pause_and_wait_idle()
-        await self.runtime.dream.wait_until_idle()
-        while True:
-            active = self._restore_owner is not None or self._restore_commit_task is not None
-            if self._closed:
-                return
-            for state in tuple(self._loops.values()):
-                try:
-                    owner = self.service._clients.get(state.owner_client_id or "")
-                    active = (
-                        active
-                        or (state.owner_client_id is not None and (owner is None or owner.expired))
-                        or state.loop.has_active_run
-                        or bool(state.run_ids)
-                        or (state.processor_task is not None and not state.processor_task.done())
-                        or bool(await state.bus.inbound_snapshot())
-                    )
-                    await state.loop.wait_for_restore_idle()
-                except RuntimeError:
-                    continue
-            if not active:
-                return
-            await asyncio.sleep(0.01)
-
-    async def prepare_configuration(
-        self, configuration: UserConfiguration
-    ) -> _PreparedWorkspaceGeneration:
-        """Prepare a complete replacement generation without publishing it."""
-        if self.runtime is None or self.workspace_state is None or self._exec_host is None:
-            raise RuntimeError("Workspace service runtime is not ready")
-        await self.wait_for_generation_idle()
-        # Late automatic titles update memory after the last Run snapshot was saved.
-        for state in tuple(self._loops.values()):
-            await state.loop.session.persist_pending_automatic_title()
-        previous = self.runtime
-        source_loops = tuple(
-            (session_id, state, state.loop, state.owner_client_id)
-            for session_id, state in self._loops.items()
-        )
-        candidate = previous.create_replacement(configuration)
-        schedule = JobSchedule.from_cron_input(configuration.memory.schedule, get_localzone_name())
-        staged: list[tuple[_LoopState, AgentLoop, MessageBus]] = []
-        schedule_job_states = list(self._schedule_loops.items())
-        staged_schedule_loops: list[tuple[str, _LoopState, AgentLoop, MessageBus]] = []
-        try:
-            await candidate.start_replacement(previous)
-            candidate.schedule_service.set_admission_guard(lambda: self.schedule_admitted)
-            candidate.prepare_replacement_schedule()
-            candidate_exec_host = create_exec_host(
-                resolve_exec_shell(configuration.runtime.exec_shell)
-            )
-            candidate_schedule_permission = RuntimePermissionControl(
-                configuration.runtime.permission_level
-            )
-            for state in tuple(self._loops.values()):
-                if state.schedule:
-                    continue
-                permission = (
-                    self.service.client_permission(state.owner_client_id)
-                    if state.owner_client_id is not None
-                    else candidate_schedule_permission
-                )
-                loop, bus = await self._create_agent_loop(
-                    runtime=candidate,
-                    configuration=configuration,
-                    schedule_service=candidate.schedule_service,
-                    exec_host=candidate_exec_host,
-                    session_id=state.loop.session.session_id,
-                    permission_control=permission,
-                    session=state.loop.session.clone(),
-                )
-                staged.append((state, loop, bus))
-            for job_id, state in schedule_job_states:
-                loop, bus = await self._create_agent_loop(
-                    runtime=candidate,
-                    configuration=configuration,
-                    schedule_service=candidate.schedule_service,
-                    exec_host=candidate_exec_host,
-                    session_id=state.loop.session.session_id,
-                    permission_control=candidate_schedule_permission,
-                    session=state.loop.session.clone(),
-                )
-                staged_schedule_loops.append((job_id, state, loop, bus))
-            return _PreparedWorkspaceGeneration(
-                configuration=configuration,
-                previous=previous,
-                runtime=candidate,
-                exec_host=candidate_exec_host,
-                schedule_permission=candidate_schedule_permission,
-                schedule=schedule,
-                source_loops=source_loops,
-                loops=staged,
-                schedule_loops=staged_schedule_loops,
-            )
-        except BaseException:
-            await self._discard_configuration_resources(
-                candidate,
-                tuple(_LoopState(loop, bus, None) for _, loop, bus in staged)
-                + tuple(_LoopState(loop, bus, None) for _, _, loop, bus in staged_schedule_loops),
-            )
-            raise
-
-    async def discard_prepared_configuration(self, prepared: _PreparedWorkspaceGeneration) -> None:
-        await self._discard_configuration_resources(
-            prepared.runtime,
-            tuple(_LoopState(loop, bus, None) for _, loop, bus in prepared.loops)
-            + tuple(_LoopState(loop, bus, None) for _, _, loop, bus in prepared.schedule_loops),
-        )
-
-    async def _discard_configuration_resources(
-        self, runtime: WorkspaceRuntime, loops: tuple[_LoopState, ...]
-    ) -> None:
-        retired = _RetiredWorkspaceGeneration(runtime, loops)
-        self._retired_generations.append(retired)
-        try:
-            await self.retire_configuration(retired)
-        except Exception:
-            # Failed cleanup remains owned and is retried by Workspace shutdown.
-            pass
-
-    def prepared_configuration_is_current(self, prepared: _PreparedWorkspaceGeneration) -> bool:
-        if (
-            self._closed
-            or self.runtime is not prepared.previous
-            or self._lock.locked()
-            or self._restore_owner is not None
-            or self._restore_commit_task is not None
-        ):
-            return False
-        if tuple(self._loops) != tuple(item[0] for item in prepared.source_loops):
-            return False
-        candidates = {state.loop.session.session_id: loop for state, loop, _bus in prepared.loops}
-        candidates.update(
-            {
-                state.loop.session.session_id: loop
-                for _job, state, loop, _bus in prepared.schedule_loops
-            }
-        )
-        for session_id, state, loop, owner in prepared.source_loops:
-            if self._loops.get(session_id) is not state or state.loop is not loop:
-                return False
-            if state.owner_client_id != owner:
-                return False
-            client = self.service._clients.get(owner or "")
-            if owner is not None and (client is None or client.expired):
-                return False
-            candidate = candidates.get(session_id)
-            if candidate is None or (
-                candidate.session.messages != loop.session.messages
-                or candidate.session.metadata != loop.session.metadata
-                or candidate.session.updated_at != loop.session.updated_at
-            ):
-                return False
-        return True
-
-    def activate_configuration(
-        self, prepared: _PreparedWorkspaceGeneration
-    ) -> _RetiredWorkspaceGeneration:
-        """Publish a prepared generation after every Workspace has passed preflight."""
-        old_loops = tuple(prepared.loops)
-        old_schedule_loops = tuple(prepared.schedule_loops)
-        claims_by_session = {claim.session_id: claim for claim in self._claims.values()}
-        retired = _RetiredWorkspaceGeneration(prepared.previous, tuple(self._loops.values()))
-        self._retired_generations.append(retired)
-        prepared.runtime.schedule_service.inherit_generation_state(
-            prepared.previous.schedule_service,
-            jobs=prepared.schedule_jobs,
-        )
-        self.service.workspace_resources.replace(
-            self.workspace_id,
-            previous=prepared.previous,
-            runtime=prepared.runtime,
-        )
-        for state in retired.loops:
-            if state.output_task is not None:
-                state.output_task.cancel()
-            if state.release_task is not None:
-                state.release_task.cancel()
-        self.runtime = prepared.runtime
-        self.configuration = prepared.configuration
-        self._schedule_permission = prepared.schedule_permission
-        self._exec_host = prepared.exec_host
-        self._loops.clear()
-        self._schedule_loops.clear()
-        for old_state, new_loop, new_bus in old_loops:
-            session_id = new_loop.session.session_id
-            state = _LoopState(new_loop, new_bus, old_state.owner_client_id)
-            self._loops[session_id] = state
-            claim = claims_by_session.get(session_id)
-            if claim is not None:
-                claim.loop = new_loop
-        for job_id, _old_state, new_loop, new_bus in old_schedule_loops:
-            state = _LoopState(new_loop, new_bus, None, schedule=True)
-            self._loops[state.loop.session.session_id] = state
-            self._schedule_loops[job_id] = state
-        return retired
-
-    async def retire_configuration(self, retired: _RetiredWorkspaceGeneration) -> None:
-        errors: list[Exception] = []
-        for state in retired.loops:
-            try:
-                await self._close_loop_state(state, abort=True)
-            except Exception as error:
-                errors.append(error)
-        try:
-            retired.runtime.release_execution_resources()
-            await retired.runtime.close()
-        except Exception as error:
-            errors.append(error)
-        if errors:
-            raise ExceptionGroup("Runtime generation retirement failed", errors)
-        self._retired_generations.remove(retired)
 
     async def _forward_output(self, state: _LoopState, run_id: str | None = None) -> bool:
         session_id = state.loop.session.session_id
@@ -2324,7 +2076,13 @@ class WorkspaceServiceRuntime:
             return
         await self.release(client_id, session_id)
 
-    async def _close_loop_state(self, state: _LoopState, *, abort: bool = False) -> None:
+    async def _close_loop_state(
+        self,
+        state: _LoopState,
+        *,
+        abort: bool = False,
+        close_loop: bool = True,
+    ) -> None:
         if state.release_task is not None:
             release_task = state.release_task
             state.release_task = None
@@ -2355,15 +2113,30 @@ class WorkspaceServiceRuntime:
                 output_task.cancel()
                 await asyncio.gather(output_task, return_exceptions=True)
         if not abort:
-            await state.loop.close()
+            if close_loop:
+                await state.loop.close()
             await self.service.confirmation.cancel_generation(state.loop.generation_id)
 
     async def _close_loop(self, session_id: str, *, abort: bool = False) -> None:
         state = self._loops.get(session_id)
         if state is None:
+            self._retained_session_closes.discard(session_id)
             return
-        await self._close_loop_state(state, abort=abort)
-        self._loops.pop(session_id, None)
+        retain_session = session_id in self._retained_session_closes
+        try:
+            await self._close_loop_state(state, abort=abort, close_loop=not retain_session)
+            if retain_session:
+                await state.loop.finish_work()
+                await state.bus.drain_inbound()
+                state.run_ids.clear()
+                state.live_runs.clear()
+                state.completed_user_count = None
+                state.processor_stopping = False
+                state.owner_client_id = None
+            else:
+                self._loops.pop(session_id, None)
+        finally:
+            self._retained_session_closes.discard(session_id)
         for job_id, candidate in tuple(self._schedule_loops.items()):
             if candidate is state:
                 self._schedule_loops.pop(job_id, None)
@@ -2380,6 +2153,9 @@ class WorkspaceServiceRuntime:
         self._schedule_loops.pop(job_id, None)
 
     async def close(self) -> None:
+        # Claim release may hold this lock while awaiting a title naturally.
+        for state in tuple(self._loops.values()):
+            state.loop.cancel_title_work()
         async with self._lock:
             if self._closed and not self._close_failed:
                 return
@@ -2397,26 +2173,7 @@ class WorkspaceServiceRuntime:
                     )
                 if self._restore_owner is not None:
                     await self._release_restore_barrier(self._restore_owner)
-                if self.runtime is not None:
-                    await self.runtime.abort_dream()
-                    if self.workspace_id in self.service.workspace_resources.resources:
-                        try:
-                            await self.service.workspace_resources.close_workspace(
-                                self.workspace_id,
-                                close_foreground=self._close_all_loops,
-                                drain_confirmation_aborts=True,
-                            )
-                        finally:
-                            await self.runtime.close()
-                    else:
-                        await self.runtime.close(
-                            close_foreground=lambda: self._close_all_loops(),
-                            drain_confirmation_aborts=True,
-                        )
-                else:
-                    await self._close_all_loops()
-                for retired in tuple(self._retired_generations):
-                    await self.retire_configuration(retired)
+                await self.service._close_workspace_resources(self)
             except BaseException:
                 self._close_failed = True
                 raise
@@ -2424,15 +2181,19 @@ class WorkspaceServiceRuntime:
                 self._close_failed = False
 
     async def _close_all_loops(self) -> None:
-        """Drain accepted work into durable terminal outcomes during lifecycle shutdown."""
+        """Flush every Session, collecting failures without skipping later entries."""
+        errors: list[Exception] = []
         for session_id in tuple(self._loops):
-            await self._close_loop(session_id)
-        for job_id in tuple(self._schedule_loops):
-            await self._close_schedule_loop(job_id)
+            try:
+                await self._close_loop(session_id)
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            raise ExceptionGroup("Session cleanup failed", errors)
 
 
-class LocalService:
-    """Own one local service instance and expose typed command behavior."""
+class AgentService:
+    """Own the Agent Home service lifecycle and schedule Agent Runs."""
 
     def __init__(
         self,
@@ -2450,21 +2211,20 @@ class LocalService:
         self._sleep = sleep
         self.service_instance_id = str(uuid4())
         self.protocol_version = 1
+        self._started_at: float | None = None
         self.state = "starting"
         self.confirmation = ToolConfirmationCoordinator()
         self._presenter = ServiceConfirmationPresenter(self)
         self._clients: dict[str, ClientState] = {}
         self._client_by_reconnect: dict[str, str] = {}
-        self._workspaces: dict[str, WorkspaceServiceRuntime] = {}
+        self._workspaces: dict[str, WorkspaceRecord] = {}
         self._workspace_keys: dict[str, str] = {}
-        self._workspace_registry = WorkspaceRuntimeRegistry()
         self._workspace_resources = WorkspaceResourceManager()
         self._skill_loader: SkillLoader | None = None
         self._model_router: ModelRouter | None = None
         self._mcp_manager: MCPRuntimeManager | None = None
         self._exec_host: ExecHost | None = None
         self._built_in_tool_catalog: BuiltInToolCatalog | None = None
-        self._initial_configuration_candidates: list[WorkspaceServiceRuntime] = []
         self._global_reconnect_task: asyncio.Task[None] | None = None
         self._stop_task: asyncio.Task[None] | None = None
         self._stop_failed = False
@@ -2484,7 +2244,6 @@ class LocalService:
         self._config_saved_configuration = configuration
         self._config_saved_revision: str | None = None
         self._config_active_revision: str | None = None
-        self._config_pending_revision: str | None = None
         self._config_fields: dict[str, dict[str, object]] | None = None
         self._config_status = "active" if configuration is not None else "pending-repair"
         self._config_state = "active" if configuration is not None else "missing"
@@ -2492,12 +2251,137 @@ class LocalService:
         self._config_backup_required = False
         self._config_requires_secret_reentry = configuration is None
         self._config_projection_error: dict[str, str] | None = None
-        self._config_waiting_for: tuple[str, ...] = ()
-        self._config_error: dict[str, str] | None = None
-        self._config_apply_task: asyncio.Task[None] | None = None
-        self._configuration_transition_active = False
         self._chat_effort_override: ReasoningEffort | None = None
         self.projects = ProjectCatalog(agent_home)
+
+    async def _activate_workspace(self, workspace: WorkspaceRecord) -> None:
+        async with workspace._lock:
+            if workspace._closed:
+                raise RuntimeError("Workspace service runtime is closed")
+            if workspace._started:
+                return
+            workspace._exec_host = self.exec_host
+
+            async def execute_user_job(job: ScheduleJob) -> None:
+                # Admission was checked at reservation; accepted occurrences must drain.
+                loop = await workspace._get_schedule_loop(job.job_id, title=job.title)
+                await loop.loop.run_schedule_job(job)
+
+            async def execute_user_occurrence(occurrence: ScheduleOccurrence) -> None:
+                loop = await workspace._get_schedule_loop(occurrence.job.job_id, title=occurrence.job.title)
+                await loop.loop.run_schedule_job(occurrence.job, occurrence)
+
+            registered_resources = False
+            try:
+                state = WorkspaceState(workspace.workspace_path)
+                state.initialize(agent_home_root=self.agent_home.path)
+                recover_session_deletions(state)
+                restore_manager = RestoreManager(state)
+                workspace._restore_result = await restore_manager.recover_pending()
+                workspace.workspace_state = state
+
+                manager = MCPWorkspaceRuntimeManager(
+                    workspace.workspace_path,
+                    shared_runtime=self.mcp_manager,
+                    built_in_names=BUILT_IN_TOOL_NAMES,
+                )
+                workspace._mcp_manager = manager
+                workspace._mcp_startup_report = await manager.start(workspace.configuration.mcp)
+                workspace._mcp_snapshot = workspace._mcp_startup_report.snapshot
+                workspace._router = self.model_router
+                workspace._mcp_keyword_preparer = MCPKeywordPreparer(
+                    model_router=workspace._router,
+                    config_loader=ConfigLoader(self.agent_home),
+                )
+                workspace._mcp_keywords = await workspace._mcp_keyword_preparer.prepare(
+                    workspace._mcp_snapshot,
+                    workspace.configuration.mcp,
+                )
+                memory_manager = MemoryManager(state)
+                dream = Dream(
+                    memory_manager=memory_manager,
+                    model_router=workspace._router,
+                    batch_size=workspace.configuration.memory.batch_size,
+                    memory_route_status=workspace._router.route_status("memory"),
+                )
+                workspace._memory_manager = memory_manager
+                workspace._dream = dream
+                schedule = ScheduleService(
+                    workspace_state=state,
+                    clock=AsyncioSchedulerClock(now=local_now),
+                    execute_user_job=execute_user_job,
+                    execute_user_occurrence=execute_user_occurrence,
+                    permission_snapshot_factory=workspace._capture_schedule_permission_snapshot,
+                    cancel_confirmation_owner=self.confirmation.cancel_owner,
+                    execute_dream=dream.run,
+                    timezone_name=get_localzone_name(),
+                )
+                workspace._schedule_service = schedule
+                self.workspace_resources.register_resources(
+                    WorkspaceResources(
+                        workspace_id=workspace.workspace_id,
+                        workspace_state=state,
+                        memory_manager=memory_manager,
+                        dream=dream,
+                        schedule_service=schedule,
+                        workspace_path=workspace.workspace_path,
+                        mcp_manager=manager,
+                        mcp_startup_report=workspace._mcp_startup_report,
+                        mcp_snapshot=workspace._mcp_snapshot,
+                        mcp_keywords=workspace._mcp_keywords,
+                        mcp_keyword_preparer=workspace._mcp_keyword_preparer,
+                        router=workspace._router,
+                    )
+                )
+                registered_resources = True
+                schedule.set_admission_guard(lambda: workspace.schedule_admitted)
+                schedule._prepare_start()
+                await schedule.register_dream_job(
+                    schedule=JobSchedule.from_cron_input(
+                        workspace.configuration.memory.schedule,
+                        get_localzone_name(),
+                    )
+                )
+                workspace._started = True
+            except BaseException as error:
+                cleanup_targets: list[Awaitable[None]] = []
+                if registered_resources:
+                    cleanup_targets.append(self._close_workspace_resources(workspace))
+                else:
+                    for resource in (workspace._schedule_service, workspace._dream, workspace._mcp_manager):
+                        if resource is not None:
+                            cleanup_targets.append(resource.close())
+                cleanup_results = await asyncio.gather(*cleanup_targets, return_exceptions=True)
+                cleanup_errors = [
+                    result for result in cleanup_results if isinstance(result, BaseException)
+                ]
+                workspace._started = False
+                if not cleanup_errors:
+                    workspace._schedule_service = None
+                    workspace._dream = None
+                    workspace._memory_manager = None
+                    workspace._mcp_manager = None
+                    workspace._mcp_startup_report = None
+                    workspace._mcp_snapshot = ()
+                    workspace._mcp_keywords = {}
+                    workspace._mcp_keyword_preparer = None
+                    workspace._router = None
+                if cleanup_errors:
+                    raise error from BaseExceptionGroup(
+                        "Workspace startup cleanup failed", cleanup_errors
+                    )
+                raise
+
+    async def _close_workspace_resources(self, workspace: WorkspaceRecord) -> None:
+        """Close this Workspace's resources without closing the service globals."""
+        if workspace.workspace_id in self.workspace_resources.resources:
+            await self.workspace_resources.close_workspace(
+                workspace.workspace_id,
+                close_foreground=workspace._close_all_loops,
+                drain_confirmation_aborts=True,
+            )
+        else:
+            await workspace._close_all_loops()
 
     async def start(self) -> None:
         async with self._start_lock:
@@ -2541,12 +2425,13 @@ class LocalService:
                 and record.path.is_dir()
             ):
                 await self._get_or_create_workspace(record.path)
+        self._started_at = monotonic()
         self.state = "ready"
         await self._reconcile_schedule_admission()
         self._global_reconnect_task = asyncio.create_task(self._stop_after_grace())
 
     @property
-    def workspaces(self) -> Mapping[str, WorkspaceServiceRuntime]:
+    def workspaces(self) -> Mapping[str, WorkspaceRecord]:
         return self._workspaces
 
     @property
@@ -2627,16 +2512,11 @@ class LocalService:
         return self.skill_loader.metadata
 
     @property
-    def configuration_transition_active(self) -> bool:
-        return self._configuration_transition_active
-
-    @property
     def configuration_ready(self) -> bool:
         """Return whether new Agent and Schedule work may be admitted."""
         return (
             self.configuration is not None
             and self._config_active_revision is not None
-            and not self._configuration_transition_active
         )
 
     def config_view(self) -> dict[str, object]:
@@ -2898,269 +2778,6 @@ class LocalService:
             self.config_view()
         await self._emit_configuration_event()
 
-    async def _activate_initial_configuration(
-        self, target: UserConfiguration, target_revision: str
-    ) -> bool:
-        """Build catalog Workspaces before publishing the first usable generation."""
-        async with self._project_lifecycle_lock:
-            return await self._prepare_initial_configuration(target, target_revision)
-
-    async def _discard_initial_configuration_candidates(self) -> None:
-        """Keep failed cleanup owned so retry and service stop can finish it."""
-        candidates = tuple(self._initial_configuration_candidates)
-        results = await asyncio.gather(
-            *(runtime.close() for runtime in candidates), return_exceptions=True
-        )
-        errors: list[BaseException] = []
-        for runtime, result in zip(candidates, results, strict=True):
-            if isinstance(result, BaseException):
-                errors.append(result)
-            else:
-                self._initial_configuration_candidates.remove(runtime)
-        if (
-            self.configuration is None
-            and self._mcp_manager is not None
-            and self._mcp_manager.started
-        ):
-            try:
-                await self._mcp_manager.close()
-            except Exception as error:
-                errors.append(error)
-        if errors:
-            raise service_error(
-                "runtime_generation_cleanup_failed",
-                "Prepared Workspace resources could not be stopped; retry the configuration.",
-                status=500,
-                retryable=True,
-            ) from BaseExceptionGroup("Initial configuration cleanup failed", errors)
-
-    async def _prepare_initial_configuration(
-        self, target: UserConfiguration, target_revision: str
-    ) -> bool:
-        await self._discard_initial_configuration_candidates()
-        async with self._config_lock:
-            self.config_view()
-            if target_revision != self._config_saved_revision:
-                return False
-        if self._mcp_manager is None:
-            self._initialize_shared_resources(target)
-        if self._mcp_manager is None:
-            raise RuntimeError("MCP Runtime Manager could not be initialized")
-        if not self._mcp_manager.started:
-            await self._mcp_manager.start(target.mcp)
-        created: list[tuple[str, WorkspaceServiceRuntime]] = []
-        try:
-            seen: set[str] = set()
-            for record in self.projects.list():
-                if (
-                    record.schedule_state not in {"available", "awaiting_resume"}
-                    or not record.path.is_dir()
-                ):
-                    continue
-                key = os.path.normcase(str(record.path.resolve(strict=True)))
-                if key in seen or key in self._workspace_keys:
-                    continue
-                seen.add(key)
-                runtime = WorkspaceServiceRuntime(
-                    self, record.path.resolve(strict=True), target, workspace_id=str(uuid4())
-                )
-                self._initial_configuration_candidates.append(runtime)
-                created.append((key, runtime))
-                await runtime.start()
-        except BaseException:
-            await self._discard_initial_configuration_candidates()
-            raise
-
-        async with self._config_lock:
-            self.config_view()
-            if (
-                self.state in {"draining", "stopped"}
-                or target_revision != self._config_saved_revision
-                or self._workspaces
-            ):
-                stale = True
-            else:
-                stale = False
-                for key, runtime in created:
-                    self._workspace_keys[key] = runtime.workspace_id
-                    self._workspaces[runtime.workspace_id] = runtime
-                    self._initial_configuration_candidates.remove(runtime)
-                self.configuration = target
-                for client in self._clients.values():
-                    client.permission_control.reconfigure(target.runtime.permission_level)
-                self._config_active_revision = target_revision
-                self._config_status = "active"
-                self._config_pending_revision = None
-                self._config_error = None
-                self._config_waiting_for = ()
-        if stale:
-            await self._discard_initial_configuration_candidates()
-            return False
-        return True
-
-    async def _apply_configuration_loop(self) -> None:
-        current_task = asyncio.current_task()
-        try:
-            while True:
-                async with self._config_lock:
-                    target = self._config_saved_configuration
-                    target_revision = self._config_saved_revision
-                    active_revision = self._config_active_revision
-                if target is None or target_revision is None or target_revision == active_revision:
-                    async with self._config_lock:
-                        if target is not None and self.configuration is not None:
-                            self._config_status = "active"
-                        self._config_pending_revision = None
-                        self._configuration_transition_active = False
-                        self._config_waiting_for = ()
-                    await self._reconcile_schedule_admission()
-                    await self._emit_configuration_event()
-                    if self._config_status == "pending":
-                        continue
-                    return
-
-                workspaces = tuple(self._workspaces.values())
-                if self.configuration is None and not workspaces:
-                    try:
-                        activated = await self._activate_initial_configuration(
-                            target, target_revision
-                        )
-                    except BaseException as error:
-                        if isinstance(error, asyncio.CancelledError):
-                            raise
-                        async with self._config_lock:
-                            if target_revision != self._config_saved_revision:
-                                continue
-                            self._config_status = "failed-to-apply"
-                            self._config_pending_revision = target_revision
-                            self._config_waiting_for = ()
-                            self._config_error = {
-                                "code": "runtime_generation_failed",
-                                "message": "The saved configuration could not be applied.",
-                            }
-                            self._configuration_transition_active = False
-                        await self._reconcile_schedule_admission()
-                        await self._emit_configuration_event()
-                        return
-                    if not activated:
-                        continue
-                    async with self._config_lock:
-                        if target_revision != self._config_saved_revision:
-                            continue
-                        self._configuration_transition_active = False
-                    await self._reconcile_schedule_admission()
-                    await self._emit_configuration_event()
-                    if self._config_status == "pending":
-                        continue
-                    return
-                prepared: list[tuple[WorkspaceServiceRuntime, _PreparedWorkspaceGeneration]] = []
-                committed = False
-                try:
-                    snapshot = self._config_loader.editable_snapshot()
-                    if snapshot.revision != target_revision:
-                        self.config_view()
-                        continue
-                    snapshot.require_valid_candidate()
-                    for workspace in workspaces:
-                        prepared.append((workspace, await workspace.prepare_configuration(target)))
-                    async with self._config_lock:
-                        self.config_view()
-                        if (
-                            target_revision != self._config_saved_revision
-                            or workspaces != tuple(self._workspaces.values())
-                            or not all(
-                                workspace.prepared_configuration_is_current(candidate)
-                                for workspace, candidate in prepared
-                            )
-                        ):
-                            latest = True
-                        else:
-                            latest = False
-                            if self.state in {"draining", "stopped"}:
-                                raise asyncio.CancelledError
-                            for _workspace, candidate in prepared:
-                                candidate.schedule_jobs = (
-                                    candidate.runtime.schedule_service.prepare_generation_state(
-                                        candidate.previous.schedule_service,
-                                        schedule=candidate.schedule,
-                                    )
-                                )
-                            self._workspace_registry.publish_replacements(
-                                tuple(
-                                    (candidate.previous, candidate.runtime)
-                                    for _, candidate in prepared
-                                )
-                            )
-                            retired = [
-                                (workspace, workspace.activate_configuration(candidate))
-                                for workspace, candidate in prepared
-                            ]
-                            committed = True
-                            self.configuration = target
-                            for client in self._clients.values():
-                                client.permission_control.reconfigure(
-                                    target.runtime.permission_level
-                                )
-                            self._config_active_revision = target_revision
-                    if latest:
-                        for workspace, candidate in prepared:
-                            await workspace.discard_prepared_configuration(candidate)
-                        continue
-                    # Cleanup cannot roll back the already published generation.
-                    for workspace, generation in retired:
-                        try:
-                            await workspace.retire_configuration(generation)
-                        except Exception:
-                            # Retain ownership for a later cleanup attempt and service stop.
-                            pass
-                    async with self._config_lock:
-                        if target_revision != self._config_saved_revision:
-                            continue
-                        self._configuration_transition_active = False
-                        self._config_status = "active"
-                        self._config_pending_revision = None
-                        self._config_error = None
-                        self._config_waiting_for = ()
-                    await self._reconcile_schedule_admission()
-                    await self._emit_configuration_event()
-                    if self._config_status == "pending":
-                        continue
-                    return
-                except BaseException as error:
-                    if not committed:
-                        await asyncio.gather(
-                            *(
-                                workspace.discard_prepared_configuration(candidate)
-                                for workspace, candidate in prepared
-                            ),
-                            return_exceptions=True,
-                        )
-                    if isinstance(error, asyncio.CancelledError):
-                        raise
-                    async with self._config_lock:
-                        if (
-                            target_revision != self._config_saved_revision
-                            or workspaces != tuple(self._workspaces.values())
-                            or any(workspace._closed for workspace in workspaces)
-                        ):
-                            continue
-                        self._config_status = "failed-to-apply"
-                        self._config_pending_revision = target_revision
-                        self._config_waiting_for = tuple(self._workspaces)
-                        self._config_error = {
-                            "code": "runtime_generation_failed",
-                            "message": "The saved configuration could not be applied.",
-                        }
-                        self._configuration_transition_active = False
-                    await self._reconcile_schedule_admission()
-                    await self._emit_configuration_event()
-                    if self._config_status == "pending":
-                        continue
-                    return
-        finally:
-            if self._config_apply_task is current_task:
-                self._config_apply_task = None
-
     async def _emit_configuration_event(self) -> None:
         if self._config_saved_revision is None:
             return
@@ -3315,11 +2932,11 @@ class LocalService:
         else:
             await self._reconcile_schedule_admission()
 
-    async def attach_workspace(self, client_id: str, path: Path) -> WorkspaceServiceRuntime:
+    async def attach_workspace(self, client_id: str, path: Path) -> WorkspaceRecord:
         async with self._project_lifecycle_lock:
             return await self._attach_workspace(client_id, path)
 
-    async def _attach_workspace(self, client_id: str, path: Path) -> WorkspaceServiceRuntime:
+    async def _attach_workspace(self, client_id: str, path: Path) -> WorkspaceRecord:
         client = self._require_client(client_id)
         if self.state in {"draining", "stopped"}:
             raise service_error("admission_closed", "The local service is stopping.")
@@ -3359,7 +2976,7 @@ class LocalService:
         client.reconnect_blocked = False
         return runtime
 
-    async def _get_or_create_workspace(self, path: Path) -> WorkspaceServiceRuntime:
+    async def _get_or_create_workspace(self, path: Path) -> WorkspaceRecord:
         key = os.path.normcase(str(path.resolve(strict=True)))
         async with self._lock:
             workspace_id = self._workspace_keys.get(key)
@@ -3375,7 +2992,7 @@ class LocalService:
                     "config_invalid", "User Configuration is unavailable.", status=422
                 )
             workspace_id = str(uuid4())
-            runtime = WorkspaceServiceRuntime(
+            runtime = WorkspaceRecord(
                 self, path, self.configuration, workspace_id=workspace_id
             )
             await runtime.start()
@@ -3383,7 +3000,7 @@ class LocalService:
             self._workspaces[workspace_id] = runtime
             return runtime
 
-    def _schedule_allowed(self, workspace: WorkspaceServiceRuntime) -> bool:
+    def _schedule_allowed(self, workspace: WorkspaceRecord) -> bool:
         key = os.path.normcase(str(workspace.workspace_path))
         for record in self.projects.list():
             if os.path.normcase(str(record.path.resolve(strict=False))) == key:
@@ -3397,7 +3014,6 @@ class LocalService:
         return (
             self.state == "ready"
             and self.configuration_ready
-            and not self._configuration_transition_active
             and any(client.connected for client in self._clients.values())
         )
 
@@ -3412,7 +3028,7 @@ class LocalService:
 
     async def register_project(
         self, client_id: str, path: Path
-    ) -> tuple[ProjectRecord, WorkspaceServiceRuntime, tuple[ScheduleJob, ...]]:
+    ) -> tuple[ProjectRecord, WorkspaceRecord, tuple[ScheduleJob, ...]]:
         async with self._project_lifecycle_lock:
             self._require_client(client_id)
             if self.configuration is None or self._config_active_revision is None:
@@ -3483,7 +3099,7 @@ class LocalService:
             jobs = await workspace.schedule_service.public_snapshot()
             return jobs, workspace.schedule_status()
 
-    def _schedule_workspace(self, client_id: str, workspace_id: str) -> WorkspaceServiceRuntime:
+    def _schedule_workspace(self, client_id: str, workspace_id: str) -> WorkspaceRecord:
         client = self._require_client(client_id)
         workspace = self.workspace(workspace_id)
         if (
@@ -3719,7 +3335,7 @@ class LocalService:
 
     async def _project_workspace_owned(
         self, client_id: str, project_id: str
-    ) -> tuple[ProjectRecord, WorkspaceServiceRuntime]:
+    ) -> tuple[ProjectRecord, WorkspaceRecord]:
         client = self._require_client(client_id)
         record = next(
             (item for item in self.projects.list() if item.project_id == project_id), None
@@ -3746,7 +3362,7 @@ class LocalService:
         title: str | None = None,
         cursor: str | None = None,
         limit: int | None = None,
-    ) -> tuple[ProjectRecord, WorkspaceServiceRuntime, dict[str, object]]:
+    ) -> tuple[ProjectRecord, WorkspaceRecord, dict[str, object]]:
         async with self._project_lifecycle_lock:
             record, workspace = await self._project_workspace_owned(client_id, project_id)
             return (
@@ -4188,7 +3804,7 @@ class LocalService:
                 # The persisted failure remains retryable if notification delivery fails.
                 pass
 
-    def workspace(self, workspace_id: str) -> WorkspaceServiceRuntime:
+    def workspace(self, workspace_id: str) -> WorkspaceRecord:
         try:
             workspace = self._workspaces[workspace_id]
         except KeyError as error:
@@ -4745,13 +4361,6 @@ class LocalService:
         return None, None, None
 
     async def stop(self) -> None:
-        if (
-            self._stop_task is not None
-            and self._stop_task.done()
-            and self._stop_failed
-            and self._initial_configuration_candidates
-        ):
-            self._stop_task = None
         if self._stop_task is not None:
             await self._stop_task
             return
@@ -4759,18 +4368,10 @@ class LocalService:
         await self._stop_task
 
     async def _stop_owned(self) -> None:
-        if self.state == "stopped" and not self._initial_configuration_candidates:
+        if self.state == "stopped":
             return
         self.state = "draining"
         errors: list[Exception] = []
-        config_task = self._config_apply_task
-        if config_task is not None and config_task is not asyncio.current_task():
-            config_task.cancel()
-            await asyncio.gather(config_task, return_exceptions=True)
-        try:
-            await self._discard_initial_configuration_candidates()
-        except Exception as error:
-            errors.append(error)
         if self._global_reconnect_task is not None:
             self._global_reconnect_task.cancel()
         await self._reconcile_schedule_admission()
@@ -4881,9 +4482,9 @@ class LocalService:
                         for user in users
                     ):
                         continue
-                    await workspace.close()
-                    self._workspaces.pop(workspace.workspace_id, None)
-                    self._workspace_keys.pop(key, None)
+                    await workspace.pause_schedule_admission()
+                    await workspace.schedule_service.pause_and_drain()
+                    await workspace.dream.abort_and_wait()
             except Exception as error:
                 errors.append(error)
         if errors:
@@ -5103,6 +4704,8 @@ def _encode_management_result(result: object) -> dict[str, object]:
     return encoded
 
 
+
+
 def _safe_wire_value(value: object) -> object:
     from datetime import datetime
     from enum import Enum
@@ -5127,10 +4730,10 @@ def _safe_wire_value(value: object) -> object:
 
 
 __all__ = [
+    "AgentService",
     "ClientState",
-    "LocalService",
     "ServiceConfirmationPresenter",
     "ServiceSink",
     "SessionClaim",
-    "WorkspaceServiceRuntime",
+    "WorkspaceRecord",
 ]

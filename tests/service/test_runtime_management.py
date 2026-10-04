@@ -17,7 +17,7 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
-from omni.agent.loop import AgentLoop
+from omni.agent.loop import AgentRunExecutor
 from omni.agent.memory.dream import DreamResult
 from omni.agent.tools.permission import PermissionContext
 from omni.agent.tools.tool_gateway import ModelToolCall
@@ -26,7 +26,7 @@ from omni.provider.models import ModelCompleted, ModelStreamEvent
 from omni.schedule.model import JobSchedule, ScheduleJob
 from omni.service.discovery import create_credential
 from omni.service.errors import ServiceError
-from omni.service.runtime import ClientState, LocalService, SessionClaim, WorkspaceServiceRuntime
+from omni.service.runtime import AgentService, ClientState, SessionClaim, WorkspaceRecord
 from omni.service.transport import create_app
 from tests.fixtures import FakeClock
 from tests.memory.test_dream import _response
@@ -37,8 +37,8 @@ from tests.service.test_service_transport import _persist_session, _prepare_agen
 
 @dataclass
 class ManagementCase:
-    service: LocalService
-    workspace: WorkspaceServiceRuntime
+    service: AgentService
+    workspace: WorkspaceRecord
     first: ClientState
     second: ClientState
     claim: SessionClaim
@@ -71,7 +71,7 @@ async def management_case(
 
     provider = _ConcurrentProvider()
     monkeypatch.setattr("omni.service.runtime.create_provider", lambda *_args: provider)
-    service = LocalService(
+    service = AgentService(
         home,
         ConfigLoader(home).load_for_startup(),
         reconnect_timeout=30,
@@ -110,7 +110,7 @@ async def _request(
     action: str,
     *,
     client: ClientState | None = None,
-    workspace: WorkspaceServiceRuntime | None = None,
+    workspace: WorkspaceRecord | None = None,
     claim: SessionClaim | None = None,
     request_id: str | None = None,
     **payload: object,
@@ -295,8 +295,8 @@ async def test_management_revalidates_claim_after_waiting_for_client_lock(
         await task
     assert stale.value.code == "stale_claim"
     assert case.service.client_permission(case.first.client_id).current() == "workspace-write"
-    assert case.workspace.runtime is not None
-    assert case.workspace.runtime.router.reasoning_effort == "medium"
+    assert case.workspace.resources is not None
+    assert case.workspace.resources.router.reasoning_effort == "medium"
 
 
 @pytest.mark.asyncio
@@ -328,7 +328,7 @@ async def test_workspace_dream_is_single_instance_across_clients_and_reopens_aft
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     case = management_case
-    runtime = case.workspace.runtime
+    runtime = case.workspace.resources
     assert runtime is not None
     started = asyncio.Event()
     release = asyncio.Event()
@@ -550,26 +550,26 @@ async def test_schedule_run_uses_configured_permission_snapshot_after_client_ove
     contexts: list[PermissionContext] = []
     provider_called = asyncio.Event()
     finished = asyncio.Event()
-    original = AgentLoop._new_run_gateway
+    original = AgentRunExecutor._new_run_gateway
     original_complete = case.provider.complete
-    original_run = AgentLoop.run_schedule_job
+    original_run = AgentRunExecutor.run_schedule_job
 
     async def complete(**kwargs: Any) -> Any:
         provider_called.set()
         return await original_complete(**kwargs)
 
-    async def run_schedule(loop: AgentLoop, *args: Any, **kwargs: Any) -> None:
+    async def run_schedule(loop: AgentRunExecutor, *args: Any, **kwargs: Any) -> None:
         await original_run(loop, *args, **kwargs)
         finished.set()
 
-    def capture_gateway(loop: AgentLoop, **kwargs: Any) -> Any:
+    def capture_gateway(loop: AgentRunExecutor, **kwargs: Any) -> Any:
         context = kwargs.get("permission_context")
         if isinstance(context, PermissionContext) and context.origin == "schedule":
             contexts.append(context)
         return original(loop, **kwargs)
 
-    monkeypatch.setattr(AgentLoop, "_new_run_gateway", capture_gateway)
-    monkeypatch.setattr(AgentLoop, "run_schedule_job", run_schedule)
+    monkeypatch.setattr(AgentRunExecutor, "_new_run_gateway", capture_gateway)
+    monkeypatch.setattr(AgentRunExecutor, "run_schedule_job", run_schedule)
     monkeypatch.setattr(case.provider, "complete", complete)
     await _request(case, "permission", permission_level="read-only")
     timestamp = int(datetime.now(UTC).timestamp() * 1000)
@@ -743,8 +743,8 @@ async def test_http_reload_preserves_active_run_snapshot_resources_and_next_run_
     }
     sink = cast(_CollectingSink, case.second.sink)
     loop = case.other_claim.loop
-    runtime = case.workspace.runtime
-    gateway = loop._tool_gateway
+    runtime = case.workspace.resources
+    catalog = case.service.built_in_tool_catalog
     session = loop.session
     async with TestServer(create_app(case.service)) as server, aiohttp.ClientSession() as http:
         url = server.make_url(
@@ -784,8 +784,9 @@ async def test_http_reload_preserves_active_run_snapshot_resources_and_next_run_
             assert result["skill_metadata"][0]["name"] == "reviewer"
             assert loop.has_active_run
             assert case.other_claim.loop is loop
-            assert case.workspace.runtime is runtime
-            assert loop._tool_gateway is gateway and loop.session is session
+            assert case.workspace.resources is runtime
+            assert loop.session is session
+            assert case.service.built_in_tool_catalog is catalog
             assert closed == []
         finally:
             release.set()
@@ -818,7 +819,7 @@ async def test_http_dream_updates_memory_and_replay_does_not_repeat_model_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     case = management_case
-    runtime = case.workspace.runtime
+    runtime = case.workspace.resources
     assert runtime is not None
     manager = runtime.memory_manager
     await manager.append_summary("The user prefers concise reports.", case.clock.now())

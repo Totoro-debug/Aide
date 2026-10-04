@@ -10,7 +10,7 @@ from uuid import UUID
 import pytest
 from textual.widgets import Input, OptionList, Static
 
-from omni.agent.loop import AgentLoop, ForegroundConversationProjection
+from omni.agent.loop import AgentRunExecutor, ForegroundConversationProjection
 from omni.agent.message_bus import MessageBus
 from omni.agent.session.session import RestoreAnchor
 from omni.management.commands import (
@@ -86,7 +86,7 @@ async def test_restore_waiter_cancellation_does_not_cancel_title_work() -> None:
             pending_persist_called = True
 
     title_task = asyncio.create_task(title_work())
-    loop = object.__new__(AgentLoop)
+    loop = object.__new__(AgentRunExecutor)
     cast(Any, loop)._aborted = False
     cast(Any, loop)._title_work = {"session": SimpleNamespace(task=title_task)}
     cast(Any, loop)._session = PendingSession()

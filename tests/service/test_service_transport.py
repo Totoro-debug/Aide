@@ -23,7 +23,6 @@ import omni.service.transport as service_transport
 import omni.terminal.cli as cli
 from omni.agent.session.restore import RestoreMode
 from omni.agent.session.session import Session
-from omni.agent.workspace_runtime import WorkspaceRuntime
 from omni.agent.workspace_state import WorkspaceState
 from omni.config.agent_home import AgentHome
 from omni.config.config import ConfigLoader
@@ -47,7 +46,7 @@ from omni.service.discovery import (
 )
 from omni.service.errors import ServiceError
 from omni.service.projects import ProjectCatalog
-from omni.service.runtime import LocalService
+from omni.service.runtime import AgentService
 from omni.service.transport import _project_job_summary, create_app
 from omni.terminal.conversation import TerminalConversationApp, _ConversationInput
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
@@ -767,7 +766,7 @@ async def test_session_page_limit_preserves_optional_and_validation_contract(
             created_at=datetime(2026, 2, index + 1, tzinfo=UTC),
             content="Private history",
         )
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     token = create_credential(home)
     server = TestServer(create_app(service))
     await service.start()
@@ -1289,13 +1288,13 @@ async def test_web_draft_stays_empty_when_workspace_has_startup_restore(
         content="Old history",
     )
     record = ProjectCatalog(home).register(project)
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     try:
         client = await service.register_client("web")
-        monkeypatch.setattr(
-            WorkspaceRuntime, "startup_session_id", property(lambda _runtime: restored_id)
-        )
+        workspace = next(iter(service.workspaces.values()))
+        from types import SimpleNamespace
+        monkeypatch.setattr(workspace, "_restore_result", SimpleNamespace(session_id=restored_id))
         created = await service.create_project_session(client.client_id, record.project_id)
         draft_id = cast(str, created["session_id"])
         assert draft_id != restored_id
@@ -1524,7 +1523,7 @@ async def test_unrelated_listener_never_receives_service_credential(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_service_without_first_client_exits_after_connection_window(tmp_path: Path) -> None:
-    service = LocalService(AgentHome(tmp_path / "agent-home"), reconnect_timeout=0.02)
+    service = AgentService(AgentHome(tmp_path / "agent-home"), reconnect_timeout=0.02)
     await service.start()
     await asyncio.wait_for(service.wait_closed(), timeout=1)
     assert service.state == "stopped"

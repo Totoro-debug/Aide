@@ -23,7 +23,7 @@ import omni.agent.context.run_context as compactor_module
 import omni.agent.loop as loop_module
 from omni.agent.blackboard import Blackboard
 from omni.agent.context.budget import estimate_request_tokens
-from omni.agent.loop import AgentLoop, ConfirmationRequestView, ModelContextOverflowError
+from omni.agent.loop import ConfirmationRequestView, ModelContextOverflowError
 from omni.agent.memory.manager import MemoryManager
 from omni.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
 from omni.agent.permission import PermissionSnapshot, RuntimePermissionControl
@@ -68,6 +68,7 @@ from tests.fixtures import (
     TaskFramingRouterAdapter,
     collect_foreground_outbound,
 )
+from tests.fixtures.agent_loop import DrivenExecutor as AgentRunExecutor
 from tests.fixtures.diagnostic_capture import capture_diagnostics
 from tests.fixtures.session import seed_session_state
 from tests.management.factories import management_service
@@ -344,7 +345,9 @@ class _TitleBehaviorRouter(_Router):
 
 
 def test_agent_loop_constructor_is_the_generation_composition_boundary() -> None:
-    assert tuple(inspect.signature(AgentLoop).parameters) == (
+    from omni.agent.loop import AgentRunExecutor as ProductionExecutor
+
+    assert tuple(inspect.signature(ProductionExecutor).parameters) == (
         "workspace_path",
         "workspace_state",
         "agent_home",
@@ -364,8 +367,10 @@ def test_agent_loop_constructor_is_the_generation_composition_boundary() -> None
         "mcp_keywords",
         "skill_loader",
         "reload_skills",
+        "session",
+        "built_in_catalog",
     )
-    assert tuple(inspect.signature(AgentLoop.close).parameters) == ("self",)
+    assert tuple(inspect.signature(AgentRunExecutor.close).parameters) == ("self",)
 
 
 def test_agent_loop_rejects_workspace_state_owned_by_another_workspace(
@@ -566,7 +571,7 @@ def _runtime(
     prepare_session: Callable[[WorkspaceState], str] | None = None,
     constructor_workspace_path: Path | None = None,
     constructor_memory_manager: MemoryManager | None = None,
-) -> tuple[AgentLoop, Session, MessageBus]:
+) -> tuple[AgentRunExecutor, Session, MessageBus]:
     agent_home = AgentHome(tmp_path / "agent-home")
     agent_home.initialize()
     workspace = tmp_path / "workspace"
@@ -599,7 +604,7 @@ def _runtime(
         else TaskFramingRouterAdapter(router, task_framing_outcomes)
     )
     model_router.bind_configuration(configuration)
-    loop = AgentLoop(
+    loop = AgentRunExecutor(
         workspace_path=(
             workspace if constructor_workspace_path is None else constructor_workspace_path
         ),
@@ -3729,10 +3734,10 @@ async def test_direct_bus_projects_completed_turn_without_session_access(
 ) -> None:
     loop, _session, _bus = _runtime(tmp_path, _Router((_response("completed without deltas"),)))
 
-    def reject_session_access(_loop: AgentLoop) -> Session:
+    def reject_session_access(_loop: AgentRunExecutor) -> Session:
         raise AssertionError("Terminal adapter must not access Session")
 
-    monkeypatch.setattr(AgentLoop, "session", property(reject_session_access))
+    monkeypatch.setattr(AgentRunExecutor, "session", property(reject_session_access))
 
     await loop.start()
     try:

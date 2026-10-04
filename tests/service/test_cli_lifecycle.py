@@ -7,9 +7,8 @@ from typing import Any, cast
 
 import pytest
 
-from omni.agent.loop import AgentLoop
+from omni.agent.loop import AgentRunExecutor
 from omni.agent.session.session import Session
-from omni.agent.workspace_runtime import WorkspaceRuntime
 from omni.config.agent_home import AgentHome
 from omni.service.client import ServiceClient, ServiceStartupError
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
@@ -42,7 +41,7 @@ async def test_cli_failed_target_preparation_preserves_selected_claim_and_resour
         try:
             previous = client.session_id
             workspace = service.workspace(client.workspace_id)
-            runtime = workspace.runtime
+            runtime = workspace.resources
             method = {
                 "constructor": "__init__",
                 "binding": "bind_confirmation_requester",
@@ -54,11 +53,11 @@ async def test_cli_failed_target_preparation_preserves_selected_claim_and_resour
             def fail(*_args: Any, **_kwargs: Any) -> None:
                 raise RuntimeError(private)
 
-            async def fail_start(_loop: AgentLoop) -> None:
+            async def fail_start(_loop: AgentRunExecutor) -> None:
                 raise RuntimeError(private)
 
             with monkeypatch.context() as patched:
-                patched.setattr(AgentLoop, method, fail_start if method == "start" else fail)
+                patched.setattr(AgentRunExecutor, method, fail_start if method == "start" else fail)
                 with pytest.raises(ServiceStartupError) as raised:
                     await client.management_dispatcher.resume(target)
                 assert private not in raised.value.message
@@ -66,7 +65,7 @@ async def test_cli_failed_target_preparation_preserves_selected_claim_and_resour
                 workspace.require_claim(
                     client.client_id, previous, client.claim_version, client.claim_credential
                 )
-                assert workspace.runtime is runtime
+                assert workspace.resources is runtime
                 status = await client.management_dispatcher.dispatch("/status")
                 assert status.handled and status.status_view is not None
             selected = await client.management_dispatcher.resume(target)
@@ -91,11 +90,11 @@ async def test_cli_disconnect_leaves_other_client_runtime_and_schedule_alive(
         first = await ServiceClient.connect_or_start(home, directory)
         second = await ServiceClient.connect_or_start(home, directory)
         workspace = service.workspace(first.workspace_id)
-        runtime = workspace.runtime
+        runtime = workspace.resources
         schedule = workspace.schedule_service
         await first.close()
         try:
-            assert workspace.runtime is runtime
+            assert workspace.resources is runtime
             assert workspace.schedule_service is schedule
             assert service.state == "ready"
             await second.submit_input("session-b")
@@ -107,7 +106,7 @@ async def test_cli_disconnect_leaves_other_client_runtime_and_schedule_alive(
     assert not service.workspaces or all(
         workspace._closed for workspace in service.workspaces.values()
     )
-    assert not WorkspaceRuntime._registry
+    assert not service.workspace_resources.resources
 
 
 @pytest.mark.asyncio

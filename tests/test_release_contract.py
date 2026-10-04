@@ -264,7 +264,7 @@ def test_distribution_metadata_builds_one_windows_runtime_wheel() -> None:
 
 
 def _ignore_unclean_build_inputs(_directory: str, names: list[str]) -> set[str]:
-    ignored = {".codegraph", ".git", ".pytest_cache", "build", "dist", "__pycache__"}
+    ignored = {".codegraph", ".git", ".pytest_cache", ".scratch", "build", "dist", "__pycache__"}
     return {name for name in names if name in ignored or name.endswith(".egg-info")}
 
 
@@ -619,20 +619,20 @@ def test_cli_source_uses_service_client_and_runtime_resource_shutdown_order() ->
     conversation = _source_function(cli_tree, "_run_service_cli_conversation")
     assert _attribute_call_lines(conversation, "ServiceClient", "connect_or_start")
     assert _attribute_call_lines(conversation, "client", "close")
-    assert not _named_call_lines(cli_tree, {"AgentLoop", "WorkspaceRuntime", "ScheduleService"})
+    assert not _named_call_lines(cli_tree, {"AgentRunExecutor", "WorkspaceRuntime", "ScheduleService"})
     main = _source_function(cli_tree, "main")
     assert _named_call_lines(main, {"_run_service_cli_conversation"})
 
-    runtime_tree = _source_ast(ROOT / "omni" / "agent" / "workspace_runtime.py")
-    runtime_shutdown = _source_function(runtime_tree, "_close_owned_resources")
+    runtime_tree = _source_ast(ROOT / "omni" / "service" / "resources.py")
+    runtime_shutdown = _source_function(runtime_tree, "close_workspace")
     resource_shutdown = (
-        min(_attribute_reference_lines(runtime_shutdown, "schedule", "pause_and_drain")),
-        min(_attribute_reference_lines(runtime_shutdown, "schedule", "close")),
-        min(_attribute_reference_lines(runtime_shutdown, "self._mcp_manager", "close")),
-        min(_attribute_reference_lines(runtime_shutdown, "self._dream", "close")),
-        min(_attribute_reference_lines(runtime_shutdown, "self._router", "close")),
+        min(_attribute_reference_lines(runtime_shutdown, "resources.schedule_service", "pause_and_drain")),
+        min(_attribute_reference_lines(runtime_shutdown, "resources.schedule_service", "close")),
+        min(_attribute_reference_lines(runtime_shutdown, "resources.dream", "close")),
+        min(_attribute_reference_lines(runtime_shutdown, "resources.mcp_manager", "close")),
     )
     assert resource_shutdown == tuple(sorted(resource_shutdown))
+
 
 
 def test_composition_and_store_signatures_match_current_contracts() -> None:
@@ -727,8 +727,9 @@ def test_runtime_status_uses_the_canonical_usage_anchor_and_configured_chat_rout
     ]
     assert len(controller_anchor_calls) == 1
 
-    loop = _source_class(loop_tree, "AgentLoop")
-    runtime_status = _direct_method(loop, "runtime_status_input")
+    loop = _source_class(loop_tree, "AgentRunExecutor")
+    assert _direct_method(loop, "runtime_status_input")
+    runtime_status = _source_function(loop_tree, "session_runtime_status_input")
     status_anchor_calls = [
         node
         for node in ast.walk(runtime_status)

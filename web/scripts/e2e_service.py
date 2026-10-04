@@ -404,7 +404,7 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
             (
                 "call-cancelled",
                 "exec",
-                {"command": wait_command, "timeout": 180},
+                {"command": wait_command, "timeout": 600},
             ),
         ]
         for index, (call_id, name, arguments) in enumerate(tool_calls):

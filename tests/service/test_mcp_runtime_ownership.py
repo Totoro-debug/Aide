@@ -13,7 +13,7 @@ from omni.agent.tools.permission import PermissionContext
 from omni.agent.tools.tool_gateway import ModelToolCall
 from omni.config.agent_home import AgentHome
 from omni.config.config import ConfigLoader, MCPServerConfiguration
-from omni.service.runtime import LocalService
+from omni.service.runtime import AgentService
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures.mcp_wire import (
     ObservedLifetimes,
@@ -64,7 +64,7 @@ async def test_concurrent_service_activation_initializes_http_once(
         return connection
 
     monkeypatch.setattr(mcp_runtime, "_default_connection_factory", factory)
-    service = LocalService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
     first = asyncio.create_task(service.start())
     second: asyncio.Task[None] | None = None
     try:
@@ -136,7 +136,7 @@ async def test_service_owns_http_and_workspace_owns_stdio_connections(
             'tool_keywords = {echo = ["echo"]}\n'
         )
         (home.path / "config.toml").write_text(config, encoding="utf-8")
-        service = LocalService(home, ConfigLoader(home).load_for_startup())
+        service = AgentService(home, ConfigLoader(home).load_for_startup())
         await service.start()
         try:
             assert [request["method"] for request in http_server.requests].count("initialize") == 1
@@ -156,13 +156,13 @@ async def test_service_owns_http_and_workspace_owns_stdio_connections(
                 "initialize"
             ) == 2
 
-            assert first_workspace.runtime is not None
-            assert second_workspace.runtime is not None
+            assert first_workspace.resources is not None
+            assert second_workspace.resources is not None
             first_http = next(
-                tool for tool in first_workspace.runtime.mcp_snapshot if tool.server_name == "http"
+                tool for tool in first_workspace.resources.mcp_snapshot if tool.server_name == "http"
             )
             second_http = next(
-                tool for tool in second_workspace.runtime.mcp_snapshot if tool.server_name == "http"
+                tool for tool in second_workspace.resources.mcp_snapshot if tool.server_name == "http"
             )
             assert first_http is second_http
 
@@ -171,7 +171,7 @@ async def test_service_owns_http_and_workspace_owns_stdio_connections(
                 for _ in range(10):
                     session_id = await workspace.create_draft(client.client_id)
                     loop = workspace.loops[session_id].loop
-                    gateway = loop._tool_gateway.for_run(
+                    gateway = loop._create_executor()._tool_gateway.for_run(
                         exposed_names=(first_http.name,),
                         permission_context=PermissionContext(
                             level="full-access", workspace_root=workspace.workspace_path

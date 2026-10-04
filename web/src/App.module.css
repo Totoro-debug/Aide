@@ -2577,6 +2577,94 @@ h1 {
   gap: 24px;
 }
 
+.settingsHeader {
+  display: grid;
+  gap: 12px;
+}
+
+.settingsLayout {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  align-items: start;
+  gap: 28px;
+}
+
+.settingsNavigation {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+  border-right: 1px solid var(--border-subtle);
+  padding-right: 16px;
+}
+
+.settingsNavigationLabel {
+  padding: 0 10px 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.settingsNavigationItem {
+  min-height: 36px;
+  border: 0;
+  border-radius: 4px;
+  padding: 7px 10px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settingsNavigationItem:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.settingsNavigationItem[aria-current="page"] {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 650;
+}
+
+.settingsDetail {
+  min-width: 0;
+}
+
+.settingsServiceStatus {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 24px 0 0;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 16px;
+}
+
+.settingsServiceStatus div {
+  min-width: 0;
+}
+
+.settingsServiceStatus dt {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.settingsServiceStatus dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.settingsErrorActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .settingsStatus {
   display: inline-flex;
   min-height: 32px;
@@ -2603,6 +2691,23 @@ h1 {
 .settingsStatus[data-state="failed-to-apply"] {
   border-color: var(--danger-border);
   color: var(--danger-text);
+}
+
+.settingsStatus[data-state="error"] {
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+
+.settingsStatus[data-state="restart-required"],
+.settingsStatus[data-state="pending-repair"] {
+  border-color: var(--warning-border);
+  color: var(--warning-text);
+}
+
+.settingsStatus[data-state="saving"],
+.settingsStatus[data-state="unsaved"] {
+  border-color: var(--border-subtle);
+  color: var(--text-muted);
 }
 
 .settingsForm {
@@ -2838,6 +2943,35 @@ h1 {
     padding-right: 24px;
     padding-left: 24px;
   }
+
+  .settingsLayout {
+    grid-template-columns: 170px minmax(0, 1fr);
+    gap: 20px;
+  }
+}
+
+@media (max-width: 760px) {
+  .settingsLayout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .settingsNavigation {
+    display: flex;
+    flex-wrap: wrap;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 0 0 10px;
+  }
+
+  .settingsNavigationLabel {
+    width: 100%;
+    padding-left: 0;
+  }
+
+  .settingsServiceStatus {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 680px) {
@@ -2859,7 +2993,7 @@ h1 {
   }
 
   .settingsSection {
-    padding: 16px;
+    padding: 12px 0;
   }
 
   .settingsSectionHeader {

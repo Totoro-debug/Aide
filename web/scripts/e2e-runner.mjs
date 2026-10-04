@@ -1520,7 +1520,7 @@ try {
           await expect(sessionListToggle).toBeFocused();
           await expect(sessionPanel).toBeHidden();
         }
-        const input = page.getByLabel(language === "en" ? "Message input" : "消息输入");
+        const input = page.locator("#conversation-input");
         const send = page.getByRole("button", { name: language === "en" ? "Send" : "发送" });
         await expect(input).toBeVisible();
         await expect(send).toBeVisible();
@@ -1550,6 +1550,27 @@ try {
         assert.equal(await page.evaluate(() => window.scrollY), 0, "Conversation scrolled the entire document");
         assert.ok(await page.getByRole("log").evaluate((log) => log.scrollHeight > log.clientHeight),
           "Long conversation did not scroll within the message region");
+        const draftText = "Unsent settings return draft 中文";
+        await page.locator("#conversation-input").fill(draftText);
+        const savedScroll = await page.getByRole("log").evaluate((log) => {
+          log.scrollTop = Math.min(200, log.scrollHeight - log.clientHeight);
+          return log.scrollTop;
+        });
+        const originalRoute = page.url();
+        if (viewport.width < 1024) {
+          await page.locator("#app-sidebar-toggle").click();
+        }
+        await page.getByRole("navigation").getByRole("link", { name: language === "en" ? "Settings" : "设置", exact: true }).click();
+        const back = page.getByRole("button", { name: language === "en" ? "Back to conversation" : "返回对话", exact: true });
+        await back.focus();
+        await page.keyboard.press("Tab");
+        await expect(back).not.toBeFocused();
+        await back.click();
+        if (viewport.width < 1024) await page.keyboard.press("Escape");
+        assert.equal(page.url(), originalRoute);
+        await expect(page.locator("#conversation-input")).toHaveValue(draftText);
+        await expect.poll(() => page.getByRole("log").evaluate((log) => log.scrollTop)).toBe(savedScroll);
+        await page.locator("#conversation-input").fill("");
         assert.ok(bounds.inputWidth > 0 && bounds.sendWidth > 0 && bounds.sendBottom <= viewport.height + 1,
           `Composer unreachable at ${viewport.width}x${viewport.height}`);
         const expectedLogWidth = viewport.width >= 1024 ? viewport.width * 0.6 : viewport.width - 32;
@@ -1667,6 +1688,11 @@ try {
   await page.getByRole("button", { name: "New session", exact: true }).click();
   await page.getByRole("region", { name: "Conversation", exact: true })
     .getByRole("heading", { name: "New Session draft", exact: true }).waitFor();
+  await page.getByLabel("Message input").fill("Unsent empty conversation draft");
+  await page.getByRole("navigation").getByRole("link", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "New Session draft", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Message input")).toHaveValue("Unsent empty conversation draft");
   await page.getByLabel("Message input").fill("tool states");
   await page.getByLabel("Message input").press("Enter");
   await page.getByRole("button", { name: "Cancel run", exact: true }).waitFor();
@@ -2067,8 +2093,8 @@ try {
           .getByRole("heading", { name: language === "en" ? "New Session draft" : "新会话草稿", exact: true }).waitFor();
         await page.getByRole("button", { name: language === "en" ? "Release session" : "释放会话", exact: true }).waitFor();
         const prompt = `retry once delete review ${language} ${theme} ${viewport.width}`;
-        await page.getByLabel(language === "en" ? "Message input" : "消息输入").fill(prompt);
-        await page.getByLabel(language === "en" ? "Message input" : "消息输入").press("Enter");
+        await page.locator("#conversation-input").fill(prompt);
+        await page.locator("#conversation-input").press("Enter");
         await waitForRecordedEvent((messages) => messages.some((completed) => completed.type === "run.completed"
           && messages.some((accepted) => accepted.type === "input.accepted"
             && accepted.payload?.text === prompt && accepted.run_id === completed.run_id)), "deletion fixture completion");

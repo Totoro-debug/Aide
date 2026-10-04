@@ -217,7 +217,13 @@ async function keyboardReach(locator) {
     if (await locator.evaluate((element) => element === document.activeElement)) return;
     await locator.page().keyboard.press("Tab");
   }
-  throw new Error("Required control cannot be reached using Tab");
+  const diagnostics = await locator.page().evaluate(() => ({
+    active: document.activeElement?.outerHTML,
+    fields: [...document.querySelectorAll("input, select")].filter((field) => field.getClientRects().length > 0)
+      .map((field) => ({ id: field.id, disabled: field.disabled })),
+    alerts: [...document.querySelectorAll('[role="alert"]')].map((alert) => alert.textContent),
+  }));
+  throw new Error(`Required control cannot be reached using Tab: ${JSON.stringify(diagnostics)}`);
 }
 
 async function keyboardFill(page, locator, value) {
@@ -227,6 +233,11 @@ async function keyboardFill(page, locator, value) {
 }
 
 async function fillRepairForm(page, state, providerBaseUrl) {
+  const sections = page.getByRole("navigation", { name: "Settings sections", exact: true });
+  await keyboardActivate(sections.getByRole("button", { name: "Runtime", exact: true }));
+  // Keep the full repair candidate invalid while the composite model fields are completed.
+  await keyboardFill(page, page.getByLabel("Maximum iterations", { exact: true }), "1");
+  await keyboardActivate(sections.getByRole("button", { name: "Models", exact: true }));
   const provider = page.locator("#settings-models-providers-openai-local");
   await expect(provider).toBeVisible();
   await keyboardFill(page, page.locator("#settings-models-providers-openai-local-base_url"), providerBaseUrl);
@@ -249,13 +260,18 @@ async function fillRepairForm(page, state, providerBaseUrl) {
   await keyboardFill(page, page.locator("#settings-models-providers-openai-local-api_key-value"),
     `startup-secret-${state}-303`,
   );
+  await keyboardActivate(sections.getByRole("button", { name: "Runtime", exact: true }));
+  await keyboardFill(page, page.getByLabel("Maximum iterations", { exact: true }), "64");
 }
 
 async function saveRepair(page, expectedStatus) {
   const responsePromise = page.waitForResponse((response) => (
     response.url().endsWith("/api/v1/config/repair") && response.request().method() === "POST"
   ));
-  await keyboardActivate(page.getByRole("button", { name: "Save settings", exact: true }));
+  const retry = page.getByRole("button", { name: "Retry save", exact: true });
+  const lastField = page.getByLabel("Maximum iterations", { exact: true });
+  if (await lastField.isVisible()) await lastField.press("Tab");
+  else await keyboardActivate(retry);
   const response = await responsePromise;
   assert.equal(response.status(), expectedStatus);
   return response.json();
@@ -455,6 +471,8 @@ async function runState(browser, state) {
       const failed = await saveRepair(page, 500);
       assert.equal(failed.code, "persistence_error");
       assert.deepEqual(await readFile(configPath), originalBytes);
+      await keyboardActivate(page.getByRole("navigation", { name: "Settings sections", exact: true })
+        .getByRole("button", { name: "Models", exact: true }));
       await expect(page.locator("#settings-models-providers-openai-local-api_key-value")).toHaveValue("startup-secret-malformed-303");
       await expect(page.locator("#settings-models-providers-openai-local-base_url")).toHaveValue(details.provider_base_url);
       assert.equal((await Promise.all(configBodies)).some((body) => body.includes("startup-secret-malformed-303")), false);
@@ -492,6 +510,8 @@ async function runState(browser, state) {
     await restartedPage.goto(details.cold_launch_url);
     await expect(restartedPage.locator("#status-heading")).toBeVisible();
     await restartedPage.getByRole("navigation").getByRole("link", { name: "Settings", exact: true }).click();
+    await keyboardActivate(restartedPage.getByRole("navigation", { name: "Settings sections", exact: true })
+      .getByRole("button", { name: "Runtime", exact: true }));
     await expect(restartedPage.getByLabel("Maximum iterations", { exact: true })).toBeEnabled();
     page = restartedPage;
     await page.evaluate(() => { window.__startupSocketBefore = window.__startupSocket; });
@@ -534,7 +554,9 @@ async function runState(browser, state) {
     await page.goto(`${details.url}/status`);
     await expect(page.locator("#status-heading")).toBeVisible();
     await expect(page).toHaveURL(/\/status$/);
+    await expect.poll(() => page.evaluate(() => window.__startupSocket?.readyState)).toBe(1);
     const oldActive = await readConfig(page);
+    assert.equal(oldActive.status, 200, `Authenticated saved configuration read: ${JSON.stringify(oldActive.body)}`);
     assert.equal(oldActive.body.configuration.state, "malformed");
     assert.equal(oldActive.body.application.active_revision, active.revision);
     assert.equal(oldActive.body.application.status, "pending-repair");

@@ -17,6 +17,39 @@ async function waitForSavedSettings(target) {
   }
 }
 
+async function settingsSection(target, section) {
+  await target.bringToFront();
+  const language = await target.locator("html").getAttribute("lang");
+  const sectionName = language === "zh-CN" ? ({
+    "General & appearance": "常规与外观",
+    Models: "模型",
+    Runtime: "运行时",
+    Memory: "记忆",
+    MCP: "MCP",
+  })[section] ?? section : section;
+  await target.getByRole("navigation", {
+    name: language === "zh-CN" ? "设置分类" : "Settings sections",
+    exact: true,
+  }).getByRole("button", { name: sectionName, exact: true }).click();
+}
+
+async function blurSettingsField(target) {
+  await target.evaluate(() => {
+    const active = document.activeElement;
+    if (active instanceof globalThis.HTMLInputElement
+      || active instanceof globalThis.HTMLTextAreaElement
+      || active instanceof globalThis.HTMLSelectElement) {
+      active.blur();
+      return;
+    }
+    const field = document.querySelector("form input:not([type=checkbox]):not(:disabled), form textarea:not(:disabled), form select:not(:disabled)");
+    if (field instanceof globalThis.HTMLElement) {
+      field.focus();
+      field.blur();
+    }
+  });
+}
+
 export async function settingsConfirmationAcceptance({ page, control }) {
   await page.bringToFront();
   await page.getByRole("button", { name: "EN", exact: true }).click();
@@ -61,13 +94,14 @@ export async function settingsConfirmationAcceptance({ page, control }) {
       entry.snapshot.live_state?.runs?.some((run) => run.run_id === runId)
     ))), acceptedRun.run_id)).toBe(true);
   await page.getByRole("navigation").getByRole("link", { name: "Settings", exact: true }).click();
+  await settingsSection(page, "Runtime");
   const field = page.getByLabel("Maximum iterations", { exact: true });
   await expect(field).toBeEnabled();
-  await field.fill("65");
   const savedResponse = page.waitForResponse((response) => (
     response.url().endsWith("/api/v1/config") && response.request().method() === "PATCH"
   ));
-  await page.getByRole("button", { name: "Save settings", exact: true }).click();
+  await field.fill("65");
+  await field.press("Tab");
   const saved = await savedResponse;
   assert.equal(saved.status(), 200);
   assert.equal((await saved.json()).application.status, "restart-required");
@@ -120,6 +154,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
     await target.getByRole("navigation").getByRole("link", { name: "Settings", exact: true }).click();
     const response = await received;
     assert.equal(response.status(), 200);
+    await settingsSection(target, "Models");
     await expect(field(target, "settings-models-providers-primary-base_url")).toBeEnabled();
     return response.json();
   };
@@ -171,13 +206,28 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
     throw new Error("New session remained admission-closed after 30 retries.");
   };
   const save = async (target, expectedStatus = 200) => {
-    const received = target.waitForResponse((response) => (
-      response.url().endsWith("/api/v1/config") && response.request().method() === "PATCH"
-    ));
-    await target.getByRole("button", { name: "Save settings", exact: true }).click();
-    const response = await received;
-    assert.equal(response.status(), expectedStatus);
-    return response.json();
+    await target.bringToFront();
+    await blurSettingsField(target);
+    if (expectedStatus !== 200) {
+      await expect(target.getByRole("alert").filter({ hasText: "Settings need attention" })).toBeVisible();
+      return null;
+    }
+    try {
+      await expect(target.locator('[role="status"][data-state="saving"]')).toBeVisible({ timeout: 1000 });
+    } catch {
+      // A quick save may already have returned the status badge to its saved state.
+    }
+    await waitForSavedSettings(target);
+    const response = await target.evaluate(async () => {
+      const credential = window.__omniTestControlCredential;
+      const result = await globalThis.fetch("/api/v1/config", {
+        credentials: "include",
+        headers: credential == null ? {} : { "X-Omni-Control": credential },
+      });
+      if (!result.ok) throw new Error(`Configuration read failed: ${result.status}`);
+      return result.json();
+    });
+    return response;
   };
   const readJsonLines = async (path) => {
     const text = await readFile(path, "utf8");
@@ -209,6 +259,8 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await modelList.getByRole("textbox", { name: "Models 3", exact: true }).fill("expanded-model-302");
   await primaryApiKeyAction(page).selectOption("replace");
   await primaryApiKeyValue(page).fill("e2e-provider-secret-replaced-302");
+  await save(page);
+  await settingsSection(page, "MCP");
   await field(page, "settings-mcp-remote-url").fill("http://127.0.0.1:1/edited-mcp-302");
   await field(page, "settings-mcp-remote-connect_timeout").fill("31");
   await field(page, "settings-mcp-remote-call_timeout").fill("61");
@@ -233,9 +285,9 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   assert.match(savedText, /e2e-mcp-secret-replaced-302/);
   assert.doesNotMatch(savedText, /e2e-provider-secret-302/);
 
+  await settingsSection(page, "Models");
   await primaryApiKeyAction(page).selectOption("keep");
   await retiredApiKeyAction(page).selectOption("clear");
-  await remoteHeaderAction(page).selectOption("clear");
   await save(page);
   await waitForSavedSettings(page);
   savedText = await readFile(configPath, "utf8");
@@ -243,19 +295,33 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   assert.match(savedText, /e2e-prototype-header-canary-302/);
   assert.doesNotMatch(savedText, /e2e-provider-secret-302/);
   assert.doesNotMatch(savedText, /e2e-retired-secret-302/);
+  await settingsSection(page, "MCP");
+  await remoteHeaderAction(page).selectOption("clear");
+  await save(page);
+  await waitForSavedSettings(page);
+  savedText = await readFile(configPath, "utf8");
   assert.doesNotMatch(savedText, /e2e-mcp-secret-302/);
   assert.doesNotMatch(savedText, /e2e-mcp-secret-replaced-302/);
 
+  await settingsSection(page, "Models");
   await page.getByRole("button", { name: "Add provider", exact: true }).click();
   const providerId = field(page, "settings-models-providers-new-provider-id");
   await providerId.fill("primary");
   const collisionBytes = await readFile(configPath);
-  await page.getByRole("button", { name: "Save settings", exact: true }).click();
+  await save(page, 422);
   const collisionSummary = page.getByRole("alert").filter({ hasText: "Settings need attention" });
   await expect(collisionSummary).toBeFocused();
   await collisionSummary.getByRole("link").filter({ hasText: "models.providers.new-provider.id" }).click();
   await expect(providerId).toBeFocused();
   assert.deepEqual(await readFile(configPath), collisionBytes);
+  await settingsSection(page, "Runtime");
+  await page.getByLabel("Maximum iterations", { exact: true }).fill("69");
+  await page.getByLabel("Maximum iterations", { exact: true }).press("Tab");
+  await expect.poll(async () => (await readFile(configPath, "utf8")).includes("max_iterations = 69")).toBe(true);
+  // Successful saves in another section must preserve the invalid composite row.
+  await collisionSummary.getByRole("link").filter({ hasText: "models.providers.new-provider.id" }).click();
+  await expect(providerId).toBeFocused();
+  await expect(providerId).toHaveValue("primary");
   await providerId.fill("");
   await providerId.pressSequentially("review-provider-302");
   await expect(providerId).toBeFocused();
@@ -272,6 +338,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await waitForSavedSettings(page);
 
   // Editable new names keep a stable row while typing; list values are lossless.
+  await settingsSection(page, "MCP");
   await page.getByRole("button", { name: "Add MCP server", exact: true }).click();
   const newName = page.getByRole("textbox", { name: "Server name", exact: true }).last();
   await newName.focus();
@@ -309,7 +376,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await save(page);
   await waitForSavedSettings(page);
   await field(page, `settings-mcp-${customName}-headers-X%2ETest-action`).selectOption("replace");
-  await page.getByRole("button", { name: "Save settings", exact: true }).click();
+  await save(page, 422);
   const headerSummary = page.getByRole("alert").filter({ hasText: "Settings need attention" });
   await expect(headerSummary).toBeFocused();
   await headerSummary.getByRole("link").click();
@@ -337,6 +404,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   assert.deepEqual(await readFile(configPath), keywordsBefore);
   await keywordInput.fill("resource");
 
+  await settingsSection(page, "Models");
   const beforeInvalid = await readFile(configPath);
   await defaultModel(page).fill("missing-model-302");
   await save(page, 422);
@@ -344,14 +412,35 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   assert.deepEqual(await readFile(configPath), beforeInvalid, "Invalid model candidate changed config bytes");
   await defaultModel(page).fill("large-model");
 
+  let releaseStaleSave;
+  let staleSaveArrived;
+  const staleSaveGate = new Promise((done) => { releaseStaleSave = done; });
+  const staleSaveArrival = new Promise((done) => { staleSaveArrived = done; });
+  const delayedStaleSave = async (route) => {
+    if (route.request().method() !== "PATCH") return route.continue();
+    staleSaveArrived();
+    await staleSaveGate;
+    await route.continue();
+  };
+  await page.route("**/api/v1/config", delayedStaleSave);
+  const staleResponsePromise = page.waitForResponse((response) => (
+    response.url().endsWith("/api/v1/config") && response.request().method() === "PATCH"
+  ));
   await defaultModel(page).fill("large-model");
   await chatModel(page).fill("large-model");
+  const chatTemperature = field(page, "settings-models-routes-chat-temperature");
+  await chatTemperature.fill("0.8");
+  await chatTemperature.press("Tab");
+  await staleSaveArrival;
   await openSettings(secondPage);
   await field(secondPage, "settings-models-routes-chat-temperature").fill("0.1");
   await save(secondPage);
   await waitForSavedSettings(secondPage);
   const beforeConflict = await readFile(configPath);
-  await save(page, 409);
+  releaseStaleSave();
+  const staleResponse = await staleResponsePromise;
+  assert.equal(staleResponse.status(), 409);
+  await page.unroute("**/api/v1/config", delayedStaleSave);
   await expect(page.getByText("These settings changed elsewhere. Your edits are still here.", { exact: true })).toBeVisible();
   assert.deepEqual(await readFile(configPath), beforeConflict, "Stale model save changed config bytes");
   await page.getByRole("button", { name: "Reload saved values", exact: true }).click();
@@ -384,6 +473,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await openSettings(page);
   await defaultModel(page).fill("small-model");
   await chatModel(page).fill("small-model");
+  await settingsSection(page, "MCP");
   const args = field(page, "settings-mcp-fixture-args").getByRole("textbox");
   await args.last().fill(mcpV2Path);
   await field(page, "settings-mcp-fixture-tool_keywords").getByRole("textbox", { name: "Tool name", exact: true }).fill("fixture_echo_v2");
@@ -448,6 +538,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
       for (const width of [390, 768, 1024, 1440]) {
         await page.setViewportSize({ width, height: 900 });
         for (const [section, id] of Object.entries({ models: "settings-models-providers-primary-base_url", routes: "settings-models-routes-chat-model", mcp: "settings-mcp-fixture-command", headers: "settings-mcp-remote-headers-__proto__-action" })) {
+          await settingsSection(page, section === "mcp" || section === "headers" ? "MCP" : "Models");
           const input = field(page, id);
           await input.scrollIntoViewIfNeeded();
           await input.focus();
@@ -484,44 +575,86 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   const settings = async (target) => {
     await target.bringToFront();
     await target.getByRole("button", { name: "EN", exact: true }).click();
+    await target.getByRole("navigation").getByRole("link", { name: "Status", exact: true }).click();
     await target.getByRole("navigation").getByRole("link", { name: "Settings", exact: true }).click();
+    await target.getByRole("navigation", { name: "Settings sections", exact: true }).waitFor();
+  };
+  const runtimeSettings = async (target) => {
+    await settingsSection(target, "Runtime");
     await expect(target.getByLabel("Maximum iterations", { exact: true })).toBeEnabled();
   };
+  const memorySettings = (target) => settingsSection(target, "Memory");
   const save = async (target, expectedStatus = 200) => {
-    const received = target.waitForResponse((response) => (
-      response.url().endsWith("/api/v1/config") && response.request().method() === "PATCH"
-    ));
-    await target.getByRole("button", { name: "Save settings", exact: true }).click();
-    const response = await received;
-    assert.equal(response.status(), expectedStatus);
-    return response.json();
+    await target.bringToFront();
+    await blurSettingsField(target);
+    if (expectedStatus === 200) {
+      try {
+        await expect(target.locator('[role="status"][data-state="saving"]')).toBeVisible({ timeout: 1000 });
+      } catch {
+        // A quick save may already have returned the status badge to its saved state.
+      }
+      await waitForSavedSettings(target);
+      return target.evaluate(async () => {
+        const credential = window.__omniTestControlCredential;
+        const response = await globalThis.fetch("/api/v1/config", {
+          credentials: "include",
+          headers: credential == null ? {} : { "X-Omni-Control": credential },
+        });
+        if (!response.ok) throw new Error(`Configuration read failed: ${response.status}`);
+        return response.json();
+      });
+    }
+    await expect(target.getByRole("alert").filter({ hasText: "Settings need attention" })).toBeVisible();
+    return null;
   };
   const configPath = resolve(control.details.home_root, ".omni", "config.toml");
   await settings(page);
+  await settingsSection(page, "General & appearance");
+  await page.locator("#settings-theme").selectOption("light");
+  await page.locator("#settings-language").selectOption("zh-CN");
+  await expect(page.getByRole("heading", { name: "常规与外观", exact: true })).toBeVisible();
+  await page.locator("#settings-language").selectOption("en");
+  const sectionNavigation = page.getByRole("navigation", { name: "Settings sections", exact: true });
+  const sections = ["General & appearance", "Models", "Runtime", "Memory", "MCP"];
+  for (const section of sections) {
+    await sectionNavigation.getByRole("button", { name: section, exact: true }).click();
+    await expect(page.getByRole("heading", { name: section, exact: true, level: 2 })).toBeVisible();
+  }
+  await expect(page.getByRole("button", { name: "Save settings", exact: true })).toHaveCount(0);
+  await sectionNavigation.getByRole("button", { name: "Runtime", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Settings", exact: true }).getByText("Service status", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Service status", exact: true })).toBeVisible();
+  await settings(page);
+  await runtimeSettings(page);
   const original = await readFile(configPath);
-  await page.getByLabel("Maximum iterations", { exact: true }).fill("1");
-  await page.getByRole("button", { name: "Save settings", exact: true }).click();
+  const invalidField = page.getByLabel("Maximum iterations", { exact: true });
+  await invalidField.fill("1");
+  await invalidField.press("Tab");
   const summary = page.getByRole("alert").filter({ hasText: "Settings need attention" });
   await expect(summary).toContainText("Review the highlighted settings.");
-  await expect(summary).toBeFocused();
-  await summary.getByRole("link").click();
-  await expect(page.getByLabel("Maximum iterations", { exact: true })).toBeFocused();
+  await expect(invalidField).toHaveAttribute("aria-invalid", "true");
   assert.deepEqual(await readFile(configPath), original, "Invalid browser edits changed config bytes");
 
-  await page.getByLabel("Maximum iterations", { exact: true }).fill("61");
+  const iterations = page.getByLabel("Maximum iterations", { exact: true });
+  const automaticSave = page.waitForResponse((response) => (
+    response.url().endsWith("/api/v1/config") && response.request().method() === "PATCH"
+  ));
+  await iterations.fill("61");
+  await iterations.press("Tab");
+  assert.equal((await automaticSave).status(), 200, "A valid field must save on blur");
+  await waitForSavedSettings(page);
   await settings(secondPage);
+  await runtimeSettings(secondPage);
+  await memorySettings(secondPage);
   await secondPage.getByLabel("Memory batch size", { exact: true }).fill("12");
   const competing = await save(secondPage);
   await page.bringToFront();
   await expect(page.getByRole("definition").filter({ hasText: competing.revision })).toHaveCount(1);
   await expect(page.getByLabel("Maximum iterations", { exact: true })).toHaveValue("61");
-  const beforeConflict = await readFile(configPath);
-  await save(page, 409);
-  await expect(page.getByText("These settings changed elsewhere. Your edits are still here.", { exact: true })).toBeVisible();
-  assert.deepEqual(await readFile(configPath), beforeConflict, "Stale browser save changed config bytes");
-  await page.getByRole("button", { name: "Reload saved values", exact: true }).click();
-  await expect(page.getByLabel("Memory batch size", { exact: true })).toHaveValue("12");
+  await runtimeSettings(page);
   await page.getByLabel("Maximum iterations", { exact: true }).fill("62");
+  await page.getByLabel("Maximum iterations", { exact: true }).press("Tab");
   const saved = await save(page);
   await waitForSavedSettings(page);
   assert.match(await readFile(configPath, "utf8"), /max_iterations = 62/);
@@ -529,6 +662,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
 
   const hold = await control.command("settings-hold");
   await page.evaluate(() => { window.__settingsSocketBefore = window.__omniTestSocket; });
+  await memorySettings(page);
   await page.getByLabel("Memory batch size", { exact: true }).fill("13");
   const pending = await save(page);
   assert.equal(pending.application.status, "restart-required");
@@ -537,6 +671,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   await page.getByRole("navigation").getByRole("link", { name: "Status", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Service status", exact: true })).toBeVisible();
   await settings(page);
+  await runtimeSettings(page);
   const released = await control.command("settings-release");
   assert.equal(released.pid, hold.pid, "Configuration application restarted the service");
   await waitForSavedSettings(page);
@@ -547,6 +682,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   const memory = await readFile(memoryPath);
   try {
     await writeFile(memoryPath, Buffer.from([0xff, 0xfe]));
+    await runtimeSettings(page);
     await page.getByLabel("Maximum iterations", { exact: true }).fill("63");
     const failedSave = await save(page);
     assert.equal(failedSave.application.status, "restart-required");
@@ -569,7 +705,13 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   };
   await page.route("**/api/v1/config", delayedPoll);
   await arrival;
+  const saveAgainstOldPoll = page.waitForResponse((response) => (
+    response.url().endsWith("/api/v1/config") && response.request().method() === "PATCH"
+  ));
   await page.getByLabel("Maximum iterations", { exact: true }).fill("64");
+  await page.getByLabel("Maximum iterations", { exact: true }).press("Tab");
+  const freshRevision = (await (await saveAgainstOldPoll).json()).revision;
+  await waitForSavedSettings(page);
   const deliveredPoll = page.waitForResponse((response) => (
     response.url().endsWith("/api/v1/config") && response.request().method() === "GET"
   ));
@@ -577,6 +719,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   await (await deliveredPoll).finished();
   await page.evaluate(() => new Promise((done) => window.requestAnimationFrame(done)));
   await expect(page.getByLabel("Maximum iterations", { exact: true })).toHaveValue("64");
+  await expect(page.getByRole("definition").filter({ hasText: freshRevision })).toHaveCount(1);
   await page.unroute("**/api/v1/config", delayedPoll);
   await save(page);
 
@@ -594,12 +737,19 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   };
   await page.route("**/api/v1/config", delayedSave);
   await page.getByLabel("Maximum iterations", { exact: true }).fill("66");
-  await page.getByRole("button", { name: "Save settings", exact: true }).click();
+  await page.getByLabel("Maximum iterations", { exact: true }).press("Tab");
   await saveArrival;
   await page.getByRole("navigation").getByRole("link", { name: "Status", exact: true }).click();
   await settings(page);
+  await runtimeSettings(page);
   await expect(page.getByLabel("Maximum iterations", { exact: true })).toHaveValue("66");
   await page.getByLabel("Maximum iterations", { exact: true }).fill("67");
+  await page.getByLabel("Maximum iterations", { exact: true }).press("Tab");
+  await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Service status", exact: true })).toBeVisible();
+  await settings(page);
+  await runtimeSettings(page);
+  await expect(page.getByLabel("Maximum iterations", { exact: true })).toHaveValue("67");
   const deliveredSave = page.waitForResponse((response) => (
     response.url().endsWith("/api/v1/config") && response.request().method() === "PATCH"
   ));
@@ -608,17 +758,51 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   await page.evaluate(() => new Promise((done) => window.requestAnimationFrame(done)));
   await page.unroute("**/api/v1/config", delayedSave);
   await expect(page.getByLabel("Maximum iterations", { exact: true })).toHaveValue("67");
-  const saveButton = page.getByRole("button", { name: "Save settings", exact: true });
-  await expect(saveButton).toBeEnabled();
+  const iterationsField = page.getByLabel("Maximum iterations", { exact: true });
+  await expect(iterationsField).toBeEnabled();
   await page.route("**/api/v1/clients", (route) => route.abort());
   await page.evaluate(() => window.__omniTestSocket.close());
-  await expect(saveButton).toBeDisabled({ timeout: 10000 });
+  await expect(iterationsField).toBeDisabled({ timeout: 10000 });
   await expect(page.getByLabel("Maximum iterations", { exact: true })).toHaveValue("67");
   await page.unroute("**/api/v1/clients");
-  await expect(saveButton).toBeEnabled({ timeout: 10000 });
+  await expect(iterationsField).toBeEnabled({ timeout: 10000 });
   await expect(page.getByLabel("Maximum iterations", { exact: true })).toHaveValue("67");
   await save(page);
   await waitForSavedSettings(page);
+
+  const lostRequests = [];
+  let loseResponse = true;
+  const lostAcknowledgement = async (route) => {
+    if (route.request().method() !== "PATCH") return route.continue();
+    lostRequests.push(route.request().postDataJSON());
+    const response = await route.fetch();
+    assert.equal(response.status(), 200);
+    if (loseResponse) {
+      loseResponse = false;
+      await route.abort();
+    } else await route.fulfill({ response });
+  };
+  await page.route("**/api/v1/config", lostAcknowledgement);
+  await iterationsField.fill("68");
+  await iterationsField.press("Tab");
+  await expect(page.getByRole("button", { name: "Retry save", exact: true })).toBeVisible();
+  assert.match(await readFile(configPath, "utf8"), /max_iterations = 68/);
+  await page.getByRole("button", { name: "Retry save", exact: true }).click();
+  await waitForSavedSettings(page);
+  assert.equal(lostRequests.length, 2);
+  assert.deepEqual(lostRequests[1], lostRequests[0], "Unknown-result retry must use the identical request ID and candidate");
+  loseResponse = true;
+  await iterationsField.fill("69");
+  await iterationsField.press("Tab");
+  await expect(page.getByRole("button", { name: "Retry save", exact: true })).toBeVisible();
+  await iterationsField.fill("70");
+  await iterationsField.press("Tab");
+  await waitForSavedSettings(page);
+  assert.equal(lostRequests.length, 5);
+  assert.deepEqual(lostRequests[3], lostRequests[2]);
+  assert.notEqual(lostRequests[4].request_id, lostRequests[3].request_id);
+  assert.match(await readFile(configPath, "utf8"), /max_iterations = 70/);
+  await page.unroute("**/api/v1/config", lostAcknowledgement);
 
   await mkdir(output, { recursive: true });
   for (const language of ["en", "zh-CN"]) {

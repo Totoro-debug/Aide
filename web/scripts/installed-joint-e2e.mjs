@@ -267,11 +267,11 @@ try {
   csrfToken = (await sessionResponse.json()).csrf_token;
   assert.equal(typeof csrfToken, "string");
 
-  await page.getByRole("navigation").getByRole("link", { name: /Projects|项目/, exact: true }).click();
-  await page.getByRole("heading", { name: /^(Projects|项目)$/ }).waitFor();
+  await page.locator("#app-sidebar").getByRole("link", { name: /Projects|项目/, exact: true }).click();
+  await page.getByRole("main").getByRole("heading", { name: /^(Projects|项目)$/ }).waitFor();
 
   async function registerProject() {
-    await page.getByRole("button", { name: /Add project|登记项目/ }).first().click();
+    await page.getByRole("main").getByRole("button", { name: /Add project|登记项目/ }).first().click();
     const dialog = page.getByRole("dialog");
     await dialog.getByLabel(/Absolute local path|本地绝对路径/).fill(workspace);
     const responsePromise = page.waitForResponse((response) => (
@@ -406,7 +406,7 @@ try {
   );
   const removalSavedJobId = removalSavedJob.job.job_id;
   await waitForObservations(observationPath, removalPrompt, 1);
-  const removableProject = page.getByRole("list", { name: /Projects|项目/ }).filter({
+  const removableProject = page.getByRole("main").getByRole("list", { name: /Projects|项目/ }).filter({
     has: page.getByRole("heading", { name: "workspace", exact: true }),
   });
   const projectButtons = removableProject.getByRole("button");
@@ -451,7 +451,7 @@ try {
   const settingsJobId = settingsJob.job.job_id;
   const settingsListing = await ensureScheduleAdmitted(context.request, secondProjectId, secondWorkspaceId);
   await waitForObservations(observationPath, settingsPrompt, 2);
-  await page.getByRole("navigation").getByRole("link", { name: /Settings|设置/, exact: true }).click();
+  await page.locator("#app-sidebar").getByRole("link", { name: /Settings|设置/, exact: true }).click();
   await page.getByRole("heading", { name: /Settings|设置/ }).waitFor();
   const iterations = page.getByLabel(/Maximum iterations|最大迭代次数/);
   await expect(iterations).toBeEnabled();

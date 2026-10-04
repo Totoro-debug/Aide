@@ -296,11 +296,13 @@ async function conversationAfterRepair(page, details, beforeSocket) {
   const firstActiveService = await fetchJson(page, "/service");
   assert.equal(firstActiveService.body.active_workspace_count, 2, "The available Project and default Chat workspace were not activated before Session open");
 
-  await keyboardActivate(page.getByRole("navigation").getByRole("link", { name: "Status", exact: true }));
+  await keyboardActivate(page.getByRole("navigation", { name: "Settings sections", exact: true })
+    .getByRole("button", { name: "Runtime", exact: true }));
+  await keyboardActivate(page.getByRole("main").getByRole("link", { name: "Status", exact: true }));
   await expect(page.locator("#status-heading")).toBeVisible();
   await expect(page).toHaveURL(/\/status$/);
-  await keyboardActivate(page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }));
-  await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
+  await keyboardActivate(page.locator("#app-sidebar").getByRole("link", { name: "Projects", exact: true }));
+  await page.getByRole("main").getByRole("heading", { name: "Projects", exact: true }).waitFor();
   await page.getByRole("button", { name: "Refresh projects", exact: true }).click();
   const projectResponse = await fetchJson(page, "/projects");
   const project = projectResponse.body.projects.find((item) => item.project_id === details.project_id);
@@ -517,7 +519,7 @@ async function runState(browser, state) {
     await restartedPage.goto(details.cold_launch_url);
     await expect(restartedPage.getByRole("heading", { name: "Omni", exact: true }).last()).toBeVisible();
     await expect(restartedPage.getByRole("textbox", { name: /Message input|消息输入/, exact: true })).toBeEnabled();
-    await restartedPage.getByRole("navigation").getByRole("link", { name: "Settings", exact: true }).click();
+    await restartedPage.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
     await keyboardActivate(restartedPage.getByRole("navigation", { name: "Settings sections", exact: true })
       .getByRole("button", { name: "Runtime", exact: true }));
     await expect(restartedPage.getByLabel("Maximum iterations", { exact: true })).toBeEnabled();

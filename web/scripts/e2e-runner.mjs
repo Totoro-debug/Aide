@@ -7,7 +7,7 @@ import { URL } from "node:url";
 import { chromium, expect } from "@playwright/test";
 
 import setup from "./e2e-setup.mjs";
-import settingsAcceptance, { settingsConfirmationAcceptance, settingsModelMcpAcceptance } from "./settings-e2e.mjs";
+import settingsAcceptance, { openServiceStatus, settingsConfirmationAcceptance, settingsModelMcpAcceptance } from "./settings-e2e.mjs";
 
 if (process.platform !== "win32") {
   console.error("Omni requires Windows.");
@@ -154,7 +154,7 @@ try {
     await targetPage.goto("about:blank");
     await targetPage.goto(targetUrl);
     assert.equal((await chatWorkspaceEntry).status(), 200, "The default Chat workspace did not open");
-    await targetPage.getByRole("heading", { name: /Conversations|对话/ }).waitFor();
+    await targetPage.getByRole("main").getByRole("heading", { name: "Omni", exact: true, level: 1 }).waitFor();
     assert.equal(new URL(targetPage.url()).pathname, "/", "The default Web route should open Chat");
     await targetPage.goto(`${new URL(targetPage.url()).origin}/status`);
     await targetPage.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
@@ -222,7 +222,7 @@ try {
   await replay.close();
 
   await settingsAcceptance({ page, secondPage, control, output, viewports });
-  await page.getByRole("navigation").getByRole("link", { name: "Status", exact: true }).click();
+  await openServiceStatus(page);
 
   for (const language of ["en", "zh-CN"]) {
     await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
@@ -234,10 +234,10 @@ try {
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
         await page.getByRole("main").waitFor();
-        const statusNavigationLink = page.getByRole("navigation").getByRole("link", {
-          name: language === "en" ? "Status" : "状态",
+        const settingsNavigationLink = page.locator("#app-sidebar").getByRole("link", {
+          name: language === "en" ? "Settings" : "设置",
         });
-        if (viewport.width <= 1024) {
+        if (viewport.width < 1024) {
           const openNavigation = page.getByRole("button", {
             name: language === "en" ? "Open navigation" : "打开导航",
           });
@@ -247,13 +247,13 @@ try {
             name: language === "en" ? "Close navigation" : "关闭导航",
           });
           await expect(closeNavigation).toHaveAttribute("aria-expanded", "true");
-          await expect(statusNavigationLink).toBeVisible();
+          await expect(settingsNavigationLink).toBeVisible();
           await page.keyboard.press("Escape");
           await expect(openNavigation).toHaveAttribute("aria-expanded", "false");
           await expect(openNavigation).toBeFocused();
-          await expect(statusNavigationLink).toBeHidden();
+          await expect(settingsNavigationLink).toBeHidden();
         } else {
-          await statusNavigationLink.waitFor();
+          await settingsNavigationLink.waitFor();
         }
         const layout = await page.evaluate(() => {
           const aside = document.querySelector("aside").getBoundingClientRect();
@@ -269,14 +269,14 @@ try {
   }
 
   await page.setViewportSize(viewports[0]);
-  const statusLink = page.getByRole("navigation").getByRole("link", { name: "状态" });
-  await statusLink.focus();
-  const statusFocusOutline = await statusLink.evaluate((element) => {
+  const settingsLink = page.locator("#app-sidebar").getByRole("link", { name: "设置" });
+  await settingsLink.focus();
+  const settingsFocusOutline = await settingsLink.evaluate((element) => {
     const style = window.getComputedStyle(element);
     return { style: style.outlineStyle, width: Number.parseFloat(style.outlineWidth) };
   });
-  assert.notEqual(statusFocusOutline.style, "none", "Keyboard focus should be visible on navigation links");
-  assert.ok(statusFocusOutline.width >= 2, "Keyboard focus ring should be at least 2px wide");
+  assert.notEqual(settingsFocusOutline.style, "none", "Keyboard focus should be visible on navigation links");
+  assert.ok(settingsFocusOutline.width >= 2, "Keyboard focus ring should be at least 2px wide");
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.setViewportSize({ width: 768, height: 1024 });
   const reducedMotionTransition = await page.locator("aside[data-open]").evaluate((element) => (
@@ -289,8 +289,9 @@ try {
     `Reduced-motion navigation transition remained animated: ${reducedMotionTransition.join(", ")}`);
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.setViewportSize(viewports[0]);
-  await statusLink.press("Enter");
-  assert.match(page.url(), /\/status$/);
+  await settingsLink.press("Enter");
+  await expect(page).toHaveURL(/\/settings$/);
+  await openServiceStatus(page);
 
   const details = page.getByRole("button", { name: /连接详情|Connection details/ });
   await details.focus();
@@ -319,9 +320,9 @@ try {
   ));
   await page.getByRole("link", { name: "New conversation", exact: true }).click();
   assert.equal((await chatWorkspaceEntry).status(), 200, "The default Chat workspace did not open");
-  await page.getByRole("heading", { name: /Conversations|对话/ }).waitFor();
-  await page.getByRole("link", { name: "Projects", exact: true }).click();
-  await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
+  await page.getByRole("main").getByRole("heading", { name: "Omni", exact: true, level: 1 }).waitFor();
+  await page.locator("#app-sidebar").getByRole("link", { name: "Projects", exact: true }).click();
+  await page.getByRole("main").getByRole("heading", { name: "Projects", exact: true }).waitFor();
   await page.getByRole("heading", { name: "No projects registered" }).waitFor();
 
   const firstProject = process.env.OMNI_E2E_FIRST_PROJECT;
@@ -329,10 +330,10 @@ try {
   const secondProject = process.env.OMNI_E2E_SECOND_PROJECT;
   const cliWorkspace = process.env.OMNI_E2E_CLI_WORKSPACE;
   assert.ok(firstProject && projectAlias && secondProject && cliWorkspace);
-  const projectItems = page.locator('ul[aria-label="Projects"] > li');
+  const projectItems = page.getByRole("main").locator('ul[aria-label="Projects"] > li');
 
   async function registerProject(path, name) {
-    await page.getByRole("button", { name: "Add project" }).first().click();
+    await page.getByRole("main").getByRole("button", { name: "Add project" }).first().click();
     const dialog = page.getByRole("dialog");
     await dialog.getByLabel("Absolute local path").fill(path);
     await dialog.getByRole("button", { name: "Register project" }).click();
@@ -340,7 +341,7 @@ try {
     await page.getByRole("heading", { name }).waitFor();
   }
 
-  await page.getByRole("button", { name: "Add project" }).first().click();
+  await page.getByRole("main").getByRole("button", { name: "Add project" }).first().click();
   const invalidDialog = page.getByRole("dialog");
   await invalidDialog.getByLabel("Absolute local path").fill("relative/project");
   await invalidDialog.getByRole("button", { name: "Register project" }).click();
@@ -373,8 +374,8 @@ try {
   );
   await page.clock.resume();
 
-  await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
-  await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
+  await page.locator("#app-sidebar").getByRole("link", { name: "Projects", exact: true }).click();
+  await page.getByRole("main").getByRole("heading", { name: "Projects", exact: true }).waitFor();
 
   const firstProjectItem = projectItems.filter({ hasText: firstProject });
   const scheduleResponsePromise = page.waitForResponse((response) => (
@@ -550,7 +551,7 @@ try {
         .getByRole("link", { name: "History", exact: true }).click();
       await page.getByRole("heading", { name: "E2E saved project job", exact: true }).first().waitFor();
     } else if (scopeChange === "project") {
-      await page.locator("aside").getByRole("link", { name: "project-two", exact: true }).click();
+      await page.locator("#app-sidebar").getByRole("button", { name: "project-two", exact: true }).click();
       await page.getByRole("heading", { name: "project-two", exact: true }).waitFor();
     } else {
       await page.route("**/api/v1/clients", (route) => route.abort());
@@ -568,7 +569,7 @@ try {
       await expect(page.getByRole("button", { name: "Refresh Schedule history", exact: true })).toBeEnabled({ timeout: 10000 });
       await page.getByRole("heading", { name: historyJobTitle, exact: true }).first().waitFor();
     }
-    await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
+    await page.locator("#app-sidebar").getByRole("link", { name: "Projects", exact: true }).click();
     await firstProjectItem.getByRole("link", { name: "Open schedule" }).click();
     await page.getByRole("heading", { name: "Schedule Jobs", exact: true }).waitFor();
     await expect(page.getByRole("button", { name: "Refresh schedule", exact: true })).toBeEnabled();
@@ -593,7 +594,7 @@ try {
     value,
   }) {
     await page.getByLabel("Message").fill(message);
-    await page.getByLabel("Title").fill(title);
+    await page.getByRole("main").getByLabel("Title", { exact: true }).fill(title);
     await page.getByRole("button", { name: kind, exact: true }).click();
     if (kind === "At") await page.getByLabel("Run at").fill(value);
     if (kind === "Every") await page.getByLabel("Interval (seconds)").fill(value);
@@ -667,7 +668,7 @@ try {
   };
   await page.route("**/schedule/jobs", loseAcceptedCreateResponse);
   await page.getByLabel("Message", { exact: true }).fill("E2E accepted retry message");
-  await page.getByLabel("Title", { exact: true }).fill(retryScheduleTitle);
+  await page.getByRole("main").getByLabel("Title", { exact: true }).fill(retryScheduleTitle);
   await page.getByRole("button", { name: "At", exact: true }).click();
   await page.getByLabel("Run at", { exact: true }).fill("2099-02-01T00:00:00Z");
   await scheduleCreate.click();
@@ -841,7 +842,7 @@ try {
   await expect(page.getByText("STALE Schedule page response", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Schedule Jobs", exact: true })).toHaveCount(0);
   await page.unroute("**/schedule/jobs", delayOldScheduleLoad);
-  await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
+  await page.locator("#app-sidebar").getByRole("link", { name: "Projects", exact: true }).click();
   await firstProjectItem.getByRole("link", { name: "Open schedule" }).click();
   await page.getByRole("heading", { name: browserAtTitle, exact: true }).waitFor();
 
@@ -914,7 +915,7 @@ try {
   await expect(scheduleStatus).toContainText("Available");
   await page.getByRole("link", { name: "Open sessions", exact: true }).click();
   await page.getByRole("heading", { name: "project-one", exact: true }).waitFor();
-  const sessionList = page.getByRole("list", { name: "Conversation Sessions" });
+  const sessionList = page.locator("#app-sidebar").getByRole("list", { name: "project-one Sessions", exact: true });
   await sessionList.getByRole("button", { name: /Web available history/ }).click();
   await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
   await page.reload();
@@ -1053,11 +1054,11 @@ try {
     && response.url().includes("/api/v1/projects/")
     && response.url().endsWith("/sessions")
   ));
-  await page.getByRole("button", { name: "New session" }).click();
+  await page.getByRole("button", { name: "New session", exact: true }).click();
   const draftResponse = await draftResponsePromise;
   const draftId = (await draftResponse.json()).session_id;
   assert.equal(typeof draftId, "string");
-  const sessionPanel = page.locator('aside[aria-label="Conversation Sessions"]');
+  const sessionPanel = page.locator("#app-sidebar");
   await sessionPanel.getByText("Empty draft", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Release session" }).click();
   await sessionPanel.getByText("Empty draft", { exact: true }).waitFor({ state: "detached" });
@@ -1103,7 +1104,7 @@ try {
     && response.url().includes("/api/v1/projects/")
     && response.url().endsWith("/sessions")
   ));
-  await page.getByRole("button", { name: "New session" }).click();
+  await page.getByRole("button", { name: "New session", exact: true }).click();
   const newSession = await (await newSessionResponsePromise).json();
   const conversationSessionId = newSession.session_id;
   const conversationWorkspaceId = newSession.workspace_id;
@@ -1524,13 +1525,9 @@ try {
       await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
       for (const viewport of conversationViewports) {
         await page.setViewportSize(viewport);
-        if (viewport.width <= 1024) {
-          const sessionListToggle = page.getByRole("button", {
-            name: language === "en" ? "Recent Sessions" : "最近会话",
-          });
-          const sessionPanel = page.getByRole("complementary", {
-            name: language === "en" ? "Conversation Sessions" : "对话会话",
-          });
+        if (viewport.width < 1024) {
+          const sessionListToggle = page.locator("#app-sidebar-toggle");
+          const sessionPanel = page.locator("#app-sidebar");
           await expect(sessionListToggle).toHaveAttribute("aria-expanded", "false");
           await sessionListToggle.click();
           await expect(sessionListToggle).toHaveAttribute("aria-expanded", "true");
@@ -1580,7 +1577,7 @@ try {
         if (viewport.width < 1024) {
           await page.locator("#app-sidebar-toggle").click();
         }
-        await page.getByRole("navigation").getByRole("link", { name: language === "en" ? "Settings" : "设置", exact: true }).click();
+        await page.locator("#app-sidebar").getByRole("link", { name: language === "en" ? "Settings" : "设置", exact: true }).click();
         const back = page.getByRole("button", { name: language === "en" ? "Back to conversation" : "返回对话", exact: true });
         await back.focus();
         await page.keyboard.press("Tab");
@@ -1634,6 +1631,7 @@ try {
 
   await page.setViewportSize(viewports[0]);
   await page.getByRole("button", { name: /Web available history/ }).click();
+  await expect(page.locator("#app-sidebar").getByRole("button", { name: /Web available history/ })).toHaveAttribute("aria-current", "page");
   await page.getByRole("button", { name: /Runtime status and controls|运行状态与控制/, exact: true }).click();
   const activeRuntimeDialog = page.getByRole("dialog", { name: /Runtime status|运行状态/, exact: true });
   await activeRuntimeDialog.getByText(/1 active|1 个运行中/, { exact: true }).waitFor();
@@ -1709,7 +1707,7 @@ try {
   await page.getByRole("region", { name: "Conversation", exact: true })
     .getByRole("heading", { name: "New Session draft", exact: true }).waitFor();
   await page.getByLabel("Message input").fill("Unsent empty conversation draft");
-  await page.getByRole("navigation").getByRole("link", { name: "Settings", exact: true }).click();
+  await page.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
   await expect(page.getByRole("heading", { name: "New Session draft", exact: true })).toBeVisible();
   await expect(page.getByLabel("Message input")).toHaveValue("Unsent empty conversation draft");
@@ -1725,7 +1723,7 @@ try {
   await expect(lightCancel).toBeHidden();
   await page.getByRole("button", { name: /Web available history/ }).click();
   await page.getByLabel("Message input").waitFor();
-  await page.getByRole("button", { name: /New session/ }).waitFor();
+  await page.getByRole("main").getByRole("button", { name: "New session", exact: true }).waitFor();
 
   const duplicatePage = await page.context().newPage();
   try {
@@ -1747,11 +1745,11 @@ try {
   } finally {
     await duplicatePage.close();
   }
-  await secondPage.getByRole("link", { name: /Projects|项目/ }).click();
-  await secondPage.getByRole("heading", { name: /^(Projects|项目)$/ }).waitFor();
-  await secondPage.locator("aside").getByRole("link", { name: "project-one", exact: true }).click();
+  await secondPage.locator("#app-sidebar").getByRole("link", { name: /Projects|项目/ }).click();
+  await secondPage.getByRole("main").getByRole("heading", { name: /^(Projects|项目)$/ }).waitFor();
+  await secondPage.locator("#app-sidebar").getByRole("button", { name: "project-one", exact: true }).click();
   await secondPage.getByRole("heading", { name: "project-one", exact: true }).waitFor();
-  const secondSessionList = secondPage.getByRole("list", { name: /Conversation Sessions|对话会话/ });
+  const secondSessionList = secondPage.locator("#app-sidebar").getByRole("list", { name: /^project-one (Sessions|会话)$/ });
   await secondSessionList.getByRole("button", { name: /CLI occupied history/ }).waitFor();
   await secondSessionList
     .getByRole("button", { name: /CLI occupied history/ })
@@ -1767,8 +1765,8 @@ try {
   const confirmationPath = control.details.confirmation_path;
   assert.ok(confirmationPath.endsWith("confirmation-outside.txt"));
   const settingsConfirmationRunId = await settingsConfirmationAcceptance({ page, control });
-  await page.locator("aside").getByRole("link", { name: "project-one", exact: true }).click();
-  const availableHistory = page.getByRole("list", { name: "Conversation Sessions", exact: true })
+  await page.locator("#app-sidebar").getByRole("button", { name: "project-one", exact: true }).click();
+  const availableHistory = page.locator("#app-sidebar").getByRole("list", { name: "project-one Sessions", exact: true })
     .getByRole("button", { name: /Web available history/ });
   let historyOpened = false;
   for (let attempt = 0; attempt < 120; attempt += 1) {
@@ -1960,7 +1958,7 @@ try {
     && response.url().includes("/api/v1/projects/")
     && new URL(response.url()).pathname.endsWith("/sessions")
   ));
-  await secondPage.getByRole("button", { name: /Refresh sessions|刷新会话/ }).click();
+  await secondPage.getByRole("main").getByRole("button", { name: /Refresh sessions|刷新会话/ }).click();
   assert.equal((await refreshResponsePromise).status(), 200);
   const releasedSession = secondSessionList.getByRole("button", { name: /Web available history/ });
   await releasedSession.getByText(/Occupied|已占用/, { exact: true }).waitFor({ state: "detached" });
@@ -1973,7 +1971,9 @@ try {
   await secondPage.getByRole("button", { name: /Release session|释放会话/ }).click();
   await secondPage.getByRole("button", { name: /Release session|释放会话/ }).waitFor({ state: "detached" });
 
-  const sessionSearch = page.getByLabel("Search by title");
+  const sessionSearch = page.locator("#app-sidebar").getByRole("listitem").filter({
+    has: page.getByRole("button", { name: "project-one", exact: true }),
+  }).getByLabel("Search by title");
   await sessionSearch.fill("Web available");
   await sessionList.getByRole("button", { name: /Web available history/ }).waitFor();
   await sessionSearch.fill("no matching session");
@@ -2019,14 +2019,14 @@ try {
   const renameDialog = page.getByRole("dialog");
   for (const closeWithEscape of [true, false]) {
     await renameButton.click();
-    await renameDialog.getByLabel("Session title").waitFor();
+    await renameDialog.getByLabel("Session title", { exact: true }).waitFor();
     if (closeWithEscape) await page.keyboard.press("Escape");
     else await renameDialog.getByRole("button", { name: "Cancel" }).click();
     await renameDialog.waitFor({ state: "hidden" });
     await expect(renameButton).toBeFocused();
   }
   await renameButton.click();
-  await renameDialog.getByLabel("Session title").fill("Renamed available history");
+  await renameDialog.getByLabel("Session title", { exact: true }).fill("Renamed available history");
   const interceptRenameConflict = async (route) => {
     if (route.request().method() !== "PATCH") {
       await route.continue();
@@ -2046,7 +2046,7 @@ try {
   await renameDialog.getByText("This Session changed elsewhere. Reload it and try again.", { exact: true }).waitFor();
   await renameDialog.getByRole("button", { name: "Save" }).waitFor({ state: "visible" });
   await expect(renameDialog.getByRole("button", { name: "Save" })).toBeEnabled();
-  assert.equal(await renameDialog.getByLabel("Session title").inputValue(), "Renamed available history",
+  assert.equal(await renameDialog.getByLabel("Session title", { exact: true }).inputValue(), "Renamed available history",
     "A metadata conflict discarded the user's title");
   await page.unroute("**/api/v1/projects/*/sessions/*", interceptRenameConflict);
   const renameResponse = page.waitForResponse((response) => (
@@ -2060,8 +2060,8 @@ try {
   assert.equal(await renameButton.evaluate((element) => element === document.activeElement), true,
     "Saving a title outside the filter lost the selected Session or its trigger focus");
   await renameButton.click();
-  await renameDialog.getByLabel("Session title").waitFor();
-  assert.equal(await renameDialog.getByLabel("Session title").inputValue(), "Renamed available history");
+  await renameDialog.getByLabel("Session title", { exact: true }).waitFor();
+  assert.equal(await renameDialog.getByLabel("Session title", { exact: true }).inputValue(), "Renamed available history");
   await page.keyboard.press("Escape");
   const deleteButton = page.getByRole("button", { name: "Delete session" });
   await deleteButton.click();
@@ -2087,7 +2087,7 @@ try {
   await page.reload();
   await restoredClaimStarted;
   const restoredSearchResponse = page.waitForResponse((response) => new URL(response.url()).searchParams.get("title") === "no matching session");
-  await page.getByLabel("Search by title").fill("no matching session");
+  await sessionSearch.fill("no matching session");
   await restoredSearchResponse;
   await page.getByText("No Sessions match this title.", { exact: true }).waitFor();
   releaseRestoredClaim();
@@ -2097,7 +2097,7 @@ try {
   await page.unroute(restoredClaimUrl, interceptRestoredClaim);
   await page.getByRole("button", { name: /Release session|释放会话/ }).click();
 
-  await page.getByLabel("Search by title").fill("");
+  await sessionSearch.fill("");
   for (const language of ["en", "zh-CN"]) {
     await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
     for (const theme of ["light", "dark"]) {
@@ -2106,7 +2106,7 @@ try {
         await page.setViewportSize(viewport);
         const creation = page.waitForResponse((response) => response.request().method() === "POST"
           && /\/projects\/[^/]+\/sessions$/.test(new URL(response.url()).pathname));
-        await page.getByRole("button", { name: language === "en" ? "New session" : "新建会话" }).click();
+        await page.getByRole("main").getByRole("button", { name: language === "en" ? "New session" : "新建会话", exact: true }).click();
         const { session_id: deleteId } = await (await creation).json();
         await page.getByRole("region", { name: language === "en" ? "Conversation" : "对话" })
           .getByRole("heading", { name: language === "en" ? "New Session draft" : "新会话草稿", exact: true }).waitFor();
@@ -2127,7 +2127,7 @@ try {
         if (extendedCase) {
           await page.getByRole("button", { name: "Rename session", exact: true }).click();
           const titleDialog = page.getByRole("dialog");
-          await titleDialog.getByLabel("Session title").fill("A".repeat(128));
+          await titleDialog.getByLabel("Session title", { exact: true }).fill("A".repeat(128));
           await titleDialog.getByRole("button", { name: "Save", exact: true }).click();
           await page.getByRole("heading", { name: "A".repeat(60), exact: true }).waitFor();
         }
@@ -2196,7 +2196,7 @@ try {
         await deleteDialog.getByRole("button", { name: language === "en" ? "Cancel" : "取消", exact: true }).click();
         await deleteDialog.waitFor({ state: "hidden" });
         assert.equal(await deleteTrigger.evaluate((element) => element === document.activeElement), true);
-        await expect(page.getByRole("button", { name: language === "en" ? "New session" : "新建会话" })).toBeEnabled();
+        await expect(page.getByRole("main").getByRole("button", { name: language === "en" ? "New session" : "新建会话", exact: true })).toBeEnabled();
         await deleteTrigger.click();
         await link(protectedFile, unsafeArtifact);
         await deleteDialog.getByRole("button", { name: deleteLabel, exact: true }).click();
@@ -2317,8 +2317,8 @@ try {
   }
   await page.setViewportSize(viewports[0]);
   await page.getByRole("button", { name: "EN", exact: true }).click();
-  await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
-  await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
+  await page.locator("#app-sidebar").getByRole("link", { name: "Projects", exact: true }).click();
+  await page.getByRole("main").getByRole("heading", { name: "Projects", exact: true }).waitFor();
 
   await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
   await registerProject(secondProject, "project-two");
@@ -2349,7 +2349,7 @@ try {
   await page.route("**/schedule/jobs", delaySwitchingScheduleLoad);
   await page.getByRole("button", { name: "Refresh schedule", exact: true }).click();
   await switchingScheduleLoadArrived;
-  await page.locator("aside").getByRole("link", { name: "project-two", exact: true }).click();
+  await page.locator("#app-sidebar").getByRole("button", { name: "project-two", exact: true }).click();
   await page.getByRole("heading", { name: "project-two", exact: true }).waitFor();
   const switchingScheduleLoadResponse = page.waitForResponse((response) => response.url() === scheduleResponse.url());
   releaseSwitchingScheduleLoad();
@@ -2357,7 +2357,7 @@ try {
   await expect(page.getByText("STALE previous Project Schedule response", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Schedule Jobs", exact: true })).toHaveCount(0);
   await page.unroute("**/schedule/jobs", delaySwitchingScheduleLoad);
-  await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
+  await page.locator("#app-sidebar").getByRole("link", { name: "Projects", exact: true }).click();
   for (const language of ["en", "zh-CN"]) {
     await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
     await page.locator("header").getByText(language === "en" ? "Projects" : "项目", { exact: true }).waitFor();
@@ -2365,8 +2365,8 @@ try {
       await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
-        if (viewport.width <= 1024) {
-          await expect(page.getByRole("navigation").getByRole("link", {
+        if (viewport.width < 1024) {
+          await expect(page.locator("#app-sidebar").getByRole("link", {
             name: language === "en" ? "Projects" : "项目",
           })).toBeHidden();
         }
@@ -2387,14 +2387,14 @@ try {
         assert.ok(layout.width <= viewport.width, `Project horizontal overflow at ${viewport.width}x${viewport.height}`);
         assert.ok(layout.mainLeft >= layout.asideRight - 1,
           `Project sidebar overlaps content at ${viewport.width}x${viewport.height}: ${JSON.stringify(layout)}`);
-        await page.getByRole("button", { name: language === "en" ? "Add project" : "登记项目" }).first().waitFor();
+        await page.getByRole("main").getByRole("button", { name: language === "en" ? "Add project" : "登记项目" }).first().waitFor();
         await mkdir(output, { recursive: true });
         await page.screenshot({ path: resolve(output, `projects-${language}-${theme}-${viewport.width}.png`) });
       }
     }
   }
   await page.setViewportSize(viewports[0]);
-  await page.locator("aside").getByRole("link", { name: "project-one", exact: true }).click();
+  await page.locator("#app-sidebar").getByRole("button", { name: "project-one", exact: true }).click();
   await page.getByRole("button", { name: /Renamed available history/ }).click();
   await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
   for (const language of ["en", "zh-CN"]) {
@@ -2404,14 +2404,13 @@ try {
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
         const layout = await page.evaluate(() => {
-          const list = document.querySelector("main aside").getBoundingClientRect();
-          const content = document.querySelector("main [role='log']").parentElement.getBoundingClientRect();
-          const horizontal = Math.max(0, Math.min(list.right, content.right) - Math.max(list.left, content.left));
-          const vertical = Math.max(0, Math.min(list.bottom, content.bottom) - Math.max(list.top, content.top));
-          return { width: document.documentElement.scrollWidth, overlap: horizontal * vertical };
+          return {
+            width: document.documentElement.scrollWidth,
+            conversationSidebars: document.querySelectorAll("main aside").length,
+          };
         });
         assert.ok(layout.width <= viewport.width, `Session horizontal overflow at ${viewport.width}x${viewport.height}`);
-        assert.ok(layout.overlap < 1, `Session list overlaps history at ${viewport.width}x${viewport.height}`);
+        assert.equal(layout.conversationSidebars, 0, "A second Session sidebar remained in the conversation panel");
         await page.screenshot({ path: resolve(output, `sessions-${language}-${theme}-${viewport.width}.png`) });
         const restore = page.getByRole("button", { name: "Restore", exact: true });
         await restore.click();
@@ -2431,10 +2430,10 @@ try {
     }
   }
   await page.setViewportSize(viewports[0]);
-  await page.locator("aside").getByRole("link", { name: "project-two", exact: true }).click();
+  await page.locator("#app-sidebar").getByRole("button", { name: "project-two", exact: true }).click();
   await page.getByRole("heading", { name: "project-two", exact: true }).waitFor();
   assert.equal(await page.getByText("Available history loaded after a successful Claim", { exact: true }).count(), 0);
-  await page.getByRole("navigation").getByRole("link", { name: /Projects|项目/ }).click();
+  await page.locator("#app-sidebar").getByRole("link", { name: /Projects|项目/ }).click();
   await page.getByRole("button", { name: "EN", exact: true }).click();
   await page.setViewportSize({ width: 768, height: 1024 });
 
@@ -2454,11 +2453,11 @@ try {
     `${restarted.url}/#ticket=${encodeURIComponent(restarted.second_ticket)}`,
   );
   await page.setViewportSize(viewports[0]);
-  await page.getByRole("link", { name: "Projects", exact: true }).click();
-  await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
+  await page.locator("#app-sidebar").getByRole("link", { name: "Projects", exact: true }).click();
+  await page.getByRole("main").getByRole("heading", { name: "Projects", exact: true }).waitFor();
   await page.getByRole("heading", { name: "project-one" }).waitFor();
   await page.getByText("Schedule paused for review").waitFor();
-  await page.locator('ul[aria-label="Projects"] > li').filter({ hasText: secondProject }).getByText("Unavailable", { exact: true }).waitFor();
+  await page.getByRole("main").locator('ul[aria-label="Projects"] > li').filter({ hasText: secondProject }).getByText("Unavailable", { exact: true }).waitFor();
   for (const language of ["en", "zh-CN"]) {
     await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
     const resumeLabel = language === "en" ? "Resume schedule" : "恢复调度";
@@ -2521,13 +2520,13 @@ try {
   await resumeButton.click();
   const review = page.getByRole("dialog", { name: "Review Schedule Jobs" });
   await review.getByRole("button", { name: "Resume schedule" }).click();
-  await page.locator('ul[aria-label="Projects"] > li').filter({ hasText: firstProject }).getByText("Schedule active").waitFor();
+  await page.getByRole("main").locator('ul[aria-label="Projects"] > li').filter({ hasText: firstProject }).getByText("Schedule active").waitFor();
 
   const resumedScheduleResponsePromise = page.waitForResponse((response) => (
     response.request().method() === "GET"
     && response.url().endsWith("/schedule/jobs")
   ));
-  await page.locator('ul[aria-label="Projects"] > li').filter({ hasText: firstProject })
+  await page.getByRole("main").locator('ul[aria-label="Projects"] > li').filter({ hasText: firstProject })
     .getByRole("link", { name: "Open schedule" }).click();
   const resumedScheduleResponse = await resumedScheduleResponsePromise;
   assert.equal(resumedScheduleResponse.status(), 200, "Resumed Schedule page did not load its real response");
@@ -2538,10 +2537,10 @@ try {
   await expect(resumedScheduleStatus).toContainText("Admitted");
   await expect(resumedScheduleStatus).toContainText("Available");
   await page.setViewportSize(viewports[0]);
-  await page.getByRole("navigation").getByRole("link", { name: "Projects", exact: true }).click();
-  await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
+  await page.locator("#app-sidebar").getByRole("link", { name: "Projects", exact: true }).click();
+  await page.getByRole("main").getByRole("heading", { name: "Projects", exact: true }).waitFor();
 
-  const removableProject = page.locator('ul[aria-label="Projects"] > li').filter({ hasText: firstProject });
+  const removableProject = page.getByRole("main").locator('ul[aria-label="Projects"] > li').filter({ hasText: firstProject });
   await removableProject.getByRole("button", { name: "Remove registration" }).click();
   const removalDialog = page.getByRole("dialog", { name: "Remove project registration?" });
   await removalDialog.getByText("saved Schedule Jobs stay on disk").waitFor();
@@ -2580,7 +2579,7 @@ try {
     if (testSocketReadyState !== 1) await new Promise((resolveWait) => setTimeout(resolveWait, 50));
   }
   assert.equal(testSocketReadyState, 1, "The test page WebSocket did not open after restart");
-  await page.locator("#app-sidebar").getByRole("link", { name: /Status|状态/ }).click();
+  await openServiceStatus(page);
   await page.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
   await page.getByRole("status").first().getByText(/Online|在线/).waitFor();
   await page.route("**/api/v1/clients", (route) => route.abort());
@@ -2595,6 +2594,7 @@ try {
     console.log("Playwright production E2E: 4 locale/theme combinations x 3 general viewports and 4 conversation viewports; long history scroll, live/history message bounds, empty layout, text contrast, both-theme cancel/approve; Schedule CRUD, accepted-create lost-ack retry, locked fields, delayed detail focus, simulated status polling, stale page/Project/disconnected responses, keyboard validation and 9999/10000ms feedback; Restore overwrite, cancel, stale responses, refresh, failure acknowledgement; delete, ticket, focus, reconnect passed");
 } catch (error) {
   acceptanceError = error;
+  console.error("E2E failed:", error);
   throw error;
 } finally {
   await secondContext?.close();

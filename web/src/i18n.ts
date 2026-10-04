@@ -5,10 +5,18 @@ const resources = {
   en: {
     translation: {
       app: { name: "Omni", subtitle: "Local workbench" },
-      nav: { newChat: "New conversation", chatHistory: "Conversations", status: "Status", projects: "Projects", sessions: "Sessions", schedule: "Schedule", settings: "Settings" },
+      nav: {
+        newChat: "New conversation", chatHistory: "Conversations", status: "Status", projects: "Projects",
+        sessions: "Sessions", schedule: "Schedule", settings: "Settings",
+        expandProjectSessions: "Expand sessions for {{project}}",
+        collapseProjectSessions: "Collapse sessions for {{project}}",
+        newProjectSession: "New session in {{project}}",
+      },
       chat: {
         configureModels: "Configure models",
         historyLoading: "Loading conversations…",
+        historyEmpty: "No conversations yet.",
+        historyError: "Conversation history could not be loaded.",
         historyDirectoriesUnavailable: "Conversation history is unavailable for these directories: {{directories}}",
         workspaceLoading: "Opening conversation workspace…",
         workspaceUnavailable: "This conversation workspace is unavailable. Check the directory and its permissions, or choose another default workspace in Settings.",
@@ -429,6 +437,7 @@ const resources = {
         notPersisted: "Not saved",
         occupied: "Occupied",
         occupiedHere: "Loaded here",
+        loading: "Loading Sessions…",
         empty: "No saved Sessions in this Project.",
         noMessages: "This Session has no readable messages.",
         selectTitle: "Select a Session",
@@ -533,10 +542,18 @@ const resources = {
   "zh-CN": {
     translation: {
       app: { name: "Omni", subtitle: "本地工作台" },
-      nav: { newChat: "新建对话", chatHistory: "对话", status: "状态", projects: "项目", sessions: "会话", schedule: "调度", settings: "设置" },
+      nav: {
+        newChat: "新建对话", chatHistory: "对话", status: "状态", projects: "项目",
+        sessions: "会话", schedule: "调度", settings: "设置",
+        expandProjectSessions: "展开 {{project}} 的会话",
+        collapseProjectSessions: "收起 {{project}} 的会话",
+        newProjectSession: "在 {{project}} 中新建会话",
+      },
       chat: {
         configureModels: "配置模型",
         historyLoading: "正在加载对话…",
+        historyEmpty: "还没有对话。",
+        historyError: "对话历史加载失败。",
         historyDirectoriesUnavailable: "以下目录中的历史对话暂不可访问：{{directories}}",
         workspaceLoading: "正在打开对话工作区…",
         workspaceUnavailable: "对话工作区不可用。请检查目录和权限，或在设置中更换默认工作区。",
@@ -957,6 +974,7 @@ const resources = {
         notPersisted: "尚未保存",
         occupied: "已占用",
         occupiedHere: "当前已加载",
+        loading: "正在加载会话…",
         empty: "此项目没有已保存的会话。",
         noMessages: "此会话没有可显示的消息。",
         selectTitle: "选择会话",

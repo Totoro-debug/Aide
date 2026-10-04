@@ -33,6 +33,17 @@ async function settingsSection(target, section) {
   }).getByRole("button", { name: sectionName, exact: true }).click();
 }
 
+export async function openServiceStatus(target) {
+  const settingsLink = target.locator("#app-sidebar").getByRole("link", {
+    name: /^(Settings|设置)$/,
+  });
+  if (!await settingsLink.isVisible()) await target.locator("#app-sidebar-toggle").click();
+  await settingsLink.click();
+  await settingsSection(target, "Runtime");
+  await target.getByRole("main").getByRole("link", { name: /^(Status|状态)$/ }).click();
+  await expect(target.locator("#status-heading")).toBeVisible();
+}
+
 async function blurSettingsField(target) {
   await target.evaluate(() => {
     const active = document.activeElement;
@@ -95,7 +106,7 @@ export async function settingsConfirmationAcceptance({ page, control }) {
     .some((event) => event.payload?.snapshot?.sessions?.some((entry) => (
       entry.snapshot.live_state?.runs?.some((run) => run.run_id === runId)
     ))), acceptedRun.run_id)).toBe(true);
-  await page.getByRole("navigation").getByRole("link", { name: "Settings", exact: true }).click();
+  await page.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
   await settingsSection(page, "Runtime");
   const field = page.getByLabel("Maximum iterations", { exact: true });
   await expect(field).toBeEnabled();
@@ -162,7 +173,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
     const received = target.waitForResponse((response) => (
       response.url().endsWith("/api/v1/config") && response.request().method() === "GET"
     ));
-    await target.getByRole("navigation").getByRole("link", { name: "Settings", exact: true }).click();
+    await target.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
     const response = await received;
     assert.equal(response.status(), 200);
     await settingsSection(target, "Models");
@@ -596,8 +607,8 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   const settings = async (target) => {
     await target.bringToFront();
     await target.getByRole("button", { name: "EN", exact: true }).click();
-    await target.getByRole("navigation").getByRole("link", { name: "Status", exact: true }).click();
-    await target.getByRole("navigation").getByRole("link", { name: "Settings", exact: true }).click();
+    await openServiceStatus(target);
+    await target.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
     await target.getByRole("navigation", { name: "Settings sections", exact: true }).waitFor();
   };
   const runtimeSettings = async (target) => {
@@ -689,7 +700,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   assert.equal(pending.application.status, "restart-required");
   assert.equal(pending.application.active_revision, saved.application.active_revision);
   await expect(page.getByText("Saved; restart Omni to use these settings.", { exact: true }).first()).toBeVisible();
-  await page.getByRole("navigation").getByRole("link", { name: "Status", exact: true }).click();
+  await openServiceStatus(page);
   await expect(page.getByRole("heading", { name: "Service status", exact: true })).toBeVisible();
   await settings(page);
   await runtimeSettings(page);
@@ -760,7 +771,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   await page.getByLabel("Maximum iterations", { exact: true }).fill("66");
   await page.getByLabel("Maximum iterations", { exact: true }).press("Tab");
   await saveArrival;
-  await page.getByRole("navigation").getByRole("link", { name: "Status", exact: true }).click();
+  await openServiceStatus(page);
   await settings(page);
   await runtimeSettings(page);
   await expect(page.getByLabel("Maximum iterations", { exact: true })).toHaveValue("66");

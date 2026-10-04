@@ -902,6 +902,21 @@ async def _run_e2e(provider_base_url: str) -> None:
                     MODEL_MCP_RELEASE.set()
                     print(json.dumps({"released": True}), flush=True)
                     continue
+                if command.strip() == "project-history-seed":
+                    history = []
+                    for index in range(101):
+                        title = f"Paginated project {index:03d}"
+                        session_id = await _seed_session(
+                            home,
+                            path / "chat-next",
+                            title=title,
+                            content=f"{title} body",
+                            created_at=datetime(2026, 1, 1, 0, index // 60, index % 60, tzinfo=UTC),
+                            creation_scope="project",
+                        )
+                        history.append({"id": session_id, "title": title})
+                    print(json.dumps({"history": history}), flush=True)
+                    continue
                 if command.strip() == "chat-history-seed":
                     history = []
                     for index in range(101):

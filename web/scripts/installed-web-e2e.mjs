@@ -122,17 +122,17 @@ try {
   await page.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
   await expect(page.getByRole("status").first()).toHaveText(/^(Online|在线)$/);
 
-  await page.getByRole("navigation").getByRole("link", { name: /Settings|设置/, exact: true }).click();
+  await page.locator("#app-sidebar").getByRole("link", { name: /Settings|设置/, exact: true }).click();
   await page.getByRole("heading", { name: /Settings|设置/ }).waitFor();
   await page.getByRole("heading", { name: /Runtime|运行时/ }).waitFor();
   await page.screenshot({ path: join(output, "settings.png"), fullPage: true });
   await page.goto(`${baseUrl}/settings`);
   await page.getByRole("heading", { name: /Runtime|运行时/ }).waitFor();
 
-  const projectsLink = page.getByRole("navigation").getByRole("link", { name: /Projects|项目/, exact: true });
+  const projectsLink = page.locator("#app-sidebar").getByRole("link", { name: /Projects|项目/, exact: true });
   await projectsLink.click();
-  await page.getByRole("heading", { name: /^(Projects|项目)$/ }).waitFor();
-  const addProject = page.getByRole("button", { name: /Add project|添加项目|登记项目/ }).first();
+  await page.getByRole("main").getByRole("heading", { name: /^(Projects|项目)$/ }).waitFor();
+  const addProject = page.getByRole("main").getByRole("button", { name: /Add project|添加项目|登记项目/ }).first();
   await addProject.click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel(/Absolute local path|本地绝对路径/).fill(workspace);

@@ -900,14 +900,13 @@ class WorkspaceRecord:
             )
         return claim
 
-    async def release(self, client_id: str, session_id: str, *, close_idle: bool = True) -> None:
+    async def release(self, client_id: str, session_id: str) -> None:
         async with self._lock:
-            await self._release_unlocked(client_id, session_id, close_idle=close_idle)
+            await self._release_unlocked(client_id, session_id)
 
     async def _release_unlocked(
-        self, client_id: str, session_id: str, *, close_idle: bool = True
+        self, client_id: str, session_id: str
     ) -> None:
-        del close_idle
         if self._restore_owner == client_id and self._restore_session_id == session_id:
             await self._wait_restore_commit()
         if self._restore_owner == client_id and self._restore_session_id == session_id:

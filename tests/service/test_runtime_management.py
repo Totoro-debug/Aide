@@ -265,7 +265,7 @@ async def test_typed_cached_response_rejects_released_and_replaced_claim(
     payload = _action_payload(action)
     initial = await _request(case, action, request_id="cached", **payload)
     assert await _request(case, action, request_id="cached", **payload) == initial
-    await case.workspace.release(case.first.client_id, case.claim.session_id, close_idle=False)
+    await case.workspace.release(case.first.client_id, case.claim.session_id)
     await case.workspace.claim(case.first.client_id, case.claim.session_id)
     with pytest.raises(ServiceError) as stale:
         await _request(case, action, request_id="cached", **payload)
@@ -287,7 +287,7 @@ async def test_management_revalidates_claim_after_waiting_for_client_lock(
     try:
         await asyncio.sleep(0)
         assert not task.done()
-        await case.workspace.release(case.first.client_id, case.claim.session_id, close_idle=False)
+        await case.workspace.release(case.first.client_id, case.claim.session_id)
         await case.workspace.claim(case.first.client_id, case.claim.session_id)
     finally:
         case.first.management_lock.release()

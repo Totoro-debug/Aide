@@ -1361,7 +1361,7 @@ async def test_stale_release_command_cannot_release_a_newer_claim(tmp_path: Path
         session_id = await workspace.create_draft(client.client_id)
         first = await service.claim(client.client_id, workspace.workspace_id, session_id)
         first_version = _claim_version(first)
-        await workspace.release(client.client_id, session_id, close_idle=False)
+        await workspace.release(client.client_id, session_id)
         second = await service.claim(client.client_id, workspace.workspace_id, session_id)
         second_version = _claim_version(second)
         assert second_version == first_version + 1

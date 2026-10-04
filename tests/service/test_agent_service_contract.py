@@ -306,7 +306,7 @@ async def test_releasing_claim_retains_session_authority(tmp_path: Path) -> None
         state = workspace.loops[session_id]
         authority = state.loop.session
 
-        await workspace.release(client.client_id, session_id, close_idle=False)
+        await workspace.release(client.client_id, session_id)
 
         assert session_id in workspace.loops
         assert workspace.loops[session_id] is state

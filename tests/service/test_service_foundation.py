@@ -919,7 +919,7 @@ async def test_reacquired_claim_rejects_the_previous_version(tmp_path: Path) -> 
         workspace = await service.attach_workspace(client.client_id, workspace_path)
         session_id = await workspace.create_draft(client.client_id)
         first = await service.claim(client.client_id, workspace.workspace_id, session_id)
-        await workspace.release(client.client_id, session_id, close_idle=False)
+        await workspace.release(client.client_id, session_id)
         second = await service.claim(client.client_id, workspace.workspace_id, session_id)
         assert cast(dict[str, object], first["claim"])["claim_version"] == 1
         assert cast(dict[str, object], second["claim"])["claim_version"] == 2

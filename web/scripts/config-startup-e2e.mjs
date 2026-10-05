@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { URL } from "node:url";
 
 import { chromium, expect } from "@playwright/test";
 
@@ -142,6 +143,45 @@ async function fetchJson(page, path, method = "GET", body = undefined) {
 
 async function readConfig(page) {
   return fetchJson(page, "/config");
+}
+
+async function setupDraftAcceptance(context, initialPage, details, state, root) {
+  let page = initialPage;
+  const text = "无模型草稿\n保留 emoji 🐾 和末尾空格  ";
+  const input = () => page.getByRole("textbox", { name: /Message input|消息输入/, exact: true });
+  const sessionFiles = async () => (await readdir(root, { recursive: true }))
+    .filter(path => /[\\/]sessions[\\/].*\.jsonl$/.test(path)).sort();
+  const before = await sessionFiles();
+  await expect.poll(() => page.evaluate(() => window.__startupSocket?.readyState)).toBe(1);
+  await input().fill(text);
+  const saved = await page.evaluate(() => JSON.parse(window.localStorage.getItem("omni.browser-recovery")));
+  assert.deepEqual(saved.target, { kind: "new-chat" });
+  assert.equal(saved.session_id, null);
+  assert.equal(saved.model_configuration, null);
+  assert.equal(saved.scroll_top, 0);
+  assert.equal(saved.draft, true);
+  assert.equal(saved.input_text, text);
+  await page.reload();
+  await expect(input()).toHaveValue(text);
+  if (state === "missing") {
+    for (const waitMs of [1000, 31000]) {
+      await page.close();
+      await delay(waitMs);
+      page = await context.newPage();
+      await page.goto(details.url);
+      await expect(input()).toHaveValue(text);
+    }
+  }
+  await page.getByRole("link", { name: /Configure models|配置模型/, exact: true }).click();
+  await page.getByRole("button", { name: /Back to conversation|返回对话/, exact: true }).click();
+  await expect(input()).toHaveValue(text);
+  await page.locator("#app-sidebar").getByRole("link", { name: /New conversation|新建对话/, exact: true }).click();
+  await expect(input()).toHaveValue("");
+  await page.reload();
+  await expect(input()).toHaveValue("");
+  assert.deepEqual(await sessionFiles(), before, "Setup drafts created persistent Sessions");
+  await input().fill(text);
+  return page;
 }
 
 async function waitForActiveConfig(page) {
@@ -440,7 +480,18 @@ async function runState(browser, state) {
     assert.match(documentResponse.headers()["content-security-policy"] ?? "", /default-src 'self'/);
     await expect(page.getByRole("heading", { name: "Omni", exact: true }).last()).toBeVisible();
     await expect(page.getByRole("button", { name: /Send|发送/, exact: true })).toBeDisabled();
-    await page.getByRole("textbox", { name: /Message input|消息输入/, exact: true }).fill("unsent setup draft");
+    page = await setupDraftAcceptance(context, page, details, state, root);
+    if (state === "missing") {
+      const oldService = (await fetchJson(page, "/service")).body.service_instance_id;
+      await page.close();
+      details = await harness.restart();
+      page = await context.newPage();
+      await page.goto(details.cold_launch_url);
+      await expect(page.getByRole("textbox", { name: /Message input|消息输入/, exact: true })).toHaveValue("");
+      assert.equal(new URL(page.url()).pathname, "/");
+      assert.notEqual((await fetchJson(page, "/service")).body.service_instance_id, oldService);
+      assert.equal(await page.evaluate(() => window.localStorage.getItem("omni.browser-recovery")), null);
+    }
     await expect(page.getByRole("button", { name: /Send|发送/, exact: true })).toBeDisabled();
     await page.getByRole("link", { name: /Configure models|配置模型/, exact: true }).click();
     try {

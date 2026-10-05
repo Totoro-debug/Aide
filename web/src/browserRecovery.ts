@@ -5,18 +5,32 @@ const REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", 
 
 export type BrowserRecoveryTarget =
   | { kind: "project"; project_id: string }
-  | { kind: "chat"; directory: string };
+  | { kind: "chat"; directory: string }
+  | { kind: "new-chat" };
 
-export interface BrowserRecoverySnapshot {
+export interface SessionBrowserRecoverySnapshot {
   version: 1;
   service_instance_id: string;
-  target: BrowserRecoveryTarget;
+  target: Exclude<BrowserRecoveryTarget, { kind: "new-chat" }>;
   session_id: string;
   draft: boolean;
   input_text: string;
   model_configuration: SessionModelConfiguration | null;
   scroll_top: number;
 }
+
+export interface NewChatBrowserRecoverySnapshot {
+  version: 1;
+  service_instance_id: string;
+  target: { kind: "new-chat" };
+  session_id: null;
+  draft: true;
+  input_text: string;
+  model_configuration: null;
+  scroll_top: 0;
+}
+
+export type BrowserRecoverySnapshot = SessionBrowserRecoverySnapshot | NewChatBrowserRecoverySnapshot;
 
 export function readBrowserRecoverySnapshot(): BrowserRecoverySnapshot | null {
   try {
@@ -49,6 +63,7 @@ export function clearBrowserRecoverySnapshot(): void {
 }
 
 export function browserRecoveryRoute(snapshot: BrowserRecoverySnapshot): string {
+  if (snapshot.session_id === null) return "/";
   const params = new URLSearchParams({ session: snapshot.session_id });
   if (snapshot.target.kind === "project") {
     return `/projects/${encodeURIComponent(snapshot.target.project_id)}?${params}`;
@@ -65,7 +80,6 @@ export function isBrowserRecoverySnapshot(value: unknown): value is BrowserRecov
     ])
     || value.version !== 1
     || !isNonEmptyString(value.service_instance_id)
-    || !isNonEmptyString(value.session_id)
     || typeof value.draft !== "boolean"
     || typeof value.input_text !== "string"
     || typeof value.scroll_top !== "number"
@@ -75,6 +89,14 @@ export function isBrowserRecoverySnapshot(value: unknown): value is BrowserRecov
     return false;
   }
   if (!isRecord(value.target)) return false;
+  if (value.target.kind === "new-chat") {
+    return hasOnlyKeys(value.target, ["kind"])
+      && value.session_id === null
+      && value.draft === true
+      && value.model_configuration === null
+      && value.scroll_top === 0;
+  }
+  if (!isNonEmptyString(value.session_id)) return false;
   return value.target.kind === "project"
     ? hasOnlyKeys(value.target, ["kind", "project_id"]) && isNonEmptyString(value.target.project_id)
     : value.target.kind === "chat"

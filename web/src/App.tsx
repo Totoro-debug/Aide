@@ -147,7 +147,7 @@ import {
   readBrowserRecoverySnapshot,
   writeBrowserRecoverySnapshot,
 } from "./browserRecovery";
-import type { BrowserRecoverySnapshot } from "./browserRecovery";
+import type { BrowserRecoverySnapshot, SessionBrowserRecoverySnapshot } from "./browserRecovery";
 
 type AuthState = "checking" | "ready" | "required" | "error";
 type ConnectionState = "checking" | "online" | "offline" | "recovering";
@@ -738,16 +738,17 @@ export default function App() {
       : location;
   const conversationParams = new URLSearchParams(conversationLocation.search);
   const requestNewChat = useCallback(() => {
+    persistBrowserRecovery(null);
     const alreadyOnNewChat = conversationLocation.pathname === "/" && conversationLocation.search === "";
     navigate("/", { state: null });
     if (alreadyOnNewChat) setNewChatVersion((version) => version + 1);
-  }, [conversationLocation.pathname, conversationLocation.search, navigate]);
+  }, [conversationLocation.pathname, conversationLocation.search, navigate, persistBrowserRecovery]);
   const openSettings = (event: React.MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
     if (location.pathname === "/settings") return;
     const recovery = readBrowserRecoverySnapshot();
     const viewport = mainContentRef.current?.querySelector<HTMLElement>('[role="log"]');
-    if (recovery !== null && viewport !== null && viewport !== undefined) {
+    if (recovery !== null && recovery.session_id !== null && viewport !== null && viewport !== undefined) {
       persistBrowserRecovery({ ...recovery, scroll_top: viewport.scrollTop });
     }
     setSettingsVisited(true);
@@ -6338,6 +6339,20 @@ function ChatSessionsView({
   const entryLoadStateRef = useRef(entryLoadState);
   entryLoadStateRef.current = entryLoadState;
 
+  useEffect(() => {
+    setSetupInput("");
+  }, [newChatVersion, serviceInstanceId]);
+
+  useEffect(() => {
+    if (authState !== "ready" || configurationNeedsSetup !== true || serviceInstanceId === null
+      || requestedSessionId !== null || requestedDirectory !== null) return;
+    const recovery = browserRecovery ?? readBrowserRecoverySnapshot();
+    if (recovery?.target.kind !== "new-chat" || recovery.service_instance_id !== serviceInstanceId) return;
+    setSetupInput(recovery.input_text);
+    onRestoreConsumed();
+  }, [authState, browserRecovery, configurationNeedsSetup, onRestoreConsumed,
+    requestedDirectory, requestedSessionId, serviceInstanceId]);
+
   const activateWorkspace = useCallback(async (directory?: string, sessionId: string | null = null) => {
     if (authState !== "ready" || configurationNeedsSetup !== false) return;
     const requestNumber = ++activationSequenceRef.current;
@@ -6406,7 +6421,21 @@ function ChatSessionsView({
                 rows={3}
                 value={setupInput}
                 placeholder={t("conversation.inputPlaceholder")}
-                onChange={(event) => setSetupInput(event.target.value)}
+                onChange={(event) => {
+                  const input = event.target.value;
+                  setSetupInput(input);
+                  if (authState !== "ready" || serviceInstanceId === null) return;
+                  onBrowserRecoveryChange({
+                    version: 1,
+                    service_instance_id: serviceInstanceId,
+                    target: { kind: "new-chat" },
+                    session_id: null,
+                    draft: true,
+                    input_text: input,
+                    model_configuration: null,
+                    scroll_top: 0,
+                  });
+                }}
               />
               <div className={styles.composerFooter}>
                 <Link
@@ -6568,17 +6597,18 @@ function ProjectSessionsContent({
   currentServiceInstanceIdRef.current = serviceInstanceId;
   const recoveryCandidate = useMemo(() => browserRecovery
     ?? (serviceInstanceId === null ? null : readBrowserRecoverySnapshot()), [browserRecovery, serviceInstanceId]);
-  const browserRecoveryMatchesScope = recoveryCandidate !== null
-    && recoveryCandidate.service_instance_id === serviceInstanceId
+  const sessionRecoveryCandidate = recoveryCandidate?.session_id != null ? recoveryCandidate : null;
+  const browserRecoveryMatchesScope = sessionRecoveryCandidate !== null
+    && sessionRecoveryCandidate.service_instance_id === serviceInstanceId
     && (isChat
-      ? recoveryCandidate.target.kind === "chat" && recoveryCandidate.target.directory === workspaceDirectory
-      : recoveryCandidate.target.kind === "project" && recoveryCandidate.target.project_id === projectId);
+      ? sessionRecoveryCandidate.target.kind === "chat" && sessionRecoveryCandidate.target.directory === workspaceDirectory
+      : sessionRecoveryCandidate.target.kind === "project" && sessionRecoveryCandidate.target.project_id === projectId);
   const matchingBrowserRecovery = browserRecoveryMatchesScope
-    && recoveryCandidate?.session_id === initialSessionId ? recoveryCandidate : null;
+    && sessionRecoveryCandidate?.session_id === initialSessionId ? sessionRecoveryCandidate : null;
   const readBrowserRecoveryForSession = useCallback((sessionId: string) => {
     const recovery = readBrowserRecoverySnapshot();
     const currentServiceInstanceId = currentServiceInstanceIdRef.current;
-    if (recovery === null || currentServiceInstanceId === null
+    if (recovery === null || recovery.session_id === null || currentServiceInstanceId === null
       || recovery.service_instance_id !== currentServiceInstanceId || recovery.session_id !== sessionId) return null;
     const targetMatches = isChat
       ? recovery.target.kind === "chat" && recovery.target.directory === workspaceDirectory
@@ -6660,7 +6690,7 @@ function ProjectSessionsContent({
   const restorePlanClaimRef = useRef<SessionClaim | null>(null);
   const restoreCompletedClaimRef = useRef<SessionClaim | null>(null);
   const consumedProjectSessionRequestRef = useRef<number | null>(null);
-  const recoveredDraftRef = useRef<BrowserRecoverySnapshot | null>(
+  const recoveredDraftRef = useRef<SessionBrowserRecoverySnapshot | null>(
     matchingBrowserRecovery?.draft === true ? matchingBrowserRecovery : null,
   );
   const draftsBySessionRef = useRef<Record<string, string>>(matchingBrowserRecovery === null

@@ -888,6 +888,10 @@ async def _run_e2e(provider_base_url: str) -> None:
                     PROCESS_RELEASE.set()
                     MODEL_MCP_RELEASE.set()
                     break
+                if command.startswith("effort "):
+                    result = await client.management("effort", {"effort": command.strip().split()[1]})
+                    print(json.dumps(result), flush=True)
+                    continue
                 if command.strip() == "process-arm":
                     PROCESS_ENTERED.clear()
                     PROCESS_RELEASE.clear()

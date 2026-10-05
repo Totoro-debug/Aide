@@ -6625,6 +6625,10 @@ function ProjectSessionsContent({
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null);
   const [availableModels, setAvailableModels] = useState<AvailableModelsResponse | null>(null);
   const [availableModelsState, setAvailableModelsState] = useState<"loading" | "ready" | "error">("loading");
+  const availableModelsRef = useRef<AvailableModelsResponse | null>(null);
+  const availableModelsServiceRef = useRef<string | null>(null);
+  const availableModelsRequestRef = useRef(0);
+  const refreshAvailableModelsRef = useRef<() => void>(() => {});
   const [sessionModelSaving, setSessionModelSaving] = useState(false);
   const [clientPermission, setClientPermission] = useState<ToolPermissionLevel>("workspace-write");
   const [clientPermissionSaving, setClientPermissionSaving] = useState(false);
@@ -6885,18 +6889,42 @@ function ProjectSessionsContent({
   }, [snapshot]);
 
   useEffect(() => {
-    if (authState !== "ready" || connectionState !== "online") return;
+    if (authState !== "ready" || connectionState !== "online" || serviceInstanceId === null) return;
     let active = true;
-    setAvailableModelsState("loading");
-    void getAvailableModels().then((result) => {
-      if (!active) return;
-      setAvailableModels(result);
-      setAvailableModelsState("ready");
-    }).catch(() => {
-      if (active) setAvailableModelsState("error");
+    if (availableModelsServiceRef.current !== serviceInstanceId) {
+      availableModelsServiceRef.current = serviceInstanceId;
+      availableModelsRef.current = null;
+      setAvailableModels(null);
+    }
+    if (availableModelsRef.current === null) setAvailableModelsState("loading");
+    function refresh() {
+      const requestNumber = ++availableModelsRequestRef.current;
+      const isCurrent = () => active && requestNumber === availableModelsRequestRef.current
+        && currentServiceInstanceIdRef.current === serviceInstanceId;
+      void getAvailableModels().then((result) => {
+        if (!isCurrent()) return;
+        availableModelsRef.current = result;
+        setAvailableModels(result);
+        setAvailableModelsState("ready");
+      }).catch(() => {
+        if (isCurrent() && availableModelsRef.current === null) setAvailableModelsState("error");
+      });
+    }
+    refreshAvailableModelsRef.current = refresh;
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    const unsubscribe = subscribeServiceEvents((event) => {
+      if (event.service_instance_id === serviceInstanceId
+        && (event.type === "config.application" || event.type === "snapshot.required")) refresh();
     });
-    return () => { active = false; };
-  }, [authState, connectionState]);
+    return () => {
+      active = false;
+      availableModelsRequestRef.current += 1;
+      refreshAvailableModelsRef.current = () => {};
+      window.clearInterval(timer);
+      unsubscribe();
+    };
+  }, [authState, connectionState, serviceInstanceId, subscribeServiceEvents]);
 
   useEffect(() => {
     if (claim === null || connectionState !== "online") return;
@@ -8589,7 +8617,10 @@ function ProjectSessionsContent({
         <RuntimeManagementDialog
           key={`${claim.workspace_id}:${claim.session_id}:${claim.claim_version}:${claim.reconnect_credential}`}
           open={managementOpen}
-          onOpenChange={setManagementOpen}
+          onOpenChange={(open) => {
+            setManagementOpen(open);
+            if (!open) refreshAvailableModelsRef.current();
+          }}
           panel={managementPanel}
           onPermissionChanged={setClientPermission}
           claim={claim}

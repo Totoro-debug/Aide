@@ -2638,7 +2638,7 @@ class AgentService:
             default_combination = {
                 "provider_id": default.provider.provider_id,
                 "model": default.route.model,
-                "reasoning_effort": default.route.reasoning_effort,
+                "reasoning_effort": self.reasoning_effort,
             }
         models = [
             {

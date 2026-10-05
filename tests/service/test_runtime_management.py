@@ -438,6 +438,9 @@ async def test_effort_is_global_runtime_control_with_shared_cli_and_persistence_
     case = management_case
     result = await _request(case, "effort", effort="high")
     assert result["published_effort"] == "high"
+    assert cast(dict[str, object], case.service.available_models_view()["default_combination"])[
+        "reasoning_effort"
+    ] == "high"
     assert (await _status(case, client=case.second, claim=case.other_claim))[
         "chat_reasoning_effort"
     ] == "high"
@@ -466,6 +469,9 @@ async def test_effort_is_global_runtime_control_with_shared_cli_and_persistence_
     assert (await _status(case))["chat_reasoning_effort"] == "max"
     assert (await cli.dispatch("/effort")).effort_selection == "max"
     assert (await _status(case, workspace=workspace, claim=claim))["chat_reasoning_effort"] == "max"
+    assert cast(dict[str, object], case.service.available_models_view()["default_combination"])[
+        "reasoning_effort"
+    ] == "max"
     assert (case.service.agent_home.path / "config.toml").read_bytes() == original
 
 
@@ -509,9 +515,11 @@ async def test_concurrent_client_effort_updates_keep_last_runtime_and_persisted_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("persistence_fails", [False, True])
 async def test_effort_applies_to_next_real_cli_foreground_call_and_usage_matches_session(
     management_case: ManagementCase,
     monkeypatch: pytest.MonkeyPatch,
+    persistence_fails: bool,
 ) -> None:
     case = management_case
     efforts: list[object] = []
@@ -522,7 +530,28 @@ async def test_effort_applies_to_next_real_cli_foreground_call_and_usage_matches
         return original(**kwargs)
 
     monkeypatch.setattr(case.provider, "stream", stream)
+    if persistence_fails:
+        def fail_save(_loader: ConfigLoader, _effort: object) -> None:
+            raise OSError("Controlled reasoning persistence failure")
+
+        monkeypatch.setattr(ConfigLoader, "update_reasoning_effort", fail_save)
     await _request(case, "effort", effort="high")
+    token = create_credential(case.service.agent_home)
+    async with (
+        TestServer(create_app(case.service), host="127.0.0.1") as server,
+        aiohttp.ClientSession() as http,
+    ):
+        async with http.get(
+            server.make_url("/api/v1/models/available"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Omni-Client": case.second.client_id,
+                "X-Omni-Control": case.second.reconnect_credential,
+            },
+        ) as response:
+            assert response.status == 200
+            projection = await response.json()
+    assert projection["default_combination"]["reasoning_effort"] == "high"
     sink = cast(_CollectingSink, case.second.sink)
     await case.workspace.input(
         case.second.client_id,

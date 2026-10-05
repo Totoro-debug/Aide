@@ -53,7 +53,7 @@ The local-browser entry for one person to converse with and manage the Personal 
 _Avoid_: remote service, multi-user platform, read-only dashboard
 
 **Agent Service**:
-The shared local authority through which CLI and Web clients operate the Personal Agent, owning shared capabilities and scheduling Agent Runs across Conversation Sessions while coordinating Workspace-owned state, Session Claims, and Tool Confirmation.
+The sole user-facing capability boundary for the Personal Agent, owning all conversation and management operations, their business rules, configuration validation, input admission and queueing, and shared runtime coordination. CLI and Web clients selectively invoke its operations and present their state.
 _Avoid_: Local Service, Agent Loop, Workspace Runtime, always-on daemon, remote service, separate CLI runtime
 
 **Client**:
@@ -65,7 +65,7 @@ An explicit user command for inspecting or changing runtime-managed state withou
 _Avoid_: Tool call, chat instruction, task management, one-shot conversation
 
 **Management Port**:
-The boundary through which Management Commands use runtime capabilities without knowing their storage or implementation details.
+The management portion of the Agent Service capability boundary, through which Management Commands use runtime capabilities without knowing their storage or implementation details.
 _Avoid_: Message Bus, direct file access, admin API
 
 **Runtime Lifetime**:

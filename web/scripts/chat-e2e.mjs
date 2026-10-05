@@ -37,9 +37,23 @@ try {
   }
   async function newChat() {
     const entry = page.waitForResponse(response => response.url().endsWith("/chat/workspaces/enter") && response.request().method() === "POST");
+    const claimed = page.waitForResponse(response => response.request().method() === "POST"
+      && /\/sessions\/[^/]+\/claim$/.test(new URL(response.url()).pathname));
+    void claimed.catch(() => {});
     await page.locator("#app-sidebar").getByRole("link", { name: "New conversation", exact: true }).click();
     const response = await entry;
+    if (response.ok()) {
+      assert.equal((await claimed).ok(), true);
+      await expect(page.getByRole("textbox", { name: "Message input", exact: true })).toBeEnabled();
+    }
     return { status: response.status(), body: await response.json() };
+  }
+  async function openSessionMore(action) {
+    const trigger = page.locator('summary[aria-label^="More options for "]');
+    const label = await trigger.getAttribute("aria-label");
+    assert.ok(label);
+    await trigger.click();
+    await page.getByRole("group", { name: label, exact: true }).getByRole("button", { name: action, exact: true }).click();
   }
   async function changeDirectory(directory) {
     await page.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
@@ -48,6 +62,27 @@ try {
     await page.getByLabel("Default conversation workspace", { exact: true }).fill(directory);
     await page.getByLabel("Default conversation workspace", { exact: true }).blur();
     assert.equal((await saved).status(), 200);
+  }
+  async function createScheduleJob(title, message) {
+    await page.locator("#schedule-field-message").fill(message);
+    await page.locator("#schedule-field-title").fill(title);
+    await page.getByRole("group", { name: "Schedule type", exact: true }).getByRole("button", { name: "Every", exact: true }).click();
+    await page.locator("#schedule-field-every_seconds").fill("3600");
+    const created = page.waitForResponse(response => response.request().method() === "POST"
+      && /\/schedule\/jobs$/.test(new URL(response.url()).pathname));
+    await page.getByRole("button", { name: "Create Job", exact: true }).click();
+    assert.equal((await created).ok(), true);
+    await expect(page.getByRole("listitem").filter({ hasText: title })).toBeVisible();
+  }
+  async function deleteScheduleJob(title) {
+    const job = page.getByRole("listitem").filter({ hasText: title });
+    await job.getByRole("button", { name: "Delete", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Delete this Schedule Job?", exact: true });
+    const deleted = page.waitForResponse(response => response.request().method() === "DELETE"
+      && /\/schedule\/jobs\//.test(new URL(response.url()).pathname));
+    await dialog.getByRole("button", { name: "Delete Job", exact: true }).click();
+    assert.equal((await deleted).ok(), true);
+    await expect(page.getByRole("listitem").filter({ hasText: title })).toHaveCount(0);
   }
   await page.goto(`${control.details.url}/#ticket=${control.details.ticket}`);
   await page.getByRole("button", { name: "EN", exact: true }).click();
@@ -164,7 +199,7 @@ try {
   assert.ok(restartedSessions.some(session => session.id === first.id));
   assert.ok(restartedSessions.some(session => session.id === secondConversation.id));
   const restartedNavigation = page.getByRole("navigation", { name: "Conversations", exact: true });
-  await restartedNavigation.getByTitle(firstConversation.directory).click();
+  await restartedNavigation.getByTitle(firstConversation.directory).filter({ hasText: firstConversation.title }).click();
   await expect(page.getByRole("log").getByText("chat acceptance message", { exact: true })).toBeVisible();
   await expect(page.getByRole("combobox", { name: "Session model", exact: true }))
     .toHaveValue(JSON.stringify(["primary", "small-model"]));
@@ -220,7 +255,9 @@ try {
     await delayedClaim;
     await route.fulfill({ response });
   });
-  await projectSessions.getByRole("button", { name: /Explicit project/ }).click();
+  await projectSessions.locator('summary[aria-label="Session actions for Explicit project"]').click();
+  await projectSessions.getByRole("group", { name: "Session actions for Explicit project", exact: true })
+    .getByRole("button", { name: "Rename session", exact: true }).click();
   await Promise.race([claimRequestStarted, new Promise((_, reject) => {
     const timer = setTimeout(() => reject(new Error("Delayed Claim was not requested")), 30000);
     timer.unref();
@@ -233,6 +270,7 @@ try {
   await newestClaim;
   await expect(page.getByRole("log").getByText("Legacy project body", { exact: true })).toBeVisible();
   await expect(projectSessions.getByRole("button", { name: /Legacy project/ })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.unroute(claimPattern);
 
   // A rejected Claim can be retried by clicking the same row again.
@@ -246,6 +284,7 @@ try {
   await page.unroute(claimPattern);
   await projectSessions.getByRole("button", { name: /Explicit project/ }).click();
   await expect(page.getByRole("log").getByText("Explicit project body", { exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 
   // Returning to project management must not replay a consumed Add request.
   await projectsNavigation.getByRole("link", { name: "Projects", exact: true }).click();
@@ -277,18 +316,121 @@ try {
   await expect(page.getByRole("log").getByText("Legacy chat body", { exact: true })).toBeVisible();
   await restartedNavigation.getByTitle(secondConversation.directory).click();
   await expect(page.getByRole("log").getByText("second directory acceptance message", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Rename session", exact: true }).click();
+  const secondConversationRow = restartedNavigation.getByTitle(secondConversation.directory).locator("xpath=../..");
+  const sessionActionTrigger = secondConversationRow.locator("summary");
+  const initialSessionActionLabel = await sessionActionTrigger.getAttribute("aria-label");
+  assert.ok(initialSessionActionLabel?.startsWith("Session actions for "));
+  const sessionActions = secondConversationRow.getByRole("group", { name: initialSessionActionLabel, exact: true });
+  await sessionActionTrigger.click();
+  await sessionActions.getByRole("button", { name: "View workspace directory", exact: true }).click();
+  const directoryDialog = page.getByRole("dialog", { name: "Workspace directory", exact: true });
+  await expect(directoryDialog.getByText(secondConversation.directory, { exact: true })).toBeVisible();
+  await directoryDialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(sessionActionTrigger).toBeFocused();
+  await sessionActionTrigger.click();
+  await sessionActions.getByRole("button", { name: "Rename session", exact: true }).click();
   const renameDialog = page.getByRole("dialog");
   await renameDialog.getByLabel("Session title", { exact: true }).fill("Renamed shared chat");
   await renameDialog.getByRole("button", { name: "Save", exact: true }).click();
   await expect(restartedNavigation.getByText("Renamed shared chat", { exact: true })).toBeVisible();
   const renamed = (await api("/chat/sessions")).body.sessions.find(session => session.id === secondConversation.id);
   assert.equal(renamed.directory.toLowerCase(), nextDirectory.toLowerCase());
+  const sharedProjectId = (await api("/projects")).body.projects.find(project => project.path.toLowerCase() === nextDirectory.toLowerCase()).project_id;
+
+  console.log("Chat E2E: checking Workspace management menus");
+  await openSessionMore("Runtime status and controls");
+  const runtimeDialog = page.getByRole("dialog", { name: "Runtime status", exact: true });
+  await expect(runtimeDialog.getByText("Client permission", { exact: true })).toBeVisible();
+  await expect(runtimeDialog.getByText("Session model", { exact: true })).toBeVisible();
+  await expect(runtimeDialog.getByText("Chat model", { exact: true })).toBeVisible();
+  await runtimeDialog.getByRole("button", { name: "Close", exact: true }).click();
+
+  const firstMemoryPath = join(firstDirectory, ".omni", "memory", "memory.md");
+  const nextMemoryPath = join(nextDirectory, ".omni", "memory", "memory.md");
+  await writeFile(firstMemoryPath, "# First workspace memory marker\n", "utf8");
+  await writeFile(nextMemoryPath, "# Next workspace memory marker\n", "utf8");
+  await openSessionMore("Workspace Memory and Dream");
+  const memoryDialog = page.getByRole("dialog", { name: "Workspace Memory and Dream", exact: true });
+  await memoryDialog.getByRole("button", { name: "View Memory", exact: true }).click();
+  await expect(memoryDialog.getByRole("region", { name: "Long-term Memory", exact: true }).last()).toBeVisible();
+  await expect(memoryDialog.locator("pre")).toContainText("Next workspace memory marker");
+  await expect(memoryDialog.locator("pre")).not.toContainText("First workspace memory marker");
+  await memoryDialog.getByRole("button", { name: "Run Dream", exact: true }).click();
+  await expect(memoryDialog.getByRole("status").filter({ hasText: /Dream completed\.|No pending summaries\./ }).last()).toBeVisible();
+  await memoryDialog.getByRole("button", { name: "Close", exact: true }).click();
+
+  await restartedNavigation.getByTitle(firstConversation.directory).filter({ hasText: firstConversation.title }).click();
+  await expect(page.getByRole("log").getByText("chat acceptance message", { exact: true })).toBeVisible();
+  await openSessionMore("Workspace Memory and Dream");
+  await memoryDialog.getByRole("button", { name: "View Memory", exact: true }).click();
+  await expect(memoryDialog.locator("pre")).toContainText("First workspace memory marker");
+  await expect(memoryDialog.locator("pre")).not.toContainText("Next workspace memory marker");
+  await memoryDialog.getByRole("button", { name: "Run Dream", exact: true }).click();
+  await expect(memoryDialog.getByRole("status").filter({ hasText: /Dream completed\.|No pending summaries\./ }).last()).toBeVisible();
+  await memoryDialog.getByRole("button", { name: "Close", exact: true }).click();
+  const openChatSchedule = page.waitForURL(url => url.pathname === "/chat/schedule");
+  await openSessionMore("Schedule tasks");
+  await openChatSchedule;
+  await expect(page.getByRole("heading", { name: "Schedule Jobs", exact: true })).toBeVisible();
+  const chatScheduleUrl = new URL(page.url());
+  assert.equal(chatScheduleUrl.searchParams.get("directory")?.toLowerCase(), firstDirectory.toLowerCase());
+  assert.equal(chatScheduleUrl.searchParams.get("session"), firstConversation.id);
+  const chatScheduleJobTitle = "Chat-only schedule job";
+  await createScheduleJob(chatScheduleJobTitle, "chat Workspace schedule acceptance task");
+
+  const legacyProjectActions = projectSessions.getByRole("group", { name: "Session actions for Legacy project", exact: true });
+  await projectSessions.locator('summary[aria-label="Session actions for Legacy project"]').click();
+  await legacyProjectActions.getByRole("button", { name: "View workspace directory", exact: true }).click();
+  const projectDirectoryDialog = page.getByRole("dialog", { name: "Workspace directory", exact: true });
+  await expect(projectDirectoryDialog.getByText(nextDirectory, { exact: true })).toBeVisible();
+  await projectDirectoryDialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(projectSessions.locator('summary[aria-label="Session actions for Legacy project"]')).toBeFocused();
+
+  await projectSessions.getByRole("button", { name: /Legacy project/ }).click();
+  await expect(page.getByRole("log").getByText("Legacy project body", { exact: true })).toBeVisible();
+  const openProjectSchedule = page.waitForURL(url => url.pathname === `/projects/${sharedProjectId}/schedule`);
+  await openSessionMore("Schedule tasks");
+  await openProjectSchedule;
+  await expect(page.getByRole("listitem").filter({ hasText: chatScheduleJobTitle })).toHaveCount(0);
+  const projectScheduleJobTitle = "Project-only schedule job";
+  await createScheduleJob(projectScheduleJobTitle, "Project Workspace schedule acceptance task");
+
+  await restartedNavigation.getByTitle(secondConversation.directory).click();
+  await expect(page.getByRole("log").getByText("second directory acceptance message", { exact: true })).toBeVisible();
+  const sharedChatSchedule = page.waitForURL(url => url.pathname === "/chat/schedule");
+  await openSessionMore("Schedule tasks");
+  await sharedChatSchedule;
+  await expect(page.getByRole("listitem").filter({ hasText: projectScheduleJobTitle })).toBeVisible();
+  await expect(page.getByRole("listitem").filter({ hasText: chatScheduleJobTitle })).toHaveCount(0);
+  await restartedNavigation.getByTitle(firstConversation.directory).filter({ hasText: firstConversation.title }).click();
+  await expect(page.getByRole("log").getByText("chat acceptance message", { exact: true })).toBeVisible();
+  const returnToChatSchedule = page.waitForURL(url => url.pathname === "/chat/schedule");
+  await openSessionMore("Schedule tasks");
+  await returnToChatSchedule;
+  await expect(page.getByRole("listitem").filter({ hasText: chatScheduleJobTitle })).toBeVisible();
+  await expect(page.getByRole("listitem").filter({ hasText: projectScheduleJobTitle })).toHaveCount(0);
+  await deleteScheduleJob(chatScheduleJobTitle);
+
+  await projectSessions.getByRole("button", { name: /Legacy project/ }).click();
+  const deleteProjectSchedule = page.waitForURL(url => url.pathname === `/projects/${sharedProjectId}/schedule`);
+  await openSessionMore("Schedule tasks");
+  await deleteProjectSchedule;
+  await expect(page.getByRole("listitem").filter({ hasText: chatScheduleJobTitle })).toHaveCount(0);
+  await deleteScheduleJob(projectScheduleJobTitle);
+
+  await restartedNavigation.getByTitle(secondConversation.directory).click();
+  await expect(page.getByRole("log").getByText("second directory acceptance message", { exact: true })).toBeVisible();
+  const modelConfigurationBeforeRestore = JSON.parse((await readFile(
+    join(nextDirectory, ".omni", "sessions", `${secondConversation.id}.jsonl`), "utf8",
+  )).split("\n")[0]).metadata.model_configuration;
   await page.getByRole("textbox", { name: "Message input", exact: true }).fill("shared chat branch to restore");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByRole("log").getByText("Fixture response.", { exact: true })).toHaveCount(2);
-  await page.getByRole("button", { name: "Restore", exact: true }).click();
-  await page.locator("#restore-anchor-select").selectOption("2");
+  const restoreEntry = page.getByRole("article").filter({ hasText: "shared chat branch to restore" });
+  await restoreEntry.locator("summary").click();
+  await restoreEntry.getByRole("group", { name: "Restore options for this message", exact: true })
+    .getByRole("button", { name: "Restore conversation to before this message", exact: true }).click();
+  await expect(page.locator("#restore-anchor-select")).toHaveValue("2");
   await page.getByRole("button", { name: "Inspect restore", exact: true }).click();
   await expect(page.getByText("Restore preview", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Restore session", exact: true }).click();
@@ -296,19 +438,83 @@ try {
   await expect(page.getByRole("log").getByText("shared chat branch to restore", { exact: true })).toHaveCount(0);
   const restored = (await api("/chat/sessions")).body.sessions.find(session => session.id === secondConversation.id);
   assert.equal(restored.directory.toLowerCase(), nextDirectory.toLowerCase());
+  assert.equal(restored.title, "Renamed shared chat");
   const restoredHeader = JSON.parse((await readFile(join(nextDirectory, ".omni", "sessions", `${secondConversation.id}.jsonl`), "utf8")).split("\n")[0]);
   assert.equal(restoredHeader.metadata.creation_scope, "chat");
+  assert.deepEqual(restoredHeader.metadata.model_configuration, modelConfigurationBeforeRestore);
   await page.getByRole("status").filter({ hasText: "Restore completed" }).getByRole("button", { name: "Close", exact: true }).click();
-  await page.getByRole("button", { name: "Delete session", exact: true }).click();
-  await page.getByRole("dialog").getByRole("button", { name: "Delete session", exact: true }).click();
+  await page.getByRole("textbox", { name: "Message input", exact: true }).fill("file restore menu branch");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByRole("log").getByText("Fixture response.", { exact: true })).toHaveCount(2);
+  const chatTitleAfterAutoTitle = (await api("/chat/sessions")).body.sessions.find(session => session.id === secondConversation.id);
+  assert.equal(chatTitleAfterAutoTitle.title, "Renamed shared chat");
+  const fileRestoreEntry = page.getByRole("article").filter({ hasText: "file restore menu branch" });
+  await fileRestoreEntry.locator("summary").click();
+  await fileRestoreEntry.getByRole("group", { name: "Restore options for this message", exact: true })
+    .getByRole("button", { name: "Restore conversation and files to before this message", exact: true }).click();
+  await expect(page.locator("#restore-anchor-select")).toHaveValue("3");
+  await page.getByRole("button", { name: "Inspect restore", exact: true }).click();
+  await expect(page.locator('input[name="restore-mode"][value="files"]')).toBeDisabled();
+  await expect(page.locator('input[name="restore-mode"][value="conversation-only"]')).toBeChecked();
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+
+  await page.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
+  await page.getByRole("navigation", { name: "Settings sections", exact: true })
+    .getByRole("button", { name: "Runtime", exact: true }).click();
+  await page.getByRole("button", { name: "Reload Skills", exact: true }).click();
+  await expect(page.getByRole("status").filter({ hasText: /Skills reloaded:/ })).toBeVisible();
+  await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+  await expect(page.getByRole("log").getByText("file restore menu branch", { exact: true })).toBeVisible();
+
+  const deleteSessionActions = restartedNavigation.getByRole("group", {
+    name: "Session actions for Renamed shared chat", exact: true,
+  });
+  await restartedNavigation.locator('summary[aria-label="Session actions for Renamed shared chat"]').click();
+  await deleteSessionActions.getByRole("button", { name: "Delete session", exact: true }).click();
+  const deleteSessionDialog = page.getByRole("dialog", { name: "Delete this Session permanently?", exact: true });
+  await deleteSessionDialog.getByRole("button", { name: "Delete session", exact: true }).click();
   await expect.poll(async () => (await api("/chat/sessions")).body.sessions.some(session => session.id === secondConversation.id)).toBe(false);
-  const sharedProjectId = (await api("/projects")).body.projects.find(project => project.path.toLowerCase() === nextDirectory.toLowerCase()).project_id;
   const remainingProjectSessions = (await api(`/projects/${sharedProjectId}/sessions`)).body.sessions;
   assert.deepEqual(new Set(remainingProjectSessions.map(session => session.title)), new Set([
     "Legacy project",
     "Explicit project",
     "Fixture response.",
   ]));
+
+  const legacyProjectMenu = projectSessions.getByRole("group", { name: "Session actions for Legacy project", exact: true });
+  await projectSessions.locator('summary[aria-label="Session actions for Legacy project"]').click();
+  await legacyProjectMenu.getByRole("button", { name: "View workspace directory", exact: true }).click();
+  const legacyDirectoryDialog = page.getByRole("dialog", { name: "Workspace directory", exact: true });
+  await expect(legacyDirectoryDialog.getByText(nextDirectory, { exact: true })).toBeVisible();
+  await legacyDirectoryDialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(projectSessions.locator('summary[aria-label="Session actions for Legacy project"]')).toBeFocused();
+
+  const explicitProjectMenu = projectSessions.getByRole("group", { name: "Session actions for Explicit project", exact: true });
+  await projectSessions.locator('summary[aria-label="Session actions for Explicit project"]').click();
+  await explicitProjectMenu.getByRole("button", { name: "Rename session", exact: true }).click();
+  const projectRenameDialog = page.getByRole("dialog");
+  await projectRenameDialog.getByLabel("Session title", { exact: true }).fill("Manual project title");
+  await projectRenameDialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(projectSessions.getByText("Manual project title", { exact: true })).toBeVisible();
+  await page.getByRole("textbox", { name: "Message input", exact: true }).fill("keep the manual project title");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByRole("log").getByText("Fixture response.", { exact: true })).toBeVisible();
+  const projectTitleAfterAutoTitle = (await api(`/projects/${sharedProjectId}/sessions`)).body.sessions
+    .find(session => session.id === seeded.history.find(session => session.title === "Explicit project").id);
+  assert.equal(projectTitleAfterAutoTitle.title, "Manual project title");
+
+  const projectSessionToDelete = (await api(`/projects/${sharedProjectId}/sessions`)).body.sessions
+    .find(session => session.id === createdProjectSession.session_id);
+  const createdProjectMenu = projectSessions.getByRole("group", {
+    name: `Session actions for ${projectSessionToDelete.title}`, exact: true,
+  });
+  await projectSessions.locator(`summary[aria-label="Session actions for ${projectSessionToDelete.title}"]`).click();
+  await createdProjectMenu.getByRole("button", { name: "Delete session", exact: true }).click();
+  const projectDeleteDialog = page.getByRole("dialog", { name: "Delete this Session permanently?", exact: true });
+  await projectDeleteDialog.getByRole("button", { name: "Delete session", exact: true }).click();
+  await expect.poll(async () => (await api(`/projects/${sharedProjectId}/sessions`)).body.sessions
+    .some(session => session.id === createdProjectSession.session_id)).toBe(false);
 
   const unavailableDirectory = join(control.details.home_root, "unavailable-chat");
   await changeDirectory(unavailableDirectory);
@@ -330,6 +536,10 @@ try {
   await expect(draftButton).toHaveAttribute("aria-current", "page");
   await page.getByRole("textbox", { name: "Message input", exact: true }).fill("recovery streaming markdown");
   await page.getByRole("button", { name: "Send", exact: true }).click();
+  const draftActivity = page.locator("article[data-run-id]").filter({ hasText: "recovery streaming markdown" })
+    .getByRole("group", { name: "Run activity", exact: true });
+  await expect(draftActivity).not.toHaveAttribute("open");
+  await draftActivity.locator("summary").click();
   await expect(page.getByRole("log").getByText("Streamed answer", { exact: true })).toBeVisible();
   await projectSessions.getByRole("button", { name: /Legacy project/ }).click();
   await expect(page.getByRole("log").getByText("Legacy project body", { exact: true })).toBeVisible();

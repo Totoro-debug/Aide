@@ -19,6 +19,7 @@ import {
   LogOut,
   Menu,
   MessageSquare,
+  MoreHorizontal,
   Moon,
   Monitor,
   Pencil,
@@ -120,6 +121,7 @@ import type {
   SessionSnapshot,
   SessionModelConfiguration,
   SessionSummary,
+  RestoreAnchor,
   AvailableModelsResponse,
   SkillMetadata,
   ToolPermissionLevel,
@@ -138,7 +140,7 @@ import type {
 } from "./protocol";
 import styles from "./App.module.css";
 import NavigationSidebar from "./NavigationSidebar";
-import type { NavigationSession } from "./NavigationSidebar";
+import type { NavigationSession, NavigationSessionAction } from "./NavigationSidebar";
 import {
   browserRecoveryRoute,
   clearBrowserRecoverySnapshot,
@@ -165,6 +167,10 @@ interface SettingsReturnLocation {
 
 interface SettingsNavigationState {
   returnTo?: SettingsReturnLocation;
+}
+
+interface PendingSessionAction extends NavigationSessionAction {
+  requestId: string;
 }
 
 interface PendingConfirmation {
@@ -242,7 +248,9 @@ export default function App() {
   const [addProjectRequest, setAddProjectRequest] = useState(0);
   const [sessionNavigationVersion, setSessionNavigationVersion] = useState(0);
   const [activeNavigationSession, setActiveNavigationSession] = useState<NavigationSession | null>(null);
+  const [activeNavigationClaim, setActiveNavigationClaim] = useState<SessionClaim | null>(null);
   const [navigationDraftSessions, setNavigationDraftSessions] = useState<NavigationSession[]>([]);
+  const [pendingSessionAction, setPendingSessionAction] = useState<PendingSessionAction | null>(null);
   const releasedEmptyDraftSessionsRef = useRef(new Set<string>());
   const [projectSessionRequest, setProjectSessionRequest] = useState<{
     projectId: string;
@@ -309,9 +317,35 @@ export default function App() {
     setProjectSessionRequest((current) => current?.requestId === requestId ? null : current);
   }, []);
   const consumeAddProjectRequest = useCallback(() => setAddProjectRequest(0), []);
-  const updateNavigationSession = useCallback((session: NavigationSession | null) => {
+  const requestSessionAction = useCallback((action: NavigationSessionAction) => {
+    const requestId = createRequestId();
+    setPendingSessionAction({ ...action, requestId });
+    setSessionNavigationVersion((version) => version + 1);
+    const query = new URLSearchParams({ session: action.sessionId });
+    if (action.projectId === null) query.set("directory", action.directory);
+    const path = action.projectId === null
+      ? `/chat?${query.toString()}`
+      : `/projects/${encodeURIComponent(action.projectId)}?${query.toString()}`;
+    navigate(path);
+    setSidebarOpen(false);
+  }, [navigate]);
+  const consumeSessionAction = useCallback((requestId: string) => {
+    setPendingSessionAction((current) => current?.requestId === requestId ? null : current);
+  }, []);
+  useEffect(() => {
+    const query = new URLSearchParams(location.search);
+    setPendingSessionAction((current) => {
+      if (current === null) return current;
+      const path = current.projectId === null ? "/chat" : `/projects/${encodeURIComponent(current.projectId)}`;
+      return location.pathname === path && query.get("session") === current.sessionId
+        && (current.projectId !== null || query.get("directory") === current.directory)
+        ? current : null;
+    });
+  }, [location.pathname, location.search]);
+  const updateNavigationSession = useCallback((session: NavigationSession | null, claim: SessionClaim | null) => {
     if (session?.draft && releasedEmptyDraftSessionsRef.current.has(session.sessionId ?? "")) return;
     setActiveNavigationSession(session);
+    setActiveNavigationClaim(claim);
     if (session?.sessionId === null || session == null) return;
     setNavigationDraftSessions((current) => {
       const otherSessions = current.filter((item) => item.sessionId !== session.sessionId);
@@ -787,9 +821,13 @@ export default function App() {
           draftSessions={navigationDraftSessions}
           onRefreshProjects={() => void refreshProjects()}
           onNewChat={requestNewChat}
-          onSessionNavigation={() => setSessionNavigationVersion((version) => version + 1)}
+          onSessionNavigation={() => {
+            setPendingSessionAction(null);
+            setSessionNavigationVersion((version) => version + 1);
+          }}
           onAddProject={requestAddProject}
           onNewProjectSession={requestProjectSession}
+          onSessionAction={requestSessionAction}
           onClose={() => setSidebarOpen(false)}
         />
         <div className={styles.sidebarFooter}>
@@ -920,6 +958,8 @@ export default function App() {
                         navigationRequestKey={String(sessionNavigationVersion)}
                         onNavigationSessionChange={updateNavigationSession}
                         onNavigationDraftReleased={removeNavigationDraft}
+                        sessionActionRequest={pendingSessionAction}
+                        onSessionActionConsumed={consumeSessionAction}
                       />
                 }
               />
@@ -947,7 +987,29 @@ export default function App() {
                         navigationRequestKey={String(sessionNavigationVersion)}
                         onNavigationSessionChange={updateNavigationSession}
                         onNavigationDraftReleased={removeNavigationDraft}
+                        sessionActionRequest={pendingSessionAction}
+                        onSessionActionConsumed={consumeSessionAction}
                       />
+                }
+              />
+              <Route
+                path="/chat/schedule"
+                element={
+                  <ScheduleJobsView
+                    authState={authState}
+                    connectionState={connectionState}
+                    projects={projects}
+                  />
+                }
+              />
+              <Route
+                path="/chat/schedule/jobs/:jobId/history"
+                element={
+                  <ScheduleJobHistoryView
+                    authState={authState}
+                    connectionState={connectionState}
+                    projects={projects}
+                  />
                 }
               />
               <Route
@@ -1001,6 +1063,8 @@ export default function App() {
                     navigationRequestKey={String(sessionNavigationVersion)}
                     onNavigationSessionChange={updateNavigationSession}
                     onNavigationDraftReleased={removeNavigationDraft}
+                    sessionActionRequest={pendingSessionAction}
+                    onSessionActionConsumed={consumeSessionAction}
                   />
                 }
               />
@@ -1038,6 +1102,7 @@ export default function App() {
                 onThemeChange={setTheme}
                 serviceStatus={serviceStatus}
                 theme={theme}
+                runtimeClaim={activeNavigationClaim}
               />
             </div>
           ) : null}
@@ -1618,6 +1683,7 @@ interface SettingsViewProps {
   onLanguageChange: (language: "en" | "zh-CN") => void;
   onThemeChange: (theme: Theme) => void;
   serviceStatus: ServiceStatus | null;
+  runtimeClaim: SessionClaim | null;
   theme: Theme;
 }
 
@@ -1629,11 +1695,48 @@ function SettingsView({
   onLanguageChange,
   onThemeChange,
   serviceStatus,
+  runtimeClaim,
   theme,
 }: SettingsViewProps) {
   const { t } = useTranslation();
   const location = useLocation();
+  const [skillReloadBusy, setSkillReloadBusy] = useState(false);
+  const [skillReloadError, setSkillReloadError] = useState<string | null>(null);
+  const [skillMetadata, setSkillMetadata] = useState<SkillMetadata[] | null>(null);
+  const skillReloadVersionRef = useRef(0);
   const [activeSection, setActiveSection] = useState<SettingsSection>("general");
+  useEffect(() => {
+    skillReloadVersionRef.current += 1;
+    setSkillReloadBusy(false);
+    setSkillReloadError(null);
+    setSkillMetadata(null);
+  }, [runtimeClaim]);
+
+  const reloadSkills = useCallback(async () => {
+    if (runtimeClaim === null || connectionState !== "online" || skillReloadBusy) return;
+    const version = skillReloadVersionRef.current + 1;
+    skillReloadVersionRef.current = version;
+    setSkillReloadBusy(true);
+    setSkillReloadError(null);
+    try {
+      const result = await reloadRuntimeSkills(
+        runtimeClaim.workspace_id,
+        runtimeClaim.session_id,
+        runtimeClaim.claim_version,
+        runtimeClaim.reconnect_credential,
+      );
+      if (skillReloadVersionRef.current !== version) return;
+      if (result.management_error !== undefined || !Array.isArray(result.skill_metadata)) {
+        setSkillReloadError("management.skillsError");
+        return;
+      }
+      setSkillMetadata(result.skill_metadata);
+    } catch (reason: unknown) {
+      if (skillReloadVersionRef.current === version) setSkillReloadError(managementErrorKey(reason));
+    } finally {
+      if (skillReloadVersionRef.current === version) setSkillReloadBusy(false);
+    }
+  }, [connectionState, runtimeClaim, skillReloadBusy]);
   useEffect(() => {
     if (location.hash === "#models") setActiveSection("models");
   }, [location.hash]);
@@ -2738,6 +2841,38 @@ function SettingsView({
               <div><dt>{t("status.protocol")}</dt><dd>v{serviceStatus?.protocol_version ?? "-"}</dd></div>
             </dl>
             <Link className={styles.secondaryButton} to="/status">{t("nav.status")}</Link>
+            <section className={styles.managementTool} aria-labelledby="settings-skills-title">
+              <div className={styles.managementToolHeader}>
+                <h3 id="settings-skills-title">{t("management.skillsTitle")}</h3>
+                <button
+                  className={styles.secondaryButton}
+                  type="button"
+                  disabled={runtimeClaim === null || connectionState !== "online" || skillReloadBusy}
+                  onClick={() => void reloadSkills()}
+                >
+                  <RefreshCw size={15} aria-hidden="true" />
+                  {skillReloadBusy ? t("management.skillsReloading") : t("management.reloadSkills")}
+                </button>
+              </div>
+              {runtimeClaim === null ? (
+                <p className={styles.managementHint}>{t("settings.skillReloadRequiresSession")}</p>
+              ) : null}
+              {skillReloadError !== null ? (
+                <div className={styles.errorBanner} role="alert"><CircleAlert size={16} aria-hidden="true" />{t(skillReloadError)}</div>
+              ) : null}
+              {skillMetadata !== null ? (
+                <div className={styles.managementOperationStatus} role="status" aria-live="polite">
+                  <strong>{t("management.skillsReloaded", { count: skillMetadata.length })}</strong>
+                  {skillMetadata.length > 0 ? (
+                    <ul aria-label={t("management.skillsList")}>
+                      {skillMetadata.map((skill) => (
+                        <li key={skill.name}><strong>{skill.name}</strong><span>{skill.description}</span></li>
+                      ))}
+                    </ul>
+                  ) : <span>{t("management.skillsEmpty")}</span>}
+                </div>
+              ) : null}
+            </section>
           </div>
 
               : null}
@@ -3210,20 +3345,24 @@ function StatusMetric({
 interface RuntimeManagementDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  panel: "runtime" | "memory";
   onPermissionChanged: (permission: ToolPermissionLevel) => void;
   claim: SessionClaim;
   sessionTitle: string;
+  sessionModelConfiguration: SessionModelConfiguration | null;
   activeRuns: LiveRun[];
   connectionState: ConnectionState;
-  triggerRef: { current: HTMLButtonElement | null };
+  triggerRef: { current: HTMLElement | null };
 }
 
 function RuntimeManagementDialog({
   open,
   onOpenChange,
+  panel,
   onPermissionChanged,
   claim,
   sessionTitle,
+  sessionModelConfiguration,
   activeRuns,
   connectionState,
   triggerRef,
@@ -3234,10 +3373,9 @@ function RuntimeManagementDialog({
   const [effort, setEffort] = useState<ReasoningEffort>("medium");
   const [loadState, setLoadState] = useState<"idle" | "loading" | "ready">("idle");
   const [saving, setSaving] = useState<"permission" | "effort" | null>(null);
-  const [operation, setOperation] = useState<"memory" | "dream" | "skills" | null>(null);
+  const [operation, setOperation] = useState<"memory" | "dream" | null>(null);
   const [memoryContent, setMemoryContent] = useState<string | null>(null);
   const [dreamResult, setDreamResult] = useState<DreamResult | null>(null);
-  const [skillMetadata, setSkillMetadata] = useState<SkillMetadata[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -3257,7 +3395,6 @@ function RuntimeManagementDialog({
     setSaving(null);
     setOperation(dreamInFlight.current ? "dream" : null);
     setMemoryContent(null);
-    setSkillMetadata(null);
     if (!open || connectionState !== "online") return;
     if (dreamInFlight.current) return;
     let active = true;
@@ -3429,33 +3566,6 @@ function RuntimeManagementDialog({
     }
   }
 
-  async function reloadSkills() {
-    if (operation !== null || connectionState !== "online") return;
-    const epoch = requestEpoch.current;
-    setOperation("skills");
-    setError(null);
-    setNotice(null);
-    try {
-      const result = await reloadRuntimeSkills(
-        claim.workspace_id,
-        claim.session_id,
-        claim.claim_version,
-        claim.reconnect_credential,
-      );
-      if (epoch !== requestEpoch.current) return;
-      if (result.management_error !== undefined || !Array.isArray(result.skill_metadata)) {
-        setError("management.skillsError");
-        return;
-      }
-      setSkillMetadata(result.skill_metadata);
-    } catch (reason: unknown) {
-      if (epoch !== requestEpoch.current) return;
-      setError(managementErrorKey(reason));
-    } finally {
-      if (epoch === requestEpoch.current) setOperation(null);
-    }
-  }
-
   const activeWorkCount = activeRuns.filter(isLiveRunActive).length;
   const numberFormat = new Intl.NumberFormat(i18n.language);
   const usedTokens = status?.projected_next_request_tokens ?? 0;
@@ -3471,12 +3581,14 @@ function RuntimeManagementDialog({
           onCloseAutoFocus={(event) => {
             event.preventDefault();
             const trigger = triggerRef.current;
-            if (trigger?.isConnected && !trigger.disabled) trigger.focus();
+            if (trigger?.isConnected && (!(trigger instanceof HTMLButtonElement) || !trigger.disabled)) trigger.focus();
           }}
         >
           <div className={styles.dialogHeader}>
             <div>
-              <Dialog.Title className={styles.dialogTitle}>{t("management.title")}</Dialog.Title>
+              <Dialog.Title className={styles.dialogTitle}>
+                {t(panel === "runtime" ? "management.title" : "management.memoryPanelTitle")}
+              </Dialog.Title>
               <Dialog.Description className={styles.dialogDescription}>
                 {t("management.scope", { session: sessionTitle })}
               </Dialog.Description>
@@ -3509,6 +3621,8 @@ function RuntimeManagementDialog({
 
           {status !== null ? (
             <>
+              {panel === "runtime" ? (
+                <>
               {status.model_configuration_available === false ? (
                 <p className={styles.notice} role="status">{t("conversation.modelUnavailable")}</p>
               ) : null}
@@ -3521,6 +3635,13 @@ function RuntimeManagementDialog({
                     </dd>
                   </div>
                 ) : null}
+                <div className={styles.managementMetric}>
+                  <dt>{t("conversation.sessionModel")}</dt>
+                  <dd>{sessionModelConfiguration === null
+                    ? t("management.inheritedSessionModel", { model: status.chat_model })
+                    : `${sessionModelConfiguration.provider_id}/${sessionModelConfiguration.model} · ${sessionModelConfiguration.reasoning_effort}`}
+                  </dd>
+                </div>
                 <div className={styles.managementMetric}>
                   <dt>{t("management.model")}</dt>
                   <dd>{status.chat_model || "-"}</dd>
@@ -3592,8 +3713,10 @@ function RuntimeManagementDialog({
                   </button>
                 </form>
               </div>
+                </>
+              ) : null}
 
-              <div className={styles.managementTools}>
+              {panel === "memory" ? <div className={styles.managementTools}>
                 <section className={styles.managementTool} aria-labelledby="management-memory-title">
                   <div className={styles.managementToolHeader}>
                     <div>
@@ -3651,39 +3774,7 @@ function RuntimeManagementDialog({
                     </div>
                   ) : null}
                 </section>
-
-                <section className={styles.managementTool} aria-labelledby="management-skills-title">
-                  <div className={styles.managementToolHeader}>
-                    <div>
-                      <h3 id="management-skills-title">{t("management.skillsTitle")}</h3>
-                    </div>
-                    <button
-                      className={styles.secondaryButton}
-                      type="button"
-                      disabled={operation !== null || connectionState !== "online"}
-                      onClick={() => void reloadSkills()}
-                    >
-                      <RefreshCw size={15} aria-hidden="true" />
-                      {operation === "skills" ? t("management.skillsReloading") : t("management.reloadSkills")}
-                    </button>
-                  </div>
-                  {skillMetadata !== null ? (
-                    <div className={styles.managementOperationStatus} role="status" aria-live="polite">
-                      <strong>{t("management.skillsReloaded", { count: skillMetadata.length })}</strong>
-                      {skillMetadata.length > 0 ? (
-                        <ul aria-label={t("management.skillsList")}>
-                          {skillMetadata.map((skill) => (
-                            <li key={skill.name}>
-                              <strong>{skill.name}</strong>
-                              <span>{skill.description}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      ) : <span>{t("management.skillsEmpty")}</span>}
-                    </div>
-                  ) : null}
-                </section>
-              </div>
+              </div> : null}
             </>
           ) : null}
         </Dialog.Content>
@@ -4313,6 +4404,34 @@ function ProjectsView({
 
 type ScheduleLoadState = "idle" | "loading" | "ready" | "error";
 
+function scheduleRouteHref(
+  projectId: string | null,
+  workspaceDirectory: string | null,
+  sessionId: string | null,
+  jobId?: string,
+): string {
+  const base = projectId === null
+    ? "/chat/schedule"
+    : `/projects/${encodeURIComponent(projectId)}/schedule`;
+  const path = jobId === undefined ? base : `${base}/jobs/${encodeURIComponent(jobId)}/history`;
+  const query = new URLSearchParams();
+  if (projectId === null && workspaceDirectory !== null) query.set("directory", workspaceDirectory);
+  if (sessionId !== null) query.set("session", sessionId);
+  const queryString = query.toString();
+  return queryString === "" ? path : `${path}?${queryString}`;
+}
+
+function sessionRouteHref(projectId: string | null, workspaceDirectory: string | null, sessionId: string | null): string {
+  if (projectId !== null) {
+    const query = sessionId === null ? "" : `?session=${encodeURIComponent(sessionId)}`;
+    return `/projects/${encodeURIComponent(projectId)}${query}`;
+  }
+  const query = new URLSearchParams();
+  if (workspaceDirectory !== null) query.set("directory", workspaceDirectory);
+  if (sessionId !== null) query.set("session", sessionId);
+  return `/chat${query.size === 0 ? "" : `?${query.toString()}`}`;
+}
+
 interface ScheduleJobsViewProps {
   authState: AuthState;
   connectionState: ConnectionState;
@@ -4320,14 +4439,20 @@ interface ScheduleJobsViewProps {
 }
 
 function ScheduleJobsView({ authState, connectionState, projects }: ScheduleJobsViewProps) {
-  const { projectId = "" } = useParams();
+  const { projectId: routeProjectId } = useParams();
+  const [searchParams] = useSearchParams();
+  const projectId = routeProjectId ?? null;
+  const workspaceDirectory = projectId === null ? searchParams.get("directory") : null;
+  const sessionId = searchParams.get("session");
   return (
     <ScheduleJobsContent
-      key={projectId}
+      key={`${projectId ?? "chat"}:${workspaceDirectory ?? ""}`}
       authState={authState}
       connectionState={connectionState}
       projects={projects}
       projectId={projectId}
+      workspaceDirectory={workspaceDirectory}
+      sessionId={sessionId}
     />
   );
 }
@@ -4337,10 +4462,19 @@ function ScheduleJobsContent({
   connectionState,
   projects,
   projectId,
-}: ScheduleJobsViewProps & { projectId: string }) {
+  workspaceDirectory,
+  sessionId,
+}: ScheduleJobsViewProps & {
+  projectId: string | null;
+  workspaceDirectory: string | null;
+  sessionId: string | null;
+}) {
   const { i18n, t } = useTranslation();
-  const project = projects.find((item) => item.project_id === projectId);
-  const projectAvailable = project?.available === true;
+  const project = projectId === null ? undefined : projects.find((item) => item.project_id === projectId);
+  const scopeMissing = projectId === null ? workspaceDirectory === null : project === undefined;
+  const projectAvailable = projectId === null
+    ? workspaceDirectory !== null && workspaceDirectory.trim() !== ""
+    : project?.available === true;
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [jobs, setJobs] = useState<ScheduleJob[]>([]);
   const jobsRef = useRef<ScheduleJob[]>([]);
@@ -4393,7 +4527,7 @@ function ScheduleJobsContent({
   }, []);
 
   const loadSchedule = useCallback(async (initial: boolean) => {
-    if (authState !== "ready" || connectionState !== "online" || !projectId || !projectAvailable) return;
+    if (authState !== "ready" || connectionState !== "online" || !projectAvailable) return;
     if (!initial && loadPendingRef.current) return;
     loadPendingRef.current = true;
     const lifecycleVersion = lifecycleVersionRef.current;
@@ -4404,7 +4538,9 @@ function ScheduleJobsContent({
     try {
       let nextWorkspaceId = workspaceIdRef.current;
       if (nextWorkspaceId === null) {
-        const sessions = await getProjectSessions(projectId, { limit: 1 });
+        const sessions = projectId === null
+          ? await enterChatWorkspace(workspaceDirectory ?? undefined)
+          : await getProjectSessions(projectId, { limit: 1 });
         if (!mountedRef.current || lifecycleVersionRef.current !== lifecycleVersion || scopeVersionRef.current !== version) return;
         nextWorkspaceId = sessions.workspace_id;
         workspaceIdRef.current = nextWorkspaceId;
@@ -4434,7 +4570,7 @@ function ScheduleJobsContent({
         loadPendingRef.current = false;
       }
     }
-  }, [authState, connectionState, projectAvailable, projectId]);
+  }, [authState, connectionState, projectAvailable, projectId, workspaceDirectory]);
 
   useEffect(() => {
     lifecycleVersionRef.current += 1;
@@ -4468,7 +4604,7 @@ function ScheduleJobsContent({
       scopeVersionRef.current += 1;
       window.clearInterval(timer);
     };
-  }, [authState, connectionState, loadSchedule, projectAvailable, projectId]);
+  }, [authState, connectionState, loadSchedule, projectAvailable, projectId, workspaceDirectory]);
 
   function clearCreateAttempt() {
     createRequestIdRef.current = null;
@@ -4634,19 +4770,19 @@ function ScheduleJobsContent({
     <section className={styles.schedulePage} aria-labelledby="schedule-heading">
       <div className={styles.pageHeading}>
         <div>
-          <Link className={styles.backLink} to={`/projects/${projectId}`}>
+          <Link className={styles.backLink} to={sessionRouteHref(projectId, workspaceDirectory, sessionId)}>
             <ArrowLeft size={15} aria-hidden="true" />
             {t("controls.backToSessions")}
           </Link>
           <p className={styles.eyebrow}>{t("nav.schedule")}</p>
           <h1 id="schedule-heading" tabIndex={-1}>{t("schedule.title")}</h1>
           <p className={styles.pageDescription}>
-            {project?.name || t("schedule.title")}
+            {project?.name ?? workspaceDirectory ?? t("schedule.title")}
             {project !== undefined ? ` · ${project.path}` : ""}
           </p>
         </div>
         <div className={styles.pageActions}>
-          <Link className={styles.secondaryButton} to={`/projects/${projectId}`}>
+          <Link className={styles.secondaryButton} to={sessionRouteHref(projectId, workspaceDirectory, sessionId)}>
             <MessageSquare size={15} aria-hidden="true" />
             {t("controls.openSessions")}
           </Link>
@@ -4701,15 +4837,15 @@ function ScheduleJobsContent({
           <div className={styles.emptyIcon} aria-hidden="true"><Info size={22} /></div>
           <div><h2>{t("schedule.authenticationRequired")}</h2><p>{t("status.unavailable")}</p></div>
         </div>
-      ) : project === undefined ? (
+      ) : scopeMissing ? (
         <div className={styles.emptyState} role="alert">
           <div className={styles.emptyIcon} aria-hidden="true"><CircleAlert size={22} /></div>
-          <div><h2>{t("schedule.notFound")}</h2><Link className={styles.secondaryButton} to="/projects">{t("controls.backToProjects")}</Link></div>
+          <div><h2>{t(projectId === null ? "schedule.workspaceNotFound" : "schedule.notFound")}</h2><Link className={styles.secondaryButton} to={sessionRouteHref(projectId, workspaceDirectory, sessionId)}>{t("controls.backToSessions")}</Link></div>
         </div>
-      ) : !projectAvailable ? (
+      ) : projectId !== null && !projectAvailable ? (
         <div className={styles.emptyState} role="status">
           <div className={styles.emptyIcon} aria-hidden="true"><FolderOpen size={22} /></div>
-          <div><h2>{t("schedule.projectUnavailable")}</h2><p>{project.path}</p></div>
+          <div><h2>{t("schedule.projectUnavailable")}</h2><p>{project?.path}</p></div>
         </div>
       ) : (
         <>
@@ -4888,7 +5024,7 @@ function ScheduleJobsContent({
               ) : loadState === "error" && jobs.length === 0 ? (
                 <div className={styles.scheduleEmptyState} role="alert"><CircleAlert size={18} aria-hidden="true" /><span>{t(loadError ?? "schedule.loadError")}</span><button className={styles.secondaryButton} type="button" onClick={() => void loadSchedule(true)}>{t("controls.retry")}</button></div>
               ) : jobs.length === 0 ? (
-                <div className={styles.scheduleEmptyState} role="status"><Clock3 size={18} aria-hidden="true" /><span>{t("schedule.empty")}</span></div>
+                <div className={styles.scheduleEmptyState} role="status"><Clock3 size={18} aria-hidden="true" /><span>{t(projectId === null ? "schedule.emptyWorkspace" : "schedule.empty")}</span></div>
               ) : (
                 <ul className={styles.scheduleJobList}>
                   {jobs.map((job) => (
@@ -4912,7 +5048,7 @@ function ScheduleJobsContent({
                       <div className={styles.scheduleJobActions}>
                         <Link
                           className={styles.secondaryButton}
-                          to={`/projects/${projectId}/schedule/jobs/${job.job_id}/history`}
+                          to={scheduleRouteHref(projectId, workspaceDirectory, sessionId, job.job_id)}
                         >
                           <BookOpen size={15} aria-hidden="true" />
                           {t("schedule.history")}
@@ -5050,7 +5186,7 @@ function ScheduleJobsContent({
               {detailJob !== null ? (
                 <Link
                   className={styles.secondaryButton}
-                  to={`/projects/${projectId}/schedule/jobs/${detailJob.job_id}/history`}
+                  to={scheduleRouteHref(projectId, workspaceDirectory, sessionId, detailJob.job_id)}
                 >
                   <BookOpen size={15} aria-hidden="true" />
                   {t("schedule.history")}
@@ -5088,14 +5224,20 @@ function ScheduleJobHistoryView({
   connectionState,
   projects,
 }: ScheduleJobsViewProps) {
-  const { projectId = "", jobId = "" } = useParams();
+  const { projectId: routeProjectId, jobId = "" } = useParams();
+  const [searchParams] = useSearchParams();
+  const projectId = routeProjectId ?? null;
+  const workspaceDirectory = projectId === null ? searchParams.get("directory") : null;
+  const sessionId = searchParams.get("session");
   return (
     <ScheduleJobHistoryContent
-      key={`${projectId}:${jobId}`}
+      key={`${projectId ?? "chat"}:${workspaceDirectory ?? ""}:${jobId}`}
       authState={authState}
       connectionState={connectionState}
       projects={projects}
       projectId={projectId}
+      workspaceDirectory={workspaceDirectory}
+      sessionId={sessionId}
       jobId={jobId}
     />
   );
@@ -5106,11 +5248,21 @@ function ScheduleJobHistoryContent({
   connectionState,
   projects,
   projectId,
+  workspaceDirectory,
+  sessionId,
   jobId,
-}: ScheduleJobsViewProps & { projectId: string; jobId: string }) {
+}: ScheduleJobsViewProps & {
+  projectId: string | null;
+  workspaceDirectory: string | null;
+  sessionId: string | null;
+  jobId: string;
+}) {
   const { i18n, t } = useTranslation();
-  const project = projects.find((item) => item.project_id === projectId);
-  const projectAvailable = project?.available === true;
+  const project = projectId === null ? undefined : projects.find((item) => item.project_id === projectId);
+  const scopeMissing = projectId === null ? workspaceDirectory === null : project === undefined;
+  const projectAvailable = projectId === null
+    ? workspaceDirectory !== null && workspaceDirectory.trim() !== ""
+    : project?.available === true;
   const [job, setJob] = useState<ScheduleJob | null>(null);
   const [scheduleStatus, setScheduleStatus] = useState<ScheduleStatus | null>(null);
   const [groups, setGroups] = useState<ScheduleHistoryGroup[]>([]);
@@ -5153,7 +5305,6 @@ function ScheduleJobHistoryContent({
     if (
       authState !== "ready"
       || connectionState !== "online"
-      || !projectId
       || !jobId
       || !projectAvailable
       || loadPendingRef.current
@@ -5173,7 +5324,9 @@ function ScheduleJobHistoryContent({
     try {
       let nextWorkspaceId = workspaceIdRef.current;
       if (nextWorkspaceId === null) {
-        const sessions = await getProjectSessions(projectId, { limit: 1 });
+        const sessions = projectId === null
+          ? await enterChatWorkspace(workspaceDirectory ?? undefined)
+          : await getProjectSessions(projectId, { limit: 1 });
         if (
           !mountedRef.current
           || scopeVersionRef.current !== scopeVersion
@@ -5217,7 +5370,7 @@ function ScheduleJobHistoryContent({
         setLoadingMore(false);
       }
     }
-  }, [authState, connectionState, jobId, projectAvailable, projectId]);
+  }, [authState, connectionState, jobId, projectAvailable, projectId, workspaceDirectory]);
 
   useEffect(() => {
     scopeVersionRef.current += 1;
@@ -5234,7 +5387,6 @@ function ScheduleJobHistoryContent({
     if (
       authState !== "ready"
       || connectionState !== "online"
-      || !projectId
       || !jobId
       || !projectAvailable
     ) return;
@@ -5246,6 +5398,7 @@ function ScheduleJobHistoryContent({
     loadHistory,
     projectAvailable,
     projectId,
+    workspaceDirectory,
   ]);
 
   const authUnavailable = authState !== "ready";
@@ -5254,19 +5407,19 @@ function ScheduleJobHistoryContent({
     <section className={styles.schedulePage} aria-labelledby="schedule-history-heading">
       <div className={styles.pageHeading}>
         <div>
-          <Link className={styles.backLink} to={`/projects/${projectId}/schedule`}>
+          <Link className={styles.backLink} to={scheduleRouteHref(projectId, workspaceDirectory, sessionId)}>
             <ArrowLeft size={15} aria-hidden="true" />
             {t("schedule.backToJobs")}
           </Link>
           <p className={styles.eyebrow}>{t("schedule.historyEyebrow")}</p>
           <h1 id="schedule-history-heading" tabIndex={-1}>{heading}</h1>
           <p className={styles.pageDescription}>
-            {project?.name || t("schedule.historyTitle")}
+            {project?.name ?? workspaceDirectory ?? t("schedule.historyTitle")}
             {project !== undefined ? ` · ${project.path}` : ""}
           </p>
         </div>
         <div className={styles.pageActions}>
-          <Link className={styles.secondaryButton} to={`/projects/${projectId}/schedule`}>
+          <Link className={styles.secondaryButton} to={scheduleRouteHref(projectId, workspaceDirectory, sessionId)}>
             <CalendarClock size={15} aria-hidden="true" />
             {t("schedule.backToJobs")}
           </Link>
@@ -5299,15 +5452,15 @@ function ScheduleJobHistoryContent({
           <div className={styles.emptyIcon} aria-hidden="true"><Info size={22} /></div>
           <div><h2>{t("schedule.authenticationRequired")}</h2><p>{t("status.unavailable")}</p></div>
         </div>
-      ) : project === undefined ? (
+      ) : scopeMissing ? (
         <div className={styles.emptyState} role="alert">
           <div className={styles.emptyIcon} aria-hidden="true"><CircleAlert size={22} /></div>
-          <div><h2>{t("schedule.notFound")}</h2><Link className={styles.secondaryButton} to="/projects">{t("controls.backToProjects")}</Link></div>
+          <div><h2>{t(projectId === null ? "schedule.workspaceNotFound" : "schedule.notFound")}</h2><Link className={styles.secondaryButton} to={sessionRouteHref(projectId, workspaceDirectory, sessionId)}>{t("controls.backToSessions")}</Link></div>
         </div>
-      ) : !projectAvailable ? (
+      ) : projectId !== null && !projectAvailable ? (
         <div className={styles.emptyState} role="status">
           <div className={styles.emptyIcon} aria-hidden="true"><FolderOpen size={22} /></div>
-          <div><h2>{t("schedule.projectUnavailable")}</h2><p>{project.path}</p></div>
+          <div><h2>{t("schedule.projectUnavailable")}</h2><p>{project?.path}</p></div>
         </div>
       ) : (
         <>
@@ -5765,11 +5918,15 @@ function HistoryMessageView({
   index,
   t,
   scheduleHistory = false,
+  restoreAnchor,
+  onRestoreAnchor,
 }: {
   message: Record<string, unknown>;
   index: number;
   t: (key: string) => string;
   scheduleHistory?: boolean;
+  restoreAnchor?: RestoreAnchor;
+  onRestoreAnchor?: (anchorId: number, mode: RestoreMode, trigger: HTMLElement) => void;
 }) {
   const role = message.role;
   const messageStatus = message.status;
@@ -5801,7 +5958,38 @@ function HistoryMessageView({
   const toolActivities = scheduleHistory && role === "assistant" ? historyToolActivities(message) : [];
   return (
     <article className={styles.historyMessage} data-role={typeof role === "string" ? role : "system"} key={`${index}-${String(role)}`}>
-      <div className={styles.historyMessageRole}>{historyRoleLabel(role, t)}</div>
+      <div className={styles.historyMessageHeader}>
+        <div className={styles.historyMessageRole}>{historyRoleLabel(role, t)}</div>
+        {role === "user" && restoreAnchor !== undefined && onRestoreAnchor !== undefined ? (
+          <details className={styles.messageRestoreMenu}>
+            <summary
+              className={styles.messageRestoreTrigger}
+              aria-label={t("controls.restoreOptionsForMessage")}
+              title={t("controls.restoreOptionsForMessage")}
+            >
+              <MoreHorizontal size={15} aria-hidden="true" />
+            </summary>
+            <div className={styles.messageRestoreItems} role="group" aria-label={t("controls.restoreOptionsForMessage")}>
+              <button className={styles.messageRestoreItem} type="button" onClick={(event) => {
+                event.currentTarget.closest("details")?.removeAttribute("open");
+                const trigger = event.currentTarget.closest("details")?.querySelector("summary");
+                if (trigger instanceof HTMLElement) onRestoreAnchor(restoreAnchor.anchor_id, "conversation-only", trigger);
+              }}>
+                <RotateCcw size={14} aria-hidden="true" />
+                {t("controls.restoreConversationBeforeMessage")}
+              </button>
+              <button className={styles.messageRestoreItem} type="button" onClick={(event) => {
+                event.currentTarget.closest("details")?.removeAttribute("open");
+                const trigger = event.currentTarget.closest("details")?.querySelector("summary");
+                if (trigger instanceof HTMLElement) onRestoreAnchor(restoreAnchor.anchor_id, "files", trigger);
+              }}>
+                <FolderOpen size={14} aria-hidden="true" />
+                {t("controls.restoreConversationAndFilesBeforeMessage")}
+              </button>
+            </div>
+          </details>
+        ) : null}
+      </div>
       {toolActivities.length > 0 ? <ToolActivityGroup tools={toolActivities} t={t} showStatus={false} /> : null}
       <MarkdownContent content={historyMessageText(message.content)} />
     </article>
@@ -5990,9 +6178,13 @@ function RunActivityGroup({
 function ConversationHistoryView({
   messages,
   t,
+  restoreAnchors = [],
+  onRestoreAnchor,
 }: {
   messages: Record<string, unknown>[];
   t: (key: string) => string;
+  restoreAnchors?: RestoreAnchor[];
+  onRestoreAnchor?: (anchorId: number, mode: RestoreMode, trigger: HTMLElement) => void;
 }) {
   return <>
     {conversationHistoryEntries(messages).map((entry) => entry.kind === "activity" ? (
@@ -6003,6 +6195,14 @@ function ConversationHistoryView({
         message={entry.message}
         index={entry.index}
         t={t}
+        restoreAnchor={restoreAnchors.find((anchor) => (
+          entry.message.role === "user"
+          && typeof entry.message.content === "string"
+          && typeof entry.message.timestamp === "string"
+          && anchor.content === entry.message.content
+          && anchor.timestamp === entry.message.timestamp
+        ))}
+        onRestoreAnchor={onRestoreAnchor}
       />
     ))}
   </>;
@@ -6088,7 +6288,9 @@ interface ProjectSessionsViewProps {
   confirmationTriggerRef: { current: HTMLElement | null };
   projectSessionRequest?: { projectId: string; requestId: number } | null;
   onProjectSessionRequestConsumed?: (requestId: number) => void;
-  onNavigationSessionChange?: (session: NavigationSession | null) => void;
+  sessionActionRequest?: PendingSessionAction | null;
+  onSessionActionConsumed?: (requestId: string) => void;
+  onNavigationSessionChange?: (session: NavigationSession | null, claim: SessionClaim | null) => void;
   onNavigationDraftReleased?: (sessionId: string, wasEmptyDraft?: boolean) => void;
   navigationRequestKey?: string;
 }
@@ -6114,6 +6316,8 @@ function ChatSessionsView({
   navigationRequestKey,
   onNavigationSessionChange,
   onNavigationDraftReleased,
+  sessionActionRequest,
+  onSessionActionConsumed,
 }: ProjectSessionsViewProps & {
   newChatVersion: number;
   configurationNeedsSetup: boolean | null;
@@ -6252,6 +6456,8 @@ function ChatSessionsView({
             startInDraft={initialSessionId === null}
             onNavigationSessionChange={onNavigationSessionChange}
             onNavigationDraftReleased={onNavigationDraftReleased}
+            sessionActionRequest={sessionActionRequest}
+            onSessionActionConsumed={onSessionActionConsumed}
           />
         )}
       </div>
@@ -6278,6 +6484,8 @@ function ProjectSessionsView({
   onProjectSessionRequestConsumed,
   onNavigationSessionChange,
   onNavigationDraftReleased,
+  sessionActionRequest,
+  onSessionActionConsumed,
 }: ProjectSessionsViewProps) {
   const { projectId = "" } = useParams();
   const [searchParams] = useSearchParams();
@@ -6307,6 +6515,8 @@ function ProjectSessionsView({
       onProjectSessionRequestConsumed={onProjectSessionRequestConsumed}
       onNavigationSessionChange={onNavigationSessionChange}
       onNavigationDraftReleased={onNavigationDraftReleased}
+      sessionActionRequest={sessionActionRequest}
+      onSessionActionConsumed={onSessionActionConsumed}
     />
   );
 }
@@ -6334,6 +6544,8 @@ function ProjectSessionsContent({
   onProjectSessionRequestConsumed,
   onNavigationSessionChange,
   onNavigationDraftReleased,
+  sessionActionRequest,
+  onSessionActionConsumed,
   startInDraft = false,
 }: ProjectSessionsViewProps & {
   projectId: string | null;
@@ -6343,6 +6555,8 @@ function ProjectSessionsContent({
   initialSessionRequestKey?: string;
   projectSessionRequestId?: number | null;
   onProjectSessionRequestConsumed?: (requestId: number) => void;
+  sessionActionRequest?: PendingSessionAction | null;
+  onSessionActionConsumed?: (requestId: string) => void;
   startInDraft?: boolean;
 }) {
   const { t, i18n } = useTranslation();
@@ -6407,6 +6621,7 @@ function ProjectSessionsContent({
   const [restoreNotice, setRestoreNotice] = useState<RestoreResult | null>(null);
   const [pendingRestoreFailure, setPendingRestoreFailure] = useState<RestoreResult | null>(null);
   const [managementOpen, setManagementOpen] = useState(false);
+  const [managementPanel, setManagementPanel] = useState<"runtime" | "memory">("runtime");
   const [pendingDeletion, setPendingDeletion] = useState<PendingSessionDeletion | null>(() => readPendingDeletion(sessionStorageId));
   const pendingDeletionRef = useRef(pendingDeletion);
   const deleteBusyRef = useRef(false);
@@ -6434,12 +6649,12 @@ function ProjectSessionsContent({
   const sessionSelectionVersionRef = useRef(0);
   const refreshSessionsRef = useRef<((cursor?: string | null, append?: boolean) => Promise<void>) | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
-  const renameTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const renameTriggerRef = useRef<HTMLElement | null>(null);
+  const deleteTriggerRef = useRef<HTMLElement | null>(null);
   const deleteRetryTriggerRef = useRef<HTMLButtonElement | null>(null);
   const deleteFocusOriginRef = useRef<"toolbar" | "retry">("toolbar");
-  const restoreTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const managementTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const restoreTriggerRef = useRef<HTMLElement | null>(null);
+  const managementTriggerRef = useRef<HTMLElement | null>(null);
   const restoreBusyRef = useRef(false);
   const restoreFocusPendingRef = useRef(false);
   const restorePlanClaimRef = useRef<SessionClaim | null>(null);
@@ -6714,7 +6929,7 @@ function ProjectSessionsContent({
     if (restoreOpen || !restoreFocusPendingRef.current) return;
     restoreFocusPendingRef.current = false;
     const trigger = restoreTriggerRef.current;
-    if (trigger?.isConnected && !trigger.disabled) trigger.focus();
+    if (trigger?.isConnected && (!(trigger instanceof HTMLButtonElement) || !trigger.disabled)) trigger.focus();
     else document.getElementById("sessions-heading")?.focus();
   }, [restoreOpen]);
 
@@ -6734,10 +6949,10 @@ function ProjectSessionsContent({
       sessionId: selectedSessionId,
       draft,
       running: (liveRunsBySession[selectedSessionId ?? ""] ?? []).some(isLiveRunActive),
-    });
-  }, [draft, liveRunsBySession, onNavigationSessionChange, project?.path, projectId, selectedSessionId, workspaceDirectory]);
+    }, claim);
+  }, [claim, draft, liveRunsBySession, onNavigationSessionChange, project?.path, projectId, selectedSessionId, workspaceDirectory]);
 
-  useEffect(() => () => onNavigationSessionChange?.(null), [onNavigationSessionChange]);
+  useEffect(() => () => onNavigationSessionChange?.(null, null), [onNavigationSessionChange]);
 
   const updateLiveRuns = useCallback(
     (sessionId: string, update: (runs: LiveRun[]) => LiveRun[]) => {
@@ -7514,16 +7729,33 @@ function ProjectSessionsContent({
     (anchor) => anchor.anchor_id === restoreAnchorId,
   );
 
-  function beginRestore(event: React.MouseEvent<HTMLButtonElement>) {
+  function beginRestore(
+    anchorId?: number,
+    mode: RestoreMode = "files",
+    trigger: HTMLElement | null = null,
+  ) {
     if (draft || claim === null || snapshot === null || activeRun !== null) return;
     const anchors = snapshot.restore_anchors ?? [];
     if (anchors.length === 0) return;
-    restoreTriggerRef.current = event.currentTarget;
-    setRestoreAnchorId(anchors[0].anchor_id);
+    const target = anchorId === undefined
+      ? anchors[0]
+      : anchors.find((anchor) => anchor.anchor_id === anchorId);
+    if (target === undefined) return;
+    if (trigger !== null) restoreTriggerRef.current = trigger;
+    setRestoreAnchorId(target.anchor_id);
     setRestorePlan(null);
-    setRestoreMode("conversation-only");
+    setRestoreMode(mode);
     setRestoreError(null);
     setRestoreOpen(true);
+  }
+
+  function openManagementPanel(panel: "runtime" | "memory", event: React.MouseEvent<HTMLButtonElement>) {
+    const menu = event.currentTarget.closest("details");
+    const trigger = menu?.querySelector("summary");
+    if (trigger instanceof HTMLElement) managementTriggerRef.current = trigger;
+    menu?.removeAttribute("open");
+    setManagementPanel(panel);
+    setManagementOpen(true);
   }
 
   async function closeRestore() {
@@ -7570,7 +7802,7 @@ function ProjectSessionsContent({
         return;
       }
       setRestorePlan(plan);
-      setRestoreMode(plan.available_modes.includes("files") ? "files" : "conversation-only");
+      setRestoreMode((current) => plan.available_modes.includes(current) ? current : "conversation-only");
     } catch (error) {
       if (mountedRef.current && claimRef.current === currentClaim) {
         setRestoreError(error instanceof ApiError && error.body?.code === "stale_claim"
@@ -7665,12 +7897,12 @@ function ProjectSessionsContent({
     }
   }
 
-  function beginRename() {
+  const beginRename = useCallback(() => {
     if (draft || claim === null || selectedSummary === undefined) return;
     setRenameTitle(selectedSummary.title);
     setRenameError(null);
     setRenameOpen(true);
-  }
+  }, [claim, draft, selectedSummary]);
 
   async function submitRename(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -7721,10 +7953,10 @@ function ProjectSessionsContent({
     }
   }
 
-  function beginDelete(event: React.MouseEvent<HTMLButtonElement>) {
+  const beginDelete = useCallback((trigger: HTMLElement | null = null) => {
     if (draft || claim === null || selectedSummary === undefined) return;
     if (pendingDeletionRef.current?.attempted) return;
-    deleteTriggerRef.current = event.currentTarget;
+    deleteTriggerRef.current = trigger;
     deleteFocusOriginRef.current = "toolbar";
     if (pendingDeletionRef.current === null) {
       const operation = { claim: { ...claim }, requestId: createRequestId(), attempted: false, title: selectedSummary.title };
@@ -7733,7 +7965,33 @@ function ProjectSessionsContent({
     }
     setDeleteError(null);
     setDeleteOpen(true);
-  }
+  }, [claim, draft, selectedSummary]);
+
+  useEffect(() => {
+    if (sessionActionRequest == null || claim === null || selectedSummary === undefined || draft) return;
+    if (sessionActionRequest.sessionId !== claim.session_id || sessionActionRequest.projectId !== projectId) return;
+    const currentDirectory = isChat ? workspaceDirectory : project?.path;
+    if (currentDirectory !== sessionActionRequest.directory) return;
+    if (sessionActionRequest.action === "rename") {
+      renameTriggerRef.current = sessionActionRequest.trigger;
+      beginRename();
+    } else {
+      beginDelete(sessionActionRequest.trigger);
+    }
+    onSessionActionConsumed?.(sessionActionRequest.requestId);
+  }, [
+    claim,
+    draft,
+    isChat,
+    onSessionActionConsumed,
+    project?.path,
+    projectId,
+    selectedSummary,
+    sessionActionRequest,
+    beginDelete,
+    beginRename,
+    workspaceDirectory,
+  ]);
 
   async function submitDelete(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -8001,52 +8259,74 @@ function ProjectSessionsContent({
                     <h2>{draft ? t("sessions.draftTitle") : selectedSummary?.title ?? t("sessions.title")}</h2>
                   </div>
                   <div className={styles.sessionHeaderActions}>
-                    {claim !== null ? (
-                      <button
-                        className={styles.iconButton}
-                        ref={managementTriggerRef}
-                        type="button"
-                        aria-label={t("controls.runtimeStatus")}
-                        title={t("controls.runtimeStatus")}
-                        disabled={connectionState !== "online" || busySessionId !== null}
-                        onClick={() => setManagementOpen(true)}
+                    <details className={styles.sessionActionMenu}>
+                      <summary
+                        className={styles.sessionActionTrigger}
+                        aria-label={t("controls.sessionMoreActions", {
+                          session: draft ? t("sessions.draftTitle") : selectedSummary?.title ?? t("sessions.title"),
+                        })}
+                        title={t("controls.sessionMoreActions", {
+                          session: draft ? t("sessions.draftTitle") : selectedSummary?.title ?? t("sessions.title"),
+                        })}
                       >
-                        <Gauge size={15} aria-hidden="true" />
-                      </button>
-                    ) : null}
+                        <MoreHorizontal size={15} aria-hidden="true" />
+                      </summary>
+                      <div className={styles.sessionActionItems} role="group" aria-label={t("controls.sessionMoreActions", {
+                        session: draft ? t("sessions.draftTitle") : selectedSummary?.title ?? t("sessions.title"),
+                      })}>
+                        <button className={styles.sessionActionMenuItem} type="button" disabled={connectionState !== "online" || busySessionId !== null}
+                          onClick={(event) => openManagementPanel("memory", event)}>
+                          <Brain size={14} aria-hidden="true" />
+                          {t("controls.workspaceMemoryAndDream")}
+                        </button>
+                        <button className={styles.sessionActionMenuItem} type="button"
+                          onClick={(event) => {
+                            event.currentTarget.closest("details")?.removeAttribute("open");
+                            navigate(scheduleRouteHref(projectId, workspaceDirectory ?? null, claim.session_id));
+                          }}>
+                          <CalendarClock size={14} aria-hidden="true" />
+                          {t("controls.scheduleTasks")}
+                        </button>
+                        <button className={styles.sessionActionMenuItem} type="button" disabled={connectionState !== "online" || busySessionId !== null}
+                          onClick={(event) => openManagementPanel("runtime", event)}>
+                          <Gauge size={14} aria-hidden="true" />
+                          {t("controls.runtimeStatus")}
+                        </button>
+                      </div>
+                    </details>
                     {!draft && selectedSummary !== undefined ? (
                       <>
                         <button
                           className={styles.iconButton}
-                          ref={renameTriggerRef}
                           type="button"
                           aria-label={t("controls.renameSession")}
                           title={t("controls.renameSession")}
                           disabled={busySessionId !== null || connectionState !== "online"}
-                          onClick={beginRename}
+                          onClick={(event) => {
+                            renameTriggerRef.current = event.currentTarget;
+                            beginRename();
+                          }}
                         >
                           <Pencil size={15} aria-hidden="true" />
                         </button>
                         <button
                           className={`${styles.iconButton} ${styles.dangerIconButton}`}
-                          ref={deleteTriggerRef}
                           type="button"
                           aria-label={t("controls.deleteSession")}
                           title={t("controls.deleteSession")}
                           disabled={busySessionId !== null || connectionState !== "online" || pendingDeletion?.attempted === true}
-                          onClick={beginDelete}
+                          onClick={(event) => beginDelete(event.currentTarget)}
                         >
                           <Trash2 size={15} aria-hidden="true" />
                         </button>
                         {(snapshot.restore_anchors ?? []).length > 0 ? (
                           <button
                             className={styles.iconButton}
-                            ref={restoreTriggerRef}
                             type="button"
                             aria-label={t("controls.restoreSession")}
                             title={t("controls.restoreSession")}
                             disabled={busySessionId !== null || activeRun !== null || connectionState !== "online"}
-                            onClick={beginRestore}
+                            onClick={(event) => beginRestore(undefined, "files", event.currentTarget)}
                           >
                             <RotateCcw size={15} aria-hidden="true" />
                           </button>
@@ -8102,7 +8382,14 @@ function ProjectSessionsContent({
                       </div>
                     ) : (
                       <div className={styles.messageHistory}>
-                        <ConversationHistoryView messages={snapshot.messages} t={t} />
+                        <ConversationHistoryView
+                          messages={snapshot.messages}
+                          t={t}
+                          restoreAnchors={activeRun === null && busySessionId === null && connectionState === "online"
+                            ? snapshot.restore_anchors
+                            : []}
+                          onRestoreAnchor={(anchorId, mode, trigger) => beginRestore(anchorId, mode, trigger)}
+                        />
                         {selectedLiveRuns.map((run) => (
                           <LiveRunView key={run.localId} run={run} t={t} onCancel={(candidate) => void cancelRun(candidate)} />
                         ))}
@@ -8273,9 +8560,11 @@ function ProjectSessionsContent({
           key={`${claim.workspace_id}:${claim.session_id}:${claim.claim_version}:${claim.reconnect_credential}`}
           open={managementOpen}
           onOpenChange={setManagementOpen}
+          panel={managementPanel}
           onPermissionChanged={setClientPermission}
           claim={claim}
           sessionTitle={draft ? t("sessions.draftTitle") : selectedSummary?.title ?? t("sessions.title")}
+          sessionModelConfiguration={savedSessionModel}
           activeRuns={selectedLiveRuns}
           connectionState={connectionState}
           triggerRef={managementTriggerRef}
@@ -8345,7 +8634,7 @@ function ProjectSessionsContent({
               const trigger = deleteFocusOriginRef.current === "retry"
                 ? deleteRetryTriggerRef.current
                 : deleteTriggerRef.current;
-              if (trigger?.isConnected && !trigger.disabled) trigger.focus();
+              if (trigger?.isConnected && (!(trigger instanceof HTMLButtonElement) || !trigger.disabled)) trigger.focus();
               else document.getElementById("sessions-heading")?.focus();
             }}
           >
@@ -8408,7 +8697,7 @@ function ProjectSessionsContent({
             onCloseAutoFocus={(event) => {
               event.preventDefault();
               const trigger = restoreTriggerRef.current;
-              if (trigger?.isConnected && !trigger.disabled) trigger.focus();
+              if (trigger?.isConnected && (!(trigger instanceof HTMLButtonElement) || !trigger.disabled)) trigger.focus();
               else document.getElementById("sessions-heading")?.focus();
             }}
           >

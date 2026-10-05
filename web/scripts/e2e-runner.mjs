@@ -100,6 +100,27 @@ try {
   });
   const primaryContext = await browser.newContext();
   let page = await primaryContext.newPage();
+  async function openWorkspacePanel(name) {
+    const menu = page.locator("details").filter({
+      has: page.getByRole("button", { name, exact: true, includeHidden: true }),
+    });
+    const trigger = menu.locator("summary");
+    await trigger.focus();
+    await trigger.press("Enter");
+    await menu.getByRole("button", { name, exact: true }).click();
+    return trigger;
+  }
+  async function openRuntimeSettings(language = "en") {
+    const settings = page.locator("#app-sidebar").getByRole("link", {
+      name: language === "en" ? "Settings" : "设置", exact: true,
+    });
+    if (!await settings.isVisible()) {
+      await page.getByRole("button", { name: language === "en" ? "Open navigation" : "打开导航", exact: true }).click();
+    }
+    await settings.click();
+    await page.getByRole("navigation", { name: language === "en" ? "Settings sections" : "设置分类", exact: true })
+      .getByRole("button", { name: language === "en" ? "Runtime" : "运行时", exact: true }).click();
+  }
   const browserErrors = [];
   page.on("pageerror", (error) => browserErrors.push(error.message));
   page.on("console", (message) => {
@@ -969,10 +990,21 @@ try {
     await page.getByRole("dialog").waitFor({ state: "hidden" });
     await expect(restoreTrigger).toBeFocused();
   }
-  await restoreTrigger.click();
-  await page.locator("#restore-anchor-select").selectOption("1");
+  const restoreMessage = page.getByRole("article").filter({ hasText: "Restore branch should disappear from history" });
+  const messageRestoreTrigger = restoreMessage.locator("summary");
+  await messageRestoreTrigger.click();
+  await restoreMessage.getByRole("button", { name: "Restore conversation to before this message", exact: true }).click();
+  await page.getByRole("button", { name: "Inspect restore" }).click();
+  await expect(page.locator('input[name="restore-mode"][value="conversation-only"]')).toBeChecked();
+  await expect(page.locator('input[name="restore-mode"][value="files"]')).toBeEnabled();
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(messageRestoreTrigger).toBeFocused();
+  await messageRestoreTrigger.click();
+  await restoreMessage.getByRole("button", { name: "Restore conversation and files to before this message", exact: true }).click();
+  await expect(page.locator("#restore-anchor-select")).toHaveValue("1");
   await page.getByRole("button", { name: "Inspect restore" }).click();
   await page.getByText("Restore preview", { exact: true }).waitFor();
+  await expect(page.locator('input[name="restore-mode"][value="files"]')).toBeChecked();
   await writeFile(resolve(control.details.restore_target), "changed by another Session\n", "utf8");
   await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
   await page.getByRole("button", { name: "Restore session" }).click();
@@ -1150,9 +1182,10 @@ try {
     await page.screenshot({ path: resolve(output, `empty-session-${viewport.width}.png`) });
   }
   await page.setViewportSize(viewports[0]);
-  const managementTrigger = page.getByRole("button", { name: "Runtime status and controls", exact: true });
-  await managementTrigger.click();
-  const managementDialog = page.getByRole("dialog", { name: "Runtime status", exact: true });
+  const managementTrigger = await openWorkspacePanel("Runtime status and controls");
+  const runtimeManagementDialog = page.getByRole("dialog", { name: "Runtime status", exact: true });
+  const memoryManagementDialog = page.getByRole("dialog", { name: "Workspace Memory and Dream", exact: true });
+  let managementDialog = runtimeManagementDialog;
   await managementDialog.getByText("primary/small-model", { exact: true }).waitFor();
   await managementDialog.getByText("Next request context", { exact: true }).waitFor();
   await managementDialog.getByText("Client permission", { exact: true }).waitFor();
@@ -1167,8 +1200,12 @@ try {
   await effortControl.locator("xpath=..")
     .getByRole("button", { name: "Save", exact: true }).click();
   await managementDialog.getByRole("status").getByText("Reasoning effort updated.", { exact: true }).waitFor();
+  await managementDialog.press("Escape");
+  await expect(managementTrigger).toBeFocused();
+  await openWorkspacePanel("Workspace Memory and Dream");
+  managementDialog = memoryManagementDialog;
   await managementDialog.getByRole("button", { name: "View Memory", exact: true }).click();
-  const memoryRegion = managementDialog.getByRole("region", { name: "Long-term Memory", exact: true });
+  const memoryRegion = managementDialog.getByRole("region", { name: "Long-term Memory", exact: true }).last();
   await memoryRegion.getByRole("heading", { level: 4, name: "Long-term Memory", exact: true }).waitFor();
   await managementDialog.getByRole("button", { name: "Run Dream", exact: true }).click();
   await managementDialog.getByRole("region", { name: "Dream", exact: true })
@@ -1192,7 +1229,7 @@ try {
   await dreamArrival;
   await managementDialog.press("Escape");
   await expect(managementTrigger).toBeFocused();
-  await managementTrigger.press("Enter");
+  await openWorkspacePanel("Workspace Memory and Dream");
   await expect(managementDialog.getByRole("button", { name: "Running Dream...", exact: true })).toBeDisabled();
   releaseDream();
   await managementDialog.getByRole("region", { name: "Dream", exact: true })
@@ -1218,14 +1255,13 @@ try {
   await managementDialog.getByRole("button", { name: "Run Dream", exact: true }).click();
   await managementDialog.getByRole("region", { name: "Dream", exact: true })
     .getByRole("status").getByText("No pending summaries.", { exact: true }).waitFor();
-  await managementDialog.getByRole("button", { name: "Reload Skills", exact: true }).click();
-  await managementDialog.getByRole("status").getByText("Skills reloaded: 0.", { exact: true }).waitFor();
   await managementDialog.getByRole("button", { name: "Close", exact: true }).click();
   await managementDialog.waitFor({ state: "hidden" });
   await expect(managementTrigger).toBeFocused();
 
-  await managementTrigger.press("Enter");
-  await expect(permissionControl).toHaveValue("read-only");
+  await openRuntimeSettings();
+  await page.getByRole("button", { name: "Reload Skills", exact: true }).click();
+  await page.getByRole("status").getByText("Skills reloaded: 0.", { exact: true }).waitFor();
   const failSkillReload = async (route) => {
     const response = await route.fetch();
     const body = await response.json();
@@ -1248,9 +1284,10 @@ try {
     });
   };
   await page.route("**/management/skills/reload", failSkillReload);
-  await managementDialog.getByRole("button", { name: "Reload Skills", exact: true }).click();
-  await managementDialog.getByRole("alert").getByText("Skills could not be reloaded.", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Reload Skills", exact: true }).click();
+  await page.getByRole("alert").getByText("Skills could not be reloaded.", { exact: true }).waitFor();
   await page.unroute("**/management/skills/reload", failSkillReload);
+  await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
 
   let releaseOldMemory;
   const oldMemoryGate = new Promise((resolveGate) => { releaseOldMemory = resolveGate; });
@@ -1274,20 +1311,20 @@ try {
       }),
     });
   };
-  await managementDialog.press("Escape");
-  await expect(managementTrigger).toBeFocused();
   await page.route("**/management/memory", delayFirstMemoryResponse);
-  await managementTrigger.click();
-  await expect(permissionControl).toHaveValue("read-only");
+  await openWorkspacePanel("Workspace Memory and Dream");
   await managementDialog.getByRole("button", { name: "View Memory", exact: true }).click();
   await oldMemoryArrival;
   await managementDialog.press("Escape");
   await expect(managementTrigger).toBeFocused();
-  await managementTrigger.click();
-  await expect(permissionControl).toHaveValue("read-only");
+  await openWorkspacePanel("Workspace Memory and Dream");
   releaseOldMemory();
   await page.unroute("**/management/memory", delayFirstMemoryResponse);
   await expect(managementDialog.getByText("STALE_MEMORY_RESPONSE", { exact: true })).toHaveCount(0);
+  await managementDialog.press("Escape");
+  await openWorkspacePanel("Runtime status and controls");
+  managementDialog = runtimeManagementDialog;
+  await expect(permissionControl).toHaveValue("read-only");
 
   for (const [action, label, value] of [
     ["permission", "Tool permission level", "full-access"],
@@ -1326,13 +1363,13 @@ try {
     await route.fulfill({ response });
   };
   await page.route("**/management/permission", delayManagementSave);
-  await managementTrigger.click();
+  await openWorkspacePanel("Runtime status and controls");
   await expect(permissionControl).toHaveValue("read-only");
   await permissionControl.selectOption("full-access");
   await permissionControl.locator("xpath=..").getByRole("button", { name: "Save", exact: true }).click();
   await oldSaveArrival;
   await managementDialog.press("Escape");
-  await managementTrigger.click();
+  await openWorkspacePanel("Runtime status and controls");
   await expect(permissionControl).toHaveValue("full-access");
   await permissionControl.selectOption("workspace-write");
   releaseOldSave();
@@ -1361,9 +1398,7 @@ try {
       await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
       for (const viewport of [...viewports, { width: 375, height: 812 }, { width: 812, height: 375 }]) {
         await page.setViewportSize(viewport);
-        const trigger = page.getByRole("button", { name: language === "en" ? "Runtime status and controls" : "运行状态与控制", exact: true });
-        await trigger.focus();
-        await trigger.press("Enter");
+        const trigger = await openWorkspacePanel(language === "en" ? "Runtime status and controls" : "运行状态与控制");
         const dialog = page.getByRole("dialog", { name: language === "en" ? "Runtime status" : "运行状态", exact: true });
         await dialog.getByText("primary/small-model", { exact: true }).waitFor();
         const bounds = await dialog.boundingBox();
@@ -1373,32 +1408,45 @@ try {
         const select = dialog.getByLabel(language === "en" ? "Chat reasoning effort" : "聊天推理强度");
         await select.focus();
         await expect(select).toBeFocused();
-        for (const [label, result] of language === "en" ? [
-          ["View Memory", "Long-term Memory loaded."],
-          ["Run Dream", "No pending summaries."],
-          ["Reload Skills", "Skills reloaded: 1."],
-        ] : [
-          ["查看记忆", "长期记忆已加载。"],
-          ["运行 Dream", "没有待处理的摘要。"],
-          ["重新加载 Skills", "Skills 已重新加载：1 个。"],
-        ]) {
-          const button = dialog.getByRole("button", { name: label, exact: true });
-          await button.focus();
-          await expect(button).toBeFocused();
-          await button.press("Enter");
-          await dialog.getByRole("status").getByText(result, { exact: true }).first().waitFor();
-        }
-        const memory = dialog.getByRole("region", { name: language === "en" ? "Long-term Memory" : "长期记忆", exact: true }).locator("pre");
-        await expect(memory).toHaveText(longMemory);
-        assert.equal(await page.evaluate(() => window.__unsafeMemory), undefined, "Memory executed HTML");
-        await dialog.getByText("Browser reload metadata", { exact: true }).waitFor();
-        await expect(dialog.getByText("PRIVATE_BAD_SKILL_SECRET", { exact: true })).toHaveCount(0);
         await dialog.evaluate((element) => {
           if (element.scrollWidth > element.clientWidth + 1) throw new Error("Runtime content overflows horizontally");
         });
         await page.screenshot({ path: resolve(output, `runtime-${language}-${theme}-${viewport.width}x${viewport.height}.png`) });
         await dialog.press("Escape");
         await expect(trigger).toBeFocused();
+        await openWorkspacePanel(language === "en" ? "Workspace Memory and Dream" : "工作区记忆和 Dream");
+        const memoryDialog = page.getByRole("dialog", { name: language === "en" ? "Workspace Memory and Dream" : "工作区记忆和 Dream", exact: true });
+        for (const [label, result] of language === "en" ? [
+          ["View Memory", "Long-term Memory loaded."],
+          ["Run Dream", "No pending summaries."],
+        ] : [
+          ["查看记忆", "长期记忆已加载。"],
+          ["运行 Dream", "没有待处理的摘要。"],
+        ]) {
+          const button = memoryDialog.getByRole("button", { name: label, exact: true });
+          await button.focus();
+          await expect(button).toBeFocused();
+          await button.press("Enter");
+          await memoryDialog.getByRole("status").getByText(result, { exact: true }).first().waitFor();
+        }
+        const memory = memoryDialog.locator("pre");
+        await expect(memory).toHaveText(longMemory);
+        assert.equal(await page.evaluate(() => window.__unsafeMemory), undefined, "Memory executed HTML");
+        await memoryDialog.evaluate((element) => {
+          if (element.scrollWidth > element.clientWidth + 1) throw new Error("Memory content overflows horizontally");
+        });
+        await page.screenshot({ path: resolve(output, `memory-${language}-${theme}-${viewport.width}x${viewport.height}.png`) });
+        await memoryDialog.press("Escape");
+        await expect(trigger).toBeFocused();
+        await openRuntimeSettings(language);
+        const reload = page.getByRole("button", { name: language === "en" ? "Reload Skills" : "重新加载 Skills", exact: true });
+        await reload.focus();
+        await expect(reload).toBeFocused();
+        await reload.press("Enter");
+        await page.getByRole("status").getByText(language === "en" ? "Skills reloaded: 1." : "Skills 已重新加载：1 个。", { exact: true }).waitFor();
+        await page.getByText("Browser reload metadata", { exact: true }).waitFor();
+        await expect(page.getByText("PRIVATE_BAD_SKILL_SECRET", { exact: true })).toHaveCount(0);
+        await page.getByRole("button", { name: language === "en" ? "Back to conversation" : "返回对话", exact: true }).click();
       }
     }
   }
@@ -1679,7 +1727,7 @@ try {
   await page.setViewportSize(viewports[0]);
   await page.getByRole("button", { name: /Web available history/ }).click();
   await expect(page.locator("#app-sidebar").getByRole("button", { name: /Web available history/ })).toHaveAttribute("aria-current", "page");
-  await page.getByRole("button", { name: /Runtime status and controls|运行状态与控制/, exact: true }).click();
+  await openWorkspacePanel(/Runtime status and controls|运行状态与控制/);
   const activeRuntimeDialog = page.getByRole("dialog", { name: /Runtime status|运行状态/, exact: true });
   await activeRuntimeDialog.getByText(/1 active|1 个运行中/, { exact: true }).waitFor();
   await activeRuntimeDialog.press("Escape");

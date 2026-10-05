@@ -558,7 +558,11 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   const runtimeResponse = page.waitForResponse((response) => (
     response.url().endsWith("/management/status") && response.request().method() === "POST"
   ));
-  await page.getByRole("button", { name: "Runtime status and controls", exact: true }).click();
+  const runtimeMenu = page.locator("details").filter({
+    has: page.getByRole("button", { name: "Runtime status and controls", exact: true, includeHidden: true }),
+  });
+  await runtimeMenu.locator("summary").click();
+  await runtimeMenu.getByRole("button", { name: "Runtime status and controls", exact: true }).click();
   const runtime = await runtimeResponse;
   assert.equal(runtime.status(), 200);
   const budget = (await runtime.json()).result.status_view;

@@ -1164,6 +1164,13 @@ h1 {
   gap: 16px;
 }
 
+.managementHint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .schedulePage {
   display: grid;
   gap: 24px;
@@ -1952,6 +1959,85 @@ h1 {
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
+}
+
+.historyMessageHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.messageRestoreMenu {
+  position: relative;
+  flex: 0 0 auto;
+  margin: -4px -8px 0 0;
+}
+
+.messageRestoreMenu > summary {
+  list-style: none;
+}
+
+.messageRestoreMenu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.messageRestoreTrigger {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.messageRestoreTrigger:hover,
+.messageRestoreTrigger:focus-visible,
+.messageRestoreMenu[open] > .messageRestoreTrigger {
+  border-color: var(--border-subtle);
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.messageRestoreItems {
+  position: absolute;
+  z-index: 8;
+  top: calc(100% + 4px);
+  right: 0;
+  display: grid;
+  width: min(280px, calc(100vw - 32px));
+  padding: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface-panel);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 14%);
+}
+
+.messageRestoreItem {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-height: 36px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+}
+
+.messageRestoreItem:hover,
+.messageRestoreItem:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: -2px;
+  background: var(--surface-hover);
 }
 
 .markdownContent {
@@ -3689,6 +3775,105 @@ h1 {
 .chatHistoryItem:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.sessionNavigationRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 2px;
+}
+
+.sessionNavigationRow > .projectSessionItem,
+.sessionNavigationRow > .chatHistoryItem {
+  flex: 1 1 auto;
+}
+
+.sessionActionMenu {
+  position: relative;
+  flex: 0 0 28px;
+}
+
+.sessionActionMenu > summary {
+  list-style: none;
+}
+
+.sessionActionMenu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.sessionActionTrigger {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.sessionActionTrigger:hover,
+.sessionActionTrigger:focus-visible,
+.sessionActionMenu[open] > .sessionActionTrigger {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.sessionActionItems {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 3px);
+  right: 0;
+  display: grid;
+  min-width: 190px;
+  gap: 2px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface-panel);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 14%);
+  padding: 4px;
+}
+
+.sessionActionMenuItem {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.sessionActionMenuItem:hover:not(:disabled),
+.sessionActionMenuItem:focus-visible {
+  background: var(--surface-hover);
+  outline: 2px solid var(--border-strong);
+  outline-offset: -2px;
+}
+
+.sessionActionMenuItem:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.sessionActionDelete {
+  color: var(--danger-strong);
+}
+
+.workspaceDirectoryPath {
+  display: block;
+  margin-top: 14px;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: 13px;
+  white-space: pre-wrap;
 }
 
 .chatHistoryMore,

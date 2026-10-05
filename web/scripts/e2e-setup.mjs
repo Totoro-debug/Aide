@@ -5,6 +5,7 @@ export default async function setup({ shutdownTimeoutMs = 15000 } = {}) {
   const child = spawn("python", ["-u", "-m", "web.scripts.e2e_service"], {
     cwd: resolve(process.cwd(), ".."),
     stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, OMNI_E2E_SHUTDOWN_TIMEOUT_MS: String(shutdownTimeoutMs) },
   });
   let errors = "";
   let stdoutBuffer = "";
@@ -129,7 +130,7 @@ export default async function setup({ shutdownTimeoutMs = 15000 } = {}) {
     },
     async restart() {
       child.stdin.write("restart\n");
-      details = publish(parseDetails(await readLine(30000, "restart")));
+      details = publish(parseDetails(await readLine(shutdownTimeoutMs + 30000, "restart")));
       return details;
     },
     async shutdown() {

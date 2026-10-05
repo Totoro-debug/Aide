@@ -1,7 +1,8 @@
 import { useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { ChevronDown, ChevronRight, MessageSquare, Plus, RefreshCw, Search } from "lucide-react";
+import * as Dialog from "@radix-ui/react-dialog";
+import { ChevronDown, ChevronRight, FolderOpen, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
 
 import { getChatSessions, getProjectSessions } from "./api";
 import type {
@@ -26,6 +27,14 @@ export interface NavigationSession {
   running?: boolean;
 }
 
+export interface NavigationSessionAction {
+  action: "rename" | "delete";
+  directory: string;
+  projectId: string | null;
+  sessionId: string;
+  trigger: HTMLElement;
+}
+
 interface NavigationSidebarProps {
   authReady: boolean;
   projects: RegisteredProject[];
@@ -39,6 +48,7 @@ interface NavigationSidebarProps {
   onSessionNavigation: () => void;
   onAddProject: () => void;
   onNewProjectSession: (projectId: string) => void;
+  onSessionAction: (action: NavigationSessionAction) => void;
   onClose: () => void;
 }
 
@@ -55,6 +65,7 @@ export default function NavigationSidebar({
   onSessionNavigation,
   onAddProject,
   onNewProjectSession,
+  onSessionAction,
   onClose,
 }: NavigationSidebarProps) {
   const { t } = useTranslation();
@@ -64,14 +75,16 @@ export default function NavigationSidebar({
   const [chatHistory, setChatHistory] = useState<ChatSessionsResponse | null>(null);
   const [chatHistoryLoadState, setChatHistoryLoadState] = useState<ProjectsLoadState>("idle");
   const [chatHistoryError, setChatHistoryError] = useState<string | null>(null);
+  const [directoryDetails, setDirectoryDetails] = useState<{ title: string; directory: string } | null>(null);
+  const directoryTriggerRef = useRef<HTMLElement | null>(null);
   const chatHistoryRequestRef = useRef(0);
   const loadedChatCountRef = useRef(0);
   const projectRouteMatch = location.pathname.match(/^\/projects\/([^/]+)/);
   const selectedProjectId = projectRouteMatch === null ? null : decodeURIComponent(projectRouteMatch[1]);
   const searchParams = new URLSearchParams(location.search);
-  const selectedSessionId = activeSession?.sessionId ?? null;
-  const selectedDirectory = activeSession?.directory ?? searchParams.get("directory");
-  const isChatRoute = location.pathname === "/" || location.pathname === "/chat";
+  const selectedSessionId = searchParams.get("session") ?? activeSession?.sessionId ?? null;
+  const selectedDirectory = searchParams.get("directory") ?? activeSession?.directory;
+  const isChatRoute = location.pathname === "/" || location.pathname === "/chat" || location.pathname.startsWith("/chat/schedule");
 
   const refreshChatHistory = useCallback(async (cursor: string | null = null) => {
     if (!authReady) return;
@@ -153,6 +166,7 @@ export default function NavigationSidebar({
   const activeChatDirectory = isChatRoute ? selectedDirectory : null;
 
   return (
+    <>
     <div className={styles.sidebarContents}>
       <nav className={styles.navigation} aria-label={t("app.name")}>
         <Link
@@ -214,6 +228,11 @@ export default function NavigationSidebar({
                 onOpenProject={() => openProject(project.project_id)}
                 onNewSession={() => onNewProjectSession(project.project_id)}
                 onOpenSession={(sessionId) => openProjectSession(project.project_id, sessionId)}
+                onSessionAction={onSessionAction}
+                onViewDirectory={(title, directory, trigger) => {
+                  directoryTriggerRef.current = trigger;
+                  setDirectoryDetails({ title, directory });
+                }}
               />
             ))}
           </ul>
@@ -238,18 +257,38 @@ export default function NavigationSidebar({
                 && session.directory === activeChatDirectory;
               return (
                 <li key={`${session.directory}:${session.id}`}>
-                  <button
-                    className={styles.chatHistoryItem}
-                    type="button"
-                    disabled={!session.available}
-                    data-active={active}
-                    aria-current={active ? "page" : undefined}
-                    title={session.directory}
-                    onClick={() => openChatSession(session)}
-                  >
-                    <span>{session.title}</span>
-                    <small>{session.directory}</small>
-                  </button>
+                  <div className={styles.sessionNavigationRow}>
+                    <button
+                      className={styles.chatHistoryItem}
+                      type="button"
+                      disabled={!session.available}
+                      data-active={active}
+                      aria-current={active ? "page" : undefined}
+                      title={session.directory}
+                      onClick={() => openChatSession(session)}
+                    >
+                      <span>{session.title}</span>
+                      <small>{session.directory}</small>
+                    </button>
+                    <SessionActionMenu
+                      sessionTitle={session.title}
+                      actionDisabled={!session.available}
+                      onAction={(action, trigger) => {
+                        onSessionAction({
+                          action,
+                          directory: session.directory,
+                          projectId: null,
+                          sessionId: session.id,
+                          trigger,
+                        });
+                        onClose();
+                      }}
+                      onViewDirectory={(trigger) => {
+                        directoryTriggerRef.current = trigger;
+                        setDirectoryDetails({ title: session.title, directory: session.directory });
+                      }}
+                    />
+                  </div>
                 </li>
               );
             })}
@@ -283,6 +322,32 @@ export default function NavigationSidebar({
         </nav>
       </section>
     </div>
+    <Dialog.Root open={directoryDetails !== null} onOpenChange={(open) => { if (!open) setDirectoryDetails(null); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className={styles.dialogOverlay} />
+        <Dialog.Content className={styles.dialogContent} onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          const trigger = directoryTriggerRef.current;
+          if (trigger?.isConnected) trigger.focus();
+        }}>
+          <div className={styles.dialogHeader}>
+            <div>
+              <Dialog.Title className={styles.dialogTitle}>{t("controls.workspaceDirectoryTitle")}</Dialog.Title>
+              <Dialog.Description className={styles.dialogDescription}>
+                {directoryDetails?.title ?? ""}
+              </Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <button className={styles.iconButton} type="button" aria-label={t("controls.close")}>
+                <X size={17} aria-hidden="true" />
+              </button>
+            </Dialog.Close>
+          </div>
+          <code className={styles.workspaceDirectoryPath}>{directoryDetails?.directory ?? ""}</code>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+    </>
   );
 }
 
@@ -297,6 +362,8 @@ function ProjectNavigationItem({
   onOpenProject,
   onNewSession,
   onOpenSession,
+  onSessionAction,
+  onViewDirectory,
 }: {
   project: RegisteredProject;
   authReady: boolean;
@@ -308,6 +375,8 @@ function ProjectNavigationItem({
   onOpenProject: () => void;
   onNewSession: () => void;
   onOpenSession: (sessionId: string) => void;
+  onSessionAction: (action: NavigationSessionAction) => void;
+  onViewDirectory: (title: string, directory: string, trigger: HTMLElement) => void;
 }) {
   const { t } = useTranslation();
   const [sessionSearch, setSessionSearch] = useState("");
@@ -451,21 +520,35 @@ function ProjectNavigationItem({
                 ))}
               {(sessions?.sessions ?? []).map((session: SessionSummary) => (
                 <li key={session.id}>
-                  <button
-                    className={styles.projectSessionItem}
-                    type="button"
-                    aria-current={activeSessionId === session.id ? "page" : undefined}
-                    data-active={activeSessionId === session.id}
-                    onClick={() => onOpenSession(session.id)}
-                  >
-                    <MessageSquare size={13} aria-hidden="true" />
-                    <span>{session.title}</span>
-                    {session.occupied ? (
-                      <small className={styles.occupiedBadge}>
-                        {t(session.occupied_by === "client" ? "sessions.occupied" : "sessions.occupiedHere")}
-                      </small>
-                    ) : null}
-                  </button>
+                  <div className={styles.sessionNavigationRow}>
+                    <button
+                      className={styles.projectSessionItem}
+                      type="button"
+                      aria-current={activeSessionId === session.id ? "page" : undefined}
+                      data-active={activeSessionId === session.id}
+                      onClick={() => onOpenSession(session.id)}
+                    >
+                      <MessageSquare size={13} aria-hidden="true" />
+                      <span>{session.title}</span>
+                      {session.occupied ? (
+                        <small className={styles.occupiedBadge}>
+                          {t(session.occupied_by === "client" ? "sessions.occupied" : "sessions.occupiedHere")}
+                        </small>
+                      ) : null}
+                    </button>
+                    <SessionActionMenu
+                      sessionTitle={session.title}
+                      actionDisabled={session.occupied && session.occupied_by === "client"}
+                      onAction={(action, trigger) => onSessionAction({
+                        action,
+                        directory: project.path,
+                        projectId: project.project_id,
+                        sessionId: session.id,
+                        trigger,
+                      })}
+                      onViewDirectory={(trigger) => onViewDirectory(session.title, project.path, trigger)}
+                    />
+                  </div>
                 </li>
               ))}
             </ul>
@@ -483,6 +566,67 @@ function ProjectNavigationItem({
         </div>
       ) : null}
     </li>
+  );
+}
+
+function SessionActionMenu({
+  sessionTitle,
+  actionDisabled,
+  onAction,
+  onViewDirectory,
+}: {
+  sessionTitle: string;
+  actionDisabled: boolean;
+  onAction: (action: "rename" | "delete", trigger: HTMLElement) => void;
+  onViewDirectory: (trigger: HTMLElement) => void;
+}) {
+  const { t } = useTranslation();
+  const label = t("controls.sessionActions", { session: sessionTitle });
+
+  function closeMenu(event: React.MouseEvent<HTMLButtonElement>) {
+    event.currentTarget.closest("details")?.removeAttribute("open");
+  }
+
+  function requestAction(action: "rename" | "delete", event: React.MouseEvent<HTMLButtonElement>) {
+    const trigger = event.currentTarget.closest("details")?.querySelector("summary");
+    closeMenu(event);
+    if (trigger instanceof HTMLElement) onAction(action, trigger);
+  }
+
+  return (
+    <details className={styles.sessionActionMenu}>
+      <summary className={styles.sessionActionTrigger} aria-label={label} title={label}>
+        <MoreHorizontal size={15} aria-hidden="true" />
+      </summary>
+      <div className={styles.sessionActionItems} role="group" aria-label={label}>
+        <button className={styles.sessionActionMenuItem} type="button" onClick={(event) => {
+          const trigger = event.currentTarget.closest("details")?.querySelector("summary");
+          closeMenu(event);
+          if (trigger instanceof HTMLElement) onViewDirectory(trigger);
+        }}>
+          <FolderOpen size={14} aria-hidden="true" />
+          {t("controls.viewWorkspaceDirectory")}
+        </button>
+        <button
+          className={styles.sessionActionMenuItem}
+          type="button"
+          disabled={actionDisabled}
+          onClick={(event) => requestAction("rename", event)}
+        >
+          <Pencil size={14} aria-hidden="true" />
+          {t("controls.renameSession")}
+        </button>
+        <button
+          className={`${styles.sessionActionMenuItem} ${styles.sessionActionDelete}`}
+          type="button"
+          disabled={actionDisabled}
+          onClick={(event) => requestAction("delete", event)}
+        >
+          <Trash2 size={14} aria-hidden="true" />
+          {t("controls.deleteSession")}
+        </button>
+      </div>
+    </details>
   );
 }
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -704,7 +705,8 @@ async def _seed_restore_session(
 
 async def _stop_service(home: AgentHome, port: int) -> None:
     accepted = await ServiceClient.stop_existing(home, port=port)
-    deadline = time.monotonic() + 15.0
+    timeout_seconds = int(os.environ.get("OMNI_E2E_SHUTDOWN_TIMEOUT_MS", "15000")) / 1000
+    deadline = time.monotonic() + timeout_seconds
     while discovery_path(home).exists():
         if time.monotonic() >= deadline:
             raise RuntimeError("E2E service did not finish shutting down.")

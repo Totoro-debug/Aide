@@ -902,6 +902,9 @@
         "arguments": {
           "type": "string"
         },
+        "result": {
+          "type": "string"
+        },
         "status": {
           "enum": [
             "running",
@@ -945,6 +948,10 @@
         },
         "assistant_content": {
           "type": "string"
+        },
+        "response_segments": {
+          "type": "array",
+          "items": {"type": "string"}
         },
         "tools": {
           "type": "array",

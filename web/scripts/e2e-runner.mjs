@@ -1091,23 +1091,24 @@ try {
   await waitForRecordedEvent((messages) => messages.some((event) => (
     event.type === "input.accepted" && event.payload?.text === "tool states"
   )), "Tool Run acceptance");
-  const toolGroup = page.locator("article[data-run-id] details").filter({ hasText: "Tool activity" }).first();
-  await toolGroup.locator("summary").first().waitFor();
-  assert.equal(await toolGroup.getAttribute("open"), null, "Tool activity should default to collapsed");
-  await toolGroup.locator("summary").first().click();
-  await toolGroup.getByText("Completed", { exact: true }).waitFor();
-  await toolGroup.getByText("Failed", { exact: true }).waitFor();
-  await toolGroup.getByText("Rejected", { exact: true }).waitFor();
-  await toolGroup.getByText("Running", { exact: true }).waitFor();
+  const toolRun = page.locator("article[data-run-id]").filter({ hasText: "tool states" }).last();
+  await expect(toolRun.getByRole("status").first()).toHaveText("Running");
+  const toolGroup = toolRun.getByRole("group", { name: "Run activity", exact: true });
+  await toolGroup.locator("summary").waitFor();
+  await expect(toolGroup).not.toHaveAttribute("open");
+  await toolGroup.locator("summary").click();
+  for (const status of ["Completed", "Failed", "Rejected", "Running"]) {
+    await toolGroup.getByRole("list").getByText(status, { exact: true }).waitFor();
+  }
   const beforeToolRefresh = await page.evaluate(() => window.__omniTestMessages);
   await page.reload();
   await expect(page.getByRole("log").getByText("tool states", { exact: true })).toHaveCount(1);
   await page.evaluate((messages) => {
     window.__omniTestMessages = [...messages, ...window.__omniTestMessages];
   }, beforeToolRefresh);
-  await toolGroup.locator("summary").first().click();
+  await toolGroup.locator("summary").click();
   for (const status of ["Completed", "Failed", "Rejected", "Running"]) {
-    await toolGroup.getByText(status, { exact: true }).waitFor();
+    await toolGroup.getByRole("list").getByText(status, { exact: true }).waitFor();
   }
 
   const newSessionResponsePromise = page.waitForResponse((response) => (
@@ -1421,14 +1422,24 @@ try {
   });
   assert.equal(await page.getByLabel("Message input").inputValue(), multilinePrompt, "IME Enter submitted the prompt");
   await page.getByLabel("Message input").press("Enter");
-  await page.getByText("Streamed answer", { exact: true }).waitFor();
+  const streamingRun = page.locator("article[data-run-id]").filter({ hasText: multilinePrompt }).last();
+  const streamingActivity = streamingRun.getByRole("group", { name: "Run activity", exact: true });
+  await streamingActivity.locator("summary").waitFor();
+  await expect(streamingActivity).not.toHaveAttribute("open");
+  await streamingActivity.locator("summary").click();
+  await streamingActivity.getByRole("heading", { name: "Streamed answer", exact: true }).waitFor();
   assert.equal(await page.getByText("The response arrived in multiple chunks.", { exact: true }).count(), 0,
     "The complete answer appeared before its first streamed frame was observed");
   await control.command("settings-wait");
   const beforeStreamRefresh = await page.evaluate(() => window.__omniTestMessages);
   await page.reload();
   await expect(page.getByRole("log").getByText(multilinePrompt, { exact: true })).toHaveCount(1);
-  await expect(page.getByRole("heading", { name: "Streamed answer", exact: true })).toHaveCount(1);
+  const recoveredStreamingActivity = page.locator("article[data-run-id]").filter({ hasText: multilinePrompt }).last()
+    .getByRole("group", { name: "Run activity", exact: true });
+  await recoveredStreamingActivity.waitFor();
+  await expect(recoveredStreamingActivity).not.toHaveAttribute("open");
+  await recoveredStreamingActivity.locator("summary").click();
+  await expect(recoveredStreamingActivity.getByRole("heading", { name: "Streamed answer", exact: true })).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Cancel run", exact: true })).toBeEnabled();
   await page.evaluate((messages) => {
     window.__omniTestMessages = [...messages, ...window.__omniTestMessages];
@@ -1731,11 +1742,18 @@ try {
   assert.ok(canceledRunIds.includes(acceptedToolRuns[0].run_id), "Cancel did not terminate the selected Run");
   assert.equal(canceledRunIds.includes(conversationRunId), false, "Cancel affected the other Session");
   await page.reload();
-  const canceledHistoryTool = page.locator('article[data-role="tool"]')
-    .filter({ hasText: "Tool call interrupted because the turn was cancelled." });
-  await canceledHistoryTool.waitFor();
-  await canceledHistoryTool.locator("summary").first().click();
-  await canceledHistoryTool.getByText("Canceled", { exact: true }).waitFor();
+  const canceledHistoryActivity = page.getByRole("log").getByRole("group", { name: "Run activity", exact: true })
+    .filter({ hasText: "Tool call interrupted because the turn was cancelled." }).last();
+  await canceledHistoryActivity.waitFor();
+  await expect(canceledHistoryActivity).not.toHaveAttribute("open");
+  await expect(canceledHistoryActivity.locator("summary")).toContainText("Canceled");
+  await canceledHistoryActivity.locator("summary").click();
+  const canceledExec = canceledHistoryActivity.getByRole("list").locator("li").filter({ hasText: /^exec/ }).last();
+  const canceledExecArguments = JSON.parse(await canceledExec.locator("pre").textContent() ?? "null");
+  assert.equal(canceledExecArguments.command, "Get-Content -LiteralPath .\\fixture.txt -Wait");
+  assert.equal(canceledExecArguments.timeout, 600);
+  await expect(canceledHistoryActivity).toContainText("Tool call interrupted because the turn was cancelled.");
+  await expect(canceledHistoryActivity).toContainText("fixture.txt");
   assert.equal(await page.getByRole("log").getByText("tool states", { exact: true }).count(), 1,
     "Reload duplicated the persisted Tool Run prompt");
   await page.getByRole("button", { name: /Light|浅色/ }).click();
@@ -2041,6 +2059,18 @@ try {
         await primaryDialog.waitFor({ state: "hidden" });
         await secondaryDialog.waitFor({ state: "hidden" });
         const completedRun = await waitForConfirmationRunCompletion();
+        const completedActivity = page.getByRole("log").getByRole("group", {
+          name: "Run activity", exact: true,
+        }).filter({ hasText: "confirmation fixture content" }).last();
+        if (combinationIndex === 0) {
+          const finalReply = page.getByRole("log").getByText("Confirmation fixture completed.", { exact: true }).last();
+          await finalReply.waitFor();
+          await completedActivity.waitFor();
+          await expect(completedActivity).not.toHaveAttribute("open");
+          await expect(completedActivity.locator("summary")).toContainText("Completed");
+          await expect(completedActivity).not.toContainText("Confirmation fixture completed.");
+          await expect(finalReply).toBeVisible();
+        }
         const expectedStatus = combinationIndex === 0 || combinationIndex === viewports.length ? "success" : "refused";
         const finishedStatuses = await page.evaluate((runId) => window.__omniTestMessages
           .filter((event) => event.type === "run.output" && event.run_id === runId
@@ -2063,6 +2093,15 @@ try {
         }
         assert.equal(await input.evaluate((element) => element === document.activeElement), true,
           "Confirmation did not restore focus to the triggering input");
+        if (combinationIndex === 0) {
+          await completedActivity.locator("summary").click();
+          await expect(completedActivity).toContainText("confirmation fixture content");
+          await expect(completedActivity).toContainText("confirmation-outside.txt");
+          await page.setViewportSize({ width: 480, height: 800 });
+          assert.ok(await page.evaluate(() => document.documentElement.scrollWidth) <= 480,
+            "Expanded Tool arguments overflowed the narrow conversation");
+          await page.setViewportSize(viewport);
+        }
       }
     }
   }
@@ -2102,6 +2141,84 @@ try {
   await page.setViewportSize(viewports[0]);
   await secondPage.setViewportSize(viewports[0]);
   await page.getByRole("button", { name: "EN", exact: true }).click();
+  for (const prompt of ["process cycles", "process cancel gap"]) {
+    await control.command("process-arm");
+    await page.getByRole("button", { name: "New session", exact: true }).click();
+    await page.getByRole("heading", { name: "New Session draft", exact: true }).waitFor();
+    await page.getByLabel("Message input").fill(prompt);
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await waitForRecordedEvent((messages) => messages.some((event) => (
+      event.type === "input.accepted" && event.payload?.text === prompt
+    )), `${prompt} acceptance`);
+    await control.command("process-wait");
+    const activity = page.getByRole("log").getByRole("group", { name: "Run activity", exact: true });
+    const verifyProcess = async () => {
+      await expect(activity.locator("summary")).toContainText("Running");
+      await expect(activity).not.toHaveAttribute("open");
+      await activity.locator("summary").focus();
+      await activity.locator("summary").press("Enter");
+      await expect(activity).toHaveAttribute("open", "");
+      const parts = activity.getByRole("list").locator(":scope > li");
+      await expect(parts.nth(0)).toHaveText("Before first tool.");
+      await expect(parts.nth(1)).toContainText("read_file");
+      await expect(parts.nth(1)).toContainText("Completed");
+      await expect(parts.nth(1)).toContainText("fixture.txt");
+      await expect(parts.nth(1)).toContainText("fixture content");
+      if (prompt === "process cycles") {
+        await expect(parts.nth(2)).toHaveText("Between tools.");
+        await expect(parts.nth(3)).toContainText("read_file");
+        await expect(parts.nth(3)).toContainText("Completed");
+        await expect(parts.nth(3)).toContainText("fixture content");
+      }
+      await expect(activity.getByText("Result", { exact: true })).toHaveCount(prompt === "process cycles" ? 2 : 1);
+    };
+    await verifyProcess();
+    await page.reload();
+    await verifyProcess();
+    if (prompt === "process cycles") {
+      await control.command("process-release");
+      await page.getByRole("log").getByText("Process final reply.", { exact: true }).waitFor();
+      await expect(activity.locator("summary")).toContainText("Completed");
+      await expect(activity).not.toHaveAttribute("open");
+      await expect(activity).not.toContainText("Process final reply.");
+      await activity.locator("summary").click();
+      await expect(activity.getByRole("list").locator(":scope > li").nth(2)).toHaveText("Between tools.");
+    } else {
+      await page.getByRole("button", { name: "Cancel run", exact: true }).click();
+      await expect(page.getByRole("button", { name: "Cancel run", exact: true })).toBeHidden();
+      await control.command("process-release");
+      await page.reload();
+      await expect(activity.locator("summary")).toContainText("Canceled");
+      await expect(activity).not.toHaveAttribute("open");
+      await activity.locator("summary").click();
+      await expect(activity).toContainText("Omni 已取消本轮对话。");
+    }
+  }
+  await page.getByLabel("Message input").fill("provider failure");
+  await page.getByLabel("Message input").press("Enter");
+  await waitForRecordedEvent((messages) => {
+    const accepted = [...messages].reverse().find((event) => (
+      event.type === "input.accepted" && event.payload?.text === "provider failure"
+    ));
+    return accepted !== undefined && messages.some((event) => (
+      event.run_id === accepted.run_id
+      && (event.type === "run.failed" || (event.type === "run.completed" && event.payload?.finish_reason === "failed"))
+    ));
+  }, "failed Agent Run completion");
+  const failedActivity = page.getByRole("log").getByRole("group", { name: "Run activity", exact: true })
+    .filter({ hasText: "Failed" }).last();
+  await failedActivity.waitFor();
+  await expect(failedActivity).not.toHaveAttribute("open");
+  await expect(failedActivity.locator("summary")).toContainText("Failed");
+  const failedReason = await page.evaluate(() => [...window.__omniTestMessages].reverse().find((event) => (
+    event.type === "run.output" && event.payload?.message?.type === "system_control"
+    && event.payload?.message?.metadata?.finish_reason === "failed"
+  ))?.payload.message.content);
+  assert.ok(typeof failedReason === "string" && failedReason.length > 0, "Failed Run had no public error reason");
+  await page.reload();
+  await expect(failedActivity.locator("summary")).toContainText("Failed");
+  await failedActivity.locator("summary").click();
+  await expect(failedActivity).toContainText(failedReason);
   const releaseResponsePromise = page.waitForResponse((response) => (
     response.request().method() === "POST" && response.url().includes("/release")
   ));

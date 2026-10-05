@@ -70,12 +70,13 @@ class AgentRunnerToolCallStarted:
 
 @dataclass(frozen=True, slots=True)
 class AgentRunnerToolCallFinished:
-    """The observed Tool outcome without its result content or artifact."""
+    """The observed Tool outcome with externalized content and no artifact reference."""
 
     type: ClassVar[Literal["tool_call_finished"]] = "tool_call_finished"
     tool_call_id: str
     tool_name: str
     status: Literal["success", "error", "refused"]
+    result: str = ""
 
 
 class AgentRunnerOutputCallback(Protocol):
@@ -444,6 +445,7 @@ class AgentRunner:
                             tool_call_id=tool_call.id,
                             tool_name=tool_call.name,
                             status=result.status,
+                            result=result.content,
                         )
                     )
                     if stop_on_tool_error and result.status != "success":

@@ -5537,12 +5537,14 @@ interface ToolActivity {
   name: string;
   arguments: string;
   status: ToolStatus;
+  result?: string | null;
 }
 
 interface LiveRun {
   localId: string;
   runId: string | null;
   prompt: string;
+  responseSegments: string[];
   assistantContent: string;
   status: RunStatus;
   tools: ToolActivity[];
@@ -5550,6 +5552,20 @@ interface LiveRun {
   cancelRequested: boolean;
   cancellable: boolean;
 }
+
+type RunActivityStatus = Extract<RunStatus, "running" | "completed" | "failed" | "canceled">;
+type RunActivityPart =
+  | { kind: "text"; key: string; content: string }
+  | { kind: "tool"; tool: ToolActivity };
+
+interface RunActivity {
+  status: RunActivityStatus | null;
+  parts: RunActivityPart[];
+}
+
+type ConversationHistoryEntry =
+  | { kind: "message"; key: string; message: Record<string, unknown>; index: number }
+  | { kind: "activity"; key: string; activity: RunActivity };
 
 interface PendingSubmission {
   localId: string;
@@ -5587,6 +5603,7 @@ function newLiveRun(
     localId,
     runId,
     prompt,
+    responseSegments: [],
     assistantContent: "",
     status,
     tools: [],
@@ -5622,12 +5639,18 @@ function reduceLiveRunEvent(runs: LiveRun[], event: ServiceEvent): LiveRun[] {
     } else if (value.type === "tool_call" && typeof metadata.tool_call_id === "string") {
       const toolId = metadata.tool_call_id;
       const tool = next.tools.find((item) => item.toolCallId === toolId);
+      if (tool === undefined) {
+        next.responseSegments = [...next.responseSegments, next.assistantContent];
+        next.assistantContent = "";
+      }
       const status: ToolStatus = metadata.status === "success" ? "completed"
         : metadata.status === "error" ? "failed" : metadata.status === "refused" ? "rejected"
           : metadata.status === "cancelled" || metadata.status === "canceled" ? "canceled" : "running";
+      const result = typeof metadata.result === "string" ? metadata.result : undefined;
       next.tools = tool === undefined ? [...next.tools, { toolCallId: toolId, name: content,
-        arguments: typeof metadata.arguments === "string" ? metadata.arguments : "", status }]
-        : next.tools.map((item) => item.toolCallId === toolId ? { ...item, status } : item);
+        arguments: typeof metadata.arguments === "string" ? metadata.arguments : "", status, result }]
+        : next.tools.map((item) => item.toolCallId === toolId
+          ? { ...item, status, result: result ?? item.result } : item);
     } else if (value.type === "system_control" && metadata._streamed === true) {
       next.status = metadata.finish_reason === "cancelled" ? "canceled" : "failed";
       next.error = content || null;
@@ -5810,6 +5833,181 @@ function historyToolActivities(message: Record<string, unknown>): ToolActivity[]
   });
 }
 
+function conversationHistoryEntries(messages: Record<string, unknown>[]): ConversationHistoryEntry[] {
+  const entries: ConversationHistoryEntry[] = [];
+  let activityParts: RunActivityPart[] | null = null;
+  let activityStatus: RunActivityStatus | null = null;
+
+  const startActivity = () => {
+    activityParts ??= [];
+  };
+  const appendText = (key: string, content: string) => {
+    if (!content) return;
+    startActivity();
+    activityParts?.push({ kind: "text", key, content });
+  };
+  const flushActivity = () => {
+    if (activityParts === null) return;
+    const index = entries.length;
+    entries.push({
+      kind: "activity",
+      key: `activity-${index}`,
+      activity: { status: activityStatus, parts: activityParts },
+    });
+    activityParts = null;
+    activityStatus = null;
+  };
+
+  messages.forEach((message, index) => {
+    const role = message.role;
+    if (role === "user") {
+      flushActivity();
+      entries.push({ kind: "message", key: `message-${index}`, message, index });
+      return;
+    }
+
+    if (role === "assistant") {
+      const isInterrupted = message.status === "interrupted";
+      const isFailed = message.status === "error";
+      if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+        appendText(`assistant-${index}`, historyMessageText(message.content));
+        for (const tool of historyToolActivities(message)) {
+          startActivity();
+          activityParts?.push({ kind: "tool", tool });
+        }
+        return;
+      }
+      if (isInterrupted || isFailed) {
+        startActivity();
+        appendText(`assistant-${index}`, historyMessageText(message.content));
+        const error = message.error;
+        if (typeof error === "object" && error !== null && "message" in error
+          && typeof error.message === "string" && error.message !== message.content) {
+          appendText(`error-${index}`, error.message);
+        }
+        activityStatus = isInterrupted ? "canceled" : "failed";
+        flushActivity();
+        return;
+      }
+      if (activityParts !== null) {
+        activityStatus = "completed";
+        flushActivity();
+      }
+      entries.push({ kind: "message", key: `message-${index}`, message, index });
+      return;
+    }
+
+    if (role === "tool") {
+      const rawStatus = typeof message.status === "string" ? message.status : "error";
+      const status: ToolStatus = rawStatus === "success" ? "completed"
+        : rawStatus === "refused" ? "rejected"
+          : rawStatus === "error" && message.content === "Tool call interrupted because the turn was cancelled."
+            ? "canceled" : "failed";
+      const toolCallId = typeof message.tool_call_id === "string" ? message.tool_call_id : `tool-${index}`;
+      const result = historyMessageText(message.content);
+      startActivity();
+      if (status === "canceled") activityStatus = "canceled";
+      const existing = activityParts?.find((part) => part.kind === "tool" && part.tool.toolCallId === toolCallId);
+      if (existing?.kind === "tool") {
+        existing.tool.status = status;
+        existing.tool.result = result;
+      } else {
+        activityParts?.push({ kind: "tool", tool: {
+          toolCallId,
+          name: typeof message.name === "string" ? message.name : "",
+          arguments: "",
+          status,
+          result,
+        } });
+      }
+      return;
+    }
+
+    flushActivity();
+    entries.push({ kind: "message", key: `message-${index}`, message, index });
+  });
+  flushActivity();
+  return entries;
+}
+
+function RunActivityGroup({
+  activity,
+  t,
+}: {
+  activity: RunActivity;
+  t: (key: string) => string;
+}) {
+  const toolCount = activity.parts.filter((part) => part.kind === "tool").length;
+  return (
+    <details className={styles.toolActivity} role="group" aria-label={t("conversation.runActivity")}>
+      <summary className={styles.toolActivityHeader}>
+        <span className={styles.toolActivityTitle}>
+          <Activity size={14} aria-hidden="true" />
+          {t("conversation.runActivity")}
+        </span>
+        {toolCount > 0 ? <span className={styles.toolActivityCount}>{toolCount}</span> : null}
+        {activity.status !== null ? (
+          <span className={`${styles.statusBadge} ${styles[`status${activity.status}`]}`}>
+            {statusIcon(activity.status, 12)}
+            {t(runStatusKey(activity.status))}
+          </span>
+        ) : null}
+        <ChevronDown className={styles.toolActivityChevron} size={14} aria-hidden="true" />
+      </summary>
+      <ul className={styles.toolActivityList}>
+        {activity.parts.map((part) => part.kind === "text" ? (
+          <li className={styles.runActivityText} key={part.key}>
+            <MarkdownContent content={part.content} />
+          </li>
+        ) : (
+          <li className={styles.toolActivityItem} key={part.tool.toolCallId}>
+            <div className={styles.toolActivityItemHeader}>
+              <span className={styles.toolName}>{part.tool.name || t("conversation.unknownTool")}</span>
+              <span className={`${styles.statusBadge} ${styles[`status${part.tool.status}`]}`}>
+                {statusIcon(part.tool.status, 12)}
+                {t(toolStatusKey(part.tool.status))}
+              </span>
+            </div>
+            {part.tool.arguments ? (
+              <div className={styles.runActivityDetail}>
+                <span>{t("conversation.toolArguments")}</span>
+                <pre>{part.tool.arguments}</pre>
+              </div>
+            ) : null}
+            {part.tool.result !== undefined && part.tool.result !== null ? (
+              <div className={styles.runActivityDetail}>
+                <span>{t("conversation.toolResult")}</span>
+                <MarkdownContent content={part.tool.result} />
+              </div>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+function ConversationHistoryView({
+  messages,
+  t,
+}: {
+  messages: Record<string, unknown>[];
+  t: (key: string) => string;
+}) {
+  return <>
+    {conversationHistoryEntries(messages).map((entry) => entry.kind === "activity" ? (
+      <RunActivityGroup key={entry.key} activity={entry.activity} t={t} />
+    ) : (
+      <HistoryMessageView
+        key={entry.key}
+        message={entry.message}
+        index={entry.index}
+        t={t}
+      />
+    ))}
+  </>;
+}
+
 function LiveRunView({
   run,
   t,
@@ -5820,6 +6018,18 @@ function LiveRunView({
   onCancel: (run: LiveRun) => void;
 }) {
   const active = isLiveRunActive(run);
+  const activityParts: RunActivityPart[] = [];
+  run.tools.forEach((tool, index) => {
+    const content = run.responseSegments[index];
+    if (content) activityParts.push({ kind: "text", key: `response-${index}`, content });
+    activityParts.push({ kind: "tool", tool });
+  });
+  if ((active || run.status !== "completed") && run.assistantContent) {
+    activityParts.push({ kind: "text", key: "current-content", content: run.assistantContent });
+  }
+  if (!active && run.error) activityParts.push({ kind: "text", key: "run-error", content: run.error });
+  const activityStatus: RunActivityStatus = active ? "running" : run.status as RunActivityStatus;
+  const showActivity = active || run.status !== "completed" || activityParts.length > 0;
   return (
     <article className={styles.liveRun} data-run-id={run.runId ?? run.localId}>
       <div className={styles.historyMessage} data-role="user">
@@ -5834,9 +6044,17 @@ function LiveRunView({
             {t(runStatusKey(run.status))}
           </span>
         </div>
-        {run.tools.length > 0 ? <ToolActivityGroup tools={run.tools} t={t} /> : null}
-        {run.assistantContent ? <MarkdownContent content={run.assistantContent} /> : active ? <p className={styles.pendingAnswer}>{t("conversation.assistantPending")}</p> : null}
-        {run.error ? <p className={styles.runError}>{run.error}</p> : null}
+        {showActivity ? (
+          <RunActivityGroup
+            key={`${run.localId}-${active ? "active" : "terminal"}`}
+            activity={{ status: activityStatus, parts: activityParts }}
+            t={t}
+          />
+        ) : null}
+        {run.status === "completed" && run.assistantContent
+          ? <MarkdownContent content={run.assistantContent} />
+          : active && !run.assistantContent
+            ? <p className={styles.pendingAnswer}>{t("conversation.assistantPending")}</p> : null}
         {active && run.runId !== null && run.cancellable ? (
           <button
             className={styles.cancelRunButton}
@@ -6613,9 +6831,10 @@ function ProjectSessionsContent({
       ));
       const recovered = live.runs.map((run): LiveRun => ({
         ...newLiveRun(run.request_id, run.run_id, run.prompt, run.status),
-        assistantContent: run.assistant_content,
+        responseSegments: run.response_segments?.slice(0, -1) ?? [],
+        assistantContent: run.response_segments?.at(-1) ?? run.assistant_content,
         tools: run.tools.map((tool) => ({ toolCallId: tool.tool_call_id, name: tool.name,
-          arguments: tool.arguments, status: tool.status })),
+          arguments: tool.arguments, status: tool.status, result: tool.result })),
         cancelRequested: run.cancel_requested, cancellable: run.cancellable,
       }));
       const requestIds = new Set(live.runs.map((run) => run.request_id));
@@ -7883,9 +8102,7 @@ function ProjectSessionsContent({
                       </div>
                     ) : (
                       <div className={styles.messageHistory}>
-                        {snapshot.messages.map((message, index) => (
-                          <HistoryMessageView key={`history-${index}-${String(message.role)}`} message={message} index={index} t={t} />
-                        ))}
+                        <ConversationHistoryView messages={snapshot.messages} t={t} />
                         {selectedLiveRuns.map((run) => (
                           <LiveRunView key={run.localId} run={run} t={t} onCancel={(candidate) => void cancelRun(candidate)} />
                         ))}

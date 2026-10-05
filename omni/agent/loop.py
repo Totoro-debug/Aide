@@ -1314,13 +1314,23 @@ class AgentRunExecutor:
             metadata_updates = {"blackboard": staged_blackboard.to_dict()}
             metadata_removals = ()
 
+        run_messages = deepcopy(result.messages)
+        if result.finish_reason == "cancelled" and not any(
+            message.get("status") == "interrupted" for message in run_messages
+        ):
+            run_messages.append(_build_assistant_repair_message(
+                content=(result.error.message if result.error else TURN_CANCELLED_MESSAGE),
+                status="interrupted",
+                error=result.error or ErrorInfo("turn_cancelled", TURN_CANCELLED_MESSAGE),
+                model_calls=0,
+            ))
         try:
             if self._aborted:
                 return False
             self._commit_agent_run(
                 active_session,
                 run_context,
-                [deepcopy(current_user), *deepcopy(result.messages)],
+                [deepcopy(current_user), *run_messages],
                 usage_delta=framing_usage,
                 metadata_updates=metadata_updates,
                 metadata_removals=metadata_removals,
@@ -1467,7 +1477,8 @@ class AgentRunExecutor:
                 OutboundMessage(
                     "tool_call",
                     event.tool_name,
-                    {"tool_call_id": event.tool_call_id, "status": event.status},
+                    {"tool_call_id": event.tool_call_id, "status": event.status,
+                     "result": event.result},
                 )
             )
             return

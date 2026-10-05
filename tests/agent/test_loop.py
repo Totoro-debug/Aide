@@ -3016,7 +3016,7 @@ async def test_direct_bus_projects_completed_turn_without_session_access(
 
 
 @pytest.mark.asyncio
-async def test_loop_publishes_the_exact_sparse_outbound_protocol_without_tool_results(
+async def test_loop_publishes_sparse_outbound_with_externalized_tool_results(
     tmp_path: Path,
 ) -> None:
     raw_arguments = '{"missing":"preserved exactly"}'
@@ -3059,7 +3059,8 @@ async def test_loop_publishes_the_exact_sparse_outbound_protocol_without_tool_re
             (
                 "tool_call",
                 "unknown_tool",
-                {"tool_call_id": "call_sparse", "status": "error"},
+                {"tool_call_id": "call_sparse", "status": "error",
+                 "result": session.messages[2]["content"]},
             ),
             ("model_response", "done", {"_stream_delta": True}),
             ("model_response", "", {"_stream_end": True}),

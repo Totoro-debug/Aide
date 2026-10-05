@@ -1814,6 +1814,7 @@ class WorkspaceRecord:
                     state.live_runs[run_id] = {
                         "run_id": run_id, "request_id": request_id or run_id, "prompt": text,
                         "status": "accepted", "assistant_content": "", "tools": [],
+                        "response_segments": [""],
                         "cancel_requested": False, "cancellable": False,
                     }
                     await state.bus.put_inbound(
@@ -4869,6 +4870,7 @@ class AgentService:
         run["status"] = "running"
         if message["type"] == "model_response" and metadata.get("_stream_delta") is True:
             run["assistant_content"] += message["content"]
+            run["response_segments"][-1] += message["content"]
         elif message["type"] == "tool_call":
             tool_id = metadata.get("tool_call_id")
             if not isinstance(tool_id, str) or not tool_id:
@@ -4878,11 +4880,15 @@ class AgentService:
             status = {"success": "completed", "error": "failed", "refused": "rejected",
                       "cancelled": "canceled", "canceled": "canceled"}.get(metadata.get("status"))
             if tool is None:
+                run["response_segments"].append("")
                 tools.append({"tool_call_id": tool_id, "name": message["content"],
                               "arguments": metadata.get("arguments", ""),
                               "status": status or "running"})
+                tool = tools[-1]
             elif status is not None:
                 tool["status"] = status
+            if isinstance(metadata.get("result"), str):
+                tool["result"] = metadata["result"]
 
     def confirmation_source(
         self, owner: ConfirmationOwner

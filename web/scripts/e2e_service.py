@@ -28,6 +28,8 @@ from omni.service.errors import ServiceError
 CONFIRMATION_PATH: str | None = None
 SETTINGS_ENTERED = asyncio.Event()
 SETTINGS_RELEASE = asyncio.Event()
+PROCESS_ENTERED = asyncio.Event()
+PROCESS_RELEASE = asyncio.Event()
 SETTINGS_RELEASE_PATH: Path | None = None
 PROJECT_REMOVAL_ENTERED = asyncio.Event()
 PROJECT_REMOVAL_RELEASE = asyncio.Event()
@@ -235,6 +237,14 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
         and not v1_tool_completed
         and not v2_tool_completed
     )
+    if "provider failure" in normalized_requested_prompt:
+        return web.Response(status=502, text="Fixture provider failure")
+    process_request = "process cycles" in normalized_requested_prompt
+    cancel_gap_request = "process cancel gap" in normalized_requested_prompt
+    if (process_request or cancel_gap_request) and "call-process-first" in current_tool_result_ids:
+        if cancel_gap_request or "call-process-second" in current_tool_result_ids:
+            PROCESS_ENTERED.set()
+            await PROCESS_RELEASE.wait()
     if model_mcp_barrier and needs_tool_search:
         MODEL_MCP_ENTERED.set()
         await MODEL_MCP_RELEASE.wait()
@@ -260,7 +270,23 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
     )
     streaming_request = "streaming markdown" in user_prompt.lower()
     wait_command = "Get-Content -LiteralPath .\\fixture.txt -Wait"
-    if needs_tool_search:
+    if process_request or cancel_gap_request:
+        if "call-process-first" not in current_tool_result_ids:
+            process_text, process_call = "Before first tool.\n\n", "call-process-first"
+        elif process_request and "call-process-second" not in current_tool_result_ids:
+            process_text, process_call = "Between tools.\n\n", "call-process-second"
+        else:
+            process_text, process_call = "Process final reply.", None
+        chunks.append(_chunk(request_id=request_id, model=model, delta={"content": process_text}))
+        if process_call is not None:
+            chunks.append(_chunk(request_id=request_id, model=model, delta={"tool_calls": [{
+                "index": 0, "id": process_call, "type": "function", "function": {
+                    "name": "read_file", "arguments": json.dumps({"path": "fixture.txt"}),
+                },
+            }]}))
+        chunks.append(_chunk(request_id=request_id, model=model, delta={},
+                             finish_reason="tool_calls" if process_call else "stop"))
+    elif needs_tool_search:
         suffix = "v1" if model_mcp_barrier else "v2"
         chunks.append(
             _chunk(
@@ -857,8 +883,22 @@ async def _run_e2e(provider_base_url: str) -> None:
                 command = await asyncio.to_thread(sys.stdin.readline)
                 if not command or command.strip() == "stop":
                     SETTINGS_RELEASE.set()
+                    PROCESS_RELEASE.set()
                     MODEL_MCP_RELEASE.set()
                     break
+                if command.strip() == "process-arm":
+                    PROCESS_ENTERED.clear()
+                    PROCESS_RELEASE.clear()
+                    print(json.dumps({"armed": True}), flush=True)
+                    continue
+                if command.strip() == "process-wait":
+                    await asyncio.wait_for(PROCESS_ENTERED.wait(), timeout=60)
+                    print(json.dumps({"holding": True}), flush=True)
+                    continue
+                if command.strip() == "process-release":
+                    PROCESS_RELEASE.set()
+                    print(json.dumps({"released": True}), flush=True)
+                    continue
                 if command.strip() == "settings-arm":
                     SETTINGS_ENTERED.clear()
                     SETTINGS_RELEASE.clear()

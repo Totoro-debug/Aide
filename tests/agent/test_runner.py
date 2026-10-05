@@ -1184,7 +1184,7 @@ async def test_runner_continues_after_provider_valid_tool_result_status(
         call.name,
         status,
     )
-    assert tool_result.content not in repr(observed)
+    assert finished[0].result == tool_result.content
 
 
 @pytest.mark.asyncio

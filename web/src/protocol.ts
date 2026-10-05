@@ -443,6 +443,7 @@ export interface ActiveRunSnapshot {
   prompt: string;
   status: "accepted" | "running";
   assistant_content: string;
+  response_segments?: string[];
   tools: ActiveToolSnapshot[];
   cancel_requested: boolean;
   cancellable: boolean;
@@ -453,6 +454,7 @@ export interface ActiveToolSnapshot {
   name: string;
   arguments: string;
   status: "running" | "completed" | "failed" | "rejected" | "canceled" | "unknown";
+  result?: string;
 }
 
 export interface RestoreAnchor {

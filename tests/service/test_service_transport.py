@@ -269,12 +269,10 @@ async def test_web_can_enter_the_default_conversation_workspace_under_agent_home
                 restore_run_token=uuid4(),
             )
             await draft.wait_for_pending_persist()
-            assert (
-                Session.load_header(workspace.workspace_state, session_id).metadata[
-                    "creation_scope"
-                ]
-                == "chat"
+            _loaded_id, _created_at, _updated_at, metadata = Session.load_header(
+                workspace.workspace_state, session_id
             )
+            assert metadata["creation_scope"] == "chat"
 
             async with http.post(
                 server.make_url(f"/api/v1/workspaces/{workspace_id}/sessions/{session_id}/release"),
@@ -374,8 +372,20 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
             ) as response:
                 assert response.status == 200
                 project_page = await response.json()
+            async with http.get(
+                server.make_url("/api/v1/chat/sessions"),
+                headers=headers,
+                params={"title": "CHAT SCOPED"},
+            ) as response:
+                assert response.status == 200
+                filtered_page = await response.json()
 
         sessions = first_page["sessions"] + second_page["sessions"]
+        assert [item["id"] for item in sessions] == [expected_legacy_chat_id, expected_chat_id]
+        assert filtered_page["sessions"] == second_page["sessions"]
+        assert filtered_page["next_cursor"] is None
+        for item, expected_time in zip(sessions, (now + timedelta(seconds=3), now), strict=True):
+            assert item["created_at"] == item["updated_at"] == expected_time.isoformat()
         assert second_page["next_cursor"] is None
         assert first_page["unavailable_directories"] == []
         assert second_page["unavailable_directories"] == []

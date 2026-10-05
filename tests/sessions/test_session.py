@@ -2052,6 +2052,10 @@ def test_load_rejects_malformed_core_or_unsupported_message_shapes(
     with pytest.raises(ValueError):
         Session.load(state, SESSION_ID)
 
+    if len(records) == 1:
+        with pytest.raises(ValueError):
+            Session.load_header(state, SESSION_ID)
+
 
 def test_load_rejects_jsonl_without_a_trailing_newline(
     agent_home: Path,
@@ -2062,6 +2066,9 @@ def test_load_rejects_jsonl_without_a_trailing_newline(
 
     with pytest.raises(ValueError, match="newline"):
         Session.load(state, SESSION_ID)
+
+    with pytest.raises(ValueError, match="complete header record"):
+        Session.load_header(state, SESSION_ID)
 
 
 def test_assistant_context_usage_is_optional_and_round_trips_through_jsonl(

@@ -63,6 +63,8 @@ async def test_deletion_marker_fences_load_and_recovery_removes_owned_data(
     assert session_deletion_pending(state, session_id)
     with pytest.raises(SessionDeletionPending):
         Session.load(state, session_id)
+    with pytest.raises(SessionDeletionPending):
+        Session.load_header(state, session_id)
 
     assert recover_session_deletions(state) == ()
     assert not state.sessions_directory.joinpath(f"{session_id}.jsonl").exists()

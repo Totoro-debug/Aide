@@ -35,7 +35,6 @@ from omni.utils.validation import (
 __all__ = [
     "RestoreAnchor",
     "Session",
-    "SessionHeader",
     "SessionRestoreBefore",
     "SessionRestoreResult",
     "SessionStoragePartition",
@@ -95,16 +94,6 @@ class SessionRestoreResult:
     anchor_id: int
     removed_messages: int
     updated_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class SessionHeader:
-    """Metadata decoded from the first persisted Session record only."""
-
-    session_id: str
-    created_at: datetime
-    updated_at: datetime
-    metadata: dict[str, Any]
 
 
 class Session:
@@ -271,7 +260,7 @@ class Session:
         session_id: str,
         *,
         partition: SessionStoragePartition | None = None,
-    ) -> SessionHeader:
+    ) -> tuple[str, datetime, datetime, dict[str, Any]]:
         """Read and validate a persisted Session header without loading its body."""
         resolved_partition = _resolve_partition(session_id, partition)
         if resolved_partition is SessionStoragePartition.FOREGROUND:
@@ -301,7 +290,7 @@ class Session:
             raise ValueError("Session JSONL contains a malformed header") from error
         if loaded_id != session_id:
             raise ValueError("Session metadata ID does not match its file name")
-        return SessionHeader(loaded_id, created_at, updated_at, metadata)
+        return loaded_id, created_at, updated_at, metadata
 
     @property
     def session_id(self) -> str:

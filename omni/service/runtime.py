@@ -4125,14 +4125,13 @@ class AgentService:
                 try:
                     if session_deletion_pending(state, session_id):
                         continue
-                    header = Session.load_header(
+                    loaded_id, created_at, updated_at, metadata = Session.load_header(
                         state,
                         session_id,
                         partition=SessionStoragePartition.FOREGROUND,
                     )
                 except (OSError, UnicodeError, ValueError, RuntimeError):
                     continue
-                metadata = header.metadata
                 if "creation_scope" in metadata:
                     if metadata.get("creation_scope") != "chat":
                         continue
@@ -4144,9 +4143,9 @@ class AgentService:
                 if title_filter and title_filter not in session_title.casefold():
                     continue
                 key = (
-                    header.updated_at,
-                    header.created_at,
-                    header.session_id,
+                    updated_at,
+                    created_at,
+                    loaded_id,
                     str(path),
                 )
                 if cursor_key is not None and key >= cursor_key:
@@ -4155,10 +4154,10 @@ class AgentService:
                     (
                         key,
                         {
-                            "id": header.session_id,
+                            "id": loaded_id,
                             "title": session_title,
-                            "created_at": header.created_at.isoformat(),
-                            "updated_at": header.updated_at.isoformat(),
+                            "created_at": created_at.isoformat(),
+                            "updated_at": updated_at.isoformat(),
                             "directory": str(path),
                             "available": path.is_dir(),
                         },

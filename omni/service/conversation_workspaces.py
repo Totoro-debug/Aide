@@ -37,12 +37,8 @@ class ConversationWorkspaceCatalog:
         assert self._paths is not None
         return identity in self._paths
 
-    def validate(self, path: Path) -> Path:
-        """Return the canonical directory path after checking the Agent Home boundary."""
-        return self._validate_path(path)
-
     def remember(self, path: Path) -> Path:
-        normalized = self._validate_path(path)
+        normalized = self.validate(path)
         identity = self._identity(normalized)
         self._load()
         assert self._paths is not None
@@ -85,7 +81,7 @@ class ConversationWorkspaceCatalog:
                 path = Path(value)
                 if not path.is_absolute():
                     raise ValueError("relative path")
-                normalized = self._validate_path(path)
+                normalized = self.validate(path)
                 identity = self._identity(normalized)
                 if identity in paths:
                     raise ValueError("duplicate path")
@@ -106,7 +102,8 @@ class ConversationWorkspaceCatalog:
         content = json.dumps(payload, ensure_ascii=True, indent=2) + "\n"
         HOST_FILESYSTEM.atomic_replace_text(self.path, content)
 
-    def _validate_path(self, path: Path) -> Path:
+    def validate(self, path: Path) -> Path:
+        """Return the canonical directory path after checking the Agent Home boundary."""
         try:
             normalized = normalize_workspace_path(path)
             resolved = normalized.resolve(strict=False)

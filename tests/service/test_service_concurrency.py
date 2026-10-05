@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -17,6 +17,7 @@ from aiohttp.test_utils import TestServer
 import omni.service.runtime as service_runtime
 from omni.agent.memory.manager import MemoryManager
 from omni.agent.message_bus import InboundMessage
+from omni.agent.session.deletion import begin_session_deletion
 from omni.agent.session.session import Session, SessionStoragePartition
 from omni.agent.workspace_state import WorkspaceState
 from omni.config.agent_home import AgentHome
@@ -865,6 +866,131 @@ async def test_loaded_sessions_leave_no_on_demand_processor_when_idle(
             assert state.processor_task is None
             assert state.output_task is None
             assert state.loop._active is None
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["project", "workspace"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "invalid_id",
+        "no_pending",
+        "new_claim",
+        "repeat_claim",
+        "other_client",
+        "closed",
+        "draft",
+        "active_owner",
+        "active_other",
+    ],
+)
+async def test_session_deletion_entries_preserve_status_and_claim_contracts(
+    tmp_path: Path, entry: str, scenario: str
+) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        other = await service.register_client("web")
+        workspace = await service.attach_workspace(client.client_id, workspace_path)
+        identity: dict[str, object] = {"workspace_id": workspace.workspace_id}
+        status: Callable[[str, str, str], Awaitable[dict[str, object]]]
+        claim_deletion: Callable[[str, str, str], Awaitable[dict[str, object]]]
+        if entry == "project":
+            record = service.projects.register(workspace_path)
+            target_id = record.project_id
+            identity["project_id"] = target_id
+            status = service.project_session_deletion_status
+            claim_deletion = service.claim_project_session_deletion
+        else:
+            target_id = workspace.workspace_id
+            status = service.session_deletion_status
+            claim_deletion = service.claim_session_deletion
+
+        session_id = Session.create(workspace.workspace_state).session_id
+        if scenario == "invalid_id":
+            for operation in (status, claim_deletion):
+                with pytest.raises(ServiceError) as invalid:
+                    await operation(client.client_id, target_id, "../invalid")
+                assert (invalid.value.code, invalid.value.status) == ("validation_error", 422)
+            return
+        if scenario in {"draft", "active_owner", "active_other"}:
+            session_id = await workspace.create_draft(client.client_id)
+        identity["session_id"] = session_id
+        if scenario in {"no_pending", "draft"}:
+            assert await status(client.client_id, target_id, session_id) == {
+                **identity,
+                "state": "present" if scenario == "draft" else "deleted",
+            }
+            with pytest.raises(ServiceError) as missing:
+                await claim_deletion(client.client_id, target_id, session_id)
+            assert (missing.value.code, missing.value.status) == ("not_found", 404)
+            assert session_id not in workspace._deletion_claims
+            return
+
+        if scenario in {"active_owner", "active_other"}:
+            active = await workspace.claim(client.client_id, session_id)
+        begin_session_deletion(workspace.workspace_state, session_id)
+        expected_status = {**identity, "state": "deleting"}
+        assert await status(client.client_id, target_id, session_id) == expected_status
+        if scenario == "closed":
+            workspace._closed = True
+            if entry == "project":
+                with pytest.raises(ServiceError) as closed_status:
+                    await status(client.client_id, target_id, session_id)
+                assert closed_status.value.code == "admission_closed"
+            else:
+                assert await status(client.client_id, target_id, session_id) == expected_status
+            with pytest.raises(ServiceError) as closed:
+                await claim_deletion(client.client_id, target_id, session_id)
+            assert (closed.value.code, closed.value.status) == ("admission_closed", 409)
+            assert session_id not in workspace._deletion_claims
+            workspace._closed = False
+            return
+        if scenario == "active_other":
+            with pytest.raises(ServiceError) as occupied:
+                await claim_deletion(other.client_id, target_id, session_id)
+            assert (occupied.value.code, occupied.value.status) == ("stale_claim", 409)
+            assert workspace._claims[session_id] is active
+            assert session_id not in workspace._deletion_claims
+            return
+
+        previous_version = workspace._claim_versions.get(session_id, 0)
+        result = await claim_deletion(client.client_id, target_id, session_id)
+        claim = cast(dict[str, object], result["claim"])
+        assert result == {**identity, "claim": claim}
+        assert set(claim) == {
+            "workspace_id", "session_id", "claim_version", "reconnect_credential"
+        }
+        assert claim["workspace_id"] == workspace.workspace_id
+        assert claim["session_id"] == session_id
+        assert isinstance(claim["reconnect_credential"], str)
+        assert claim["reconnect_credential"]
+        if scenario == "active_owner":
+            assert claim["claim_version"] == active.version == previous_version
+            assert claim["reconnect_credential"] == active.credential
+            assert session_id not in workspace._deletion_claims
+        else:
+            assert claim["claim_version"] == previous_version + 1
+            assert session_id not in workspace.loops
+        if scenario == "repeat_claim":
+            repeated = await asyncio.gather(
+                claim_deletion(client.client_id, target_id, session_id),
+                claim_deletion(client.client_id, target_id, session_id),
+            )
+            assert repeated[0] == result == repeated[1]
+            assert workspace._claim_versions[session_id] == previous_version + 1
+        if scenario == "other_client":
+            with pytest.raises(ServiceError) as contested:
+                await claim_deletion(other.client_id, target_id, session_id)
+            assert (contested.value.code, contested.value.status) == ("session_claimed", 409)
+            assert await claim_deletion(client.client_id, target_id, session_id) == result
+            assert workspace._claim_versions[session_id] == previous_version + 1
     finally:
         await service.stop()
 

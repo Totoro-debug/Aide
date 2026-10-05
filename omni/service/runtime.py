@@ -3548,79 +3548,20 @@ class AgentService:
     ) -> dict[str, object]:
         async with self._project_lifecycle_lock:
             _record, workspace = await self._project_workspace_owned(client_id, project_id)
-            async with workspace._lock:
-                try:
-                    state = session_deletion_status(workspace.workspace_state, session_id)
-                except ValueError as error:
-                    raise service_error(
-                        "validation_error", "Session ID is invalid.", status=422
-                    ) from error
-                except OSError as error:
-                    raise service_error(
-                        "persistence_error",
-                        "Session deletion status could not be read safely.",
-                        status=500,
-                        retryable=True,
-                    ) from error
-                if state == "deleted" and session_id in workspace._loops:
-                    state = "present"
-                return {
-                    "project_id": project_id,
-                    "workspace_id": workspace.workspace_id,
-                    "session_id": session_id,
-                    "state": state,
-                }
+            result = await self.session_deletion_status(
+                client_id, workspace.workspace_id, session_id
+            )
+            return {"project_id": project_id, **result}
 
     async def claim_project_session_deletion(
         self, client_id: str, project_id: str, session_id: str
     ) -> dict[str, object]:
         async with self._project_lifecycle_lock:
             _record, workspace = await self._project_workspace_owned(client_id, project_id)
-            async with workspace._lock:
-                if workspace._closed:
-                    raise service_error("admission_closed", "Workspace admission is closed.")
-                try:
-                    pending = session_deletion_pending(workspace.workspace_state, session_id)
-                except ValueError as error:
-                    raise service_error(
-                        "validation_error", "Session ID is invalid.", status=422
-                    ) from error
-                except OSError as error:
-                    raise service_error(
-                        "persistence_error",
-                        "Session deletion state could not be read safely.",
-                        status=500,
-                        retryable=True,
-                    ) from error
-                if not pending:
-                    raise service_error("not_found", "Session deletion is not pending.", status=404)
-                active = workspace._claims.get(session_id)
-                cleanup = workspace._deletion_claims.get(session_id)
-                if active is not None:
-                    active = workspace.require_claim(client_id, session_id, active.version)
-                    version, credential = active.version, active.credential
-                else:
-                    if cleanup is not None and cleanup.client_id != client_id:
-                        raise service_error(
-                            "session_claimed", "Session deletion is claimed by another client."
-                        )
-                    if cleanup is None:
-                        version = workspace._claim_versions.get(session_id, 0) + 1
-                        workspace._claim_versions[session_id] = version
-                        cleanup = SessionDeletionClaim(session_id, client_id, version, str(uuid4()))
-                        workspace._deletion_claims[session_id] = cleanup
-                    version, credential = cleanup.version, cleanup.credential
-                return {
-                    "project_id": project_id,
-                    "workspace_id": workspace.workspace_id,
-                    "session_id": session_id,
-                    "claim": {
-                        "workspace_id": workspace.workspace_id,
-                        "session_id": session_id,
-                        "claim_version": version,
-                        "reconnect_credential": credential,
-                    },
-                }
+            result = await self.claim_session_deletion(
+                client_id, workspace.workspace_id, session_id
+            )
+            return {"project_id": project_id, **result}
 
     async def enter_default_conversation_workspace(
         self, client_id: str, *, directory: str | None = None

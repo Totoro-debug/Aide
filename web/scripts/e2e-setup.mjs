@@ -1,11 +1,15 @@
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 
-export default async function setup({ shutdownTimeoutMs = 15000 } = {}) {
+export default async function setup({ shutdownTimeoutMs = 15000, sessionModels = false } = {}) {
   const child = spawn("python", ["-u", "-m", "web.scripts.e2e_service"], {
     cwd: resolve(process.cwd(), ".."),
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, OMNI_E2E_SHUTDOWN_TIMEOUT_MS: String(shutdownTimeoutMs) },
+    env: {
+      ...process.env,
+      OMNI_E2E_SHUTDOWN_TIMEOUT_MS: String(shutdownTimeoutMs),
+      ...(sessionModels ? { OMNI_E2E_SESSION_MODELS: "1" } : {}),
+    },
   });
   let errors = "";
   let stdoutBuffer = "";
@@ -123,6 +127,7 @@ export default async function setup({ shutdownTimeoutMs = 15000 } = {}) {
 
   return {
     details,
+    serviceLog: () => errors,
     async command(command) {
       const response = readLine(30000, `command ${command}`);
       child.stdin.write(`${command}\n`);

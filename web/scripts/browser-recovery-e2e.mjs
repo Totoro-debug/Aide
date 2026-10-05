@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdir } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { URL, URLSearchParams, pathToFileURL } from "node:url";
 import { chromium, expect as playwrightExpect } from "@playwright/test";
@@ -270,6 +271,25 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     await page.getByRole("button", { name: "Send", exact: true }).click();
     await expect(page.getByRole("log").getByText("Fixture response.", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Release session", exact: true }).click();
+    if (process.env.OMNI_E2E_RECOVERY_SHARED_DIRECTORY === "1") {
+      await mkdir(`${control.details.home_root}\\chat-next`);
+      await control.command("project-history-seed");
+      await page.locator("#app-sidebar").getByRole("button", { name: "Add project", exact: true }).click();
+      const sharedProjectDialog = page.getByRole("dialog");
+      await sharedProjectDialog.getByLabel("Absolute local path", { exact: true })
+        .fill(`${control.details.home_root}\\chat-next`);
+      await sharedProjectDialog.getByRole("button", { name: "Register project", exact: true }).click();
+      await expect(sharedProjectDialog).toBeHidden();
+      await page.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
+      await page.getByRole("navigation", { name: "Settings sections", exact: true })
+        .getByRole("button", { name: "General & appearance", exact: true }).click();
+      const changed = page.waitForResponse(response => response.url().endsWith("/api/v1/config")
+        && response.request().method() === "PATCH");
+      await page.getByLabel("Default conversation workspace", { exact: true })
+        .fill(`${control.details.home_root}\\chat-next`);
+      await page.getByLabel("Default conversation workspace", { exact: true }).blur();
+      assert.equal((await changed).status(), 200);
+    }
     await page.locator("#app-sidebar").getByRole("link", { name: "New conversation", exact: true }).click();
     await expect(page.getByLabel("Message input")).toBeEnabled();
     await browserRecoveryAcceptance({ page, control });

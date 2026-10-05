@@ -48,12 +48,18 @@ def _config(
     mcp_args: list[str],
     mcp_cwd: str,
 ) -> str:
+    model_capacities = (
+        "[models.providers.primary.model_context_windows]\nlarge-model = 65536\n"
+        if os.environ.get("OMNI_E2E_SESSION_MODELS") == "1"
+        else ""
+    )
     return f"""[models.providers.primary]
 protocol = "openai-compatible"
 base_url = "{base_url}"
 api_key = "e2e-provider-secret-302"
 models = ["small-model", "large-model"]
 
+{model_capacities}
 [models.providers.retired]
 protocol = "openai-compatible"
 base_url = "{base_url}"

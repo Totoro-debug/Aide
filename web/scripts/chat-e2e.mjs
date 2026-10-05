@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { URL } from "node:url";
 import { chromium, expect as playwrightExpect } from "@playwright/test";
@@ -9,8 +9,39 @@ import browserRecoveryAcceptance from "./browser-recovery-e2e.mjs";
 const expect = playwrightExpect.configure({ timeout: 30000 });
 const control = await setup({ shutdownTimeoutMs: 60000 });
 const browser = await chromium.launch({ channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge" });
+const diagnostics = [];
+let diagnosticPage;
+function redact(value) {
+  if (Array.isArray(value)) return value.map(redact);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key, /credential|csrf|token|api_key|authorization|secret|ticket/i.test(key) ? "<REDACTED>" : redact(item),
+    ]));
+  }
+  return value;
+}
+function recordDiagnostic(value) {
+  diagnostics.push(redact(value));
+  if (diagnostics.length > 500) diagnostics.shift();
+}
 try {
   const context = await browser.newContext({ locale: "en" });
+  context.on("page", target => {
+    diagnosticPage = target;
+    target.on("pageerror", error => recordDiagnostic({ type: "pageerror", message: error.message }));
+    target.on("requestfailed", request => recordDiagnostic({
+      type: "requestfailed", path: new URL(request.url()).pathname, error: request.failure()?.errorText,
+    }));
+    target.on("response", async response => {
+      const path = new URL(response.url()).pathname;
+      if (!path.startsWith("/api/v1/") || path.includes("/config") || path.includes("/web/")) return;
+      const request = response.request();
+      recordDiagnostic({
+        method: request.method(), path, status: response.status(),
+        request: request.postDataJSON(), response: await response.json().catch(() => null),
+      });
+    });
+  });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -577,6 +608,18 @@ try {
   await page.keyboard.press("Escape");
   await browserRecoveryAcceptance({ page, control });
 } catch (error) {
+  await mkdir("test-results/chat-e2e", { recursive: true });
+  const pageState = diagnosticPage?.isClosed() === false
+    ? await diagnosticPage.locator("#main-content").innerText().catch(() => "") : "";
+  const controls = diagnosticPage?.isClosed() === false ? await diagnosticPage.evaluate(() => ({
+    route: window.location.pathname + window.location.search,
+    controls: [...document.querySelectorAll("main select, main textarea")].map(item => ({
+      label: item.getAttribute("aria-label"), disabled: item.disabled, value: item.value,
+    })),
+  })).catch(() => null) : null;
+  await writeFile("test-results/chat-e2e/diagnostics.json", JSON.stringify({
+    error: error.message, page: pageState, controls, network: diagnostics, service: control.serviceLog(),
+  }, null, 2));
   console.error(error);
   throw error;
 } finally {

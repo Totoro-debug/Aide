@@ -8496,11 +8496,13 @@ function ProjectSessionsContent({
                           });
                         }}
                       >
-                        <option value="">
-                          {chatDefaultModel === null
-                            ? t("conversation.modelsUnavailable")
-                            : `${t("conversation.defaultModel")} · ${chatDefaultModel.provider_id}/${chatDefaultModel.model}`}
-                        </option>
+                        {savedSessionModel === null ? (
+                          <option value="" disabled>
+                            {chatDefaultModel === null
+                              ? t("conversation.modelsUnavailable")
+                              : `${t("conversation.defaultModel")} · ${chatDefaultModel.provider_id}/${chatDefaultModel.model}`}
+                          </option>
+                        ) : null}
                         {savedSessionModel !== null && !selectedModelAvailable ? (
                           <option value={JSON.stringify([savedSessionModel.provider_id, savedSessionModel.model])}>
                             {`${savedSessionModel.provider_id}/${savedSessionModel.model} · ${t("conversation.unavailableModel")}`}

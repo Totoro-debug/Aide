@@ -45,6 +45,7 @@ from omni.service.errors import ServiceError
 from omni.service.execution import SessionExecution
 from omni.service.projects import ProjectCatalog, ProjectCatalogError
 from omni.service.runtime import AgentService, WorkspaceRecord
+from omni.utils.host_filesystem import HOST_FILESYSTEM
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
 from tests.fixtures.project_removal import complete_project_removal, wait_for_project_removal
@@ -99,7 +100,7 @@ def test_conversation_workspace_catalog_persists_canonical_paths_without_materia
     tmp_path: Path,
 ) -> None:
     home = AgentHome(tmp_path / "agent-home")
-    old_chat = tmp_path / "old-chat"
+    old_chat = tmp_path / "old-chat-会话"
     current_chat = home.path / "chat"
     old_chat.mkdir()
     current_chat.mkdir(parents=True)
@@ -110,6 +111,13 @@ def test_conversation_workspace_catalog_persists_canonical_paths_without_materia
     catalog.remember(current_chat)
 
     assert catalog.list() == (old_chat.resolve(), current_chat.resolve())
+    expected = {
+        "format_version": 1,
+        "workspaces": [str(old_chat.resolve()), str(current_chat.resolve())],
+    }
+    assert catalog.path.read_bytes() == (
+        json.dumps(expected, ensure_ascii=True, indent=2) + "\n"
+    ).encode("utf-8")
     old_chat.rmdir()
     assert ConversationWorkspaceCatalog(home).list() == (
         old_chat.resolve(),
@@ -117,6 +125,33 @@ def test_conversation_workspace_catalog_persists_canonical_paths_without_materia
     )
     with pytest.raises(ConversationWorkspaceCatalogError):
         catalog.remember(home.path / "skills")
+
+
+def test_conversation_workspace_catalog_keeps_file_and_memory_when_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = AgentHome(tmp_path / "agent-home")
+    first_path = tmp_path / "first"
+    second_path = tmp_path / "second"
+    catalog = ConversationWorkspaceCatalog(home)
+    catalog.remember(first_path)
+    original = catalog.path.read_bytes()
+    original_replace = os.replace
+
+    def fail_catalog_replace(source: Any, target: Any) -> None:
+        if Path(os.fspath(target)) == HOST_FILESYSTEM.path_for_io(catalog.path):
+            raise OSError("injected publication failure")
+        original_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", fail_catalog_replace)
+    with pytest.raises(OSError, match="injected publication failure"):
+        catalog.remember(second_path)
+
+    assert catalog.path.read_bytes() == original
+    assert catalog.list() == (first_path.resolve(),)
+    assert not catalog.contains(second_path)
+    assert ConversationWorkspaceCatalog(home).list() == (first_path.resolve(),)
+    assert not tuple(home.path.glob(f".{catalog.path.name}.*.tmp"))
 
 
 def test_project_catalog_rejects_agent_home_overlap_and_invalid_file(tmp_path: Path) -> None:

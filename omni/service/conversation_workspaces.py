@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 
 from omni.agent.workspace_state import normalize_workspace_path
 from omni.config.agent_home import AgentHome
+from omni.utils.host_filesystem import HOST_FILESYSTEM
 
 CONVERSATION_WORKSPACES_FILENAME = "conversation-workspaces.json"
 CONVERSATION_WORKSPACES_FORMAT_VERSION = 1
@@ -103,22 +103,8 @@ class ConversationWorkspaceCatalog:
             "format_version": CONVERSATION_WORKSPACES_FORMAT_VERSION,
             "workspaces": [str(path) for path in self._paths.values()],
         }
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent
-        )
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
-                descriptor = -1
-                json.dump(payload, stream, ensure_ascii=True, indent=2)
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-            temporary.unlink(missing_ok=True)
+        content = json.dumps(payload, ensure_ascii=True, indent=2) + "\n"
+        HOST_FILESYSTEM.atomic_replace_text(self.path, content)
 
     def _validate_path(self, path: Path) -> Path:
         try:

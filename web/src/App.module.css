@@ -2274,6 +2274,40 @@ h1 {
   color: var(--text-muted);
 }
 
+.composerSettings {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(120px, 0.75fr) minmax(145px, 0.9fr);
+  align-items: end;
+  gap: 8px;
+}
+
+.composerSetting {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.composerSelect {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface-app);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  padding: 0 8px;
+}
+
+.composerSelect:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .composerHint,
 .composerError {
   min-width: 0;
@@ -3517,6 +3551,14 @@ h1 {
 }
 
 @media (max-width: 680px) {
+  .composerSettings {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .composerModelSetting {
+    grid-column: 1 / -1;
+  }
+
   .topbar {
     min-height: 56px;
     align-items: center;

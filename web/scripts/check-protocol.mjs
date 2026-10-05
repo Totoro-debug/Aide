@@ -48,7 +48,7 @@ for (const field of [
   }
 }
 const commandTypes = new Set(definitions.client_command.properties.type.enum);
-for (const command of ["claim", "release", "input", "cancel", "confirmation_decide", "subscribe"]) {
+for (const command of ["claim", "release", "input", "session_model_configure", "cancel", "confirmation_decide", "subscribe"]) {
   if (!commandTypes.has(command)) {
     throw new Error(`The client command contract is missing ${command}`);
   }
@@ -85,6 +85,7 @@ const referenceTypes = {
   management_error: "ManagementError",
   dream_result: "DreamResult",
   skill_metadata: "SkillMetadata",
+  session_model_configuration: "SessionModelConfiguration",
   management_result: "ManagementResult",
   config_fields: "ConfigFields",
   config_models_fields: "ConfigModelsFields",
@@ -187,6 +188,7 @@ for (const [name, definitionName] of [
   ["ConfirmationRequestedPayload", "confirmation_requested_payload"],
   ["ConfirmationEventOwner", "confirmation_event_owner"],
   ["SessionSnapshot", "session_snapshot"],
+  ["SessionModelConfiguration", "session_model_configuration"],
   ["RestoreAnchor", "restore_anchor"],
 ]) {
   checkMembers(name, interfaceDeclaration(name).members, definitions[definitionName]);

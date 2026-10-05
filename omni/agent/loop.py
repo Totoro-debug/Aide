@@ -81,7 +81,14 @@ from omni.logging.session import session_log
 from omni.management.service import RuntimeStatusInput
 from omni.provider.errors import ModelCallError
 from omni.provider.model_router import ModelRouterDelegate, ModelRouteStatus, RunModelRouter
-from omni.provider.models import ModelCompleted, ModelRoute, ReasoningDelta, TextDelta
+from omni.provider.models import (
+    ModelCompleted,
+    ModelRoute,
+    ReasoningDelta,
+    ReasoningEffort,
+    TextDelta,
+)
+from omni.provider.session_configuration import SessionModelConfiguration
 from omni.schedule.model import ScheduleJob
 from omni.schedule.service import (
     ScheduleJobExecutionError,
@@ -324,10 +331,16 @@ class AgentRunExecutor:
         self._preflighted = False
         self._preflight_error: Exception | None = None
         self._session_abandoned = False
+        self._run_model_configuration: SessionModelConfiguration | None = None
 
     @property
     def session(self) -> Session:
         return self._session
+
+    @property
+    def run_model_configuration(self) -> SessionModelConfiguration | None:
+        """Return the explicit combination captured before this foreground Run waits."""
+        return self._run_model_configuration
 
     @property
     def generation_id(self) -> UUID:
@@ -859,8 +872,13 @@ class AgentRunExecutor:
         current_user: dict[str, Any],
         route: Literal["chat", "schedule"],
         project_messages: Callable[[Sequence[dict[str, Any]]], list[dict[str, Any]]],
+        session_model_configuration: SessionModelConfiguration | None = None,
     ) -> _AgentRunContext:
-        run_router = RunModelRouter(self._model_router, guard=agent_run_attempt_guard)
+        run_router = RunModelRouter(
+            self._model_router,
+            guard=agent_run_attempt_guard,
+            session_model_configuration=session_model_configuration,
+        )
         controller = AgentRunContextController.from_session(
             session,
             provider=run_router,
@@ -1005,6 +1023,8 @@ class AgentRunExecutor:
         restore_before = active_session.capture_restore_before()
         restore_run_token = self._new_uuid()
         permission_snapshot = self._permission_control.snapshot(self._exec_host.resolved_shell)
+        session_model_configuration = active_session.model_configuration
+        self._run_model_configuration = session_model_configuration
         skill_state = self._skill_loader.skills
         manual_invocation = self._skill_loader.resolve_manual(inbound.content)
         start_title = not active_session.messages
@@ -1029,6 +1049,7 @@ class AgentRunExecutor:
                             manual_invocation=manual_invocation,
                             execution_ready=execution_ready,
                             permission_snapshot=permission_snapshot,
+                            session_model_configuration=session_model_configuration,
                             restore_before=restore_before,
                             restore_run_token=restore_run_token,
                         )
@@ -1043,6 +1064,7 @@ class AgentRunExecutor:
                             manual_invocation=manual_invocation,
                             execution_ready=execution_ready,
                             permission_snapshot=permission_snapshot,
+                            session_model_configuration=session_model_configuration,
                             restore_before=restore_before,
                             restore_run_token=restore_run_token,
                         )
@@ -1070,6 +1092,7 @@ class AgentRunExecutor:
         manual_invocation: ManualSkillInvocation | None = None,
         execution_ready: asyncio.Event,
         permission_snapshot: PermissionSnapshot,
+        session_model_configuration: SessionModelConfiguration | None = None,
         restore_before: SessionRestoreBefore | None = None,
         restore_run_token: UUID | None = None,
     ) -> bool:
@@ -1097,6 +1120,7 @@ class AgentRunExecutor:
             current_user=deepcopy(current_user),
             route="chat",
             project_messages=project_messages,
+            session_model_configuration=session_model_configuration,
         )
         framing_usage: dict[str, int] | None = None
 
@@ -1657,7 +1681,19 @@ def session_runtime_status_input(
     generation_started_at: float | None,
 ) -> RuntimeStatusInput:
     """Project resident history for management without constructing an executor."""
-    route_status = _configured_model_route_status(configuration, "chat")
+    session_model_configuration = session.model_configuration
+    model_configuration_available = True
+    try:
+        route_status = _configured_model_route_status(
+            configuration,
+            "chat",
+            session_model_configuration=session_model_configuration,
+        )
+    except ValueError:
+        if session_model_configuration is None:
+            raise
+        model_configuration_available = False
+        route_status = _configured_model_route_status(configuration, "chat")
     session_id = session.session_id
     messages = session.messages
     metadata = session.metadata
@@ -1679,7 +1715,7 @@ def session_runtime_status_input(
     if usage_anchor is not None:
         latest_usage_context, reported_usage = usage_anchor
         latest_reported_usage = tuple((field, reported_usage[field]) for field in usage_fields)
-    return _foreground_runtime_status_input(
+    status_input = _foreground_runtime_status_input(
         context_builder=context_builder,
         history=messages[last_compacted:],
         session_id=session_id,
@@ -1691,6 +1727,11 @@ def session_runtime_status_input(
         last_compacted=last_compacted,
         cumulative_usage=tuple((field, cast(int, value)) for field, value in usage),
         chat_model=f"{route_status.provider_id}/{route_status.model}",
+        chat_reasoning_effort=(
+            None
+            if session_model_configuration is None
+            else session_model_configuration.reasoning_effort
+        ),
         context_window=route_status.context_window,
         generation_started_at=generation_started_at,
         max_output=route_status.max_output,
@@ -1702,6 +1743,7 @@ def session_runtime_status_input(
         latest_usage_context=latest_usage_context,
         latest_reported_usage=latest_reported_usage,
     )
+    return replace(status_input, model_configuration_available=model_configuration_available)
 
 
 __all__ = [
@@ -1767,8 +1809,18 @@ def _merge_usage_deltas(
 def _configured_model_route_status(
     configuration: UserConfiguration,
     route: ModelRoute,
+    *,
+    session_model_configuration: SessionModelConfiguration | None = None,
 ) -> ModelRouteStatus:
-    resolved = configuration.resolve_route(route)
+    resolved = (
+        configuration.resolve_session_model_route(
+            session_model_configuration.provider_id,
+            session_model_configuration.model,
+            session_model_configuration.reasoning_effort,
+        )
+        if session_model_configuration is not None and route == "chat"
+        else configuration.resolve_route(route)
+    )
     return ModelRouteStatus(
         requested_route=route,
         selected_route=cast(ModelRoute, resolved.selected_route),
@@ -1793,6 +1845,7 @@ def _foreground_runtime_status_input(
     last_compacted: int = 0,
     cumulative_usage: tuple[tuple[str, int], ...] = (),
     chat_model: str = "",
+    chat_reasoning_effort: ReasoningEffort | None = None,
     context_window: int = 0,
     max_output: int = 0,
     compact_ratio: float = 0.9,
@@ -1825,6 +1878,7 @@ def _foreground_runtime_status_input(
         last_compacted=last_compacted,
         cumulative_usage=cumulative_usage,
         chat_model=chat_model,
+        chat_reasoning_effort=chat_reasoning_effort,
         context_window=context_window,
         max_output=max_output,
         compact_ratio=compact_ratio,

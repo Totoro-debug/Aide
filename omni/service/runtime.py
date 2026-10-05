@@ -74,6 +74,7 @@ from omni.errors import ErrorInfo
 from omni.management.commands import MANAGEMENT_COMMANDS
 from omni.provider.factory import create_provider
 from omni.provider.model_router import ModelRouter
+from omni.provider.models import REASONING_EFFORT_LEVELS, SessionModelConfiguration
 from omni.schedule.history import (
     ScheduleHistoryPersistenceError,
     ScheduleHistoryRequestError,
@@ -1135,6 +1136,17 @@ class WorkspaceRecord:
             "session_id": projection.session_id,
             "messages": messages,
             "live_state": live_state,
+            "model_configuration": (
+                None
+                if loop_state.loop.session.model_configuration is None
+                else loop_state.loop.session.model_configuration.to_dict()
+            ),
+            "model_configuration_version": loop_state.loop.session.model_configuration_version,
+            "active_model_configuration": (
+                None
+                if loop_state.loop.active_model_configuration is None
+                else loop_state.loop.active_model_configuration.to_dict()
+            ),
             "restore_anchors": [
                 {
                     "anchor_id": anchor.anchor_id,
@@ -1777,6 +1789,19 @@ class WorkspaceRecord:
                 raise service_error(
                     "admission_closed", "Conversation input is temporarily unavailable."
                 )
+            selection = claim.loop.session.model_configuration
+            if selection is not None:
+                try:
+                    self.configuration.resolve_session_model_route(
+                        selection.provider_id, selection.model, selection.reasoning_effort
+                    )
+                except (ConfigError, ValueError) as error:
+                    raise service_error(
+                        "model_unavailable",
+                        "Choose an available model before sending to this Session.",
+                        status=422,
+                        field_errors={"model": "choose an available model"},
+                    ) from error
             state = self._loops[session_id]
             client = self.service.client(client_id)
             async with state.coordination_lock:
@@ -2596,12 +2621,24 @@ class AgentService:
         return self._config_response()
 
     def available_models_view(self) -> dict[str, object]:
-        """Return active provider models with capacities and the active default route."""
+        """Return active provider models with capacities and the effective chat route."""
         configuration = self.configuration
         if configuration is None:
             return {"models": [], "default_combination": None}
 
         capacities = configuration.effective_model_context_windows()
+        try:
+            default = configuration.resolve_route("chat")
+        except ConfigError:
+            minimum_capacity = None
+            default_combination = None
+        else:
+            minimum_capacity = default.route.max_output
+            default_combination = {
+                "provider_id": default.provider.provider_id,
+                "model": default.route.model,
+                "reasoning_effort": default.route.reasoning_effort,
+            }
         models = [
             {
                 "provider_id": provider_id,
@@ -2612,17 +2649,9 @@ class AgentService:
             if provider.is_usable
             for model in provider.models
             if model in capacities[provider_id]
+            and minimum_capacity is not None
+            and capacities[provider_id][model] > minimum_capacity
         ]
-        try:
-            default = configuration.resolve_route("default")
-        except ConfigError:
-            default_combination = None
-        else:
-            default_combination = {
-                "provider_id": default.provider.provider_id,
-                "model": default.route.model,
-                "reasoning_effort": default.route.reasoning_effort,
-            }
         return {"models": models, "default_combination": default_combination}
 
     def _configuration_request_result(
@@ -4610,6 +4639,109 @@ class AgentService:
                 payload={"text": text, "request_id": request_id},
                 target_client_ids=(client_id,),
             )
+        elif command_type == "session_model_configure":
+            self._validate_claim_fields(client_id, workspace_id, session_id, claim_version)
+            assert (
+                isinstance(workspace_id, str)
+                and isinstance(session_id, str)
+                and isinstance(claim_version, int)
+            )
+            workspace = self.workspace(workspace_id)
+            workspace.require_claim(client_id, session_id, claim_version)
+            provider_id = payload.get("provider_id")
+            model = payload.get("model")
+            reasoning_effort = payload.get("reasoning_effort")
+            expected_version = payload.get("expected_model_configuration_version")
+            if (
+                not isinstance(provider_id, str)
+                or not provider_id.strip()
+                or not isinstance(model, str)
+                or not model.strip()
+                or not isinstance(reasoning_effort, str)
+                or reasoning_effort not in REASONING_EFFORT_LEVELS
+            ):
+                raise service_error(
+                    "validation_error", "Session Model Configuration is invalid.", status=422
+                )
+            if (
+                isinstance(expected_version, bool)
+                or not isinstance(expected_version, int)
+                or expected_version < 0
+            ):
+                raise service_error(
+                    "validation_error",
+                    "expected_model_configuration_version is invalid.",
+                    status=422,
+                    field_errors={"expected_model_configuration_version": "must be nonnegative"},
+                )
+            configuration = self.configuration
+            if configuration is None:
+                raise service_error(
+                    "model_unavailable",
+                    "The selected model is not available for this Agent Service.",
+                    status=422,
+                    field_errors={"model": "choose an available model with a valid context window"},
+                )
+            try:
+                selection = SessionModelConfiguration(
+                    provider_id,
+                    model,
+                    reasoning_effort,
+                )
+                configuration.resolve_session_model_route(
+                    selection.provider_id,
+                    selection.model,
+                    selection.reasoning_effort,
+                )
+            except (AttributeError, ConfigError, TypeError, ValueError) as error:
+                raise service_error(
+                    "model_unavailable",
+                    "The selected model is not available for this Agent Service.",
+                    status=422,
+                    field_errors={"model": "choose an available model with a valid context window"},
+                ) from error
+            claim = workspace.require_claim(client_id, session_id, claim_version)
+            session = claim.loop.session
+            try:
+                await session.wait_for_pending_persist()
+                workspace.require_claim(client_id, session_id, claim_version)
+                version = session.configure_model_durably(
+                    selection,
+                    expected_version=expected_version,
+                )
+            except ValueError as error:
+                if "version is stale" in str(error):
+                    raise service_error(
+                        "model_configuration_conflict",
+                        "Session Model Configuration changed; reload it before retrying.",
+                        status=409,
+                    ) from error
+                raise service_error(
+                    "validation_error",
+                    "Session Model Configuration is invalid.",
+                    status=422,
+                ) from error
+            except (OSError, RuntimeError) as error:
+                raise service_error(
+                    "persistence_error",
+                    "Session Model Configuration could not be saved.",
+                    status=500,
+                ) from error
+            result = {
+                "model_configuration": selection.to_dict(),
+                "model_configuration_version": version,
+            }
+            if version != expected_version:
+                await self.emit(
+                    "session.model_configuration",
+                    workspace_id=workspace_id,
+                    session_id=session_id,
+                    run_id=None,
+                    payload={
+                        **selection.to_dict(),
+                        "model_configuration_version": version,
+                    },
+                )
         elif command_type == "cancel":
             self._validate_claim_fields(client_id, workspace_id, session_id, claim_version)
             cancel_run_id = payload.get("run_id")

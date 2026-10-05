@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Any, Literal
 import pytest
 
 from omni.agent.session.session import Session, SessionStoragePartition
+from omni.agent.tools.tool_gateway import ModelToolCall
+from omni.provider.session_configuration import SessionModelConfiguration
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import collect_foreground_outbound
 from tests.fixtures.session import seed_session_state
@@ -101,6 +104,172 @@ def _old_run() -> list[dict[str, Any]]:
         }
     )
     return messages
+
+
+def _selectable_configuration() -> str:
+    return _configuration().replace(
+        'models = ["claude-model"]',
+        'models = ["claude-model", "selected-small", "large-model"]\n'
+        "[models.providers.anthropic-default.model_context_windows]\n"
+        "claude-model = 200000\nselected-small = 4096\nlarge-model = 200000",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model,compacted", [("selected-small", True), ("large-model", False)])
+async def test_selected_model_capacity_controls_real_run_compaction(
+    agent_home: Path,
+    workspace: Path,
+    model: str,
+    compacted: bool,
+) -> None:
+    provider = _ScheduleProvider(
+        chat_responses=(_response("done"),),
+        memory_responses=(_response("fact summary"), _response("action summary")),
+    )
+    loop, router, schedule, dream, _dispatcher, bus = _agent_loop(
+        agent_home,
+        workspace,
+        provider,
+        schedule_clock=_BlockingClock(NOW),
+        config_text=_selectable_configuration(),
+    )
+    history = _old_run()
+    seed_session_state(
+        loop.session, messages=history, metadata=loop.session.metadata, last_compacted=0
+    )
+    loop.session.configure_model_durably(
+        SessionModelConfiguration("anthropic-default", model, "high"),
+        expected_version=0,
+    )
+    try:
+        await loop.start()
+        await collect_foreground_outbound(bus, "new request")
+        assert provider.stream_requests[0].model == model
+        assert provider.stream_requests[0].reasoning_effort == "high"
+        assert len(provider.complete_requests) == (2 if compacted else 0)
+        assert loop.session.last_compacted == (len(history) if compacted else 0)
+    finally:
+        await _close_components(loop, router, schedule, dream)
+
+
+@pytest.mark.asyncio
+async def test_model_is_captured_before_title_and_kept_through_tools_until_next_run(
+    agent_home: Path,
+    workspace: Path,
+) -> None:
+    (workspace / "example.txt").write_text("tool contents", encoding="utf-8")
+    provider = _ScheduleProvider(
+        chat_responses=(
+            _response(
+                "read", tool_call=ModelToolCall("read", "read_file", '{"path":"example.txt"}')
+            ),
+            _response("first done"),
+            _response("second done"),
+        ),
+        block_chat_call=1,
+    )
+    loop, router, schedule, dream, _dispatcher, bus = _agent_loop(
+        agent_home,
+        workspace,
+        provider,
+        schedule_clock=_BlockingClock(NOW),
+        config_text=_selectable_configuration(),
+    )
+    first = SessionModelConfiguration("anthropic-default", "selected-small", "high")
+    second = SessionModelConfiguration("anthropic-default", "large-model", "max")
+    loop.session.configure_model_durably(first, expected_version=0)
+    original_title = loop._start_title_if_needed
+
+    def change_selection_at_title(session: Session, content: str) -> Any:
+        work = original_title(session, content)
+        session.configure_model_durably(second, expected_version=1)
+        return work
+
+    loop._start_title_if_needed = change_selection_at_title  # type: ignore[method-assign]
+    task = asyncio.create_task(collect_foreground_outbound(bus, "first request"))
+    try:
+        await loop.start()
+        await asyncio.wait_for(provider.chat_block_started.wait(), timeout=10)
+        assert loop.execution.active_model_configuration == first
+        assert loop.execution.runtime_status_input().active_model_configuration == first
+        assert loop.session.model_configuration == second
+        provider.release_chat.set()
+        await asyncio.wait_for(task, timeout=10)
+        await collect_foreground_outbound(bus, "second request")
+        assert [(call.model, call.reasoning_effort) for call in provider.stream_requests] == [
+            ("selected-small", "high"),
+            ("selected-small", "high"),
+            ("large-model", "max"),
+        ]
+        restored = Session.load(loop.session.workspace_state, loop.session.session_id)
+        assert restored.model_configuration == second
+    finally:
+        provider.release_chat.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await _close_components(loop, router, schedule, dream)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sessions_share_provider_with_independent_model_combinations(
+    agent_home: Path,
+    workspace: Path,
+) -> None:
+    second_workspace = workspace / "second"
+    second_workspace.mkdir()
+    provider = _ScheduleProvider(
+        chat_responses=(_response("done"), _response("done")),
+        block_chat_call=1,
+    )
+    first_loop, router, schedule, dream, _dispatcher, first_bus = _agent_loop(
+        agent_home,
+        workspace,
+        provider,
+        schedule_clock=_BlockingClock(NOW),
+        config_text=_selectable_configuration(),
+    )
+    second_loop, second_router, second_schedule, second_dream, _other, second_bus = _agent_loop(
+        agent_home,
+        second_workspace,
+        provider,
+        schedule_clock=_BlockingClock(NOW),
+        config_text=_selectable_configuration(),
+    )
+    second_loop._model_router = first_loop._model_router
+    first_loop.session.configure_model_durably(
+        SessionModelConfiguration("anthropic-default", "selected-small", "high"),
+        expected_version=0,
+    )
+    second_loop.session.configure_model_durably(
+        SessionModelConfiguration("anthropic-default", "large-model", "low"),
+        expected_version=0,
+    )
+    first_task: asyncio.Task[object] | None = None
+    try:
+        await first_loop.start()
+        await second_loop.start()
+        first_task = asyncio.create_task(collect_foreground_outbound(first_bus, "first session"))
+        await asyncio.wait_for(provider.chat_block_started.wait(), timeout=10)
+        await asyncio.wait_for(
+            collect_foreground_outbound(second_bus, "second session"), timeout=10
+        )
+        assert not first_task.done()
+        assert [(call.model, call.reasoning_effort) for call in provider.stream_requests] == [
+            ("selected-small", "high"),
+            ("large-model", "low"),
+        ]
+        provider.release_chat.set()
+        await asyncio.wait_for(first_task, timeout=10)
+    finally:
+        provider.release_chat.set()
+        if first_task is not None:
+            if not first_task.done():
+                first_task.cancel()
+            await asyncio.gather(first_task, return_exceptions=True)
+        await _close_components(first_loop, router, schedule, dream)
+        await _close_components(second_loop, second_router, second_schedule, second_dream)
 
 
 @pytest.mark.asyncio

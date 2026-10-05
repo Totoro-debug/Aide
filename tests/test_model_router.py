@@ -29,7 +29,9 @@ from omni.provider.models import (
     ModelCompleted,
     ModelContinuation,
     ModelResponse,
+    ModelRoute,
     ModelUsage,
+    SessionModelConfiguration,
     TextDelta,
 )
 from tests.fixtures import DetachedRequestPreparer, FakeClock, ScriptedFakeProvider, StreamScript
@@ -1521,6 +1523,76 @@ async def test_model_router_runtime_effort_keeps_explicit_routes_independent() -
 
 
 @pytest.mark.asyncio
+async def test_run_model_router_uses_its_session_model_without_changing_shared_routes() -> None:
+    base = routed_configuration()
+    alternate_provider = ProviderConfiguration(
+        provider_id="alternate-chat-provider",
+        protocol="anthropic",
+        base_url="https://alternate.example/v1",
+        api_key="alternate-secret",
+        models=("chat-model",),
+        model_context_windows={"chat-model": 16_384},
+    )
+    configuration_with_alternate = replace(
+        base,
+        models=replace(
+            base.models,
+            providers={**base.models.providers, alternate_provider.provider_id: alternate_provider},
+        ),
+    )
+    default_provider = ScriptedFakeProvider(completions=(response("default"),))
+    chat_provider = ScriptedFakeProvider(
+        completions=(response("runtime route"), response("updated session route"))
+    )
+    alternate = ScriptedFakeProvider(completions=(response("session route"),))
+    providers = {
+        "default-provider": default_provider,
+        "chat-provider": chat_provider,
+        "alternate-chat-provider": alternate,
+    }
+    router = ModelRouter(
+        configuration=configuration_with_alternate,
+        provider_factory=lambda provider: providers[provider.provider_id],
+        clock=FakeClock(NOW),
+    )
+    router.set_reasoning_effort("low")
+    selected_configuration = SessionModelConfiguration(
+        "alternate-chat-provider",
+        "chat-model",
+        "max",
+    )
+    selected_run = router.for_run(
+        guard=lambda _status, _messages, _tools: None,
+        session_model_configuration=selected_configuration,
+    )
+    selected_configuration = SessionModelConfiguration("chat-provider", "chat-model", "high")
+    updated_session_run = router.for_run(
+        guard=lambda _status, _messages, _tools: None,
+        session_model_configuration=selected_configuration,
+    )
+    runtime_run = router.for_run(guard=lambda _status, _messages, _tools: None)
+
+    selected_status = selected_run.call_route_status("chat", continuation=None)
+    await selected_run.complete("chat", **request())
+    await updated_session_run.complete("chat", **request())
+    await runtime_run.complete("chat", **request())
+
+    assert selected_status == ModelRouteStatus(
+        requested_route="chat",
+        selected_route="chat",
+        provider_id="alternate-chat-provider",
+        model="chat-model",
+        context_window=16_384,
+        max_output=8192,
+        used_default=False,
+    )
+    assert len(alternate.complete_requests) == 1
+    assert alternate.complete_requests[0].reasoning_effort == "max"
+    assert [call.reasoning_effort for call in chat_provider.complete_requests] == ["high", "low"]
+    assert router.route_status("chat").provider_id == "chat-provider"
+
+
+@pytest.mark.asyncio
 async def test_model_router_runtime_effort_reaches_routes_inheriting_default() -> None:
     provider = ScriptedFakeProvider(
         completions=(response("memory"), response("schedule")),
@@ -2113,7 +2185,8 @@ async def test_run_model_router_explicit_guard_overrides_bound_guard() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_model_router_preserves_retry_and_continuation() -> None:
+@pytest.mark.parametrize("explicit_selection", [False, True])
+async def test_run_model_router_preserves_retry_and_continuation(explicit_selection: bool) -> None:
     continuation = ModelContinuation(provider_id="default-provider", payload="opaque-state")
     provider = ScriptedFakeProvider(
         completions=(retryable_timeout(), response("Retried"), response("Continued"))
@@ -2131,9 +2204,17 @@ async def test_run_model_router_preserves_retry_and_continuation() -> None:
         guarded_attempts.append(status)
         return True
 
-    run = router.for_run(guard=guard)
-    assert await run.complete("default", **request()) == response("Retried")
-    assert await run.complete("default", **request(), continuation=continuation) == response(
+    run = router.for_run(
+        guard=guard,
+        session_model_configuration=(
+            SessionModelConfiguration("default-provider", "default-model", "high")
+            if explicit_selection
+            else None
+        ),
+    )
+    route: ModelRoute = "chat" if explicit_selection else "default"
+    assert await run.complete(route, **request()) == response("Retried")
+    assert await run.complete(route, **request(), continuation=continuation) == response(
         "Continued"
     )
     assert [call.continuation for call in provider.complete_requests] == [
@@ -2142,7 +2223,9 @@ async def test_run_model_router_preserves_retry_and_continuation() -> None:
         continuation,
     ]
     assert len(guarded_attempts) == 3
-    assert run.current_call_status("default") == guarded_attempts[-1]
+    assert run.current_call_status(route) == guarded_attempts[-1]
+    if explicit_selection:
+        assert [call.reasoning_effort for call in provider.complete_requests] == ["high"] * 3
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import replace
 from uuid import UUID, uuid4
 
 from omni.agent.loop import (
@@ -15,6 +16,7 @@ from omni.agent.loop import (
 from omni.agent.message_bus import InboundMessage, MessageBus
 from omni.agent.session.session import Session
 from omni.management.service import RuntimeStatusInput
+from omni.provider.session_configuration import SessionModelConfiguration
 from omni.schedule.model import ScheduleJob
 from omni.schedule.service import ScheduleOccurrence
 from omni.skills.catalog import LoadedSkill, SkillMetadata
@@ -47,6 +49,10 @@ class SessionExecution:
     @property
     def has_active_run(self) -> bool:
         return self._active is not None
+
+    @property
+    def active_model_configuration(self) -> SessionModelConfiguration | None:
+        return None if self._active is None else self._active.run_model_configuration
 
     def foreground_input_admitted(self) -> bool:
         return not (self._closed or self._replacement_barrier_held)
@@ -160,7 +166,9 @@ class SessionExecution:
         )
 
     def runtime_status_input(self) -> RuntimeStatusInput:
-        return self._status_input()
+        return replace(
+            self._status_input(), active_model_configuration=self.active_model_configuration
+        )
 
     def reload_skill(self) -> tuple[SkillMetadata, ...]:
         return self._reload_skills()

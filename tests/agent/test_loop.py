@@ -1243,6 +1243,7 @@ async def test_agent_loop_status_projection_is_one_read_immutable_and_side_effec
         def __init__(self) -> None:
             self.calls = {
                 "session_id": 0,
+                "model_configuration": 0,
                 "messages": 0,
                 "metadata": 0,
                 "last_compacted": 0,
@@ -1252,6 +1253,11 @@ async def test_agent_loop_status_projection_is_one_read_immutable_and_side_effec
         def session_id(self) -> str:
             self.calls["session_id"] += 1
             return session.session_id
+
+        @property
+        def model_configuration(self) -> Any:
+            self.calls["model_configuration"] += 1
+            return session.model_configuration
 
         @property
         def messages(self) -> list[dict[str, Any]]:
@@ -1290,6 +1296,7 @@ async def test_agent_loop_status_projection_is_one_read_immutable_and_side_effec
 
     assert spy.calls == {
         "session_id": 1,
+        "model_configuration": 1,
         "messages": 1,
         "metadata": 1,
         "last_compacted": 1,

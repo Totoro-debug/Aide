@@ -58,6 +58,23 @@ try {
   }
   const firstDirectory = join(control.details.home_root, ".omni", "chat");
   assert.deepEqual(await readdir(join(firstDirectory, ".omni", "sessions")), [], "An empty draft was persisted");
+  const sessionModel = page.getByRole("combobox", { name: "Session model", exact: true });
+  const sessionEffort = page.getByRole("combobox", { name: "Reasoning effort", exact: true });
+  const permission = page.getByRole("combobox", { name: "Client permission", exact: true });
+  await expect(permission).toHaveValue("full-access");
+  await permission.selectOption("workspace-write");
+  await expect(permission).toHaveValue("workspace-write");
+  await permission.selectOption("full-access");
+  const warning = page.getByRole("dialog", { name: "Enable full access?", exact: true });
+  await expect(warning.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await warning.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(permission).toHaveValue("workspace-write");
+  await permission.selectOption("full-access");
+  await warning.getByRole("button", { name: "Enable full access", exact: true }).click();
+  await expect(permission).toHaveValue("full-access");
+  await sessionEffort.selectOption("high");
+  await expect(sessionEffort).toHaveValue("high");
+  await expect(sessionModel).toHaveValue(JSON.stringify(["primary", "small-model"]));
   await page.getByRole("textbox", { name: "Message input", exact: true }).fill("chat acceptance message");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByRole("log").getByText("Fixture response.", { exact: true })).toBeVisible();
@@ -65,6 +82,43 @@ try {
   const first = (await api("/chat/sessions")).body.sessions[0];
   const header = JSON.parse((await readFile(join(first.directory, ".omni", "sessions", `${first.id}.jsonl`), "utf8")).split("\n")[0]);
   assert.equal(header.metadata.creation_scope, "chat");
+  assert.deepEqual(header.metadata.model_configuration, {
+    provider_id: "primary",
+    model: "small-model",
+    reasoning_effort: "high",
+  });
+  assert.equal(header.metadata.model_configuration_version, 1);
+  const firstTurnObservation = (await readFile(control.details.provider_observation_path, "utf8"))
+    .trim().split("\n").map(line => JSON.parse(line))
+    .find(observation => observation.prompt.includes("chat acceptance message")
+      && observation.tools.length > 0);
+  assert.ok(firstTurnObservation, "The first chat turn must reach the configured model");
+  assert.equal(firstTurnObservation.model, "small-model");
+  assert.equal(firstTurnObservation.reasoning_effort, "high");
+  assert.equal(firstTurnObservation.max_output, 1024);
+  let releaseModels;
+  let modelsRequested;
+  const modelsGate = new Promise(resolve => { releaseModels = resolve; });
+  const modelsStarted = new Promise(resolve => { modelsRequested = resolve; });
+  await page.route("**/api/v1/models/available", async route => {
+    modelsRequested();
+    await modelsGate;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      models: [], default_combination: null,
+    }) });
+  });
+  await page.reload();
+  await modelsStarted;
+  await expect(page.getByRole("textbox", { name: "Message input", exact: true })).toBeEnabled();
+  await page.getByRole("textbox", { name: "Message input", exact: true }).fill("unsent model check");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeDisabled();
+  releaseModels();
+  await expect(page.getByRole("link", { name: "Configure models", exact: true })).toHaveAttribute("href", "/settings");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeDisabled();
+  await page.unroute("**/api/v1/models/available");
+  await page.reload();
+  await expect(sessionModel).toHaveValue(JSON.stringify(["primary", "small-model"]));
+  await expect(sessionEffort).toHaveValue("high");
   assert.equal((await api("/projects")).body.projects.length, 0);
   const forbidden = await api("/workspaces/attach", "POST", { request_id: "chat-attach-denied", path: control.details.cli_workspace });
   assert.equal(forbidden.status, 403, "Web gained arbitrary CLI directory attachment");
@@ -110,6 +164,10 @@ try {
   const restartedNavigation = page.getByRole("navigation", { name: "Conversations", exact: true });
   await restartedNavigation.getByTitle(firstConversation.directory).click();
   await expect(page.getByRole("log").getByText("chat acceptance message", { exact: true })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Session model", exact: true }))
+    .toHaveValue(JSON.stringify(["primary", "small-model"]));
+  await expect(page.getByRole("combobox", { name: "Reasoning effort", exact: true }))
+    .toHaveValue("high");
   await restartedNavigation.getByTitle(secondConversation.directory).click();
   await expect(page.getByRole("log").getByText("second directory acceptance message", { exact: true })).toBeVisible();
 

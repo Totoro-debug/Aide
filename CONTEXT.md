@@ -312,9 +312,17 @@ _Avoid_: Tool switch, safety flag, enablement
 A named model purpose that resolves a model request without exposing Provider selection to its caller.
 _Avoid_: Model string, provider selection, backend, ad hoc route
 
+**Available Model**:
+A user-configured model offered for conversation selection, with its own context-window capacity.
+_Avoid_: Model Route, Model Provider, active Session model
+
+**Session Model Configuration**:
+The Available Model and Reasoning Effort selected together for one Conversation Session and used by its subsequent Agent Runs. Changes do not alter an Agent Run already in progress.
+_Avoid_: global Model Route change, Model Provider configuration, mid-run model switch
+
 **Reasoning Effort**:
-A five-level intent attached to one Model Route that asks its Model Provider to trade response capability and thoroughness against latency and cost for each request.
-_Avoid_: Thinking level, token budget, Conversation Session override
+A five-level intent that asks a Model Provider to trade response capability and thoroughness against latency and cost for a model request.
+_Avoid_: Thinking level, token budget, model identity
 
 **Model Provider**:
 A configured backend that implements model calls for one or more Model Routes.

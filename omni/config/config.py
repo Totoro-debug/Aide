@@ -273,6 +273,37 @@ class UserConfiguration:
             used_default=selected_route != requested_route,
         )
 
+    def resolve_session_model_route(
+        self,
+        provider_id: str,
+        model: str,
+        reasoning_effort: ReasoningEffort,
+    ) -> ResolvedModelRoute:
+        """Resolve one explicitly selected Available Model for a chat Agent Run."""
+        provider = self.models.providers.get(provider_id)
+        if provider is None or not provider.is_usable or model not in provider.models:
+            raise ValueError("Session Model Configuration is unavailable")
+        capacity = self.effective_model_context_windows()[provider_id].get(model)
+        if capacity is None:
+            raise ValueError("Session Model Configuration has no known context window")
+        chat = self.resolve_route("chat")
+        if capacity <= chat.route.max_output:
+            raise ValueError("Session Model Configuration cannot satisfy the chat output budget")
+        route = replace(
+            chat.route,
+            provider_id=provider_id,
+            model=model,
+            context_window=capacity,
+            reasoning_effort=reasoning_effort,
+        )
+        return ResolvedModelRoute(
+            requested_route="chat",
+            selected_route="chat",
+            provider=provider,
+            route=route,
+            used_default=False,
+        )
+
     def effective_model_context_windows(self) -> Mapping[str, Mapping[str, int]]:
         """Return explicit capacities plus values recoverable from legacy default/chat routes."""
         capacities = {

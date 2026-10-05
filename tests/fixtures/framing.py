@@ -18,6 +18,7 @@ from omni.provider.models import (
     ModelResponse,
     ModelRoute,
     ModelStreamEvent,
+    SessionModelConfiguration,
 )
 
 
@@ -55,6 +56,7 @@ class TaskFramingRouterAdapter:
         messages: ModelMessages,
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None = None,
+        session_model_configuration: SessionModelConfiguration | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         if _accepts_guard(self._delegate.stream):
@@ -66,6 +68,11 @@ class TaskFramingRouterAdapter:
                     tools=tools,
                     continuation=continuation,
                     guard=guard,
+                    **(
+                        {"session_model_configuration": session_model_configuration}
+                        if session_model_configuration is not None
+                        else {}
+                    ),
                 ),
             )
         self._check_fake_attempt(route, messages=messages, tools=tools, guard=guard)
@@ -83,6 +90,7 @@ class TaskFramingRouterAdapter:
         messages: ModelMessages,
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None = None,
+        session_model_configuration: SessionModelConfiguration | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> ModelResponse:
         if self._outcomes is not None and _is_task_framing_request(
@@ -99,6 +107,11 @@ class TaskFramingRouterAdapter:
                     tools=tools,
                     continuation=continuation,
                     guard=guard,
+                    **(
+                        {"session_model_configuration": session_model_configuration}
+                        if session_model_configuration is not None
+                        else {}
+                    ),
                 ),
             )
         self._check_fake_attempt(route, messages=messages, tools=tools, guard=guard)
@@ -122,10 +135,19 @@ class TaskFramingRouterAdapter:
         route: ModelRoute,
         *,
         continuation: ModelContinuation | None,
+        session_model_configuration: SessionModelConfiguration | None = None,
     ) -> ModelRouteStatus:
         call_route_status = getattr(self._delegate, "call_route_status", None)
         if callable(call_route_status):
-            status = call_route_status(route, continuation=continuation)
+            status = call_route_status(
+                route,
+                continuation=continuation,
+                **(
+                    {"session_model_configuration": session_model_configuration}
+                    if session_model_configuration is not None
+                    else {}
+                ),
+            )
             if isinstance(status, ModelRouteStatus):
                 return status
         status = self._configured_statuses.get(route)

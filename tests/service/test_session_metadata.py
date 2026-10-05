@@ -14,8 +14,11 @@ import pytest
 from aiohttp.test_utils import TestServer
 
 from omni.agent.session.session import Session
+from omni.config.agent_home import AgentHome
 from omni.config.config import ConfigLoader
+from omni.provider.session_configuration import SessionModelConfiguration
 from omni.service.discovery import create_credential
+from omni.service.errors import ServiceError
 from omni.service.runtime import AgentService, ClientState, SessionClaim, WorkspaceRecord
 from omni.service.transport import create_app
 from tests.service.test_service_transport import _persist_session, _prepare_agent_home
@@ -62,8 +65,12 @@ class MetadataHarness:
 
 
 @asynccontextmanager
-async def _metadata_service(tmp_path: Path) -> AsyncIterator[MetadataHarness]:
-    home = _prepare_agent_home(tmp_path / "agent-home")
+async def _metadata_service(
+    tmp_path: Path,
+    *,
+    agent_home: AgentHome | None = None,
+) -> AsyncIterator[MetadataHarness]:
+    home = agent_home or _prepare_agent_home(tmp_path / "agent-home")
     directory = tmp_path / "workspace"
     directory.mkdir()
     session_id = await _persist_session(
@@ -74,7 +81,8 @@ async def _metadata_service(tmp_path: Path) -> AsyncIterator[MetadataHarness]:
         content="Private conversation body",
     )
     token = create_credential(home)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=30)
+    active_configuration = ConfigLoader(home).load_for_startup()
+    service = AgentService(home, active_configuration, reconnect_timeout=30)
     await service.start()
     server = TestServer(create_app(service), host="127.0.0.1")
     try:
@@ -100,6 +108,211 @@ async def _metadata_service(tmp_path: Path) -> AsyncIterator[MetadataHarness]:
     finally:
         await server.close()
         await service.stop()
+
+
+def _session_model_test_configuration(home: AgentHome) -> None:
+    (home.path / "config.toml").write_text(
+        """[models.providers.first-provider]
+protocol = "openai-compatible"
+base_url = "https://first.example/v1"
+api_key = "first-secret"
+models = ["shared-model"]
+
+[models.providers.first-provider.model_context_windows]
+shared-model = 32000
+
+[models.providers.second-provider]
+protocol = "anthropic"
+base_url = "https://second.example/v1"
+api_key = "second-secret"
+models = ["shared-model"]
+
+[models.providers.second-provider.model_context_windows]
+shared-model = 16000
+
+[models.routes.default]
+provider_id = "first-provider"
+model = "shared-model"
+context_window = 32000
+max_output = 4096
+temperature = 0.2
+reasoning_effort = "medium"
+timeout = 60
+""",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_model_configuration_is_claimed_versioned_and_persisted(
+    tmp_path: Path,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    _session_model_test_configuration(home)
+    async with _metadata_service(tmp_path, agent_home=home) as harness:
+        command_payload = {
+            "expected_model_configuration_version": 0,
+            "provider_id": "second-provider",
+            "model": "shared-model",
+            "reasoning_effort": "max",
+        }
+        command = {
+            "request_id": "configure-session-model",
+            "type": "session_model_configure",
+            "workspace_id": harness.workspace.workspace_id,
+            "session_id": harness.session.session_id,
+            "claim_version": harness.claim.version,
+            "payload": command_payload,
+        }
+
+        acknowledgement = await harness.service.handle_command(
+            harness.client.client_id,
+            command,
+        )
+
+        expected = {
+            "provider_id": "second-provider",
+            "model": "shared-model",
+            "reasoning_effort": "max",
+        }
+        assert acknowledgement["accepted"] is True
+        assert acknowledgement["result"] == {
+            "model_configuration": expected,
+            "model_configuration_version": 1,
+        }
+        assert harness.session.metadata_version == 0
+        assert harness.session.metadata["model_configuration_version"] == 1
+        assert harness.session.metadata["model_configuration"] == expected
+
+        persisted = Session.load(harness.session.workspace_state, harness.session.session_id)
+        assert persisted.metadata["model_configuration"] == expected
+        assert persisted.metadata["model_configuration_version"] == 1
+        event = next(
+            event
+            for event in reversed(harness.client.events)
+            if event["type"] == "session.model_configuration"
+        )
+        assert event["payload"] == {
+            **expected,
+            "model_configuration_version": 1,
+        }
+
+        stale_command = {
+            **command,
+            "request_id": "configure-session-model-stale",
+            "payload": {
+                **command_payload,
+                "provider_id": "first-provider",
+                "expected_model_configuration_version": 0,
+            },
+        }
+        with pytest.raises(ServiceError) as error:
+            await harness.service.handle_command(harness.client.client_id, stale_command)
+        assert error.value.code == "model_configuration_conflict"
+        assert error.value.status == 409
+        assert harness.session.model_configuration is not None
+        assert harness.session.model_configuration.to_dict() == expected
+        assert harness.session.model_configuration_version == 1
+        assert (
+            len(
+                [
+                    event
+                    for event in harness.client.events
+                    if event["type"] == "session.model_configuration"
+                ]
+            )
+            == 1
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["unknown_model", "stale_claim", "missing_claim", "invalid_effort"])
+async def test_session_model_configuration_rejects_invalid_updates_without_mutation(
+    tmp_path: Path,
+    invalid: str,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    _session_model_test_configuration(home)
+    async with _metadata_service(tmp_path, agent_home=home) as harness:
+        before = harness.path.read_bytes()
+        payload = {
+            "expected_model_configuration_version": 0,
+            "provider_id": "second-provider",
+            "model": "unknown" if invalid == "unknown_model" else "shared-model",
+            "reasoning_effort": "unknown" if invalid == "invalid_effort" else "high",
+        }
+        command = {
+            "request_id": f"invalid-{invalid}",
+            "type": "session_model_configure",
+            "workspace_id": harness.workspace.workspace_id,
+            "session_id": harness.session.session_id,
+            "claim_version": harness.claim.version + (1 if invalid == "stale_claim" else 0),
+            "payload": payload,
+        }
+        if invalid == "missing_claim":
+            await harness.workspace.release(harness.client.client_id, harness.session.session_id)
+        with pytest.raises(ServiceError) as error:
+            await harness.service.handle_command(harness.client.client_id, command)
+        assert (
+            error.value.code
+            == {
+                "unknown_model": "model_unavailable",
+                "stale_claim": "stale_claim",
+                "missing_claim": "stale_claim",
+                "invalid_effort": "validation_error",
+            }[invalid]
+        )
+        assert harness.session.model_configuration is None
+        assert harness.session.model_configuration_version == 0
+        assert harness.path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_removed_session_model_keeps_history_readable_and_rejects_input(
+    tmp_path: Path,
+) -> None:
+    async with _metadata_service(tmp_path) as harness:
+        selection = SessionModelConfiguration("removed-provider", "removed-model", "high")
+        harness.session.configure_model_durably(selection, expected_version=0)
+        before = harness.path.read_bytes()
+        snapshot = harness.workspace.session_snapshot(harness.session.session_id)
+        assert snapshot["model_configuration"] == selection.to_dict()
+        assert snapshot["messages"]
+        status = harness.claim.loop.runtime_status_input()
+        assert status.model_configuration_available is False
+        assert status.context_window > 0
+        assert harness.session.model_configuration == selection
+        async with harness.http.post(
+            harness.server.make_url(
+                f"/api/v1/workspaces/{harness.workspace.workspace_id}/management/status"
+            ),
+            headers=harness.headers,
+            json={
+                "request_id": "removed-model-status",
+                "current_session_id": harness.session.session_id,
+                "claim_version": harness.claim.version,
+            },
+        ) as response:
+            assert response.status == 200
+            view = (await response.json())["result"]["status_view"]
+            assert view["model_configuration_available"] is False
+            assert view["current_permission_level"] == "workspace-write"
+        with pytest.raises(ServiceError) as error:
+            await harness.service.handle_command(
+                harness.client.client_id,
+                {
+                    "request_id": "removed-model-input",
+                    "type": "input",
+                    "workspace_id": harness.workspace.workspace_id,
+                    "session_id": harness.session.session_id,
+                    "claim_version": harness.claim.version,
+                    "payload": {"text": "must be rejected"},
+                },
+            )
+        assert error.value.code == "model_unavailable"
+        assert error.value.status == 422
+        assert harness.path.read_bytes() == before
+        assert not any(event["type"] == "input.accepted" for event in harness.client.events)
 
 
 @pytest.mark.asyncio

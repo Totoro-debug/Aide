@@ -8,6 +8,7 @@ import pytest
 
 from omni.agent.session.session import Session
 from omni.agent.workspace_state import WorkspaceState
+from omni.provider.session_configuration import SessionModelConfiguration
 
 CREATED_AT = datetime(2026, 10, 1, tzinfo=UTC)
 RENAMED_AT = CREATED_AT + timedelta(seconds=10)
@@ -223,3 +224,27 @@ async def test_rename_empty_draft_never_materializes_history(workspace: Path) ->
     assert session.updated_at == CREATED_AT
     assert session.metadata_version == 0
     assert not state.path.exists()
+
+
+@pytest.mark.asyncio
+async def test_model_configuration_on_empty_draft_persists_with_first_turn(workspace: Path) -> None:
+    state = WorkspaceState(workspace)
+    session = Session.create(state, now=lambda: CREATED_AT)
+    selection = SessionModelConfiguration("provider", "model", "high")
+
+    assert session.configure_model_durably(selection, expected_version=0) == 1
+    assert session.model_configuration == selection
+    assert session.model_configuration_version == 1
+    assert session.updated_at == CREATED_AT
+    assert not state.path.exists()
+
+    session.commit_agent_run(
+        [{"role": "user", "content": "First turn"}],
+        pending_last_compacted=0,
+        pending_action_summary=None,
+    )
+    await session.wait_for_pending_persist()
+
+    persisted = Session.load(state, session.session_id)
+    assert persisted.model_configuration == selection
+    assert persisted.model_configuration_version == 1

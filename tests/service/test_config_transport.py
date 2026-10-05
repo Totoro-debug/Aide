@@ -153,9 +153,13 @@ async def test_available_models_excludes_unusable_providers(config_http: ConfigH
         "no-key": replace(provider, provider_id="no-key", api_key=" "),
         "bad-url": replace(provider, provider_id="bad-url", base_url="invalid"),
         "bad-protocol": replace(provider, provider_id="bad-protocol", protocol="unsupported"),
+        "too-small": replace(provider, provider_id="too-small"),
     }
     known: dict[str, ProviderConfiguration] = {
-        name: replace(value, model_context_windows={"small-model": 16384})
+        name: replace(
+            value,
+            model_context_windows={"small-model": 1024 if name == "too-small" else 16384},
+        )
         for name, value in unavailable.items()
     }
     service.configuration = replace(
@@ -166,6 +170,26 @@ async def test_available_models_excludes_unusable_providers(config_http: ConfigH
     assert service.available_models_view()["models"] == [
         {"provider_id": "primary", "model": "small-model", "context_window": 8192}
     ]
+
+    current_configuration = service.configuration
+    assert current_configuration is not None
+    chat_route = replace(
+        current_configuration.models.routes["default"],
+        context_window=16_384,
+        reasoning_effort="high",
+    )
+    service.configuration = replace(
+        current_configuration,
+        models=replace(
+            current_configuration.models,
+            routes={**current_configuration.models.routes, "chat": chat_route},
+        ),
+    )
+    assert service.available_models_view()["default_combination"] == {
+        "provider_id": "primary",
+        "model": "small-model",
+        "reasoning_effort": "high",
+    }
 
 
 @pytest.mark.asyncio

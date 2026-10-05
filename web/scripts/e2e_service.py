@@ -195,7 +195,9 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
                 json.dumps(
                     {
                         "model": model,
+                        "max_output": body.get("max_tokens"),
                         "prompt": user_prompt,
+                        "reasoning_effort": body.get("reasoning_effort"),
                         "tools": tool_names,
                         "tool_results": tuple(tool_result_ids),
                     },

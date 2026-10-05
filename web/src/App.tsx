@@ -64,6 +64,7 @@ import {
   getRuntimeStatus,
   getServiceStatus,
   getConfig,
+  getAvailableModels,
   openEventStream,
   releaseProjectSession,
   releaseWorkspaceSession,
@@ -117,7 +118,9 @@ import type {
   SessionClaim,
   SessionClaimResponse,
   SessionSnapshot,
+  SessionModelConfiguration,
   SessionSummary,
+  AvailableModelsResponse,
   SkillMetadata,
   ToolPermissionLevel,
   RestoreMode,
@@ -3118,6 +3121,7 @@ function StatusMetric({
 interface RuntimeManagementDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onPermissionChanged: (permission: ToolPermissionLevel) => void;
   claim: SessionClaim;
   sessionTitle: string;
   activeRuns: LiveRun[];
@@ -3128,6 +3132,7 @@ interface RuntimeManagementDialogProps {
 function RuntimeManagementDialog({
   open,
   onOpenChange,
+  onPermissionChanged,
   claim,
   sessionTitle,
   activeRuns,
@@ -3185,6 +3190,7 @@ function RuntimeManagementDialog({
       }
       setStatus(result.status_view);
       setPermission(result.status_view.current_permission_level);
+      onPermissionChanged(result.status_view.current_permission_level);
       setEffort(result.status_view.chat_reasoning_effort);
       setLoadState("ready");
     }).catch((reason: unknown) => {
@@ -3193,7 +3199,7 @@ function RuntimeManagementDialog({
       setLoadState("ready");
     });
     return () => { active = false; requestEpoch.current += 1; };
-  }, [claim, open, connectionState]);
+  }, [claim, onPermissionChanged, open, connectionState]);
 
   async function savePermission(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -3217,6 +3223,7 @@ function RuntimeManagementDialog({
         return;
       }
       setPermission(published);
+      onPermissionChanged(published);
       setStatus((current) => current === null ? current : {
         ...current,
         current_permission_level: published,
@@ -3413,7 +3420,18 @@ function RuntimeManagementDialog({
 
           {status !== null ? (
             <>
+              {status.model_configuration_available === false ? (
+                <p className={styles.notice} role="status">{t("conversation.modelUnavailable")}</p>
+              ) : null}
               <dl className={styles.managementStatusGrid} aria-label={t("management.statusTitle")}>
+                {status.active_model_configuration !== undefined ? (
+                  <div className={styles.managementMetric}>
+                    <dt>{t("conversation.activeModel")}</dt>
+                    <dd>
+                      {`${status.active_model_configuration.provider_id}/${status.active_model_configuration.model} · ${status.active_model_configuration.reasoning_effort}`}
+                    </dd>
+                  </div>
+                ) : null}
                 <div className={styles.managementMetric}>
                   <dt>{t("management.model")}</dt>
                   <dd>{status.chat_model || "-"}</dd>
@@ -5995,6 +6013,13 @@ function ProjectSessionsContent({
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [claim, setClaim] = useState<SessionClaim | null>(null);
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null);
+  const [availableModels, setAvailableModels] = useState<AvailableModelsResponse | null>(null);
+  const [availableModelsState, setAvailableModelsState] = useState<"loading" | "ready" | "error">("loading");
+  const [sessionModelSaving, setSessionModelSaving] = useState(false);
+  const [clientPermission, setClientPermission] = useState<ToolPermissionLevel>("workspace-write");
+  const [clientPermissionSaving, setClientPermissionSaving] = useState(false);
+  const [fullAccessWarningClaim, setFullAccessWarningClaim] = useState<SessionClaim | null>(null);
+  const fullAccessCancelRef = useRef<HTMLButtonElement | null>(null);
   const [draft, setDraft] = useState(false);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -6022,6 +6047,8 @@ function ProjectSessionsContent({
   const [composerError, setComposerError] = useState<string | null>(null);
   const claimRef = useRef<SessionClaim | null>(null);
   const snapshotRef = useRef<SessionSnapshot | null>(null);
+  const sessionModelSavingRef = useRef(false);
+  const clientPermissionSavingRef = useRef(false);
   const claimsBySessionRef = useRef<Record<string, SessionClaim>>({});
   const snapshotsBySessionRef = useRef<Record<string, SessionSnapshot>>({});
   const liveRunsRef = useRef<Record<string, LiveRun[]>>({});
@@ -6169,6 +6196,37 @@ function ProjectSessionsContent({
     snapshotRef.current = snapshot;
     if (snapshot !== null) snapshotsBySessionRef.current[snapshot.session_id] = snapshot;
   }, [snapshot]);
+
+  useEffect(() => {
+    if (authState !== "ready" || connectionState !== "online") return;
+    let active = true;
+    setAvailableModelsState("loading");
+    void getAvailableModels().then((result) => {
+      if (!active) return;
+      setAvailableModels(result);
+      setAvailableModelsState("ready");
+    }).catch(() => {
+      if (active) setAvailableModelsState("error");
+    });
+    return () => { active = false; };
+  }, [authState, connectionState]);
+
+  useEffect(() => {
+    if (claim === null || connectionState !== "online") return;
+    let active = true;
+    void getRuntimeStatus(
+      claim.workspace_id,
+      claim.session_id,
+      claim.claim_version,
+      claim.reconnect_credential,
+    ).then((result) => {
+      if (active && result.status_view !== undefined
+        && PERMISSION_LEVELS.includes(result.status_view.current_permission_level)) {
+        setClientPermission(result.status_view.current_permission_level);
+      }
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [claim, connectionState]);
 
   useEffect(() => {
     if (connectionState !== "online" || claim === null || draft) return;
@@ -6585,6 +6643,32 @@ function ProjectSessionsContent({
     const cursor = sessionCursorRef.current[sessionId];
     if (cursor?.streamId === event.stream_id && event.seq <= cursor.seq) return;
     sessionCursorRef.current[sessionId] = { streamId: event.stream_id, seq: event.seq };
+    if (event.type === "session.model_configuration") {
+      const providerId = event.payload.provider_id;
+      const model = event.payload.model;
+      const effort = event.payload.reasoning_effort;
+      const version = event.payload.model_configuration_version;
+      const currentSnapshot = snapshotsBySessionRef.current[sessionId];
+      if (
+        typeof providerId === "string" && providerId.length > 0
+        && typeof model === "string" && model.length > 0
+        && typeof effort === "string" && REASONING_EFFORTS.includes(effort as ReasoningEffort)
+        && typeof version === "number" && Number.isInteger(version) && version > 0
+        && currentSnapshot !== undefined
+        && version >= currentSnapshot.model_configuration_version
+      ) {
+        adoptSnapshot({
+          ...currentSnapshot,
+          model_configuration: {
+            provider_id: providerId,
+            model,
+            reasoning_effort: effort as ReasoningEffort,
+          },
+          model_configuration_version: version,
+        });
+      }
+      return;
+    }
     if (event.type === "input.accepted" && typeof event.payload.request_id === "string") {
       pendingSubmissionsRef.current = pendingSubmissionsRef.current.filter(
         (pending) => pending.command.request_id !== event.payload.request_id,
@@ -6724,6 +6808,94 @@ function ProjectSessionsContent({
     }
   }
 
+  async function saveSessionModelConfiguration(nextConfiguration: SessionModelConfiguration) {
+    const currentClaim = claimRef.current;
+    const currentSnapshot = snapshotRef.current;
+    if (currentClaim === null || currentSnapshot === null || sessionModelSavingRef.current) return;
+    sessionModelSavingRef.current = true;
+    setSessionModelSaving(true);
+    setComposerError(null);
+    try {
+      const result = await sendServiceCommand({
+        request_id: createRequestId(),
+        type: "session_model_configure",
+        workspace_id: currentClaim.workspace_id,
+        session_id: currentClaim.session_id,
+        claim_version: currentClaim.claim_version,
+        payload: {
+          expected_model_configuration_version: currentSnapshot.model_configuration_version,
+          provider_id: nextConfiguration.provider_id,
+          model: nextConfiguration.model,
+          reasoning_effort: nextConfiguration.reasoning_effort,
+        },
+      });
+      if (claimRef.current !== currentClaim) return;
+      const version = result.model_configuration_version;
+      if (typeof version !== "number" || !Number.isInteger(version)) {
+        throw new ServiceCommandError(null, false);
+      }
+      const latestSnapshot = snapshotRef.current;
+      if (latestSnapshot === null || latestSnapshot.session_id !== currentClaim.session_id) return;
+      if (version >= latestSnapshot.model_configuration_version) {
+        adoptSnapshot({
+          ...latestSnapshot,
+          model_configuration: nextConfiguration,
+          model_configuration_version: version,
+        });
+      }
+    } catch (error) {
+      if (error instanceof ServiceCommandError && error.body?.code === "model_configuration_conflict") {
+        setComposerError("conversation.modelConfigurationConflict");
+        try {
+          const latest = await readRunSnapshot(currentClaim);
+          if (claimRef.current === currentClaim) adoptSnapshot(latest);
+        } catch {
+          // Claim recovery will refresh the saved selection after reconnection.
+        }
+      } else {
+        setComposerError("conversation.modelConfigurationFailed");
+      }
+    } finally {
+      sessionModelSavingRef.current = false;
+      if (mountedRef.current) setSessionModelSaving(false);
+    }
+  }
+
+  async function saveClientPermission(value: string, confirmed = false) {
+    if (!PERMISSION_LEVELS.includes(value as ToolPermissionLevel)
+      || clientPermissionSavingRef.current || connectionState !== "online") return;
+    const currentClaim = claimRef.current;
+    if (currentClaim === null) return;
+    const nextPermission = value as ToolPermissionLevel;
+    if (nextPermission === "full-access" && clientPermission !== "full-access" && !confirmed) {
+      setFullAccessWarningClaim(currentClaim);
+      return;
+    }
+    clientPermissionSavingRef.current = true;
+    setClientPermissionSaving(true);
+    setComposerError(null);
+    try {
+      const result = await updateRuntimePermission(
+        currentClaim.workspace_id,
+        currentClaim.session_id,
+        currentClaim.claim_version,
+        currentClaim.reconnect_credential,
+        nextPermission,
+      );
+      if (claimRef.current !== currentClaim) return;
+      const published = result.published_permission_level;
+      if (published == null || !PERMISSION_LEVELS.includes(published)) {
+        throw new Error("The service returned an invalid permission level.");
+      }
+      setClientPermission(published);
+    } catch {
+      setComposerError("conversation.permissionSaveFailed");
+    } finally {
+      clientPermissionSavingRef.current = false;
+      if (mountedRef.current) setClientPermissionSaving(false);
+    }
+  }
+
   async function submitInput(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const currentClaim = claimRef.current;
@@ -6731,6 +6903,7 @@ function ProjectSessionsContent({
     const text = inputText.trim();
     if (currentClaim === null || sessionId === null || !text) return;
     if (pendingDeletionRef.current?.attempted && pendingDeletionRef.current.claim.session_id === sessionId) return;
+    if (sessionModelSavingRef.current || modelSelectionNeedsAttention) return;
     const activeRun = (liveRunsRef.current[sessionId] ?? []).some(isLiveRunActive);
     if (activeRun || connectionState !== "online") return;
     const localId = createRequestId();
@@ -6792,6 +6965,18 @@ function ProjectSessionsContent({
   const selectedSummary = selectedSessionId === null ? undefined : sessionSummaries[selectedSessionId];
   const selectedLiveRuns = selectedSessionId === null ? [] : liveRunsBySession[selectedSessionId] ?? [];
   const activeRun = selectedLiveRuns.find(isLiveRunActive) ?? null;
+  const savedSessionModel = snapshot?.model_configuration ?? null;
+  const chatDefaultModel = availableModels?.default_combination ?? null;
+  const displayedModel = savedSessionModel ?? chatDefaultModel;
+  const displayedEffort = savedSessionModel?.reasoning_effort
+    ?? chatDefaultModel?.reasoning_effort
+    ?? "medium";
+  const selectedModelAvailable = savedSessionModel === null || availableModels?.models.some(
+    (model) => model.provider_id === savedSessionModel.provider_id && model.model === savedSessionModel.model,
+  ) === true;
+  const modelSelectionNeedsAttention = availableModelsState !== "ready"
+    || (availableModels?.models.length ?? 0) === 0
+    || (savedSessionModel === null ? chatDefaultModel === null : !selectedModelAvailable);
   const selectedRestoreAnchor = snapshot?.restore_anchors?.find(
     (anchor) => anchor.anchor_id === restoreAnchorId,
   );
@@ -7394,10 +7579,104 @@ function ProjectSessionsContent({
                     }}
                     onKeyDown={handleInputKeyDown}
                   />
+                  <div className={styles.composerSettings}>
+                    <label className={`${styles.composerSetting} ${styles.composerModelSetting}`}>
+                      <span>{t("conversation.sessionModel")}</span>
+                      <select
+                        className={styles.composerSelect}
+                        aria-label={t("conversation.sessionModel")}
+                        value={savedSessionModel === null
+                          ? ""
+                          : JSON.stringify([savedSessionModel.provider_id, savedSessionModel.model])}
+                        disabled={sessionModelSaving || connectionState !== "online" || availableModelsState !== "ready"
+                          || (availableModels?.models.length ?? 0) === 0}
+                        onChange={(event) => {
+                          const selected = availableModels?.models.find((model) => (
+                            JSON.stringify([model.provider_id, model.model]) === event.target.value
+                          ));
+                          if (selected === undefined) return;
+                          void saveSessionModelConfiguration({
+                            provider_id: selected.provider_id,
+                            model: selected.model,
+                            reasoning_effort: displayedEffort,
+                          });
+                        }}
+                      >
+                        <option value="">
+                          {chatDefaultModel === null
+                            ? t("conversation.modelsUnavailable")
+                            : `${t("conversation.defaultModel")} · ${chatDefaultModel.provider_id}/${chatDefaultModel.model}`}
+                        </option>
+                        {savedSessionModel !== null && !selectedModelAvailable ? (
+                          <option value={JSON.stringify([savedSessionModel.provider_id, savedSessionModel.model])}>
+                            {`${savedSessionModel.provider_id}/${savedSessionModel.model} · ${t("conversation.unavailableModel")}`}
+                          </option>
+                        ) : null}
+                        {(availableModels?.models ?? []).map((model) => (
+                          <option
+                            key={JSON.stringify([model.provider_id, model.model])}
+                            value={JSON.stringify([model.provider_id, model.model])}
+                          >
+                            {`${model.provider_id} · ${model.model} (${model.context_window.toLocaleString(i18n.language)})`}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className={styles.composerSetting}>
+                      <span>{t("conversation.sessionEffort")}</span>
+                      <select
+                        className={styles.composerSelect}
+                        aria-label={t("conversation.sessionEffort")}
+                        value={displayedEffort}
+                        disabled={sessionModelSaving || connectionState !== "online" || displayedModel === null}
+                        onChange={(event) => {
+                          const effort = event.target.value as ReasoningEffort;
+                          const selected = savedSessionModel ?? chatDefaultModel;
+                          if (!REASONING_EFFORTS.includes(effort) || selected === null) return;
+                          void saveSessionModelConfiguration({
+                            provider_id: selected.provider_id,
+                            model: selected.model,
+                            reasoning_effort: effort,
+                          });
+                        }}
+                      >
+                        {REASONING_EFFORTS.map((effort) => (
+                          <option key={effort} value={effort}>
+                            {t(`settings.reasoningEfforts.${effort}`)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className={styles.composerSetting}>
+                      <span>{t("conversation.clientPermission")}</span>
+                      <select
+                        className={styles.composerSelect}
+                        aria-label={t("conversation.clientPermission")}
+                        value={clientPermission}
+                        disabled={clientPermissionSaving || connectionState !== "online"}
+                        onChange={(event) => void saveClientPermission(event.target.value)}
+                      >
+                        {PERMISSION_LEVELS.map((level) => (
+                          <option key={level} value={level}>
+                            {t(`settings.permissionLevels.${level}`)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
                   <div className={styles.composerFooter}>
+                    {availableModelsState !== "loading" && modelSelectionNeedsAttention ? (
+                      <Link className={styles.secondaryButton} to="/settings">
+                        {t("conversation.configureModels")}
+                      </Link>
+                    ) : null}
                     <p className={composerError !== null ? styles.composerError : styles.composerHint} role={composerError !== null ? "alert" : "status"}>
                       {composerError !== null
                         ? t(composerError)
+                        : availableModelsState === "error"
+                          ? t("conversation.modelsUnavailable")
+                          : modelSelectionNeedsAttention
+                            ? t("conversation.modelUnavailable")
                         : activeRun !== null
                           ? t("conversation.activeRun")
                           : t("conversation.enterHint")}
@@ -7405,7 +7684,8 @@ function ProjectSessionsContent({
                     <button
                       className={styles.primaryButton}
                       type="submit"
-                      disabled={!inputText.trim() || activeRun !== null || connectionState !== "online"}
+                      disabled={!inputText.trim() || activeRun !== null || connectionState !== "online"
+                        || sessionModelSaving || modelSelectionNeedsAttention}
                     >
                       <Send size={15} aria-hidden="true" />
                       {t("controls.send")}
@@ -7429,6 +7709,7 @@ function ProjectSessionsContent({
           key={`${claim.workspace_id}:${claim.session_id}:${claim.claim_version}:${claim.reconnect_credential}`}
           open={managementOpen}
           onOpenChange={setManagementOpen}
+          onPermissionChanged={setClientPermission}
           claim={claim}
           sessionTitle={draft ? t("sessions.draftTitle") : selectedSummary?.title ?? t("sessions.title")}
           activeRuns={selectedLiveRuns}
@@ -7436,6 +7717,45 @@ function ProjectSessionsContent({
           triggerRef={managementTriggerRef}
         />
       ) : null}
+      <Dialog.Root
+        open={fullAccessWarningClaim !== null}
+        onOpenChange={(open) => { if (!open) setFullAccessWarningClaim(null); }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className={styles.dialogOverlay} />
+          <Dialog.Content
+            className={styles.dialogContent}
+            onOpenAutoFocus={(event) => {
+              event.preventDefault();
+              fullAccessCancelRef.current?.focus();
+            }}
+          >
+            <Dialog.Title className={styles.dialogTitle}>{t("conversation.fullAccessTitle")}</Dialog.Title>
+            <Dialog.Description className={styles.dialogDescription}>
+              {t("conversation.fullAccessWarning")}
+            </Dialog.Description>
+            <div className={styles.dialogActions}>
+              <Dialog.Close asChild>
+                <button ref={fullAccessCancelRef} className={styles.secondaryButton} type="button">
+                  {t("controls.cancel")}
+                </button>
+              </Dialog.Close>
+              <button
+                className={styles.primaryButton}
+                type="button"
+                disabled={claim !== fullAccessWarningClaim || connectionState !== "online"}
+                onClick={() => {
+                  if (claimRef.current !== fullAccessWarningClaim) return;
+                  setFullAccessWarningClaim(null);
+                  void saveClientPermission("full-access", true);
+                }}
+              >
+                {t("conversation.enableFullAccess")}
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
       <Dialog.Root
         open={deleteOpen}
         onOpenChange={(open) => {

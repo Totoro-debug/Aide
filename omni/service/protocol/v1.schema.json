@@ -359,6 +359,8 @@
       "properties": {
         "version": {"type": "string"},
         "chat_model": {"type": "string"},
+        "active_model_configuration": {"$ref": "#/$defs/session_model_configuration"},
+        "model_configuration_available": {"type": "boolean"},
         "chat_reasoning_effort": {"$ref": "#/$defs/reasoning_effort"},
         "uptime_seconds": {"type": "integer", "minimum": 0},
         "context_window": {"type": "integer", "minimum": 1},
@@ -470,7 +472,7 @@
       "properties": {
         "request_id": {"$ref": "#/$defs/request_id"},
         "type": {
-          "enum": ["claim", "release", "input", "cancel", "confirmation_decide", "subscribe"]
+          "enum": ["claim", "release", "input", "session_model_configure", "cancel", "confirmation_decide", "subscribe"]
         },
         "workspace_id": {"type": ["string", "null"]},
         "session_id": {"type": ["string", "null"]},
@@ -479,7 +481,7 @@
       },
       "allOf": [
         {
-          "if": {"properties": {"type": {"enum": ["claim", "release", "input", "cancel"]}}},
+          "if": {"properties": {"type": {"enum": ["claim", "release", "input", "session_model_configure", "cancel"]}}},
           "then": {
             "properties": {
               "workspace_id": {"$ref": "#/$defs/identifier"},
@@ -488,7 +490,7 @@
           }
         },
         {
-          "if": {"properties": {"type": {"enum": ["release", "input", "cancel"]}}},
+          "if": {"properties": {"type": {"enum": ["release", "input", "session_model_configure", "cancel"]}}},
           "then": {"properties": {"claim_version": {"$ref": "#/$defs/claim_version"}}}
         },
         {
@@ -498,6 +500,23 @@
         {
           "if": {"properties": {"type": {"enum": ["claim", "release"]}}},
           "then": {"properties": {"payload": {"type": "object", "maxProperties": 0}}}
+        },
+        {
+          "if": {"properties": {"type": {"const": "session_model_configure"}}},
+          "then": {
+            "properties": {
+              "payload": {
+                "type": "object",
+                "required": ["expected_model_configuration_version", "provider_id", "model", "reasoning_effort"],
+                "properties": {
+                  "expected_model_configuration_version": {"type": "integer", "minimum": 0},
+                  "provider_id": {"$ref": "#/$defs/identifier"},
+                  "model": {"type": "string", "minLength": 1},
+                  "reasoning_effort": {"$ref": "#/$defs/reasoning_effort"}
+                }
+              }
+            }
+          }
         },
         {
           "if": {"properties": {"type": {"const": "input"}}},
@@ -737,15 +756,28 @@
     "session_snapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["session_id", "messages", "restore_anchors", "live_state"],
+      "required": ["session_id", "messages", "restore_anchors", "live_state", "model_configuration", "model_configuration_version"],
       "properties": {
         "session_id": {"$ref": "#/$defs/identifier"},
         "live_state": {"anyOf": [{"$ref": "#/$defs/session_live_state"}, {"type": "null"}]},
         "messages": {"type": "array", "items": {"type": "object"}},
+        "model_configuration": {"anyOf": [{"$ref": "#/$defs/session_model_configuration"}, {"type": "null"}]},
+        "model_configuration_version": {"type": "integer", "minimum": 0},
+        "active_model_configuration": {"anyOf": [{"$ref": "#/$defs/session_model_configuration"}, {"type": "null"}]},
         "restore_anchors": {
           "type": "array",
           "items": {"$ref": "#/$defs/restore_anchor"}
         }
+      }
+    },
+    "session_model_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_id", "model", "reasoning_effort"],
+      "properties": {
+        "provider_id": {"$ref": "#/$defs/identifier"},
+        "model": {"type": "string", "minLength": 1},
+        "reasoning_effort": {"$ref": "#/$defs/reasoning_effort"}
       }
     },
     "restore_anchor": {

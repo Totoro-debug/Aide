@@ -33,6 +33,7 @@ from omni.config.agent_home import AgentHome
 from omni.config.config import ConfigLoader, ConfigView
 from omni.errors import ErrorInfo
 from omni.provider.models import REASONING_EFFORT_LEVELS, ReasoningEffort
+from omni.provider.session_configuration import SessionModelConfiguration
 from omni.skills.catalog import SkillMetadata
 from omni.utils.host_filesystem import HOST_FILESYSTEM
 from omni.utils.validation import require_nonnegative_int, require_nonnegative_number
@@ -121,6 +122,9 @@ class RuntimeStatusInput:
     last_compacted: int = 0
     cumulative_usage: tuple[tuple[str, int], ...] = ()
     chat_model: str = ""
+    chat_reasoning_effort: ReasoningEffort | None = None
+    active_model_configuration: SessionModelConfiguration | None = None
+    model_configuration_available: bool = True
     context_window: int = 0
     max_output: int = 0
     compact_ratio: float = 0.9
@@ -157,6 +161,8 @@ class RuntimeStatus:
     schedule: dict[str, object] | None = None
     configured_permission_level: ToolPermissionLevel = "workspace-write"
     current_permission_level: ToolPermissionLevel = "workspace-write"
+    active_model_configuration: SessionModelConfiguration | None = None
+    model_configuration_available: bool = True
 
     def __post_init__(self) -> None:
         require_nonnegative_int(self.uptime_seconds, field="uptime_seconds")
@@ -206,6 +212,10 @@ class RuntimeStatus:
         }
         if self.schedule is not None:
             result["schedule"] = dict(self.schedule)
+        if self.active_model_configuration is not None:
+            result["active_model_configuration"] = self.active_model_configuration.to_dict()
+        if not self.model_configuration_available:
+            result["model_configuration_available"] = False
         return result
 
 
@@ -398,7 +408,11 @@ class ManagementViewService:
         """Return all required runtime and current-session status fields."""
         try:
             projection = self._current_agent_loop().runtime_status_input()
-            chat_reasoning_effort = await self.reasoning_effort()
+            chat_reasoning_effort = (
+                projection.chat_reasoning_effort
+                if projection.chat_reasoning_effort is not None
+                else await self.reasoning_effort()
+            )
             if projection.context_window <= 0:
                 raise ValueError("Runtime status context window must be positive")
             budget = ContextBudget(
@@ -435,6 +449,8 @@ class ManagementViewService:
                 version=__version__,
                 chat_model=projection.chat_model,
                 chat_reasoning_effort=chat_reasoning_effort,
+                active_model_configuration=projection.active_model_configuration,
+                model_configuration_available=projection.model_configuration_available,
                 uptime_seconds=uptime,
                 context_window=budget.context_window,
                 max_output=budget.max_output,

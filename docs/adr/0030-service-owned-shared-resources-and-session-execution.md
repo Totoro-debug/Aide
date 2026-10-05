@@ -55,6 +55,15 @@ The authoritative requirements and quantified delivery criteria are tracked in
   selection changes a Client's later Run snapshots; global chat Reasoning Effort
   selection changes later logical model requests and retains its existing
   best-effort persistence. These controls do not rebuild shared resources.
+- A Conversation Session may explicitly select an Available Model and Reasoning
+  Effort together. The combination has an independent metadata version and is
+  captured before the foreground Run's first wait, including title coordination.
+  Later selection changes affect subsequent Runs. The captured combination and
+  its model capacity drive requests, retries, continuation and context budgeting;
+  auxiliary Model Routes retain their configured purposes. Sessions without an
+  explicit combination keep the existing CLI and Schedule defaults. Session
+  Restore preserves the current selection, while an unavailable selection keeps
+  history readable and must be replaced before new input is admitted.
 
 ## Execution structure
 

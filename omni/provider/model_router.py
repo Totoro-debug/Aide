@@ -20,6 +20,7 @@ from omni.provider.models import (
     ModelStreamEvent,
     ReasoningEffort,
 )
+from omni.provider.session_configuration import SessionModelConfiguration
 
 _MAX_ATTEMPTS = 5
 _RETRYABLE_CODES = frozenset({"provider_rate_limited", "provider_timeout", "provider_unavailable"})
@@ -63,6 +64,7 @@ class ModelRouterDelegate(Protocol):
         messages: ModelMessages,
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None = None,
+        session_model_configuration: SessionModelConfiguration | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> AsyncIterator[ModelStreamEvent]: ...
 
@@ -73,6 +75,7 @@ class ModelRouterDelegate(Protocol):
         messages: ModelMessages,
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None = None,
+        session_model_configuration: SessionModelConfiguration | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> Coroutine[Any, Any, ModelResponse]: ...
 
@@ -83,15 +86,23 @@ class ModelRouterDelegate(Protocol):
         route: ModelRoute,
         *,
         continuation: ModelContinuation | None,
+        session_model_configuration: SessionModelConfiguration | None = None,
     ) -> ModelRouteStatus: ...
 
 
 class RunModelRouter:
     """Bind one guard and final route-status snapshot to an Agent Run."""
 
-    def __init__(self, router: ModelRouterDelegate, *, guard: ModelAttemptGuard) -> None:
+    def __init__(
+        self,
+        router: ModelRouterDelegate,
+        *,
+        guard: ModelAttemptGuard,
+        session_model_configuration: SessionModelConfiguration | None = None,
+    ) -> None:
         self._router = router
         self._guard = guard
+        self._session_model_configuration = session_model_configuration
         self._call_statuses: dict[ModelRoute, ModelRouteStatus] = {}
 
     def stream(
@@ -103,13 +114,24 @@ class RunModelRouter:
         continuation: ModelContinuation | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
-        events = self._router.stream(
-            route,
-            messages=messages,
-            tools=tools,
-            continuation=continuation,
-            guard=self._guard if guard is None else guard,
-        )
+        call_guard = self._guard if guard is None else guard
+        if self._session_model_configuration is None:
+            events = self._router.stream(
+                route,
+                messages=messages,
+                tools=tools,
+                continuation=continuation,
+                guard=call_guard,
+            )
+        else:
+            events = self._router.stream(
+                route,
+                messages=messages,
+                tools=tools,
+                continuation=continuation,
+                session_model_configuration=self._session_model_configuration,
+                guard=call_guard,
+            )
 
         async def observe() -> AsyncIterator[ModelStreamEvent]:
             try:
@@ -130,12 +152,22 @@ class RunModelRouter:
         guard: ModelAttemptGuard | None = None,
     ) -> ModelResponse:
         try:
+            call_guard = self._guard if guard is None else guard
+            if self._session_model_configuration is None:
+                return await self._router.complete(
+                    route,
+                    messages=messages,
+                    tools=tools,
+                    continuation=continuation,
+                    guard=call_guard,
+                )
             return await self._router.complete(
                 route,
                 messages=messages,
                 tools=tools,
                 continuation=continuation,
-                guard=self._guard if guard is None else guard,
+                session_model_configuration=self._session_model_configuration,
+                guard=call_guard,
             )
         finally:
             self._remember_call_status(route)
@@ -149,7 +181,13 @@ class RunModelRouter:
         *,
         continuation: ModelContinuation | None,
     ) -> ModelRouteStatus:
-        return self._router.call_route_status(route, continuation=continuation)
+        if self._session_model_configuration is None:
+            return self._router.call_route_status(route, continuation=continuation)
+        return self._router.call_route_status(
+            route,
+            continuation=continuation,
+            session_model_configuration=self._session_model_configuration,
+        )
 
     def _remember_call_status(self, route: ModelRoute) -> None:
         status = self._router.current_call_status(route)
@@ -180,9 +218,18 @@ class ModelRouter:
         self._reasoning_effort_override: ReasoningEffort | None = None
         self._close_task: asyncio.Task[None] | None = None
 
-    def for_run(self, *, guard: ModelAttemptGuard) -> RunModelRouter:
-        """Bind a per-attempt guard and final status to one Agent Run."""
-        return RunModelRouter(self, guard=guard)
+    def for_run(
+        self,
+        *,
+        guard: ModelAttemptGuard,
+        session_model_configuration: SessionModelConfiguration | None = None,
+    ) -> RunModelRouter:
+        """Bind a per-attempt guard and final route status to an Agent Run."""
+        return RunModelRouter(
+            self,
+            guard=guard,
+            session_model_configuration=session_model_configuration,
+        )
 
     def route_status(self, requested_route: ModelRoute) -> ModelRouteStatus:
         """Return the current concrete route identity without provider credentials."""
@@ -205,11 +252,16 @@ class ModelRouter:
         requested_route: ModelRoute,
         *,
         continuation: ModelContinuation | None,
+        session_model_configuration: SessionModelConfiguration | None = None,
     ) -> ModelRouteStatus:
         """Preview the initial route for one logical call without publishing state."""
         return _route_status(
             requested_route,
-            self._resolve_call_route(requested_route, continuation),
+            self._resolve_call_route(
+                requested_route,
+                continuation,
+                session_model_configuration=session_model_configuration,
+            ),
         )
 
     @property
@@ -234,15 +286,21 @@ class ModelRouter:
         messages: ModelMessages,
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None = None,
+        session_model_configuration: SessionModelConfiguration | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
-        resolved, reasoning_effort = self._begin_call(route, continuation=continuation)
+        resolved, reasoning_effort = self._begin_call(
+            route,
+            continuation=continuation,
+            session_model_configuration=session_model_configuration,
+        )
         return self._stream_direct(
             resolved,
             messages=messages,
             tools=tools,
             continuation=continuation,
             reasoning_effort=reasoning_effort,
+            publish_route_status=route != "chat" or session_model_configuration is None,
             guard=guard,
         )
 
@@ -254,6 +312,7 @@ class ModelRouter:
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None,
         reasoning_effort: ReasoningEffort | None,
+        publish_route_status: bool,
         guard: ModelAttemptGuard | None,
     ) -> AsyncIterator[ModelStreamEvent]:
         if continuation is not None and continuation.provider_id != resolved.provider.provider_id:
@@ -291,6 +350,7 @@ class ModelRouter:
                     failure,
                     attempt=attempt,
                     reasoning_effort=reasoning_effort,
+                    publish_route_status=publish_route_status,
                 )
 
     def complete(
@@ -300,15 +360,21 @@ class ModelRouter:
         messages: ModelMessages,
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None = None,
+        session_model_configuration: SessionModelConfiguration | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> Coroutine[Any, Any, ModelResponse]:
-        resolved, reasoning_effort = self._begin_call(route, continuation=continuation)
+        resolved, reasoning_effort = self._begin_call(
+            route,
+            continuation=continuation,
+            session_model_configuration=session_model_configuration,
+        )
         return self._complete_direct(
             resolved,
             messages=messages,
             tools=tools,
             continuation=continuation,
             reasoning_effort=reasoning_effort,
+            publish_route_status=route != "chat" or session_model_configuration is None,
             guard=guard,
         )
 
@@ -320,6 +386,7 @@ class ModelRouter:
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None,
         reasoning_effort: ReasoningEffort | None,
+        publish_route_status: bool,
         guard: ModelAttemptGuard | None,
     ) -> ModelResponse:
         if continuation is not None and continuation.provider_id != resolved.provider.provider_id:
@@ -350,6 +417,7 @@ class ModelRouter:
                     failure,
                     attempt=attempt,
                     reasoning_effort=reasoning_effort,
+                    publish_route_status=publish_route_status,
                 )
 
         raise AssertionError("Provider attempt budget exhausted without a terminal result")
@@ -396,6 +464,7 @@ class ModelRouter:
         *,
         attempt: int,
         reasoning_effort: ReasoningEffort | None,
+        publish_route_status: bool,
     ) -> ResolvedModelRoute:
         if attempt == _MAX_ATTEMPTS:
             raise failure
@@ -431,7 +500,8 @@ class ModelRouter:
             route=fallback_route,
         )
         status = _route_status(requested_route, fallback)
-        self._route_statuses[requested_route] = status
+        if publish_route_status:
+            self._route_statuses[requested_route] = status
         self._remember_current_call_status(requested_route, status)
         _log_fallback(current, fallback, failure, attempt=attempt)
         return fallback
@@ -450,16 +520,27 @@ class ModelRouter:
         requested_route: ModelRoute,
         *,
         continuation: ModelContinuation | None,
+        session_model_configuration: SessionModelConfiguration | None,
     ) -> tuple[ResolvedModelRoute, ReasoningEffort | None]:
-        reasoning_effort = self._reasoning_effort_override
-        resolved = self._resolve_call_route(requested_route, continuation)
+        session_chat_selection = session_model_configuration if requested_route == "chat" else None
+        reasoning_effort = (
+            session_chat_selection.reasoning_effort
+            if session_chat_selection is not None
+            else self._reasoning_effort_override
+        )
+        resolved = self._resolve_call_route(
+            requested_route,
+            continuation,
+            session_model_configuration=session_chat_selection,
+        )
         if reasoning_effort is not None and resolved.selected_route in {"default", "chat"}:
             resolved = replace(
                 resolved,
                 route=replace(resolved.route, reasoning_effort=reasoning_effort),
             )
         status = _route_status(requested_route, resolved)
-        self._route_statuses[requested_route] = status
+        if session_chat_selection is None:
+            self._route_statuses[requested_route] = status
         self._remember_current_call_status(requested_route, status)
         if resolved.used_default:
             logger.warning(
@@ -476,11 +557,24 @@ class ModelRouter:
         self,
         requested_route: ModelRoute,
         continuation: ModelContinuation | None,
+        *,
+        session_model_configuration: SessionModelConfiguration | None,
     ) -> ResolvedModelRoute:
         if continuation is not None:
             previous = self.current_call_status(requested_route)
             if previous is not None and previous.provider_id == continuation.provider_id:
-                resolved = self._configuration.resolve_route(previous.selected_route)
+                if (
+                    session_model_configuration is not None
+                    and requested_route == "chat"
+                    and previous.selected_route == "chat"
+                ):
+                    resolved = self._configuration.resolve_session_model_route(
+                        session_model_configuration.provider_id,
+                        session_model_configuration.model,
+                        session_model_configuration.reasoning_effort,
+                    )
+                else:
+                    resolved = self._configuration.resolve_route(previous.selected_route)
                 if (
                     resolved.selected_route == previous.selected_route
                     and resolved.provider.provider_id == previous.provider_id
@@ -491,6 +585,12 @@ class ModelRouter:
                         requested_route=requested_route,
                         used_default=previous.selected_route != requested_route,
                     )
+        if session_model_configuration is not None and requested_route == "chat":
+            return self._configuration.resolve_session_model_route(
+                session_model_configuration.provider_id,
+                session_model_configuration.model,
+                session_model_configuration.reasoning_effort,
+            )
         return self._configuration.resolve_route(requested_route)
 
     def _remember_current_call_status(

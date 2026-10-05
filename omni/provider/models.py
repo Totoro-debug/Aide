@@ -2,21 +2,22 @@
 
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar, Final, Literal, Protocol
+from typing import Any, ClassVar, Literal, Protocol
 
 from omni.agent.tools.tool_gateway import ModelToolCall
 from omni.provider.errors import EmptyModelResponseError
+from omni.provider.session_configuration import (
+    REASONING_EFFORT_LEVELS as REASONING_EFFORT_LEVELS,
+)
+from omni.provider.session_configuration import (
+    ReasoningEffort as ReasoningEffort,
+)
+from omni.provider.session_configuration import (
+    SessionModelConfiguration as SessionModelConfiguration,
+)
 from omni.utils.validation import require_nonnegative_int
 
 type ModelRoute = Literal["default", "chat", "memory", "schedule"]
-type ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
-REASONING_EFFORT_LEVELS: Final[tuple[ReasoningEffort, ...]] = (
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-    "max",
-)
 type FinishReason = Literal["stop", "tool_calls", "length", "cancelled"]
 type ModelMessageDictionary = dict[str, Any]
 type ModelMessages = Sequence[ModelMessageDictionary]

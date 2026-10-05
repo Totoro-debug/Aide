@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 from omni.agent.context.budget import ContextUsageSnapshot
 from omni.agent.tools.base import ArtifactReference
 from omni.agent.workspace_state import WorkspaceState
+from omni.provider.session_configuration import SessionModelConfiguration
 from omni.utils.async_tasks import await_task_preserving_cancellation
 from omni.utils.host_filesystem import HOST_FILESYSTEM
 from omni.utils.text import normalize_title as _normalize_title
@@ -53,6 +54,8 @@ _TOKEN_USAGE_PATCH_KEYS = frozenset({"token_usage", "token_usage_delta", "usage_
 _TITLE_SOURCE = "_title_source"
 _TITLE_VERSION = "_title_version"
 _MANUAL_TITLE_SOURCE = "manual"
+_SESSION_MODEL_CONFIGURATION = "model_configuration"
+_SESSION_MODEL_CONFIGURATION_VERSION = "model_configuration_version"
 _RESTORE_MESSAGE_FIELDS = frozenset({"restore_anchor_id", "restore_run_token", "restore_before"})
 _RESTORE_BEFORE_FIELDS = frozenset({"metadata", "last_compacted"})
 _RESTORE_NEXT_ANCHOR_ID = "restore_next_anchor_id"
@@ -344,6 +347,20 @@ class Session:
         """Return whether the title was explicitly chosen by a user."""
         return self.metadata.get(_TITLE_SOURCE) == _MANUAL_TITLE_SOURCE
 
+    @property
+    def model_configuration(self) -> SessionModelConfiguration | None:
+        """Return the selected model combination, if this Session has one."""
+        value = self.metadata.get(_SESSION_MODEL_CONFIGURATION)
+        return None if value is None else SessionModelConfiguration.from_dict(value)
+
+    @property
+    def model_configuration_version(self) -> int:
+        """Return the independent optimistic-concurrency version for model selection."""
+        value = self.metadata.get(_SESSION_MODEL_CONFIGURATION_VERSION, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("Session Model Configuration version is malformed")
+        return cast(int, value)
+
     def capture_restore_before(self) -> SessionRestoreBefore:
         """Capture detached Session state before a foreground User input."""
         self._ensure_not_abandoned()
@@ -521,6 +538,11 @@ class Session:
         current_next_id = _next_restore_anchor_id(self.metadata, self.messages)
         restored_next_id = _next_restore_anchor_id(anchor_before.metadata, retained_messages)
         restored_metadata = copy.deepcopy(anchor_before.metadata)
+        for key in (_SESSION_MODEL_CONFIGURATION, _SESSION_MODEL_CONFIGURATION_VERSION):
+            if key in self.metadata:
+                restored_metadata[key] = copy.deepcopy(self.metadata[key])
+            else:
+                restored_metadata.pop(key, None)
         restored_metadata[_RESTORE_NEXT_ANCHOR_ID] = max(
             current_next_id,
             restored_next_id,
@@ -565,6 +587,10 @@ class Session:
         copied_patch = _copy_json_object(patch, field="metadata")
         if _RESTORE_NEXT_ANCHOR_ID in copied_patch:
             raise ValueError("restore anchor counter is Session-owned")
+        if {_SESSION_MODEL_CONFIGURATION, _SESSION_MODEL_CONFIGURATION_VERSION}.intersection(
+            copied_patch
+        ):
+            raise ValueError("Session Model Configuration must use its versioned update")
         _normalize_blackboard_metadata(copied_patch, invalid_is_absent=False)
 
         token_delta = copied_patch.pop("token_usage_delta", None)
@@ -636,6 +662,45 @@ class Session:
         self._write_content(content)
         self.metadata = candidate_metadata
         self._updated_at = renamed_at
+
+    def configure_model_durably(
+        self,
+        configuration: SessionModelConfiguration,
+        *,
+        expected_version: int,
+    ) -> int:
+        """Publish one validated model combination without changing the title version."""
+        self._ensure_not_abandoned()
+        if self._closed:
+            raise RuntimeError("Session is closed")
+        require_nonnegative_int(expected_version, field="expected_version")
+        if any(not task.done() for task in self._persist_tasks):
+            raise RuntimeError("Pending Session snapshots must finish before model update")
+        current_version = self.model_configuration_version
+        if current_version != expected_version:
+            raise ValueError("Session Model Configuration version is stale")
+        if self.model_configuration == configuration:
+            return current_version
+
+        candidate_metadata = copy.deepcopy(self.metadata)
+        candidate_version = current_version + 1
+        candidate_metadata[_SESSION_MODEL_CONFIGURATION] = configuration.to_dict()
+        candidate_metadata[_SESSION_MODEL_CONFIGURATION_VERSION] = candidate_version
+        _validate_metadata(candidate_metadata)
+        updated_at = self._clock_now()
+        if self.messages:
+            content = _serialize_session_state(
+                session_id=self._session_id,
+                created_at=self._created_at,
+                updated_at=updated_at,
+                last_compacted=self.last_compacted,
+                metadata=candidate_metadata,
+                messages=self.messages,
+            )
+            self._write_content(content)
+        self.metadata = candidate_metadata
+        self._updated_at = updated_at
+        return candidate_version
 
     def persist(self) -> None:
         """Schedule a silent, ordered write of the current complete Session snapshot."""
@@ -997,6 +1062,19 @@ def _validate_metadata(metadata: dict[str, Any]) -> None:
     title_source = metadata.get(_TITLE_SOURCE)
     if title_source is not None and title_source != _MANUAL_TITLE_SOURCE:
         raise ValueError("metadata._title_source is invalid")
+    model_configuration = metadata.get(_SESSION_MODEL_CONFIGURATION)
+    model_configuration_version = metadata.get(_SESSION_MODEL_CONFIGURATION_VERSION, 0)
+    require_nonnegative_int(
+        model_configuration_version,
+        field=_SESSION_MODEL_CONFIGURATION_VERSION,
+    )
+    if model_configuration is None:
+        if model_configuration_version != 0:
+            raise ValueError("Session Model Configuration version requires a selection")
+    else:
+        SessionModelConfiguration.from_dict(model_configuration)
+        if model_configuration_version == 0:
+            raise ValueError("Session Model Configuration requires a positive version")
     if _RESTORE_NEXT_ANCHOR_ID in metadata:
         _validate_restore_next_anchor_id(metadata[_RESTORE_NEXT_ANCHOR_ID])
     _normalize_blackboard_metadata(metadata, invalid_is_absent=False)

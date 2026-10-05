@@ -65,6 +65,7 @@ export type ClientCommandType =
   | "claim"
   | "release"
   | "input"
+  | "session_model_configure"
   | "cancel"
   | "confirmation_decide"
   | "subscribe";
@@ -132,6 +133,12 @@ export interface AvailableModelsResponse {
     model: string;
     reasoning_effort: ReasoningEffort;
   } | null;
+}
+
+export interface SessionModelConfiguration {
+  provider_id: string;
+  model: string;
+  reasoning_effort: ReasoningEffort;
 }
 
 export interface ConfigRouteFields {
@@ -236,6 +243,8 @@ export interface SkillMetadata {
 }
 
 export interface RuntimeStatus {
+  model_configuration_available?: boolean;
+  active_model_configuration?: SessionModelConfiguration;
   version: string;
   chat_model: string;
   chat_reasoning_effort: ReasoningEffort;
@@ -413,10 +422,13 @@ export interface SessionSummary {
 }
 
 export interface SessionSnapshot {
+  active_model_configuration?: SessionModelConfiguration | null;
   session_id: string;
   messages: Record<string, unknown>[];
   restore_anchors: RestoreAnchor[];
   live_state: SessionLiveState | null;
+  model_configuration: SessionModelConfiguration | null;
+  model_configuration_version: number;
 }
 
 export interface SessionLiveState {

@@ -17,6 +17,7 @@ from omni.provider.models import (
     ModelRoute,
     ModelStreamEvent,
     ReasoningEffort,
+    SessionModelConfiguration,
 )
 from omni.templates import render_template
 
@@ -180,6 +181,7 @@ class ScriptedFakeRouter:
         messages: Sequence[dict[str, object]],
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None = None,
+        session_model_configuration: SessionModelConfiguration | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         status = self.call_route_status(route, continuation=continuation)
@@ -204,6 +206,7 @@ class ScriptedFakeRouter:
         messages: Sequence[dict[str, object]],
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None = None,
+        session_model_configuration: SessionModelConfiguration | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> ModelResponse:
         status = self.call_route_status(route, continuation=continuation)
@@ -230,8 +233,9 @@ class ScriptedFakeRouter:
         route: ModelRoute,
         *,
         continuation: ModelContinuation | None,
+        session_model_configuration: SessionModelConfiguration | None = None,
     ) -> ModelRouteStatus:
-        del continuation
+        del continuation, session_model_configuration
         return self._route_statuses.get(
             route,
             ModelRouteStatus(

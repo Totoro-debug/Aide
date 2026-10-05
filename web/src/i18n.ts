@@ -532,6 +532,7 @@ const resources = {
         toolArguments: "Arguments",
         unknownTool: "Unknown tool",
         submitFailed: "The message could not be submitted.",
+        submitUnknown: "Message delivery is unknown. Check the conversation after reconnecting.",
         cancelFailed: "The run could not be canceled.",
       },
       confirmation: {
@@ -1085,6 +1086,7 @@ const resources = {
         toolArguments: "参数",
         unknownTool: "未知工具",
         submitFailed: "消息提交失败。",
+        submitUnknown: "消息提交结果未知，恢复连接后请核对会话记录。",
         cancelFailed: "运行取消失败。",
       },
       confirmation: {

@@ -108,7 +108,7 @@ export default function NavigationSidebar({
 
   useEffect(() => {
     try {
-      sessionStorage.setItem(EXPANDED_PROJECTS_KEY, JSON.stringify(expandedProjectIds));
+      localStorage.setItem(EXPANDED_PROJECTS_KEY, JSON.stringify(expandedProjectIds));
     } catch {
       // Navigation remains usable when browser storage is unavailable.
     }
@@ -488,7 +488,10 @@ function ProjectNavigationItem({
 
 function readExpandedProjectIds(): string[] {
   try {
-    const value: unknown = JSON.parse(sessionStorage.getItem(EXPANDED_PROJECTS_KEY) ?? "[]");
+    const stored = localStorage.getItem(EXPANDED_PROJECTS_KEY)
+      ?? sessionStorage.getItem(EXPANDED_PROJECTS_KEY)
+      ?? "[]";
+    const value: unknown = JSON.parse(stored);
     return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [];
   } catch {
     return [];

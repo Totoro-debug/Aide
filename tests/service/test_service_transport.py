@@ -2061,6 +2061,24 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
             ) as response:
                 assert response.status == 403
 
+            await asyncio.sleep(31)
+            async with browser.post(
+                f"{client.base_url}/api/v1/clients",
+                headers={"Origin": client.base_url, "X-Omni-CSRF": csrf},
+                json={"request_id": "browser-client-after-expiry", "kind": "web"},
+            ) as response:
+                assert response.status == 200, await response.text()
+                replacement_client = await response.json()
+                assert replacement_client["client_id"] != web_client["client_id"]
+
+            async with browser.get(
+                f"{client.base_url}/api/v1/web/session",
+                headers={"Origin": client.base_url},
+            ) as response:
+                assert response.status == 200
+                rebound_session = await response.json()
+                assert rebound_session["client_id"] == replacement_client["client_id"]
+
             async with browser.get(
                 f"{client.base_url}/api/v1/service",
                 headers={"Origin": "http://evil.example"},

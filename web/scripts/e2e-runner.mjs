@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { link, mkdir, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { URL } from "node:url";
+import { URL, URLSearchParams } from "node:url";
 import { chromium, expect } from "@playwright/test";
 
 import setup from "./e2e-setup.mjs";
@@ -99,9 +99,14 @@ try {
     channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge",
   });
   const primaryContext = await browser.newContext();
-  const page = await primaryContext.newPage();
+  let page = await primaryContext.newPage();
   const browserErrors = [];
   page.on("pageerror", (error) => browserErrors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error" && message.text().includes("Maximum update depth")) {
+      browserErrors.push(message.text());
+    }
+  });
   async function waitForRecordedEvent(matches, description) {
     for (let attempt = 0; attempt < 200; attempt += 1) {
       const messages = await page.evaluate(() => window.__omniTestMessages);
@@ -130,6 +135,7 @@ try {
   await page.addInitScript(() => {
     const OriginalWebSocket = window.WebSocket;
     window.__omniTestMessages = [];
+    window.__omniTestInputs = [];
     window.WebSocket = class extends OriginalWebSocket {
       constructor(...args) {
         super(...args);
@@ -142,6 +148,11 @@ try {
             // Only JSON service messages are relevant to this test.
           }
         });
+      }
+      send(value) {
+        const command = JSON.parse(value);
+        if (command.type === "input") window.__omniTestInputs.push(command);
+        super.send(value);
       }
     };
   });
@@ -330,7 +341,7 @@ try {
   const secondProject = process.env.OMNI_E2E_SECOND_PROJECT;
   const cliWorkspace = process.env.OMNI_E2E_CLI_WORKSPACE;
   assert.ok(firstProject && projectAlias && secondProject && cliWorkspace);
-  const projectItems = page.getByRole("main").locator('ul[aria-label="Projects"] > li');
+  let projectItems = page.getByRole("main").locator('ul[aria-label="Projects"] > li');
 
   async function registerProject(path, name) {
     await page.getByRole("main").getByRole("button", { name: "Add project" }).first().click();
@@ -377,7 +388,7 @@ try {
   await page.locator("#app-sidebar").getByRole("link", { name: "Projects", exact: true }).click();
   await page.getByRole("main").getByRole("heading", { name: "Projects", exact: true }).waitFor();
 
-  const firstProjectItem = projectItems.filter({ hasText: firstProject });
+  let firstProjectItem = projectItems.filter({ hasText: firstProject });
   const scheduleResponsePromise = page.waitForResponse((response) => (
     response.request().method() === "GET"
     && response.url().endsWith("/schedule/jobs")
@@ -396,7 +407,7 @@ try {
   await expect(scheduleStatus).not.toContainText("{{");
 
   const historyJobTitle = "E2E schedule history job";
-  const historyJobItem = page.getByRole("listitem").filter({ hasText: historyJobTitle });
+  let historyJobItem = page.getByRole("listitem").filter({ hasText: historyJobTitle });
   const historyResponsePromise = page.waitForResponse((response) => (
     response.request().method() === "GET" && /\/schedule\/jobs\/[^/]+\/history(?:\?|$)/.test(response.url())
   ));
@@ -915,7 +926,7 @@ try {
   await expect(scheduleStatus).toContainText("Available");
   await page.getByRole("link", { name: "Open sessions", exact: true }).click();
   await page.getByRole("heading", { name: "project-one", exact: true }).waitFor();
-  const sessionList = page.locator("#app-sidebar").getByRole("list", { name: "project-one Sessions", exact: true });
+  let sessionList = page.locator("#app-sidebar").getByRole("list", { name: "project-one Sessions", exact: true });
   await sessionList.getByRole("button", { name: /Web available history/ }).click();
   await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
   await page.reload();
@@ -1518,6 +1529,9 @@ try {
   assert.equal(await page.evaluate(() => new Set(window.__omniTestMessages.filter((event) => (
     event.type === "input.accepted" && event.payload?.text === "retry once"
   )).map((event) => event.run_id)).size), 1, "Reconnect accepted a duplicate Run");
+  assert.equal(await page.evaluate(() => window.__omniTestInputs.filter(
+    (command) => command.payload.text === "retry once",
+  ).length), 1, "An unknown input was automatically resent after reconnect");
 
   for (const language of ["en", "zh-CN"]) {
     await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
@@ -1587,6 +1601,28 @@ try {
         assert.equal(page.url(), originalRoute);
         await expect(page.locator("#conversation-input")).toHaveValue(draftText);
         await expect.poll(() => page.getByRole("log").evaluate((log) => log.scrollTop)).toBe(savedScroll);
+        if (language === "en" && viewport.width === conversationViewports[0].width) {
+          const recoveryBeforeReload = await page.evaluate(() => (
+            JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null")
+          ));
+          assert.equal(recoveryBeforeReload.input_text, draftText,
+            "The active composer text was not written to browser recovery storage");
+          await expect.poll(() => page.evaluate(() => (
+            JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null")?.scroll_top ?? -1
+          ))).toBe(savedScroll);
+          const recordedMessages = await page.evaluate(() => window.__omniTestMessages);
+          await page.reload();
+          await expect(page.locator("#conversation-input")).toHaveValue(draftText);
+          await page.evaluate(messages => {
+            window.__omniTestMessages = [...messages, ...window.__omniTestMessages];
+          }, recordedMessages);
+          const restoredScroll = await page.getByRole("log").evaluate((log) => ({
+            scrollTop: log.scrollTop,
+            lineHeight: Number.parseFloat(window.getComputedStyle(log).lineHeight) || 24,
+          }));
+          assert.ok(Math.abs(restoredScroll.scrollTop - savedScroll) <= restoredScroll.lineHeight,
+            `Browser recovery moved conversation scroll by more than one line: ${JSON.stringify({ savedScroll, restoredScroll })}`);
+        }
         await page.locator("#conversation-input").fill("");
         assert.ok(bounds.inputWidth > 0 && bounds.sendWidth > 0 && bounds.sendBottom <= viewport.height + 1,
           `Composer unreachable at ${viewport.width}x${viewport.height}`);
@@ -1706,11 +1742,122 @@ try {
   await page.getByRole("button", { name: "New session", exact: true }).click();
   await page.getByRole("region", { name: "Conversation", exact: true })
     .getByRole("heading", { name: "New Session draft", exact: true }).waitFor();
-  await page.getByLabel("Message input").fill("Unsent empty conversation draft");
+  const recoveryText = "Unsent empty conversation draft";
+  await page.getByLabel("Message input").fill(recoveryText);
+  const recoveryModel = page.getByLabel("Session model");
+  const selectedRecoveryModel = await recoveryModel.locator("option").evaluateAll((options) => (
+    options.find((option) => option.value !== "")?.value ?? null
+  ));
+  assert.ok(selectedRecoveryModel, "The empty draft exposed no selectable model");
+  await recoveryModel.selectOption(selectedRecoveryModel);
+  const recoveryEffort = page.getByLabel("Reasoning effort");
+  await recoveryEffort.selectOption("high");
+  await expect(recoveryEffort).toHaveValue("high");
+  const projectExpansion = page.locator("#app-sidebar").getByRole("button", {
+    name: /^(Expand|Collapse) sessions for project-one$/,
+  });
+  if (await projectExpansion.getAttribute("aria-expanded") !== "true") await projectExpansion.click();
+  await expect(projectExpansion).toHaveAttribute("aria-expanded", "true");
+  await expect.poll(() => page.evaluate(() => {
+    const recovery = JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null");
+    return recovery?.model_configuration?.reasoning_effort === "high";
+  })).toBe(true);
+  const beforeRecoverySession = await page.evaluate(async () => {
+    const [serviceResponse, sessionResponse] = await Promise.all([
+      window.fetch("/api/v1/service", { credentials: "include" }),
+      window.fetch("/api/v1/web/session", { credentials: "include" }),
+    ]);
+    return { service: await serviceResponse.json(), session: await sessionResponse.json() };
+  });
+  const expiredDraftId = await page.evaluate(() => (
+    JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null")?.session_id ?? null
+  ));
+  assert.equal(typeof expiredDraftId, "string", "The active draft was not persisted for browser recovery");
+  await page.reload();
+  await expect(page.getByRole("region", { name: "Conversation", exact: true })
+    .getByRole("heading", { name: "New Session draft", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Message input")).toHaveValue(recoveryText);
+  await expect(page.getByLabel("Session model")).toHaveValue(selectedRecoveryModel);
+  await expect(recoveryEffort).toHaveValue("high");
+
+  const recoveryUrl = page.url();
+  await page.close();
+  await delay(31_000);
+  page = await primaryContext.newPage();
+  projectItems = page.getByRole("main").locator('ul[aria-label="Projects"] > li');
+  firstProjectItem = projectItems.filter({ hasText: firstProject });
+  historyJobItem = page.getByRole("listitem").filter({ hasText: historyJobTitle });
+  sessionList = page.locator("#app-sidebar").getByRole("list", { name: "project-one Sessions", exact: true });
+  page.on("pageerror", (error) => browserErrors.push(error.message));
+  await page.addInitScript(() => {
+    if (window.top === window && window.location.protocol === "http:") {
+      const staged = window.sessionStorage.getItem("omni.test-recovery");
+      if (staged !== null) {
+        window.localStorage.setItem("omni.browser-recovery", staged);
+        window.sessionStorage.removeItem("omni.test-recovery");
+      }
+    }
+    const OriginalWebSocket = window.WebSocket;
+    window.__omniTestMessages = [];
+    window.__omniTestInputs = [];
+    window.WebSocket = class extends OriginalWebSocket {
+      constructor(...args) {
+        super(...args);
+        window.__omniTestControlCredential = Array.isArray(args[1]) ? args[1][1] : null;
+        window.__omniTestSocket = this;
+        this.addEventListener("message", (event) => {
+          try {
+            window.__omniTestMessages.push(JSON.parse(event.data));
+          } catch {
+            // Only JSON service messages are relevant to this test.
+          }
+        });
+      }
+      send(value) {
+        const command = JSON.parse(value);
+        if (command.type === "input") window.__omniTestInputs.push(command);
+        super.send(value);
+      }
+    };
+  });
+  await page.goto(recoveryUrl);
+  await expect(page.getByRole("region", { name: "Conversation", exact: true })
+    .getByRole("heading", { name: "New Session draft", exact: true })).toBeVisible({ timeout: 15000 });
+  await expect(page.locator("#app-sidebar").getByRole("button", { name: "Collapse sessions for project-one", exact: true }))
+    .toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByLabel("Message input")).toHaveValue(recoveryText);
+  await expect(page.getByLabel("Session model")).toHaveValue(selectedRecoveryModel);
+  await expect(page.getByLabel("Reasoning effort")).toHaveValue("high");
+  assert.equal(await page.getByRole("log").getByText(recoveryText, { exact: true }).count(), 0,
+    "Browser recovery automatically resent the unsent draft text");
+  const afterRecoverySession = await page.evaluate(async () => {
+    const [serviceResponse, sessionResponse] = await Promise.all([
+      window.fetch("/api/v1/service", { credentials: "include" }),
+      window.fetch("/api/v1/web/session", { credentials: "include" }),
+    ]);
+    return {
+      service: await serviceResponse.json(),
+      session: await sessionResponse.json(),
+      recovery: JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null"),
+    };
+  });
+  assert.equal(afterRecoverySession.service.service_instance_id, beforeRecoverySession.service.service_instance_id,
+    "The service instance changed while the browser was disconnected");
+  assert.notEqual(afterRecoverySession.session.client_id, beforeRecoverySession.session.client_id,
+    "The expired Web Client was not replaced");
+  assert.equal(afterRecoverySession.recovery.session_id, expiredDraftId,
+    "Browser recovery changed the active Session identity");
+  assert.equal(afterRecoverySession.recovery.service_instance_id, beforeRecoverySession.service.service_instance_id);
+  assert.equal("workspace_id" in afterRecoverySession.recovery, false,
+    "Browser recovery stored a transient workspace identity");
+  assert.deepEqual(Object.keys(afterRecoverySession.recovery.model_configuration).sort(), [
+    "model", "provider_id", "reasoning_effort",
+  ]);
+
   await page.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
   await expect(page.getByRole("heading", { name: "New Session draft", exact: true })).toBeVisible();
-  await expect(page.getByLabel("Message input")).toHaveValue("Unsent empty conversation draft");
+  await expect(page.getByLabel("Message input")).toHaveValue(recoveryText);
   await page.getByLabel("Message input").fill("tool states");
   await page.getByLabel("Message input").press("Enter");
   await page.getByRole("button", { name: "Cancel run", exact: true }).waitFor();
@@ -1722,6 +1869,7 @@ try {
   )), "Light-theme Tool Run cancellation");
   await expect(lightCancel).toBeHidden();
   await page.getByRole("button", { name: /Web available history/ }).click();
+  await page.getByRole("log").getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
   await page.getByLabel("Message input").waitFor();
   await page.getByRole("main").getByRole("button", { name: "New session", exact: true }).waitFor();
 
@@ -1755,8 +1903,13 @@ try {
     .getByRole("button", { name: /CLI occupied history/ })
     .getByText(/Occupied|已占用/, { exact: true })
     .waitFor();
+  const occupiedClaimResponse = secondPage.waitForResponse((response) => (
+    response.request().method() === "POST" && response.url().includes("/claim")
+  ));
   await secondSessionList.getByRole("button", { name: /Web available history/ }).click();
-  await secondPage.getByRole("alert").filter({ hasText: /occupied|占用/ }).waitFor();
+  assert.equal((await occupiedClaimResponse).status(), 409);
+  await secondPage.getByRole("region", { name: "Conversation", exact: true })
+    .getByText("This Session is occupied by another client.", { exact: true }).waitFor();
   assert.equal(
     await secondPage.getByText("Available history loaded after a successful Claim", { exact: true }).count(),
     0,
@@ -1764,6 +1917,8 @@ try {
 
   const confirmationPath = control.details.confirmation_path;
   assert.ok(confirmationPath.endsWith("confirmation-outside.txt"));
+  await page.getByLabel("Client permission", { exact: true }).selectOption("workspace-write");
+  await expect(page.getByLabel("Client permission", { exact: true })).toBeEnabled();
   const settingsConfirmationRunId = await settingsConfirmationAcceptance({ page, control });
   await page.locator("#app-sidebar").getByRole("button", { name: "project-one", exact: true }).click();
   const availableHistory = page.locator("#app-sidebar").getByRole("list", { name: "project-one Sessions", exact: true })
@@ -1966,7 +2121,8 @@ try {
     response.request().method() === "POST" && response.url().includes("/claim")
   ));
   await releasedSession.click();
-  assert.equal((await handoffClaimPromise).status(), 200);
+  const handoffClaimResponse = await handoffClaimPromise;
+  assert.equal(handoffClaimResponse.status(), 200, await handoffClaimResponse.text());
   await secondPage.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
   await secondPage.getByRole("button", { name: /Release session|释放会话/ }).click();
   await secondPage.getByRole("button", { name: /Release session|释放会话/ }).waitFor({ state: "detached" });
@@ -2446,8 +2602,39 @@ try {
   await missingProject.getByText("Unavailable", { exact: true }).waitFor();
   assert.equal(await page.getByText(cliWorkspace).count(), 0, "unregistered CLI Workspace leaked into Project list");
 
+  const previousRecovery = await page.evaluate(() => (
+    JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null")
+  ));
+  assert.ok(previousRecovery, "The browser had no active Session snapshot before service restart");
   const restarted = await control.restart();
-  await openChatAndStatus(page, `${restarted.url}/#ticket=${encodeURIComponent(restarted.ticket)}`);
+  const staleRouteParams = new URLSearchParams({ session: previousRecovery.session_id });
+  const staleSessionRoute = previousRecovery.target.kind === "project"
+    ? `/projects/${encodeURIComponent(previousRecovery.target.project_id)}?${staleRouteParams}`
+    : `/chat?directory=${encodeURIComponent(previousRecovery.target.directory)}&${staleRouteParams}`;
+  const defaultChatEntry = page.waitForResponse((response) => (
+    response.request().method() === "POST"
+    && response.url().endsWith("/api/v1/chat/workspaces/enter")
+  ));
+  await page.goto(`${restarted.url}${staleSessionRoute}#ticket=${encodeURIComponent(restarted.ticket)}`);
+  await defaultChatEntry;
+  await expect(page.getByLabel("Message input")).toBeVisible({ timeout: 15000 });
+  assert.equal(new URL(page.url()).pathname, "/", "A stale Session route survived a new service instance");
+  await expect(page.getByRole("region", { name: "Conversation", exact: true })
+    .getByRole("heading", { name: "New Session draft", exact: true })).toBeVisible({ timeout: 15000 });
+  const newServiceRecovery = await page.evaluate(async () => {
+    const [serviceResponse] = await Promise.all([window.fetch("/api/v1/service", { credentials: "include" })]);
+    return {
+      service: await serviceResponse.json(),
+      recovery: JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null"),
+    };
+  });
+  assert.notEqual(newServiceRecovery.service.service_instance_id, previousRecovery.service_instance_id);
+  if (newServiceRecovery.recovery !== null) {
+    assert.equal(newServiceRecovery.recovery.target.kind, "chat");
+    assert.equal(newServiceRecovery.recovery.service_instance_id, newServiceRecovery.service.service_instance_id);
+    assert.notEqual(newServiceRecovery.recovery.session_id, previousRecovery.session_id,
+      "The previous service Session was restored into the new service");
+  }
   await openChatAndStatus(
     secondPage,
     `${restarted.url}/#ticket=${encodeURIComponent(restarted.second_ticket)}`,
@@ -2571,6 +2758,38 @@ try {
 
   await settingsModelMcpAcceptance({ page: secondPage, secondPage: page, control, output });
 
+  const activeService = await page.evaluate(async () => (
+    window.fetch("/api/v1/service", { credentials: "include" }).then((response) => response.json())
+  ));
+  const missingRecoveryId = "missing-browser-recovery-session";
+  await page.evaluate(({ serviceInstanceId, sessionId }) => {
+    window.sessionStorage.setItem("omni.test-recovery", JSON.stringify({
+      version: 1,
+      service_instance_id: serviceInstanceId,
+      target: { kind: "project", project_id: "project-one" },
+      session_id: sessionId,
+      draft: false,
+      input_text: "",
+      model_configuration: null,
+      scroll_top: 0,
+    }));
+  }, { serviceInstanceId: activeService.service_instance_id, sessionId: missingRecoveryId });
+  const currentOrigin = new URL(page.url()).origin;
+  await page.goto(`${currentOrigin}/projects/project-one?session=${missingRecoveryId}`);
+  await page.getByText("This Session is no longer available.", { exact: true }).waitFor();
+  await expect(page.getByLabel("Message input")).toBeVisible({ timeout: 15000 });
+  assert.equal(new URL(page.url()).pathname, "/", "A deleted Session did not return to the default Chat route");
+  await expect(page.getByRole("region", { name: "Conversation", exact: true })
+    .getByRole("heading", { name: "New Session draft", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Message input")).toHaveValue("");
+  const recoveryAfterDeletion = await page.evaluate(() => (
+    JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null")
+  ));
+  assert.notEqual(recoveryAfterDeletion.session_id, missingRecoveryId,
+    "The deleted Session remained the browser recovery target");
+  assert.equal(recoveryAfterDeletion.service_instance_id, activeService.service_instance_id);
+  assert.equal(recoveryAfterDeletion.target.kind, "chat");
+
   await page.bringToFront();
   await page.setViewportSize(viewports[0]);
   let testSocketReadyState = -1;
@@ -2581,14 +2800,14 @@ try {
   assert.equal(testSocketReadyState, 1, "The test page WebSocket did not open after restart");
   await openServiceStatus(page);
   await page.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
-  await page.getByRole("status").first().getByText(/Online|在线/).waitFor();
+  await page.getByRole("status").filter({ hasText: /Online|在线/ }).first().waitFor();
   await page.route("**/api/v1/clients", (route) => route.abort());
   await page.evaluate(() => window.__omniTestSocket.close());
-  await page.getByRole("status").first().getByText(/Reconnecting|恢复连接中/).waitFor();
-  await page.getByRole("status").first().getByText(/Offline|离线/).waitFor({ timeout: 10000 });
+  await page.getByRole("status").filter({ hasText: /Reconnecting|恢复连接中/ }).first().waitFor();
+  await page.getByRole("status").filter({ hasText: /Offline|离线/ }).first().waitFor({ timeout: 10000 });
   await page.unroute("**/api/v1/clients");
   const reconnectResumedAt = Date.now();
-  await page.getByRole("status").first().getByText(/Online|在线/).waitFor({ timeout: 10000 });
+  await page.getByRole("status").filter({ hasText: /Online|在线/ }).first().waitFor({ timeout: 10000 });
   console.log(`Final Offline → Online: ${Date.now() - reconnectResumedAt}ms (limit 10000ms)`);
   assert.deepEqual(browserErrors, [], "Browser JavaScript errors were reported");
     console.log("Playwright production E2E: 4 locale/theme combinations x 3 general viewports and 4 conversation viewports; long history scroll, live/history message bounds, empty layout, text contrast, both-theme cancel/approve; Schedule CRUD, accepted-create lost-ack retry, locked fields, delayed detail focus, simulated status polling, stale page/Project/disconnected responses, keyboard validation and 9999/10000ms feedback; Restore overwrite, cancel, stale responses, refresh, failure acknowledgement; delete, ticket, focus, reconnect passed");

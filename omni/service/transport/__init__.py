@@ -539,7 +539,12 @@ class AgentServiceTransport:
             session = context.web_session
             if session.client_id is not None:
                 reconnect = session.reconnect_credential
-            client = await self.service.register_client(kind, reconnect)
+            try:
+                client = await self.service.register_client(kind, reconnect)
+            except ServiceError as error:
+                if error.code != "stale_client":
+                    raise
+                client = await self.service.register_client(kind)
             session.client_id = client.client_id
             session.reconnect_credential = client.reconnect_credential
         else:

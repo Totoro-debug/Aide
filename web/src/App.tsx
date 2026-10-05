@@ -37,7 +37,7 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
@@ -139,6 +139,13 @@ import type {
 import styles from "./App.module.css";
 import NavigationSidebar from "./NavigationSidebar";
 import type { NavigationSession } from "./NavigationSidebar";
+import {
+  browserRecoveryRoute,
+  clearBrowserRecoverySnapshot,
+  readBrowserRecoverySnapshot,
+  writeBrowserRecoverySnapshot,
+} from "./browserRecovery";
+import type { BrowserRecoverySnapshot } from "./browserRecovery";
 
 type AuthState = "checking" | "ready" | "required" | "error";
 type ConnectionState = "checking" | "online" | "offline" | "recovering";
@@ -217,6 +224,8 @@ export default function App() {
   const { i18n, t } = useTranslation();
   const location = useLocation();
   const navigate = useNavigate();
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
   const [authState, setAuthState] = useState<AuthState>("checking");
   const [connectionState, setConnectionState] = useState<ConnectionState>("checking");
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
@@ -234,12 +243,15 @@ export default function App() {
   const [sessionNavigationVersion, setSessionNavigationVersion] = useState(0);
   const [activeNavigationSession, setActiveNavigationSession] = useState<NavigationSession | null>(null);
   const [navigationDraftSessions, setNavigationDraftSessions] = useState<NavigationSession[]>([]);
+  const releasedEmptyDraftSessionsRef = useRef(new Set<string>());
   const [projectSessionRequest, setProjectSessionRequest] = useState<{
     projectId: string;
     requestId: number;
   } | null>(null);
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
   const [confirmationNotice, setConfirmationNotice] = useState<string | null>(null);
+  const [browserRecovery, setBrowserRecovery] = useState<BrowserRecoverySnapshot | null>(null);
+  const [browserRecoveryNotice, setBrowserRecoveryNotice] = useState<string | null>(null);
   const [settingsVisited, setSettingsVisited] = useState(location.pathname === "/settings");
   const mainContentRef = useRef<HTMLElement | null>(null);
   const bootstrapPromise = useRef<Promise<RegisteredClient> | null>(null);
@@ -253,7 +265,31 @@ export default function App() {
   const nextProjectSessionRequestRef = useRef(0);
   const resolvingConfirmationTokenRef = useRef<string | null>(null);
   const confirmationNoticeTimerRef = useRef<number | null>(null);
+  const browserRecoveryNoticeTimerRef = useRef<number | null>(null);
+  const serviceInstanceIdRef = useRef<string | null>(null);
   const consumeRegisteredClient = useCallback(() => setRegisteredClient(null), []);
+  const persistBrowserRecovery = useCallback((snapshot: BrowserRecoverySnapshot | null) => {
+    if (snapshot === null) {
+      clearBrowserRecoverySnapshot();
+    } else {
+      writeBrowserRecoverySnapshot(snapshot);
+    }
+    setBrowserRecovery((current) => JSON.stringify(current) === JSON.stringify(snapshot) ? current : snapshot);
+  }, []);
+  const handleMissingBrowserRecovery = useCallback(() => {
+    consumeRegisteredClient();
+    clearBrowserRecoverySnapshot();
+    setBrowserRecovery(null);
+    setBrowserRecoveryNotice("sessions.notFoundError");
+    if (browserRecoveryNoticeTimerRef.current !== null) {
+      window.clearTimeout(browserRecoveryNoticeTimerRef.current);
+    }
+    browserRecoveryNoticeTimerRef.current = window.setTimeout(() => {
+      setBrowserRecoveryNotice(null);
+      browserRecoveryNoticeTimerRef.current = null;
+    }, 6000);
+    navigate("/", { replace: true, state: null });
+  }, [consumeRegisteredClient, navigate]);
   const subscribeServiceEvents = useCallback((listener: ServiceEventListener) => {
     eventListenersRef.current.add(listener);
     return () => eventListenersRef.current.delete(listener);
@@ -274,6 +310,7 @@ export default function App() {
   }, []);
   const consumeAddProjectRequest = useCallback(() => setAddProjectRequest(0), []);
   const updateNavigationSession = useCallback((session: NavigationSession | null) => {
+    if (session?.draft && releasedEmptyDraftSessionsRef.current.has(session.sessionId ?? "")) return;
     setActiveNavigationSession(session);
     if (session?.sessionId === null || session == null) return;
     setNavigationDraftSessions((current) => {
@@ -281,7 +318,9 @@ export default function App() {
       return session.draft ? [...otherSessions, session] : otherSessions;
     });
   }, []);
-  const removeNavigationDraft = useCallback((sessionId: string) => {
+  const removeNavigationDraft = useCallback((sessionId: string, wasEmptyDraft = false) => {
+    if (wasEmptyDraft) releasedEmptyDraftSessionsRef.current.add(sessionId);
+    setActiveNavigationSession((current) => current?.sessionId === sessionId ? null : current);
     setNavigationDraftSessions((current) => current.filter((session) => session.sessionId !== sessionId));
   }, []);
   const sendServiceCommand = useCallback(
@@ -464,6 +503,9 @@ export default function App() {
       if (confirmationNoticeTimerRef.current !== null) {
         window.clearTimeout(confirmationNoticeTimerRef.current);
       }
+      if (browserRecoveryNoticeTimerRef.current !== null) {
+        window.clearTimeout(browserRecoveryNoticeTimerRef.current);
+      }
     };
   }, []);
 
@@ -511,6 +553,30 @@ export default function App() {
         const current = await getServiceStatus();
         if (!active) {
           return;
+        }
+        const previousServiceInstanceId = serviceInstanceIdRef.current;
+        const serviceChanged = previousServiceInstanceId !== null
+          && previousServiceInstanceId !== current.service_instance_id;
+        serviceInstanceIdRef.current = current.service_instance_id;
+        const savedRecovery = readBrowserRecoverySnapshot();
+        if (serviceChanged || (savedRecovery !== null
+          && savedRecovery.service_instance_id !== current.service_instance_id)) {
+          clearBrowserRecoverySnapshot();
+          setBrowserRecovery(null);
+          if ((initial || serviceChanged) && isConversationPath(window.location.pathname)) {
+            navigateRef.current("/", { replace: true, state: null });
+          }
+        } else if (savedRecovery !== null) {
+          setBrowserRecovery(savedRecovery);
+          if (initial && shouldRestoreBrowserRecovery(
+            window.location.pathname,
+            window.location.search,
+            savedRecovery,
+          )) {
+            navigateRef.current(browserRecoveryRoute(savedRecovery), { replace: true, state: null });
+          }
+        } else {
+          setBrowserRecovery(null);
         }
         if (
           eventCursorRef.current !== null
@@ -645,6 +711,11 @@ export default function App() {
   const openSettings = (event: React.MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
     if (location.pathname === "/settings") return;
+    const recovery = readBrowserRecoverySnapshot();
+    const viewport = mainContentRef.current?.querySelector<HTMLElement>('[role="log"]');
+    if (recovery !== null && viewport !== null && viewport !== undefined) {
+      persistBrowserRecovery({ ...recovery, scroll_top: viewport.scrollTop });
+    }
     setSettingsVisited(true);
     navigate("/settings", {
       state: {
@@ -839,6 +910,10 @@ export default function App() {
                         sendServiceCommand={sendServiceCommand}
                         subscribeServiceEvents={subscribeServiceEvents}
                         confirmationTriggerRef={confirmationTriggerRef}
+                        browserRecovery={browserRecovery}
+                        serviceInstanceId={serviceStatus?.service_instance_id ?? null}
+                        onBrowserRecoveryChange={persistBrowserRecovery}
+                        onBrowserRecoveryUnavailable={handleMissingBrowserRecovery}
                         newChatVersion={newChatVersion}
                         initialSessionId={conversationParams.get("session")}
                         initialDirectory={conversationParams.get("directory")}
@@ -862,6 +937,10 @@ export default function App() {
                         sendServiceCommand={sendServiceCommand}
                         subscribeServiceEvents={subscribeServiceEvents}
                         confirmationTriggerRef={confirmationTriggerRef}
+                        browserRecovery={browserRecovery}
+                        serviceInstanceId={serviceStatus?.service_instance_id ?? null}
+                        onBrowserRecoveryChange={persistBrowserRecovery}
+                        onBrowserRecoveryUnavailable={handleMissingBrowserRecovery}
                         newChatVersion={newChatVersion}
                         initialSessionId={conversationParams.get("session")}
                         initialDirectory={conversationParams.get("directory")}
@@ -913,6 +992,10 @@ export default function App() {
                     sendServiceCommand={sendServiceCommand}
                     subscribeServiceEvents={subscribeServiceEvents}
                     confirmationTriggerRef={confirmationTriggerRef}
+                    browserRecovery={browserRecovery}
+                    serviceInstanceId={serviceStatus?.service_instance_id ?? null}
+                    onBrowserRecoveryChange={persistBrowserRecovery}
+                    onBrowserRecoveryUnavailable={handleMissingBrowserRecovery}
                     projectSessionRequest={projectSessionRequest}
                     onProjectSessionRequestConsumed={consumeProjectSessionRequest}
                     navigationRequestKey={String(sessionNavigationVersion)}
@@ -959,6 +1042,12 @@ export default function App() {
             </div>
           ) : null}
         </main>
+        {browserRecoveryNotice !== null ? (
+          <div className={styles.confirmationNotice} role="status" aria-live="polite">
+            <CircleAlert size={16} aria-hidden="true" />
+            {t(browserRecoveryNotice)}
+          </div>
+        ) : null}
         {confirmationNotice !== null && pendingConfirmation === null ? (
           <div className={styles.confirmationNotice} role="status" aria-live="polite">
             <CircleCheck size={16} aria-hidden="true" />
@@ -5770,7 +5859,11 @@ interface ProjectSessionsViewProps {
   connectionState: ConnectionState;
   projects: RegisteredProject[];
   registeredClient: RegisteredClient | null;
+  browserRecovery: BrowserRecoverySnapshot | null;
+  serviceInstanceId: string | null;
   onRestoreConsumed: () => void;
+  onBrowserRecoveryChange: (snapshot: BrowserRecoverySnapshot | null) => void;
+  onBrowserRecoveryUnavailable: () => void;
   refreshVersion: number;
   sendServiceCommand: (command: ClientCommand) => Promise<ServiceCommandResult>;
   subscribeServiceEvents: (listener: ServiceEventListener) => () => void;
@@ -5778,7 +5871,7 @@ interface ProjectSessionsViewProps {
   projectSessionRequest?: { projectId: string; requestId: number } | null;
   onProjectSessionRequestConsumed?: (requestId: number) => void;
   onNavigationSessionChange?: (session: NavigationSession | null) => void;
-  onNavigationDraftReleased?: (sessionId: string) => void;
+  onNavigationDraftReleased?: (sessionId: string, wasEmptyDraft?: boolean) => void;
   navigationRequestKey?: string;
 }
 
@@ -5787,7 +5880,11 @@ function ChatSessionsView({
   connectionState,
   projects,
   registeredClient,
+  browserRecovery,
+  serviceInstanceId,
   onRestoreConsumed,
+  onBrowserRecoveryChange,
+  onBrowserRecoveryUnavailable,
   refreshVersion,
   sendServiceCommand,
   subscribeServiceEvents,
@@ -5814,6 +5911,10 @@ function ChatSessionsView({
   const [entryLoadState, setEntryLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [entryError, setEntryError] = useState<string | null>(null);
   const activationSequenceRef = useRef(0);
+  const workspaceEntryRef = useRef(workspaceEntry);
+  workspaceEntryRef.current = workspaceEntry;
+  const entryLoadStateRef = useRef(entryLoadState);
+  entryLoadStateRef.current = entryLoadState;
 
   const activateWorkspace = useCallback(async (directory?: string, sessionId: string | null = null) => {
     if (authState !== "ready" || configurationNeedsSetup !== false) return;
@@ -5845,6 +5946,11 @@ function ChatSessionsView({
   useEffect(() => {
     if (authState !== "ready" || configurationNeedsSetup !== false) return;
     if (requestedSessionId !== null && requestedDirectory !== null) {
+      if (entryLoadStateRef.current === "ready"
+        && workspaceEntryRef.current?.directory === requestedDirectory) {
+        setInitialSessionId(requestedSessionId);
+        return;
+      }
       void activateWorkspace(requestedDirectory, requestedSessionId);
     } else {
       void activateWorkspace();
@@ -5895,6 +6001,11 @@ function ChatSessionsView({
               </div>
             </form>
           </div>
+        ) : authState === "required" ? (
+          <div className={styles.notice} role="status">
+            <CircleAlert size={16} aria-hidden="true" />
+            <span>{t("status.authenticationRequired")}</span>
+          </div>
         ) : workspaceEntry === null ? (
           <div className={entryLoadState === "error" ? styles.errorBanner : styles.notice} role={entryLoadState === "error" ? "alert" : "status"}>
             <CircleAlert size={16} aria-hidden="true" />
@@ -5907,7 +6018,11 @@ function ChatSessionsView({
             connectionState={connectionState}
             projects={projects}
             registeredClient={registeredClient}
+            browserRecovery={browserRecovery}
+            serviceInstanceId={serviceInstanceId}
             onRestoreConsumed={onRestoreConsumed}
+            onBrowserRecoveryChange={onBrowserRecoveryChange}
+            onBrowserRecoveryUnavailable={onBrowserRecoveryUnavailable}
             refreshVersion={refreshVersion}
             sendServiceCommand={sendServiceCommand}
             subscribeServiceEvents={subscribeServiceEvents}
@@ -5931,7 +6046,11 @@ function ProjectSessionsView({
   connectionState,
   projects,
   registeredClient,
+  browserRecovery,
+  serviceInstanceId,
   onRestoreConsumed,
+  onBrowserRecoveryChange,
+  onBrowserRecoveryUnavailable,
   refreshVersion,
   sendServiceCommand,
   subscribeServiceEvents,
@@ -5954,7 +6073,11 @@ function ProjectSessionsView({
       connectionState={connectionState}
       projects={projects}
       registeredClient={registeredClient}
+      browserRecovery={browserRecovery}
+      serviceInstanceId={serviceInstanceId}
       onRestoreConsumed={onRestoreConsumed}
+      onBrowserRecoveryChange={onBrowserRecoveryChange}
+      onBrowserRecoveryUnavailable={onBrowserRecoveryUnavailable}
       refreshVersion={refreshVersion}
       sendServiceCommand={sendServiceCommand}
       subscribeServiceEvents={subscribeServiceEvents}
@@ -5975,7 +6098,11 @@ function ProjectSessionsContent({
   connectionState,
   projects,
   registeredClient,
+  browserRecovery,
+  serviceInstanceId,
   onRestoreConsumed,
+  onBrowserRecoveryChange,
+  onBrowserRecoveryUnavailable,
   refreshVersion,
   sendServiceCommand,
   subscribeServiceEvents,
@@ -6005,6 +6132,27 @@ function ProjectSessionsContent({
   const navigate = useNavigate();
   const sessionScopeId = projectId ?? initialWorkspaceId ?? "";
   const sessionStorageId = projectId ?? workspaceDirectory ?? sessionScopeId;
+  const currentServiceInstanceIdRef = useRef(serviceInstanceId);
+  currentServiceInstanceIdRef.current = serviceInstanceId;
+  const recoveryCandidate = useMemo(() => browserRecovery
+    ?? (serviceInstanceId === null ? null : readBrowserRecoverySnapshot()), [browserRecovery, serviceInstanceId]);
+  const browserRecoveryMatchesScope = recoveryCandidate !== null
+    && recoveryCandidate.service_instance_id === serviceInstanceId
+    && (isChat
+      ? recoveryCandidate.target.kind === "chat" && recoveryCandidate.target.directory === workspaceDirectory
+      : recoveryCandidate.target.kind === "project" && recoveryCandidate.target.project_id === projectId);
+  const matchingBrowserRecovery = browserRecoveryMatchesScope
+    && recoveryCandidate?.session_id === initialSessionId ? recoveryCandidate : null;
+  const readBrowserRecoveryForSession = useCallback((sessionId: string) => {
+    const recovery = readBrowserRecoverySnapshot();
+    const currentServiceInstanceId = currentServiceInstanceIdRef.current;
+    if (recovery === null || currentServiceInstanceId === null
+      || recovery.service_instance_id !== currentServiceInstanceId || recovery.session_id !== sessionId) return null;
+    const targetMatches = isChat
+      ? recovery.target.kind === "chat" && recovery.target.directory === workspaceDirectory
+      : recovery.target.kind === "project" && recovery.target.project_id === projectId;
+    return targetMatches ? recovery : null;
+  }, [isChat, projectId, workspaceDirectory]);
   const project = projectId === null ? undefined : projects.find((item) => item.project_id === projectId);
   const [sessions, setSessions] = useState<ProjectSessionsResponse | WorkspaceSessionsResponse | null>(null);
   const [sessionSummaries, setSessionSummaries] = useState<Record<string, SessionSummary>>({});
@@ -6021,6 +6169,8 @@ function ProjectSessionsContent({
   const [fullAccessWarningClaim, setFullAccessWarningClaim] = useState<SessionClaim | null>(null);
   const fullAccessCancelRef = useRef<HTMLButtonElement | null>(null);
   const [draft, setDraft] = useState(false);
+  const [occupiedSessionId, setOccupiedSessionId] = useState<string | null>(null);
+  const [recreateBrowserDraft, setRecreateBrowserDraft] = useState(false);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [renameOpen, setRenameOpen] = useState(false);
@@ -6044,10 +6194,18 @@ function ProjectSessionsContent({
   const deleteBusyRef = useRef(false);
   const [liveRunsBySession, setLiveRunsBySession] = useState<Record<string, LiveRun[]>>({});
   const [inputText, setInputText] = useState("");
+  const inputTextRef = useRef(inputText);
+  const setComposerInputText = useCallback((value: string) => {
+    inputTextRef.current = value;
+    setInputText(value);
+  }, []);
   const [composerError, setComposerError] = useState<string | null>(null);
   const claimRef = useRef<SessionClaim | null>(null);
   const snapshotRef = useRef<SessionSnapshot | null>(null);
   const sessionModelSavingRef = useRef(false);
+  const saveSessionModelConfigurationRef = useRef<(configuration: SessionModelConfiguration) => Promise<void>>(
+    async () => undefined,
+  );
   const clientPermissionSavingRef = useRef(false);
   const claimsBySessionRef = useRef<Record<string, SessionClaim>>({});
   const snapshotsBySessionRef = useRef<Record<string, SessionSnapshot>>({});
@@ -6069,7 +6227,15 @@ function ProjectSessionsContent({
   const restorePlanClaimRef = useRef<SessionClaim | null>(null);
   const restoreCompletedClaimRef = useRef<SessionClaim | null>(null);
   const consumedProjectSessionRequestRef = useRef<number | null>(null);
-  const draftsBySessionRef = useRef<Record<string, string>>({});
+  const recoveredDraftRef = useRef<BrowserRecoverySnapshot | null>(
+    matchingBrowserRecovery?.draft === true ? matchingBrowserRecovery : null,
+  );
+  const draftsBySessionRef = useRef<Record<string, string>>(matchingBrowserRecovery === null
+    ? {}
+    : { [matchingBrowserRecovery.session_id]: matchingBrowserRecovery.input_text });
+  const conversationViewportRef = useRef<HTMLDivElement | null>(null);
+  const recoveryScrollTimerRef = useRef<number | null>(null);
+  const restoredRecoveryScrollRef = useRef<string | null>(null);
   const pendingSubmissionsRef = useRef<PendingSubmission[]>([]);
   const pendingClientIdRef = useRef<string | null>(null);
   const needsReclaimRef = useRef(false);
@@ -6092,6 +6258,64 @@ function ProjectSessionsContent({
       ? claimWorkspaceSession(sessionScopeId, sessionId)
       : claimProjectSession(sessionScopeId, sessionId)
   ), [isChat, sessionScopeId]);
+
+  const persistSelectedBrowserRecovery = useCallback((options?: { inputText?: string; scrollTop?: number }) => {
+    const currentClaim = claimRef.current;
+    const currentSnapshot = snapshotRef.current;
+    const currentSessionId = selectedSessionRef.current;
+    if (conversationViewportRef.current?.checkVisibility() !== true) return;
+    if (serviceInstanceId === null || currentClaim === null || currentSnapshot === null
+      || currentSessionId === null) return;
+    let target: BrowserRecoverySnapshot["target"];
+    if (isChat) {
+      if (workspaceDirectory === undefined || workspaceDirectory.length === 0) return;
+      target = { kind: "chat", directory: workspaceDirectory };
+    } else {
+      if (projectId === null) return;
+      target = { kind: "project", project_id: projectId };
+    }
+    const configuration = draft && currentSnapshot.messages.length === 0
+      ? currentSnapshot.model_configuration
+      : null;
+    const recoveredInputText = options?.inputText === undefined && inputTextRef.current === ""
+      ? readBrowserRecoveryForSession(currentSessionId)?.input_text
+      : undefined;
+    const inputTextToPersist = options?.inputText ?? recoveredInputText ?? inputTextRef.current;
+    if (options?.inputText === undefined && inputTextToPersist !== inputTextRef.current) {
+      setComposerInputText(inputTextToPersist);
+    }
+    onBrowserRecoveryChange({
+      version: 1,
+      service_instance_id: serviceInstanceId,
+      target,
+      session_id: currentSessionId,
+      draft,
+      input_text: inputTextToPersist,
+      model_configuration: configuration === null ? null : {
+        provider_id: configuration.provider_id,
+        model: configuration.model,
+        reasoning_effort: configuration.reasoning_effort,
+      },
+      scroll_top: options?.scrollTop ?? conversationViewportRef.current?.scrollTop ?? 0,
+    });
+  }, [draft, isChat, onBrowserRecoveryChange, projectId, readBrowserRecoveryForSession,
+    serviceInstanceId, setComposerInputText, workspaceDirectory]);
+
+  useEffect(() => {
+    const saveBeforeClose = () => persistSelectedBrowserRecovery();
+    window.addEventListener("pagehide", saveBeforeClose);
+    return () => window.removeEventListener("pagehide", saveBeforeClose);
+  }, [persistSelectedBrowserRecovery]);
+
+  useLayoutEffect(() => {
+    if (claim === null || snapshot === null || restoredRecoveryScrollRef.current === claim.session_id) return;
+    const recovery = readBrowserRecoveryForSession(claim.session_id);
+    if (recovery === null) return;
+    const viewport = conversationViewportRef.current;
+    if (viewport === null) return;
+    viewport.scrollTop = recovery.scroll_top;
+    restoredRecoveryScrollRef.current = claim.session_id;
+  }, [claim, readBrowserRecoveryForSession, snapshot]);
 
   const getClaimedSession = useCallback((currentClaim: SessionClaim) => (
     isChat
@@ -6281,6 +6505,11 @@ function ProjectSessionsContent({
   }, [selectedSessionId]);
 
   useEffect(() => {
+    if (claim === null || snapshot === null || selectedSessionId === null) return;
+    persistSelectedBrowserRecovery();
+  }, [claim, draft, inputText, persistSelectedBrowserRecovery, selectedSessionId, snapshot]);
+
+  useEffect(() => {
     onNavigationSessionChange?.({
       projectId,
       directory: workspaceDirectory ?? project?.path ?? null,
@@ -6314,7 +6543,16 @@ function ProjectSessionsContent({
         ? { ...run, runId, status: run.status === "submitting" ? "accepted" : run.status }
         : run));
     } catch (error) {
-      if (error instanceof ServiceCommandError && error.resultUnknown) return;
+      if (error instanceof ServiceCommandError && error.resultUnknown) {
+        pendingSubmissionsRef.current = pendingSubmissionsRef.current.filter(
+          (item) => item.localId !== pending.localId,
+        );
+        updateLiveRuns(pending.sessionId, (runs) => runs.filter((run) => (
+          run.localId !== pending.localId || run.status !== "submitting"
+        )));
+        if (selectedSessionRef.current === pending.sessionId) setComposerError("conversation.submitUnknown");
+        return;
+      }
       pendingSubmissionsRef.current = pendingSubmissionsRef.current.filter(
         (item) => item.localId !== pending.localId,
       );
@@ -6347,10 +6585,8 @@ function ProjectSessionsContent({
       setLiveRunsBySession({});
       return;
     }
-    for (const pending of [...pendingSubmissionsRef.current]) {
-      void sendPendingSubmission(pending);
-    }
-  }, [connectionState, registeredClient, sendPendingSubmission, updateLiveRuns]);
+    // Reconcile unknown submissions through service snapshots; never resend inputs.
+  }, [connectionState, registeredClient, updateLiveRuns]);
 
   const clearClaimState = useCallback(() => {
     const previous = claimRef.current;
@@ -6453,6 +6689,7 @@ function ProjectSessionsContent({
       }
       if (
         connectionState === "online" && registeredClient !== null &&
+        initialSessionId == null &&
         pendingClientIdRef.current === registeredClient.client_id &&
         attemptedRestoreRef.current !== registeredClient.web_control_credential &&
         registeredClient.current_workspace_id === response.workspace_id &&
@@ -6525,10 +6762,15 @@ function ProjectSessionsContent({
       setActionError(restoreError);
     } catch (error) {
       if (!mountedRef.current || requestNumber !== sessionRequestRef.current) return;
+      if (error instanceof ApiError && error.body?.code === "not_found"
+        && initialSessionId != null && readBrowserRecoveryForSession(initialSessionId) !== null) {
+        onBrowserRecoveryUnavailable();
+        return;
+      }
       setLoadState("error");
       setActionError(sessionErrorKey(error));
     }
-  }, [authState, claimDeletion, clearClaimState, clearPendingDeletion, connectionState, getDeletionStatus, listSessions, onRestoreConsumed, registeredClient, releaseOrphanClaim, rememberPendingDeletion, rememberSession, readClaimSnapshot, sessionScopeId]);
+  }, [authState, claimDeletion, clearClaimState, clearPendingDeletion, connectionState, getDeletionStatus, initialSessionId, listSessions, onBrowserRecoveryUnavailable, onRestoreConsumed, readBrowserRecoveryForSession, registeredClient, releaseOrphanClaim, rememberPendingDeletion, rememberSession, readClaimSnapshot, sessionScopeId]);
 
   useEffect(() => {
     if (connectionState !== "online") needsReclaimRef.current = true;
@@ -6686,9 +6928,21 @@ function ProjectSessionsContent({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      if (recoveryScrollTimerRef.current !== null) {
+        window.clearTimeout(recoveryScrollTimerRef.current);
+      }
       releaseClaims();
     };
   }, [sessionScopeId, releaseClaims]);
+
+  useEffect(() => {
+    if (matchingBrowserRecovery === null) return;
+    draftsBySessionRef.current[matchingBrowserRecovery.session_id] = matchingBrowserRecovery.input_text;
+    if (selectedSessionRef.current === matchingBrowserRecovery.session_id) {
+      setComposerInputText(matchingBrowserRecovery.input_text);
+    }
+    if (matchingBrowserRecovery.draft) recoveredDraftRef.current = matchingBrowserRecovery;
+  }, [matchingBrowserRecovery, setComposerInputText]);
 
   const openSession = useCallback(async (sessionId: string, isDraft: boolean, allowBusy = false) => {
     if (pendingDeletionRef.current?.attempted && pendingDeletionRef.current.claim.session_id === sessionId) return;
@@ -6696,6 +6950,7 @@ function ProjectSessionsContent({
     sessionSelectionVersionRef.current += 1;
     setManagementOpen(false);
     setBusySessionId(sessionId);
+    setOccupiedSessionId(null);
     setActionError(null);
     try {
       const response = await readClaimSnapshot(sessionId);
@@ -6706,23 +6961,43 @@ function ProjectSessionsContent({
       rememberSession(response.claim, response.snapshot);
       setSelectedSessionId(sessionId);
       selectedSessionRef.current = sessionId;
-      setInputText(draftsBySessionRef.current[sessionId] ?? "");
+      const recovery = readBrowserRecoveryForSession(sessionId);
+      const restoredInput = recovery?.input_text ?? draftsBySessionRef.current[sessionId] ?? "";
+      draftsBySessionRef.current[sessionId] = restoredInput;
+      setComposerInputText(restoredInput);
       setComposerError(null);
       setDraft(isDraft || response.snapshot.messages.length === 0);
       await refreshSessions();
     } catch (error) {
-      setActionError(sessionErrorKey(error));
+      const recovery = readBrowserRecoveryForSession(sessionId);
+      if (error instanceof ApiError && error.body?.code === "session_claimed") {
+        clearClaimState();
+        setOccupiedSessionId(sessionId);
+        setActionError("sessions.claimedError");
+      } else if (error instanceof ApiError && error.body?.code === "not_found" && recovery !== null) {
+        if (recovery.draft) {
+          recoveredDraftRef.current = recovery;
+          setRecreateBrowserDraft(true);
+          setActionError(null);
+        } else {
+          onBrowserRecoveryUnavailable();
+        }
+      } else {
+        setActionError(sessionErrorKey(error));
+      }
     } finally {
       setBusySessionId(null);
     }
-  }, [busySessionId, readClaimSnapshot, refreshSessions, releaseOrphanClaim, rememberSession]);
+  }, [busySessionId, clearClaimState, onBrowserRecoveryUnavailable, readBrowserRecoveryForSession, readClaimSnapshot,
+    refreshSessions, releaseOrphanClaim, rememberSession, setComposerInputText]);
 
   useEffect(() => {
     if (initialSessionId == null) {
       attemptedHistorySessionRef.current = null;
       return;
     }
-    if (loadState !== "ready" || busySessionId !== null) return;
+    if (authState !== "ready" || connectionState !== "online"
+      || loadState !== "ready" || busySessionId !== null) return;
     const attemptKey = `${sessionScopeId}:${initialSessionId}:${initialSessionRequestKey ?? ""}`;
     if (attemptedHistorySessionRef.current === attemptKey) return;
     if (!sessions?.sessions.some((item) => item.id === initialSessionId) && sessionNextCursor !== null) {
@@ -6730,13 +7005,18 @@ function ProjectSessionsContent({
       return;
     }
     attemptedHistorySessionRef.current = attemptKey;
+    if (registeredClient !== null) {
+      attemptedRestoreRef.current = registeredClient.web_control_credential;
+      onRestoreConsumed();
+    }
     void openSession(initialSessionId, false);
-  }, [busySessionId, initialSessionId, initialSessionRequestKey, loadState, openSession, refreshSessions, sessionNextCursor, sessionScopeId, sessions]);
+  }, [authState, busySessionId, connectionState, initialSessionId, initialSessionRequestKey, loadState, onRestoreConsumed, openSession, refreshSessions, registeredClient, sessionNextCursor, sessionScopeId, sessions]);
 
   const createDraft = useCallback(async () => {
     if (busySessionId !== null) return;
     sessionSelectionVersionRef.current += 1;
     setBusySessionId("new");
+    setOccupiedSessionId(null);
     setActionError(null);
     if (!isChat) navigate(`/projects/${encodeURIComponent(sessionScopeId)}`, { replace: true });
     try {
@@ -6775,17 +7055,49 @@ function ProjectSessionsContent({
     void createDraft();
   }, [createDraft, initialSessionId, loadState, sessionScopeId, startInDraft]);
 
+  useEffect(() => {
+    if (!recreateBrowserDraft || loadState !== "ready" || busySessionId !== null) return;
+    const recovery = recoveredDraftRef.current;
+    setRecreateBrowserDraft(false);
+    if (recovery === null) return;
+    void (async () => {
+      await createDraft();
+      const currentClaim = claimRef.current;
+      const newSessionId = selectedSessionRef.current;
+      if (currentClaim === null || newSessionId === null) return;
+      draftsBySessionRef.current[newSessionId] = recovery.input_text;
+      setComposerInputText(recovery.input_text);
+      if (recovery.model_configuration !== null) {
+        await saveSessionModelConfigurationRef.current(recovery.model_configuration);
+      }
+      if (isChat && workspaceDirectory !== undefined) {
+        const params = new URLSearchParams({
+          directory: workspaceDirectory,
+          session: newSessionId,
+        });
+        navigate(`/chat?${params}`, { replace: true, state: null });
+      }
+      recoveredDraftRef.current = null;
+    })();
+  }, [busySessionId, createDraft, isChat, loadState, navigate, recreateBrowserDraft, setComposerInputText, workspaceDirectory]);
+
   async function releaseCurrent() {
     const current = claimRef.current;
     if (current === null) return;
     if (pendingDeletionRef.current?.attempted && pendingDeletionRef.current.claim.session_id === current.session_id) return;
+    const releasedEmptyDraft = draft && snapshotRef.current?.messages.length === 0;
+    if (registeredClient !== null) {
+      attemptedRestoreRef.current = registeredClient.web_control_credential;
+    }
+    onRestoreConsumed();
     setManagementOpen(false);
     setBusySessionId(current.session_id);
     setActionError(null);
     if (!isChat) navigate(`/projects/${encodeURIComponent(sessionScopeId)}`, { replace: true });
     try {
       await releaseSessionClaim(current);
-      onNavigationDraftReleased?.(current.session_id);
+      onNavigationDraftReleased?.(current.session_id, releasedEmptyDraft);
+      if (releasedEmptyDraft) onBrowserRecoveryChange(null);
       delete claimsBySessionRef.current[current.session_id];
       delete snapshotsBySessionRef.current[current.session_id];
       claimRef.current = null;
@@ -6798,7 +7110,7 @@ function ProjectSessionsContent({
       setRestorePlan(null);
       setRestoreNotice(null);
       delete draftsBySessionRef.current[current.session_id];
-      setInputText("");
+      setComposerInputText("");
       setDraft(false);
       await refreshSessions();
     } catch (error) {
@@ -6808,7 +7120,7 @@ function ProjectSessionsContent({
     }
   }
 
-  async function saveSessionModelConfiguration(nextConfiguration: SessionModelConfiguration) {
+  const saveSessionModelConfiguration = useCallback(async (nextConfiguration: SessionModelConfiguration) => {
     const currentClaim = claimRef.current;
     const currentSnapshot = snapshotRef.current;
     if (currentClaim === null || currentSnapshot === null || sessionModelSavingRef.current) return;
@@ -6859,7 +7171,8 @@ function ProjectSessionsContent({
       sessionModelSavingRef.current = false;
       if (mountedRef.current) setSessionModelSaving(false);
     }
-  }
+  }, [adoptSnapshot, readRunSnapshot, sendServiceCommand]);
+  saveSessionModelConfigurationRef.current = saveSessionModelConfiguration;
 
   async function saveClientPermission(value: string, confirmed = false) {
     if (!PERMISSION_LEVELS.includes(value as ToolPermissionLevel)
@@ -6925,7 +7238,8 @@ function ProjectSessionsContent({
       ...runs,
       newLiveRun(pending.command.request_id, null, text, "submitting"),
     ]);
-    setInputText("");
+    setComposerInputText("");
+    persistSelectedBrowserRecovery({ inputText: "" });
     delete draftsBySessionRef.current[sessionId];
     setComposerError(null);
     inputRef.current?.focus();
@@ -7267,7 +7581,7 @@ function ProjectSessionsContent({
         setClaim(null);
         setSnapshot(null);
         setSelectedSessionId(null);
-        setInputText("");
+        setComposerInputText("");
         setDraft(false);
         setComposerError(null);
       }
@@ -7546,7 +7860,23 @@ function ProjectSessionsContent({
                   className={styles.conversationStage}
                   data-empty={snapshot.messages.length === 0 && selectedLiveRuns.length === 0}
                 >
-                  <div className={styles.conversationViewport} role="log" aria-live="off" aria-label={t("sessions.historyLabel")}>
+                  <div
+                    className={styles.conversationViewport}
+                    ref={conversationViewportRef}
+                    role="log"
+                    aria-live="off"
+                    aria-label={t("sessions.historyLabel")}
+                    onScroll={(event) => {
+                      const viewport = event.currentTarget;
+                      if (recoveryScrollTimerRef.current !== null) {
+                        window.clearTimeout(recoveryScrollTimerRef.current);
+                      }
+                      recoveryScrollTimerRef.current = window.setTimeout(() => {
+                        persistSelectedBrowserRecovery({ scrollTop: viewport.scrollTop });
+                        recoveryScrollTimerRef.current = null;
+                      }, 120);
+                    }}
+                  >
                     {snapshot.messages.length === 0 && selectedLiveRuns.length === 0 ? (
                       <div className={styles.emptyConversation} role="status">
                         <h2 className={styles.emptyBrand}>Omni</h2>
@@ -7574,8 +7904,10 @@ function ProjectSessionsContent({
                     disabled={activeRun !== null || connectionState !== "online"}
                     placeholder={t("conversation.inputPlaceholder")}
                     onChange={(event) => {
-                      draftsBySessionRef.current[claim.session_id] = event.target.value;
-                      setInputText(event.target.value);
+                      const nextInput = event.target.value;
+                      draftsBySessionRef.current[claim.session_id] = nextInput;
+                      setComposerInputText(nextInput);
+                      persistSelectedBrowserRecovery({ inputText: nextInput });
                     }}
                     onKeyDown={handleInputKeyDown}
                   />
@@ -7694,6 +8026,21 @@ function ProjectSessionsContent({
                   </form>
                 </div>
               </>
+            ) : occupiedSessionId !== null ? (
+              <div className={styles.sessionPrompt} role="status">
+                <Info size={22} aria-hidden="true" />
+                <h2>{t("sessions.occupied")}</h2>
+                <p>{t("sessions.claimedError")}</p>
+                <button
+                  className={styles.primaryButton}
+                  type="button"
+                  disabled={busySessionId !== null || connectionState !== "online"}
+                  onClick={() => void createDraft()}
+                >
+                  <Plus size={16} aria-hidden="true" />
+                  {t("controls.newSession")}
+                </button>
+              </div>
             ) : (
               <div className={styles.sessionPrompt}>
                 <MessageSquare size={22} aria-hidden="true" />
@@ -8203,6 +8550,32 @@ function readAndClearTicket(): string | null {
     window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.search}`);
   }
   return ticket;
+}
+
+function isConversationPath(pathname: string): boolean {
+  return pathname === "/" || pathname === "/chat" || /^\/projects\/[^/]+$/.test(pathname);
+}
+
+function shouldRestoreBrowserRecovery(
+  pathname: string,
+  search: string,
+  snapshot: BrowserRecoverySnapshot,
+): boolean {
+  if (!isConversationPath(pathname)) return false;
+  const params = new URLSearchParams(search);
+  if (params.has("session")) return false;
+  if (pathname.startsWith("/projects/")) {
+    let projectId: string;
+    try {
+      projectId = decodeURIComponent(pathname.slice("/projects/".length));
+    } catch {
+      return false;
+    }
+    return snapshot.target.kind === "project" && snapshot.target.project_id === projectId;
+  }
+  const requestedDirectory = params.get("directory");
+  return requestedDirectory === null
+    || (snapshot.target.kind === "chat" && snapshot.target.directory === requestedDirectory);
 }
 
 function readThemePreference(): Theme {

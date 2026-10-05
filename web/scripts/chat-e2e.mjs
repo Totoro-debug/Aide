@@ -4,12 +4,14 @@ import { join } from "node:path";
 import { URL } from "node:url";
 import { chromium, expect as playwrightExpect } from "@playwright/test";
 import setup from "./e2e-setup.mjs";
+import browserRecoveryAcceptance from "./browser-recovery-e2e.mjs";
 
 const expect = playwrightExpect.configure({ timeout: 30000 });
 const control = await setup({ shutdownTimeoutMs: 60000 });
 const browser = await chromium.launch({ channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge" });
 try {
-  const page = await browser.newPage({ locale: "en" });
+  const context = await browser.newContext({ locale: "en" });
+  const page = await context.newPage();
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
   await page.addInitScript(() => {
@@ -361,6 +363,9 @@ try {
   await expect(page.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true })).toBeVisible();
   assert.deepEqual(errors, []);
   console.log("Chat E2E: cross-directory/restart history, pagination, legacy and shared-directory classification, Claim, rename/restore/delete ownership, unavailable history, mobile navigation, draft/send/cancel/settings and CLI boundary passed");
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.keyboard.press("Escape");
+  await browserRecoveryAcceptance({ page, control });
 } catch (error) {
   console.error(error);
   throw error;

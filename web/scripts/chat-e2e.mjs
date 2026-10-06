@@ -423,6 +423,43 @@ try {
   await expect(page.getByRole("log").getByText("Explicit project body", { exact: true })).toBeVisible();
   await expect(page.getByRole("dialog")).toHaveCount(0);
 
+  // A failed open from a retired conversation view must not replace newer navigation.
+  let oldOpenRequested = false;
+  let releaseOldOpen;
+  const oldOpenGate = new Promise(resolve => { releaseOldOpen = resolve; });
+  await page.route(openPattern, async route => {
+    if (route.request().postDataJSON()?.session_id !== secondConversation.id) return route.continue();
+    oldOpenRequested = true;
+    await oldOpenGate;
+    await route.fulfill({
+      status: 404,
+      contentType: "application/json",
+      body: JSON.stringify({ code: "not_found", message: "Session was deleted", retryable: false,
+        field_errors: { session_id: "Session was deleted" }, request_id: "retired-conversation-open" }),
+    });
+  });
+  try {
+    await restartedNavigation.getByTitle(secondConversation.directory).click();
+    await expect.poll(() => oldOpenRequested).toBe(true);
+    await projectSessions.locator('summary[aria-label="Session actions for Explicit project"]').click();
+    await projectSessions.getByRole("group", { name: "Session actions for Explicit project", exact: true })
+      .getByRole("button", { name: "Rename session", exact: true }).click();
+    const retainedRename = page.getByRole("dialog").getByLabel("Session title", { exact: true });
+    await expect(retainedRename).toHaveValue("Explicit project");
+    const oldFailure = page.waitForResponse(response => response.status() === 404
+      && response.request().method() === "POST"
+      && new URL(response.url()).pathname.endsWith("/conversations/open"));
+    releaseOldOpen();
+    await oldFailure;
+    await page.waitForLoadState("networkidle");
+    await expect(retainedRename).toHaveValue("Explicit project");
+    await expect(page.getByRole("log").getByText("Explicit project body", { exact: true })).toBeVisible();
+    await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+  } finally {
+    releaseOldOpen();
+    await page.unroute(openPattern);
+  }
+
   // Returning to project management must not replay a consumed Add request.
   await projectsNavigation.getByRole("link", { name: "Projects", exact: true }).click();
   await expect(page.locator("#main-content").getByRole("heading", { name: "Projects", exact: true })).toBeVisible();

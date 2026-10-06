@@ -6171,6 +6171,9 @@ function ChatSessionsView({
     } else {
       void activateWorkspace();
     }
+    return () => {
+      activationSequenceRef.current += 1;
+    };
   }, [
     activateWorkspace,
     authState,

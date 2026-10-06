@@ -1093,8 +1093,10 @@ async def test_service_terminal_preserves_output_delivered_before_submission_ack
     original_event = ServiceClient._handle_event
     original_submit = ServiceClient.submit_user_input
 
-    async def handle_event(client: ServiceClient, event: Mapping[str, object]) -> None:
-        await original_event(client, event)
+    async def handle_event(
+        client: ServiceClient, event: Mapping[str, object], *, recover_display: bool = False
+    ) -> None:
+        await original_event(client, event, recover_display=recover_display)
         if event.get("type") == "run.completed":
             finished.set()
 

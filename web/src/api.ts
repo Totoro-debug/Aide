@@ -16,6 +16,7 @@ import type {
   WorkspaceSessionsResponse,
   ChatSessionsResponse,
   ChatWorkspaceEntry,
+  ConversationOpenResponse,
   SessionClaimResponse,
   SessionCreation,
   SessionDeletion,
@@ -202,6 +203,20 @@ export function enterChatWorkspace(directory?: string): Promise<ChatWorkspaceEnt
     method: "POST",
     mutation: true,
     body: { request_id: createRequestId(), ...(directory === undefined ? {} : { directory }) },
+  });
+}
+
+export function openConversation(options: {
+  project_id?: string;
+  workspace_id?: string;
+  directory?: string;
+  session_id?: string;
+  create_new?: boolean;
+}): Promise<ConversationOpenResponse> {
+  return request<ConversationOpenResponse>("/conversations/open", {
+    method: "POST",
+    mutation: true,
+    body: { request_id: createRequestId(), ...options },
   });
 }
 
@@ -813,10 +828,13 @@ export async function executeRestore(
   claimCredential: string,
   plan: RestorePlan,
   mode: RestoreMode,
-): Promise<{ result: RestoreResult; claimVersion: number; claimCredential: string }> {
+): Promise<{ result: RestoreResult; claim: SessionClaim; snapshot: SessionSnapshot }> {
   const response = await request<{
     request_id: string;
-    result: ManagementResult & { claim_version?: number; claim_credential?: string };
+    result: ManagementResult & {
+      claim?: SessionClaim;
+      snapshot?: SessionSnapshot;
+    };
   }>(`/workspaces/${encodeURIComponent(workspaceId)}/management/restore/execute`, {
     method: "POST",
     mutation: true,
@@ -830,20 +848,26 @@ export async function executeRestore(
     extraHeaders: { "X-Omni-Claim": claimCredential },
   });
   const nextResult = response.result.restore_result;
-  const nextClaimVersion = response.result.claim_version;
-  const nextClaimCredential = response.result.claim_credential;
+  const nextClaim = response.result.claim;
+  const nextSnapshot = response.result.snapshot;
   if (
     nextResult === undefined ||
     nextResult === null ||
-    typeof nextClaimVersion !== "number" ||
-    typeof nextClaimCredential !== "string"
+    nextClaim === undefined ||
+    nextClaim.workspace_id !== workspaceId ||
+    nextClaim.session_id !== sessionId ||
+    !Number.isInteger(nextClaim.claim_version) ||
+    nextClaim.claim_version < 1 ||
+    typeof nextClaim.reconnect_credential !== "string" ||
+    nextSnapshot === undefined ||
+    nextSnapshot.session_id !== sessionId
   ) {
     throw new ApiError(409, null);
   }
   return {
     result: nextResult,
-    claimVersion: nextClaimVersion,
-    claimCredential: nextClaimCredential,
+    claim: nextClaim,
+    snapshot: nextSnapshot,
   };
 }
 

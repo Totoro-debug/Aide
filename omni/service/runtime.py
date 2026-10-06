@@ -10,7 +10,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from time import monotonic
@@ -92,6 +92,16 @@ from omni.schedule.store import (
     ScheduleStoreFaultedError,
     WorkspaceScheduleStore,
 )
+from omni.service.contracts import (
+    ConversationClaimDTO,
+    ConversationOpenDTO,
+    ConversationOpenError,
+    ConversationOpenFailureDTO,
+    ProjectJobSummaryDTO,
+    ProjectListDTO,
+    ProjectRegistrationDTO,
+    ProjectSummaryDTO,
+)
 from omni.service.conversation_workspaces import (
     ConversationWorkspaceCatalog,
     ConversationWorkspaceCatalogError,
@@ -114,6 +124,37 @@ class ServiceSink(Protocol):
 _PROJECT_REMOVAL_FAILURE_MESSAGE = (
     "Project work could not be stopped; the registration remains blocked."
 )
+
+
+def _project_job_summary(job: ScheduleJob) -> ProjectJobSummaryDTO:
+    due_at: datetime | None = None
+    if job.schedule.kind == "at":
+        due_at = job.schedule.at_datetime
+    elif job.schedule.kind == "every" and job.schedule.every_seconds is not None:
+        anchor_ms = (
+            job.state.last_finished_at_ms
+            if job.state.last_finished_at_ms is not None
+            else job.created_at_ms
+        )
+        due_at = datetime.fromtimestamp(anchor_ms / 1000, UTC) + timedelta(
+            seconds=job.schedule.every_seconds
+        )
+    if job.schedule.kind == "at" and job.state.last_status is not None:
+        review_status = "completed"
+    elif due_at is None:
+        review_status = "next_on_resume"
+    else:
+        review_status = "overdue" if due_at <= datetime.now(UTC) else "upcoming"
+    summary: ProjectJobSummaryDTO = {
+        "job_id": job.job_id,
+        "title": cast(str, job.title),
+        "schedule": job.schedule.to_dict(),
+        "due_at": due_at.isoformat() if due_at is not None else None,
+        "review_status": review_status,
+    }
+    return summary
+
+
 _CONFIG_INVALID_ERROR = {
     "code": "config_invalid",
     "message": "The saved User Configuration contains invalid fields.",
@@ -479,10 +520,15 @@ class ClientState:
         default_factory=dict
     )
     management_results: dict[str, tuple[str, dict[str, object]]] = field(default_factory=dict)
+    conversation_open_results: dict[str, tuple[tuple[object, ...], ConversationOpenDTO]] = field(
+        default_factory=dict
+    )
+    conversation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     claimed: set[tuple[str, str]] = field(default_factory=set)
     attached_workspaces: set[str] = field(default_factory=set)
     current_workspace_id: str | None = None
     current_session_id: str | None = None
+    current_project_id: str | None = None
     disconnect_task: asyncio.Task[None] | None = None
     reconnect_deadline: float | None = None
     delivery_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -3380,6 +3426,12 @@ class AgentService:
         async with self._project_lifecycle_lock:
             return await self._attach_workspace(client_id, path)
 
+    async def enter_workspace(self, client_id: str, path: Path) -> dict[str, object]:
+        if self._require_client(client_id).kind != "cli":
+            raise service_error("forbidden", "Only CLI clients may attach a directory.", status=403)
+        workspace = await self.attach_workspace(client_id, path)
+        return {"workspace_id": workspace.workspace_id, "project_id": None}
+
     async def _attach_workspace(self, client_id: str, path: Path) -> WorkspaceRecord:
         client = self._require_client(client_id)
         if self.state in {"draining", "stopped"}:
@@ -3514,6 +3566,42 @@ class AgentService:
                 record = self.projects.set_schedule_state(record.project_id, "available")
                 await self._reconcile_schedule_admission()
             return record, workspace, jobs
+
+    async def register_project_entry(self, client_id: str, path: Path) -> ProjectRegistrationDTO:
+        record, workspace, jobs = await self.register_project(client_id, path)
+        return {
+            "project_id": record.project_id,
+            "workspace_id": workspace.workspace_id,
+            "schedule_state": record.schedule_state,
+            "saved_jobs": [_project_job_summary(job) for job in jobs],
+        }
+
+    async def list_projects(self, client_id: str) -> ProjectListDTO:
+        self._require_client(client_id)
+        try:
+            records = self.projects.list()
+        except ProjectCatalogError as error:
+            raise service_error(
+                "persistence_error", "The Project catalog could not be read safely.", status=500
+            ) from error
+        projects: list[ProjectSummaryDTO] = []
+        for record in records:
+            saved_jobs, schedule_status = await self.project_schedule_snapshot(record)
+            project: ProjectSummaryDTO = {
+                "project_id": record.project_id,
+                "path": str(record.path),
+                "name": record.path.name,
+                "schedule_state": record.schedule_state,
+                "available": record.path.is_dir() and self.configuration_ready,
+                "saved_jobs": [_project_job_summary(job) for job in saved_jobs],
+                "schedule_status": schedule_status,
+            }
+            if record.removal_operation_id is not None:
+                project["removal_operation_id"] = record.removal_operation_id
+            if record.removal_error is not None:
+                project["removal_error"] = record.removal_error
+            projects.append(project)
+        return {"projects": projects}
 
     async def project_schedule_snapshot(
         self, record: ProjectRecord
@@ -3963,6 +4051,204 @@ class AgentService:
             "project_id": None,
         }
 
+    async def open_conversation(
+        self,
+        client_id: str,
+        *,
+        project_id: str | None = None,
+        workspace_id: str | None = None,
+        directory: str | None = None,
+        session_id: str | None = None,
+        create_new: bool = False,
+        request_id: str | None = None,
+    ) -> ConversationOpenDTO:
+        client = self._require_client(client_id)
+        fingerprint = (project_id, workspace_id, directory, session_id, create_new)
+        async with client.conversation_lock:
+            self._require_client(client_id)
+            try:
+                if request_id is not None:
+                    if not request_id:
+                        raise service_error(
+                            "validation_error", "request_id is required.", status=422
+                        )
+                    previous = client.conversation_open_results.get(request_id)
+                    if previous is not None:
+                        if previous[0] != fingerprint:
+                            raise service_error(
+                                "request_reused", "Conversation request_id was reused."
+                            )
+                        claimed = previous[1]["claim"]
+                        self.workspace(claimed["workspace_id"]).require_claim(
+                            client_id,
+                            claimed["session_id"],
+                            claimed["claim_version"],
+                            claimed["reconnect_credential"],
+                        )
+                        return deepcopy(previous[1])
+                result = await self._open_conversation_once(
+                    client,
+                    project_id=project_id,
+                    workspace_id=workspace_id,
+                    directory=directory,
+                    session_id=session_id,
+                    create_new=create_new,
+                )
+            except ServiceError as error:
+                current: ConversationClaimDTO | None = None
+                active_workspace = self._workspaces.get(client.current_workspace_id or "")
+                if active_workspace is not None:
+                    claim = active_workspace._claims.get(client.current_session_id or "")
+                    if (
+                        claim is not None
+                        and claim.client_id == client_id
+                        and claim.status == "claimed"
+                    ):
+                        current = {
+                            "workspace_id": claim.workspace_id,
+                            "session_id": claim.session_id,
+                            "claim_version": claim.version,
+                            "reconnect_credential": claim.credential,
+                        }
+                failure: ConversationOpenFailureDTO = {
+                    "target": {
+                        "project_id": project_id,
+                        "workspace_id": workspace_id,
+                        "directory": directory,
+                        "session_id": session_id,
+                        "status": error.code,
+                    },
+                    "current_context": current,
+                }
+                if current is not None and active_workspace is not None:
+                    try:
+                        snapshot = active_workspace.session_snapshot(current["session_id"])
+                    except (ServiceError, OSError, ValueError):
+                        pass
+                    else:
+                        failure["current_conversation"] = {
+                            "request_id": request_id or str(uuid4()),
+                            "project_id": client.current_project_id,
+                            "workspace_id": current["workspace_id"],
+                            "directory": str(active_workspace.workspace_path),
+                            "session_id": current["session_id"],
+                            "claim": current,
+                            "snapshot": snapshot,
+                        }
+                raise ConversationOpenError(error, failure) from error
+            client.current_project_id = result["project_id"]
+            if request_id is not None:
+                client.conversation_open_results[request_id] = (fingerprint, deepcopy(result))
+            return result
+
+    async def _open_conversation_once(
+        self,
+        client: ClientState,
+        *,
+        project_id: str | None,
+        workspace_id: str | None,
+        directory: str | None,
+        session_id: str | None,
+        create_new: bool,
+    ) -> ConversationOpenDTO:
+        client_id = client.client_id
+        if sum(value is not None for value in (project_id, workspace_id, directory)) > 1:
+            raise service_error("validation_error", "Conversation scope is ambiguous.", status=422)
+        if session_id is not None and not session_id:
+            raise service_error("validation_error", "Session ID is invalid.", status=422)
+        if create_new and session_id is not None:
+            raise service_error(
+                "validation_error", "A new Conversation cannot include a Session ID.", status=422
+            )
+
+        if project_id is not None:
+            async with self._project_lifecycle_lock:
+                _record, workspace = await self._project_workspace_owned(client_id, project_id)
+                return await self._open_conversation_in_workspace(
+                    client,
+                    workspace,
+                    project_id=project_id,
+                    session_id=session_id,
+                    create_new=create_new,
+                )
+
+        if directory is not None:
+            if client.kind == "cli":
+                entry = await self.enter_workspace(client_id, Path(directory))
+                workspace_id = cast(str, entry["workspace_id"])
+            else:
+                entry = await self.enter_default_conversation_workspace(
+                    client_id, directory=directory
+                )
+                workspace_id = cast(str, entry["workspace_id"])
+        elif workspace_id is None:
+            if client.kind != "web":
+                workspace_id = client.current_workspace_id
+            else:
+                entry = await self.enter_default_conversation_workspace(client_id)
+                workspace_id = cast(str, entry["workspace_id"])
+            if workspace_id is None:
+                raise service_error("validation_error", "Workspace ID is required.", status=422)
+
+        workspace = self._schedule_workspace(client_id, workspace_id)
+        return await self._open_conversation_in_workspace(
+            client, workspace, project_id=None, session_id=session_id, create_new=create_new
+        )
+
+    async def _open_conversation_in_workspace(
+        self,
+        client: ClientState,
+        workspace: WorkspaceRecord,
+        *,
+        project_id: str | None,
+        session_id: str | None,
+        create_new: bool,
+    ) -> ConversationOpenDTO:
+        if (
+            session_id is None
+            and not create_new
+            and client.kind == "cli"
+            and client.current_workspace_id == workspace.workspace_id
+        ):
+            session_id = client.current_session_id
+        created = session_id is None
+        if session_id is None:
+            creation_scope = "project" if project_id is not None else None
+            reuse_startup_session = project_id is None and client.kind != "web" and not create_new
+            if (
+                project_id is None
+                and client.kind == "web"
+                and self.conversation_workspaces.contains(workspace.workspace_path)
+            ):
+                creation_scope = "chat"
+            session_id = await workspace.create_draft(
+                client.client_id,
+                reuse_startup_session=reuse_startup_session,
+                creation_scope=creation_scope,
+            )
+        created_draft = created and workspace._draft_clients.get(session_id) == client.client_id
+        try:
+            claimed = await self.claim(client.client_id, workspace.workspace_id, session_id)
+        except BaseException as error:
+            if isinstance(error, ServiceError) and error.code == "not_found":
+                error.field_errors["session_id"] = "Conversation Session was not found."
+            if created_draft:
+                async with workspace._lock:
+                    if session_id not in workspace._claims:
+                        await workspace._close_loop(session_id, abort=True)
+                        workspace._draft_clients.pop(session_id, None)
+            raise
+        claim = cast(ConversationClaimDTO, claimed["claim"])
+        snapshot = cast(dict[str, object], claimed["snapshot"])
+        return {
+            "project_id": project_id,
+            "workspace_id": workspace.workspace_id,
+            "directory": str(workspace.workspace_path),
+            "session_id": session_id,
+            "claim": claim,
+            "snapshot": snapshot,
+        }
+
     async def create_project_session(self, client_id: str, project_id: str) -> dict[str, object]:
         async with self._project_lifecycle_lock:
             _record, workspace = await self._project_workspace_owned(client_id, project_id)
@@ -3992,17 +4278,69 @@ class AgentService:
         claim_version: int,
         claim_credential: str,
     ) -> dict[str, object]:
-        async with self._project_lifecycle_lock:
-            _record, workspace = await self._project_workspace_owned(client_id, project_id)
-            claim = workspace.require_claim(client_id, session_id, claim_version, claim_credential)
-            workspace._ensure_session_available(session_id)
-            return {
-                "project_id": project_id,
-                "workspace_id": workspace.workspace_id,
-                "session_id": session_id,
-                "claim_version": claim.version,
-                "snapshot": workspace.session_snapshot(session_id),
-            }
+        return await self.get_session_snapshot(
+            client_id,
+            None,
+            session_id,
+            claim_version,
+            claim_credential,
+            project_id=project_id,
+        )
+
+    async def get_session_snapshot(
+        self,
+        client_id: str,
+        workspace_id: str | None,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+        *,
+        project_id: str | None = None,
+    ) -> dict[str, object]:
+        if project_id is not None:
+            async with self._project_lifecycle_lock:
+                _record, workspace = await self._project_workspace_owned(client_id, project_id)
+                return self._session_snapshot_for_workspace(
+                    client_id,
+                    workspace,
+                    session_id,
+                    claim_version,
+                    claim_credential,
+                    project_id=project_id,
+                )
+        else:
+            if workspace_id is None:
+                raise service_error("validation_error", "Workspace ID is required.", status=422)
+            workspace = self._schedule_workspace(client_id, workspace_id)
+        return self._session_snapshot_for_workspace(
+            client_id,
+            workspace,
+            session_id,
+            claim_version,
+            claim_credential,
+        )
+
+    @staticmethod
+    def _session_snapshot_for_workspace(
+        client_id: str,
+        workspace: WorkspaceRecord,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+        *,
+        project_id: str | None = None,
+    ) -> dict[str, object]:
+        claim = workspace.require_claim(client_id, session_id, claim_version, claim_credential)
+        workspace._ensure_session_available(session_id)
+        result: dict[str, object] = {
+            "workspace_id": workspace.workspace_id,
+            "session_id": session_id,
+            "claim_version": claim.version,
+            "snapshot": workspace.session_snapshot(session_id),
+        }
+        if project_id is not None:
+            result["project_id"] = project_id
+        return result
 
     async def release_project_session(
         self,
@@ -4014,6 +4352,32 @@ class AgentService:
     ) -> None:
         async with self._project_lifecycle_lock:
             _record, workspace = await self._project_workspace_owned(client_id, project_id)
+            workspace.require_claim(client_id, session_id, claim_version, claim_credential)
+            await workspace.release(client_id, session_id)
+
+    async def release_conversation(
+        self,
+        client_id: str,
+        workspace_id: str | None,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+        *,
+        project_id: str | None = None,
+    ) -> None:
+        if project_id is None:
+            if workspace_id is None:
+                raise service_error("validation_error", "Workspace ID is required.", status=422)
+            await self.release_claim(
+                client_id, workspace_id, session_id, claim_version, claim_credential
+            )
+            return
+        async with self._project_lifecycle_lock:
+            _record, workspace = await self._project_workspace_owned(client_id, project_id)
+            if workspace_id is not None and workspace.workspace_id != workspace_id:
+                raise service_error(
+                    "validation_error", "Workspace does not match Project.", status=422
+                )
             workspace.require_claim(client_id, session_id, claim_version, claim_credential)
             await workspace.release(client_id, session_id)
 
@@ -4318,19 +4682,46 @@ class AgentService:
         previous_workspace_id = client.current_workspace_id
         previous_session_id = client.current_session_id
         already_claimed = (workspace_id, session_id) in client.claimed
+        draft_owner = workspace._draft_clients.get(session_id)
+        prior_state = workspace._loops.get(session_id)
+        prior_owner = None if prior_state is None else prior_state.owner_client_id
         claim = await workspace.claim(client_id, session_id)
+        try:
+            if not already_claimed:
+                await self.emit(
+                    "session.claimed",
+                    workspace_id=workspace_id,
+                    session_id=session_id,
+                    run_id=None,
+                    payload={"occupied": True},
+                    target_client_ids=self.workspace_audience(workspace_id),
+                )
+            snapshot = workspace.session_snapshot(session_id)
+        except BaseException as error:
+            if not already_claimed:
+                workspace._claims.pop(session_id, None)
+                workspace._loops[session_id].owner_client_id = prior_owner
+                if draft_owner is not None:
+                    workspace._draft_clients[session_id] = draft_owner
+                await self.emit(
+                    "session.released",
+                    workspace_id=workspace_id,
+                    session_id=session_id,
+                    run_id=None,
+                    payload={},
+                    target_client_ids=self.workspace_audience(workspace_id),
+                )
+            if isinstance(error, (OSError, ValueError)):
+                raise service_error(
+                    "persistence_error",
+                    "Conversation snapshot could not be read safely.",
+                    status=500,
+                ) from error
+            raise
         client.claimed.add((workspace_id, session_id))
         client.current_workspace_id = workspace_id
         client.current_session_id = session_id
-        if not already_claimed:
-            await self.emit(
-                "session.claimed",
-                workspace_id=workspace_id,
-                session_id=session_id,
-                run_id=None,
-                payload={"occupied": True},
-                target_client_ids=self.workspace_audience(workspace_id),
-            )
+        client.current_project_id = None
         if (
             previous_workspace_id is not None
             and previous_session_id is not None
@@ -4346,7 +4737,7 @@ class AgentService:
                 "claim_version": claim.version,
                 "reconnect_credential": claim.credential,
             },
-            "snapshot": workspace.session_snapshot(session_id),
+            "snapshot": snapshot,
         }
 
     async def list_sessions(self, client_id: str, workspace_id: str) -> list[dict[str, object]]:
@@ -4644,6 +5035,133 @@ class AgentService:
             request_id,
         )
 
+    async def inspect_restore(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+        request_id: str,
+        anchor_id: int,
+    ) -> dict[str, object]:
+        return await self._restore_management(
+            client_id,
+            workspace_id,
+            session_id,
+            claim_version,
+            claim_credential,
+            "restore/inspect",
+            request_id,
+            {"anchor_id": anchor_id},
+        )
+
+    async def commit_restore(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+        request_id: str,
+        anchor_id: int,
+        mode: str,
+    ) -> dict[str, object]:
+        result = await self._restore_management(
+            client_id,
+            workspace_id,
+            session_id,
+            claim_version,
+            claim_credential,
+            "restore/execute",
+            request_id,
+            {"plan": {"anchor_id": anchor_id}, "mode": mode},
+        )
+        if not isinstance(result.get("restore_result"), dict):
+            raise service_error("restore_failed", "Session Restore returned no result.", status=500)
+        return result
+
+    async def get_restore_result(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        return await self._restore_management(
+            client_id,
+            workspace_id,
+            session_id,
+            claim_version,
+            claim_credential,
+            "restore/result",
+            request_id,
+            {},
+        )
+
+    async def cancel_restore(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        return await self._restore_management(
+            client_id,
+            workspace_id,
+            session_id,
+            claim_version,
+            claim_credential,
+            "restore/cancel",
+            request_id,
+            {},
+        )
+
+    async def acknowledge_restore_failure(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        return await self._restore_management(
+            client_id,
+            workspace_id,
+            session_id,
+            claim_version,
+            claim_credential,
+            "restore/acknowledge",
+            request_id,
+            {},
+        )
+
+    async def _restore_management(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        claim_version: int,
+        claim_credential: str,
+        action: str,
+        request_id: str,
+        payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        return await self.handle_management(
+            client_id,
+            workspace_id,
+            session_id,
+            action,
+            {"request_id": request_id, **payload},
+            claim_version=claim_version,
+            claim_credential=claim_credential,
+        )
+
     async def handle_management(
         self,
         client_id: str,
@@ -4830,6 +5348,13 @@ class AgentService:
             if claim is not None and claim.client_id == client_id:
                 encoded["claim_version"] = claim.version
                 encoded["claim_credential"] = claim.credential
+                encoded["claim"] = {
+                    "workspace_id": workspace_id,
+                    "session_id": session_id,
+                    "claim_version": claim.version,
+                    "reconnect_credential": claim.credential,
+                }
+                encoded["snapshot"] = workspace.session_snapshot(session_id)
         return encoded
 
     async def configure_conversation_model(

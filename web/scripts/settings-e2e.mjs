@@ -66,23 +66,15 @@ async function blurSettingsField(target) {
 export async function settingsConfirmationAcceptance({ page, control }) {
   await page.bringToFront();
   await page.getByRole("button", { name: "EN", exact: true }).click();
-  const draftResponses = Promise.all([
-    page.waitForResponse((response) => (
-      /\/projects\/[^/]+\/sessions$/.test(new globalThis.URL(response.url()).pathname)
-      && response.request().method() === "POST"
-    )),
-    page.waitForResponse((response) => (
-      /\/projects\/[^/]+\/sessions\/[^/]+\/claim$/.test(new globalThis.URL(response.url()).pathname)
-      && response.request().method() === "POST"
-    )),
-  ]);
+  const openedResponse = page.waitForResponse((response) => (
+    new globalThis.URL(response.url()).pathname.endsWith("/conversations/open")
+    && response.request().method() === "POST"
+  ));
   await page.getByRole("button", { name: "New session", exact: true }).click();
-  const [createdResponse, claimedResponse] = await draftResponses;
-  assert.equal(createdResponse.status(), 200, "Settings draft creation failed");
-  assert.equal(claimedResponse.status(), 200, "Settings draft Claim failed");
-  const created = await createdResponse.json();
-  const claimed = await claimedResponse.json();
-  assert.equal(claimed.claim.session_id, created.session_id);
+  const response = await openedResponse;
+  assert.equal(response.status(), 200, "Settings draft creation and Claim failed");
+  const opened = await response.json();
+  assert.equal(opened.claim.session_id, opened.session_id);
   await expect(page.getByRole("button", { name: "New session", exact: true })).toBeEnabled();
   await control.command("settings-arm");
   await page.locator("textarea").fill("settings generation barrier confirmation");
@@ -93,9 +85,9 @@ export async function settingsConfirmationAcceptance({ page, control }) {
       .reverse().find((event) => (
         event.type === "input.accepted" && event.session_id === sessionId
         && event.payload?.text === "settings generation barrier confirmation"
-      )), created.session_id);
+      )), opened.session_id);
     return acceptedRun?.session_id;
-  }, { timeout: 10000, message: "Settings input must be accepted in the newly claimed draft" }).toBe(created.session_id);
+  }, { timeout: 10000, message: "Settings input must be accepted in the newly claimed draft" }).toBe(opened.session_id);
   await control.command("settings-wait");
   await page.reload();
   await expect(page.getByRole("log").getByText("settings generation barrier confirmation", { exact: true }))
@@ -200,24 +192,14 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
     for (let attempt = 0; attempt < 30; attempt += 1) {
       await expect(button).toBeEnabled({ timeout: 30000 });
       const result = target.waitForResponse((response) => (
-        /\/projects\/[^/]+\/sessions$/.test(new globalThis.URL(response.url()).pathname)
+        new globalThis.URL(response.url()).pathname.endsWith("/conversations/open")
         && response.request().method() === "POST"
       ));
-      const claimed = target.waitForResponse(async (response) => {
-        if (!/\/projects\/[^/]+\/sessions\/[^/]+\/claim$/.test(new globalThis.URL(response.url()).pathname)
-          || response.request().method() !== "POST") return false;
-        const created = await result;
-        if (!created.ok()) return false;
-        return new globalThis.URL(response.url()).pathname.endsWith(`/${(await created.json()).session_id}/claim`);
-      }).catch(() => null);
       await button.click();
       const response = await result;
       const body = await response.json();
       if (response.ok()) {
-        const claimResponse = await claimed;
-        assert.ok(claimResponse);
-        assert.equal(claimResponse.status(), 200);
-        assert.equal((await claimResponse.json()).claim.session_id, body.session_id);
+        assert.equal(body.claim.session_id, body.session_id);
         await expect(button).toBeEnabled({ timeout: 30000 });
         await expect(target.locator("textarea")).toBeVisible({ timeout: 30000 });
         return;

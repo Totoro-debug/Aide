@@ -71,6 +71,9 @@ const referenceTypes = {
   active_run_snapshot: "ActiveRunSnapshot",
   session_live_state: "SessionLiveState",
   session_snapshot: "SessionSnapshot",
+  session_claim: "SessionClaim",
+  conversation_open_failure: "ConversationOpenFailure",
+  conversation_open_response: "ConversationOpenResponse",
   session_recovery_snapshot: "SessionRecoverySnapshot",
   pending_confirmation_snapshot: "PendingConfirmationSnapshot",
   confirmation_request: "ConfirmationRequest",
@@ -78,6 +81,7 @@ const referenceTypes = {
   confirmation_event_owner: "ConfirmationEventOwner",
   restore_anchor: "RestoreAnchor",
   identifier: "string",
+  claim_version: "number",
   request_id: "string",
   tool_permission_level: "ToolPermissionLevel",
   reasoning_effort: "ReasoningEffort",
@@ -195,6 +199,10 @@ for (const [name, definitionName] of [
   ["ConfirmationRequestedPayload", "confirmation_requested_payload"],
   ["ConfirmationEventOwner", "confirmation_event_owner"],
   ["SessionSnapshot", "session_snapshot"],
+  ["SessionClaim", "session_claim"],
+  ["ConversationOpenResponse", "conversation_open_response"],
+  ["ConversationOpenFailure", "conversation_open_failure"],
+  ["ServiceErrorBody", "error"],
   ["SessionModelConfiguration", "session_model_configuration"],
   ["RestoreAnchor", "restore_anchor"],
 ]) {
@@ -216,7 +224,7 @@ checkMembers("ConfigPatchResponse", [
 const managementFields = [
   "handled", "output", "status_view", "effort_selection", "permission_selection",
   "published_effort", "published_permission_level", "memory_content", "dream_result",
-  "management_error", "skill_metadata",
+  "management_error", "skill_metadata", "claim", "snapshot",
 ];
 checkMembers("ManagementResult", interfaceDeclaration("ManagementResult").members, {
   properties: Object.fromEntries(managementFields.map((field) => [field, definitions.management_result.properties[field]])),

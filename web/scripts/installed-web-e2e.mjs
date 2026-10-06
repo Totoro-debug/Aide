@@ -57,26 +57,17 @@ page.on("websocket", (socket) => {
 });
 
 async function createClaimedDraft(button) {
-  const createdResponsePromise = page.waitForResponse((response) => (
-    response.request().method() === "POST" && response.url().endsWith("/sessions")
+  const openedResponsePromise = page.waitForResponse((response) => (
+    response.request().method() === "POST"
+      && new URL(response.url()).pathname.endsWith("/conversations/open")
   ));
-  const responses = Promise.all([
-    createdResponsePromise,
-    page.waitForResponse(async (response) => {
-      if (response.request().method() !== "POST" || !response.url().endsWith("/claim")) return false;
-      const created = await (await createdResponsePromise).json();
-      return response.url().endsWith(`/sessions/${created.session_id}/claim`);
-    }),
-  ]);
   await button.click();
-  const [createdResponse, claimedResponse] = await responses;
-  assert.equal(createdResponse.status(), 200, "Installed draft creation failed");
-  assert.equal(claimedResponse.status(), 200, "Installed draft Claim failed");
-  const created = await createdResponse.json();
-  const claimed = await claimedResponse.json();
-  assert.equal(claimed.claim.session_id, created.session_id);
+  const openedResponse = await openedResponsePromise;
+  assert.equal(openedResponse.status(), 200, "Installed draft creation and Claim failed");
+  const opened = await openedResponse.json();
+  assert.equal(opened.claim.session_id, opened.session_id);
   await expect(button).toBeEnabled();
-  return created;
+  return opened;
 }
 
 try {
@@ -212,7 +203,7 @@ try {
       await delay(200);
       socket.connectToServer();
     });
-    await page.route("**/api/v1/projects/*/sessions/*/claim", async (route) => {
+    await page.route("**/api/v1/conversations/open", async (route) => {
       const response = await route.fetch();
       await delay(750);
       await route.fulfill({ response });

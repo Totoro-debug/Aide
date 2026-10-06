@@ -536,6 +536,8 @@ export interface ManagementResult {
   restore_plan?: RestorePlan;
   restore_result?: RestoreResult | null;
   restore_listing?: { session_id: string; anchors: RestoreAnchor[] };
+  claim?: SessionClaim;
+  snapshot?: SessionSnapshot;
 }
 
 export interface ManagementResponse {
@@ -548,6 +550,22 @@ export interface SessionClaim {
   session_id: string;
   claim_version: number;
   reconnect_credential: string;
+}
+
+export interface ConversationOpenResponse {
+  request_id: string;
+  project_id: string | null;
+  workspace_id: string;
+  directory: string;
+  session_id: string;
+  claim: SessionClaim;
+  snapshot: SessionSnapshot;
+}
+
+export interface ConversationOpenFailure {
+  target: Record<string, unknown>;
+  current_context: SessionClaim | null;
+  current_conversation?: ConversationOpenResponse;
 }
 
 export interface ProjectSessionsResponse {
@@ -696,4 +714,5 @@ export interface ServiceErrorBody {
   field_errors: Record<string, string>;
   retryable: boolean;
   request_id: string;
+  conversation?: ConversationOpenFailure;
 }

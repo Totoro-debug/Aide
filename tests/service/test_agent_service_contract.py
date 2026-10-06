@@ -20,6 +20,7 @@ from omni.service.execution import SessionExecution
 from omni.service.runtime import AgentService
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
+from tests.service.test_protocol_contract import _validator
 from tests.service.test_service_concurrency import (
     _claim_version,
     _CollectingSink,
@@ -317,6 +318,152 @@ async def test_releasing_claim_retains_session_authority(tmp_path: Path) -> None
         assert cast(dict[str, Any], second["snapshot"])["session_id"] == session_id
         assert cast(dict[str, Any], first["claim"])["claim_version"] == 1
         assert cast(dict[str, Any], second["claim"])["claim_version"] == 2
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_open_conversation_returns_snapshot_and_preserves_context_on_occupied_target(
+    tmp_path: Path,
+) -> None:
+    home = _home(tmp_path / "agent-home")
+    first_path = tmp_path / "first-project"
+    second_path = tmp_path / "second-project"
+    first_path.mkdir()
+    second_path.mkdir()
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        owner = await service.register_client("web")
+        first_record, _, _ = await service.register_project(owner.client_id, first_path)
+        second_record, _, _ = await service.register_project(owner.client_id, second_path)
+
+        first = await service.open_conversation(
+            owner.client_id, project_id=first_record.project_id, create_new=True
+        )
+        _validator("conversation_open_response").validate({"request_id": "first", **first})
+        second = await service.open_conversation(
+            owner.client_id, project_id=second_record.project_id, create_new=True
+        )
+        other = await service.register_client("web")
+        await service.open_conversation(
+            other.client_id,
+            project_id=first_record.project_id,
+            session_id=first["session_id"],
+        )
+
+        with pytest.raises(ServiceError) as occupied:
+            await service.open_conversation(
+                owner.client_id,
+                project_id=first_record.project_id,
+                session_id=first["session_id"],
+            )
+
+        assert occupied.value.code == "session_claimed"
+        _validator("error").validate(occupied.value.to_dict("occupied"))
+        claim = second["claim"]
+        failure = cast(dict[str, Any], occupied.value.to_dict("occupied")["conversation"])
+        assert failure["current_context"] == claim
+        assert failure["current_conversation"]["project_id"] == second_record.project_id
+        assert failure["target"]["status"] == "session_claimed"
+        assert failure["target"]["session_id"] == first["session_id"]
+        assert "snapshot" not in failure["target"]
+        with pytest.raises(ServiceError) as missing:
+            await service.open_conversation(
+                owner.client_id,
+                project_id=first_record.project_id,
+                session_id="20261005-000000-000000_00000000-0000-4000-8000-000000000322",
+            )
+        assert missing.value.code == "not_found"
+        assert "session_id" in missing.value.field_errors
+        _validator("error").validate(missing.value.to_dict("missing"))
+        current = await service.get_session_snapshot(
+            owner.client_id,
+            second["workspace_id"],
+            second["session_id"],
+            claim["claim_version"],
+            claim["reconnect_credential"],
+        )
+        assert first["snapshot"]["session_id"] == first["session_id"]
+        assert cast(dict[str, object], current["snapshot"])["session_id"] == second["session_id"]
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_open_conversation_request_replay_preserves_one_draft_and_rejects_reuse(
+    tmp_path: Path,
+) -> None:
+    home = _home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        first, replay = await asyncio.gather(
+            *(
+                service.open_conversation(
+                    client.client_id, directory=str(path), create_new=True, request_id="open-once"
+                )
+                for _ in range(2)
+            )
+        )
+        assert first == replay
+        workspace = service.workspace(first["workspace_id"])
+        assert list(workspace.loops) == [first["session_id"]]
+        assert not (path / ".omni" / "sessions" / f"{first['session_id']}.jsonl").exists()
+        with pytest.raises(ServiceError) as reused:
+            await service.open_conversation(
+                client.client_id, directory=str(path), request_id="open-once"
+            )
+        assert reused.value.code == "request_reused"
+        reconnected = await service.open_conversation(client.client_id, directory=str(path))
+        assert reconnected["claim"] == first["claim"]
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["claim", "snapshot", "snapshot_io"])
+async def test_failed_new_conversation_discards_only_the_unclaimed_draft(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    home = _home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        first = await service.open_conversation(client.client_id, directory=str(path))
+        workspace = service.workspace(first["workspace_id"])
+
+        async def reject_claim(*_args: object) -> dict[str, object]:
+            raise ServiceError("admission_closed", "Admission closed before claiming.")
+
+        def reject_snapshot(_session_id: str) -> dict[str, object]:
+            if failure_stage == "snapshot_io":
+                raise OSError("Deletion state cannot be read.")
+            raise ServiceError("admission_closed", "Snapshot could not be prepared.")
+
+        if failure_stage == "claim":
+            monkeypatch.setattr(service, "claim", reject_claim)
+        else:
+            monkeypatch.setattr(workspace, "session_snapshot", reject_snapshot)
+        with pytest.raises(ServiceError) as rejected:
+            await service.open_conversation(
+                client.client_id, workspace_id=workspace.workspace_id, create_new=True
+            )
+        assert rejected.value.code == (
+            "persistence_error" if failure_stage == "snapshot_io" else "admission_closed"
+        )
+        assert list(workspace.loops) == [first["session_id"]]
+        assert workspace._draft_clients == {}
+        failure = cast(dict[str, Any], rejected.value.to_dict("failed")["conversation"])
+        assert failure["current_context"] == first["claim"]
     finally:
         await service.stop()
 

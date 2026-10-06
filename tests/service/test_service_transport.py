@@ -20,7 +20,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from yarl import URL
 
-import omni.service.transport as service_transport
+import omni.service.runtime as service_runtime
 import omni.terminal.cli as cli
 from omni.agent.session.restore import RestoreMode
 from omni.agent.session.session import Session
@@ -48,8 +48,8 @@ from omni.service.discovery import (
 )
 from omni.service.errors import ServiceError
 from omni.service.projects import ProjectCatalog
-from omni.service.runtime import AgentService
-from omni.service.transport import _project_job_summary, create_app
+from omni.service.runtime import AgentService, _project_job_summary
+from omni.service.transport import create_app
 from omni.terminal.conversation import TerminalConversationApp, _ConversationInput
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
@@ -68,7 +68,7 @@ def test_project_job_review_uses_controlled_time_for_at_every_and_cron(
         def fromtimestamp(timestamp: float, tz: timezone | None = None) -> datetime:
             return datetime.fromtimestamp(timestamp, tz)
 
-    monkeypatch.setattr(service_transport, "datetime", FrozenDateTime)
+    monkeypatch.setattr(service_runtime, "datetime", FrozenDateTime)
 
     at = ScheduleJob(
         job_id=str(uuid4()),
@@ -238,28 +238,25 @@ async def test_web_can_enter_the_default_conversation_workspace_under_agent_home
 
             workspace_id = result["workspace_id"]
             async with http.post(
-                server.make_url(f"/api/v1/workspaces/{workspace_id}/sessions"),
+                server.make_url("/api/v1/conversations/open"),
                 headers=headers,
-                json={"request_id": "create-chat-draft"},
+                json={
+                    "request_id": "open-chat-draft",
+                    "workspace_id": workspace_id,
+                    "create_new": True,
+                },
             ) as response:
                 assert response.status == 200
-                created = await response.json()
+                opened = await response.json()
 
-            session_id = created["session_id"]
+            session_id = opened["session_id"]
+            claim = opened["claim"]
+            assert opened["snapshot"]["session_id"] == session_id
             session_path = chat / ".omni" / "sessions" / f"{session_id}.jsonl"
             assert not session_path.exists()
             workspace = service.workspace(workspace_id)
             draft = workspace._loops[session_id].loop.session
             assert draft.metadata["creation_scope"] == "chat"
-
-            async with http.post(
-                server.make_url(f"/api/v1/workspaces/{workspace_id}/sessions/{session_id}/claim"),
-                headers=headers,
-                json={"request_id": "claim-chat-draft"},
-            ) as response:
-                assert response.status == 200
-                claim_response = await response.json()
-            claim = claim_response["claim"]
 
             draft.commit_agent_run(
                 [{"role": "user", "content": "Persisted from a chat draft"}],
@@ -762,7 +759,9 @@ async def test_project_http_contract_reports_path_errors_and_keeps_cli_workspace
             ) as response:
                 assert response.status == 200
                 registered = await response.json()
+                assert registered["request_id"] == "register"
                 assert registered["schedule_state"] == "available"
+                assert registered["saved_jobs"] == []
                 project_id = registered["project_id"]
 
             async with http.post(

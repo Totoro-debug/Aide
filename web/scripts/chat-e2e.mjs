@@ -81,14 +81,12 @@ try {
     }, { path, method, body });
   }
   async function newChat() {
-    const entry = page.waitForResponse(response => response.url().endsWith("/chat/workspaces/enter") && response.request().method() === "POST");
-    const claimed = page.waitForResponse(response => response.request().method() === "POST"
-      && /\/sessions\/[^/]+\/claim$/.test(new URL(response.url()).pathname));
-    void claimed.catch(() => {});
+    const opened = page.waitForResponse(response => response.request().method() === "POST"
+      && new URL(response.url()).pathname.endsWith("/conversations/open"));
+    void opened.catch(() => {});
     await page.locator("#app-sidebar").getByRole("link", { name: "New conversation", exact: true }).click();
-    const response = await entry;
+    const response = await opened;
     if (response.ok()) {
-      assert.equal((await claimed).ok(), true);
       await expect(page.getByRole("textbox", { name: "Message input", exact: true })).toBeEnabled();
     }
     return { status: response.status(), body: await response.json() };
@@ -343,7 +341,8 @@ try {
   await expect(projectSessions.getByRole("button")).toHaveCount(2);
 
   const projectCreation = page.waitForResponse(response => response.request().method() === "POST"
-    && /\/projects\/[^/]+\/sessions$/.test(new URL(response.url()).pathname));
+    && new URL(response.url()).pathname.endsWith("/conversations/open")
+    && response.request().postDataJSON()?.create_new === true);
   await projectsNavigation.getByRole("button", { name: "New session in chat-next", exact: true }).click();
   const createdProjectSession = await (await projectCreation).json();
   await page.getByRole("textbox", { name: "Message input", exact: true }).fill("project row creates in its workspace");
@@ -367,8 +366,12 @@ try {
   const delayedClaim = new Promise(resolve => { releaseClaim = resolve; });
   const claimRequestStarted = new Promise(resolve => { claimStarted = resolve; });
   const explicitProject = seeded.history.find(session => session.title === "Explicit project");
-  const claimPattern = `**/projects/*/sessions/${explicitProject.id}/claim`;
-  await page.route(claimPattern, async route => {
+  const openPattern = "**/api/v1/conversations/open";
+  await page.route(openPattern, async route => {
+    if (route.request().postDataJSON()?.session_id !== explicitProject.id) {
+      await route.continue();
+      return;
+    }
     const response = await route.fetch();
     claimStarted();
     await delayedClaim;
@@ -383,24 +386,27 @@ try {
   })]);
   const legacyProject = seeded.history.find(session => session.title === "Legacy project");
   const newestClaim = page.waitForResponse(response => response.request().method() === "POST"
-    && response.url().endsWith(`/sessions/${legacyProject.id}/claim`));
+    && new URL(response.url()).pathname.endsWith("/conversations/open")
+    && response.request().postDataJSON()?.session_id === legacyProject.id);
   await projectSessions.getByRole("button", { name: /Legacy project/ }).click();
   releaseClaim();
   await newestClaim;
   await expect(page.getByRole("log").getByText("Legacy project body", { exact: true })).toBeVisible();
   await expect(projectSessions.getByRole("button", { name: /Legacy project/ })).toHaveAttribute("aria-current", "page");
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await page.unroute(claimPattern);
+  await page.unroute(openPattern);
 
   // A rejected Claim can be retried by clicking the same row again.
-  await page.route(claimPattern, route => route.fulfill({
-    status: 409,
-    contentType: "application/json",
-    body: JSON.stringify({ code: "session_claimed", message: "Session is occupied", retryable: true, field_errors: {}, request_id: "navigation-occupied" }),
-  }));
+  await page.route(openPattern, route => route.request().postDataJSON()?.session_id === explicitProject.id
+    ? route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      body: JSON.stringify({ code: "session_claimed", message: "Session is occupied", retryable: true, field_errors: {}, request_id: "navigation-occupied" }),
+    })
+    : route.continue());
   await projectSessions.getByRole("button", { name: /Explicit project/ }).click();
   await expect(page.getByRole("alert").filter({ hasText: "occupied" })).toBeVisible();
-  await page.unroute(claimPattern);
+  await page.unroute(openPattern);
   await projectSessions.getByRole("button", { name: /Explicit project/ }).click();
   await expect(page.getByRole("log").getByText("Explicit project body", { exact: true })).toBeVisible();
   await expect(page.getByRole("dialog")).toHaveCount(0);

@@ -352,26 +352,19 @@ class RemoteManagementCommandDispatcher:
         return result
 
     async def restore_inspect(self, anchor_id: int) -> Any:
-        return _management_result(
-            await self.client.management("restore/inspect", {"anchor_id": anchor_id})
-        )
+        return _management_result(await self.client.inspect_restore(anchor_id))
 
     async def restore_commit(self, plan: RestorePlan, mode: RestoreMode | str) -> Any:
-        return _management_result(
-            await self.client.management(
-                "restore/execute",
-                {"plan": {"anchor_id": plan.anchor_id}, "mode": str(mode)},
-            )
-        )
+        return _management_result(await self.client.commit_restore(plan.anchor_id, str(mode)))
 
     async def restore_result(self) -> Any:
-        return _management_result(await self.client.management("restore/result", {}))
+        return _management_result(await self.client.get_restore_result())
 
     async def restore_cancel(self) -> Any:
-        return _management_result(await self.client.management("restore/cancel", {}))
+        return _management_result(await self.client.cancel_restore())
 
     async def restore_acknowledge_failure(self) -> Any:
-        return _management_result(await self.client.management("restore/acknowledge", {}))
+        return _management_result(await self.client.acknowledge_restore_failure())
 
 
 class ServiceClient:
@@ -588,46 +581,12 @@ class ServiceClient:
     async def attach_workspace(self, workspace: Path) -> None:
         """Attach, open, and claim a Workspace after startup eligibility is checked."""
         if self.workspace_id:
-            raise ServiceStartupError("workspace_already_attached", "A Workspace is already attached.")
-        workspace = workspace.resolve(strict=True)
-        attached = await self._http_request(
-            "POST",
-            "/api/v1/workspaces/attach",
-            payload={"request_id": str(uuid4()), "path": str(workspace)},
-            mutation=True,
-        )
-        self.workspace_id = _require_string(attached, "workspace_id")
-        if (
-            self._previous_workspace_id == self.workspace_id
-            and self._previous_session_id
-        ):
-            self.session_id = self._previous_session_id
-        else:
-            draft = await self._http_request(
-                "POST",
-                f"/api/v1/workspaces/{self.workspace_id}/sessions",
-                payload={"request_id": str(uuid4())},
-                mutation=True,
-            )
-            self.session_id = _require_string(draft, "session_id")
-        await self._open_socket()
-        claim = await self._command(
-            "claim",
-            workspace_id=self.workspace_id,
-            session_id=self.session_id,
-            claim_version=None,
-            payload={},
-        )
-        claim_data = claim.get("claim")
-        snapshot = claim.get("snapshot")
-        if not isinstance(claim_data, dict) or not isinstance(snapshot, dict):
             raise ServiceStartupError(
-                "service_protocol_error", "Service claim response is invalid."
+                "workspace_already_attached", "A Workspace is already attached."
             )
-        self.claim_version = _require_int(claim_data, "claim_version")
-        self.claim_credential = _require_string(claim_data, "reconnect_credential")
-        self.control.set_projection(_projection(snapshot))
-        await self._apply_snapshot(snapshot)
+        workspace = workspace.resolve(strict=True)
+        await self._open_socket()
+        await self.open_conversation(directory=str(workspace))
 
     async def _open_socket(self) -> None:
         self._socket = await self.http.ws_connect(
@@ -888,24 +847,54 @@ class ServiceClient:
         )
 
     async def claim_session(self, session_id: str) -> dict[str, object]:
-        result = await self._command(
-            "claim",
-            workspace_id=self.workspace_id,
-            session_id=session_id,
-            claim_version=None,
-            payload={},
+        return await self.open_conversation(session_id=session_id)
+
+    async def open_conversation(
+        self,
+        *,
+        project_id: str | None = None,
+        workspace_id: str | None = None,
+        directory: str | None = None,
+        session_id: str | None = None,
+        create_new: bool = False,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "request_id": str(uuid4()),
+            "create_new": create_new,
+        }
+        for key, value in (
+            ("project_id", project_id),
+            (
+                "workspace_id",
+                (workspace_id or self.workspace_id or None)
+                if project_id is None and directory is None
+                else workspace_id,
+            ),
+            ("directory", directory),
+            ("session_id", session_id),
+        ):
+            if value is not None:
+                payload[key] = value
+        result = await self._http_request(
+            "POST", "/api/v1/conversations/open", payload=payload, mutation=True
         )
         claim = result.get("claim")
         snapshot = result.get("snapshot")
         if not isinstance(claim, dict) or not isinstance(snapshot, dict):
-            raise ServiceStartupError(
-                "service_protocol_error", "Service claim response is invalid."
-            )
-        if session_id != self.session_id:
+            raise ServiceStartupError("service_protocol_error", "Conversation response is invalid.")
+        next_workspace_id = _require_string(claim, "workspace_id")
+        next_session_id = _require_string(claim, "session_id")
+        next_version = _require_int(claim, "claim_version")
+        next_credential = _require_string(claim, "reconnect_credential")
+        if snapshot.get("session_id") != next_session_id:
+            raise ServiceStartupError("service_protocol_error", "Conversation snapshot is invalid.")
+        if (next_workspace_id, next_session_id) != (self.workspace_id, self.session_id):
             self.control.clear_runs()
-        self.session_id = _require_string(claim, "session_id")
-        self.claim_version = _require_int(claim, "claim_version")
-        self.claim_credential = _require_string(claim, "reconnect_credential")
+        self.workspace_id = next_workspace_id
+        self.session_id = next_session_id
+        self.claim_version = next_version
+        self.claim_credential = next_credential
+        self.control.set_projection(_projection(snapshot))
         await self._apply_snapshot(snapshot)
         return result
 
@@ -932,12 +921,12 @@ class ServiceClient:
 
     async def release_session(self) -> None:
         """Release the current idle Session Claim through the event channel."""
-        await self._command(
-            "release",
-            workspace_id=self.workspace_id,
-            session_id=self.session_id,
-            claim_version=self.claim_version,
-            payload={},
+        await self._http_request(
+            "POST",
+            f"/api/v1/workspaces/{self.workspace_id}/sessions/{self.session_id}/release",
+            payload={"request_id": str(uuid4()), "claim_version": self.claim_version},
+            mutation=True,
+            extra_headers={"X-Omni-Claim": self.claim_credential},
         )
         self.claim_version = 0
         self.claim_credential = ""
@@ -956,6 +945,23 @@ class ServiceClient:
 
     async def execute_management_command(self, command: str) -> dict[str, object]:
         return await self.management("dispatch", {"command": command})
+
+    async def inspect_restore(self, anchor_id: int) -> dict[str, object]:
+        return await self.management("restore/inspect", {"anchor_id": anchor_id})
+
+    async def commit_restore(self, anchor_id: int, mode: str) -> dict[str, object]:
+        return await self.management(
+            "restore/execute", {"plan": {"anchor_id": anchor_id}, "mode": mode}
+        )
+
+    async def get_restore_result(self) -> dict[str, object]:
+        return await self.management("restore/result", {})
+
+    async def cancel_restore(self) -> dict[str, object]:
+        return await self.management("restore/cancel", {})
+
+    async def acknowledge_restore_failure(self) -> dict[str, object]:
+        return await self.management("restore/acknowledge", {})
 
     async def get_input_capabilities(self) -> dict[str, object]:
         response = await self._http_request("GET", "/api/v1/input-capabilities")
@@ -1002,18 +1008,17 @@ class ServiceClient:
         if not isinstance(result, dict):
             raise ServiceStartupError("service_protocol_error", "Management response is invalid.")
         if action == "restore/execute" and isinstance(result.get("restore_result"), dict):
-            self.claim_version = _require_int(result, "claim_version")
-            self.claim_credential = _require_string(result, "claim_credential")
-            current = await self._http_request(
-                "GET",
-                (
-                    f"/api/v1/workspaces/{self.workspace_id}/sessions/{self.session_id}"
-                    f"?claim_version={self.claim_version}"
-                ),
-                extra_headers={"X-Omni-Claim": self.claim_credential},
-            )
-            snapshot = current.get("snapshot")
-            if not isinstance(snapshot, dict):
+            claim = result.get("claim")
+            snapshot = result.get("snapshot")
+            if not isinstance(claim, dict) or not isinstance(snapshot, dict):
+                raise ServiceStartupError(
+                    "service_protocol_error", "Restored Conversation context is invalid."
+                )
+            self.workspace_id = _require_string(claim, "workspace_id")
+            self.session_id = _require_string(claim, "session_id")
+            self.claim_version = _require_int(claim, "claim_version")
+            self.claim_credential = _require_string(claim, "reconnect_credential")
+            if snapshot.get("session_id") != self.session_id:
                 raise ServiceStartupError(
                     "service_protocol_error", "Restored Session snapshot is invalid."
                 )

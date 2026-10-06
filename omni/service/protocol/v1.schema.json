@@ -681,7 +681,9 @@
         "restore_plan": {"type": "object"},
         "restore_result": {"type": ["object", "null"]},
         "claim_version": {"$ref": "#/$defs/claim_version"},
-        "claim_credential": {"$ref": "#/$defs/identifier"}
+        "claim_credential": {"$ref": "#/$defs/identifier"},
+        "claim": {"$ref": "#/$defs/session_claim"},
+        "snapshot": {"$ref": "#/$defs/session_snapshot"}
       }
     },
     "management_response": {
@@ -702,7 +704,32 @@
         "message": {"type": "string"},
         "field_errors": {"type": "object", "additionalProperties": {"type": "string"}},
         "retryable": {"type": "boolean"},
-        "request_id": {"$ref": "#/$defs/request_id"}
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "conversation": {"$ref": "#/$defs/conversation_open_failure"}
+      }
+    },
+    "conversation_open_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "project_id", "workspace_id", "directory", "session_id", "claim", "snapshot"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "project_id": {"type": ["string", "null"]},
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "directory": {"type": "string"},
+        "session_id": {"$ref": "#/$defs/identifier"},
+        "claim": {"$ref": "#/$defs/session_claim"},
+        "snapshot": {"$ref": "#/$defs/session_snapshot"}
+      }
+    },
+    "conversation_open_failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "current_context"],
+      "properties": {
+        "target": {"type": "object"},
+        "current_context": {"anyOf": [{"$ref": "#/$defs/session_claim"}, {"type": "null"}]},
+        "current_conversation": {"$ref": "#/$defs/conversation_open_response"}
       }
     },
     "conversation_input_accepted": {

@@ -39,7 +39,7 @@ try {
     }, currentClaim);
   }
   page.on("response", async response => {
-    if (/\/sessions\/[^/]+\/claim$/.test(response.url()) && response.ok()) {
+    if (new globalThis.URL(response.url()).pathname.endsWith("/conversations/open") && response.ok()) {
       currentClaim = (await response.json()).claim;
     }
   });

@@ -181,7 +181,7 @@ try {
   async function openChatAndStatus(targetPage, targetUrl) {
     const chatWorkspaceEntry = targetPage.waitForResponse((response) => (
       response.request().method() === "POST"
-      && response.url().endsWith("/api/v1/chat/workspaces/enter")
+      && response.url().endsWith("/api/v1/conversations/open")
     ));
     await targetPage.goto("about:blank");
     await targetPage.goto(targetUrl);
@@ -348,7 +348,7 @@ try {
   await page.getByRole("button", { name: "EN", exact: true }).click();
   const chatWorkspaceEntry = page.waitForResponse((response) => (
     response.request().method() === "POST"
-    && response.url().endsWith("/api/v1/chat/workspaces/enter")
+    && response.url().endsWith("/api/v1/conversations/open")
   ));
   await page.getByRole("link", { name: "New conversation", exact: true }).click();
   assert.equal((await chatWorkspaceEntry).status(), 200, "The default Chat workspace did not open");
@@ -1094,8 +1094,8 @@ try {
 
   const draftResponsePromise = page.waitForResponse((response) => (
     response.request().method() === "POST"
-    && response.url().includes("/api/v1/projects/")
-    && response.url().endsWith("/sessions")
+    && new URL(response.url()).pathname.endsWith("/conversations/open")
+    && response.request().postDataJSON()?.create_new === true
   ));
   await page.getByRole("button", { name: "New session", exact: true }).click();
   const draftResponse = await draftResponsePromise;
@@ -1145,8 +1145,8 @@ try {
 
   const newSessionResponsePromise = page.waitForResponse((response) => (
     response.request().method() === "POST"
-    && response.url().includes("/api/v1/projects/")
-    && response.url().endsWith("/sessions")
+    && new URL(response.url()).pathname.endsWith("/conversations/open")
+    && response.request().postDataJSON()?.create_new === true
   ));
   await page.getByRole("button", { name: "New session", exact: true }).click();
   const newSession = await (await newSessionResponsePromise).json();
@@ -1501,8 +1501,12 @@ try {
   const lateClaimGate = new Promise((resolveGate) => { releaseLateClaim = resolveGate; });
   let lateClaimArrived;
   const lateClaimArrival = new Promise((resolveArrival) => { lateClaimArrived = resolveArrival; });
-  const lateClaimRoute = `**/sessions/${conversationSessionId}/claim`;
+  const lateClaimRoute = "**/api/v1/conversations/open";
   await page.route(lateClaimRoute, async (route) => {
+    if (route.request().postDataJSON()?.session_id !== conversationSessionId) {
+      await route.continue();
+      return;
+    }
     const response = await route.fetch();
     lateClaimArrived();
     await lateClaimGate;
@@ -1970,7 +1974,9 @@ try {
     .getByText(/Occupied|已占用/, { exact: true })
     .waitFor();
   const occupiedClaimResponse = secondPage.waitForResponse((response) => (
-    response.request().method() === "POST" && response.url().includes("/claim")
+    response.request().method() === "POST"
+    && new URL(response.url()).pathname.endsWith("/conversations/open")
+    && response.request().postDataJSON()?.session_id === control.details.available_session_id
   ));
   await secondSessionList.getByRole("button", { name: /Web available history/ }).click();
   assert.equal((await occupiedClaimResponse).status(), 409);
@@ -2283,7 +2289,9 @@ try {
   const releasedSession = secondSessionList.getByRole("button", { name: /Web available history/ });
   await releasedSession.getByText(/Occupied|已占用/, { exact: true }).waitFor({ state: "detached" });
   const handoffClaimPromise = secondPage.waitForResponse((response) => (
-    response.request().method() === "POST" && response.url().includes("/claim")
+    response.request().method() === "POST"
+    && new URL(response.url()).pathname.endsWith("/conversations/open")
+    && response.request().postDataJSON()?.session_id === control.details.available_session_id
   ));
   await releasedSession.click();
   const handoffClaimResponse = await handoffClaimPromise;
@@ -2403,8 +2411,15 @@ try {
     await restoredClaimReleased;
     await route.fulfill({ response });
   };
-  const restoredClaimUrl = `**/api/v1/projects/*/sessions/${control.details.available_session_id}/claim`;
-  await page.route(restoredClaimUrl, interceptRestoredClaim);
+  const restoredClaimUrl = "**/api/v1/conversations/open";
+  const interceptAvailableSessionOpen = async (route) => {
+    if (route.request().postDataJSON()?.session_id !== control.details.available_session_id) {
+      await route.continue();
+      return;
+    }
+    await interceptRestoredClaim(route);
+  };
+  await page.route(restoredClaimUrl, interceptAvailableSessionOpen);
   await page.reload();
   await restoredClaimStarted;
   const restoredSearchResponse = page.waitForResponse((response) => new URL(response.url()).searchParams.get("title") === "no matching session");
@@ -2415,7 +2430,7 @@ try {
   await page.getByRole("heading", { name: "Renamed available history", exact: true }).waitFor();
   await page.evaluate(() => new Promise((resolveFrame) => window.requestAnimationFrame(() => window.requestAnimationFrame(resolveFrame))));
   await page.getByText("No Sessions match this title.", { exact: true }).waitFor();
-  await page.unroute(restoredClaimUrl, interceptRestoredClaim);
+  await page.unroute(restoredClaimUrl, interceptAvailableSessionOpen);
   await page.getByRole("button", { name: /Release session|释放会话/ }).click();
 
   await sessionSearch.fill("");
@@ -2426,7 +2441,8 @@ try {
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
         const creation = page.waitForResponse((response) => response.request().method() === "POST"
-          && /\/projects\/[^/]+\/sessions$/.test(new URL(response.url()).pathname));
+          && new URL(response.url()).pathname.endsWith("/conversations/open")
+          && response.request().postDataJSON()?.create_new === true);
         await page.getByRole("main").getByRole("button", { name: language === "en" ? "New session" : "新建会话", exact: true }).click();
         const { session_id: deleteId } = await (await creation).json();
         await page.getByRole("region", { name: language === "en" ? "Conversation" : "对话" })
@@ -2531,7 +2547,8 @@ try {
           await deleteDialog.waitFor({ state: "hidden" });
           const otherSessionCreation = page.waitForResponse((response) => (
             response.request().method() === "POST"
-            && /\/api\/v1\/projects\/[^/]+\/sessions$/.test(new URL(response.url()).pathname)
+            && new URL(response.url()).pathname.endsWith("/conversations/open")
+            && response.request().postDataJSON()?.create_new === true
           ));
           await page.getByRole("button", { name: "New session", exact: true }).click();
           otherSessionId = (await (await otherSessionCreation).json()).session_id;
@@ -2556,19 +2573,22 @@ try {
           notifyRestoredSessionClaimResponse = resolveResponse;
         });
         const delayRestoredSessionClaim = async (route) => {
+          if (route.request().postDataJSON()?.session_id !== otherSessionId) {
+            await route.continue();
+            return;
+          }
           const response = await route.fetch();
-          const pathname = new URL(route.request().url()).pathname;
-          if (otherSessionId !== null && pathname.endsWith(`/sessions/${otherSessionId}/claim`)) {
+          if (otherSessionId !== null) {
             notifyRestoredSessionClaim();
             await restoredSessionClaimReleased;
           }
           await route.fulfill({ response });
-          if (otherSessionId !== null && pathname.endsWith(`/sessions/${otherSessionId}/claim`)) {
+          if (otherSessionId !== null) {
             notifyRestoredSessionClaimResponse();
           }
         };
         if (otherSessionId !== null) {
-          await page.route("**/api/v1/projects/*/sessions/*/claim", delayRestoredSessionClaim);
+          await page.route("**/api/v1/conversations/open", delayRestoredSessionClaim);
         }
         const deletionRetry = page.getByRole("button", { name: language === "en" ? "Retry" : "重试", exact: true });
         await page.reload();
@@ -2587,7 +2607,7 @@ try {
           releaseRestoredSessionClaim();
           await restoredSessionClaimResponse;
           await page.getByRole("button", { name: "Delete session", exact: true }).waitFor();
-          await page.unroute("**/api/v1/projects/*/sessions/*/claim", delayRestoredSessionClaim);
+          await page.unroute("**/api/v1/conversations/open", delayRestoredSessionClaim);
         }
         await page.keyboard.press("Escape");
         await deleteDialog.waitFor({ state: "hidden" });
@@ -2778,7 +2798,7 @@ try {
     : `/chat?directory=${encodeURIComponent(previousRecovery.target.directory)}&${staleRouteParams}`;
   const defaultChatEntry = page.waitForResponse((response) => (
     response.request().method() === "POST"
-    && response.url().endsWith("/api/v1/chat/workspaces/enter")
+    && response.url().endsWith("/api/v1/conversations/open")
   ));
   await page.goto(`${restarted.url}${staleSessionRoute}#ticket=${encodeURIComponent(restarted.ticket)}`);
   await defaultChatEntry;

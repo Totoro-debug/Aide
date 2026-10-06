@@ -15,7 +15,7 @@ import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
 from omni.agent.session.backup_store import FileBackupStore
-from omni.agent.session.restore import RestoreManager
+from omni.agent.session.restore import RestoreManager, RestoreMode
 from omni.agent.session.session import Session
 from omni.agent.workspace_state import WorkspaceState
 from omni.config.config import ConfigLoader
@@ -23,6 +23,7 @@ from omni.service.discovery import create_credential
 from omni.service.errors import ServiceError
 from omni.service.runtime import AgentService, SessionClaim, WorkspaceRecord
 from omni.service.transport import create_app
+from tests.service.test_protocol_contract import _validator
 from tests.service.test_service_concurrency import _CollectingSink, _ConcurrentProvider
 from tests.service.test_service_transport import _persist_session, _prepare_agent_home
 
@@ -127,6 +128,65 @@ async def test_restore_plan_and_cancel_are_bound_to_inspected_session(
     assert workspace._restore_owner is None
     assert not workspace._restore_schedule_paused
     assert claim.loop.foreground_input_admitted()
+
+
+@pytest.mark.asyncio
+async def test_named_restore_commit_returns_rotated_claim_and_new_snapshot(
+    restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
+) -> None:
+    service, workspace, owner, claim, target = restore_case
+    old_version, old_credential = claim.version, claim.credential
+    inspected = await service.inspect_restore(
+        owner,
+        workspace.workspace_id,
+        claim.session_id,
+        claim.version,
+        claim.credential,
+        "inspect-named",
+        1,
+    )
+    plan = cast(dict[str, Any], inspected["restore_plan"])
+    assert plan["anchor_id"] == 1
+
+    committed = await service.commit_restore(
+        owner,
+        workspace.workspace_id,
+        claim.session_id,
+        claim.version,
+        claim.credential,
+        "commit-named",
+        1,
+        RestoreMode.CONVERSATION_ONLY.value,
+    )
+
+    next_claim = cast(dict[str, Any], committed["claim"])
+    _validator("management_result").validate(committed)
+    snapshot = cast(dict[str, Any], committed["snapshot"])
+    assert cast(dict[str, Any], committed["restore_result"])["session_id"] == claim.session_id
+    assert snapshot["session_id"] == claim.session_id
+    assert snapshot["messages"] == []
+    assert target.read_bytes() == b"current branch"
+    assert next_claim["claim_version"] > old_version
+    replayed = await service.commit_restore(
+        owner,
+        workspace.workspace_id,
+        claim.session_id,
+        old_version,
+        old_credential,
+        "commit-named",
+        1,
+        RestoreMode.CONVERSATION_ONLY.value,
+    )
+    assert replayed == committed
+    with pytest.raises(ServiceError) as stale:
+        await service.get_session_snapshot(
+            owner,
+            workspace.workspace_id,
+            claim.session_id,
+            old_version,
+            old_credential,
+        )
+    assert stale.value.code == "stale_claim"
 
 
 @pytest.mark.asyncio

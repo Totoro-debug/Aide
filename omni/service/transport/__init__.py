@@ -10,7 +10,6 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
 from typing import cast
@@ -19,10 +18,8 @@ from urllib.parse import urlsplit
 from aiohttp import WSMsgType, web
 
 from ...config.config import ConfigError
-from ...schedule.model import ScheduleJob
 from ..discovery import identity_proof
 from ..errors import ServiceError, service_error
-from ..projects import ProjectCatalogError
 from ..runtime import AgentService, ServiceSink
 
 _API_PREFIX = "/api/v1"
@@ -38,34 +35,6 @@ _STATIC_CSP = (
     "img-src 'self' data:; connect-src 'self' ws:; base-uri 'none'; "
     "frame-ancestors 'none'; form-action 'self'"
 )
-
-
-def _project_job_summary(job: ScheduleJob) -> dict[str, object]:
-    due_at: datetime | None = None
-    if job.schedule.kind == "at":
-        due_at = job.schedule.at_datetime
-    elif job.schedule.kind == "every" and job.schedule.every_seconds is not None:
-        anchor_ms = (
-            job.state.last_finished_at_ms
-            if job.state.last_finished_at_ms is not None
-            else job.created_at_ms
-        )
-        due_at = datetime.fromtimestamp(anchor_ms / 1000, UTC) + timedelta(
-            seconds=job.schedule.every_seconds
-        )
-    if job.schedule.kind == "at" and job.state.last_status is not None:
-        review_status = "completed"
-    elif due_at is None:
-        review_status = "next_on_resume"
-    else:
-        review_status = "overdue" if due_at <= datetime.now(UTC) else "upcoming"
-    return {
-        "job_id": job.job_id,
-        "title": job.title,
-        "schedule": job.schedule.to_dict(),
-        "due_at": due_at.isoformat() if due_at is not None else None,
-        "review_status": review_status,
-    }
 
 
 @dataclass(slots=True)
@@ -138,6 +107,7 @@ class AgentServiceTransport:
         app.router.add_post(
             f"{_API_PREFIX}/chat/workspaces/enter", self._enter_conversation_workspace
         )
+        app.router.add_post(f"{_API_PREFIX}/conversations/open", self._open_conversation)
         app.router.add_get(f"{_API_PREFIX}/chat/sessions", self._list_chat_sessions)
         app.router.add_get(f"{_API_PREFIX}/projects", self._list_projects)
         app.router.add_post(f"{_API_PREFIX}/projects", self._register_project)
@@ -666,8 +636,6 @@ class AgentServiceTransport:
     async def _attach_workspace(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, mutation=True, client_required=True)
         client_id = _context_client_id(context)
-        if self.service.client(client_id).kind != "cli":
-            raise service_error("forbidden", "Only CLI clients may attach a directory.", status=403)
         body = await _json_object(request)
         request_id = _require_request_id(body)
         path = body.get("path")
@@ -678,41 +646,56 @@ class AgentServiceTransport:
                 status=422,
                 field_errors={"path": "must be an absolute directory"},
             )
-        workspace = await self.service.attach_workspace(client_id, _path_from_text(path))
-        return web.json_response(
-            {
-                "request_id": request_id,
-                "workspace_id": workspace.workspace_id,
-                "project_id": None,
-            }
-        )
+        result = await self.service.enter_workspace(client_id, _path_from_text(path))
+        return web.json_response({"request_id": request_id, **result})
 
     async def _list_projects(self, request: web.Request) -> web.Response:
-        self._authenticate(request)
-        projects = []
-        try:
-            records = self.service.projects.list()
-        except ProjectCatalogError as error:
+        context = self._authenticate(request, client_required=True)
+        result = await self.service.list_projects(_context_client_id(context))
+        return web.json_response(result)
+
+    async def _open_conversation(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        body = await _json_object(request)
+        allowed = {
+            "request_id",
+            "project_id",
+            "workspace_id",
+            "directory",
+            "session_id",
+            "create_new",
+        }
+        if set(body) - allowed:
+            raise service_error("validation_error", "Conversation fields are invalid.", status=422)
+        request_id = _require_request_id(body)
+        scope_values = ("project_id", "workspace_id", "directory", "session_id")
+        for field in scope_values:
+            value = body.get(field)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise service_error(
+                    "validation_error",
+                    f"{field} is invalid.",
+                    status=422,
+                    field_errors={field: "must be a nonempty string"},
+                )
+        create_new = body.get("create_new", False)
+        if not isinstance(create_new, bool):
             raise service_error(
-                "persistence_error", "The Project catalog could not be read safely.", status=500
-            ) from error
-        for record in records:
-            saved_jobs, schedule_status = await self.service.project_schedule_snapshot(record)
-            project = {
-                "project_id": record.project_id,
-                "path": str(record.path),
-                "name": record.path.name,
-                "schedule_state": record.schedule_state,
-                "available": record.path.is_dir() and self.service.configuration_ready,
-                "saved_jobs": [_project_job_summary(job) for job in saved_jobs],
-                "schedule_status": schedule_status,
-            }
-            if record.removal_operation_id is not None:
-                project["removal_operation_id"] = record.removal_operation_id
-            if record.removal_error is not None:
-                project["removal_error"] = record.removal_error
-            projects.append(project)
-        return web.json_response({"projects": projects})
+                "validation_error",
+                "create_new must be a boolean.",
+                status=422,
+                field_errors={"create_new": "must be a boolean"},
+            )
+        result = await self.service.open_conversation(
+            _context_client_id(context),
+            request_id=request_id,
+            project_id=cast(str | None, body.get("project_id")),
+            workspace_id=cast(str | None, body.get("workspace_id")),
+            directory=cast(str | None, body.get("directory")),
+            session_id=cast(str | None, body.get("session_id")),
+            create_new=create_new,
+        )
+        return web.json_response({"request_id": request_id, **result})
 
     async def _enter_conversation_workspace(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, mutation=True, client_required=True)
@@ -753,18 +736,8 @@ class AgentServiceTransport:
         path = body.get("path")
         if not isinstance(path, str) or not path:
             raise service_error("validation_error", "Project path is required.", status=422)
-        record, workspace, jobs = await self.service.register_project(
-            client_id, _path_from_text(path)
-        )
-        return web.json_response(
-            {
-                "request_id": request_id,
-                "project_id": record.project_id,
-                "workspace_id": workspace.workspace_id,
-                "schedule_state": record.schedule_state,
-                "saved_jobs": [_project_job_summary(job) for job in jobs],
-            }
-        )
+        result = await self.service.register_project_entry(client_id, _path_from_text(path))
+        return web.json_response({"request_id": request_id, **result})
 
     async def _remove_project(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, mutation=True, client_required=True)
@@ -910,12 +883,13 @@ class AgentServiceTransport:
             or claim_version < 1
         ):
             raise service_error("validation_error", "claim_version is invalid.", status=422)
-        await self.service.release_project_session(
+        await self.service.release_conversation(
             client_id,
-            request.match_info["project_id"],
+            None,
             request.match_info["session_id"],
             claim_version,
             _required_header(request, "X-Omni-Claim"),
+            project_id=request.match_info["project_id"],
         )
         return web.json_response({"request_id": request_id, "released": True})
 
@@ -986,7 +960,7 @@ class AgentServiceTransport:
             or claim_version < 1
         ):
             raise service_error("validation_error", "claim_version is invalid.", status=422)
-        await self.service.release_claim(
+        await self.service.release_conversation(
             client_id,
             request.match_info["workspace_id"],
             request.match_info["session_id"],
@@ -1023,16 +997,10 @@ class AgentServiceTransport:
         session_id = request.match_info["session_id"]
         claim_version = _integer_query(request, "claim_version")
         claim_credential = _required_header(request, "X-Omni-Claim")
-        workspace = self.service.workspace(workspace_id)
-        claim = workspace.require_claim(client_id, session_id, claim_version, claim_credential)
-        workspace._ensure_session_available(session_id)
         return web.json_response(
-            {
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "claim_version": claim.version,
-                "snapshot": workspace.session_snapshot(session_id),
-            }
+            await self.service.get_session_snapshot(
+                client_id, workspace_id, session_id, claim_version, claim_credential
+            )
         )
 
     async def _rename_session(self, request: web.Request) -> web.Response:
@@ -1168,15 +1136,98 @@ class AgentServiceTransport:
                 claim_version = raw_body_claim_version
             else:
                 claim_version = None
-        result = await self.service.handle_management(
-            client_id,
-            request.match_info["workspace_id"],
-            session_value,
-            request.match_info["action"],
-            body,
-            claim_version=claim_version,
-            claim_credential=request.headers.get("X-Omni-Claim"),
-        )
+        action = request.match_info["action"]
+        claim_credential = request.headers.get("X-Omni-Claim")
+        restore_actions = {
+            "restore/inspect",
+            "restore/execute",
+            "restore/result",
+            "restore/cancel",
+            "restore/acknowledge",
+            "restore/acknowledge-failure",
+        }
+        if action in restore_actions:
+            if claim_version is None or claim_credential is None or session_value is None:
+                raise service_error(
+                    "stale_claim", "Conversation Session Claim is missing or stale.", retryable=True
+                )
+            workspace_id = request.match_info["workspace_id"]
+            if action == "restore/inspect":
+                anchor_id = body.get("anchor_id")
+                if isinstance(anchor_id, bool) or not isinstance(anchor_id, int):
+                    raise service_error(
+                        "validation_error", "Restore anchor ID is invalid.", status=422
+                    )
+                result = await self.service.inspect_restore(
+                    client_id,
+                    workspace_id,
+                    session_value,
+                    claim_version,
+                    claim_credential,
+                    request_id,
+                    anchor_id,
+                )
+            elif action == "restore/execute":
+                wire_plan = body.get("plan")
+                mode = body.get("mode")
+                anchor_id = wire_plan.get("anchor_id") if isinstance(wire_plan, dict) else None
+                if (
+                    isinstance(anchor_id, bool)
+                    or not isinstance(anchor_id, int)
+                    or anchor_id < 1
+                    or not isinstance(mode, str)
+                    or not mode
+                ):
+                    raise service_error(
+                        "validation_error", "Restore request is invalid.", status=422
+                    )
+                result = await self.service.commit_restore(
+                    client_id,
+                    workspace_id,
+                    session_value,
+                    claim_version,
+                    claim_credential,
+                    request_id,
+                    anchor_id,
+                    mode,
+                )
+            elif action == "restore/result":
+                result = await self.service.get_restore_result(
+                    client_id,
+                    workspace_id,
+                    session_value,
+                    claim_version,
+                    claim_credential,
+                    request_id,
+                )
+            elif action == "restore/cancel":
+                result = await self.service.cancel_restore(
+                    client_id,
+                    workspace_id,
+                    session_value,
+                    claim_version,
+                    claim_credential,
+                    request_id,
+                )
+            else:
+                result = await self.service.acknowledge_restore_failure(
+                    client_id,
+                    workspace_id,
+                    session_value,
+                    claim_version,
+                    claim_credential,
+                    request_id,
+                )
+        else:
+            result = await self.service.handle_management(
+                client_id,
+                request.match_info["workspace_id"],
+                session_value,
+                action,
+                body,
+                claim_version=claim_version,
+                claim_credential=claim_credential,
+            )
         return web.json_response({"request_id": request_id, "result": result})
 
     async def _stop_service(self, request: web.Request) -> web.Response:

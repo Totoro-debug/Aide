@@ -173,11 +173,6 @@ _MISSING = object()
 WEB_TICKET_TTL_SECONDS = 25.0
 
 
-def _consume_background_task_result(task: asyncio.Task[Any]) -> None:
-    if not task.cancelled():
-        task.exception()
-
-
 def _schedule_job_projection(
     job: ScheduleJob,
     *,
@@ -2553,7 +2548,7 @@ class AgentService:
             self._stop_operation_id = str(uuid4())
         if self._stop_task is None:
             self._stop_task = asyncio.create_task(self._stop_owned())
-            self._stop_task.add_done_callback(_consume_background_task_result)
+            self._stop_task.add_done_callback(_consume_task_result)
         result: ServiceStopDTO = {
             "request_id": request_id,
             "accepted": True,

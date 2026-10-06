@@ -2339,7 +2339,6 @@ h1 {
   flex: 0 0 auto;
   gap: 8px;
   margin: 0 auto;
-  border-top: 1px solid var(--border-subtle);
   background: var(--surface-app);
   padding: 14px 0 12px;
 }
@@ -2350,25 +2349,36 @@ h1 {
   padding: 0;
 }
 
+.composerBox {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 22px;
+  background: var(--surface-app);
+  padding: 10px;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 3%);
+}
+
+.composerBox:focus-within {
+  border-color: var(--border-strong);
+}
+
 .composerInput {
   width: 100%;
   min-height: 74px;
   box-sizing: border-box;
   resize: vertical;
-  border: 1px solid var(--border-strong);
-  border-radius: 22px;
+  border: 0;
+  border-radius: 12px;
   background: var(--surface-app);
   color: var(--text-primary);
   font: inherit;
   font-size: 13px;
   line-height: 1.5;
-  padding: 10px 11px;
+  padding: 4px 3px 10px;
 }
 
 .composerInput:focus {
-  border-color: var(--accent-strong);
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
+  outline: none;
 }
 
 .composerInput:disabled {
@@ -2380,38 +2390,189 @@ h1 {
   color: var(--text-muted);
 }
 
-.composerSettings {
-  display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(120px, 0.75fr) minmax(145px, 0.9fr);
-  align-items: end;
+.composerToolbar,
+.composerControls {
+  display: flex;
+  min-width: 0;
+  align-items: center;
   gap: 8px;
+}
+
+.composerControls {
+  position: relative;
+  flex: 1;
+  justify-content: space-between;
+}
+
+.composerPermissionControl,
+.composerModelControl {
+  position: relative;
+  min-width: 0;
+}
+
+.composerPermissionControl {
+  flex: 0 0 auto;
+}
+
+.composerModelControl {
+  position: static;
+  flex: 0 1 auto;
+  margin-left: auto;
+}
+
+.composerControlTrigger {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  padding: 4px;
+}
+
+.composerControlTrigger:hover,
+.composerControlTrigger[aria-expanded="true"] {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.composerControlTrigger > svg,
+.composerControlTrigger > span[lang] {
+  flex: 0 0 auto;
+}
+
+.composerControlTrigger[aria-expanded="true"] .composerChevron {
+  transform: rotate(180deg);
+}
+
+.composerModelName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composerMenu {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 8px);
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  background: var(--surface-panel);
+  padding: 5px;
+  box-shadow: 0 4px 18px rgb(0 0 0 / 9%);
+}
+
+.composerMenu[hidden] {
+  display: none;
+}
+
+.composerPermissionMenu {
+  left: 0;
+  min-width: 164px;
+}
+
+.composerModelMenu {
+  right: 0;
+  width: min(300px, 100%);
+}
+
+.composerMenuOption {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  padding: 7px;
+}
+
+.composerMenuOption > span {
+  flex: 1;
+}
+
+.composerMenuOption:hover,
+.composerMenuOption:focus-visible,
+.composerMenuOption[aria-checked="true"] {
+  background: var(--surface-hover);
 }
 
 .composerSetting {
   display: grid;
   min-width: 0;
-  gap: 4px;
-  color: var(--text-muted);
-  font-size: 11px;
-  line-height: 1.3;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  color: var(--text-primary);
+  font-size: 13px;
+  padding: 2px 6px;
+}
+
+.composerSetting > span {
+  white-space: nowrap;
 }
 
 .composerSelect {
   width: 100%;
   min-width: 0;
   height: 34px;
-  border: 1px solid var(--border-strong);
+  border: 0;
   border-radius: 5px;
-  background: var(--surface-app);
-  color: var(--text-primary);
+  background: transparent;
+  color: var(--text-muted);
   font: inherit;
   font-size: 12px;
-  padding: 0 8px;
+  text-align: right;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  padding: 0 2px;
 }
 
-.composerSelect:disabled {
+.composerSelect:disabled,
+.composerControlTrigger:disabled,
+.composerMenuOption:disabled {
   cursor: wait;
   opacity: 0.65;
+}
+
+.composerSend {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: var(--surface-send);
+  color: var(--text-send);
+  cursor: pointer;
+  padding: 0;
+}
+
+.composerSend:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.composerFooter {
+  flex-wrap: wrap;
+  padding: 0 4px;
 }
 
 .composerHint,
@@ -3665,14 +3826,6 @@ h1 {
 }
 
 @media (max-width: 680px) {
-  .composerSettings {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  }
-
-  .composerModelSetting {
-    grid-column: 1 / -1;
-  }
-
   .topbar {
     min-height: 56px;
     align-items: center;

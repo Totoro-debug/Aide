@@ -1,6 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   ArrowLeft,
+  ArrowUp,
   Activity,
   Ban,
   BookOpen,
@@ -138,6 +139,7 @@ import type {
   ScheduleStatus,
 } from "./protocol";
 import styles from "./App.module.css";
+import ComposerControls from "./ComposerControls";
 import NavigationSidebar from "./NavigationSidebar";
 import type { NavigationSession, NavigationSessionAction } from "./NavigationSidebar";
 import {
@@ -6193,6 +6195,7 @@ function ChatSessionsView({
               </div>
             </div>
             <form className={styles.composer} onSubmit={(event) => event.preventDefault()}>
+              <div className={styles.composerBox}>
               <label className={styles.srOnly} htmlFor="setup-conversation-input">{t("conversation.inputLabel")}</label>
               <textarea
                 id="setup-conversation-input"
@@ -6229,6 +6232,7 @@ function ChatSessionsView({
                   <Send size={15} aria-hidden="true" />
                   {t("controls.send")}
                 </button>
+              </div>
               </div>
             </form>
           </div>
@@ -8442,6 +8446,7 @@ function ProjectSessionsContent({
                     )}
                   </div>
                   <form className={styles.composer} onSubmit={(event) => void submitInput(event)}>
+                  <div className={styles.composerBox}>
                   <label className={styles.srOnly} htmlFor="conversation-input">{t("conversation.inputLabel")}</label>
                   <textarea
                     ref={inputRef}
@@ -8461,9 +8466,18 @@ function ProjectSessionsContent({
                     }}
                     onKeyDown={handleInputKeyDown}
                   />
-                  <div className={styles.composerSettings}>
-                    <label className={`${styles.composerSetting} ${styles.composerModelSetting}`}>
-                      <span>{t("conversation.sessionModel")}</span>
+                  <div className={styles.composerToolbar}>
+                  <ComposerControls
+                    key={claim.session_id}
+                    permission={clientPermission}
+                    permissionDisabled={clientPermissionSaving}
+                    onPermissionChange={(level) => void saveClientPermission(level)}
+                    modelSummary={displayedModel?.model ?? t("conversation.modelsUnavailable")}
+                    effortSummary={t(`settings.reasoningEfforts.${displayedEffort}`, { lng: "en" })}
+                    disabled={connectionState !== "online"}
+                  >
+                    <label className={styles.composerSetting}>
+                      <span>{t("conversation.modelMenuLabel")}</span>
                       <select
                         className={styles.composerSelect}
                         aria-label={t("conversation.sessionModel")}
@@ -8507,10 +8521,11 @@ function ProjectSessionsContent({
                       </select>
                     </label>
                     <label className={styles.composerSetting}>
-                      <span>{t("conversation.sessionEffort")}</span>
+                      <span>{t("conversation.effortMenuLabel")}</span>
                       <select
                         className={styles.composerSelect}
                         aria-label={t("conversation.sessionEffort")}
+                        lang="en"
                         value={displayedEffort}
                         disabled={sessionModelSaving || connectionState !== "online" || displayedModel === null}
                         onChange={(event) => {
@@ -8526,27 +8541,22 @@ function ProjectSessionsContent({
                       >
                         {REASONING_EFFORTS.map((effort) => (
                           <option key={effort} value={effort}>
-                            {t(`settings.reasoningEfforts.${effort}`)}
+                            {t(`settings.reasoningEfforts.${effort}`, { lng: "en" })}
                           </option>
                         ))}
                       </select>
                     </label>
-                    <label className={styles.composerSetting}>
-                      <span>{t("conversation.clientPermission")}</span>
-                      <select
-                        className={styles.composerSelect}
-                        aria-label={t("conversation.clientPermission")}
-                        value={clientPermission}
-                        disabled={clientPermissionSaving || connectionState !== "online"}
-                        onChange={(event) => void saveClientPermission(event.target.value)}
-                      >
-                        {PERMISSION_LEVELS.map((level) => (
-                          <option key={level} value={level}>
-                            {t(`settings.permissionLevels.${level}`)}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                  </ComposerControls>
+                    <button
+                      className={styles.composerSend}
+                      type="submit"
+                      aria-label={t("controls.send")}
+                      title={t("controls.send")}
+                      disabled={!inputText.trim() || connectionState !== "online"}
+                    >
+                      <ArrowUp size={20} aria-hidden="true" />
+                    </button>
+                  </div>
                   </div>
                   <div className={styles.composerFooter}>
                     {availableModelsState !== "loading" && modelSelectionNeedsAttention ? (
@@ -8580,14 +8590,6 @@ function ProjectSessionsContent({
                           ? t("conversation.queueBehindActive")
                           : t("conversation.enterHint")}
                     </p>
-                    <button
-                      className={styles.primaryButton}
-                      type="submit"
-                      disabled={!inputText.trim() || connectionState !== "online"}
-                    >
-                      <Send size={15} aria-hidden="true" />
-                      {t("controls.send")}
-                    </button>
                   </div>
                   </form>
                 </div>

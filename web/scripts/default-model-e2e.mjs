@@ -73,6 +73,7 @@ try {
   await expect(effort).toHaveValue("max");
   await page.unroute("**/api/v1/models/available");
 
+  await page.locator("#composer-model-trigger").click();
   await effort.selectOption("medium");
   await expect(model).toHaveValue(JSON.stringify(["primary", "small-model"]));
   const explicit = await snapshot();

@@ -136,7 +136,9 @@ export default async function browserRecoveryAcceptance({ page: initialPage, con
       }
       await expect(input()).toBeEnabled();
       if (draft) {
+        await page.locator("#composer-model-trigger").click();
         await model().selectOption(JSON.stringify(["primary", "small-model"]));
+        await page.locator("#composer-model-trigger").click();
         await effort().selectOption("xhigh");
         await expect(effort()).toBeEnabled();
       }

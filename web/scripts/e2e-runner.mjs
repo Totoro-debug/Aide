@@ -1813,8 +1813,10 @@ try {
     options.find((option) => option.value !== "")?.value ?? null
   ));
   assert.ok(selectedRecoveryModel, "The empty draft exposed no selectable model");
+  await page.locator("#composer-model-trigger").click();
   await recoveryModel.selectOption(selectedRecoveryModel);
   const recoveryEffort = page.getByLabel("Reasoning effort");
+  await page.locator("#composer-model-trigger").click();
   await recoveryEffort.selectOption("high");
   await expect(recoveryEffort).toHaveValue("high");
   const projectExpansion = page.locator("#app-sidebar").getByRole("button", {
@@ -1983,8 +1985,9 @@ try {
 
   const confirmationPath = control.details.confirmation_path;
   assert.ok(confirmationPath.endsWith("confirmation-outside.txt"));
-  await page.getByLabel("Client permission", { exact: true }).selectOption("workspace-write");
-  await expect(page.getByLabel("Client permission", { exact: true })).toBeEnabled();
+  await page.locator("#composer-permission-trigger").click();
+  await page.locator('#composer-permission-menu [data-value="workspace-write"]').click();
+  await expect(page.locator("#composer-permission-trigger")).toBeEnabled();
   const settingsConfirmationRunId = await settingsConfirmationAcceptance({ page, control });
   await page.locator("#app-sidebar").getByRole("button", { name: "project-one", exact: true }).click();
   const availableHistory = page.locator("#app-sidebar").getByRole("list", { name: "project-one Sessions", exact: true })

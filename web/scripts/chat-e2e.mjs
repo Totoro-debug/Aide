@@ -5,6 +5,7 @@ import { URL } from "node:url";
 import { chromium, expect as playwrightExpect } from "@playwright/test";
 import setup from "./e2e-setup.mjs";
 import browserRecoveryAcceptance from "./browser-recovery-e2e.mjs";
+import composerAcceptance from "./composer-e2e.mjs";
 
 const expect = playwrightExpect.configure({ timeout: 30000 });
 const control = await setup({ shutdownTimeoutMs: 60000 });
@@ -142,20 +143,29 @@ try {
   assert.ok(Array.isArray(inputCapabilities.body.skill_metadata));
   const firstDirectory = join(control.details.home_root, ".omni", "chat");
   assert.deepEqual(await readdir(join(firstDirectory, ".omni", "sessions")), [], "An empty draft was persisted");
-  const sessionModel = page.getByRole("combobox", { name: "Session model", exact: true });
-  const sessionEffort = page.getByRole("combobox", { name: "Reasoning effort", exact: true });
-  const permission = page.getByRole("combobox", { name: "Client permission", exact: true });
-  await expect(permission).toHaveValue("full-access");
-  await permission.selectOption("workspace-write");
-  await expect(permission).toHaveValue("workspace-write");
-  await permission.selectOption("full-access");
+  const sessionModel = page.getByLabel("Session model", { exact: true });
+  const sessionEffort = page.getByLabel("Reasoning effort", { exact: true });
+  const permission = page.getByRole("button", { name: "Client permission", exact: true });
+  async function selectPermission(value) {
+    await permission.click();
+    await page.locator(`#composer-permission-menu [data-value="${value}"]`).click();
+  }
+  await expect(permission).toHaveAttribute("data-value", "full-access");
+  await selectPermission("workspace-write");
+  await expect(permission).toHaveAttribute("data-value", "workspace-write");
+  await selectPermission("read-only");
+  await expect(permission).toHaveAttribute("data-value", "read-only");
+  await selectPermission("workspace-write");
+  await expect(permission).toHaveAttribute("data-value", "workspace-write");
+  await selectPermission("full-access");
   const warning = page.getByRole("dialog", { name: "Enable full access?", exact: true });
   await expect(warning.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
   await warning.getByRole("button", { name: "Cancel", exact: true }).click();
-  await expect(permission).toHaveValue("workspace-write");
-  await permission.selectOption("full-access");
+  await expect(permission).toHaveAttribute("data-value", "workspace-write");
+  await selectPermission("full-access");
   await warning.getByRole("button", { name: "Enable full access", exact: true }).click();
-  await expect(permission).toHaveValue("full-access");
+  await expect(permission).toHaveAttribute("data-value", "full-access");
+  await page.locator("#composer-model-trigger").click();
   await sessionEffort.selectOption("high");
   await expect(sessionEffort).toHaveValue("high");
   await expect(sessionModel).toHaveValue(JSON.stringify(["primary", "small-model"]));
@@ -180,6 +190,8 @@ try {
   assert.equal(firstTurnObservation.model, "small-model");
   assert.equal(firstTurnObservation.reasoning_effort, "high");
   assert.equal(firstTurnObservation.max_output, 1024);
+
+  await composerAcceptance(page);
 
   await control.command("queue-arm");
   const messageInput = page.getByRole("textbox", { name: "Message input", exact: true });
@@ -318,9 +330,9 @@ try {
   const restartedNavigation = page.getByRole("navigation", { name: "Conversations", exact: true });
   await restartedNavigation.getByTitle(firstConversation.directory).filter({ hasText: firstConversation.title }).click();
   await expect(page.getByRole("log").getByText("chat acceptance message", { exact: true })).toBeVisible();
-  await expect(page.getByRole("combobox", { name: "Session model", exact: true }))
+  await expect(page.getByLabel("Session model", { exact: true }))
     .toHaveValue(JSON.stringify(["primary", "small-model"]));
-  await expect(page.getByRole("combobox", { name: "Reasoning effort", exact: true }))
+  await expect(page.getByLabel("Reasoning effort", { exact: true }))
     .toHaveValue("high");
   await restartedNavigation.getByTitle(secondConversation.directory).click();
   await expect(page.getByRole("log").getByText("second directory acceptance message", { exact: true })).toBeVisible();

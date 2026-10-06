@@ -546,7 +546,6 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
         "inbound_snapshot",
         "put_inbound",
         "get_inbound",
-        "update_inbound_metadata",
         "remove_inbound",
         "pause_inbound_delivery",
         "resume_inbound_delivery",

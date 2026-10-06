@@ -86,13 +86,8 @@ class RemoteMessageBus(MessageBus):
     async def stage_submitted_input(self, text: str, request_id: str) -> None:
         await super().put_inbound(InboundMessage(content=text, metadata={"request_id": request_id}))
 
-    async def accept_one_input(
-        self,
-        request_id: str | None = None,
-        run_id: str | None = None,
-    ) -> None:
-        if request_id is not None and run_id is not None:
-            await super().update_inbound_metadata(request_id, {"run_id": run_id})
+    async def accept_one_input(self, request_id: str | None = None) -> None:
+        if request_id is not None:
             await super().remove_inbound(request_id)
             return
         messages = await super().drain_inbound()
@@ -850,8 +845,8 @@ class ServiceClient:
             request_id = payload.get("request_id") if isinstance(payload, dict) else None
             if isinstance(run_id, str):
                 self.control.accept_run(run_id)
-            if isinstance(request_id, str) and isinstance(run_id, str):
-                await self.bus.accept_one_input(request_id, run_id)
+            if isinstance(request_id, str):
+                await self.bus.accept_one_input(request_id)
             else:
                 await self.bus.accept_one_input()
         elif event_type == "run.started" and current_session:

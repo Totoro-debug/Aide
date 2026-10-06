@@ -69,25 +69,6 @@ class MessageBus:
         self._invoke_inbound_changed_callback(callback, snapshot)
         return message
 
-    async def update_inbound_metadata(
-        self,
-        request_id: str,
-        values: dict[str, Any],
-    ) -> bool:
-        async with self._condition:
-            message = next(
-                (
-                    item
-                    for item in self._inbound
-                    if item.metadata.get("request_id") == request_id
-                ),
-                None,
-            )
-            if message is None:
-                return False
-            message.metadata.update(values)
-            return True
-
     async def remove_inbound(self, request_id: str) -> InboundMessage | None:
         async with self._condition:
             index = next(

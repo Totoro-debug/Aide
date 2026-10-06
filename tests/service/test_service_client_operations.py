@@ -57,6 +57,48 @@ async def connected_client(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request_id", "remaining", "notifications"),
+    [("B", ["C"], 1), ("unknown", ["B", "C"], 0), (None, ["C"], 2)],
+)
+async def test_input_acceptance_preserves_other_queued_messages_and_run_output(
+    connected_client: tuple[ServiceClient, AgentService, AsyncExitStack],
+    request_id: str | None,
+    remaining: list[str],
+    notifications: int,
+) -> None:
+    client, service, _stack = connected_client
+    await client.bus.stage_submitted_input("queued B", "B")
+    await client.bus.stage_submitted_input("queued C", "C")
+    before = await client.bus.inbound_snapshot()
+    snapshots: list[tuple[str, ...]] = []
+    client.bus.set_inbound_changed_callback(
+        lambda messages: snapshots.append(tuple(message.content for message in messages))
+    )
+    received: list[Mapping[str, object]] = []
+    client.add_state_listener(received.append)
+    await service.emit(
+        "input.accepted", workspace_id=client.workspace_id, session_id=client.session_id,
+        run_id="accepted-run", payload={} if request_id is None else {"request_id": request_id},
+    )
+    await _wait_until(lambda: any(event["type"] == "input.accepted" for event in received))
+    after = await client.bus.inbound_snapshot()
+    assert [message.content for message in after] == [f"queued {item}" for item in remaining]
+    assert [message.metadata for message in after] == [{"request_id": item} for item in remaining]
+    assert all(message is before[0 if item == "B" else 1]
+               for message, item in zip(after, remaining, strict=True))
+    assert len(snapshots) == notifications
+    assert client.control.has_active_run
+    await service.emit(
+        "run.output", workspace_id=client.workspace_id, session_id=client.session_id,
+        run_id="accepted-run", payload={"message": {"type": "model_response", "content": "answer"}},
+    )
+    output = await asyncio.wait_for(client.bus.get_outbound(), timeout=5)
+    assert output.content == "answer"
+    assert output.metadata["_remote_run_id"] == "accepted-run"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("recovery", ["short", "expired", "instance"])
 async def test_client_recovers_connection_and_never_reuses_expired_claim(
     connected_client: tuple[ServiceClient, AgentService, AsyncExitStack], recovery: str,

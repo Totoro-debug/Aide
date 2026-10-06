@@ -1256,7 +1256,41 @@ function secretDraft(configured: boolean): SecretDraft {
   return { configured, action: "keep", value: "" };
 }
 
-function formFromConfig(fields: ConfigFields, previous: SettingsForm | null = null): SettingsForm {
+function settingsRowKeys(names: string[], previous: [string, string][], reserved: string[]): Map<string, string> {
+  const rows = new Map<string, string>();
+  const used = new Set<string>();
+  const unavailable = new Set([...previous.map(([row]) => row), ...reserved]);
+  for (const name of names) {
+    const match = previous.find(([row, value]) => value === name && !used.has(row));
+    if (match === undefined) continue;
+    rows.set(name, match[0]);
+    used.add(match[0]);
+  }
+  for (const name of names) {
+    if (rows.has(name)) continue;
+    let row = name;
+    while (used.has(row) || unavailable.has(row)) row = createRequestId();
+    rows.set(name, row);
+    used.add(row);
+  }
+  return rows;
+}
+
+function formFromConfig(
+  fields: ConfigFields,
+  previous: SettingsForm | null = null,
+  latest: SettingsForm | null = previous,
+): SettingsForm {
+  const providerRows = settingsRowKeys(
+    Object.keys(fields.models.providers),
+    Object.entries(previous?.models.providers ?? {}).map(([row, value]) => [row, value.id]),
+    Object.keys(latest?.models.providers ?? {}),
+  );
+  const serverRows = settingsRowKeys(
+    Object.keys(fields.mcp),
+    Object.entries(previous?.mcp ?? {}).map(([row, value]) => [row, value.name]),
+    Object.keys(latest?.mcp ?? {}),
+  );
   return {
     runtime: {
       max_tool_result_chars: String(fields.runtime.max_tool_result_chars),
@@ -1275,7 +1309,7 @@ function formFromConfig(fields: ConfigFields, previous: SettingsForm | null = nu
     },
     models: {
       providers: Object.fromEntries(Object.entries(fields.models.providers).map(([id, provider]) => [
-        Object.entries(previous?.models.providers ?? {}).find(([row, value]) => row === id || value.id === id)?.[0] ?? id, {
+        providerRows.get(id)!, {
         id,
         protocol: provider.protocol,
         base_url: provider.base_url,
@@ -1295,9 +1329,13 @@ function formFromConfig(fields: ConfigFields, previous: SettingsForm | null = nu
       }])),
     },
     mcp: Object.fromEntries(Object.entries(fields.mcp).map(([name, server]) => {
-      const previousEntry = Object.entries(previous?.mcp ?? {}).find(([row, value]) => row === name || value.name === name);
-      const row = previousEntry?.[0] ?? name;
-      const previousServer = previousEntry?.[1];
+      const row = serverRows.get(name)!;
+      const previousServer = previous?.mcp[row];
+      const headerRows = settingsRowKeys(
+        Object.keys(server.headers),
+        Object.entries(previousServer?.headers ?? {}).map(([key, value]) => [key, value.name]),
+        Object.keys(latest?.mcp[row]?.headers ?? {}),
+      );
       return [row, {
         name,
         enabled: server.enabled,
@@ -1307,11 +1345,7 @@ function formFromConfig(fields: ConfigFields, previous: SettingsForm | null = nu
         cwd: server.cwd ?? "",
         url: server.url ?? "",
         headers: Object.fromEntries(Object.entries(server.headers).map(([header, value]) => {
-          const previousHeader = Object.entries(previousServer?.headers ?? {}).find(([row, draft]) => (
-            row === header || draft.name === header
-          ));
-          const row = previousHeader?.[0] ?? header;
-          return [row, { ...secretDraft(value.configured), name: header }];
+          return [headerRows.get(header)!, { ...secretDraft(value.configured), name: header }];
         })),
         connect_timeout: String(server.connect_timeout),
         call_timeout: String(server.call_timeout),
@@ -1507,7 +1541,11 @@ function changedConfigFieldPaths(baseline: ConfigFields, candidate: ConfigPatchF
       ...fields.models,
       providers: settingsRowsForComparison(Object.entries(fields.models?.providers ?? {}), "id"),
     },
-    mcp: settingsRowsForComparison(Object.entries(fields.mcp ?? {}), "name"),
+    mcp: settingsRowsForComparison(Object.entries(fields.mcp ?? {}).map(([row, server]) => [row, {
+      ...server,
+      header_rows: server.header_rows?.slice().sort((left, right) => left.name.localeCompare(right.name)),
+      tool_keyword_rows: server.tool_keyword_rows?.slice().sort((left, right) => left.name.localeCompare(right.name)),
+    }]), "name"),
   });
   return changedSettingsPaths(normalized(comparableBaseline), normalized(comparable)).filter((path) => (
     !(path[0] === "models" && path[1] === "providers" && (
@@ -2002,7 +2040,7 @@ function SettingsView({
       setResponse(next);
       draftRevisionRef.current = next.revision;
       const latestDraft = draftRef.current ?? snapshot;
-      const savedDraft = formFromConfig(next.fields, snapshot);
+      const savedDraft = formFromConfig(next.fields, snapshot, latestDraft);
       for (const section of ["runtime", "memory", "web", "models", "mcp"] as const) {
         if (!operation.sections.includes(section)) {
           Object.assign(savedDraft, { [section]: latestDraft[section] });

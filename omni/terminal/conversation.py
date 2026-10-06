@@ -1381,6 +1381,38 @@ class _SessionSwitchConfirmationScreen(ModalScreen[bool]):
         self.query_one("#session-switch-approve", Button).focus()
 
 
+class _ConversationRecoveryScreen(ModalScreen[str]):
+    """Offer explicit actions when the service cannot reopen the selected Session."""
+
+    CSS = """
+    _ConversationRecoveryScreen { align: center middle; }
+    #conversation-recovery-panel {
+        width: 80%; max-width: 76; height: auto; padding: 1 2;
+        border: round $warning; background: $surface;
+    }
+    #conversation-recovery-panel Static { height: auto; margin-bottom: 1; }
+    #conversation-recovery-actions { height: auto; }
+    #conversation-recovery-actions Button { margin-right: 1; }
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self._message = message
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="conversation-recovery-panel"):
+            yield Static("Conversation Session unavailable")
+            yield Static(self._message, markup=False)
+            with Horizontal(id="conversation-recovery-actions"):
+                yield Button("Retry original Session", id="conversation-recovery-retry")
+                yield Button("New Session", id="conversation-recovery-new")
+
+    @on(Button.Pressed)
+    def _button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss("new" if event.button.id == "conversation-recovery-new" else "retry")
+
+
 class _MarkdownStream(Protocol):
     async def write(self, markdown_fragment: str) -> None: ...
 
@@ -2808,6 +2840,7 @@ class TerminalConversationApp(App[None]):
         self._size_screen: _SizeInsufficientScreen | None = None
         self._outbound_worker: Worker[None] | None = None
         self._resume_worker: Worker[None] | None = None
+        self._service_connection_state: str | None = None
         self._restore_worker: Worker[None] | None = None
         self._restore_result_worker: Worker[None] | None = None
         self._restore_workflow_active = False
@@ -3564,6 +3597,11 @@ class TerminalConversationApp(App[None]):
         with suppress(NoMatches, NoScreen, ScreenStackError):
             status = self._status_view
             state = "Working" if self._working else "Ready"
+            if self._service_run_projection and not self._control.foreground_input_admitted():
+                state = (
+                    "Reconnecting" if self._service_connection_state == "recovering"
+                    else "Session unavailable"
+                )
             width = self.size.width
             available = max(1, width - 2)
             content = state
@@ -3933,7 +3971,14 @@ class TerminalConversationApp(App[None]):
 
     async def _consume_service_state(self, outbound: OutboundMessage) -> bool:
         if "_remote_connection_state" in outbound.metadata:
+            self._service_connection_state = str(outbound.metadata["_remote_connection_state"])
             await self._mount_management_output(outbound.content, scroll=False)
+            self._render_status_bar()
+            if outbound.metadata.get("_remote_recovery_error") is True:
+                self.push_screen(
+                    _ConversationRecoveryScreen(outbound.content),
+                    callback=self._conversation_recovery_selected,
+                )
             return True
         snapshot = outbound.metadata.get("_remote_state_snapshot")
         if not isinstance(snapshot, dict):
@@ -4010,6 +4055,27 @@ class TerminalConversationApp(App[None]):
         if self._consumed_runs:
             self._run_ready.set()
         return True
+
+    def _conversation_recovery_selected(self, action: str | None) -> None:
+        if action is None or self._closing:
+            return
+        self._resume_worker = self.run_worker(
+            self._recover_selected_conversation(action == "new"),
+            name="recover-conversation", group="resume-session", exit_on_error=False,
+        )
+
+    async def _recover_selected_conversation(self, create_new: bool) -> None:
+        recover = getattr(self._management_dispatcher, "recover_conversation", None)
+        if recover is None:
+            return
+        try:
+            await recover(create_new=create_new)
+        except Exception as error:
+            message = str(error)
+            await self._mount_management_output(message, scroll=False)
+            self.push_screen(
+                _ConversationRecoveryScreen(message), callback=self._conversation_recovery_selected,
+            )
 
     async def _consume_outbound(self) -> None:
         try:
@@ -4937,11 +5003,18 @@ class TerminalConversationApp(App[None]):
                 self._fatal_management_error = fatal_error
                 self.exit(return_code=1)
                 return
-            except Exception:
+            except Exception as error:
                 await self._mount_management_rows(
                     _RESUME_MANAGEMENT_COMMAND_TOKEN,
-                    "Session resume failed.",
+                    str(error) if getattr(error, "code", None) == "result_unknown"
+                    else "Session resume failed.",
                 )
+                self._render_status_bar()
+                if getattr(error, "code", None) == "result_unknown":
+                    self.push_screen(
+                        _ConversationRecoveryScreen(str(error)),
+                        callback=self._conversation_recovery_selected,
+                    )
                 return
             resumed_session_id = result.resumed_session_id
             if resumed_session_id != session_id:

@@ -1653,6 +1653,8 @@ class WorkspaceRecord:
         session_id: str,
         claim_version: int | None = None,
         claim_credential: str | None = None,
+        *,
+        resume_context: dict[str, object] | None = None,
     ) -> Any:
         """Build the existing typed Management dispatcher for one Claim."""
         from omni.management.commands import ManagementCommandDispatcher
@@ -1704,7 +1706,9 @@ class WorkspaceRecord:
                         "Finish or cancel the active foreground run before switching sessions.",
                     )
                 )
-            await self.service.claim(client_id, self.workspace_id, target_session_id)
+            context = await self.service.claim(client_id, self.workspace_id, target_session_id)
+            if resume_context is not None:
+                resume_context.update(context)
 
         async def restore_listing() -> RestoreListingReport:
             from omni.management.service import RestoreListingReport
@@ -5467,11 +5471,13 @@ class AgentService:
                 "Conversation Session Claim is missing or stale.",
                 retryable=True,
             )
+        resume_context: dict[str, object] = {}
         dispatcher = workspace.management_dispatcher(
             client_id,
             session_id,
             claim_version if requires_claim else None,
             claim_credential if requires_claim else None,
+            resume_context=resume_context,
         )
         if action == "dispatch":
             command = payload.get("command")
@@ -5537,6 +5543,8 @@ class AgentService:
         else:
             raise service_error("validation_error", "Unsupported management action.", status=422)
         encoded = _encode_management_result(result)
+        if encoded.get("resumed_session_id") is not None:
+            encoded.update(resume_context)
         if action == "restore/execute" and getattr(result, "restore_result", None) is not None:
             claim = workspace._claims.get(session_id)
             if claim is not None and claim.client_id == client_id:

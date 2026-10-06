@@ -344,12 +344,12 @@ class RemoteManagementCommandDispatcher:
         )
 
     async def resume(self, session_id: str, *, force: bool = False) -> Any:
-        result = _management_result(
+        return _management_result(
             await self.client.management("resume", {"session_id": session_id, "force": force})
         )
-        if result.resumed_session_id == session_id:
-            await self.client.switch_session(session_id)
-        return result
+
+    async def recover_conversation(self, *, create_new: bool = False) -> None:
+        await self.client.recover_conversation(create_new=create_new)
 
     async def restore_inspect(self, anchor_id: int) -> Any:
         return _management_result(await self.client.inspect_restore(anchor_id))
@@ -400,6 +400,11 @@ class ServiceClient:
         self._subscription_task: asyncio.Task[None] | None = None
         self._event_cursor: tuple[str, int] | None = None
         self._awaiting_snapshot = False
+        self._recovery_target: tuple[str, str] | None = None
+        self._context_generation = 0
+        self._resume_retry: tuple[str, dict[str, object], dict[str, str]] | None = None
+        self._needs_conversation_recovery = False
+        self._recovery_request: tuple[bool, str] | None = None
         self._state_listeners: set[Callable[[Mapping[str, object]], None]] = set()
         self._send_lock = asyncio.Lock()
         self._pending: dict[str, asyncio.Future[dict[str, object]]] = {}
@@ -701,6 +706,10 @@ class ServiceClient:
                         )
                     client_id = _require_string(registered, "client_id")
                     if not same_instance or client_id != self.client_id:
+                        self._context_generation += 1
+                        self._needs_conversation_recovery = self._recovery_target is not None
+                        self._recovery_request = None
+                        self._resume_retry = None
                         self.workspace_id = ""
                         self.session_id = ""
                         self.claim_version = 0
@@ -712,6 +721,15 @@ class ServiceClient:
                     await self._open_socket()
                     if self._socket is None or self._socket.closed:
                         continue
+                    if self._needs_conversation_recovery:
+                        try:
+                            await self.recover_conversation()
+                        except ServiceError as error:
+                            await self._report_recovery_error(error.message)
+                        except ServiceStartupError as error:
+                            if self._socket is None or self._socket.closed:
+                                continue
+                            await self._report_recovery_error(error.message)
                     return
                 except (OSError, ValueError, ServiceError, ServiceStartupError, aiohttp.ClientError):
                     if self._socket is not None:
@@ -719,6 +737,47 @@ class ServiceClient:
                     continue
         finally:
             self._reconnect_task = None
+
+    async def _report_recovery_error(self, message: str) -> None:
+        self.control.set_admitted(False)
+        await self.bus.put_remote_output({
+            "type": "system_control", "content": message,
+            "metadata": {"_remote_connection_state": "session_unavailable",
+                         "_remote_recovery_error": True},
+        })
+
+    async def recover_conversation(self, *, create_new: bool = False) -> None:
+        target = self._recovery_target
+        if target is None:
+            raise ServiceStartupError("session_missing", "No Conversation Session to recover.")
+        if self._recovery_request is None or self._recovery_request[0] != create_new:
+            self._recovery_request = (create_new, str(uuid4()))
+        try:
+            if not create_new and self._resume_retry is not None:
+                retry_payload = self._resume_retry[1]
+                result = await self.management("resume", {
+                    "session_id": retry_payload["session_id"], "force": retry_payload["force"],
+                })
+            else:
+                result = await self.open_conversation(
+                    directory=target[0], session_id=None if create_new else target[1],
+                    create_new=create_new, request_id=self._recovery_request[1],
+                )
+        except ServiceError:
+            self._recovery_request = None
+            raise
+        self._recovery_request = None
+        self._needs_conversation_recovery = False
+        self._resume_retry = None
+        await self.bus.put_remote_output({
+            "type": "system_control",
+            "metadata": {"_remote_state_snapshot": result["snapshot"],
+                         "_remote_snapshot_rebuild": True},
+        })
+        await self.bus.put_remote_output({
+            "type": "system_control", "content": "Conversation Session recovered.",
+            "metadata": {"_remote_connection_state": "online"},
+        })
 
     async def _read_events(self) -> None:
         socket = self._socket
@@ -749,29 +808,31 @@ class ServiceClient:
         except Exception:
             return
         finally:
-            self._socket = None
-            for future in self._pending.values():
-                if not future.done():
-                    future.set_exception(
-                        ServiceStartupError("service_disconnected", "Service connection closed.")
+            if self._socket is socket:
+                self._context_generation += 1
+                self._socket = None
+                for future in self._pending.values():
+                    if not future.done():
+                        future.set_exception(
+                            ServiceStartupError("service_disconnected", "Service connection closed.")
+                        )
+                self.control.set_admitted(False)
+                self.control.clear_runs()
+                if not socket.closed:
+                    with suppress(Exception):
+                        await socket.close()
+                if not self._closed:
+                    for local in tuple(self.confirmation._items):
+                        await self.confirmation._dismiss_local(local)
+                    await self.bus.put_remote_output(
+                        {
+                            "type": "system_control",
+                            "content": "Local service connection closed.",
+                            "metadata": {"_remote_connection_state": "recovering"},
+                        }
                     )
-            self.control.set_admitted(False)
-            self.control.clear_runs()
-            if not socket.closed:
-                with suppress(Exception):
-                    await socket.close()
-            if not self._closed:
-                for local in tuple(self.confirmation._items):
-                    await self.confirmation._dismiss_local(local)
-                await self.bus.put_remote_output(
-                    {
-                        "type": "system_control",
-                        "content": "Local service connection closed.",
-                        "metadata": {"_remote_connection_state": "recovering"},
-                    }
-                )
-                if self._reconnect_task is None:
-                    self._reconnect_task = asyncio.create_task(self._reconnect())
+                    if self._reconnect_task is None:
+                        self._reconnect_task = asyncio.create_task(self._reconnect())
 
     async def _handle_event(
         self, event: Mapping[str, object], *, recover_display: bool = False,
@@ -855,6 +916,10 @@ class ServiceClient:
                                      "_remote_snapshot_reason": (
                                          payload.get("reason") if isinstance(payload, dict) else None
                                      )},
+                    })
+                    await self.bus.put_remote_output({
+                        "type": "system_control", "content": "Local service connection restored.",
+                        "metadata": {"_remote_connection_state": "online"},
                     })
             if "pending_confirmation" in snapshot:
                 pending = snapshot["pending_confirmation"]
@@ -996,9 +1061,11 @@ class ServiceClient:
         directory: str | None = None,
         session_id: str | None = None,
         create_new: bool = False,
+        request_id: str | None = None,
     ) -> dict[str, object]:
+        generation = self._context_generation
         payload: dict[str, object] = {
-            "request_id": str(uuid4()),
+            "request_id": request_id or str(uuid4()),
             "create_new": create_new,
         }
         for key, value in (
@@ -1017,6 +1084,14 @@ class ServiceClient:
         result = await self._http_request(
             "POST", "/api/v1/conversations/open", payload=payload, mutation=True
         )
+        if self._closed or generation != self._context_generation:
+            raise ServiceStartupError("service_disconnected", "Conversation response is outdated.")
+        await self._apply_conversation_context(result, directory=_require_string(result, "directory"))
+        return result
+
+    async def _apply_conversation_context(
+        self, result: Mapping[str, object], *, directory: str | None = None,
+    ) -> None:
         claim = result.get("claim")
         snapshot = result.get("snapshot")
         if not isinstance(claim, dict) or not isinstance(snapshot, dict):
@@ -1025,17 +1100,27 @@ class ServiceClient:
         next_session_id = _require_string(claim, "session_id")
         next_version = _require_int(claim, "claim_version")
         next_credential = _require_string(claim, "reconnect_credential")
-        if snapshot.get("session_id") != next_session_id:
+        if (
+            snapshot.get("session_id") != next_session_id
+            or result.get("session_id", next_session_id) != next_session_id
+            or result.get("workspace_id", next_workspace_id) != next_workspace_id
+            or result.get("resumed_session_id") not in (None, next_session_id)
+        ):
             raise ServiceStartupError("service_protocol_error", "Conversation snapshot is invalid.")
+        projection = _projection(snapshot)
         if (next_workspace_id, next_session_id) != (self.workspace_id, self.session_id):
             self.control.clear_runs()
         self.workspace_id = next_workspace_id
         self.session_id = next_session_id
         self.claim_version = next_version
         self.claim_credential = next_credential
-        self.control.set_projection(_projection(snapshot))
+        if directory is None and self._recovery_target is not None:
+            directory = self._recovery_target[0]
+        if directory is not None:
+            self._recovery_target = (directory, next_session_id)
+        self._resume_retry = None
+        self.control.set_projection(projection)
         await self._apply_snapshot(snapshot)
-        return result
 
     async def list_sessions(self, workspace_id: str | None = None) -> list[dict[str, object]]:
         """Return foreground Session metadata without loading any Session body."""
@@ -1183,9 +1268,12 @@ class ServiceClient:
             payload={"token": token, "decision": decision},
         )
 
-    async def management(self, action: str, payload: dict[str, object]) -> dict[str, object]:
+    async def management(
+        self, action: str, payload: dict[str, object], *, request_id: str | None = None,
+    ) -> dict[str, object]:
+        generation = self._context_generation
         request_payload: dict[str, object] = {
-            "request_id": str(uuid4()),
+            "request_id": request_id or str(uuid4()),
             "current_session_id": self.session_id,
             **payload,
         }
@@ -1194,32 +1282,60 @@ class ServiceClient:
             request_payload["claim_version"] = self.claim_version
         if self.claim_credential:
             extra_headers["X-Omni-Claim"] = self.claim_credential
-        response = await self._http_request(
-            "POST",
-            f"/api/v1/workspaces/{self.workspace_id}/management/{action}",
-            payload=request_payload,
-            mutation=True,
-            extra_headers=extra_headers,
-        )
+        path = f"/api/v1/workspaces/{self.workspace_id}/management/{action}"
+        if action == "resume":
+            retry = self._resume_retry
+            if (retry is not None
+                    and (request_id is None or retry[1]["request_id"] == request_id)
+                    and all(retry[1].get(key) == value for key, value in payload.items())):
+                path, request_payload, extra_headers = retry
+            self._resume_retry = (path, request_payload, extra_headers)
+        try:
+            response = await self._http_request(
+                "POST", path, payload=request_payload, mutation=True, extra_headers=extra_headers,
+            )
+        except ServiceError:
+            if action == "resume":
+                self._resume_retry = None
+            raise
+        except (aiohttp.ClientError, TimeoutError, ServiceStartupError) as error:
+            if action == "resume":
+                if isinstance(error, ServiceStartupError) and error.code == "service_http_error":
+                    self._resume_retry = None
+                    raise
+                self.claim_version = 0
+                self.claim_credential = ""
+                self.control.set_admitted(False)
+                raise ServiceStartupError(
+                    "result_unknown", "Session resume result is unknown. Retry the same selection.",
+                ) from error
+            raise
+        if self._closed or generation != self._context_generation:
+            raise ServiceStartupError("service_disconnected", "Management response is outdated.")
         result = response.get("result")
         if not isinstance(result, dict):
             raise ServiceStartupError("service_protocol_error", "Management response is invalid.")
-        if action == "restore/execute" and isinstance(result.get("restore_result"), dict):
-            claim = result.get("claim")
-            snapshot = result.get("snapshot")
-            if not isinstance(claim, dict) or not isinstance(snapshot, dict):
-                raise ServiceStartupError(
-                    "service_protocol_error", "Restored Conversation context is invalid."
-                )
-            self.workspace_id = _require_string(claim, "workspace_id")
-            self.session_id = _require_string(claim, "session_id")
-            self.claim_version = _require_int(claim, "claim_version")
-            self.claim_credential = _require_string(claim, "reconnect_credential")
-            if snapshot.get("session_id") != self.session_id:
-                raise ServiceStartupError(
-                    "service_protocol_error", "Restored Session snapshot is invalid."
-                )
-            await self._apply_snapshot(snapshot)
+        try:
+            if action == "resume" and result.get("resumed_session_id") is not None:
+                claim = result.get("claim")
+                if (result["resumed_session_id"] != request_payload.get("session_id")
+                        or not isinstance(claim, dict)
+                        or claim.get("workspace_id") != self.workspace_id):
+                    raise ServiceStartupError(
+                        "service_protocol_error", "Resumed Conversation context is invalid.",
+                    )
+            if result.get("resumed_session_id") is not None or (
+                action == "restore/execute" and isinstance(result.get("restore_result"), dict)
+            ):
+                await self._apply_conversation_context(result)
+        except ServiceStartupError:
+            if action == "resume":
+                self.control.set_admitted(False)
+                self.claim_version = 0
+                self.claim_credential = ""
+            raise
+        if action == "resume":
+            self._resume_retry = None
         return result
 
     async def create_web_ticket(self) -> str:
@@ -1241,6 +1357,7 @@ class ServiceClient:
         if self._closed:
             return
         self._closed = True
+        self._context_generation += 1
         for task in (self._reconnect_task, self._subscription_task):
             if task is not None:
                 task.cancel()

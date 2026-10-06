@@ -662,6 +662,13 @@
         "handled", "output", "effort_selection", "permission_selection", "published_effort",
         "published_permission_level", "resumed_session_id", "resume_skipped_count"
       ],
+      "allOf": [{
+        "if": {
+          "required": ["resumed_session_id"],
+          "properties": {"resumed_session_id": {"type": "string"}}
+        },
+        "then": {"required": ["claim", "snapshot"]}
+      }],
       "properties": {
         "handled": {"type": "boolean"},
         "output": {"type": ["string", "null"]},

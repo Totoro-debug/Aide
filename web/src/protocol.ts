@@ -548,6 +548,7 @@ export interface RestoreResult {
 export interface ManagementResult {
   handled: boolean;
   output: string | null;
+  resumed_session_id?: string | null;
   memory_content?: string | null;
   dream_result?: DreamResult;
   management_error?: ManagementError;

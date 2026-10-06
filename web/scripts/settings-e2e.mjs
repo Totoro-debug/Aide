@@ -129,6 +129,131 @@ export async function settingsConfirmationAcceptance({ page, control }) {
   return acceptedRun.run_id;
 }
 
+async function settingsRowCollisionAcceptance({ page, configPath, openSettings, save }) {
+  const original = await readFile(configPath, "utf8");
+  const cases = [
+    {
+      section: "Models", button: "Add provider", label: "Provider ID", row: "new-provider",
+      external: '\n[models.providers.new-provider]\nprotocol = "openai-compatible"\nbase_url = "http://127.0.0.1:1/external"\nmodels = []\napi_key = "collision-external-secret"\n',
+    },
+    {
+      section: "MCP", button: "Add MCP server", label: "Server name", row: "new-mcp",
+      external: '\n[mcp.servers.new-mcp]\nenabled = false\ntransport = "stdio"\ncommand = "python"\nargs = ["external"]\n',
+    },
+    { section: "MCP", button: "Add header", label: "Header name", row: "X-Header-2" },
+  ];
+  try {
+    for (const reverse of [false, true]) {
+      for (const scenario of cases) {
+        console.log(`Settings row collision: ${scenario.label}, reverse=${reverse}`);
+        await writeFile(configPath, original);
+        await page.reload();
+        await openSettings(page);
+        await settingsSection(page, scenario.section);
+        const container = scenario.label === "Header name" ? page.locator('#settings-mcp-remote') : page;
+        await container.getByRole("button", { name: scenario.button, exact: true }).click();
+        const name = container.getByRole("textbox", { name: scenario.label, exact: true }).last();
+        const nameHandle = await name.elementHandle();
+        const renamed = scenario.label === "Header name" ? "X-Collision" : "collision-local";
+        const lateName = reverse && scenario.label === "Provider ID" ? `${renamed}-later` : renamed;
+        let release;
+        const gate = new Promise((done) => { release = done; });
+        let saved;
+        const intercept = async (route) => {
+          if (route.request().method() !== "PATCH") return route.continue();
+          const candidate = route.request().postDataJSON()?.fields;
+          if (scenario.label === "Provider ID"
+            && candidate?.models?.providers?.[scenario.row]?.base_url !== "http://127.0.0.1:1/local") return route.continue();
+          const external = reverse && scenario.label === "Provider ID"
+            ? scenario.external + scenario.external.replaceAll("new-provider", "new-provider-2")
+            : scenario.external;
+          const externalHeader = reverse ? '"X-Header-3" = "collision-extra-header-secret", ' : "";
+          await writeFile(configPath, external ? original + external
+            : original.replace('headers = { Authorization', `headers = { ${externalHeader}"X-Header-2" = "collision-header-secret", Authorization`));
+          const response = await route.fetch();
+          assert.equal(response.status(), 200, JSON.stringify(await response.json()));
+          saved = await response.json();
+          if (reverse) {
+            saved.fields.models.providers = Object.fromEntries(Object.entries(saved.fields.models.providers).reverse());
+            saved.fields.mcp = Object.fromEntries(Object.entries(saved.fields.mcp).reverse());
+            for (const server of Object.values(saved.fields.mcp)) server.headers = Object.fromEntries(Object.entries(server.headers).reverse());
+          }
+          await gate;
+          await route.fulfill({ response, json: saved });
+        };
+        await page.route("**/api/v1/config", intercept);
+        await name.fill(renamed);
+        if (scenario.label === "Provider ID") {
+          await page.locator("#settings-models-providers-collision-local-base_url").fill("http://127.0.0.1:1/local");
+        }
+        if (scenario.label === "Header name") {
+          await page.locator(`#settings-mcp-remote-headers-${scenario.row}-action`).selectOption("replace");
+          await page.locator(`#settings-mcp-remote-headers-${scenario.row}-value`).fill("collision-local-secret");
+        }
+        await blurSettingsField(page);
+        const saveButton = page.getByRole("button", { name: "Save changes", exact: true });
+        if (await saveButton.isVisible()) await saveButton.click();
+        await expect.poll(() => saved !== undefined, { timeout: 30000 }).toBe(true);
+        if (reverse && scenario.label === "Provider ID") {
+          await nameHandle.fill(lateName);
+          await page.getByRole("button", { name: "Add provider", exact: true }).click();
+          await page.getByRole("textbox", { name: "Provider ID", exact: true }).last().fill("collision-draft");
+        } else if (reverse && scenario.label === "Server name") {
+          await page.locator(`#settings-mcp-${renamed}`).getByRole("button", { name: "Remove MCP server", exact: true }).click();
+        } else if (reverse) {
+          await container.getByRole("button", { name: "Add header", exact: true }).click();
+          await container.getByRole("textbox", { name: "Header name", exact: true }).last().fill("X-Draft");
+        }
+        // Keep focus on the stable row while the completed save response arrives.
+        if (!reverse) await nameHandle.focus();
+        release();
+        await expect.poll(async () => container.getByRole("textbox", { name: scenario.label, exact: true })
+          .evaluateAll((items, row) => items.map((item) => item.value).includes(row), scenario.row)).toBe(true);
+        if (!reverse) {
+          await waitForSavedSettings(page);
+          assert.equal(await nameHandle.evaluate((element) => document.activeElement === element), true);
+        }
+        await page.unroute("**/api/v1/config", intercept);
+        const names = await container.getByRole("textbox", { name: scenario.label, exact: true }).evaluateAll((items) => items.map((item) => item.value));
+        assert.equal(names.includes(lateName), !(reverse && scenario.label === "Server name"),
+          `Request-time edits were lost for ${scenario.label}`);
+        assert.ok(names.includes(scenario.row), `External ${scenario.label} disappeared`);
+        assert.equal(new Set(names).size, names.length);
+        // A second full collection save must preserve the externally added item on disk.
+        if (reverse && scenario.label === "Provider ID") {
+          assert.ok(names.includes("collision-draft") && names.includes("new-provider-2"));
+          await page.locator("#settings-models-providers-collision-draft-base_url").fill("http://127.0.0.1:1/draft");
+        } else if (reverse && scenario.label === "Header name") {
+          assert.ok(names.includes("X-Draft") && names.includes("X-Header-3"));
+          await page.locator("#settings-mcp-remote-headers-X-Header-3-action").selectOption("replace");
+          await page.locator("#settings-mcp-remote-headers-X-Header-3-value").fill("collision-draft-secret");
+        }
+        const changed = scenario.label === "Provider ID"
+          ? page.locator(`#settings-models-providers-${lateName}-base_url`)
+          : page.locator(`#settings-mcp-${scenario.label === "Server name" ? (reverse ? scenario.row : renamed) : "remote"}-call_timeout`);
+        await changed.fill(scenario.label === "Provider ID" ? "http://127.0.0.1:1/second-save" : "73");
+        const next = await save(page);
+        if (scenario.label === "Provider ID") {
+          assert.equal(next.fields.models.providers[scenario.row].base_url, "http://127.0.0.1:1/external");
+          assert.match(await readFile(configPath, "utf8"), /collision-external-secret/);
+          if (reverse) assert.ok(next.fields.models.providers["new-provider-2"]);
+        } else if (scenario.label === "Server name") {
+          assert.deepEqual(next.fields.mcp[scenario.row].args, ["external"]);
+        } else {
+          assert.equal(next.fields.mcp.remote.headers[scenario.row].configured, true);
+          assert.match(await readFile(configPath, "utf8"), /collision-header-secret/);
+          if (reverse) assert.match(await readFile(configPath, "utf8"), /collision-extra-header-secret/);
+        }
+      }
+    }
+    console.log("Settings Provider/MCP/Header row collisions: both response orders, focus and consecutive saves passed");
+  } finally {
+    await writeFile(configPath, original);
+    await page.reload();
+    await openSettings(page);
+  }
+}
+
 export async function settingsModelMcpAcceptance({ page, secondPage, control, output }) {
   const configPath = resolve(control.details.home_root, ".omni", "config.toml");
   const providerObservationPath = process.env.OMNI_E2E_PROVIDER_OBSERVATION_PATH;
@@ -315,6 +440,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   });
   assert.equal(initial.fields.mcp.fixture.transport, "stdio");
   assert.equal(initial.fields.mcp.remote.headers.Authorization.configured, true);
+  await settingsRowCollisionAcceptance({ page, configPath, openSettings, save });
   for (const secret of [
     "e2e-provider-secret-302",
     "e2e-retired-secret-302",
@@ -588,7 +714,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   )), "The active generation did not reach the large-model Tool Search request");
 
   const runtimeResponse = page.waitForResponse((response) => (
-    response.url().endsWith("/management/status") && response.request().method() === "POST"
+    response.url().endsWith("/runtime/status") && response.request().method() === "POST"
   ));
   const runtimeMenu = page.locator("details").filter({
     has: page.getByRole("button", { name: "Runtime status and controls", exact: true, includeHidden: true }),
@@ -597,7 +723,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await runtimeMenu.getByRole("button", { name: "Runtime status and controls", exact: true }).click();
   const runtime = await runtimeResponse;
   assert.equal(runtime.status(), 200);
-  const budget = (await runtime.json()).result.status_view;
+  const budget = (await runtime.json()).status;
   assert.equal(budget.chat_model, "primary/large-model");
   assert.equal(budget.context_window, 65536);
   assert.equal(budget.max_output, conflictResolved.fields.models.routes.chat.max_output);

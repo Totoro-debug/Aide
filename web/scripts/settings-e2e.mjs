@@ -33,12 +33,37 @@ async function settingsSection(target, section) {
   }).getByRole("button", { name: sectionName, exact: true }).click();
 }
 
+async function setInterfacePreference(target, field, value, toolbarName) {
+  if (new globalThis.URL(target.url()).pathname !== "/settings") {
+    await target.getByRole("button", { name: toolbarName, exact: true }).click();
+    return;
+  }
+  const navigation = target.getByRole("navigation", { name: /^(Settings sections|设置分类)$/ });
+  const section = await navigation.getByRole("button").evaluateAll((buttons) => (
+    buttons.findIndex((button) => button.getAttribute("aria-current") === "page")
+  ));
+  await settingsSection(target, "General & appearance");
+  await target.locator(field).selectOption(value);
+  await target.getByRole("navigation", { name: /^(Settings sections|设置分类)$/ })
+    .getByRole("button").nth(section).click();
+}
+
+export async function setInterfaceLanguage(target, language) {
+  await setInterfacePreference(target, "#settings-language", language, language === "en" ? "EN" : "中文");
+}
+
+export async function setInterfaceTheme(target, theme) {
+  await setInterfacePreference(target, "#settings-theme", theme, theme === "light" ? /Light|浅色/ : /Dark|深色/);
+}
+
 export async function openServiceStatus(target) {
-  const settingsLink = target.locator("#app-sidebar").getByRole("link", {
-    name: /^(Settings|设置)$/,
-  });
-  if (!await settingsLink.isVisible()) await target.locator("#app-sidebar-toggle").click();
-  await settingsLink.click();
+  if (new globalThis.URL(target.url()).pathname !== "/settings") {
+    const settingsLink = target.locator("#app-sidebar").getByRole("link", {
+      name: /^(Settings|设置)$/,
+    });
+    if (!await settingsLink.isVisible()) await target.locator("#app-sidebar-toggle").click();
+    await settingsLink.click();
+  }
   await settingsSection(target, "Runtime");
   await target.getByRole("main").getByRole("link", { name: /^(Status|状态)$/ }).click();
   await expect(target.locator("#status-heading")).toBeVisible();
@@ -65,7 +90,7 @@ async function blurSettingsField(target) {
 
 export async function settingsConfirmationAcceptance({ page, control }) {
   await page.bringToFront();
-  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
   const openedResponse = page.waitForResponse((response) => (
     new globalThis.URL(response.url()).pathname.endsWith("/conversations/open")
     && response.request().method() === "POST"
@@ -286,11 +311,13 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   };
   const openSettings = async (target) => {
     await target.bringToFront();
-    await target.getByRole("button", { name: "EN", exact: true }).click();
+    await setInterfaceLanguage(target, "en");
     const received = target.waitForResponse((response) => (
       response.url().endsWith("/api/v1/config") && response.request().method() === "GET"
     ));
-    await target.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
+    if (new globalThis.URL(target.url()).pathname !== "/settings") {
+      await target.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
+    }
     const response = await received;
     assert.equal(response.status(), 200);
     await settingsSection(target, "Models");
@@ -794,9 +821,9 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
   await openSettings(page);
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await setInterfaceLanguage(page, language);
     for (const theme of ["light", "dark"]) {
-      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      await setInterfaceTheme(page, theme);
       for (const width of [390, 768, 1024, 1440]) {
         await page.setViewportSize({ width, height: 900 });
         for (const [section, id] of Object.entries({ models: "settings-models-providers-primary-base_url", routes: "settings-models-routes-chat-model", mcp: "settings-mcp-fixture-command", headers: "settings-mcp-remote-headers-__proto__-action" })) {
@@ -811,7 +838,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
       }
     }
   }
-  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
   await page.setViewportSize({ width: 1440, height: 900 });
   await openProject(page);
   const bodies = await Promise.all(responseBodies);
@@ -836,7 +863,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
 export default async function settingsAcceptance({ page, secondPage, control, output, viewports }) {
   const settings = async (target) => {
     await target.bringToFront();
-    await target.getByRole("button", { name: "EN", exact: true }).click();
+    await setInterfaceLanguage(target, "en");
     await openServiceStatus(target);
     await target.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
     await target.getByRole("navigation", { name: "Settings sections", exact: true }).waitFor();
@@ -905,7 +932,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   await expect(page.getByRole("button", { name: "Save settings", exact: true })).toHaveCount(0);
   await sectionNavigation.getByRole("button", { name: "Runtime", exact: true }).click();
   await expect(page.getByRole("region", { name: "Settings", exact: true }).getByText("Service status", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+  await page.getByRole("button", { name: "Back to app", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Service status", exact: true })).toBeVisible();
   await settings(page);
   await runtimeSettings(page);
@@ -1046,7 +1073,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
   await page.getByLabel("Maximum iterations", { exact: true }).press("Tab");
   assert.equal((await latestSave).status(), 200, "A completed edit must save while an older response is delayed");
   await waitForSavedSettings(page);
-  await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+  await page.getByRole("button", { name: "Back to app", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Service status", exact: true })).toBeVisible();
   await settings(page);
   await runtimeSettings(page);
@@ -1109,14 +1136,23 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
 
   await mkdir(output, { recursive: true });
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await setInterfaceLanguage(page, language);
     for (const theme of ["light", "dark"]) {
-      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      await setInterfaceTheme(page, theme);
       for (const viewport of [...viewports, { width: 390, height: 844 }]) {
         await page.setViewportSize(viewport);
         const label = language === "en" ? "Maximum iterations" : "最大迭代次数";
         await page.getByLabel(label, { exact: true }).focus();
         await expect(page.getByLabel(label, { exact: true })).toBeFocused();
+        await expect(page.locator("#app-sidebar")).toBeHidden();
+        await expect(page.getByRole("banner")).toBeHidden();
+        const settingsBounds = await page.getByRole("region", {
+          name: language === "en" ? "Settings" : "设置", exact: true,
+        }).boundingBox();
+        assert.ok(settingsBounds && Math.abs(settingsBounds.x) <= 1 && Math.abs(settingsBounds.y) <= 1
+          && Math.abs(settingsBounds.width - viewport.width) <= 1
+          && Math.abs(settingsBounds.height - viewport.height) <= 1,
+        `Settings must fill the viewport at ${language}/${theme}/${viewport.width}`);
         assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
           `Settings overflow at ${language}/${theme}/${viewport.width}`);
         await page.screenshot({ path: resolve(output, `settings-${language}-${theme}-${viewport.width}.png`) });
@@ -1124,6 +1160,6 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
     }
   }
   await page.setViewportSize(viewports[0]);
-  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
   console.log("Settings production CSP E2E: global without Claim, invalid bytes, cross-client stale CAS and explicit reload, dirty late poll, real active Run save/restart with same PID/WS, save remains independent of resource preparation, versions, keyboard and 4 locale/theme x 4 viewports passed");
 }

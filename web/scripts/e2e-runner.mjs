@@ -1281,7 +1281,7 @@ try {
   await page.getByRole("button", { name: "Reload Skills", exact: true }).click();
   await page.getByRole("alert").getByText("Skills could not be reloaded.", { exact: true }).waitFor();
   await page.unroute("**/skills/reload", failSkillReload);
-  await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+  await page.getByRole("button", { name: "Back to app", exact: true }).click();
 
   let releaseOldMemory;
   const oldMemoryGate = new Promise((resolveGate) => { releaseOldMemory = resolveGate; });
@@ -1440,7 +1440,7 @@ try {
         await page.getByRole("status").getByText(language === "en" ? "Skills reloaded: 1." : "Skills 已重新加载：1 个。", { exact: true }).waitFor();
         await page.getByText("Browser reload metadata", { exact: true }).waitFor();
         await expect(page.getByText("PRIVATE_BAD_SKILL_SECRET", { exact: true })).toHaveCount(0);
-        await page.getByRole("button", { name: language === "en" ? "Back to conversation" : "返回对话", exact: true }).click();
+        await page.getByRole("button", { name: language === "en" ? "Back to app" : "返回应用", exact: true }).click();
       }
     }
   }
@@ -1649,7 +1649,7 @@ try {
           await page.locator("#app-sidebar-toggle").click();
         }
         await page.locator("#app-sidebar").getByRole("link", { name: language === "en" ? "Settings" : "设置", exact: true }).click();
-        const back = page.getByRole("button", { name: language === "en" ? "Back to conversation" : "返回对话", exact: true });
+        const back = page.getByRole("button", { name: language === "en" ? "Back to app" : "返回应用", exact: true });
         await back.focus();
         await page.keyboard.press("Tab");
         await expect(back).not.toBeFocused();
@@ -1921,7 +1921,7 @@ try {
   ]);
 
   await page.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+  await page.getByRole("button", { name: "Back to app", exact: true }).click();
   await expect(page.getByRole("heading", { name: "New Session draft", exact: true })).toBeVisible();
   await expect(page.getByLabel("Message input")).toHaveValue(recoveryText);
   await page.getByLabel("Message input").fill("tool states");

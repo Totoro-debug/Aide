@@ -646,7 +646,7 @@ try {
     .getByRole("button", { name: "Runtime", exact: true }).click();
   await page.getByRole("button", { name: "Reload Skills", exact: true }).click();
   await expect(page.getByRole("status").filter({ hasText: /Skills reloaded:/ })).toBeVisible();
-  await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+  await page.getByRole("button", { name: "Back to app", exact: true }).click();
   await expect(page.getByRole("log").getByText("file restore menu branch", { exact: true })).toBeVisible();
 
   const deleteSessionActions = restartedNavigation.getByRole("group", {

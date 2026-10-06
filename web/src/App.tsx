@@ -652,7 +652,7 @@ export default function App() {
     });
   };
   return (
-    <div className={styles.appShell}>
+    <div className={location.pathname === "/settings" ? `${styles.appShell} ${styles.appShellSettings}` : styles.appShell}>
       <a className={styles.skipLink} href="#main-content">
         {t("nav.status")}
       </a>
@@ -1623,6 +1623,7 @@ function SettingsView({
 }: SettingsViewProps) {
   const { t } = useTranslation();
   const location = useLocation();
+  const settingsContentRef = useRef<HTMLDivElement | null>(null);
   const [skillReloadBusy, setSkillReloadBusy] = useState(false);
   const [skillReloadError, setSkillReloadError] = useState<string | null>(null);
   const [skillMetadata, setSkillMetadata] = useState<SkillMetadata[] | null>(null);
@@ -2298,13 +2299,46 @@ function SettingsView({
             ? t("settings.pendingRepair")
             : t("settings.active");
 
+  const settingsSidebar = (
+    <aside className={styles.settingsSidebar}>
+      <button className={styles.settingsBack} type="button" onClick={onBack}>
+        <ArrowLeft size={17} aria-hidden="true" />
+        {t("settings.backToApp")}
+      </button>
+      <nav className={styles.settingsNavigation} aria-label={t("settings.sections")}>
+        <span className={styles.settingsNavigationLabel}>{t("settings.sections")}</span>
+        {([
+          ["general", "settings.generalAppearance", Settings2],
+          ["models", "settings.models", Brain],
+          ["runtime", "settings.runtime", Gauge],
+          ["memory", "settings.memory", BookOpen],
+          ["mcp", "settings.mcp", Activity],
+        ] as const).map(([section, label, Icon]) => (
+          <button
+            className={styles.settingsNavigationItem}
+            type="button"
+            key={section}
+            disabled={draft === null}
+            aria-current={activeSection === section ? "page" : undefined}
+            onClick={() => {
+              setActiveSection(section);
+              if (settingsContentRef.current !== null) settingsContentRef.current.scrollTop = 0;
+            }}
+          >
+            <Icon size={17} aria-hidden="true" />
+            {t(label)}
+          </button>
+        ))}
+      </nav>
+    </aside>
+  );
+
   if (authState !== "ready") {
     return (
       <section className={styles.settingsPage} aria-labelledby="settings-title">
-        <button className={styles.secondaryButton} type="button" onClick={onBack}>
-          <ArrowLeft size={15} aria-hidden="true" />
-          {t("settings.backToConversation")}
-        </button>
+        {settingsSidebar}
+        <div className={styles.settingsContent}>
+          <div className={styles.settingsContentInner}>
         <div className={styles.pageHeading}>
           <div>
             <p className={styles.eyebrow}>{t("nav.settings")}</p>
@@ -2315,17 +2349,18 @@ function SettingsView({
           <CircleAlert size={17} aria-hidden="true" />
           <span>{t("settings.authenticationRequired")}</span>
         </div>
+          </div>
+        </div>
       </section>
     );
   }
 
   return (
     <section className={styles.settingsPage} aria-labelledby="settings-title">
+      {settingsSidebar}
+      <div className={styles.settingsContent} ref={settingsContentRef}>
+        <div className={styles.settingsContentInner}>
       <div className={styles.settingsHeader}>
-        <button className={styles.secondaryButton} type="button" onClick={onBack}>
-          <ArrowLeft size={15} aria-hidden="true" />
-          {t("settings.backToConversation")}
-        </button>
         <div className={styles.pageHeading}>
           <div>
             <p className={styles.eyebrow}>{t("nav.settings")}</p>
@@ -2435,27 +2470,6 @@ function SettingsView({
           onClickCapture={captureSettingsClick}
           noValidate
         >
-          <div className={styles.settingsLayout}>
-            <nav className={styles.settingsNavigation} aria-label={t("settings.sections")}>
-              <span className={styles.settingsNavigationLabel}>{t("settings.sections")}</span>
-              {([
-                ["general", "settings.generalAppearance"],
-                ["models", "settings.models"],
-                ["runtime", "settings.runtime"],
-                ["memory", "settings.memory"],
-                ["mcp", "settings.mcp"],
-              ] as const).map(([section, label]) => (
-                <button
-                  className={styles.settingsNavigationItem}
-                  type="button"
-                  key={section}
-                  aria-current={activeSection === section ? "page" : undefined}
-                  onClick={() => setActiveSection(section)}
-                >
-                  {t(label)}
-                </button>
-              ))}
-            </nav>
             <div className={styles.settingsDetail}>
               {activeSection === "general" ? (
                 <div className={styles.settingsSection}>
@@ -2902,7 +2916,6 @@ function SettingsView({
 
               : null}
             </div>
-          </div>
           {notice !== null ? (
             <div className={styles.notice} role="status" aria-live="polite">
               <CircleCheck size={16} aria-hidden="true" />
@@ -2911,6 +2924,8 @@ function SettingsView({
           ) : null}
         </form>
       ) : null}
+        </div>
+      </div>
     </section>
   );
 }

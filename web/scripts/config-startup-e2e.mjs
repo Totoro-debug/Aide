@@ -7,6 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { URL } from "node:url";
 
 import { chromium, expect } from "@playwright/test";
+import { setInterfaceLanguage, setInterfaceTheme } from "./settings-e2e.mjs";
 
 if (process.platform !== "win32") {
   console.error("Omni requires Windows.");
@@ -186,7 +187,7 @@ async function setupDraftAcceptance(context, initialPage, details, state, root) 
     }
   }
   await page.getByRole("link", { name: /Configure models|配置模型/, exact: true }).click();
-  await page.getByRole("button", { name: /Back to conversation|返回对话/, exact: true }).click();
+  await page.getByRole("button", { name: /Back to app|返回应用/, exact: true }).click();
   await expect(input()).toHaveValue(text);
   await page.locator("#app-sidebar").getByRole("link", { name: /New conversation|新建对话/, exact: true }).click();
   await expect(input()).toHaveValue("");
@@ -237,11 +238,9 @@ async function assertAdmissionClosed(page, projectId) {
 
 async function screenshotStates(page, state, phase) {
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await setInterfaceLanguage(page, language);
     for (const theme of ["light", "dark"]) {
-      await page.getByRole("button", {
-        name: theme === "light" ? /Light|浅色/ : /Dark|深色/,
-      }).click();
+      await setInterfaceTheme(page, theme);
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
         assert.ok(
@@ -254,8 +253,8 @@ async function screenshotStates(page, state, phase) {
       }
     }
   }
-  await page.getByRole("button", { name: "EN", exact: true }).click();
-  await page.getByRole("button", { name: /Light/ }).click();
+  await setInterfaceLanguage(page, "en");
+  await setInterfaceTheme(page, "light");
   await page.setViewportSize(narrowViewport);
 }
 

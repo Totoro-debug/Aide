@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
@@ -85,6 +86,8 @@ async def test_config_get_returns_safe_structured_fields(config_http: ConfigHttp
     assert body["fields"]["runtime"]["max_iterations"] == 50
     assert body["fields"]["models"]["providers"]["primary"]["api_key"] == {"configured": True}
     assert "minimal-secret" not in str(body)
+    assert body["secret_revisions"]["models.providers.primary.api_key"]
+    assert "minimal-secret" not in str(body["secret_revisions"])
     assert body["application"]["status"] == "active"
 
 
@@ -111,11 +114,7 @@ async def test_available_models_exposes_active_capacity_and_default_without_secr
             cast(str, service.config_view()["revision"]),
             {
                 "models": {
-                    "providers": {
-                        "primary": {
-                            "model_context_windows": {"small-model": 16384}
-                        }
-                    }
+                    "providers": {"primary": {"model_context_windows": {"small-model": 16384}}}
                 }
             },
             client_id=client_id,
@@ -127,9 +126,7 @@ async def test_available_models_exposes_active_capacity_and_default_without_secr
 
     assert initial_response.status == active_response.status == 200
     assert initial == {
-        "models": [
-            {"provider_id": "primary", "model": "small-model", "context_window": 8192}
-        ],
+        "models": [{"provider_id": "primary", "model": "small-model", "context_window": 8192}],
         "default_combination": {
             "provider_id": "primary",
             "model": "small-model",
@@ -275,6 +272,479 @@ async def test_config_patch_reports_restart_required_and_stale_conflict(
     assert conflict["code"] == "config_revision_conflict"
 
 
+@pytest.mark.asyncio
+async def test_config_patch_merges_nonoverlapping_external_changes(
+    config_http: ConfigHttp,
+) -> None:
+    service, server, client_id, control = config_http
+    token = create_credential(service.agent_home)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Omni-CSRF": token,
+        "X-Omni-Client": client_id,
+        "X-Omni-Control": control,
+    }
+    baseline = service.config_view()
+    revision = cast(str, baseline["revision"])
+    ConfigLoader(service.agent_home).patch_editable_fields(revision, {"memory": {"batch_size": 14}})
+
+    async with aiohttp.ClientSession() as http:
+        response = await http.patch(
+            server.make_url("/api/v1/config"),
+            headers=headers,
+            json={
+                "request_id": "merge-nonoverlapping-config-edit",
+                "revision": revision,
+                "baseline": baseline["fields"],
+                "fields": {"runtime": {"max_iterations": 80}},
+                "secrets": {},
+            },
+        )
+        saved = await response.json()
+
+    assert response.status == 200
+    assert saved["fields"]["runtime"]["max_iterations"] == 80
+    assert saved["fields"]["memory"]["batch_size"] == 14
+
+
+@pytest.mark.asyncio
+async def test_config_patch_merges_complete_browser_form_with_unchanged_model_arrays(
+    config_http: ConfigHttp,
+) -> None:
+    service, server, client_id, control = config_http
+    token = create_credential(service.agent_home)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Omni-CSRF": token,
+        "X-Omni-Client": client_id,
+        "X-Omni-Control": control,
+    }
+    baseline = service.config_view()
+    revision = cast(str, baseline["revision"])
+    browser_fields = json.loads(json.dumps(baseline["fields"]))
+    for provider in browser_fields["models"]["providers"].values():
+        provider.pop("api_key")
+    browser_fields["runtime"]["max_iterations"] = 80
+    ConfigLoader(service.agent_home).patch_editable_fields(revision, {"memory": {"batch_size": 14}})
+
+    async with aiohttp.ClientSession() as http:
+        response = await http.patch(
+            server.make_url("/api/v1/config"),
+            headers=headers,
+            json={
+                "request_id": "merge-complete-browser-config-edit",
+                "revision": revision,
+                "baseline": baseline["fields"],
+                "fields": browser_fields,
+                "secrets": {},
+            },
+        )
+        saved = await response.json()
+
+    assert response.status == 200
+    assert saved["fields"]["runtime"]["max_iterations"] == 80
+    assert saved["fields"]["memory"]["batch_size"] == 14
+    assert saved["fields"]["models"]["providers"]["primary"]["models"] == ["small-model"]
+
+
+@pytest.mark.asyncio
+async def test_config_patch_rejects_duplicate_provider_ids_with_form_row_path(
+    config_http: ConfigHttp,
+) -> None:
+    service, server, client_id, control = config_http
+    token = create_credential(service.agent_home)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Omni-CSRF": token,
+        "X-Omni-Client": client_id,
+        "X-Omni-Control": control,
+    }
+    baseline = service.config_view()
+    revision = cast(str, baseline["revision"])
+    browser_fields = json.loads(json.dumps(baseline["fields"]))
+    providers = browser_fields["models"]["providers"]
+    for provider_id, provider in providers.items():
+        provider.pop("api_key")
+        provider["id"] = provider_id
+    providers["new-provider"] = {**providers["primary"], "id": "primary"}
+    before = (service.agent_home.path / "config.toml").read_bytes()
+
+    async with aiohttp.ClientSession() as http:
+        response = await http.patch(
+            server.make_url("/api/v1/config"),
+            headers=headers,
+            json={
+                "request_id": "reject-duplicate-provider-id",
+                "revision": revision,
+                "baseline": baseline["fields"],
+                "fields": browser_fields,
+                "secrets": {},
+            },
+        )
+        body = await response.json()
+
+    assert response.status == 422
+    assert body["field_errors"] == {"models.providers.new-provider.id": "must be unique"}
+    assert (service.agent_home.path / "config.toml").read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_config_patch_reports_external_secret_conflict(config_http: ConfigHttp) -> None:
+    service, server, client_id, control = config_http
+    token = create_credential(service.agent_home)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Omni-CSRF": token,
+        "X-Omni-Client": client_id,
+        "X-Omni-Control": control,
+    }
+    baseline = service.config_view()
+    revision = cast(str, baseline["revision"])
+    secret_path = "models.providers.primary.api_key"
+    ConfigLoader(service.agent_home).patch_editable_fields(
+        revision,
+        {},
+        {secret_path: {"action": "replace", "value": "external-secret-326"}},
+    )
+
+    async with aiohttp.ClientSession() as http:
+        response = await http.patch(
+            server.make_url("/api/v1/config"),
+            headers=headers,
+            json={
+                "request_id": "stale-secret-config-edit",
+                "revision": revision,
+                "baseline": baseline["fields"],
+                "baseline_secrets": baseline["secret_revisions"],
+                "fields": {"runtime": {"max_iterations": 80}},
+                "secrets": {secret_path: {"action": "replace", "value": "client-secret-326"}},
+            },
+        )
+        result = await response.json()
+
+    assert response.status == 409
+    assert result["code"] == "config_revision_conflict"
+    assert result["field_errors"] == {secret_path: "changed elsewhere"}
+    assert "external-secret-326" not in str(result)
+    assert "client-secret-326" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_config_editor_orders_consecutive_edits_and_preserves_external_fields(
+    config_http: ConfigHttp,
+) -> None:
+    service, server, client_id, control = config_http
+    token = create_credential(service.agent_home)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Omni-CSRF": token,
+        "X-Omni-Client": client_id,
+        "X-Omni-Control": control,
+    }
+    baseline = service.config_view()
+    revision = cast(str, baseline["revision"])
+    ConfigLoader(service.agent_home).patch_editable_fields(
+        revision, {"runtime": {"max_tool_result_chars": 5000}}
+    )
+    async with aiohttp.ClientSession() as http:
+
+        async def save(
+            sequence: int, value: int, source: dict[str, object] | None = None
+        ) -> tuple[int, dict[str, object]]:
+            source = baseline if source is None else source
+            response = await http.patch(
+                server.make_url("/api/v1/config"),
+                headers=headers,
+                json={
+                    "request_id": f"ordered-edit-{sequence}",
+                    "revision": source["revision"],
+                    "baseline": source["fields"],
+                    "baseline_secrets": source["secret_revisions"],
+                    "editor_id": "one-settings-editor",
+                    "edit_sequence": sequence,
+                    "fields": {"runtime": {**cast(dict[str, object], cast(dict[str, object], source["fields"])["runtime"]), "max_iterations": value}},
+                    "secrets": {},
+                },
+            )
+            return response.status, await response.json()
+
+        status, first_response = await save(1, 61)
+        assert status == 200
+        assert (await save(2, 62))[0] == 200
+        # The UI can receive response 1 after edit 2 has already committed.
+        assert (await save(3, 63, first_response))[0] == 200
+        # Request 5 reaches the Service before delayed request 4.
+        assert (await save(5, 65))[0] == 200
+        status, rejected = await save(4, 64)
+        assert status == 409 and rejected["code"] == "config_edit_superseded"
+        # Changing back to the original value is still a new edit.
+        assert (await save(6, 50))[0] == 200
+        current = ConfigLoader(service.agent_home).load()
+        assert current.runtime.max_iterations == 50
+        assert current.runtime.max_tool_result_chars == 5000
+        external = ConfigLoader(service.agent_home)
+        external.patch_editable_fields(external.revision(), {"runtime": {"max_iterations": 70}})
+        status, conflict = await save(7, 65)
+        assert status == 409 and conflict["code"] == "config_revision_conflict"
+        assert external.load().runtime.max_iterations == 70
+
+
+@pytest.mark.asyncio
+async def test_config_editor_coordinates_consecutive_mcp_keyword_arrays(
+    config_http: ConfigHttp,
+) -> None:
+    service, server, client_id, control = config_http
+    loader = ConfigLoader(service.agent_home)
+    loader.path.write_text(FULL_CONFIG, encoding="utf-8")
+    token = create_credential(service.agent_home)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Omni-CSRF": token,
+        "X-Omni-Client": client_id,
+        "X-Omni-Control": control,
+    }
+    async with aiohttp.ClientSession() as http:
+        response = await http.get(server.make_url("/api/v1/config"), headers=headers)
+        baseline = await response.json()
+        loader.patch_editable_fields(
+            baseline["revision"], {"mcp": {"http": {"call_timeout": 75}}}
+        )
+
+        async def save(
+            sequence: int,
+            keywords: list[str],
+            source: dict[str, object] | None = None,
+        ) -> tuple[int, dict[str, object]]:
+            source = baseline if source is None else source
+            fields = json.loads(json.dumps(source["fields"]))
+            fields["mcp"]["http"]["tool_keywords"] = {"read": keywords}
+            result = await http.patch(
+                server.make_url("/api/v1/config"),
+                headers=headers,
+                json={
+                    "request_id": f"ordered-keywords-{sequence}",
+                    "revision": source["revision"],
+                    "baseline": source["fields"],
+                    "baseline_secrets": source["secret_revisions"],
+                    "editor_id": "keyword-editor",
+                    "edit_sequence": sequence,
+                    "fields": {"mcp": fields["mcp"]},
+                    "secrets": {},
+                },
+            )
+            return result.status, await result.json()
+
+        status, first_response = await save(1, ["resource"])
+        assert status == 200
+        assert (await save(2, ["resource", "file"]))[0] == 200
+        assert (await save(3, ["resource", "file", "read"], first_response))[0] == 200
+        current = loader.load().mcp["http"]
+        assert current.tool_keywords["read"] == ("resource", "file", "read")
+        assert current.call_timeout == 75
+        loader.patch_editable_fields(
+            loader.revision(), {"mcp": {"http": {"tool_keywords": {"read": ["external"]}}}}
+        )
+        status, conflict = await save(4, ["resource", "read"])
+        assert status == 409 and conflict["code"] == "config_revision_conflict"
+        assert loader.load().mcp["http"].tool_keywords["read"] == ("external",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remove", ["provider", "server", "header", "transport"])
+async def test_config_structural_secret_removal_rejects_external_rotation(
+    config_http: ConfigHttp,
+    remove: str,
+) -> None:
+    service, server, client_id, control = config_http
+    (service.agent_home.path / "config.toml").write_text(FULL_CONFIG, encoding="utf-8")
+    baseline = service.config_view()
+    revision = cast(str, baseline["revision"])
+    fields = json.loads(json.dumps(baseline["fields"]))
+    for provider in fields["models"]["providers"].values():
+        provider.pop("api_key")
+    secret_path = (
+        "models.providers.retired.api_key"
+        if remove == "provider"
+        else "mcp.http.headers.Authorization"
+    )
+    if remove == "provider":
+        del fields["models"]["providers"]["retired"]
+    elif remove == "server":
+        fields["mcp"] = {}
+    elif remove == "header":
+        fields["mcp"]["http"]["headers"] = {}
+    else:
+        fields["mcp"]["http"].update(transport="stdio", command="fixture", url=None, headers={})
+    loader = ConfigLoader(service.agent_home)
+    loader.patch_editable_fields(
+        revision, {}, {secret_path: {"action": "replace", "value": "rotated-secret-326"}}
+    )
+    before = loader.path.read_bytes()
+    token = create_credential(service.agent_home)
+    async with aiohttp.ClientSession() as http:
+        response = await http.patch(
+            server.make_url("/api/v1/config"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Omni-CSRF": token,
+                "X-Omni-Client": client_id,
+                "X-Omni-Control": control,
+            },
+            json={
+                "request_id": f"remove-secret-{remove}",
+                "revision": revision,
+                "baseline": baseline["fields"],
+                "baseline_secrets": baseline["secret_revisions"],
+                "fields": fields,
+                "secrets": {},
+            },
+        )
+        body = await response.json()
+    assert response.status == 409
+    assert body["field_errors"] == {secret_path: "changed elsewhere"}
+    assert "rotated-secret-326" not in str(body)
+    assert loader.path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("duplicate", ["server", "header", "keyword"])
+async def test_config_rejects_duplicate_named_mcp_form_rows(
+    config_http: ConfigHttp,
+    duplicate: str,
+) -> None:
+    service, server, client_id, control = config_http
+    baseline = service.config_view()
+    server_fields: dict[str, object] = {
+        "name": "fixture",
+        "enabled": False,
+        "transport": "stdio",
+        "command": "fixture",
+    }
+    mcp: dict[str, object] = {"first-row": server_fields}
+    if duplicate == "server":
+        mcp["second-row"] = server_fields
+    elif duplicate == "header":
+        server_fields.update(
+            transport="streamable-http",
+            command=None,
+            url="https://mcp.example/tools",
+            header_rows=[{"name": "Authorization", "secret": {"configured": False}}] * 2,
+        )
+    else:
+        server_fields["tool_keyword_rows"] = [{"name": "read", "keywords": ["resource"]}] * 2
+    before = (service.agent_home.path / "config.toml").read_bytes()
+    token = create_credential(service.agent_home)
+    async with aiohttp.ClientSession() as http:
+        response = await http.patch(
+            server.make_url("/api/v1/config"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Omni-CSRF": token,
+                "X-Omni-Client": client_id,
+                "X-Omni-Control": control,
+            },
+            json={
+                "request_id": f"duplicate-{duplicate}",
+                "revision": baseline["revision"],
+                "fields": {"mcp": mcp},
+                "secrets": {},
+            },
+        )
+        body = await response.json()
+    assert response.status == 422
+    assert "must be unique" in str(body["field_errors"])
+    assert (service.agent_home.path / "config.toml").read_bytes() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("section", ["models", "mcp"])
+async def test_partial_config_edit_preserves_nonoverlapping_external_leaf_fields(
+    config_http: ConfigHttp, section: str,
+) -> None:
+    service, server, client_id, control = config_http
+    (service.agent_home.path / "config.toml").write_text(FULL_CONFIG, encoding="utf-8")
+    baseline = service.config_view()
+    loader = ConfigLoader(service.agent_home)
+    external: dict[str, object]
+    fields: dict[str, object]
+    if section == "models":
+        external = {"models": {"providers": {"primary": {"base_url": "https://external.example/v1"}, "retired": {}}}}
+        fields = {"models": {"providers": {"primary": {"model_context_windows": {"small-model": 16384}}, "retired": {}}}}
+    else:
+        external = {"mcp": {"http": {"url": "https://external.example/tools"}}}
+        fields = {"mcp": {"http": {"call_timeout": 90}}}
+    loader.patch_editable_fields(cast(str, baseline["revision"]), external)
+    token = create_credential(service.agent_home)
+    async with aiohttp.ClientSession() as http:
+        response = await http.patch(server.make_url("/api/v1/config"), headers={
+            "Authorization": f"Bearer {token}", "X-Omni-CSRF": token,
+            "X-Omni-Client": client_id, "X-Omni-Control": control,
+        }, json={"request_id": f"partial-stale-{section}", "revision": baseline["revision"],
+                 "baseline": baseline["fields"], "baseline_secrets": baseline["secret_revisions"],
+                 "fields": fields, "secrets": {}})
+        body = await response.json()
+    assert response.status == 200, body
+    configuration = loader.load()
+    if section == "models":
+        assert configuration.models.providers["primary"].base_url == "https://external.example/v1"
+        assert configuration.models.providers["primary"].model_context_windows["small-model"] == 16384
+    else:
+        assert configuration.mcp["http"].url == "https://external.example/tools"
+        assert configuration.mcp["http"].call_timeout == 90
+
+
+@pytest.mark.asyncio
+async def test_pending_service_reports_saved_config_restart_requirement(tmp_path: Path) -> None:
+    home = AgentHome(tmp_path / "home")
+    home.initialize()
+    service = AgentService(home, reconnect_timeout=3600)
+    await service.start()
+    client = await service.register_client("cli")
+    token = create_credential(home)
+    try:
+        # A repaired, valid saved document never activates the pending Service.
+        (home.path / "config.toml").write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
+        async with TestServer(create_app(service), host="127.0.0.1") as server:
+            async with aiohttp.ClientSession() as http:
+                response = await http.get(server.make_url("/api/v1/config/startup"), headers={
+                    "Authorization": f"Bearer {token}", "X-Omni-Client": client.client_id,
+                })
+                body = await response.json()
+        assert response.status == 200
+        assert body["startup"]["available"] is False
+        assert body["startup"]["error"]["code"] == "config_restart_required"
+        assert body["application"]["status"] == "restart-required"
+        assert "minimal-secret" not in str(body)
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stale", [True, False])
+async def test_config_save_reports_safe_error_after_external_toml_corruption(
+    config_http: ConfigHttp, stale: bool,
+) -> None:
+    service, server, client_id, control = config_http
+    baseline = service.config_view()
+    loader = ConfigLoader(service.agent_home)
+    loader.path.write_text('[broken secret = "must-not-leak-326"', encoding="utf-8")
+    before = loader.path.read_bytes()
+    token = create_credential(service.agent_home)
+    async with aiohttp.ClientSession() as http:
+        response = await http.patch(server.make_url("/api/v1/config"), headers={
+            "Authorization": f"Bearer {token}", "X-Omni-CSRF": token,
+            "X-Omni-Client": client_id, "X-Omni-Control": control,
+        }, json={"request_id": f"corrupted-save-{stale}",
+                 "revision": baseline["revision"] if stale else loader.revision(),
+                 "baseline": baseline["fields"], "fields": {"runtime": {"max_iterations": 80}},
+                 "secrets": {}})
+        body = await response.json()
+    assert response.status == (409 if stale else 422)
+    assert body["code"] == ("config_revision_conflict" if stale else "config_parse_error")
+    assert "must-not-leak-326" not in str(body)
+    assert loader.path.read_bytes() == before
+
+
 @pytest_asyncio.fixture
 async def live_service(tmp_path: Path) -> AsyncIterator[tuple[AgentService, Path]]:
     home = AgentHome(tmp_path / "agent-home")
@@ -328,7 +798,9 @@ async def test_config_save_preserves_workspace_and_later_activation_uses_startup
 
 
 @pytest_asyncio.fixture
-async def full_config_http(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[ConfigHttp]:
+async def full_config_http(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[ConfigHttp]:
     from omni.agent.tools.mcp_runtime import MCPRuntimeManager, MCPStartupReport
 
     async def start(_manager: MCPRuntimeManager, _configuration: object) -> MCPStartupReport:

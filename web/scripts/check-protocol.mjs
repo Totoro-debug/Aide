@@ -93,6 +93,7 @@ const referenceTypes = {
   config_provider_fields: "ConfigProviderFields",
   config_route_fields: "ConfigRouteFields",
   config_redacted_secret: "ConfigRedactedSecret",
+  config_secret_revisions: "Record<string,string|null>",
   config_application: "ConfigApplication",
   config_application_status: "ConfigApplicationStatus",
   config_projection: "ConfigProjection",

@@ -19,6 +19,14 @@ const narrowViewport = { width: 390, height: 844 };
 const viewports = [narrowViewport, { width: 768, height: 1024 }, { width: 1024, height: 768 }, { width: 1440, height: 900 }];
 const states = ["missing", "invalid", "malformed"];
 
+function servicePort(homeRoot) {
+  let hash = 2166136261;
+  for (const character of resolve(homeRoot)) {
+    hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
+  }
+  return 20000 + (hash >>> 0) % 40000;
+}
+
 function startupCli(homeRoot, command) {
   const argv = JSON.stringify(["omni", ...command]);
   const source = [
@@ -30,7 +38,12 @@ function startupCli(homeRoot, command) {
   ].join("; ");
   return spawnSync("python", ["-c", source], {
     cwd: repoRoot,
-    env: { ...process.env, USERPROFILE: homeRoot, HOME: homeRoot },
+    env: {
+      ...process.env,
+      USERPROFILE: homeRoot,
+      HOME: homeRoot,
+      OMNI_SERVICE_PORT: String(servicePort(homeRoot)),
+    },
     encoding: "utf8",
     timeout: 30000,
   });
@@ -424,9 +437,11 @@ async function runState(browser, state) {
       const bare = startupCli(bareRoot, []);
       assert.equal(bare.status, 2, `Bare CLI unexpectedly started for ${state}: ${bare.stdout}`);
       const bareOutput = `${bare.stdout ?? ""}\n${bare.stderr ?? ""}`;
-      const expectedCode = state === "missing" ? "config_missing" : state === "invalid" ? "route_unavailable" : "config_parse_error";
+      const expectedCode = state === "missing" ? "config_missing" : state === "invalid" ? "config_invalid" : "config_parse_error";
       assert.match(bareOutput, new RegExp(expectedCode));
       assert.equal(bareOutput.includes(details.malformed_secret), false);
+      const stopped = startupCli(bareRoot, ["service", "stop"]);
+      assert.equal(stopped.status, 0, `Isolated bare CLI service did not stop: ${stopped.stdout}`);
     } finally {
       await rm(bareRoot, { recursive: true, force: true });
     }
@@ -439,7 +454,7 @@ async function runState(browser, state) {
     const sharedBare = startupCli(details.user_home_root, []);
     assert.equal(sharedBare.status, 2, "Existing Web service swallowed bare CLI startup errors");
     const sharedBareOutput = `${sharedBare.stdout ?? ""}\n${sharedBare.stderr ?? ""}`;
-    assert.match(sharedBareOutput, new RegExp(state === "missing" ? "config_missing" : state === "invalid" ? "route_unavailable" : "config_parse_error"));
+    assert.match(sharedBareOutput, new RegExp(state === "missing" ? "config_missing" : state === "invalid" ? "config_invalid" : "config_parse_error"));
     assert.equal(sharedBareOutput.includes(details.malformed_secret), false);
     if (state === "missing") await rm(join(details.home_root, "config.toml"));
 

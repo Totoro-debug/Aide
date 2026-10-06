@@ -3,6 +3,15 @@
   "$id": "https://omni.local/protocol/v1.schema.json",
   "title": "Omni local service protocol v1",
   "$defs": {
+    "config_secret_revisions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
     "identifier": {"type": "string", "minLength": 1},
     "request_id": {"$ref": "#/$defs/identifier"},
     "claim_version": {"type": "integer", "minimum": 1},
@@ -39,13 +48,37 @@
       "properties": {"configured": {"type": "boolean"}}
     },
     "config_provider_fields": {
-      "type": "object", "additionalProperties": false,
-      "required": ["protocol", "base_url", "models", "api_key"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "base_url",
+        "models",
+        "api_key",
+        "model_context_windows"
+      ],
       "properties": {
-        "protocol": {"type": "string"},
-        "base_url": {"type": "string"},
-        "models": {"type": "array", "items": {"type": "string"}},
-        "api_key": {"$ref": "#/$defs/config_redacted_secret"}
+        "protocol": {
+          "type": "string"
+        },
+        "base_url": {
+          "type": "string"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "api_key": {
+          "$ref": "#/$defs/config_redacted_secret"
+        },
+        "model_context_windows": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        }
       }
     },
     "config_route_fields": {
@@ -98,11 +131,30 @@
       }
     },
     "config_patch_provider_fields": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "protocol": {"type": "string"},
-        "base_url": {"type": "string"},
-        "models": {"type": "array", "items": {"type": "string"}}
+        "id": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "base_url": {
+          "type": "string"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "model_context_windows": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        }
       }
     },
     "config_patch_route_fields": {
@@ -118,47 +170,149 @@
       }
     },
     "config_patch_mcp_fields": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "enabled": {"type": "boolean"},
-        "transport": {"enum": ["stdio", "streamable-http"]},
-        "command": {"type": ["string", "null"]},
-        "args": {"type": "array", "items": {"type": "string"}},
-        "cwd": {"type": ["string", "null"]},
-        "url": {"type": ["string", "null"]},
+        "enabled": {
+          "type": "boolean"
+        },
+        "transport": {
+          "enum": [
+            "stdio",
+            "streamable-http"
+          ]
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "headers": {
           "type": "object",
-          "additionalProperties": {"$ref": "#/$defs/config_redacted_secret"}
+          "additionalProperties": {
+            "$ref": "#/$defs/config_redacted_secret"
+          }
         },
-        "connect_timeout": {"type": "integer", "minimum": 1, "maximum": 600},
-        "call_timeout": {"type": "integer", "minimum": 1, "maximum": 600},
+        "connect_timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600
+        },
+        "call_timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600
+        },
         "tool_keywords": {
           "type": "object",
-          "additionalProperties": {"type": "array", "items": {"type": "string"}}
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "header_rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "secret"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "secret": {
+                "$ref": "#/$defs/config_redacted_secret"
+              }
+            }
+          }
+        },
+        "tool_keyword_rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "keywords"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "keywords": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
         }
       }
     },
     "config_patch_fields": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "runtime": {"$ref": "#/$defs/config_runtime_fields"},
-        "memory": {"$ref": "#/$defs/config_memory_fields"},
+        "runtime": {
+          "$ref": "#/$defs/config_runtime_fields"
+        },
+        "memory": {
+          "$ref": "#/$defs/config_memory_fields"
+        },
+        "web": {
+          "$ref": "#/$defs/config_web_fields"
+        },
         "models": {
-          "type": "object", "additionalProperties": false,
+          "type": "object",
+          "additionalProperties": false,
           "properties": {
             "providers": {
               "type": "object",
-              "additionalProperties": {"$ref": "#/$defs/config_patch_provider_fields"}
+              "additionalProperties": {
+                "$ref": "#/$defs/config_patch_provider_fields"
+              }
             },
             "routes": {
               "type": "object",
-              "additionalProperties": {"$ref": "#/$defs/config_patch_route_fields"}
+              "additionalProperties": {
+                "$ref": "#/$defs/config_patch_route_fields"
+              }
             }
           }
         },
         "mcp": {
           "type": "object",
-          "additionalProperties": {"$ref": "#/$defs/config_patch_mcp_fields"}
+          "additionalProperties": {
+            "$ref": "#/$defs/config_patch_mcp_fields"
+          }
         }
       }
     },
@@ -229,26 +383,142 @@
         "restart_required": {"type": "boolean"}
       }
     },
-    "config_response": {
-      "type": "object", "additionalProperties": false,
-      "required": ["revision", "fields", "configuration", "application"],
+    "config_startup_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "fields",
+        "secret_revisions",
+        "configuration",
+        "application",
+        "startup"
+      ],
       "properties": {
-        "revision": {"type": "string"},
-        "fields": {"$ref": "#/$defs/config_fields"},
-        "configuration": {"$ref": "#/$defs/config_projection"},
-        "application": {"$ref": "#/$defs/config_application"}
+        "revision": {
+          "type": "string"
+        },
+        "fields": {
+          "$ref": "#/$defs/config_fields"
+        },
+        "secret_revisions": {
+          "$ref": "#/$defs/config_secret_revisions"
+        },
+        "configuration": {
+          "$ref": "#/$defs/config_projection"
+        },
+        "application": {
+          "$ref": "#/$defs/config_application"
+        },
+        "startup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "available",
+            "diagnostics",
+            "error"
+          ],
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "diagnostics": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "config_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "fields",
+        "secret_revisions",
+        "configuration",
+        "application"
+      ],
+      "properties": {
+        "revision": {
+          "type": "string"
+        },
+        "fields": {
+          "$ref": "#/$defs/config_fields"
+        },
+        "secret_revisions": {
+          "$ref": "#/$defs/config_secret_revisions"
+        },
+        "configuration": {
+          "$ref": "#/$defs/config_projection"
+        },
+        "application": {
+          "$ref": "#/$defs/config_application"
+        }
       }
     },
     "config_mutation_response": {
-      "type": "object", "additionalProperties": false,
-      "required": ["request_id", "revision", "fields", "configuration", "application"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "revision",
+        "fields",
+        "secret_revisions",
+        "configuration",
+        "application"
+      ],
       "properties": {
-        "request_id": {"type": "string"},
-        "revision": {"type": "string"},
-        "fields": {"$ref": "#/$defs/config_fields"},
-        "configuration": {"$ref": "#/$defs/config_projection"},
-        "backup_id": {"type": ["string", "null"]},
-        "application": {"$ref": "#/$defs/config_application"}
+        "request_id": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "fields": {
+          "$ref": "#/$defs/config_fields"
+        },
+        "secret_revisions": {
+          "$ref": "#/$defs/config_secret_revisions"
+        },
+        "configuration": {
+          "$ref": "#/$defs/config_projection"
+        },
+        "backup_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "application": {
+          "$ref": "#/$defs/config_application"
+        }
       }
     },
     "runtime_status_request": {
@@ -602,14 +872,54 @@
     "config_patch": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["request_id", "revision", "fields", "secrets"],
+      "required": [
+        "request_id",
+        "revision",
+        "fields",
+        "secrets"
+      ],
       "properties": {
-        "request_id": {"$ref": "#/$defs/request_id"},
-        "revision": {"$ref": "#/$defs/identifier"},
-        "fields": {"$ref": "#/$defs/config_patch_fields"},
+        "request_id": {
+          "$ref": "#/$defs/request_id"
+        },
+        "revision": {
+          "$ref": "#/$defs/identifier"
+        },
+        "fields": {
+          "$ref": "#/$defs/config_patch_fields"
+        },
         "secrets": {
-          "type": "object", "additionalProperties": {"$ref": "#/$defs/config_secret_change"}
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/config_secret_change"
+          }
+        },
+        "baseline": {
+          "$ref": "#/$defs/config_fields"
+        },
+        "baseline_secrets": {
+          "$ref": "#/$defs/config_secret_revisions"
+        },
+        "overwrite_conflicts": {
+          "type": "boolean"
+        },
+        "editor_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "edit_sequence": {
+          "type": "integer",
+          "minimum": 1
         }
+      },
+      "dependentRequired": {
+        "editor_id": [
+          "edit_sequence",
+          "baseline"
+        ],
+        "edit_sequence": [
+          "editor_id",
+          "baseline"
+        ]
       }
     },
     "redacted_secret": {

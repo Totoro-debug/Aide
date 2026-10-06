@@ -13,7 +13,6 @@ from omni.agent.workspace_state import (
     WorkspaceStateError,
 )
 from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigError, ConfigLoader
 from omni.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
 from omni.management.commands import ManagementCommandDispatcher
 from omni.management.service import (
@@ -101,8 +100,34 @@ async def _run_service_cli_conversation(
     workspace: Path,
 ) -> None:
     """Run the terminal as a client of the shared local service."""
-    client = await ServiceClient.connect_or_start(agent_home, workspace)
+    client = await ServiceClient.connect_or_start(agent_home, workspace, attach_workspace=False)
     try:
+        config = await client.get_startup_config()
+        startup = config.get("startup")
+        if not isinstance(startup, dict) or not isinstance(startup.get("available"), bool):
+            raise ServiceStartupError("service_protocol_error", "Service startup state is invalid.")
+        diagnostics = startup.get("diagnostics")
+        if isinstance(diagnostics, list):
+            for diagnostic in diagnostics:
+                if isinstance(diagnostic, str):
+                    console.print(diagnostic, markup=False, highlight=False, soft_wrap=True)
+        if not startup["available"]:
+            error = startup.get("error")
+            if (
+                not isinstance(error, dict)
+                or not isinstance(error.get("code"), str)
+                or not isinstance(error.get("message"), str)
+            ):
+                raise ServiceStartupError(
+                    "service_protocol_error", "Service startup error is invalid."
+                )
+            raise ServiceStartupError(error["code"], error["message"])
+        if not is_interactive_terminal():
+            raise ServiceStartupError(
+                "interactive_terminal_required",
+                "Terminal Conversation requires interactive stdin, stdout, and stderr TTYs.",
+            )
+        await client.attach_workspace(workspace)
         terminal_app = TerminalConversationApp(
             bus=client.bus,
             control=client.control,
@@ -135,39 +160,10 @@ def main(context: typer.Context) -> None:
     if context.invoked_subcommand is not None:
         return
     agent_home = AgentHome.production()
-    loader = ConfigLoader(agent_home)
-    try:
-        loader.load_for_startup()
-    except ConfigError as config_error:
-        _print_error(config_error.error, loader.path)
-        exit_code = 1 if config_error.error.code == "persistence_error" else 2
-        raise typer.Exit(code=exit_code) from None
-    except OSError:
-        _print_error(
-            ErrorInfo("persistence_error", "User Configuration could not be read or written."),
-            loader.path,
-        )
-        raise typer.Exit(code=1) from None
-    if not is_interactive_terminal():
-        _print_error_info(
-            ErrorInfo(
-                "interactive_terminal_required",
-                "Terminal Conversation requires interactive stdin, stdout, and stderr TTYs.",
-            )
-        )
-        raise typer.Exit(code=2)
-    if loader.diagnostics:
-        console.print(
-            "".join(f"{diagnostic.message}\n" for diagnostic in loader.diagnostics),
-            markup=False,
-            highlight=False,
-            soft_wrap=True,
-            end="",
-        )
     try:
         asyncio.run(
             _run_service_cli_conversation(
-                agent_home=loader.agent_home,
+                agent_home=agent_home,
                 workspace=Path.cwd(),
             )
         )
@@ -194,7 +190,13 @@ def main(context: typer.Context) -> None:
         raise typer.Exit(code=1) from None
     except ServiceStartupError as service_error:
         _print_error_info(service_error)
-        raise typer.Exit(code=1) from None
+        exit_code = (
+            2
+            if service_error.code.startswith("config_")
+            or service_error.code == "interactive_terminal_required"
+            else 1
+        )
+        raise typer.Exit(code=exit_code) from None
     except ServiceError as service_error:
         _print_error_info(service_error)
         raise typer.Exit(code=1) from None
@@ -237,30 +239,33 @@ def web_command() -> None:
 def config_command() -> None:
     """Display User Configuration with plaintext API keys redacted."""
     agent_home = AgentHome.production()
-    loader = ConfigLoader(agent_home)
     try:
-        loader.ensure_default()
-        view = loader.view()
-    except (OSError, UnicodeError):
-        _print_error(
-            ErrorInfo("persistence_error", "User Configuration could not be read or written."),
-            loader.path,
-        )
+        result = asyncio.run(_read_service_config_text(agent_home))
+    except (ServiceStartupError, ServiceError) as error:
+        _print_error_info(error)
         raise typer.Exit(code=1) from None
-
+    header_text = result.get("header_text")
+    redacted_content = result.get("redacted_content")
+    if not isinstance(header_text, str) or not isinstance(redacted_content, str):
+        _print_error_info(
+            ServiceStartupError("service_protocol_error", "Service config view is invalid.")
+        )
+        raise typer.Exit(code=1)
+    console.print(header_text, markup=False, highlight=False, soft_wrap=True, end="")
     console.print(
-        view.header_text(),
+        redacted_content,
         markup=False,
         highlight=False,
         soft_wrap=True,
-        end="",
+        end="" if redacted_content.endswith("\n") else "\n",
     )
-    console.print(
-        view.redacted_content,
-        markup=False,
-        highlight=False,
-        soft_wrap=True,
-        end="" if view.redacted_content.endswith("\n") else "\n",
-    )
-    if view.error is not None:
+    if isinstance(result.get("error_code"), str):
         raise typer.Exit(code=2)
+
+
+async def _read_service_config_text(agent_home: AgentHome) -> dict[str, object]:
+    client = await ServiceClient.connect_or_start(agent_home, Path.cwd(), attach_workspace=False)
+    try:
+        return await client.get_config_text()
+    finally:
+        await client.close()

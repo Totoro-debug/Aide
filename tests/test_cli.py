@@ -1,7 +1,9 @@
+import asyncio
 import importlib
 import importlib.util
 import os
 import shutil
+import socket
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +31,23 @@ from tests.configuration.test_config import (
     REDACTION_CONFIG,
     VALID_CONFIG,
 )
+
+_INSTALLED_SERVICE_PORTS: dict[str, int] = {}
+
+
+@pytest.fixture(autouse=True)
+def stop_installed_test_services() -> Any:
+    yield
+    for home_path, port in tuple(_INSTALLED_SERVICE_PORTS.items()):
+        asyncio.run(ServiceClient.stop_existing(AgentHome(Path(home_path)), port=port))
+        _INSTALLED_SERVICE_PORTS.pop(home_path, None)
+
+
+def stop_installed_test_service(agent_home: Path) -> None:
+    home_path = str(agent_home.resolve())
+    port = _INSTALLED_SERVICE_PORTS.get(home_path)
+    if port is not None:
+        asyncio.run(ServiceClient.stop_existing(AgentHome(agent_home), port=port))
 
 
 def test_legacy_runtime_module_is_not_discoverable() -> None:
@@ -90,10 +109,23 @@ async def test_cli_service_adapter_binds_terminal_and_closes_client_once(
     async def close() -> None:
         events.append("client_close")
 
-    client.close = close
+    async def get_config() -> dict[str, object]:
+        events.append("get_config")
+        return {"startup": {"available": True, "diagnostics": [], "error": None}}
 
-    async def connect(actual_home: AgentHome, directory: Path) -> ServiceClient:
+    async def attach_workspace(directory: Path) -> None:
+        assert directory == tmp_path
+        events.append("attach_workspace")
+
+    client.close = close
+    client.get_startup_config = get_config
+    client.attach_workspace = attach_workspace
+
+    async def connect(
+        actual_home: AgentHome, directory: Path, *, attach_workspace: bool
+    ) -> ServiceClient:
         assert actual_home is home and directory == tmp_path
+        assert attach_workspace is False
         events.append("connect")
         return cast(ServiceClient, client)
 
@@ -121,9 +153,18 @@ async def test_cli_service_adapter_binds_terminal_and_closes_client_once(
 
     monkeypatch.setattr(ServiceClient, "connect_or_start", connect)
     monkeypatch.setattr(cli, "TerminalConversationApp", App)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
     if failure_stage is None:
         await cli._run_service_cli_conversation(agent_home=home, workspace=tmp_path)
-        assert events == ["connect", "terminal_init", "bind", "run", "client_close"]
+        assert events == [
+            "connect",
+            "get_config",
+            "attach_workspace",
+            "terminal_init",
+            "bind",
+            "run",
+            "client_close",
+        ]
     else:
         with pytest.raises(RuntimeError) as raised:
             await cli._run_service_cli_conversation(agent_home=home, workspace=tmp_path)
@@ -138,7 +179,10 @@ async def test_cli_connection_failure_never_constructs_terminal(
 ) -> None:
     failure = ServiceStartupError("service_port_in_use", "The local service port is occupied.")
 
-    async def connect(_home: AgentHome, _directory: Path) -> ServiceClient:
+    async def connect(
+        _home: AgentHome, _directory: Path, *, attach_workspace: bool
+    ) -> ServiceClient:
+        assert attach_workspace is False
         raise failure
 
     def terminal(**_kwargs: object) -> None:
@@ -149,6 +193,55 @@ async def test_cli_connection_failure_never_constructs_terminal(
     with pytest.raises(ServiceStartupError) as raised:
         await cli._run_service_cli_conversation(agent_home=AgentHome(tmp_path), workspace=tmp_path)
     assert raised.value is failure
+
+
+@pytest.mark.asyncio
+async def test_cli_pending_service_config_does_not_attach_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    client = SimpleNamespace()
+
+    async def get_config() -> dict[str, object]:
+        events.append("scaffold")
+        return {
+            "startup": {
+                "available": False,
+                "diagnostics": [],
+                "error": {
+                    "code": "config_missing",
+                    "message": "A default User Configuration was created; edit it before starting Omni.\n"
+                    f"Path: {tmp_path / 'home' / 'config.toml'}",
+                },
+            },
+        }
+
+    async def attach_workspace(_workspace: Path) -> None:
+        events.append("attach")
+
+    async def close() -> None:
+        events.append("close")
+
+    client.get_startup_config = get_config
+    client.attach_workspace = attach_workspace
+    client.close = close
+
+    async def connect(
+        _home: AgentHome, _directory: Path, *, attach_workspace: bool
+    ) -> ServiceClient:
+        assert attach_workspace is False
+        return cast(ServiceClient, client)
+
+    monkeypatch.setattr(ServiceClient, "connect_or_start", connect)
+    with pytest.raises(
+        ServiceStartupError, match="default User Configuration was created"
+    ) as raised:
+        await cli._run_service_cli_conversation(
+            agent_home=AgentHome(tmp_path / "home"), workspace=tmp_path
+        )
+    assert raised.value.code == "config_missing"
+    assert str(tmp_path / "home" / "config.toml") in raised.value.message
+    assert events == ["scaffold", "close"]
 
 
 def test_cli_reports_unexpected_startup_failure_without_raw_exception_output(
@@ -307,6 +400,13 @@ def run_installed_omni(
     environment = os.environ.copy()
     environment["HOME"] = str(agent_home.parent)
     environment["USERPROFILE"] = str(agent_home.parent)
+    home_key = str(agent_home.resolve())
+    if home_key not in _INSTALLED_SERVICE_PORTS:
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            _INSTALLED_SERVICE_PORTS[home_key] = listener.getsockname()[1]
+    port = _INSTALLED_SERVICE_PORTS[home_key]
+    environment["OMNI_SERVICE_PORT"] = str(port)
     source_root = str(Path(__file__).parent.parent)
     existing_pythonpath = environment.get("PYTHONPATH")
     environment["PYTHONPATH"] = (
@@ -561,7 +661,7 @@ def test_installed_omni_rejects_valid_configuration_without_a_tty(
     assert not (workspace / ".omni").exists()
 
 
-def test_installed_omni_stops_only_on_parse_failure(
+def test_installed_omni_uses_service_configuration_eligibility(
     agent_home: Path,
     workspace: Path,
 ) -> None:
@@ -570,13 +670,15 @@ def test_installed_omni_stops_only_on_parse_failure(
 
     config_path.write_text(MALFORMED_CONFIG, encoding="utf-8")
     parse_result = run_installed_omni(agent_home, workspace=workspace)
+    stop_installed_test_service(agent_home)
 
-    schema_content = REDACTION_CONFIG.replace(
-        "max_tool_result_chars = 50000",
-        "max_tool_result_chars = 50000\nmisspelled_setting = true",
+    schema_content = VALID_CONFIG.replace(
+        "max_tool_result_chars = 60000",
+        "max_tool_result_chars = 60000\nmisspelled_setting = true",
     )
     config_path.write_text(schema_content, encoding="utf-8")
     schema_result = run_installed_omni(agent_home, workspace=workspace)
+    stop_installed_test_service(agent_home)
 
     config_path.write_text(EXPECTED_DEFAULT_CONFIG, encoding="utf-8")
     default_result = run_installed_omni(agent_home, workspace=workspace)
@@ -590,7 +692,7 @@ def test_installed_omni_stops_only_on_parse_failure(
     assert "config_invalid" not in schema_result.stdout
     assert "configuration gate passed" not in parse_result.stdout
     assert "interactive_terminal_required" in schema_result.stdout
-    assert "interactive_terminal_required" in default_result.stdout
+    assert "config_invalid" in default_result.stdout
     assert not (workspace / ".omni").exists()
     combined_output = "".join(
         result.stdout + result.stderr for result in (parse_result, schema_result, default_result)

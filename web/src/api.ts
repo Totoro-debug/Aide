@@ -38,6 +38,7 @@ import type {
   ServiceStatus,
   ConfigPatchResponse,
   ConfigResponse,
+  ConfigFields,
   ConfigPatchFields,
   ConfigSecrets,
   AvailableModelsResponse,
@@ -323,11 +324,27 @@ export function patchConfig(
   fields: ConfigPatchFields,
   secrets: ConfigSecrets,
   requestId: string = createRequestId(),
+  options: {
+    baseline?: ConfigFields;
+    baselineSecrets?: Record<string, string | null>;
+    overwriteConflicts?: boolean;
+    editorId?: string;
+    editSequence?: number;
+  } = {},
 ): Promise<ConfigPatchResponse> {
   return request<ConfigPatchResponse>("/config", {
     method: "PATCH",
     mutation: true,
-    body: { request_id: requestId, revision, fields, secrets },
+    body: {
+      request_id: requestId,
+      revision,
+      fields,
+      secrets,
+      ...(options.baseline === undefined ? {} : { baseline: options.baseline }),
+      ...(options.baselineSecrets === undefined ? {} : { baseline_secrets: options.baselineSecrets }),
+      ...(options.overwriteConflicts === undefined ? {} : { overwrite_conflicts: options.overwriteConflicts }),
+      ...(options.editorId === undefined ? {} : { editor_id: options.editorId, edit_sequence: options.editSequence }),
+    },
   });
 }
 
@@ -336,11 +353,27 @@ export function repairConfig(
   fields: ConfigPatchFields,
   secrets: ConfigSecrets,
   requestId: string = createRequestId(),
+  options: {
+    baseline?: ConfigFields;
+    baselineSecrets?: Record<string, string | null>;
+    overwriteConflicts?: boolean;
+    editorId?: string;
+    editSequence?: number;
+  } = {},
 ): Promise<ConfigPatchResponse> {
   return request<ConfigPatchResponse>("/config/repair", {
     method: "POST",
     mutation: true,
-    body: { request_id: requestId, revision, fields, secrets },
+    body: {
+      request_id: requestId,
+      revision,
+      fields,
+      secrets,
+      ...(options.baseline === undefined ? {} : { baseline: options.baseline }),
+      ...(options.baselineSecrets === undefined ? {} : { baseline_secrets: options.baselineSecrets }),
+      ...(options.overwriteConflicts === undefined ? {} : { overwrite_conflicts: options.overwriteConflicts }),
+      ...(options.editorId === undefined ? {} : { editor_id: options.editorId, edit_sequence: options.editSequence }),
+    },
   });
 }
 

@@ -8,8 +8,10 @@ from collections.abc import Callable, Mapping, MutableMapping, MutableSequence, 
 from dataclasses import dataclass, field, replace
 from functools import partial
 from hashlib import sha256
+from hmac import new as hmac_new
 from math import isfinite
 from pathlib import Path
+from secrets import token_bytes
 from types import MappingProxyType
 from typing import Final, Literal, NoReturn, cast
 from urllib.parse import urlsplit
@@ -436,6 +438,8 @@ class ConfigEditResult:
     fields: Mapping[str, Mapping[str, object]]
     configuration: UserConfiguration
     backup_id: str | None = None
+    previous_fields: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    previous_secret_revisions: Mapping[str, str | None] = field(default_factory=dict)
 
 
 class ConfigError(Exception):
@@ -450,14 +454,21 @@ class ConfigError(Exception):
 class ConfigRevisionConflict(ConfigError):
     """Raised when a configuration edit was based on an older file revision."""
 
-    def __init__(self, expected_revision: str, current_revision: str) -> None:
+    def __init__(
+        self,
+        expected_revision: str,
+        current_revision: str,
+        conflicts: tuple[str, ...] = (),
+    ) -> None:
         self.expected_revision = expected_revision
         self.current_revision = current_revision
+        self.conflicts = conflicts
         super().__init__(
             ErrorInfo(
                 "config_invalid",
                 "User Configuration changed before this edit was applied.",
-            )
+            ),
+            field_errors={path: "changed elsewhere" for path in conflicts},
         )
 
 
@@ -1212,6 +1223,155 @@ def _configuration_revision(content: bytes) -> str:
     return f"sha256:{sha256(content).hexdigest()}"
 
 
+_CONFIG_MISSING = object()
+
+
+def _same_config_value(left: object, right: object) -> bool:
+    if left is _CONFIG_MISSING or right is _CONFIG_MISSING:
+        return left is right
+    return left == right
+
+
+def _mutable_config_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            key: _mutable_config_value(nested)
+            for key, nested in cast(Mapping[str, object], value).items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_mutable_config_value(nested) for nested in value]
+    return value
+
+
+def _merge_config_value(
+    baseline: object,
+    requested: object,
+    current: object,
+    *,
+    path: tuple[str, ...],
+    conflicts: list[str],
+    overwrite_conflicts: bool = False,
+) -> object:
+    baseline = _mutable_config_value(baseline)
+    requested = _mutable_config_value(requested)
+    current = _mutable_config_value(current)
+    if path[:2] == ("models", "providers") and path[-1:] == ("api_key",):
+        return current
+    if (
+        isinstance(baseline, Mapping)
+        and isinstance(requested, Mapping)
+        and isinstance(current, Mapping)
+    ):
+        merged: dict[str, object] = {}
+        for key in set(baseline) | set(requested) | set(current):
+            value = _merge_config_value(
+                baseline.get(key, _CONFIG_MISSING),
+                requested.get(key, _CONFIG_MISSING),
+                current.get(key, _CONFIG_MISSING),
+                path=(*path, str(key)),
+                conflicts=conflicts,
+                overwrite_conflicts=overwrite_conflicts,
+            )
+            if value is not _CONFIG_MISSING:
+                merged[key] = value
+        return merged
+    if requested is _CONFIG_MISSING:
+        if (
+            (len(path) == 2 and path[0] == "models")
+            or (len(path) == 4 and path[:2] in {("models", "providers"), ("models", "routes")})
+            or (len(path) == 3 and path[0] == "mcp")
+        ):
+            return current
+        if baseline is _CONFIG_MISSING:
+            return current
+        if current is _CONFIG_MISSING or _same_config_value(current, baseline):
+            return _CONFIG_MISSING
+        if overwrite_conflicts:
+            return _CONFIG_MISSING
+        conflicts.append(".".join(path))
+        return current
+    if _same_config_value(requested, baseline):
+        return current
+    if _same_config_value(current, baseline) or _same_config_value(current, requested):
+        return requested
+    if overwrite_conflicts:
+        return requested
+    conflicts.append(".".join(path))
+    return current
+
+
+def _merge_stale_config_fields(
+    baseline: Mapping[str, object],
+    requested: Mapping[str, object],
+    current: Mapping[str, object],
+    *,
+    expected_revision: str,
+    current_revision: str,
+    overwrite_conflicts: bool = False,
+) -> dict[str, object]:
+    merged: dict[str, object] = {}
+    conflicts: list[str] = []
+    for section, requested_values in requested.items():
+        base_values = baseline.get(section, _CONFIG_MISSING)
+        current_values = current.get(section, _CONFIG_MISSING)
+        if section in {"models", "mcp"}:
+            section_values = _merge_config_value(
+                base_values,
+                requested_values,
+                current_values,
+                path=(section,),
+                conflicts=conflicts,
+                overwrite_conflicts=overwrite_conflicts,
+            )
+            if isinstance(section_values, Mapping):
+                normalized_section = dict(section_values)
+                if section == "models":
+                    providers = normalized_section.get("providers")
+                    if isinstance(providers, Mapping):
+                        normalized_section["providers"] = {
+                            provider_id: {
+                                field: value
+                                for field, value in provider.items()
+                                if field != "api_key"
+                            }
+                            if isinstance(provider, Mapping)
+                            else provider
+                            for provider_id, provider in providers.items()
+                        }
+                merged[section] = normalized_section
+            continue
+
+        if not isinstance(requested_values, Mapping):
+            conflicts.append(section)
+            continue
+        base_section = base_values if isinstance(base_values, Mapping) else {}
+        current_section = current_values if isinstance(current_values, Mapping) else {}
+        section_patch: dict[str, object] = {}
+        for field_name, requested_value in requested_values.items():
+            base_value = base_section.get(field_name, _CONFIG_MISSING)
+            current_value = current_section.get(field_name, _CONFIG_MISSING)
+            if _same_config_value(requested_value, base_value):
+                continue
+            if _same_config_value(current_value, base_value) or _same_config_value(
+                current_value, requested_value
+            ):
+                section_patch[field_name] = requested_value
+            elif overwrite_conflicts:
+                section_patch[field_name] = requested_value
+            else:
+                conflicts.append(f"{section}.{field_name}")
+        if section_patch:
+            merged[section] = section_patch
+
+    if conflicts:
+        raise ConfigRevisionConflict(
+            expected_revision,
+            current_revision,
+            tuple(sorted(set(conflicts))),
+        )
+    return merged
+
+
 def _editable_configuration_fields(
     configuration: UserConfiguration,
 ) -> Mapping[str, Mapping[str, object]]:
@@ -1353,8 +1513,15 @@ def _validate_provider_fields(provider_id: str, value: object) -> dict[str, obje
     if not _PROVIDER_ID_PATTERN.fullmatch(provider_id):
         _invalid(field, "must use a lowercase kebab-case provider ID")
     table = _editable_table(value, field)
-    _reject_unknown_fields(table, {"protocol", "base_url", "models", "model_context_windows"}, field)
+    _reject_unknown_fields(
+        table, {"id", "protocol", "base_url", "models", "model_context_windows"}, field
+    )
     normalized: dict[str, object] = {}
+    if "id" in table:
+        editable_id = _string(table["id"], f"{field}.id", nonempty=True)
+        if not _PROVIDER_ID_PATTERN.fullmatch(editable_id):
+            _invalid(f"{field}.id", "must use a lowercase kebab-case provider ID")
+        normalized["id"] = editable_id
     if "protocol" in table:
         protocol = _string(table["protocol"], f"{field}.protocol")
         if protocol not in {"anthropic", "openai-compatible"}:
@@ -1441,11 +1608,33 @@ def _validate_redacted_headers(value: object, field: str) -> dict[str, dict[str,
     return headers
 
 
+def _named_edit_rows(value: object, field: str, value_key: str) -> dict[str, object]:
+    if not isinstance(value, list):
+        _invalid(field, "must be an array")
+    named: dict[str, object] = {}
+    for index, row in enumerate(value):
+        item = _editable_table(row, f"{field}.{index}")
+        _reject_unknown_fields(item, {"name", value_key}, f"{field}.{index}")
+        name = _string(item.get("name"), f"{field}.{index}.name", nonempty=True)
+        if name in named:
+            _invalid(f"{field}.{index}.name", "must be unique")
+        named[name] = item.get(value_key)
+    return named
+
+
 def _validate_mcp_fields(mcp_name: str, value: object) -> dict[str, object]:
     field = f"mcp.{mcp_name}"
     if _MCP_NAME_PATTERN.fullmatch(mcp_name) is None:
         _invalid(field, "must use a lowercase name with up to 64 letters, digits, '_' or '-'")
-    table = _editable_table(value, field)
+    table = dict(_editable_table(value, field))
+    for row_field, target, value_key in (
+        ("header_rows", "headers", "secret"),
+        ("tool_keyword_rows", "tool_keywords", "keywords"),
+    ):
+        if row_field in table:
+            if target in table:
+                _invalid(f"{field}.{row_field}", "must not accompany the named object")
+            table[target] = _named_edit_rows(table.pop(row_field), f"{field}.{target}", value_key)
     allowed = {
         "enabled",
         "transport",
@@ -1535,10 +1724,22 @@ def _validate_editable_fields(fields: Mapping[str, object]) -> dict[str, dict[st
                 providers = _editable_table(
                     model_values["providers"], "config.fields.models.providers"
                 )
-                models["providers"] = {
-                    provider_id: _validate_provider_fields(provider_id, provider)
-                    for provider_id, provider in providers.items()
-                }
+                seen_provider_ids: set[str] = set()
+                for provider_row, provider in providers.items():
+                    provider_fields = _editable_table(provider, f"models.providers.{provider_row}")
+                    provider_id = provider_fields.get("id", provider_row)
+                    if isinstance(provider_id, str) and _PROVIDER_ID_PATTERN.fullmatch(provider_id):
+                        if provider_id in seen_provider_ids:
+                            _invalid(f"models.providers.{provider_row}.id", "must be unique")
+                        seen_provider_ids.add(provider_id)
+                normalized_providers: dict[str, dict[str, object]] = {}
+                for provider_row, provider in providers.items():
+                    provider_fields = _validate_provider_fields(provider_row, provider)
+                    provider_id = cast(str, provider_fields.pop("id", provider_row))
+                    if provider_id in normalized_providers:
+                        _invalid(f"models.providers.{provider_row}.id", "must be unique")
+                    normalized_providers[provider_id] = provider_fields
+                models["providers"] = normalized_providers
             if "routes" in model_values:
                 routes = _editable_table(model_values["routes"], "config.fields.models.routes")
                 models["routes"] = {
@@ -1549,10 +1750,14 @@ def _validate_editable_fields(fields: Mapping[str, object]) -> dict[str, dict[st
             continue
         if section == "mcp":
             servers = _editable_table(raw_values, "config.fields.mcp")
-            normalized[section] = {
-                server_name: _validate_mcp_fields(server_name, server)
-                for server_name, server in servers.items()
-            }
+            normalized_servers: dict[str, object] = {}
+            for row, server in servers.items():
+                server_fields = dict(_editable_table(server, f"mcp.{row}"))
+                name = _string(server_fields.pop("name", row), f"mcp.{row}.name", nonempty=True)
+                if name in normalized_servers:
+                    _invalid(f"mcp.{row}.name", "must be unique")
+                normalized_servers[name] = _validate_mcp_fields(name, server_fields)
+            normalized[section] = normalized_servers
             continue
         section_values: dict[str, object] = {}
         for field_name, value in raw_values.items():
@@ -2163,6 +2368,7 @@ class ConfigLoader:
     def __init__(self, agent_home: AgentHome) -> None:
         self.agent_home = agent_home
         self._diagnostics: tuple[ConfigurationDiagnosticValue, ...] = ()
+        self._secret_revision_key = token_bytes(32)
 
     @property
     def path(self) -> Path:
@@ -2187,6 +2393,102 @@ class ConfigLoader:
     def revision(self) -> str:
         """Return the current raw-file revision without exposing its contents."""
         return _configuration_revision(self.path.read_bytes())
+
+    def secret_revisions(self, configuration: UserConfiguration) -> Mapping[str, str | None]:
+        """Return keyed opaque revisions for editable secrets."""
+        revisions: dict[str, str | None] = {}
+
+        def fingerprint(value: str) -> str | None:
+            if not value:
+                return None
+            return hmac_new(self._secret_revision_key, value.encode("utf-8"), "sha256").hexdigest()
+
+        for provider_id, provider in configuration.models.providers.items():
+            revisions[f"models.providers.{provider_id}.api_key"] = fingerprint(provider.api_key)
+        for server_name, server in configuration.mcp.items():
+            for header_name, value in server.headers.items():
+                revisions[f"mcp.{server_name}.headers.{header_name}"] = fingerprint(value)
+        return MappingProxyType(revisions)
+
+    def _coordinate_stale_edit(
+        self,
+        content: bytes,
+        expected_revision: str,
+        current_revision: str,
+        normalized: Mapping[str, object],
+        secrets: Mapping[str, object] | None,
+        baseline: Mapping[str, object] | None,
+        baseline_secrets: Mapping[str, object] | None,
+        overwrite_conflicts: bool,
+    ) -> dict[str, dict[str, object]]:
+        if baseline is None:
+            raise ConfigRevisionConflict(expected_revision, current_revision)
+        try:
+            document = _table(tomllib.loads(content.decode("utf-8")), "configuration")
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+            raise ConfigRevisionConflict(expected_revision, current_revision) from error
+        configuration = _parse_configuration(document)
+        revisions = self.secret_revisions(configuration)
+        changed_secrets = {
+            path
+            for path, change in (secrets or {}).items()
+            if isinstance(change, Mapping) and change.get("action") in {"replace", "clear"}
+        }
+        models = normalized.get("models")
+        providers = models.get("providers") if isinstance(models, Mapping) else None
+        if isinstance(providers, Mapping):
+            baseline_models = baseline.get("models")
+            baseline_providers = (
+                baseline_models.get("providers", {}) if isinstance(baseline_models, Mapping) else {}
+            )
+            changed_secrets.update(
+                f"models.providers.{name}.api_key"
+                for name in configuration.models.providers
+                if name not in providers
+                and isinstance(baseline_providers, Mapping)
+                and name in baseline_providers
+            )
+        servers = normalized.get("mcp")
+        if isinstance(servers, Mapping):
+            for name, server in configuration.mcp.items():
+                baseline_servers = baseline.get("mcp", {})
+                old_server = (
+                    baseline_servers.get(name, {}) if isinstance(baseline_servers, Mapping) else {}
+                )
+                old_headers = (
+                    old_server.get("headers", {}) if isinstance(old_server, Mapping) else {}
+                )
+                candidate = servers.get(name)
+                headers = candidate.get("headers") if isinstance(candidate, Mapping) else None
+                removed = candidate is None or (
+                    isinstance(candidate, Mapping) and candidate.get("transport") == "stdio"
+                )
+                changed_secrets.update(
+                    f"mcp.{name}.headers.{header}"
+                    for header in server.headers
+                    if isinstance(old_headers, Mapping)
+                    and header in old_headers
+                    and (removed or (isinstance(headers, Mapping) and header not in headers))
+                )
+        conflicts = tuple(
+            sorted(
+                path
+                for path in changed_secrets
+                if baseline_secrets is None or baseline_secrets.get(path) != revisions.get(path)
+            )
+        )
+        if conflicts and not overwrite_conflicts:
+            raise ConfigRevisionConflict(expected_revision, current_revision, conflicts)
+        return _validate_editable_fields(
+            _merge_stale_config_fields(
+                baseline,
+                normalized,
+                _editable_configuration_fields(configuration),
+                expected_revision=expected_revision,
+                current_revision=current_revision,
+                overwrite_conflicts=overwrite_conflicts,
+            )
+        )
 
     def editable_snapshot(self) -> ConfigEditableSnapshot:
         """Read the safe structured configuration projection for a Web editor."""
@@ -2264,7 +2566,7 @@ class ConfigLoader:
             valid = False
         else:
             valid = True
-        self._diagnostics = ()
+        self._diagnostics = tuple(diagnostics)
         if not valid:
             return ConfigWebSnapshot(
                 revision=revision,
@@ -2297,6 +2599,9 @@ class ConfigLoader:
         expected_revision: str,
         fields: Mapping[str, object],
         secrets: Mapping[str, object] | None = None,
+        baseline: Mapping[str, object] | None = None,
+        baseline_secrets: Mapping[str, object] | None = None,
+        overwrite_conflicts: bool = False,
     ) -> ConfigEditResult:
         """Atomically apply safe fields when the caller still has the latest revision."""
         if not isinstance(expected_revision, str) or not expected_revision:
@@ -2307,7 +2612,26 @@ class ConfigLoader:
             original_content = self.path.read_bytes()
             current_revision = _configuration_revision(original_content)
             if current_revision != expected_revision:
-                raise ConfigRevisionConflict(expected_revision, current_revision)
+                normalized = self._coordinate_stale_edit(
+                    original_content,
+                    expected_revision,
+                    current_revision,
+                    normalized,
+                    secrets,
+                    baseline,
+                    baseline_secrets,
+                    overwrite_conflicts,
+                )
+            try:
+                previous_configuration = _parse_configuration(
+                    _table(tomllib.loads(original_content.decode("utf-8")), "configuration")
+                )
+            except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+                raise ConfigError(ErrorInfo(
+                    "config_parse_error", "User Configuration TOML could not be parsed."
+                )) from error
+            previous_fields = _editable_configuration_fields(previous_configuration)
+            previous_secret_revisions = self.secret_revisions(previous_configuration)
             try:
                 source_document = tomlkit.parse(original_content.decode("utf-8"))
             except (tomlkit.exceptions.ParseError, UnicodeDecodeError) as error:
@@ -2362,6 +2686,8 @@ class ConfigLoader:
                 revision=_configuration_revision(candidate_content.encode("utf-8")),
                 fields=_editable_configuration_fields(configuration),
                 configuration=configuration,
+                previous_fields=previous_fields,
+                previous_secret_revisions=previous_secret_revisions,
             )
 
     def repair_editable_fields(
@@ -2369,6 +2695,9 @@ class ConfigLoader:
         expected_revision: str,
         fields: Mapping[str, object],
         secrets: Mapping[str, object] | None = None,
+        baseline: Mapping[str, object] | None = None,
+        baseline_secrets: Mapping[str, object] | None = None,
+        overwrite_conflicts: bool = False,
     ) -> ConfigEditResult:
         """Repair a missing or malformed document using a validated default structure."""
         if not isinstance(expected_revision, str) or not expected_revision:
@@ -2388,9 +2717,26 @@ class ConfigLoader:
                 missing = True
                 original_content = b""
             current_revision = _configuration_revision(original_content)
+            try:
+                previous_configuration = _parse_configuration(
+                    _table(tomllib.loads(original_content.decode("utf-8")), "configuration")
+                )
+                previous_fields = _editable_configuration_fields(previous_configuration)
+                previous_secret_revisions = self.secret_revisions(previous_configuration)
+            except (UnicodeDecodeError, tomllib.TOMLDecodeError, ConfigError):
+                previous_fields = {}
+                previous_secret_revisions = {}
             if current_revision != expected_revision:
-                raise ConfigRevisionConflict(expected_revision, current_revision)
-
+                normalized = self._coordinate_stale_edit(
+                    original_content,
+                    expected_revision,
+                    current_revision,
+                    normalized,
+                    secrets,
+                    baseline,
+                    baseline_secrets,
+                    overwrite_conflicts,
+                )
             malformed = False
             if missing:
                 source_document = tomlkit.parse(DEFAULT_CONFIG_TEMPLATE)
@@ -2461,6 +2807,8 @@ class ConfigLoader:
                 fields=_editable_configuration_fields(configuration),
                 configuration=configuration,
                 backup_id=backup_id,
+                previous_fields=previous_fields,
+                previous_secret_revisions=previous_secret_revisions,
             )
 
     def _backup_malformed_content(self, content: bytes) -> str:

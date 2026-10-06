@@ -174,10 +174,14 @@ export type ConfigPatchFields = {
   memory?: Partial<ConfigFields["memory"]>;
   web?: Partial<ConfigFields["web"]>;
   models?: {
-    providers?: Record<string, Partial<Omit<ConfigProviderFields, "api_key">>>;
+    providers?: Record<string, Partial<Omit<ConfigProviderFields, "api_key"> & { id: string }>>;
     routes?: Record<string, Partial<ConfigRouteFields>>;
   };
-  mcp?: Record<string, Partial<ConfigMcpFields>>;
+  mcp?: Record<string, Partial<ConfigMcpFields> & {
+    name?: string;
+    header_rows?: { name: string; secret: ConfigRedactedSecret }[];
+    tool_keyword_rows?: { name: string; keywords: string[] }[];
+  }>;
 };
 
 export type ConfigSecretChange =
@@ -209,6 +213,7 @@ export interface ConfigApplication {
 export interface ConfigResponse {
   revision: string;
   fields: ConfigFields;
+  secret_revisions: Record<string, string | null>;
   configuration: ConfigProjection;
   application: ConfigApplication;
 }

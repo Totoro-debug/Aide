@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
+from typing import cast
 from urllib.parse import urlsplit
 
 from aiohttp import WSMsgType, web
@@ -126,6 +127,8 @@ class AgentServiceTransport:
         app.router.add_get(f"{_API_PREFIX}/service/identity", self._service_identity)
         app.router.add_get(f"{_API_PREFIX}/service", self._service_info)
         app.router.add_get(f"{_API_PREFIX}/config", self._config)
+        app.router.add_get(f"{_API_PREFIX}/config/text", self._config_text)
+        app.router.add_get(f"{_API_PREFIX}/config/startup", self._config_startup)
         app.router.add_get(f"{_API_PREFIX}/models/available", self._available_models)
         app.router.add_patch(f"{_API_PREFIX}/config", self._patch_config)
         app.router.add_post(f"{_API_PREFIX}/config/repair", self._repair_config)
@@ -411,6 +414,14 @@ class AgentServiceTransport:
         self._authenticate(request, client_required=True)
         return web.json_response(self.service.config_view())
 
+    async def _config_text(self, request: web.Request) -> web.Response:
+        self._authenticate(request, client_required=True)
+        return web.json_response(self.service.configuration_text_view())
+
+    async def _config_startup(self, request: web.Request) -> web.Response:
+        self._authenticate(request, client_required=True)
+        return web.json_response(self.service.configuration_startup_view())
+
     async def _available_models(self, request: web.Request) -> web.Response:
         self._authenticate(request, client_required=True)
         return web.json_response(self.service.available_models_view())
@@ -418,7 +429,15 @@ class AgentServiceTransport:
     async def _patch_config(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, mutation=True, client_required=True)
         body = await _json_object(request)
-        if set(body) != {"request_id", "revision", "fields", "secrets"}:
+        required = {"request_id", "revision", "fields", "secrets"}
+        optional = {
+            "baseline",
+            "baseline_secrets",
+            "overwrite_conflicts",
+            "editor_id",
+            "edit_sequence",
+        }
+        if not required.issubset(body) or set(body) - required - optional:
             raise service_error(
                 "validation_error", "Configuration request fields are invalid.", status=422
             )
@@ -447,15 +466,56 @@ class AgentServiceTransport:
                 status=422,
                 field_errors={"secrets": "must be an object"},
             )
+        baseline = body.get("baseline")
+        if baseline is not None and not isinstance(baseline, Mapping):
+            raise service_error(
+                "validation_error",
+                "Configuration baseline must be an object.",
+                status=422,
+                field_errors={"baseline": "must be an object"},
+            )
+        baseline_secrets = body.get("baseline_secrets")
+        if baseline_secrets is not None and not isinstance(baseline_secrets, Mapping):
+            raise service_error(
+                "validation_error",
+                "Configuration secret baseline must be an object.",
+                status=422,
+                field_errors={"baseline_secrets": "must be an object"},
+            )
+        overwrite_conflicts = body.get("overwrite_conflicts", False)
+        if not isinstance(overwrite_conflicts, bool):
+            raise service_error(
+                "validation_error",
+                "Configuration conflict resolution must be a boolean.",
+                status=422,
+                field_errors={"overwrite_conflicts": "must be a boolean"},
+            )
         result = await self.service.update_configuration(
-            request_id, revision, fields, secrets, client_id=context.client_id
+            request_id,
+            revision,
+            fields,
+            secrets,
+            client_id=context.client_id,
+            baseline=baseline,
+            baseline_secrets=baseline_secrets,
+            overwrite_conflicts=overwrite_conflicts,
+            editor_id=cast(str | None, body.get("editor_id")),
+            edit_sequence=cast(int | None, body.get("edit_sequence")),
         )
         return web.json_response({"request_id": request_id, **result})
 
     async def _repair_config(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, mutation=True, client_required=True)
         body = await _json_object(request)
-        if set(body) != {"request_id", "revision", "fields", "secrets"}:
+        required = {"request_id", "revision", "fields", "secrets"}
+        optional = {
+            "baseline",
+            "baseline_secrets",
+            "overwrite_conflicts",
+            "editor_id",
+            "edit_sequence",
+        }
+        if not required.issubset(body) or set(body) - required - optional:
             raise service_error(
                 "validation_error", "Configuration repair fields are invalid.", status=422
             )
@@ -484,8 +544,41 @@ class AgentServiceTransport:
                 status=422,
                 field_errors={"secrets": "must be an object"},
             )
+        baseline = body.get("baseline")
+        if baseline is not None and not isinstance(baseline, Mapping):
+            raise service_error(
+                "validation_error",
+                "Configuration baseline must be an object.",
+                status=422,
+                field_errors={"baseline": "must be an object"},
+            )
+        baseline_secrets = body.get("baseline_secrets")
+        if baseline_secrets is not None and not isinstance(baseline_secrets, Mapping):
+            raise service_error(
+                "validation_error",
+                "Configuration secret baseline must be an object.",
+                status=422,
+                field_errors={"baseline_secrets": "must be an object"},
+            )
+        overwrite_conflicts = body.get("overwrite_conflicts", False)
+        if not isinstance(overwrite_conflicts, bool):
+            raise service_error(
+                "validation_error",
+                "Configuration conflict resolution must be a boolean.",
+                status=422,
+                field_errors={"overwrite_conflicts": "must be a boolean"},
+            )
         result = await self.service.repair_configuration(
-            request_id, revision, fields, secrets, client_id=context.client_id
+            request_id,
+            revision,
+            fields,
+            secrets,
+            client_id=context.client_id,
+            baseline=baseline,
+            baseline_secrets=baseline_secrets,
+            overwrite_conflicts=overwrite_conflicts,
+            editor_id=cast(str | None, body.get("editor_id")),
+            edit_sequence=cast(int | None, body.get("edit_sequence")),
         )
         return web.json_response({"request_id": request_id, **result})
 

@@ -154,7 +154,7 @@ type ConnectionState = "checking" | "online" | "offline" | "recovering";
 type Theme = "system" | "light" | "dark";
 type ProjectsLoadState = "idle" | "loading" | "ready" | "error";
 type SettingsSection = "general" | "models" | "runtime" | "memory" | "mcp";
-type PersistedSettingsSection = Exclude<SettingsSection, "general"> | "web";
+type ConfigSettingsSection = "models" | "runtime" | "memory" | "mcp" | "web";
 type ServiceEventListener = (event: ServiceEvent) => void;
 
 interface SettingsReturnLocation {
@@ -1319,6 +1319,20 @@ interface SettingsForm {
   mcp: Record<string, McpForm>;
 }
 
+interface PendingSettingsSave {
+  requestId: string;
+  editSequence: number;
+  revision: string;
+  snapshot: SettingsForm;
+  baseline: ConfigFields;
+  baselineSecrets: Record<string, string | null>;
+  fields: ConfigPatchFields;
+  secrets: ConfigSecrets;
+  sections: ConfigSettingsSection[];
+  overwriteConflicts: boolean;
+  repairing: boolean;
+}
+
 type SecretAction = ConfigSecretChange["action"];
 
 interface SecretDraft {
@@ -1383,7 +1397,8 @@ function formFromConfig(fields: ConfigFields, previous: SettingsForm | null = nu
       default_chat_workspace: fields.web.default_chat_workspace,
     },
     models: {
-      providers: Object.fromEntries(Object.entries(fields.models.providers).map(([id, provider]) => [id, {
+      providers: Object.fromEntries(Object.entries(fields.models.providers).map(([id, provider]) => [
+        Object.entries(previous?.models.providers ?? {}).find(([row, value]) => row === id || value.id === id)?.[0] ?? id, {
         id,
         protocol: provider.protocol,
         base_url: provider.base_url,
@@ -1435,9 +1450,10 @@ function formFromConfig(fields: ConfigFields, previous: SettingsForm | null = nu
 
 function configFromForm(form: SettingsForm): { fields: ConfigPatchFields; secrets: ConfigSecrets } {
   const secrets: ConfigSecrets = {};
-  const providers: Record<string, { protocol: string; base_url: string; models: string[]; model_context_windows: Record<string, number> }> = {};
-  for (const provider of Object.values(form.models.providers)) {
-    providers[provider.id] = {
+  const providers: Record<string, { id: string; protocol: string; base_url: string; models: string[]; model_context_windows: Record<string, number> }> = {};
+  for (const [providerRow, provider] of Object.entries(form.models.providers)) {
+    providers[providerRow] = {
+      id: provider.id,
       protocol: provider.protocol,
       base_url: provider.base_url,
       models: provider.models,
@@ -1462,27 +1478,28 @@ function configFromForm(form: SettingsForm): { fields: ConfigPatchFields; secret
     };
   }
   const mcp: Record<string, Record<string, unknown>> = {};
-  for (const server of Object.values(form.mcp)) {
-    const headers: Record<string, { configured: boolean }> = Object.create(null) as Record<string, { configured: boolean }>;
+  for (const [serverRow, server] of Object.entries(form.mcp)) {
+    const headerRows: { name: string; secret: { configured: boolean } }[] = [];
     for (const draft of server.transport === "streamable-http" ? Object.values(server.headers) : []) {
       const header = draft.name;
-      headers[header] = { configured: draft.configured };
+      headerRows.push({ name: header, secret: { configured: draft.configured } });
       const path = `mcp.${server.name}.headers.${header}`;
       secrets[path] = draft.action === "replace"
         ? { action: "replace", value: draft.value }
         : { action: draft.action };
     }
-    mcp[server.name] = {
+    mcp[serverRow] = {
+      name: server.name,
       enabled: server.enabled,
       transport: server.transport,
       command: server.transport === "stdio" ? server.command : null,
       args: server.transport === "stdio" ? server.args : [],
       cwd: server.transport === "stdio" && server.cwd.trim() ? server.cwd.trim() : null,
       url: server.transport === "streamable-http" ? server.url.trim() : null,
-      headers,
+      header_rows: headerRows,
       connect_timeout: Number(server.connect_timeout),
       call_timeout: Number(server.call_timeout),
-      tool_keywords: Object.fromEntries(server.tool_keywords.map((tool) => [tool.name, tool.keywords])),
+      tool_keyword_rows: server.tool_keywords.map((tool) => ({ name: tool.name, keywords: tool.keywords })),
     };
   }
   return {
@@ -1563,19 +1580,6 @@ function SecretInput({ id, label, secret, disabled, onChange, error }: SecretInp
 
 type SettingsFieldError = Record<string, string>;
 
-interface SettingsSaveRequest {
-  requestId: string;
-  revision: string;
-  section: PersistedSettingsSection;
-  snapshot: SettingsForm;
-  base: SettingsForm;
-  repairing: boolean;
-  fields: ConfigPatchFields;
-  secrets: ConfigSecrets;
-}
-
-const PERSISTED_SETTINGS_SECTIONS: PersistedSettingsSection[] = ["models", "runtime", "memory", "mcp", "web"];
-
 function sameSettingsValue(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;
   if (typeof left !== "object" || left === null || typeof right !== "object" || right === null) return false;
@@ -1586,94 +1590,95 @@ function isSettingsRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function settingsSectionForPath(path: string): PersistedSettingsSection | null {
-  const section = path.split(".", 1)[0];
-  return PERSISTED_SETTINGS_SECTIONS.includes(section as PersistedSettingsSection)
-    ? section as PersistedSettingsSection
-    : null;
+function changedSettingsPaths(
+  baseline: unknown,
+  candidate: unknown,
+  path: string[] = [],
+): string[][] {
+  if (sameSettingsValue(baseline, candidate)) return [];
+  if (baseline === undefined || candidate === undefined) return path.length === 0 ? [] : [path];
+  if (!isSettingsRecord(baseline) || !isSettingsRecord(candidate)) return [path];
+  return [...new Set([...Object.keys(baseline), ...Object.keys(candidate)])]
+    .flatMap((key) => changedSettingsPaths(baseline[key], candidate[key], [...path, key]));
 }
 
-function mergeSettingsDraft(
-  base: unknown,
-  local: unknown,
-  remote: unknown,
-  conflicts: string[],
-  options: {
-    sent?: unknown;
-    savingSection?: PersistedSettingsSection;
-    conflictOnSecret?: boolean;
-  } = {},
-  path = "",
-): unknown {
-  if (sameSettingsValue(local, base)) return remote;
-  if (
-    options.conflictOnSecret === true
-    && /(?:^|\.)(?:api_key|headers)(?:\.|$)/.test(path)
-  ) {
-    conflicts.push(path);
-    return local;
-  }
-  if (sameSettingsValue(remote, base) || sameSettingsValue(local, remote)) return local;
-
-  if (
-    (isSettingsRecord(base) || base === undefined)
-    && isSettingsRecord(local)
-    && isSettingsRecord(remote)
-  ) {
-    const merged: Record<string, unknown> = {};
-    const keys = new Set([
-      ...Object.keys(isSettingsRecord(base) ? base : {}),
-      ...Object.keys(local),
-      ...Object.keys(remote),
-    ]);
-    for (const key of keys) {
-      const value = mergeSettingsDraft(
-        isSettingsRecord(base) ? base[key] : undefined,
-        local[key],
-        remote[key],
-        conflicts,
-        options,
-        path ? `${path}.${key}` : key,
-      );
-      if (value !== undefined) merged[key] = value;
-    }
-    return merged;
-  }
-
-  if (
-    options.sent !== undefined
-    && options.savingSection !== undefined
-    && settingsSectionForPath(path) === options.savingSection
-  ) {
-    return local;
-  }
-
-  conflicts.push(path || "configuration");
-  return local;
+function settingsRowsForComparison<T extends { id?: string; name?: string }>(
+  rows: [string, T][],
+  nameField: "id" | "name",
+) {
+  return Object.fromEntries(rows.map(([row, value]) => {
+    const fields = { ...value };
+    const name = fields[nameField] ?? row;
+    delete fields[nameField];
+    return { name, fields };
+  }).sort((left, right) => left.name.localeCompare(right.name))
+    .map((entry, index) => [String(index), entry]));
 }
 
-function settingsSectionChanged(left: SettingsForm, right: SettingsForm, section: PersistedSettingsSection): boolean {
-  return !sameSettingsValue(left[section], right[section]);
+function changedConfigFieldPaths(baseline: ConfigFields, candidate: ConfigPatchFields): string[][] {
+  const comparable = structuredClone(candidate);
+  const comparableBaseline: ConfigPatchFields = structuredClone(baseline);
+  for (const server of Object.values(comparableBaseline.mcp ?? {})) {
+    server.header_rows = Object.entries(server.headers ?? {}).map(([name, secret]) => ({ name, secret }));
+    server.tool_keyword_rows = Object.entries(server.tool_keywords ?? {}).map(([name, keywords]) => ({ name, keywords }));
+    delete server.headers;
+    delete server.tool_keywords;
+  }
+  const normalized = (fields: ConfigPatchFields) => ({
+    ...fields,
+    models: {
+      ...fields.models,
+      providers: settingsRowsForComparison(Object.entries(fields.models?.providers ?? {}), "id"),
+    },
+    mcp: settingsRowsForComparison(Object.entries(fields.mcp ?? {}), "name"),
+  });
+  return changedSettingsPaths(normalized(comparableBaseline), normalized(comparable)).filter((path) => (
+    !(path[0] === "models" && path[1] === "providers" && (
+      path[path.length - 1] === "api_key"
+    ))
+  ));
 }
 
-function configPatchForSection(
-  form: SettingsForm,
-  section: PersistedSettingsSection,
-): { fields: ConfigPatchFields; secrets: ConfigSecrets } {
-  const config = configFromForm(form);
-  if (section === "runtime") return { fields: { runtime: config.fields.runtime }, secrets: {} };
-  if (section === "memory") return { fields: { memory: config.fields.memory }, secrets: {} };
-  if (section === "web") return { fields: { web: config.fields.web! }, secrets: {} };
-  if (section === "models") {
-    return {
-      fields: { models: config.fields.models! },
-      secrets: Object.fromEntries(Object.entries(config.secrets).filter(([path]) => path.startsWith("models."))),
-    };
+function preserveSettingsInput(sent: unknown, latest: unknown, saved: unknown): unknown {
+  if (sameSettingsValue(sent, latest)) return saved;
+  if (!isSettingsRecord(sent) || !isSettingsRecord(latest) || !isSettingsRecord(saved)) return latest;
+  const result = { ...saved };
+  for (const key of new Set([...Object.keys(sent), ...Object.keys(latest)])) {
+    if (sameSettingsValue(sent[key], latest[key])) continue;
+    if (!(key in latest)) delete result[key];
+    else result[key] = preserveSettingsInput(sent[key], latest[key], saved[key]);
   }
-  return {
-    fields: { mcp: config.fields.mcp! },
-    secrets: Object.fromEntries(Object.entries(config.secrets).filter(([path]) => path.startsWith("mcp."))),
-  };
+  return result;
+}
+
+function settingsSectionsForChanges(
+  baseline: ConfigFields,
+  fields: ConfigPatchFields,
+  secrets: ConfigSecrets,
+): ConfigSettingsSection[] {
+  const sections = new Set<ConfigSettingsSection>(
+    changedConfigFieldPaths(baseline, fields).map(([section]) => section as ConfigSettingsSection),
+  );
+  for (const [path, change] of Object.entries(secrets)) {
+    if (change.action !== "keep") sections.add(path.split(".")[0] as ConfigSettingsSection);
+  }
+  return [...sections];
+}
+
+function configFieldsForSections(fields: ConfigPatchFields, sections: ConfigSettingsSection[]): ConfigPatchFields {
+  const selected: ConfigPatchFields = {};
+  if (sections.includes("runtime") && fields.runtime !== undefined) selected.runtime = fields.runtime;
+  if (sections.includes("memory") && fields.memory !== undefined) selected.memory = fields.memory;
+  if (sections.includes("web") && fields.web !== undefined) selected.web = fields.web;
+  if (sections.includes("models") && fields.models !== undefined) selected.models = fields.models;
+  if (sections.includes("mcp") && fields.mcp !== undefined) selected.mcp = fields.mcp;
+  return selected;
+}
+
+function configSecretsForSections(secrets: ConfigSecrets, sections: ConfigSettingsSection[]): ConfigSecrets {
+  return Object.fromEntries(Object.entries(secrets).filter(([path]) => (
+    sections.includes(path.split(".")[0] as ConfigSettingsSection)
+  )));
 }
 
 interface SettingsViewProps {
@@ -1754,30 +1759,25 @@ function SettingsView({
   const [conflictedPaths, setConflictedPaths] = useState<string[]>([]);
   const dirtyRef = useRef(false);
   const draftRef = useRef<SettingsForm | null>(null);
-  const savedFormRef = useRef<SettingsForm | null>(null);
   const draftRevisionRef = useRef<string | null>(null);
+  const baselineFieldsRef = useRef<ConfigFields | null>(null);
+  const baselineSecretRevisionsRef = useRef<Record<string, string | null> | null>(null);
   const requestSequence = useRef(0);
+  const editorIdRef = useRef(createRequestId());
   const mutationSequence = useRef(0);
-  const pendingSectionsRef = useRef<PersistedSettingsSection[]>([]);
+  const retryOperationRef = useRef<PendingSettingsSave | null>(null);
+  const dirtySectionsRef = useRef(new Set<ConfigSettingsSection>());
   const conflictPathsRef = useRef<string[]>([]);
-  const [saveQueueVersion, setSaveQueueVersion] = useState(0);
   const mutationInFlight = useRef(false);
-  const unresolvedSaveRef = useRef<SettingsSaveRequest | null>(null);
+  const focusErrorSummaryRef = useRef(false);
   const errorSummaryRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (submitError === null) return;
+    if (submitError === null || !saveFailed || !focusErrorSummaryRef.current) return;
+    focusErrorSummaryRef.current = false;
     const timer = window.setTimeout(() => errorSummaryRef.current?.focus(), 0);
     return () => window.clearTimeout(timer);
-  }, [submitError]);
-
-  useEffect(() => {
-    dirtyRef.current = dirty;
-  }, [dirty]);
-
-  useEffect(() => {
-    draftRef.current = draft;
-  }, [draft]);
+  }, [saveFailed, submitError]);
 
   const applyResponse = useCallback((next: ConfigResponse) => {
     setResponse(next);
@@ -1785,8 +1785,10 @@ function SettingsView({
       const nextDraft = formFromConfig(next.fields, draftRef.current);
       setDraft(nextDraft);
       draftRef.current = nextDraft;
-      savedFormRef.current = nextDraft;
       draftRevisionRef.current = next.revision;
+      baselineFieldsRef.current = next.fields;
+      baselineSecretRevisionsRef.current = next.secret_revisions;
+      dirtySectionsRef.current.clear();
       conflictPathsRef.current = [];
       setConflictedPaths([]);
       setDirty(false);
@@ -1832,110 +1834,49 @@ function SettingsView({
     mutationSequence.current += 1;
   }, []);
 
-  const validateField = useCallback((path: string, value: string | boolean): string | null => {
-    if (path.startsWith("models.providers.") && path.includes(".model_context_windows.")) {
-      if (value === "") return null;
-      const numeric = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
-      return !Number.isSafeInteger(numeric) || numeric < 1024 || numeric > 10_000_000
-        ? t("settings.invalidInteger") : null;
-    }
-    if (path === "web.default_chat_workspace" && (typeof value !== "string" || !value.trim())) {
-      return t("settings.required");
-    }
-    const integerFields: Record<string, [number, number]> = {
-      "runtime.max_tool_result_chars": [1000, 1_000_000],
-      "runtime.max_iterations": [50, Number.MAX_SAFE_INTEGER],
-      "memory.batch_size": [1, 1000],
-    };
-    const integerRange = integerFields[path];
-    if (integerRange !== undefined) {
-      const numeric = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
-      if (!Number.isSafeInteger(numeric) || numeric < integerRange[0] || numeric > integerRange[1]) {
-        return t("settings.invalidInteger");
-      }
-    }
-    if (path.endsWith(".context_window")) {
-      const numeric = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
-      if (!Number.isSafeInteger(numeric) || numeric < 1024 || numeric > 10_000_000) {
-        return t("settings.invalidInteger");
-      }
-    }
-    if (path.endsWith(".max_output")) {
-      const numeric = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
-      if (!Number.isSafeInteger(numeric) || numeric < 1 || numeric > 9_999_999) {
-        return t("settings.invalidInteger");
-      }
-    }
-    if (path.endsWith(".timeout") || path.endsWith(".connect_timeout") || path.endsWith(".call_timeout")) {
-      const numeric = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
-      if (!Number.isSafeInteger(numeric) || numeric < 1 || numeric > 600) {
-        return t("settings.invalidInteger");
-      }
-    }
-    if (path.endsWith(".temperature")) {
-      const numeric = typeof value === "string" ? Number(value) : NaN;
-      if (!Number.isFinite(numeric) || numeric < 0 || numeric > 2) {
-        return t("settings.invalidValue");
-      }
-    }
-    if (path.endsWith(".api_key.value") || path.endsWith(".headers.value")) {
-      if (typeof value !== "string" || value.length === 0) return t("settings.secretRequired");
-    }
-    if (path.endsWith(".url") && typeof value === "string" && value.trim() !== "") {
-      try {
-        const url = new URL(value);
-        if (url.protocol !== "http:" && url.protocol !== "https:") return t("settings.invalidUrl");
-      } catch {
-        return t("settings.invalidUrl");
-      }
-    }
-    if (path === "runtime.compact_ratio") {
-      const numeric = typeof value === "string" ? Number(value) : NaN;
-      if (!Number.isFinite(numeric) || numeric < 0.5 || numeric > 0.95) {
-        return t("settings.invalidRatio");
-      }
-    }
-    if (path === "memory.schedule") {
-      if (typeof value !== "string" || value.trim().split(/\s+/).length !== 5) {
-        return t("settings.invalidSchedule");
-      }
-    }
-    return null;
-  }, [t]);
-
   const updateField = useCallback((path: string, value: string | boolean) => {
+    const current = draftRef.current;
+    if (current === null) return;
+    const [section, field] = path.split(".");
+    if (section !== "runtime" && section !== "memory" && section !== "web") return;
+    if (section === "web" && typeof value !== "string") return;
+    const next = {
+      ...current,
+      [section]: { ...current[section], [field]: value },
+    } as SettingsForm;
+    dirtySectionsRef.current.add(section);
+    draftRef.current = next;
     dirtyRef.current = true;
-    setDraft((current) => {
-      if (current === null) return current;
-      const [section, field] = path.split(".");
-      if (section !== "runtime" && section !== "memory" && section !== "web") return current;
-      if (section === "web" && typeof value !== "string") return current;
-      return {
-        ...current,
-        [section]: { ...current[section], [field]: value },
-      } as SettingsForm;
-    });
+    setDraft(next);
     setDirty(true);
     setSaveFailed(false);
     setNotice(null);
-    if (conflictPathsRef.current.length === 0) setSubmitError(null);
-  }, []);
+    const hasErrorsOutsideSection = Object.keys(fieldErrors).some((errorPath) => errorPath.split(".")[0] !== section);
+    if (conflictPathsRef.current.length === 0 && !hasErrorsOutsideSection) setSubmitError(null);
+  }, [fieldErrors]);
 
   const updateDraft = useCallback((update: (current: SettingsForm) => SettingsForm) => {
+    const current = draftRef.current;
+    if (current === null) return;
+    const next = update(current);
+    const changedSections: ConfigSettingsSection[] = [];
+    for (const section of ["runtime", "memory", "web", "models", "mcp"] as const) {
+      if (!sameSettingsValue(current[section], next[section])) {
+        dirtySectionsRef.current.add(section);
+        changedSections.push(section);
+      }
+    }
+    draftRef.current = next;
     dirtyRef.current = true;
-    setDraft((current) => current === null ? current : update(current));
+    setDraft(next);
     setDirty(true);
     setSaveFailed(false);
     setNotice(null);
-    if (conflictPathsRef.current.length === 0) setSubmitError(null);
-  }, []);
-
-  const enqueueSave = useCallback((section: PersistedSettingsSection) => {
-    if (!pendingSectionsRef.current.includes(section)) {
-      pendingSectionsRef.current.push(section);
-    }
-    setSaveQueueVersion((version) => version + 1);
-  }, []);
+    const hasErrorsOutsideChangedSections = Object.keys(fieldErrors).some((errorPath) => (
+      !changedSections.includes(errorPath.split(".")[0] as ConfigSettingsSection)
+    ));
+    if (conflictPathsRef.current.length === 0 && !hasErrorsOutsideChangedSections) setSubmitError(null);
+  }, [fieldErrors]);
 
   const updateProvider = useCallback((id: string, update: Partial<ProviderForm>) => {
     updateDraft((current) => ({
@@ -2081,306 +2022,208 @@ function SettingsView({
     updateMcp(serverId, { headers });
   }, [updateMcp]);
 
-  const validateAll = useCallback((current: SettingsForm): SettingsFieldError => {
-    const values: Record<string, string | boolean> = {
-      "runtime.max_tool_result_chars": current.runtime.max_tool_result_chars,
-      "runtime.max_iterations": current.runtime.max_iterations,
-      "runtime.enable_skill_always_load": current.runtime.enable_skill_always_load,
-      "runtime.compact_ratio": current.runtime.compact_ratio,
-      "runtime.permission_level": current.runtime.permission_level,
-      "runtime.exec_shell": current.runtime.exec_shell,
-      "memory.batch_size": current.memory.batch_size,
-      "memory.schedule": current.memory.schedule,
-      "web.default_chat_workspace": current.web.default_chat_workspace,
-    };
-    const errors: SettingsFieldError = {};
-    for (const [path, value] of Object.entries(values)) {
-      const error = validateField(path, value);
-      if (error !== null) errors[path] = error;
-    }
-    for (const [providerRow, provider] of Object.entries(current.models.providers)) {
-      const providerPath = `models.providers.${provider.id}`;
-      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(provider.id)) {
-        errors[`models.providers.${providerRow}.id`] = t("settings.invalidProviderId");
-      }
-      if (Object.values(current.models.providers).filter((entry) => entry.id === provider.id).length !== 1) errors[`models.providers.${providerRow}.id`] = t("settings.invalidProviderId");
-      if (provider.models.some((model) => !model || model !== model.trim()) || new Set(provider.models).size !== provider.models.length) errors[`${providerPath}.models`] = t("settings.invalidValue");
-      for (const [model, contextWindow] of Object.entries(provider.model_context_windows)) {
-        if (!provider.models.includes(model)) continue;
-        const path = `${providerPath}.model_context_windows.${model}`;
-        const error = validateField(path, contextWindow);
-        if (error !== null) {
-          errors[path] = error;
-          continue;
-        }
-        if (contextWindow === "") continue;
-        const numeric = Number(contextWindow);
-        if (Object.values(current.models.routes).some((route) => (
-          route.provider_id === provider.id
-          && route.model === model
-          && Number.isSafeInteger(Number(route.max_output))
-          && numeric <= Number(route.max_output)
-        ))) errors[path] = t("settings.contextWindowMustExceedOutput");
-      }
-      const baseError = validateField(`${providerPath}.url`, provider.base_url);
-      if (baseError || !provider.base_url) errors[`${providerPath}.base_url`] = baseError ?? t("settings.required");
-      if (provider.api_key.action === "replace" && provider.api_key.value.length === 0) {
-        errors[`${providerPath}.api_key.value`] = t("settings.secretRequired");
-      }
-    }
-    for (const route of Object.values(current.models.routes)) {
-      const routePath = `models.routes.${route.name}`;
-      for (const field of ["context_window", "max_output", "temperature", "timeout"] as const) {
-        const error = validateField(`${routePath}.${field}`, route[field]);
-        if (error !== null) errors[`${routePath}.${field}`] = error;
-      }
-      if (!route.provider_id.trim()) errors[`${routePath}.provider_id`] = t("settings.required");
-      if (!route.model.trim()) errors[`${routePath}.model`] = t("settings.required");
-    }
-    for (const [serverRow, server] of Object.entries(current.mcp)) {
-      const serverPath = `mcp.${server.name}`;
-      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(server.name)) {
-        errors[`mcp.${serverRow}.name`] = t("settings.invalidServerName");
-      }
-      for (const field of ["connect_timeout", "call_timeout"] as const) {
-        const error = validateField(`${serverPath}.${field}`, server[field]);
-        if (error !== null) errors[`${serverPath}.${field}`] = error;
-      }
-      if (server.transport === "stdio" && !server.command.trim()) {
-        errors[`${serverPath}.command`] = t("settings.required");
-      }
-      if (server.transport === "streamable-http") {
-        const error = validateField(`${serverPath}.url`, server.url);
-        if (error !== null) errors[`${serverPath}.url`] = error;
-        else if (!server.url.trim()) errors[`${serverPath}.url`] = t("settings.required");
-      }
-      if (Object.values(current.mcp).filter((entry) => entry.name === server.name).length !== 1) errors[`mcp.${serverRow}.name`] = t("settings.invalidServerName");
-      const toolNames = server.tool_keywords.map((tool) => tool.name);
-      if (new Set(toolNames).size !== toolNames.length || toolNames.some((name) => !name)) errors[`${serverPath}.tool_keywords`] = t("settings.invalidValue");
-      if (server.transport !== "streamable-http") continue;
-      const headerNames = Object.values(server.headers).map((secret) => secret.name);
-      if (new Set(headerNames).size !== headerNames.length) errors[`${serverPath}.headers`] = t("settings.invalidIdentifier");
-      for (const [header, secret] of Object.entries(server.headers)) {
-        if (!secret.name || secret.name !== secret.name.trim()) errors[`${serverPath}.headers`] = t("settings.required");
-        if (secret.action === "replace" && secret.value.length === 0) {
-          errors[`${serverPath}.headers.${header}.value`] = t("settings.secretRequired");
-        }
-      }
-    }
-    return errors;
-  }, [t, validateField]);
-
-  const blurField = useCallback((path: string, value: string | boolean) => {
-    const error = validateField(path, value);
-    setFieldErrors((current) => {
-      const next = { ...current };
-      if (error === null) delete next[path];
-      else next[path] = error;
-      return next;
-    });
-  }, [validateField]);
-
-  useEffect(() => {
-    if (
-      authState !== "ready"
-      || connectionState !== "online"
-      || mutationInFlight.current
-      || (unresolvedSaveRef.current !== null && saveFailed)
-      || pendingSectionsRef.current.length === 0
-    ) return;
-
-    let section = pendingSectionsRef.current.shift()!;
-    const unresolved = unresolvedSaveRef.current;
-    const retryIncludesCompletedEdit = unresolved !== null
-      && unresolved.section === section
-      && !sameSettingsValue(draftRef.current?.[section], unresolved.snapshot[section]);
-    if (unresolved !== null && unresolved.section !== section) {
-      pendingSectionsRef.current.unshift(section);
-      section = unresolved.section;
-    }
-    setSaveQueueVersion((version) => version + 1);
-    const snapshot = unresolved?.snapshot ?? draftRef.current;
-    const base = unresolved?.base ?? savedFormRef.current;
-    const revision = unresolved?.revision ?? draftRevisionRef.current;
-    if (snapshot === null || base === null || revision === null) return;
-    if (conflictPathsRef.current.some((path) => settingsSectionForPath(path) === section)) return;
-    const repairing = response?.configuration.repair_required === true;
-    if (unresolved === null && !repairing && !settingsSectionChanged(snapshot, base, section)) return;
-
-    const allErrors = validateAll(snapshot);
-    const validationErrors = Object.fromEntries(Object.entries(allErrors).filter(([path]) => (
-      repairing || settingsSectionForPath(path) === section
-    )));
-    setFieldErrors((current) => {
-      const next = { ...current };
-      for (const path of Object.keys(next)) {
-        if (repairing || settingsSectionForPath(path) === section) delete next[path];
-      }
-      return { ...next, ...validationErrors };
-    });
-    if (unresolved === null && Object.keys(validationErrors).length > 0) {
-      setSaveFailed(true);
-      setSubmitError(t("settings.validationSummary"));
+  const saveDraft = useCallback(async (
+    overwriteConflicts = false,
+    focusError = false,
+    autoSection?: ConfigSettingsSection | null,
+  ) => {
+    if (authState !== "ready" || connectionState !== "online") {
       return;
     }
+    const pending = focusError && saveFailed ? retryOperationRef.current : null;
+    if (saveFailed && !focusError && pending === null) {
+      return;
+    }
+    focusErrorSummaryRef.current = focusError;
+    const snapshot = pending?.snapshot ?? draftRef.current;
+    const baseline = pending?.baseline ?? baselineFieldsRef.current;
+    const baselineSecrets = pending?.baselineSecrets ?? baselineSecretRevisionsRef.current;
+    const revision = pending?.revision ?? draftRevisionRef.current;
+    if (snapshot === null || baseline === null || baselineSecrets === null || revision === null) return;
+    const fullCandidate = pending === null ? configFromForm(snapshot) : null;
+    const allChangedSections = fullCandidate === null
+      ? []
+      : settingsSectionsForChanges(baseline, fullCandidate.fields, fullCandidate.secrets);
+    const repairing = pending?.repairing ?? response?.configuration.repair_required === true;
+    const sections = pending?.sections ?? (repairing
+      ? ["runtime", "memory", "web", "models", "mcp"]
+      : focusError
+        ? allChangedSections
+        : autoSection === undefined
+          ? [...dirtySectionsRef.current]
+          : autoSection === null
+            ? []
+            : allChangedSections.filter((section) => section === autoSection));
+    const candidate = pending === null
+      ? {
+        fields: configFieldsForSections(fullCandidate?.fields ?? {}, sections),
+        secrets: configSecretsForSections(fullCandidate?.secrets ?? {}, sections),
+      }
+      : { fields: pending.fields, secrets: pending.secrets };
+    const incompleteReplacement = (sections.includes("models") && Object.values(snapshot.models.providers).some((provider) => (
+      provider.api_key.action === "replace" && provider.api_key.value.length === 0
+    ))) || (sections.includes("mcp") && Object.values(snapshot.mcp).some((server) => Object.values(server.headers).some((header) => (
+      header.action === "replace" && header.value.length === 0
+    ))));
+    if (incompleteReplacement && !focusError) return;
+    const changedPaths = fullCandidate === null ? [] : changedConfigFieldPaths(baseline, fullCandidate.fields);
+    const hasFieldChanges = pending === null
+      ? changedPaths.some(([section]) => sections.includes(section as ConfigSettingsSection))
+      : Object.keys(candidate.fields).length > 0;
+    const hasSecretChanges = Object.values(candidate.secrets).some(({ action }) => action !== "keep");
+    if (!repairing && !hasFieldChanges && !hasSecretChanges) {
+      return;
+    }
+    const inFlight = retryOperationRef.current;
+    if (mutationInFlight.current && inFlight !== null
+      && sameSettingsValue(inFlight.snapshot, snapshot)
+      && sameSettingsValue(inFlight.sections, sections)) return;
 
-    const sectionPatch = configPatchForSection(snapshot, section);
-    const fullConfig = repairing ? configFromForm(snapshot) : null;
-    const pendingRequest = unresolved ?? {
-      requestId: createRequestId(), revision, section, snapshot, base, repairing,
-      fields: fullConfig?.fields ?? sectionPatch.fields,
-      secrets: fullConfig?.secrets ?? sectionPatch.secrets,
-    };
-    unresolvedSaveRef.current = pendingRequest;
     requestSequence.current += 1;
     const sequence = ++mutationSequence.current;
+    const operation = pending ?? {
+      requestId: createRequestId(),
+      editSequence: requestSequence.current,
+      revision,
+      snapshot,
+      baseline,
+      baselineSecrets,
+      fields: candidate.fields,
+      secrets: candidate.secrets,
+      sections,
+      overwriteConflicts,
+      repairing,
+    };
+    retryOperationRef.current = operation;
     mutationInFlight.current = true;
     setSaving(true);
     setSaveFailed(false);
     setNotice(null);
-    if (conflictPathsRef.current.length === 0) setSubmitError(null);
+    const hasUnsubmittedFieldErrors = Object.keys(fieldErrors).some((path) => (
+      !sections.includes(path.split(".")[0] as ConfigSettingsSection)
+    ));
+    if (!overwriteConflicts && !hasUnsubmittedFieldErrors && conflictPathsRef.current.length === 0) {
+      setSubmitError(null);
+    }
 
-    void (async () => {
-      try {
-        const next = pendingRequest.repairing
-          ? await repairConfig(revision, pendingRequest.fields, pendingRequest.secrets, pendingRequest.requestId)
-          : await patchConfig(revision, pendingRequest.fields, pendingRequest.secrets, pendingRequest.requestId);
-        if (mutationSequence.current !== sequence) return;
+    try {
+      const options = {
+        baseline: operation.baseline,
+        baselineSecrets: operation.baselineSecrets,
+        overwriteConflicts: operation.overwriteConflicts,
+        editorId: editorIdRef.current,
+        editSequence: operation.editSequence,
+      };
+      const next = operation.repairing
+        ? await repairConfig(operation.revision, operation.fields, operation.secrets, operation.requestId, options)
+        : await patchConfig(operation.revision, operation.fields, operation.secrets, operation.requestId, options);
+      if (mutationSequence.current !== sequence) return;
 
-        unresolvedSaveRef.current = null;
-        const latestLocal = draftRef.current ?? snapshot;
-        if (retryIncludesCompletedEdit) {
-          enqueueSave(section);
-        }
-        const remote = formFromConfig(next.fields, sameSettingsValue(latestLocal, snapshot) ? null : snapshot);
-        const mergeConflicts: string[] = [];
-        const mergeBase = pendingRequest.repairing ? snapshot : { ...base, [section]: snapshot[section] };
-        const merged = mergeSettingsDraft(mergeBase, latestLocal, remote, mergeConflicts, {
-          sent: snapshot,
-          savingSection: section,
-        }) as SettingsForm;
-        const nextConflicts = [...new Set([...conflictPathsRef.current, ...mergeConflicts])];
-        setResponse(next);
-        savedFormRef.current = remote;
-        draftRevisionRef.current = next.revision;
-        draftRef.current = merged;
-        setDraft(merged);
-        const stillDirty = !sameSettingsValue(merged, remote);
-        dirtyRef.current = stillDirty;
-        setDirty(stillDirty);
-        conflictPathsRef.current = nextConflicts;
-        setConflictedPaths(nextConflicts);
-        setFieldErrors((current) => {
-          const nextErrors = { ...current };
-          for (const path of Object.keys(nextErrors)) {
-            if (settingsSectionForPath(path) === section) delete nextErrors[path];
-          }
-          for (const path of mergeConflicts) nextErrors[path] = t("settings.conflictField");
-          return nextErrors;
-        });
-        if (nextConflicts.length > 0) {
-          setSaveFailed(true);
-          setSubmitError(t("settings.conflict"));
-        } else if (Object.keys(validateAll(merged)).some((path) => settingsSectionForPath(path) !== section)) {
-          setSaveFailed(true);
-          setSubmitError(t("settings.validationSummary"));
-        } else {
-          setSaveFailed(false);
-          setSubmitError(null);
-        }
-        setNotice(next.application.restart_required ? t("settings.restartRequired") : t("settings.saved"));
-      } catch (error) {
-        if (mutationSequence.current !== sequence) return;
-        if (error instanceof ApiError && error.body !== null) unresolvedSaveRef.current = null;
-        if (error instanceof ApiError && error.body?.code === "config_revision_conflict") {
-          try {
-            const latest = await getConfig();
-            if (mutationSequence.current !== sequence) return;
-            const remote = formFromConfig(latest.fields, base);
-            const latestLocal = draftRef.current ?? snapshot;
-            const mergeConflicts: string[] = [];
-            const merged = mergeSettingsDraft(
-              savedFormRef.current ?? base,
-              latestLocal,
-              remote,
-              mergeConflicts,
-              { conflictOnSecret: true },
-            ) as SettingsForm;
-            const nextConflicts = [...new Set([...conflictPathsRef.current, ...mergeConflicts])];
-            const retryThisSection = sameSettingsValue(latestLocal[section], snapshot[section])
-              || pendingSectionsRef.current.includes(section);
-            pendingSectionsRef.current = pendingSectionsRef.current.filter((queued) => (
-              !nextConflicts.some((path) => settingsSectionForPath(path) === queued)
-            ));
-            if (
-              nextConflicts.length === 0
-              && retryThisSection
-              && settingsSectionChanged(merged, remote, section)
-            ) {
-              pendingSectionsRef.current.unshift(section);
-            }
-            setResponse(latest);
-            savedFormRef.current = remote;
-            draftRevisionRef.current = latest.revision;
-            draftRef.current = merged;
-            setDraft(merged);
-            const stillDirty = !sameSettingsValue(merged, remote);
-            dirtyRef.current = stillDirty;
-            setDirty(stillDirty);
-            conflictPathsRef.current = nextConflicts;
-            setConflictedPaths(nextConflicts);
-            setFieldErrors((current) => {
-              const nextErrors = { ...current };
-              for (const path of Object.keys(nextErrors)) {
-                if (settingsSectionForPath(path) === section) delete nextErrors[path];
-              }
-              for (const path of nextConflicts) nextErrors[path] = t("settings.conflictField");
-              return nextErrors;
-            });
-            setSaveFailed(nextConflicts.length > 0);
-            setSubmitError(nextConflicts.length > 0 ? t("settings.conflict") : null);
-            setNotice(null);
-          } catch (reloadError) {
-            if (mutationSequence.current === sequence) {
-              setSaveFailed(true);
-              setSubmitError(reloadError instanceof ApiError ? reloadError.message : t("settings.unavailable"));
-            }
-          }
-        } else if (error instanceof ApiError && error.body !== null) {
-          const serverErrors = Object.fromEntries(Object.keys(error.body.field_errors).map((path) => [
-            path,
-            t(path === "memory.schedule" ? "settings.invalidSchedule"
-              : path === "runtime.compact_ratio" ? "settings.invalidRatio" : "settings.invalidValue"),
-          ]));
-          setFieldErrors((current) => ({ ...current, ...serverErrors }));
-          setSaveFailed(true);
-          setSubmitError(error.body.code === "config_invalid" ? t("settings.validationSummary")
-            : error.body.code === "persistence_error" ? t("settings.persistenceFailed") : error.body.message);
-        } else {
-          setSaveFailed(true);
-          setSubmitError(t("settings.unavailable"));
-        }
-      } finally {
-        if (mutationSequence.current === sequence) {
-          mutationInFlight.current = false;
-          setSaving(false);
-          setSaveQueueVersion((version) => version + 1);
+      retryOperationRef.current = null;
+      setResponse(next);
+      draftRevisionRef.current = next.revision;
+      const latestDraft = draftRef.current ?? snapshot;
+      const savedDraft = formFromConfig(next.fields, snapshot);
+      for (const section of ["runtime", "memory", "web", "models", "mcp"] as const) {
+        if (!operation.sections.includes(section)) {
+          Object.assign(savedDraft, { [section]: latestDraft[section] });
         }
       }
-    })();
-  }, [authState, connectionState, response?.configuration.repair_required, saveFailed, saveQueueVersion, t, validateAll, enqueueSave]);
+      const preservedDraft = preserveSettingsInput(snapshot, latestDraft, savedDraft) as SettingsForm;
+      draftRef.current = preservedDraft;
+      setDraft(preservedDraft);
+      baselineFieldsRef.current = next.fields;
+      baselineSecretRevisionsRef.current = next.secret_revisions;
+      const remainingCandidate = configFromForm(preservedDraft);
+      dirtySectionsRef.current = new Set(settingsSectionsForChanges(
+        next.fields,
+        remainingCandidate.fields,
+        remainingCandidate.secrets,
+      ));
+      const isSubmittedPath = (path: string) => operation.sections.includes(path.split(".")[0] as ConfigSettingsSection);
+      setFieldErrors((current) => Object.fromEntries(Object.entries(current).filter(([path]) => !isSubmittedPath(path))));
+      conflictPathsRef.current = conflictPathsRef.current.filter((path) => !isSubmittedPath(path));
+      setConflictedPaths(conflictPathsRef.current);
+      const hasRemainingConflicts = conflictPathsRef.current.length > 0;
+      const hasRemainingFieldErrors = Object.keys(fieldErrors).some((path) => !isSubmittedPath(path));
+      if (!hasRemainingConflicts && !hasRemainingFieldErrors) setSubmitError(null);
+      setSaveFailed(hasRemainingConflicts);
+      const hasRemainingChanges = dirtySectionsRef.current.size > 0;
+      dirtyRef.current = hasRemainingChanges;
+      setDirty(hasRemainingChanges);
+      setNotice(next.application.restart_required ? t("settings.restartRequired") : t("settings.saved"));
+    } catch (error) {
+      if (mutationSequence.current !== sequence) return;
+      if (error instanceof ApiError && error.body !== null) {
+        retryOperationRef.current = null;
+        const conflict = error.body.code === "config_revision_conflict";
+        const serverPaths = Object.keys(error.body.field_errors);
+        const errors = Object.fromEntries(serverPaths.map((path) => [
+          path,
+          conflict
+            ? t("settings.conflictField")
+            : t(path === "memory.schedule" ? "settings.invalidSchedule"
+              : path === "runtime.compact_ratio" ? "settings.invalidRatio" : "settings.invalidValue"),
+        ]));
+        const isSubmittedPath = (path: string) => operation.sections.includes(path.split(".")[0] as ConfigSettingsSection);
+        setFieldErrors((current) => ({
+          ...Object.fromEntries(Object.entries(current).filter(([path]) => !isSubmittedPath(path))),
+          ...errors,
+        }));
+        const retainedConflicts = conflictPathsRef.current.filter((path) => !isSubmittedPath(path));
+        const paths = conflict
+          ? [...new Set([...retainedConflicts, ...(serverPaths.length > 0 ? serverPaths : ["configuration"])])]
+          : retainedConflicts;
+        conflictPathsRef.current = paths;
+        setConflictedPaths(paths);
+        if (conflict) {
+          try {
+            setResponse(await getConfig());
+          } catch {
+            // Keep the draft and original conflict if the refresh is unavailable.
+          }
+        }
+        setSaveFailed(true);
+        setSubmitError(conflict
+          ? t("settings.conflict")
+          : error.body.code === "config_invalid" ? t("settings.validationSummary")
+            : error.body.code === "persistence_error" ? t("settings.persistenceFailed") : error.body.message);
+      } else {
+        setSaveFailed(true);
+        setSubmitError(error instanceof ApiError ? error.message : t("settings.unavailable"));
+      }
+      setNotice(null);
+    } finally {
+      if (mutationSequence.current === sequence) {
+        mutationInFlight.current = false;
+        setSaving(false);
+      }
+    }
+  }, [authState, connectionState, fieldErrors, response?.configuration.repair_required, saveFailed, t]);
+
+  const blurField = useCallback((path: string, value: string | boolean) => {
+    void value;
+    setFieldErrors((current) => {
+      const next = { ...current };
+      delete next[path];
+      return next;
+    });
+    const section = path.split(".")[0] as ConfigSettingsSection;
+    void saveDraft(false, false, section);
+  }, [saveDraft]);
 
   const reloadSaved = async () => {
-    if (saving || connectionState !== "online") return;
+    if (saving || mutationInFlight.current || connectionState !== "online") return;
     const sequence = ++mutationSequence.current;
     setSaving(true);
     mutationInFlight.current = true;
     try {
       const next = await getConfig();
       if (mutationSequence.current !== sequence) return;
-      unresolvedSaveRef.current = null;
-      pendingSectionsRef.current = [];
+      retryOperationRef.current = null;
       dirtyRef.current = false;
+      setDirty(false);
+      dirtySectionsRef.current.clear();
       applyResponse(next);
       setFieldErrors({});
       setSubmitError(null);
@@ -2397,38 +2240,23 @@ function SettingsView({
       if (mutationSequence.current === sequence) {
         mutationInFlight.current = false;
         setSaving(false);
-        setSaveQueueVersion((version) => version + 1);
       }
     }
   };
 
   const keepLocalChanges = () => {
-    const sections = [...new Set(conflictPathsRef.current.map(settingsSectionForPath).filter(
-      (section): section is PersistedSettingsSection => section !== null,
-    ))];
     conflictPathsRef.current = [];
     setConflictedPaths([]);
-    setFieldErrors((current) => Object.fromEntries(Object.entries(current).filter(([path]) => (
-      !sections.some((section) => settingsSectionForPath(path) === section)
-    ))));
+    setFieldErrors({});
     setSubmitError(null);
     setSaveFailed(false);
-    for (const section of sections) enqueueSave(section);
+    void saveDraft(true, true);
   };
 
   const retryPendingChanges = () => {
-    const current = draftRef.current;
-    const saved = savedFormRef.current;
-    if (current === null || saved === null) return;
     setSaveFailed(false);
     setSubmitError(null);
-    if (unresolvedSaveRef.current !== null) enqueueSave(unresolvedSaveRef.current.section);
-    for (const section of PERSISTED_SETTINGS_SECTIONS) {
-      if (
-        settingsSectionChanged(current, saved, section)
-        && !conflictPathsRef.current.some((path) => settingsSectionForPath(path) === section)
-      ) enqueueSave(section);
-    }
+    void saveDraft(conflictPathsRef.current.length > 0, true);
   };
 
   const errorEntries = Object.entries(fieldErrors);
@@ -2436,23 +2264,29 @@ function SettingsView({
   const captureSettingsBlur = (event?: React.FocusEvent<HTMLFormElement>) => {
     if (event !== undefined && !(event.target instanceof HTMLInputElement
       || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement)) return;
-    if (activeSection === "general") {
-      if (event?.target instanceof HTMLInputElement
-        && event.target.id === fieldId("web.default_chat_workspace")) enqueueSave("web");
-      return;
+    if (event?.target instanceof HTMLSelectElement
+      && event.target.id.endsWith("-action") && event.target.value === "replace") {
+      const value = document.getElementById(event.target.id.replace(/-action$/, "-value"));
+      if (!(value instanceof HTMLInputElement) || value.value.length === 0) return;
     }
-    enqueueSave(activeSection);
+    void saveDraft(false, false, activeSection === "general" ? null : activeSection);
   };
   const captureSettingsChange = (event: React.FormEvent<HTMLFormElement>) => {
     const target = event.target;
+    if (target instanceof HTMLSelectElement && target.id.endsWith("-action") && target.value === "replace") return;
+    if (target instanceof HTMLSelectElement && target.id.endsWith("-transport") && target.value === "streamable-http") return;
     if (
       target instanceof HTMLSelectElement
       || (target instanceof HTMLInputElement && (target.type === "checkbox" || target.type === "radio"))
-    ) captureSettingsBlur();
+    ) window.setTimeout(() => void saveDraft(false, false, activeSection === "general" ? null : activeSection), 0);
   };
   const captureSettingsClick = (event: React.MouseEvent<HTMLFormElement>) => {
-    if (event.target instanceof Element && event.target.closest("button") !== null
-      && event.target.closest("nav") === null) captureSettingsBlur();
+    if (!(event.target instanceof Element)) return;
+    const button = event.target.closest("button");
+    if (button === null || button.closest("nav") !== null) return;
+    const label = (button.getAttribute("aria-label") ?? button.textContent ?? "").trim();
+    if (/^(?:add|添加)(?:\s|$)/i.test(label)) return;
+    window.setTimeout(() => void saveDraft(false, false, activeSection === "general" ? null : activeSection), 0);
   };
   const canAddRoute = draft !== null && (["default", "chat", "memory", "schedule"] as const).some(
     (name) => draft.models.routes[name] === undefined,
@@ -2478,9 +2312,10 @@ function SettingsView({
   const fieldError = (path: string) => fieldErrors[path];
   const groupError = (prefix: string) => Object.entries(fieldErrors).find(([path]) => path === prefix || path.startsWith(`${prefix}.`))?.[1];
   const focusError = (path: string, switchSection = true) => {
-    const fieldSection = settingsSectionForPath(path);
-    const section = fieldSection === "web" ? "general" : fieldSection;
-    if (switchSection && section !== null && section !== activeSection) {
+    const section = path.startsWith("web.")
+      ? "general"
+      : (["models", "runtime", "memory", "mcp"] as const).find((candidate) => path.startsWith(`${candidate}.`));
+    if (switchSection && section !== undefined && section !== activeSection) {
       setActiveSection(section);
       window.setTimeout(() => focusError(path, false), 0);
       return;
@@ -2527,14 +2362,14 @@ function SettingsView({
 
   const settingsStatusState = saveFailed
     ? "error"
-    : saving || pendingSectionsRef.current.length > 0
+    : saving
       ? "saving"
       : dirty
         ? "unsaved"
         : response?.application.status;
   const settingsStatusLabel = saveFailed
     ? t("settings.saveFailed")
-    : saving || pendingSectionsRef.current.length > 0
+    : saving
       ? t("settings.saving")
       : dirty
         ? t("settings.unsaved")
@@ -2578,11 +2413,16 @@ function SettingsView({
             <h1 id="settings-title">{t("settings.title")}</h1>
             <p className={styles.pageDescription}>{t("settings.description")}</p>
           </div>
+          {dirty && !saving && !saveFailed ? (
+            <button className={styles.secondaryButton} type="button" onClick={() => void saveDraft(false, true)} disabled={controlDisabled}>
+              {t("settings.saveChanges")}
+            </button>
+          ) : null}
           {response !== null ? (
             <div className={styles.settingsStatus} data-state={settingsStatusState} role="status" aria-live="polite">
               {saveFailed
                 ? <CircleAlert size={15} aria-hidden="true" />
-                : saving || pendingSectionsRef.current.length > 0
+                : saving
                   ? <RefreshCw size={15} className={styles.spin} aria-hidden="true" />
                   : response.application.status === "active"
                     ? <CircleCheck size={15} aria-hidden="true" />

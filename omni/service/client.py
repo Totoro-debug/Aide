@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import inspect
+import os
 import secrets
 import socket
 import subprocess
@@ -345,6 +346,8 @@ class ServiceClient:
         self.reconnect_credential = reconnect_credential
         self.workspace_id = ""
         self.session_id = ""
+        self._previous_workspace_id: str | None = None
+        self._previous_session_id: str | None = None
         self.claim_version = 0
         self.claim_credential = ""
         self._socket: aiohttp.ClientWebSocketResponse | None = None
@@ -371,10 +374,25 @@ class ServiceClient:
         agent_home: AgentHome,
         workspace: Path,
         *,
-        port: int = DEFAULT_SERVICE_PORT,
+        port: int | None = None,
         reconnect_credential: str | None = None,
         attach_workspace: bool = True,
     ) -> ServiceClient:
+        if port is None:
+            configured_port = os.environ.get("OMNI_SERVICE_PORT")
+            if configured_port is not None:
+                try:
+                    port = int(configured_port)
+                except ValueError:
+                    raise ServiceStartupError(
+                        "service_port_invalid", "The configured local service port is invalid."
+                    ) from None
+            else:
+                port = DEFAULT_SERVICE_PORT
+        if not 1 <= port <= 65535:
+            raise ServiceStartupError(
+                "service_port_invalid", "The configured local service port is invalid."
+            )
         agent_home.initialize()
         if attach_workspace:
             workspace = workspace.resolve(strict=True)
@@ -485,50 +503,17 @@ class ServiceClient:
                 client_id=client_id,
                 reconnect_credential=new_reconnect,
             )
-            if not attach_workspace:
-                return client
             previous_workspace_id = client_data.get("current_workspace_id")
             previous_session_id = client_data.get("current_session_id")
-            attached = await client._http_request(
-                "POST",
-                "/api/v1/workspaces/attach",
-                payload={"request_id": str(uuid4()), "path": str(workspace)},
-                mutation=True,
+            client._previous_workspace_id = (
+                previous_workspace_id if isinstance(previous_workspace_id, str) else None
             )
-            client.workspace_id = _require_string(attached, "workspace_id")
-            if (
-                isinstance(previous_workspace_id, str)
-                and previous_workspace_id == client.workspace_id
-                and isinstance(previous_session_id, str)
-                and previous_session_id
-            ):
-                client.session_id = previous_session_id
-            else:
-                draft = await client._http_request(
-                    "POST",
-                    f"/api/v1/workspaces/{client.workspace_id}/sessions",
-                    payload={"request_id": str(uuid4())},
-                    mutation=True,
-                )
-                client.session_id = _require_string(draft, "session_id")
-            await client._open_socket()
-            claim = await client._command(
-                "claim",
-                workspace_id=client.workspace_id,
-                session_id=client.session_id,
-                claim_version=None,
-                payload={},
+            client._previous_session_id = (
+                previous_session_id if isinstance(previous_session_id, str) else None
             )
-            claim_data = claim.get("claim")
-            snapshot = claim.get("snapshot")
-            if not isinstance(claim_data, dict) or not isinstance(snapshot, dict):
-                raise ServiceStartupError(
-                    "service_protocol_error", "Service claim response is invalid."
-                )
-            client.claim_version = _require_int(claim_data, "claim_version")
-            client.claim_credential = _require_string(claim_data, "reconnect_credential")
-            client.control.set_projection(_projection(snapshot))
-            await client._apply_snapshot(snapshot)
+            if not attach_workspace:
+                return client
+            await client.attach_workspace(workspace)
             return client
         except BaseException:
             if client is None:
@@ -536,6 +521,62 @@ class ServiceClient:
             else:
                 await client.close()
             raise
+
+    async def get_config(self) -> dict[str, object]:
+        """Read the Service-owned saved and active configuration projection."""
+        return await self._http_request("GET", "/api/v1/config")
+
+    async def get_config_text(self) -> dict[str, object]:
+        """Read the Service-owned redacted text view for the CLI command."""
+        return await self._http_request("GET", "/api/v1/config/text")
+
+    async def get_startup_config(self) -> dict[str, object]:
+        """Read Service startup eligibility and safe diagnostics."""
+        return await self._http_request("GET", "/api/v1/config/startup")
+
+    async def attach_workspace(self, workspace: Path) -> None:
+        """Attach, open, and claim a Workspace after startup eligibility is checked."""
+        if self.workspace_id:
+            raise ServiceStartupError("workspace_already_attached", "A Workspace is already attached.")
+        workspace = workspace.resolve(strict=True)
+        attached = await self._http_request(
+            "POST",
+            "/api/v1/workspaces/attach",
+            payload={"request_id": str(uuid4()), "path": str(workspace)},
+            mutation=True,
+        )
+        self.workspace_id = _require_string(attached, "workspace_id")
+        if (
+            self._previous_workspace_id == self.workspace_id
+            and self._previous_session_id
+        ):
+            self.session_id = self._previous_session_id
+        else:
+            draft = await self._http_request(
+                "POST",
+                f"/api/v1/workspaces/{self.workspace_id}/sessions",
+                payload={"request_id": str(uuid4())},
+                mutation=True,
+            )
+            self.session_id = _require_string(draft, "session_id")
+        await self._open_socket()
+        claim = await self._command(
+            "claim",
+            workspace_id=self.workspace_id,
+            session_id=self.session_id,
+            claim_version=None,
+            payload={},
+        )
+        claim_data = claim.get("claim")
+        snapshot = claim.get("snapshot")
+        if not isinstance(claim_data, dict) or not isinstance(snapshot, dict):
+            raise ServiceStartupError(
+                "service_protocol_error", "Service claim response is invalid."
+            )
+        self.claim_version = _require_int(claim_data, "claim_version")
+        self.claim_credential = _require_string(claim_data, "reconnect_credential")
+        self.control.set_projection(_projection(snapshot))
+        await self._apply_snapshot(snapshot)
 
     async def _open_socket(self) -> None:
         self._socket = await self.http.ws_connect(

@@ -22,6 +22,7 @@ from omni.management.service import (
 )
 from omni.service.client import ServiceClient, ServiceStartupError
 from omni.service.errors import ServiceError
+from omni.skills.catalog import SkillMetadata
 from tests.configuration.test_config import (
     EXPECTED_DEFAULT_CONFIG,
     EXPECTED_REDACTED_CONFIG,
@@ -105,6 +106,10 @@ async def test_cli_service_adapter_binds_terminal_and_closes_client_once(
     )
     home = AgentHome(tmp_path / "home")
     failure = RuntimeError("Controlled terminal failure")
+    management_commands = ("/status", "/memory")
+    skill_metadata = (
+        SkillMetadata("service_skill", "Published by service", tmp_path / "SKILL.md"),
+    )
 
     async def close() -> None:
         events.append("client_close")
@@ -117,9 +122,14 @@ async def test_cli_service_adapter_binds_terminal_and_closes_client_once(
         assert directory == tmp_path
         events.append("attach_workspace")
 
+    async def get_input_capabilities() -> dict[str, object]:
+        events.append("get_input_capabilities")
+        return {"management_commands": management_commands, "skill_metadata": skill_metadata}
+
     client.close = close
     client.get_startup_config = get_config
     client.attach_workspace = attach_workspace
+    client.get_input_capabilities = get_input_capabilities
 
     async def connect(
         actual_home: AgentHome, directory: Path, *, attach_workspace: bool
@@ -135,6 +145,8 @@ async def test_cli_service_adapter_binds_terminal_and_closes_client_once(
                 "bus": client.bus,
                 "control": client.control,
                 "management_dispatcher": client.management_dispatcher,
+                "skill_metadata": skill_metadata,
+                "management_command_tokens": management_commands,
             }
             events.append("terminal_init")
             if failure_stage == "constructor":
@@ -160,6 +172,7 @@ async def test_cli_service_adapter_binds_terminal_and_closes_client_once(
             "connect",
             "get_config",
             "attach_workspace",
+            "get_input_capabilities",
             "terminal_init",
             "bind",
             "run",
@@ -170,6 +183,7 @@ async def test_cli_service_adapter_binds_terminal_and_closes_client_once(
             await cli._run_service_cli_conversation(agent_home=home, workspace=tmp_path)
         assert raised.value is failure
         assert events[-1] == "client_close"
+    assert events[:4] == ["connect", "get_config", "attach_workspace", "get_input_capabilities"]
     assert events.count("client_close") == 1
 
 

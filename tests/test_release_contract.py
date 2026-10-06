@@ -546,6 +546,8 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
         "inbound_snapshot",
         "put_inbound",
         "get_inbound",
+        "update_inbound_metadata",
+        "remove_inbound",
         "pause_inbound_delivery",
         "resume_inbound_delivery",
         "drain_inbound",
@@ -681,11 +683,17 @@ def test_composition_and_store_signatures_match_current_contracts() -> None:
         "management_dispatcher",
         "monotonic",
         "skill_metadata",
+        "management_command_tokens",
     )
     management_index = tuple(argument.arg for argument in terminal_init.args.kwonlyargs).index(
         "management_dispatcher"
     )
     assert terminal_init.args.kw_defaults[management_index] is None
+    command_tokens_index = tuple(argument.arg for argument in terminal_init.args.kwonlyargs).index(
+        "management_command_tokens"
+    )
+    command_tokens_default = terminal_init.args.kw_defaults[command_tokens_index]
+    assert isinstance(command_tokens_default, ast.Constant) and command_tokens_default.value is None
 
     schedule_store = _source_class(
         _source_ast(ROOT / "omni" / "schedule" / "store.py"),

@@ -20,6 +20,7 @@ from omni.management.service import (
 )
 from omni.service.client import ServiceClient, ServiceStartupError
 from omni.service.errors import ServiceError
+from omni.skills.catalog import SkillMetadata
 from omni.terminal.conversation import (
     TerminalConversationApp,
     is_interactive_terminal,
@@ -128,10 +129,15 @@ async def _run_service_cli_conversation(
                 "Terminal Conversation requires interactive stdin, stdout, and stderr TTYs.",
             )
         await client.attach_workspace(workspace)
+        capabilities = await client.get_input_capabilities()
         terminal_app = TerminalConversationApp(
             bus=client.bus,
             control=client.control,
             management_dispatcher=cast(ManagementCommandDispatcher, client.management_dispatcher),
+            skill_metadata=cast(tuple[SkillMetadata, ...], capabilities["skill_metadata"]),
+            management_command_tokens=cast(
+                tuple[str, ...], capabilities["management_commands"]
+            ),
         )
         terminal_app.bind_confirmation_coordinator(client.confirmation)
         await terminal_app.run_async()

@@ -25,6 +25,12 @@ import type {
   SessionRelease,
   SessionSnapshot,
   SessionClaim,
+  SessionLiveState,
+  SessionModelConfiguration,
+  SubmitUserInputResult,
+  RecalledConversationInput,
+  RecallQueuedInputsResult,
+  InputCapabilitiesResponse,
   ManagementResult,
   ManagementResponse,
   ToolPermissionLevel,
@@ -75,6 +81,113 @@ export class ServiceCommandError extends Error {
 export interface EventStreamConnection {
   close: () => void;
   sendCommand: (command: ClientCommand) => Promise<ServiceCommandResult>;
+}
+
+export type ClientCommandSender = EventStreamConnection["sendCommand"];
+export type ConversationCommandContext = Pick<SessionClaim,
+  "workspace_id" | "session_id" | "claim_version">;
+
+export async function submitUserInput(
+  sendCommand: ClientCommandSender,
+  context: ConversationCommandContext,
+  text: string,
+  requestId = createRequestId(),
+): Promise<SubmitUserInputResult> {
+  const result = await sendCommand({
+    request_id: requestId,
+    type: "input",
+    workspace_id: context.workspace_id,
+    session_id: context.session_id,
+    claim_version: context.claim_version,
+    payload: { text },
+  });
+  if (result.kind === "management" && typeof result.management_result === "object"
+    && result.management_result !== null && !Array.isArray(result.management_result)) {
+    return result as unknown as SubmitUserInputResult;
+  }
+  if (result.kind === "conversation_input" && typeof result.run_id === "string"
+    && result.run_id && (result.live_state === null || typeof result.live_state === "object")) {
+    return result as unknown as SubmitUserInputResult;
+  }
+  throw new ServiceCommandError(null, false);
+}
+
+export async function recallQueuedInputs(
+  sendCommand: ClientCommandSender,
+  context: ConversationCommandContext,
+): Promise<RecallQueuedInputsResult> {
+  const result = await sendCommand({
+    request_id: createRequestId(),
+    type: "recall_queued_inputs",
+    workspace_id: context.workspace_id,
+    session_id: context.session_id,
+    claim_version: context.claim_version,
+    payload: {},
+  });
+  const items = result.recalled_inputs;
+  if (!Array.isArray(items) || items.some((item) => typeof item !== "object" || item === null
+    || typeof item.run_id !== "string" || typeof item.text !== "string")) {
+    throw new ServiceCommandError(null, false);
+  }
+  return {
+    recalled_inputs: items as RecalledConversationInput[],
+    live_state: typeof result.live_state === "object" && result.live_state !== null
+      ? result.live_state as SessionLiveState : null,
+  };
+}
+
+export function cancelConversationRun(
+  sendCommand: ClientCommandSender,
+  context: ConversationCommandContext,
+  runId: string,
+  requestId = createRequestId(),
+): Promise<ServiceCommandResult> {
+  return sendCommand({
+    request_id: requestId,
+    type: "cancel",
+    workspace_id: context.workspace_id,
+    session_id: context.session_id,
+    claim_version: context.claim_version,
+    payload: { run_id: runId },
+  });
+}
+
+export function configureConversationModel(
+  sendCommand: ClientCommandSender,
+  context: ConversationCommandContext,
+  expectedVersion: number,
+  configuration: SessionModelConfiguration,
+  requestId = createRequestId(),
+): Promise<ServiceCommandResult> {
+  return sendCommand({
+    request_id: requestId,
+    type: "session_model_configure",
+    workspace_id: context.workspace_id,
+    session_id: context.session_id,
+    claim_version: context.claim_version,
+    payload: {
+      expected_model_configuration_version: expectedVersion,
+      provider_id: configuration.provider_id,
+      model: configuration.model,
+      reasoning_effort: configuration.reasoning_effort,
+    },
+  });
+}
+
+export function decideServiceConfirmation(
+  sendCommand: ClientCommandSender,
+  token: string,
+  decision: "approved" | "declined",
+  requestId = createRequestId(),
+): Promise<ServiceCommandResult> {
+  return sendCommand({
+    request_id: requestId,
+    type: "confirmation_decide",
+    workspace_id: null,
+    session_id: null,
+    claim_version: null,
+    payload: { token, decision },
+  });
 }
 
 type WorkspaceSessionCreation = Omit<SessionCreation, "project_id"> & { project_id: null };
@@ -317,6 +430,10 @@ export function getConfig(): Promise<ConfigResponse> {
 
 export function getAvailableModels(): Promise<AvailableModelsResponse> {
   return request<AvailableModelsResponse>("/models/available");
+}
+
+export function getInputCapabilities(): Promise<InputCapabilitiesResponse> {
+  return request<InputCapabilitiesResponse>("/input-capabilities");
 }
 
 export function patchConfig(

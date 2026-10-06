@@ -2508,6 +2508,7 @@ class _ConsumedRun:
     turn_id: UUID
     user_text: str
     projection: _MessageBusRunProjection
+    run_id: str | None = None
     started: bool = False
 
 
@@ -2783,9 +2784,15 @@ class TerminalConversationApp(App[None]):
         management_dispatcher: ManagementCommandDispatcher,
         monotonic: Callable[[], float] = monotonic_now,
         skill_metadata: tuple[SkillMetadata, ...] = (),
+        management_command_tokens: tuple[str, ...] | None = None,
     ) -> None:
         super().__init__()
         self._skill_metadata = tuple(skill_metadata)
+        self._management_command_tokens = management_command_tokens
+        self._service_run_projection = callable(
+            getattr(management_dispatcher, "recall_queued_inputs", None)
+        )
+        self._submitting_input = False
         self._bus = bus
         self._control = control
         self._management_dispatcher = management_dispatcher
@@ -3296,7 +3303,7 @@ class TerminalConversationApp(App[None]):
 
     @property
     def has_pending_input(self) -> bool:
-        return bool(self._pending_inputs)
+        return bool(self._pending_inputs) or any(not run.started for run in self._consumed_runs)
 
     @on(TextArea.Changed, "#conversation-input")
     def _input_changed(self, message: TextArea.Changed) -> None:
@@ -3506,7 +3513,11 @@ class TerminalConversationApp(App[None]):
             self._hide_command_completion()
             return
         self._completion_dismissed_text = None
-        candidates = _completion_candidates(text, self._skill_metadata)
+        candidates = _completion_candidates(
+            text,
+            self._skill_metadata,
+            management_command_tokens=self._management_command_tokens,
+        )
         if not candidates:
             self._hide_command_completion()
             return
@@ -3669,8 +3680,28 @@ class TerminalConversationApp(App[None]):
             self.exit()
             return
 
-        result = await self._management_dispatcher.dispatch(text)
+        submit_user_input = getattr(self._management_dispatcher, "submit_user_input", None)
+        self._draining_inputs = True
+        self._submitting_input = True
+        try:
+            result = (
+                await submit_user_input(text)
+                if callable(submit_user_input)
+                else await self._management_dispatcher.dispatch(text)
+            )
+        except Exception as error:
+            if not self._service_run_projection:
+                raise
+            await self._mount_management_rows(
+                "input", f"{getattr(error, 'code', 'submission_failed')}: {error}"
+            )
+            return
+        finally:
+            self._draining_inputs = False
+            self._submitting_input = False
+            self._run_ready.set()
         if result.handled:
+            self._remove_pending_text(text)
             if result.effort_selection is not None:
                 message.text_area.remember_submission(text)
                 self._open_reasoning_effort_selector(result.effort_selection, message.text_area)
@@ -3717,7 +3748,12 @@ class TerminalConversationApp(App[None]):
             return
 
         foreground_input_admitted = getattr(self._control, "foreground_input_admitted", None)
-        if callable(foreground_input_admitted) and not foreground_input_admitted():
+        if (
+            not result.submitted
+            and callable(foreground_input_admitted)
+            and not foreground_input_admitted()
+        ):
+            self._remove_pending_text(text)
             message.text_area.text = ""
             await self._mount_management_rows(
                 "input",
@@ -3725,10 +3761,14 @@ class TerminalConversationApp(App[None]):
             )
             return
         message.text_area.remember_submission(text)
-        message.text_area.text = ""
+        if message.text_area.text == text:
+            message.text_area.text = ""
         self._pending_inputs.append(text)
         self._refresh_pending_queue()
-        await self._bus.put_inbound(InboundMessage(content=text))
+        if result.submitted:
+            self._promote_consumed_inputs(1, run_id=result.submitted_run_id)
+        else:
+            await self._bus.put_inbound(InboundMessage(content=text))
 
     @on(_ConversationInput.ControlAction)
     async def _handle_control_action(self, message: _ConversationInput.ControlAction) -> None:
@@ -3759,7 +3799,18 @@ class TerminalConversationApp(App[None]):
         self.exit()
 
     async def _drain_pending_inputs(self, text_area: _ConversationInput) -> None:
-        if text_area.text or not self._pending_inputs:
+        if text_area.text:
+            return
+        recall_queued_inputs = getattr(self._management_dispatcher, "recall_queued_inputs", None)
+        if callable(recall_queued_inputs):
+            self._draining_inputs = True
+            try:
+                recalled = await recall_queued_inputs()
+            finally:
+                self._draining_inputs = False
+            await self._restore_recalled_inputs(recalled, text_area)
+            return
+        if not self._pending_inputs:
             return
         pending_before = len(self._pending_inputs)
         self._draining_inputs = True
@@ -3779,6 +3830,49 @@ class TerminalConversationApp(App[None]):
         text_area.move_cursor(
             (len(text_area.document.lines) - 1, len(text_area.document.lines[-1]))
         )
+        self._refresh_pending_queue()
+
+    async def _restore_recalled_inputs(
+        self,
+        recalled: list[dict[str, str]],
+        text_area: _ConversationInput,
+    ) -> None:
+        if not recalled:
+            return
+        recalled_ids = {item["run_id"] for item in recalled}
+        removed_ids: set[str] = set()
+        retained: deque[_ConsumedRun] = deque()
+        for run in self._consumed_runs:
+            if run.run_id in recalled_ids:
+                await run.projection.close()
+                removed_ids.add(run.run_id)
+            else:
+                retained.append(run)
+        self._consumed_runs = retained
+        recalled_texts: list[str] = []
+        for item in recalled:
+            if item["run_id"] not in removed_ids:
+                for index, pending in enumerate(self._pending_inputs):
+                    if pending == item["text"]:
+                        del self._pending_inputs[index]
+                        break
+            recalled_texts.append(item["text"])
+        input_area = self._conversation_input or text_area
+        input_area.active_turn_token = (
+            self._consumed_runs[0].turn_id if self._consumed_runs else None
+        )
+        self._set_working(bool(self._consumed_runs))
+        if self._consumed_runs:
+            self._run_ready.set()
+        text_area.text = "\n".join([*recalled_texts, *([text_area.text] if text_area.text else [])])
+        text_area.move_cursor(
+            (len(text_area.document.lines) - 1, len(text_area.document.lines[-1]))
+        )
+        self._refresh_pending_queue()
+
+    def _remove_pending_text(self, text: str) -> None:
+        with suppress(ValueError):
+            self._pending_inputs.remove(text)
         self._refresh_pending_queue()
 
     def _on_inbound_snapshot_for(
@@ -3807,7 +3901,7 @@ class TerminalConversationApp(App[None]):
             promote_removed=message.promote_removed,
         )
 
-    def _promote_consumed_inputs(self, count: int) -> None:
+    def _promote_consumed_inputs(self, count: int, *, run_id: str | None = None) -> None:
         promoted = False
         display = self._conversation_display
         if display is None:
@@ -3827,6 +3921,7 @@ class TerminalConversationApp(App[None]):
                     turn_id=turn_id,
                     user_text=text,
                     projection=projection,
+                    run_id=run_id if _ == 0 else None,
                 )
             )
             promoted = True
@@ -3847,12 +3942,26 @@ class TerminalConversationApp(App[None]):
                 if not self._consumed_runs:
                     continue
                 run = self._consumed_runs[0]
-                if not run.started:
+                if not run.started and not self._service_run_projection:
                     await self._start_consumed_run(run)
                 outbound = buffered
                 buffered = None
                 if outbound is None:
                     outbound = await self._bus.get_outbound()
+                remote_run_id = outbound.metadata.pop("_remote_run_id", None)
+                if isinstance(remote_run_id, str):
+                    remote_run = next(
+                        (item for item in self._consumed_runs if item.run_id == remote_run_id),
+                        None,
+                    )
+                    if remote_run is None:
+                        continue
+                    run = remote_run
+                remote_started = outbound.metadata.pop("_remote_run_started", False)
+                if not run.started:
+                    await self._start_consumed_run(run)
+                if remote_started:
+                    continue
                 await run.projection.consume(outbound)
                 if run.projection.terminal_seen:
                     await run.projection.close()
@@ -3880,6 +3989,8 @@ class TerminalConversationApp(App[None]):
                 )
                 if outbound in done:
                     message = outbound.result()
+                    if self._submitting_input and not self._consumed_runs:
+                        await self._run_ready.wait()
                     if run_ready in done or self._consumed_runs:
                         return message
                     continue
@@ -3902,6 +4013,7 @@ class TerminalConversationApp(App[None]):
         input_area.active_turn_token = run.turn_id
         self._active_run_projection = run.projection
         self._set_working(True)
+        self._refresh_pending_queue()
         display.content_changed()
 
     def _finish_consumed_run(self, run: _ConsumedRun) -> None:
@@ -4773,14 +4885,16 @@ class TerminalConversationApp(App[None]):
     def _refresh_pending_queue(self) -> None:
         with suppress(NoMatches, NoScreen, ScreenStackError):
             queue = self.query_one("#pending-queue", Static)
-            if not self._pending_inputs:
+            pending = [run.user_text for run in self._consumed_runs if not run.started]
+            pending.extend(self._pending_inputs)
+            if not pending:
                 queue.update("")
                 queue.display = False
                 return
-            count = len(self._pending_inputs)
+            count = len(pending)
             available = max(1, self.size.width - 2)
             suffix = f" +{count - 2} more" if count > 2 else ""
-            shown = list(self._pending_inputs)[:2]
+            shown = pending[:2]
             separator_width = 3 if len(shown) == 2 else 0
             share = max(1, (available - cell_len(suffix) - separator_width) // len(shown))
             summaries = [_queue_excerpt(" ".join(value.split()), min(48, share)) for value in shown]
@@ -4816,6 +4930,8 @@ def _friendly_name(name: str, *, fallback: str) -> str:
 def _completion_candidates(
     text: str,
     skill_metadata: tuple[SkillMetadata, ...],
+    *,
+    management_command_tokens: tuple[str, ...] | None = None,
 ) -> tuple[_CompletionCandidate, ...]:
     if not text.startswith("/") or any(character.isspace() for character in text):
         return ()
@@ -4828,6 +4944,7 @@ def _completion_candidates(
         )
         for command in MANAGEMENT_COMMANDS
         if command.token.startswith(text)
+        and (management_command_tokens is None or command.token in management_command_tokens)
     )
     skills = tuple(
         _CompletionCandidate(

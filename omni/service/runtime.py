@@ -1139,6 +1139,18 @@ class WorkspaceRecord:
             raise service_error("not_found", "Conversation Session was not found.", status=404)
         return loop.loop.project_foreground_conversation()
 
+    def session_model_available(self, session_id: str) -> bool:
+        selection = self._loops[session_id].loop.session.model_configuration
+        if selection is None:
+            return True
+        try:
+            self.configuration.resolve_session_model_route(
+                selection.provider_id, selection.model, selection.reasoning_effort
+            )
+        except (ConfigError, ValueError):
+            return False
+        return True
+
     def session_snapshot(self, session_id: str) -> dict[str, object]:
         """Return the claimed Session conversation plus presentation-safe Restore Anchors."""
         self._ensure_session_available(session_id)
@@ -1184,6 +1196,7 @@ class WorkspaceRecord:
                 else loop_state.loop.session.model_configuration.to_dict()
             ),
             "model_configuration_version": loop_state.loop.session.model_configuration_version,
+            "model_configuration_available": self.session_model_available(session_id),
             "active_model_configuration": (
                 None
                 if loop_state.loop.active_model_configuration is None
@@ -1831,19 +1844,13 @@ class WorkspaceRecord:
                 raise service_error(
                     "admission_closed", "Conversation input is temporarily unavailable."
                 )
-            selection = claim.loop.session.model_configuration
-            if selection is not None:
-                try:
-                    self.configuration.resolve_session_model_route(
-                        selection.provider_id, selection.model, selection.reasoning_effort
-                    )
-                except (ConfigError, ValueError) as error:
-                    raise service_error(
-                        "model_unavailable",
-                        "Choose an available model before sending to this Session.",
-                        status=422,
-                        field_errors={"model": "choose an available model"},
-                    ) from error
+            if not self.session_model_available(session_id):
+                raise service_error(
+                    "model_unavailable",
+                    "Choose an available model before sending to this Session.",
+                    status=422,
+                    field_errors={"model": "choose an available model"},
+                )
             state = self._loops[session_id]
             client = self.service.client(client_id)
             async with state.coordination_lock:
@@ -1867,6 +1874,63 @@ class WorkspaceRecord:
                     )
                 self._ensure_processor(state)
             return claim
+
+    async def recall_queued_inputs(
+        self,
+        client_id: str,
+        session_id: str,
+        version: int,
+    ) -> dict[str, object]:
+        self.require_claim(client_id, session_id, version)
+        state = self._loops[session_id]
+        recalled: list[tuple[str, InboundMessage]] = []
+        async with state.coordination_lock:
+            self._require_admitted()
+            self.require_claim(client_id, session_id, version)
+            queued = await state.bus.inbound_snapshot()
+            for message in queued:
+                run_id = message.metadata.get("run_id")
+                if (
+                    not isinstance(run_id, str)
+                    or run_id not in state.run_ids
+                    or run_id not in state.live_runs
+                ):
+                    raise service_error(
+                        "service_state_invalid",
+                        "Queued Conversation input state is inconsistent.",
+                        status=500,
+                    )
+                recalled.append((run_id, message))
+            drained = await state.bus.drain_inbound()
+            if len(drained) != len(recalled):
+                raise service_error(
+                    "service_state_invalid",
+                    "Queued Conversation input state changed during recall.",
+                    status=500,
+                )
+            recalled_ids = {run_id for run_id, _message in recalled}
+            for run_id in recalled_ids:
+                state.run_ids.remove(run_id)
+
+        for run_id, message in recalled:
+            request_id = message.metadata.get("request_id")
+            await self.service.emit(
+                "input.recalled",
+                workspace_id=self.workspace_id,
+                session_id=session_id,
+                run_id=run_id,
+                payload={
+                    "text": message.content,
+                    "request_id": request_id if isinstance(request_id, str) else run_id,
+                },
+                target_client_ids=(client_id,),
+            )
+        return {
+            "recalled_inputs": [
+                {"run_id": run_id, "text": message.content} for run_id, message in recalled
+            ],
+            "live_state": self.session_snapshot(session_id)["live_state"],
+        }
 
     def _ensure_processor(self, state: _LoopState) -> None:
         """Start one Session processor while preserving the enqueue boundary."""
@@ -1916,10 +1980,23 @@ class WorkspaceRecord:
             state.output_task = output_task
             terminal_forwarded = False
             execution_failed = False
+            execution_task = asyncio.create_task(state.loop.run_foreground(inbound))
             try:
                 try:
-                    await state.loop.run_foreground(inbound)
+                    while not state.loop.has_active_run and not execution_task.done():
+                        await asyncio.sleep(0)
+                    if state.loop.has_active_run and run_id is not None:
+                        await self.service.emit(
+                            "run.started",
+                            workspace_id=self.workspace_id,
+                            session_id=state.loop.session.session_id,
+                            run_id=run_id,
+                            payload={},
+                        )
+                    await execution_task
                 except asyncio.CancelledError:
+                    execution_task.cancel()
+                    await asyncio.gather(execution_task, return_exceptions=True)
                     raise
                 except Exception:
                     execution_failed = True
@@ -1987,13 +2064,14 @@ class WorkspaceRecord:
 
     async def cancel(self, client_id: str, session_id: str, version: int, run_id: str) -> None:
         claim = self.require_claim(client_id, session_id, version)
-        if not claim.loop.has_active_run:
-            return
         state = self._loops[session_id]
-        if not state.run_ids or state.run_ids[0] != run_id:
-            raise service_error("stale_run", "The requested Agent Run is no longer active.")
         client = self.service.client(client_id)
         async with client.delivery_lock:
+            claim = self.require_claim(client_id, session_id, version)
+            if not claim.loop.has_active_run:
+                return
+            if not state.run_ids or state.run_ids[0] != run_id:
+                raise service_error("stale_run", "The requested Agent Run is no longer active.")
             if run_id in state.live_runs:
                 state.live_runs[run_id]["cancel_requested"] = True
         await claim.loop.cancel_active_run()
@@ -2834,6 +2912,19 @@ class AgentService:
             and capacities[provider_id][model] > minimum_capacity
         ]
         return {"models": models, "default_combination": default_combination}
+
+    def get_input_capabilities(self) -> dict[str, object]:
+        """Return published Management Command and Skill metadata for clients."""
+        from omni.management.commands import MANAGEMENT_COMMANDS
+
+        skills = () if self._skill_loader is None else self._skill_loader.metadata
+        return {
+            "management_commands": [command.token for command in MANAGEMENT_COMMANDS],
+            "skill_metadata": [
+                {"name": item.name, "description": item.description, "path": str(item.path)}
+                for item in skills
+            ],
+        }
 
     def _configuration_request_result(
         self, request_id: str, fingerprint: str
@@ -4741,6 +4832,202 @@ class AgentService:
                 encoded["claim_credential"] = claim.credential
         return encoded
 
+    async def configure_conversation_model(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        claim_version: int,
+        payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        self._require_client(client_id)
+        workspace = self.workspace(workspace_id)
+        workspace.require_claim(client_id, session_id, claim_version)
+        provider_id = payload.get("provider_id")
+        model = payload.get("model")
+        reasoning_effort = payload.get("reasoning_effort")
+        expected_version = payload.get("expected_model_configuration_version")
+        if (
+            not isinstance(provider_id, str)
+            or not provider_id.strip()
+            or not isinstance(model, str)
+            or not model.strip()
+            or not isinstance(reasoning_effort, str)
+            or reasoning_effort not in REASONING_EFFORT_LEVELS
+        ):
+            raise service_error(
+                "validation_error", "Session Model Configuration is invalid.", status=422
+            )
+        if (
+            isinstance(expected_version, bool)
+            or not isinstance(expected_version, int)
+            or expected_version < 0
+        ):
+            raise service_error(
+                "validation_error",
+                "expected_model_configuration_version is invalid.",
+                status=422,
+                field_errors={"expected_model_configuration_version": "must be nonnegative"},
+            )
+        configuration = self.configuration
+        if configuration is None:
+            raise service_error(
+                "model_unavailable",
+                "The selected model is not available for this Agent Service.",
+                status=422,
+                field_errors={"model": "choose an available model with a valid context window"},
+            )
+        try:
+            selection = SessionModelConfiguration(
+                provider_id,
+                model,
+                reasoning_effort,
+            )
+            configuration.resolve_session_model_route(
+                selection.provider_id,
+                selection.model,
+                selection.reasoning_effort,
+            )
+        except (AttributeError, ConfigError, TypeError, ValueError) as error:
+            raise service_error(
+                "model_unavailable",
+                "The selected model is not available for this Agent Service.",
+                status=422,
+                field_errors={"model": "choose an available model with a valid context window"},
+            ) from error
+        claim = workspace.require_claim(client_id, session_id, claim_version)
+        session = claim.loop.session
+        try:
+            await session.wait_for_pending_persist()
+            workspace.require_claim(client_id, session_id, claim_version)
+            version = session.configure_model_durably(
+                selection,
+                expected_version=expected_version,
+            )
+        except ValueError as error:
+            if "version is stale" in str(error):
+                raise service_error(
+                    "model_configuration_conflict",
+                    "Session Model Configuration changed; reload it before retrying.",
+                    status=409,
+                ) from error
+            raise service_error(
+                "validation_error",
+                "Session Model Configuration is invalid.",
+                status=422,
+            ) from error
+        except (OSError, RuntimeError) as error:
+            raise service_error(
+                "persistence_error",
+                "Session Model Configuration could not be saved.",
+                status=500,
+            ) from error
+        result: dict[str, object] = {
+            "model_configuration": selection.to_dict(),
+            "model_configuration_version": version,
+        }
+        if version != expected_version:
+            await self.emit(
+                "session.model_configuration",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                run_id=None,
+                payload={
+                    **selection.to_dict(),
+                    "model_configuration_version": version,
+                },
+            )
+        return result
+
+    async def execute_management_command(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        claim_version: int,
+        command: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        claim = self.workspace(workspace_id).require_claim(client_id, session_id, claim_version)
+        return await self.handle_management(
+            client_id,
+            workspace_id,
+            session_id,
+            "dispatch",
+            {"request_id": request_id, "command": command},
+            claim_version=claim_version,
+            claim_credential=claim.credential,
+        )
+
+    async def recall_queued_inputs(
+        self, client_id: str, workspace_id: str, session_id: str, claim_version: int
+    ) -> dict[str, object]:
+        self._require_client(client_id)
+        return await self.workspace(workspace_id).recall_queued_inputs(
+            client_id, session_id, claim_version
+        )
+
+    async def cancel_run(
+        self, client_id: str, workspace_id: str, session_id: str, claim_version: int, run_id: str
+    ) -> None:
+        self._require_client(client_id)
+        await self.workspace(workspace_id).cancel(client_id, session_id, claim_version, run_id)
+
+    def decide_confirmation(
+        self, client_id: str, token: str, decision: ConfirmationDecision
+    ) -> dict[str, object]:
+        self._require_client(client_id)
+        if not self._presenter.decide(client_id, token, decision):
+            raise service_error("confirmation_resolved", "Confirmation is already resolved.")
+        return {"decided": True}
+
+    async def submit_user_input(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        claim_version: int,
+        text: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        """Classify a raw submission before admitting ordinary Session input."""
+        from omni.management.commands import MANAGEMENT_COMMANDS
+
+        workspace = self.workspace(workspace_id)
+        workspace.require_claim(client_id, session_id, claim_version)
+        if text in {command.token for command in MANAGEMENT_COMMANDS}:
+            response = await self.execute_management_command(
+                client_id, workspace_id, session_id, claim_version, text, request_id
+            )
+            if response.get("handled") is not True:
+                raise service_error(
+                    "service_protocol_error", "Management result is invalid.", status=500
+                )
+            return {"kind": "management", "management_result": response}
+
+        run_id = str(uuid4())
+        await workspace.input(
+            client_id,
+            session_id,
+            claim_version,
+            text,
+            run_id,
+            request_id,
+        )
+        await self.emit(
+            "input.accepted",
+            workspace_id=workspace_id,
+            session_id=session_id,
+            run_id=run_id,
+            payload={"text": text, "request_id": request_id},
+            target_client_ids=(client_id,),
+        )
+        return {
+            "kind": "conversation_input",
+            "run_id": run_id,
+            "live_state": workspace.session_snapshot(session_id)["live_state"],
+        }
+
     async def handle_command(
         self, client_id: str, command: Mapping[str, object]
     ) -> dict[str, object]:
@@ -4806,18 +5093,26 @@ class AgentService:
                 and isinstance(session_id, str)
                 and isinstance(claim_version, int)
             )
-            run_id = str(uuid4())
-            await self.workspace(workspace_id).input(
-                client_id, session_id, claim_version, text, run_id, request_id
+            result = await self.submit_user_input(
+                client_id,
+                workspace_id,
+                session_id,
+                claim_version,
+                text,
+                request_id,
             )
-            result = {"run_id": run_id}
-            await self.emit(
-                "input.accepted",
-                workspace_id=workspace_id,
-                session_id=session_id,
-                run_id=run_id,
-                payload={"text": text, "request_id": request_id},
-                target_client_ids=(client_id,),
+        elif command_type == "recall_queued_inputs":
+            self._validate_claim_fields(client_id, workspace_id, session_id, claim_version)
+            assert (
+                isinstance(workspace_id, str)
+                and isinstance(session_id, str)
+                and isinstance(claim_version, int)
+            )
+            result = await self.recall_queued_inputs(
+                client_id,
+                workspace_id,
+                session_id,
+                claim_version,
             )
         elif command_type == "session_model_configure":
             self._validate_claim_fields(client_id, workspace_id, session_id, claim_version)
@@ -4828,100 +5123,9 @@ class AgentService:
             )
             workspace = self.workspace(workspace_id)
             workspace.require_claim(client_id, session_id, claim_version)
-            provider_id = payload.get("provider_id")
-            model = payload.get("model")
-            reasoning_effort = payload.get("reasoning_effort")
-            expected_version = payload.get("expected_model_configuration_version")
-            if (
-                not isinstance(provider_id, str)
-                or not provider_id.strip()
-                or not isinstance(model, str)
-                or not model.strip()
-                or not isinstance(reasoning_effort, str)
-                or reasoning_effort not in REASONING_EFFORT_LEVELS
-            ):
-                raise service_error(
-                    "validation_error", "Session Model Configuration is invalid.", status=422
-                )
-            if (
-                isinstance(expected_version, bool)
-                or not isinstance(expected_version, int)
-                or expected_version < 0
-            ):
-                raise service_error(
-                    "validation_error",
-                    "expected_model_configuration_version is invalid.",
-                    status=422,
-                    field_errors={"expected_model_configuration_version": "must be nonnegative"},
-                )
-            configuration = self.configuration
-            if configuration is None:
-                raise service_error(
-                    "model_unavailable",
-                    "The selected model is not available for this Agent Service.",
-                    status=422,
-                    field_errors={"model": "choose an available model with a valid context window"},
-                )
-            try:
-                selection = SessionModelConfiguration(
-                    provider_id,
-                    model,
-                    reasoning_effort,
-                )
-                configuration.resolve_session_model_route(
-                    selection.provider_id,
-                    selection.model,
-                    selection.reasoning_effort,
-                )
-            except (AttributeError, ConfigError, TypeError, ValueError) as error:
-                raise service_error(
-                    "model_unavailable",
-                    "The selected model is not available for this Agent Service.",
-                    status=422,
-                    field_errors={"model": "choose an available model with a valid context window"},
-                ) from error
-            claim = workspace.require_claim(client_id, session_id, claim_version)
-            session = claim.loop.session
-            try:
-                await session.wait_for_pending_persist()
-                workspace.require_claim(client_id, session_id, claim_version)
-                version = session.configure_model_durably(
-                    selection,
-                    expected_version=expected_version,
-                )
-            except ValueError as error:
-                if "version is stale" in str(error):
-                    raise service_error(
-                        "model_configuration_conflict",
-                        "Session Model Configuration changed; reload it before retrying.",
-                        status=409,
-                    ) from error
-                raise service_error(
-                    "validation_error",
-                    "Session Model Configuration is invalid.",
-                    status=422,
-                ) from error
-            except (OSError, RuntimeError) as error:
-                raise service_error(
-                    "persistence_error",
-                    "Session Model Configuration could not be saved.",
-                    status=500,
-                ) from error
-            result = {
-                "model_configuration": selection.to_dict(),
-                "model_configuration_version": version,
-            }
-            if version != expected_version:
-                await self.emit(
-                    "session.model_configuration",
-                    workspace_id=workspace_id,
-                    session_id=session_id,
-                    run_id=None,
-                    payload={
-                        **selection.to_dict(),
-                        "model_configuration_version": version,
-                    },
-                )
+            result = await self.configure_conversation_model(
+                client_id, workspace_id, session_id, claim_version, payload
+            )
         elif command_type == "cancel":
             self._validate_claim_fields(client_id, workspace_id, session_id, claim_version)
             cancel_run_id = payload.get("run_id")
@@ -4932,9 +5136,7 @@ class AgentService:
                 and isinstance(session_id, str)
                 and isinstance(claim_version, int)
             )
-            await self.workspace(workspace_id).cancel(
-                client_id, session_id, claim_version, cancel_run_id
-            )
+            await self.cancel_run(client_id, workspace_id, session_id, claim_version, cancel_run_id)
             result = {"cancelled": True}
         elif command_type == "confirmation_decide":
             token = payload.get("token")
@@ -4943,12 +5145,9 @@ class AgentService:
                 raise service_error(
                     "validation_error", "confirmation decision is invalid.", status=422
                 )
-            accepted = self._presenter.decide(
+            result = self.decide_confirmation(
                 client_id, token, cast(ConfirmationDecision, decision)
             )
-            if not accepted:
-                raise service_error("confirmation_resolved", "Confirmation is already resolved.")
-            result = {"decided": True}
         elif command_type == "subscribe":
             last_seq = payload.get("last_seq")
             await self._replay(client, last_seq, payload.get("stream_id"))
@@ -5034,6 +5233,15 @@ class AgentService:
     def _update_live_run(
         state: _LoopState, event_type: str, run_id: str, payload: dict[str, object]
     ) -> None:
+        if event_type == "input.recalled":
+            state.live_runs.pop(run_id, None)
+            return
+        if event_type == "run.started":
+            run = state.live_runs.get(run_id)
+            if run is not None:
+                run["status"] = "running"
+                run["cancellable"] = True
+            return
         if event_type in {"run.completed", "run.failed"}:
             if state.live_runs.pop(run_id, None) is not None:
                 if state.completed_user_count is not None:

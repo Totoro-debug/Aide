@@ -73,6 +73,7 @@ class _ConcurrentProvider:
         self.session_b_cancelled = asyncio.Event()
         self.block_b = block_b
         self.early_a_delta = early_a_delta
+        self.user_inputs: list[str] = []
 
     async def complete(
         self,
@@ -120,6 +121,8 @@ class _ConcurrentProvider:
             if isinstance(system, str) and system.startswith("Generate a concise title"):
                 yield ModelCompleted(_response("Concurrent session"))
                 return
+            user_input = user.rsplit("## User Input\n\n", 1)[-1].split("\n\n## Task goal", 1)[0]
+            self.user_inputs.append(user_input)
             if "session-a" in user:
                 self.session_a_started.set()
                 if self.early_a_delta:
@@ -2538,6 +2541,290 @@ async def test_same_text_inputs_keep_distinct_request_ids_and_only_current_run_i
         assert len(cast(dict[str, Any], workspace.session_snapshot(session))["live_state"]["runs"]) == 2
     finally:
         provider.release_a.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_submit_user_input_routes_management_and_unknown_slash_as_service_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    provider = _ConcurrentProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _config: provider)
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, path)
+        session = await workspace.create_draft(client.client_id)
+        claim = await service.claim(client.client_id, workspace.workspace_id, session)
+        base = {
+            "workspace_id": workspace.workspace_id,
+            "session_id": session,
+            "claim_version": _claim_version(claim),
+        }
+
+        management = await service.handle_command(
+            client.client_id,
+            {
+                **base,
+                "request_id": "management-status",
+                "type": "input",
+                "payload": {"text": "/status"},
+            },
+        )
+        management_result = cast(dict[str, Any], management["result"])
+        assert management_result["kind"] == "management"
+        assert cast(dict[str, Any], management_result["management_result"])["handled"] is True
+        assert not any(event["type"] == "input.accepted" for event in sink.events)
+
+        unknown = await service.handle_command(
+            client.client_id,
+            {
+                **base,
+                "request_id": "unknown-slash",
+                "type": "input",
+                "payload": {"text": "/not-a-management-command"},
+            },
+        )
+        unknown_result = cast(dict[str, Any], unknown["result"])
+        assert unknown_result["kind"] == "conversation_input"
+        assert isinstance(unknown_result["run_id"], str)
+        await asyncio.wait_for(provider.session_b_started.wait(), 2)
+        assert [
+            cast(dict[str, Any], event["payload"])["text"]
+            for event in sink.events
+            if event["type"] == "input.accepted"
+        ] == ["/not-a-management-command"]
+    finally:
+        provider.release_b.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/config",
+        "/status",
+        "/effort",
+        "/permission",
+        "/resume",
+        "/restore",
+        "/memory",
+        "/dream",
+        "/reload_skill",
+    ],
+)
+async def test_raw_management_inputs_never_enter_foreground_fifo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    home = _configured_home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    provider = _ConcurrentProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _config: provider)
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, path)
+        session = await workspace.create_draft(client.client_id)
+        claim = await service.claim(client.client_id, workspace.workspace_id, session)
+        ack = await service.handle_command(
+            client.client_id,
+            {
+                "workspace_id": workspace.workspace_id,
+                "session_id": session,
+                "claim_version": _claim_version(claim),
+                "request_id": "raw-management",
+                "type": "input",
+                "payload": {"text": command},
+            },
+        )
+        result = cast(dict[str, Any], ack["result"])
+        assert result["kind"] == "management"
+        assert cast(dict[str, Any], result["management_result"])["handled"] is True
+        assert not await workspace.loops[session].bus.inbound_snapshot()
+        assert not workspace.loops[session].live_runs
+        assert not provider.user_inputs
+        assert not any(event["type"] == "input.accepted" for event in sink.events)
+        if command == "/effort":
+            assert cast(dict[str, Any], result["management_result"])["effort_selection"] is not None
+        if command == "/permission":
+            assert (
+                cast(dict[str, Any], result["management_result"])["permission_selection"]
+                is not None
+            )
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_recall_queued_inputs_is_atomic_fifo_and_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    provider = _ConcurrentProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _config: provider)
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, path)
+        session = await workspace.create_draft(client.client_id)
+        claim = await service.claim(client.client_id, workspace.workspace_id, session)
+        context = {
+            "workspace_id": workspace.workspace_id,
+            "session_id": session,
+            "claim_version": _claim_version(claim),
+        }
+
+        async def submit(request_id: str, text: str) -> str:
+            ack = await service.handle_command(
+                client.client_id,
+                {
+                    **context,
+                    "request_id": request_id,
+                    "type": "input",
+                    "payload": {"text": text},
+                },
+            )
+            return cast(str, cast(dict[str, Any], ack["result"])["run_id"])
+
+        run_a = await submit("input-a", "session-a")
+        await asyncio.wait_for(provider.session_a_started.wait(), 2)
+        run_b = await submit("input-b", "queued b")
+        run_c = await submit("input-c", "queued c")
+        recall_command = {
+            **context,
+            "request_id": "recall-once",
+            "type": "recall_queued_inputs",
+            "payload": {},
+        }
+        recalled = await service.handle_command(client.client_id, recall_command)
+        recalled_result = cast(dict[str, Any], recalled["result"])
+        assert recalled_result["recalled_inputs"] == [
+            {"run_id": run_b, "text": "queued b"},
+            {"run_id": run_c, "text": "queued c"},
+        ]
+        assert cast(dict[str, Any], recalled_result["live_state"])["runs"][0]["run_id"] == run_a
+        assert await service.handle_command(client.client_id, recall_command) == recalled
+        empty_recall = await service.handle_command(
+            client.client_id, {**recall_command, "request_id": "empty-recall"}
+        )
+        assert cast(dict[str, Any], empty_recall["result"])["recalled_inputs"] == []
+
+        run_d = await submit("input-d", "queued d")
+        assert await service.handle_command(client.client_id, recall_command) == recalled
+        inbound = await workspace.loops[session].bus.inbound_snapshot()
+        assert [(item.metadata["run_id"], item.content) for item in inbound] == [
+            (run_d, "queued d")
+        ]
+        live = cast(dict[str, Any], workspace.session_snapshot(session)["live_state"])
+        assert [run["run_id"] for run in live["runs"]] == [
+            run_a,
+            run_d,
+        ]
+        provider.release_a.set()
+        provider.release_b.set()
+        await asyncio.wait_for(sink.wait_for("run.completed", run_a), 2)
+        await asyncio.wait_for(sink.wait_for("run.completed", run_d), 2)
+        assert provider.user_inputs.count("queued b") == 0
+        assert provider.user_inputs.count("queued c") == 0
+        assert provider.user_inputs.count("queued d") == 1
+        assert {
+            event.get("run_id") for event in sink.events if event.get("type") == "input.recalled"
+        } == {run_b, run_c}
+    finally:
+        provider.release_a.set()
+        provider.release_b.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_recall_racing_with_next_run_start_never_executes_and_recalls_same_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _configured_home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    provider = _ConcurrentProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _config: provider)
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("web")
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, path)
+        session = await workspace.create_draft(client.client_id)
+        claim = await service.claim(client.client_id, workspace.workspace_id, session)
+        context = {
+            "workspace_id": workspace.workspace_id,
+            "session_id": session,
+            "claim_version": _claim_version(claim),
+        }
+
+        first = await service.handle_command(
+            client.client_id,
+            {
+                **context,
+                "request_id": "race-input-a",
+                "type": "input",
+                "payload": {"text": "session-a"},
+            },
+        )
+        run_a = cast(str, cast(dict[str, Any], first["result"])["run_id"])
+        await asyncio.wait_for(provider.session_a_started.wait(), 2)
+        queued = await service.handle_command(
+            client.client_id,
+            {
+                **context,
+                "request_id": "race-input-b",
+                "type": "input",
+                "payload": {"text": "queued b"},
+            },
+        )
+        run_b = cast(str, cast(dict[str, Any], queued["result"])["run_id"])
+        recall = asyncio.create_task(
+            service.handle_command(
+                client.client_id,
+                {
+                    **context,
+                    "request_id": "race-recall",
+                    "type": "recall_queued_inputs",
+                    "payload": {},
+                },
+            )
+        )
+        provider.release_a.set()
+        recalled = await asyncio.wait_for(recall, 2)
+        recalled_result = cast(dict[str, Any], recalled["result"])
+        recalled_ids = {
+            item["run_id"]
+            for item in cast(list[dict[str, str]], recalled_result["recalled_inputs"])
+        }
+        await asyncio.wait_for(sink.wait_for("run.completed", run_a), 2)
+        if run_b in recalled_ids:
+            assert provider.user_inputs.count("queued b") == 0
+        else:
+            await asyncio.wait_for(sink.wait_for("run.completed", run_b), 2)
+            assert provider.user_inputs.count("queued b") == 1
+        assert (run_b in recalled_ids) != ("queued b" in provider.user_inputs)
+    finally:
+        provider.release_a.set()
+        provider.release_b.set()
         await service.stop()
 
 

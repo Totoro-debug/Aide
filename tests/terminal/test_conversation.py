@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import json
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -1032,11 +1032,96 @@ async def _run_cli_terminal_case(
 
     monkeypatch.setattr("omni.service.runtime.AgentRunExecutor", DeterministicExecutor)
     monkeypatch.setattr(cli, "TerminalConversationApp", ScenarioApp)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
     monkeypatch.setattr(
         "omni.service.runtime.create_provider", lambda _configuration: selected_provider
     )
     async with cli_service(home):
         await cli._run_service_cli_conversation(agent_home=home, workspace=workspace)
+
+
+@pytest.mark.asyncio
+async def test_service_terminal_recalls_only_queued_inputs_through_up_key(
+    agent_home: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = CancellableProvider()
+
+    async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
+        input_area = app.query_one("#conversation-input", TextArea)
+        await pilot.press(*list("active A"), "enter")
+        await asyncio.wait_for(provider.first_delta_emitted.wait(), 2)
+        for text in ("queued B", "queued C"):
+            await pilot.press(*list(text), "enter")
+            await pilot.pause()
+        assert app.has_pending_input
+        assert "Pending (2)" in str(app.query_one("#pending-queue", Static).content)
+        await pilot.press("up")
+        async with asyncio.timeout(3):
+            while input_area.text != "queued B\nqueued C":
+                await pilot.pause()
+        assert not app.has_pending_input
+        assert app._control.has_active_run
+        assert not provider.cancelled.is_set()
+        await pilot.press("ctrl+c")
+        await _wait_for_turn(app)
+        input_area.text = "next D"
+        await pilot.press("enter")
+        await _wait_for_turn(app)
+        assert len(provider.stream_requests) == 2
+        assert all(
+            "queued B" not in str(call.messages) and "queued C" not in str(call.messages)
+            for call in provider.stream_requests
+        )
+        assert "Recovered runtime response." in _visible_screen_text(app)
+
+    await _run_cli_terminal_case(
+        agent_home=agent_home,
+        workspace=workspace,
+        monkeypatch=monkeypatch,
+        scenario=scenario,
+        provider=provider,
+    )
+
+
+@pytest.mark.asyncio
+async def test_service_terminal_preserves_output_delivered_before_submission_ack(
+    agent_home: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omni.service.client import ServiceClient
+
+    finished = asyncio.Event()
+    original_event = ServiceClient._handle_event
+    original_submit = ServiceClient.submit_user_input
+
+    async def handle_event(client: ServiceClient, event: Mapping[str, object]) -> None:
+        await original_event(client, event)
+        if event.get("type") == "run.completed":
+            finished.set()
+
+    async def delayed_ack(
+        client: ServiceClient, text: str, *, request_id: str | None = None
+    ) -> dict[str, object]:
+        result = await original_submit(client, text, request_id=request_id)
+        await asyncio.wait_for(finished.wait(), 2)
+        return result
+
+    monkeypatch.setattr(ServiceClient, "_handle_event", handle_event)
+    monkeypatch.setattr(ServiceClient, "submit_user_input", delayed_ack)
+
+    async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
+        await pilot.press(*list("fast answer"), "enter")
+        await _wait_for_turn(app)
+        assert finished.is_set()
+        assert not app._consumed_runs
+        assert "early response" in _visible_screen_text(app)
+
+    await _run_cli_terminal_case(
+        agent_home=agent_home,
+        workspace=workspace,
+        monkeypatch=monkeypatch,
+        scenario=scenario,
+        provider=_FixedCatalogProvider((_response(content="early response"),)),
+    )
 
 
 def _tool_call(
@@ -3209,6 +3294,7 @@ async def test_fatal_resume_failure_exits_without_rendering_private_error(
     assert private_error not in str(raised.value)
     assert private_error not in visible_after_failure
     assert "Must not be rendered after fatal replacement failure." not in visible_after_failure
+
 
 @pytest.mark.asyncio
 async def test_terminal_conversation_starts_blank_and_focuses_input() -> None:

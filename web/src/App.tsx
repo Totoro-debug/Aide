@@ -52,6 +52,9 @@ import {
   claimProjectSessionDeletion,
   claimWorkspaceSession,
   claimWorkspaceSessionDeletion,
+  cancelConversationRun,
+  configureConversationModel,
+  decideServiceConfirmation,
   exchangeTicket,
   getProjectRemoval,
   getProjectSession,
@@ -89,12 +92,14 @@ import {
   getScheduleJobHistory,
   inspectRestore,
   restoreBrowserSession,
+  recallQueuedInputs,
   ServiceCommandError,
   triggerRuntimeDream,
   patchConfig,
   repairConfig,
   updateRuntimeEffort,
   updateRuntimePermission,
+  submitUserInput,
 } from "./api";
 import type {
   ClientCommand,
@@ -260,6 +265,11 @@ export default function App() {
   const [confirmationNotice, setConfirmationNotice] = useState<string | null>(null);
   const [browserRecovery, setBrowserRecovery] = useState<BrowserRecoverySnapshot | null>(null);
   const [browserRecoveryNotice, setBrowserRecoveryNotice] = useState<string | null>(null);
+  const conversationDraftsRef = useRef<Record<string, Record<string, string>>>({});
+  const [conversationDraftVersion, setConversationDraftVersion] = useState(0);
+  const notifyConversationDraftChanged = useCallback(() => {
+    setConversationDraftVersion((version) => version + 1);
+  }, []);
   const [settingsVisited, setSettingsVisited] = useState(location.pathname === "/settings");
   const mainContentRef = useRef<HTMLElement | null>(null);
   const bootstrapPromise = useRef<Promise<RegisteredClient> | null>(null);
@@ -386,14 +396,7 @@ export default function App() {
     resolvingConfirmationTokenRef.current = confirmation.token;
     pendingConfirmationRef.current = null;
     setPendingConfirmation(null);
-    void sendServiceCommand({
-      request_id: createRequestId(),
-      type: "confirmation_decide",
-      workspace_id: null,
-      session_id: null,
-      claim_version: null,
-      payload: { token: confirmation.token, decision },
-    }).catch((error: unknown) => {
+    void decideServiceConfirmation(sendServiceCommand, confirmation.token, decision).catch((error: unknown) => {
       resolvingConfirmationTokenRef.current = null;
       if (error instanceof ServiceCommandError && error.body?.code === "confirmation_resolved") {
         showConfirmationNotice("confirmation.resolvedElsewhere");
@@ -950,6 +953,9 @@ export default function App() {
                         subscribeServiceEvents={subscribeServiceEvents}
                         confirmationTriggerRef={confirmationTriggerRef}
                         browserRecovery={browserRecovery}
+                        conversationDraftsRef={conversationDraftsRef}
+                        conversationDraftVersion={conversationDraftVersion}
+                        onConversationDraftChanged={notifyConversationDraftChanged}
                         serviceInstanceId={serviceStatus?.service_instance_id ?? null}
                         onBrowserRecoveryChange={persistBrowserRecovery}
                         onBrowserRecoveryUnavailable={handleMissingBrowserRecovery}
@@ -979,6 +985,9 @@ export default function App() {
                         subscribeServiceEvents={subscribeServiceEvents}
                         confirmationTriggerRef={confirmationTriggerRef}
                         browserRecovery={browserRecovery}
+                        conversationDraftsRef={conversationDraftsRef}
+                        conversationDraftVersion={conversationDraftVersion}
+                        onConversationDraftChanged={notifyConversationDraftChanged}
                         serviceInstanceId={serviceStatus?.service_instance_id ?? null}
                         onBrowserRecoveryChange={persistBrowserRecovery}
                         onBrowserRecoveryUnavailable={handleMissingBrowserRecovery}
@@ -1056,6 +1065,9 @@ export default function App() {
                     subscribeServiceEvents={subscribeServiceEvents}
                     confirmationTriggerRef={confirmationTriggerRef}
                     browserRecovery={browserRecovery}
+                    conversationDraftsRef={conversationDraftsRef}
+                    conversationDraftVersion={conversationDraftVersion}
+                    onConversationDraftChanged={notifyConversationDraftChanged}
                     serviceInstanceId={serviceStatus?.service_instance_id ?? null}
                     onBrowserRecoveryChange={persistBrowserRecovery}
                     onBrowserRecoveryUnavailable={handleMissingBrowserRecovery}
@@ -5564,7 +5576,8 @@ type ConversationHistoryEntry =
 interface PendingSubmission {
   localId: string;
   sessionId: string;
-  command: ClientCommand;
+  claim: SessionClaim;
+  text: string;
 }
 
 interface PendingSessionDeletion {
@@ -5610,6 +5623,7 @@ function newLiveRun(
 function reduceLiveRunEvent(runs: LiveRun[], event: ServiceEvent): LiveRun[] {
   if (event.run_id === null) return runs;
   const runId = event.run_id;
+  if (event.type === "input.recalled") return runs.filter((run) => run.runId !== runId);
   const requestId = typeof event.payload.request_id === "string" ? event.payload.request_id : null;
   const index = runs.findIndex((run) => run.runId === runId
     || (event.type === "input.accepted" && requestId !== null && run.localId === requestId));
@@ -5619,6 +5633,9 @@ function reduceLiveRunEvent(runs: LiveRun[], event: ServiceEvent): LiveRun[] {
   if (event.type === "input.accepted") {
     next.prompt = typeof event.payload.text === "string" ? event.payload.text : next.prompt;
     if (next.status === "submitting") next.status = "accepted";
+  } else if (event.type === "run.started") {
+    next.status = "running";
+    next.cancellable = true;
   } else if (event.type === "run.output") {
     const message = event.payload.message;
     if (typeof message !== "object" || message === null || Array.isArray(message)) return runs;
@@ -5628,6 +5645,7 @@ function reduceLiveRunEvent(runs: LiveRun[], event: ServiceEvent): LiveRun[] {
     const content = typeof value.content === "string" ? value.content : "";
     if (!isLiveRunActive(next)) return runs;
     next.status = "running";
+    next.cancellable = true;
     if (value.type === "model_response" && metadata._stream_delta === true) {
       next.assistantContent += content;
     } else if (value.type === "tool_call" && typeof metadata.tool_call_id === "string") {
@@ -6119,6 +6137,9 @@ interface ProjectSessionsViewProps {
   projects: RegisteredProject[];
   registeredClient: RegisteredClient | null;
   browserRecovery: BrowserRecoverySnapshot | null;
+  conversationDraftsRef: { current: Record<string, Record<string, string>> };
+  conversationDraftVersion: number;
+  onConversationDraftChanged: () => void;
   serviceInstanceId: string | null;
   onRestoreConsumed: () => void;
   onBrowserRecoveryChange: (snapshot: BrowserRecoverySnapshot | null) => void;
@@ -6142,6 +6163,9 @@ function ChatSessionsView({
   projects,
   registeredClient,
   browserRecovery,
+  conversationDraftsRef,
+  conversationDraftVersion,
+  onConversationDraftChanged,
   serviceInstanceId,
   onRestoreConsumed,
   onBrowserRecoveryChange,
@@ -6310,6 +6334,9 @@ function ChatSessionsView({
             projects={projects}
             registeredClient={registeredClient}
             browserRecovery={browserRecovery}
+            conversationDraftsRef={conversationDraftsRef}
+            conversationDraftVersion={conversationDraftVersion}
+            onConversationDraftChanged={onConversationDraftChanged}
             serviceInstanceId={serviceInstanceId}
             onRestoreConsumed={onRestoreConsumed}
             onBrowserRecoveryChange={onBrowserRecoveryChange}
@@ -6340,6 +6367,9 @@ function ProjectSessionsView({
   projects,
   registeredClient,
   browserRecovery,
+  conversationDraftsRef,
+  conversationDraftVersion,
+  onConversationDraftChanged,
   serviceInstanceId,
   onRestoreConsumed,
   onBrowserRecoveryChange,
@@ -6369,6 +6399,9 @@ function ProjectSessionsView({
       projects={projects}
       registeredClient={registeredClient}
       browserRecovery={browserRecovery}
+      conversationDraftsRef={conversationDraftsRef}
+      conversationDraftVersion={conversationDraftVersion}
+      onConversationDraftChanged={onConversationDraftChanged}
       serviceInstanceId={serviceInstanceId}
       onRestoreConsumed={onRestoreConsumed}
       onBrowserRecoveryChange={onBrowserRecoveryChange}
@@ -6396,6 +6429,9 @@ function ProjectSessionsContent({
   projects,
   registeredClient,
   browserRecovery,
+  conversationDraftsRef,
+  conversationDraftVersion,
+  onConversationDraftChanged,
   serviceInstanceId,
   onRestoreConsumed,
   onBrowserRecoveryChange,
@@ -6507,6 +6543,7 @@ function ProjectSessionsContent({
     setInputText(value);
   }, []);
   const [composerError, setComposerError] = useState<string | null>(null);
+  const [composerNotice, setComposerNotice] = useState<string | null>(null);
   const claimRef = useRef<SessionClaim | null>(null);
   const snapshotRef = useRef<SessionSnapshot | null>(null);
   const sessionModelSavingRef = useRef(false);
@@ -6537,9 +6574,9 @@ function ProjectSessionsContent({
   const recoveredDraftRef = useRef<SessionBrowserRecoverySnapshot | null>(
     matchingBrowserRecovery?.draft === true ? matchingBrowserRecovery : null,
   );
-  const draftsBySessionRef = useRef<Record<string, string>>(matchingBrowserRecovery === null
-    ? {}
-    : { [matchingBrowserRecovery.session_id]: matchingBrowserRecovery.input_text });
+  const draftsBySessionRef = useRef<Record<string, string>>({});
+  const draftsScope = `${serviceInstanceId ?? ""}:${sessionScopeId}`;
+  draftsBySessionRef.current = conversationDraftsRef.current[draftsScope] ??= {};
   const conversationViewportRef = useRef<HTMLDivElement | null>(null);
   const recoveryScrollTimerRef = useRef<number | null>(null);
   const restoredRecoveryScrollRef = useRef<string | null>(null);
@@ -6607,6 +6644,15 @@ function ProjectSessionsContent({
     });
   }, [draft, isChat, onBrowserRecoveryChange, projectId, readBrowserRecoveryForSession,
     serviceInstanceId, setComposerInputText, workspaceDirectory]);
+
+  useLayoutEffect(() => {
+    const sessionId = selectedSessionRef.current;
+    if (sessionId === null) return;
+    const recoveredInput = draftsBySessionRef.current[sessionId];
+    if (recoveredInput === undefined || recoveredInput === inputTextRef.current) return;
+    setComposerInputText(recoveredInput);
+    persistSelectedBrowserRecovery({ inputText: recoveredInput });
+  }, [conversationDraftVersion, persistSelectedBrowserRecovery, setComposerInputText]);
 
   useEffect(() => {
     const saveBeforeClose = () => persistSelectedBrowserRecovery();
@@ -6864,15 +6910,102 @@ function ProjectSessionsContent({
 
   const sendPendingSubmission = useCallback(async (pending: PendingSubmission) => {
     try {
-      const result = await sendServiceCommand(pending.command);
-      const runId = result.run_id;
-      if (typeof runId !== "string" || !runId) throw new ServiceCommandError(null, false);
+      const result = await submitUserInput(
+        sendServiceCommand,
+        pending.claim,
+        pending.text,
+        pending.localId,
+      );
       pendingSubmissionsRef.current = pendingSubmissionsRef.current.filter(
         (item) => item.localId !== pending.localId,
       );
-      updateLiveRuns(pending.sessionId, (runs) => runs.map((run) => run.localId === pending.localId
-        ? { ...run, runId, status: run.status === "submitting" ? "accepted" : run.status }
-        : run));
+      if (result.kind === "management") {
+        updateLiveRuns(pending.sessionId, (runs) => runs.filter((run) => run.localId !== pending.localId));
+        const management = result.management_result;
+        if (typeof management !== "object" || management === null || Array.isArray(management)) {
+          throw new ServiceCommandError(null, false);
+        }
+        const fields = management;
+        const output = fields.output;
+        const effort = fields.effort_selection;
+        const permission = fields.permission_selection;
+        if (claimRef.current !== pending.claim) return;
+        if (fields.management_error !== undefined) {
+          setComposerError(fields.management_error.message);
+          setComposerNotice(null);
+          return;
+        }
+        if (effort != null || permission != null) {
+          managementTriggerRef.current = inputRef.current;
+          setManagementPanel("runtime");
+          setManagementOpen(true);
+        }
+        if (fields.restore_listing !== undefined) {
+          const firstAnchor = fields.restore_listing.anchors[0];
+          if (firstAnchor === undefined) {
+            await cancelRestore(pending.claim);
+          } else {
+            restoreTriggerRef.current = inputRef.current;
+            setRestoreAnchorId(firstAnchor.anchor_id);
+            setRestorePlan(null);
+            setRestoreMode("conversation-only");
+            setRestoreError(null);
+            setRestoreOpen(true);
+          }
+        }
+        setComposerError(null);
+        setComposerNotice(typeof output === "string" ? output
+          : typeof effort === "string" ? t(`settings.reasoningEfforts.${effort}`)
+            : typeof permission === "string" ? t(`settings.permissionLevels.${permission}`)
+              : t("conversation.managementCompleted"));
+        return;
+      }
+      if (result.kind !== "conversation_input" || typeof result.run_id !== "string" || !result.run_id) {
+        throw new ServiceCommandError(null, false);
+      }
+      const runId = result.run_id;
+      const controlsByRunId = new Map<string, { status: RunStatus; cancellable: boolean; cancelRequested: boolean }>();
+      const liveState = result.live_state;
+      if (typeof liveState === "object" && liveState !== null && !Array.isArray(liveState)) {
+        const liveStateValue = liveState;
+        const liveStateSeq = liveStateValue.seq;
+        const liveStateStreamId = liveStateValue.stream_id;
+        const currentCursor = sessionCursorRef.current[pending.sessionId];
+        const staleLiveState = typeof liveStateStreamId === "string"
+          && typeof liveStateSeq === "number"
+          && Number.isInteger(liveStateSeq)
+          && currentCursor?.streamId === liveStateStreamId
+          && currentCursor.seq > liveStateSeq;
+        const wireRuns = liveStateValue.runs;
+        if (!staleLiveState && Array.isArray(wireRuns)) {
+          for (const wireRun of wireRuns) {
+            if (typeof wireRun !== "object" || wireRun === null || Array.isArray(wireRun)) continue;
+            const run = wireRun;
+            if (typeof run.run_id !== "string"
+              || (run.status !== "accepted" && run.status !== "running")
+              || typeof run.cancellable !== "boolean") continue;
+            controlsByRunId.set(run.run_id, {
+              status: run.status,
+              cancellable: run.cancellable,
+              cancelRequested: run.cancel_requested === true,
+            });
+          }
+        }
+      }
+      updateLiveRuns(pending.sessionId, (runs) => runs.map((run) => {
+        const accepted = run.localId === pending.localId
+          ? { ...run, runId, status: run.status === "submitting" ? "accepted" as const : run.status }
+          : run;
+        const authoritative = accepted.runId === null ? undefined : controlsByRunId.get(accepted.runId);
+        return authoritative === undefined ? accepted : {
+          ...accepted,
+          status: authoritative.status,
+          cancellable: authoritative.cancellable,
+          cancelRequested: authoritative.cancelRequested,
+        };
+      }));
+      setComposerError(null);
+      setComposerNotice(null);
     } catch (error) {
       if (error instanceof ServiceCommandError && error.resultUnknown) {
         pendingSubmissionsRef.current = pendingSubmissionsRef.current.filter(
@@ -6897,7 +7030,7 @@ function ProjectSessionsContent({
         setComposerError(message ?? "conversation.submitFailed");
       }
     }
-  }, [sendServiceCommand, updateLiveRuns]);
+  }, [sendServiceCommand, t, updateLiveRuns]);
 
   useEffect(() => {
     if (connectionState !== "online" || registeredClient === null) return;
@@ -6931,6 +7064,7 @@ function ProjectSessionsContent({
     setRestoreOpen(false);
     setRestorePlan(null);
     setRestoreNotice(null);
+    setComposerNotice(null);
   }, []);
 
   const adoptSnapshot = useCallback((nextSnapshot: SessionSnapshot) => {
@@ -6952,7 +7086,7 @@ function ProjectSessionsContent({
       }));
       const requestIds = new Set(live.runs.map((run) => run.request_id));
       pendingSubmissionsRef.current = pendingSubmissionsRef.current.filter(
-        (pending) => !requestIds.has(pending.command.request_id),
+        (pending) => !requestIds.has(pending.localId),
       );
       updateLiveRuns(sessionId, (runs) => events.reduce(reduceLiveRunEvent, [
         ...recovered, ...runs.filter((run) => run.status === "submitting"
@@ -7239,13 +7373,14 @@ function ProjectSessionsContent({
             reasoning_effort: effort as ReasoningEffort,
           },
           model_configuration_version: version,
+          model_configuration_available: true,
         });
       }
       return;
     }
     if (event.type === "input.accepted" && typeof event.payload.request_id === "string") {
       pendingSubmissionsRef.current = pendingSubmissionsRef.current.filter(
-        (pending) => pending.command.request_id !== event.payload.request_id,
+        (pending) => pending.localId !== event.payload.request_id,
       );
     }
     updateLiveRuns(sessionId, (runs) => reduceLiveRunEvent(runs, event));
@@ -7269,9 +7404,11 @@ function ProjectSessionsContent({
 
   useEffect(() => {
     if (matchingBrowserRecovery === null) return;
-    draftsBySessionRef.current[matchingBrowserRecovery.session_id] = matchingBrowserRecovery.input_text;
+    const restoredInput = draftsBySessionRef.current[matchingBrowserRecovery.session_id]
+      ?? matchingBrowserRecovery.input_text;
+    draftsBySessionRef.current[matchingBrowserRecovery.session_id] = restoredInput;
     if (selectedSessionRef.current === matchingBrowserRecovery.session_id) {
-      setComposerInputText(matchingBrowserRecovery.input_text);
+      setComposerInputText(restoredInput);
     }
     if (matchingBrowserRecovery.draft) recoveredDraftRef.current = matchingBrowserRecovery;
   }, [matchingBrowserRecovery, setComposerInputText]);
@@ -7294,7 +7431,7 @@ function ProjectSessionsContent({
       setSelectedSessionId(sessionId);
       selectedSessionRef.current = sessionId;
       const recovery = readBrowserRecoveryForSession(sessionId);
-      const restoredInput = recovery?.input_text ?? draftsBySessionRef.current[sessionId] ?? "";
+      const restoredInput = draftsBySessionRef.current[sessionId] ?? recovery?.input_text ?? "";
       draftsBySessionRef.current[sessionId] = restoredInput;
       setComposerInputText(restoredInput);
       setComposerError(null);
@@ -7460,19 +7597,12 @@ function ProjectSessionsContent({
     setSessionModelSaving(true);
     setComposerError(null);
     try {
-      const result = await sendServiceCommand({
-        request_id: createRequestId(),
-        type: "session_model_configure",
-        workspace_id: currentClaim.workspace_id,
-        session_id: currentClaim.session_id,
-        claim_version: currentClaim.claim_version,
-        payload: {
-          expected_model_configuration_version: currentSnapshot.model_configuration_version,
-          provider_id: nextConfiguration.provider_id,
-          model: nextConfiguration.model,
-          reasoning_effort: nextConfiguration.reasoning_effort,
-        },
-      });
+      const result = await configureConversationModel(
+        sendServiceCommand,
+        currentClaim,
+        currentSnapshot.model_configuration_version,
+        nextConfiguration,
+      );
       if (claimRef.current !== currentClaim) return;
       const version = result.model_configuration_version;
       if (typeof version !== "number" || !Number.isInteger(version)) {
@@ -7485,6 +7615,7 @@ function ProjectSessionsContent({
           ...latestSnapshot,
           model_configuration: nextConfiguration,
           model_configuration_version: version,
+          model_configuration_available: true,
         });
       }
     } catch (error) {
@@ -7545,37 +7676,79 @@ function ProjectSessionsContent({
     event.preventDefault();
     const currentClaim = claimRef.current;
     const sessionId = selectedSessionRef.current;
-    const text = inputText.trim();
-    if (currentClaim === null || sessionId === null || !text) return;
+    const text = inputText;
+    if (currentClaim === null || sessionId === null || !text.trim()) return;
     if (pendingDeletionRef.current?.attempted && pendingDeletionRef.current.claim.session_id === sessionId) return;
-    if (sessionModelSavingRef.current || modelSelectionNeedsAttention) return;
-    const activeRun = (liveRunsRef.current[sessionId] ?? []).some(isLiveRunActive);
-    if (activeRun || connectionState !== "online") return;
+    if (connectionState !== "online") return;
     const localId = createRequestId();
     confirmationTriggerRef.current = inputRef.current;
     const pending: PendingSubmission = {
       localId,
       sessionId,
-      command: {
-        request_id: localId,
-        type: "input",
-        workspace_id: currentClaim.workspace_id,
-        session_id: currentClaim.session_id,
-        claim_version: currentClaim.claim_version,
-        payload: { text },
-      },
+      claim: currentClaim,
+      text,
     };
     pendingSubmissionsRef.current.push(pending);
     updateLiveRuns(sessionId, (runs) => [
       ...runs,
-      newLiveRun(pending.command.request_id, null, text, "submitting"),
+      newLiveRun(pending.localId, null, text, "submitting"),
     ]);
     setComposerInputText("");
     persistSelectedBrowserRecovery({ inputText: "" });
     delete draftsBySessionRef.current[sessionId];
     setComposerError(null);
+    setComposerNotice(null);
     inputRef.current?.focus();
     await sendPendingSubmission(pending);
+  }
+
+  async function recallQueuedConversationInputs() {
+    const currentClaim = claimRef.current;
+    if (currentClaim === null || connectionState !== "online") return;
+    const sessionDrafts = draftsBySessionRef.current;
+    setComposerError(null);
+    try {
+      const result = await recallQueuedInputs(sendServiceCommand, currentClaim);
+      const recalledIds = new Set(result.recalled_inputs.map((item) => item.run_id));
+      const cursor = sessionCursorRef.current[currentClaim.session_id];
+      const staleState = result.live_state !== null
+        && cursor?.streamId === result.live_state.stream_id
+        && cursor.seq > result.live_state.seq;
+      const serverRuns = new Map((staleState ? [] : result.live_state?.runs ?? [])
+        .map((run) => [run.run_id, run]));
+      updateLiveRuns(currentClaim.session_id, (runs) => runs
+        .filter((run) => run.runId === null || !recalledIds.has(run.runId))
+        .map((run) => {
+          const serverRun = run.runId === null ? undefined : serverRuns.get(run.runId);
+          return serverRun === undefined ? run : {
+            ...run,
+            status: serverRun.status,
+            cancellable: serverRun.cancellable,
+            cancelRequested: serverRun.cancel_requested,
+          };
+        }));
+      const recalledText = result.recalled_inputs.map((item) => item.text).join("\n");
+      if (recalledText) {
+        const stillSelected = mountedRef.current && claimRef.current === currentClaim;
+        const currentDraft = stillSelected ? inputTextRef.current
+          : sessionDrafts[currentClaim.session_id] ?? "";
+        const nextDraft = [recalledText, currentDraft].filter(Boolean).join("\n");
+        sessionDrafts[currentClaim.session_id] = nextDraft;
+        onConversationDraftChanged();
+        if (stillSelected) {
+          setComposerInputText(nextDraft);
+          persistSelectedBrowserRecovery({ inputText: nextDraft });
+        }
+      }
+      if (mountedRef.current && claimRef.current === currentClaim) setComposerNotice(null);
+    } catch (error) {
+      if (!mountedRef.current || claimRef.current !== currentClaim) return;
+      if (error instanceof ServiceCommandError && error.resultUnknown) {
+        setComposerError("conversation.recallUnknown");
+      } else {
+        setComposerError("conversation.recallFailed");
+      }
+    }
   }
 
   function handleInputKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -7591,14 +7764,7 @@ function ProjectSessionsContent({
       ? { ...candidate, cancelRequested: true }
       : candidate));
     try {
-      await sendServiceCommand({
-        request_id: createRequestId(),
-        type: "cancel",
-        workspace_id: currentClaim.workspace_id,
-        session_id: currentClaim.session_id,
-        claim_version: currentClaim.claim_version,
-        payload: { run_id: run.runId },
-      });
+      await cancelConversationRun(sendServiceCommand, currentClaim, run.runId);
     } catch (error) {
       if (error instanceof ServiceCommandError && error.resultUnknown) return;
       updateLiveRuns(currentClaim.session_id, (runs) => runs.map((candidate) => candidate.runId === run.runId
@@ -7611,18 +7777,15 @@ function ProjectSessionsContent({
   const selectedSummary = selectedSessionId === null ? undefined : sessionSummaries[selectedSessionId];
   const selectedLiveRuns = selectedSessionId === null ? [] : liveRunsBySession[selectedSessionId] ?? [];
   const activeRun = selectedLiveRuns.find(isLiveRunActive) ?? null;
+  const queuedInputCount = selectedLiveRuns.filter((run) => run.status === "accepted" && !run.cancellable).length;
   const savedSessionModel = snapshot?.model_configuration ?? null;
   const chatDefaultModel = availableModels?.default_combination ?? null;
   const displayedModel = savedSessionModel ?? chatDefaultModel;
   const displayedEffort = savedSessionModel?.reasoning_effort
     ?? chatDefaultModel?.reasoning_effort
     ?? "medium";
-  const selectedModelAvailable = savedSessionModel === null || availableModels?.models.some(
-    (model) => model.provider_id === savedSessionModel.provider_id && model.model === savedSessionModel.model,
-  ) === true;
-  const modelSelectionNeedsAttention = availableModelsState !== "ready"
-    || (availableModels?.models.length ?? 0) === 0
-    || (savedSessionModel === null ? chatDefaultModel === null : !selectedModelAvailable);
+  const modelSelectionNeedsAttention = snapshot?.model_configuration_available === false
+    || (savedSessionModel === null && (availableModelsState !== "ready" || chatDefaultModel === null));
   const selectedRestoreAnchor = snapshot?.restore_anchors?.find(
     (anchor) => anchor.anchor_id === restoreAnchorId,
   );
@@ -8303,12 +8466,13 @@ function ProjectSessionsContent({
                     className={styles.composerInput}
                     rows={3}
                     value={inputText}
-                    disabled={activeRun !== null || connectionState !== "online"}
+                    disabled={connectionState !== "online"}
                     placeholder={t("conversation.inputPlaceholder")}
                     onChange={(event) => {
                       const nextInput = event.target.value;
                       draftsBySessionRef.current[claim.session_id] = nextInput;
                       setComposerInputText(nextInput);
+                      setComposerNotice(null);
                       persistSelectedBrowserRecovery({ inputText: nextInput });
                     }}
                     onKeyDown={handleInputKeyDown}
@@ -8343,7 +8507,7 @@ function ProjectSessionsContent({
                               : `${t("conversation.defaultModel")} · ${chatDefaultModel.provider_id}/${chatDefaultModel.model}`}
                           </option>
                         ) : null}
-                        {savedSessionModel !== null && !selectedModelAvailable ? (
+                        {savedSessionModel !== null && snapshot?.model_configuration_available === false ? (
                           <option value={JSON.stringify([savedSessionModel.provider_id, savedSessionModel.model])}>
                             {`${savedSessionModel.provider_id}/${savedSessionModel.model} · ${t("conversation.unavailableModel")}`}
                           </option>
@@ -8406,22 +8570,36 @@ function ProjectSessionsContent({
                         {t("conversation.configureModels")}
                       </Link>
                     ) : null}
-                    <p className={composerError !== null ? styles.composerError : styles.composerHint} role={composerError !== null ? "alert" : "status"}>
+                    {queuedInputCount > 0 ? (
+                      <button
+                        className={styles.secondaryButton}
+                        type="button"
+                        disabled={connectionState !== "online"}
+                        onClick={() => void recallQueuedConversationInputs()}
+                      >
+                        <RotateCcw size={14} aria-hidden="true" />
+                        {t("conversation.recallQueued", { count: queuedInputCount })}
+                      </button>
+                    ) : null}
+                    <p className={composerError !== null ? styles.composerError
+                      : composerNotice !== null ? styles.composerNotice : styles.composerHint}
+                    role={composerError !== null ? "alert" : "status"}>
                       {composerError !== null
                         ? t(composerError)
+                        : composerNotice !== null
+                          ? composerNotice
                         : availableModelsState === "error"
                           ? t("conversation.modelsUnavailable")
                           : modelSelectionNeedsAttention
                             ? t("conversation.modelUnavailable")
                         : activeRun !== null
-                          ? t("conversation.activeRun")
+                          ? t("conversation.queueBehindActive")
                           : t("conversation.enterHint")}
                     </p>
                     <button
                       className={styles.primaryButton}
                       type="submit"
-                      disabled={!inputText.trim() || activeRun !== null || connectionState !== "online"
-                        || sessionModelSaving || modelSelectionNeedsAttention}
+                      disabled={!inputText.trim() || connectionState !== "online"}
                     >
                       <Send size={15} aria-hidden="true" />
                       {t("controls.send")}

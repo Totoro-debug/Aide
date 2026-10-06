@@ -705,6 +705,55 @@
         "request_id": {"$ref": "#/$defs/request_id"}
       }
     },
+    "conversation_input_accepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "run_id", "live_state"],
+      "properties": {
+        "kind": {"enum": ["conversation_input"]},
+        "run_id": {"$ref": "#/$defs/identifier"},
+        "live_state": {"anyOf": [{"$ref": "#/$defs/session_live_state"}, {"type": "null"}]}
+      }
+    },
+    "management_input_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "management_result"],
+      "properties": {
+        "kind": {"enum": ["management"]},
+        "management_result": {"$ref": "#/$defs/management_result"}
+      }
+    },
+    "submit_user_input_result": {
+      "oneOf": [{"$ref": "#/$defs/conversation_input_accepted"}, {"$ref": "#/$defs/management_input_result"}]
+    },
+    "recalled_conversation_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "text"],
+      "properties": {
+        "run_id": {"$ref": "#/$defs/identifier"},
+        "text": {"type": "string"}
+      }
+    },
+    "recall_queued_inputs_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recalled_inputs", "live_state"],
+      "properties": {
+        "recalled_inputs": {"type": "array", "items": {"$ref": "#/$defs/recalled_conversation_input"}},
+        "live_state": {"anyOf": [{"$ref": "#/$defs/session_live_state"}, {"type": "null"}]}
+      }
+    },
+    "input_capabilities_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["management_commands", "skill_metadata"],
+      "properties": {
+        "management_commands": {"type": "array", "items": {"type": "string"}},
+        "skill_metadata": {"type": "array", "items": {"$ref": "#/$defs/skill_metadata"}}
+      }
+    },
     "ack": {
       "type": "object",
       "additionalProperties": false,
@@ -742,7 +791,7 @@
       "properties": {
         "request_id": {"$ref": "#/$defs/request_id"},
         "type": {
-          "enum": ["claim", "release", "input", "session_model_configure", "cancel", "confirmation_decide", "subscribe"]
+          "enum": ["claim", "release", "input", "session_model_configure", "cancel", "recall_queued_inputs", "confirmation_decide", "subscribe"]
         },
         "workspace_id": {"type": ["string", "null"]},
         "session_id": {"type": ["string", "null"]},
@@ -751,7 +800,7 @@
       },
       "allOf": [
         {
-          "if": {"properties": {"type": {"enum": ["claim", "release", "input", "session_model_configure", "cancel"]}}},
+          "if": {"properties": {"type": {"enum": ["claim", "release", "input", "session_model_configure", "cancel", "recall_queued_inputs"]}}},
           "then": {
             "properties": {
               "workspace_id": {"$ref": "#/$defs/identifier"},
@@ -760,7 +809,7 @@
           }
         },
         {
-          "if": {"properties": {"type": {"enum": ["release", "input", "session_model_configure", "cancel"]}}},
+          "if": {"properties": {"type": {"enum": ["release", "input", "session_model_configure", "cancel", "recall_queued_inputs"]}}},
           "then": {"properties": {"claim_version": {"$ref": "#/$defs/claim_version"}}}
         },
         {
@@ -1074,6 +1123,7 @@
         "model_configuration": {"anyOf": [{"$ref": "#/$defs/session_model_configuration"}, {"type": "null"}]},
         "model_configuration_version": {"type": "integer", "minimum": 0},
         "active_model_configuration": {"anyOf": [{"$ref": "#/$defs/session_model_configuration"}, {"type": "null"}]},
+        "model_configuration_available": {"type": "boolean"},
         "restore_anchors": {
           "type": "array",
           "items": {"$ref": "#/$defs/restore_anchor"}

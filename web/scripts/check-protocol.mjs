@@ -48,7 +48,7 @@ for (const field of [
   }
 }
 const commandTypes = new Set(definitions.client_command.properties.type.enum);
-for (const command of ["claim", "release", "input", "session_model_configure", "cancel", "confirmation_decide", "subscribe"]) {
+for (const command of ["claim", "release", "input", "session_model_configure", "cancel", "recall_queued_inputs", "confirmation_decide", "subscribe"]) {
   if (!commandTypes.has(command)) {
     throw new Error(`The client command contract is missing ${command}`);
   }
@@ -87,6 +87,7 @@ const referenceTypes = {
   skill_metadata: "SkillMetadata",
   session_model_configuration: "SessionModelConfiguration",
   management_result: "ManagementResult",
+  recalled_conversation_input: "RecalledConversationInput",
   config_fields: "ConfigFields",
   config_models_fields: "ConfigModelsFields",
   config_mcp_fields: "ConfigMcpFields",
@@ -182,6 +183,11 @@ for (const [name, definitionName] of [
   ["ActiveToolSnapshot", "active_tool_snapshot"],
   ["ActiveRunSnapshot", "active_run_snapshot"],
   ["SessionLiveState", "session_live_state"],
+  ["ConversationInputAccepted", "conversation_input_accepted"],
+  ["ManagementInputResult", "management_input_result"],
+  ["RecalledConversationInput", "recalled_conversation_input"],
+  ["RecallQueuedInputsResult", "recall_queued_inputs_result"],
+  ["InputCapabilitiesResponse", "input_capabilities_response"],
   ["SessionRecoverySnapshot", "session_recovery_snapshot"],
   ["PendingConfirmationSnapshot", "pending_confirmation_snapshot"],
   ["RecoverySnapshot", "recovery_snapshot"],

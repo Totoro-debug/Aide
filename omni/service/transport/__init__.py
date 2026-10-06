@@ -130,6 +130,7 @@ class AgentServiceTransport:
         app.router.add_get(f"{_API_PREFIX}/config/text", self._config_text)
         app.router.add_get(f"{_API_PREFIX}/config/startup", self._config_startup)
         app.router.add_get(f"{_API_PREFIX}/models/available", self._available_models)
+        app.router.add_get(f"{_API_PREFIX}/input-capabilities", self._input_capabilities)
         app.router.add_patch(f"{_API_PREFIX}/config", self._patch_config)
         app.router.add_post(f"{_API_PREFIX}/config/repair", self._repair_config)
         app.router.add_post(f"{_API_PREFIX}/clients", self._register_client)
@@ -425,6 +426,10 @@ class AgentServiceTransport:
     async def _available_models(self, request: web.Request) -> web.Response:
         self._authenticate(request, client_required=True)
         return web.json_response(self.service.available_models_view())
+
+    async def _input_capabilities(self, request: web.Request) -> web.Response:
+        self._authenticate(request, client_required=True)
+        return web.json_response(self.service.get_input_capabilities())
 
     async def _patch_config(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, mutation=True, client_required=True)

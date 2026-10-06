@@ -36,6 +36,8 @@ PROJECT_REMOVAL_ENTERED = asyncio.Event()
 PROJECT_REMOVAL_RELEASE = asyncio.Event()
 INSTALLED_CONCURRENCY_RELEASE = asyncio.Event()
 INSTALLED_EXPIRY_RELEASE = asyncio.Event()
+QUEUE_RECALL_ENTERED = asyncio.Event()
+QUEUE_RECALL_RELEASE = asyncio.Event()
 MODEL_MCP_ENTERED = asyncio.Event()
 MODEL_MCP_RELEASE = asyncio.Event()
 PROVIDER_OBSERVATION_PATH: Path | None = None
@@ -222,6 +224,9 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
         await PROJECT_REMOVAL_RELEASE.wait()
     if "concurrent session streaming markdown" in normalized_requested_prompt:
         await INSTALLED_CONCURRENCY_RELEASE.wait()
+    if "queue recall barrier" in normalized_requested_prompt:
+        QUEUE_RECALL_ENTERED.set()
+        await QUEUE_RECALL_RELEASE.wait()
     if "installed expiry barrier" in normalized_requested_prompt:
         await INSTALLED_EXPIRY_RELEASE.wait()
     model_mcp_barrier = "model mcp generation barrier" in normalized_prompt
@@ -892,11 +897,25 @@ async def _run_e2e(provider_base_url: str) -> None:
                 if not command or command.strip() == "stop":
                     SETTINGS_RELEASE.set()
                     PROCESS_RELEASE.set()
+                    QUEUE_RECALL_RELEASE.set()
                     MODEL_MCP_RELEASE.set()
                     break
                 if command.startswith("effort "):
                     result = await client.management("effort", {"effort": command.strip().split()[1]})
                     print(json.dumps(result), flush=True)
+                    continue
+                if command.strip() == "queue-arm":
+                    QUEUE_RECALL_ENTERED.clear()
+                    QUEUE_RECALL_RELEASE.clear()
+                    print(json.dumps({"armed": True}), flush=True)
+                    continue
+                if command.strip() == "queue-wait":
+                    await asyncio.wait_for(QUEUE_RECALL_ENTERED.wait(), timeout=60)
+                    print(json.dumps({"holding": True}), flush=True)
+                    continue
+                if command.strip() == "queue-release":
+                    QUEUE_RECALL_RELEASE.set()
+                    print(json.dumps({"released": True}), flush=True)
                     continue
                 if command.strip() == "process-arm":
                     PROCESS_ENTERED.clear()

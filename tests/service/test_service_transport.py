@@ -1729,9 +1729,18 @@ async def test_cli_entry_binds_terminal_to_service_adapters(
     connected: list[ServiceClient] = []
 
     async def connect(
-        _client_type: type[ServiceClient], agent_home: AgentHome, path: Path
+        _client_type: type[ServiceClient],
+        agent_home: AgentHome,
+        path: Path,
+        *,
+        attach_workspace: bool = True,
     ) -> ServiceClient:
-        client = await original_connect(agent_home, path, port=port)
+        client = await original_connect(
+            agent_home,
+            path,
+            port=port,
+            attach_workspace=attach_workspace,
+        )
         connected.append(client)
         return client
 
@@ -1742,21 +1751,26 @@ async def test_cli_entry_binds_terminal_to_service_adapters(
             bus: RemoteMessageBus,
             control: RemoteControl,
             management_dispatcher: RemoteManagementCommandDispatcher,
+            skill_metadata: tuple[object, ...],
+            management_command_tokens: tuple[str, ...],
         ) -> None:
             assert isinstance(bus, RemoteMessageBus)
             assert isinstance(control, RemoteControl)
+            assert skill_metadata == ()
+            assert "/status" in management_command_tokens
             self.management = management_dispatcher
 
         def bind_confirmation_coordinator(self, coordinator: RemoteConfirmationCoordinator) -> None:
             assert isinstance(coordinator, RemoteConfirmationCoordinator)
 
         async def run_async(self) -> None:
-            status = await self.management.dispatch("/status")
+            status = await self.management.submit_user_input("/status")
             assert status.handled is True
             assert status.status_view is not None
 
     monkeypatch.setattr(ServiceClient, "connect_or_start", classmethod(connect))
     monkeypatch.setattr(cli, "TerminalConversationApp", FakeTerminalApp)
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
     try:
         await cli._run_service_cli_conversation(agent_home=home, workspace=workspace)
         assert len(connected) == 1

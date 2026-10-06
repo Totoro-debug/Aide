@@ -73,22 +73,35 @@ class RemoteMessageBus(MessageBus):
         self.client = client
 
     async def put_inbound(self, message: InboundMessage) -> None:
-        await super().put_inbound(message)
+        request_id = str(uuid4())
+        await self.stage_submitted_input(message.content, request_id)
         try:
-            await self.client.submit_input(message.content)
+            result = await self.client.submit_user_input(message.content, request_id=request_id)
         except BaseException:
-            pending = await super().drain_inbound()
-            for item in pending:
-                if item is not message:
-                    await super().put_inbound(item)
+            await super().remove_inbound(request_id)
             raise
+        if result.get("kind") == "management":
+            await super().remove_inbound(request_id)
 
-    async def accept_one_input(self) -> None:
+    async def stage_submitted_input(self, text: str, request_id: str) -> None:
+        await super().put_inbound(InboundMessage(content=text, metadata={"request_id": request_id}))
+
+    async def accept_one_input(
+        self,
+        request_id: str | None = None,
+        run_id: str | None = None,
+    ) -> None:
+        if request_id is not None and run_id is not None:
+            await super().update_inbound_metadata(request_id, {"run_id": run_id})
+            await super().remove_inbound(request_id)
+            return
         messages = await super().drain_inbound()
         for message in messages[1:]:
             await super().put_inbound(message)
 
-    async def put_remote_output(self, value: Mapping[str, object]) -> None:
+    async def put_remote_output(
+        self, value: Mapping[str, object], *, run_id: str | None = None
+    ) -> None:
         message_type = value.get("type")
         if message_type not in {
             "model_reasoning",
@@ -99,11 +112,14 @@ class RemoteMessageBus(MessageBus):
             message_type = "system_control"
         content = value.get("content")
         metadata = value.get("metadata")
+        projected_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        if run_id is not None:
+            projected_metadata["_remote_run_id"] = run_id
         await super().put_outbound(
             OutboundMessage(
                 cast(Any, message_type),
                 content if isinstance(content, str) else "",
-                dict(metadata) if isinstance(metadata, dict) else {},
+                projected_metadata,
             )
         )
 
@@ -282,7 +298,42 @@ class RemoteManagementCommandDispatcher:
         self.client = client
 
     async def dispatch(self, command: str) -> Any:
-        return _management_result(await self.client.management("dispatch", {"command": command}))
+        return await self.execute_management_command(command)
+
+    async def execute_management_command(self, command: str) -> Any:
+        return _management_result(await self.client.execute_management_command(command))
+
+    async def submit_user_input(self, text: str) -> Any:
+        from omni.management.commands import ManagementCommandResult
+
+        request_id = str(uuid4())
+        result = await self.client.submit_user_input(text, request_id=request_id)
+        if result.get("kind") == "management":
+            management_result = result.get("management_result")
+            if not isinstance(management_result, dict):
+                raise ServiceStartupError("service_protocol_error", "Management result is invalid.")
+            return _management_result(management_result)
+        if result.get("kind") != "conversation_input" or not isinstance(result.get("run_id"), str):
+            raise ServiceStartupError("service_protocol_error", "Input result is invalid.")
+        run_id = cast(str, result["run_id"])
+        return ManagementCommandResult(
+            handled=False,
+            output=None,
+            submitted=True,
+            submitted_run_id=run_id,
+        )
+
+    async def recall_queued_inputs(self) -> list[dict[str, str]]:
+        result = await self.client.recall_queued_inputs()
+        items = result.get("recalled_inputs")
+        if not isinstance(items, list) or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("run_id"), str)
+            or not isinstance(item.get("text"), str)
+            for item in items
+        ):
+            raise ServiceStartupError("service_protocol_error", "Queue recall result is invalid.")
+        return cast(list[dict[str, str]], items)
 
     async def update_reasoning_effort(self, effort: str) -> Any:
         return _management_result(await self.client.management("effort", {"effort": effort}))
@@ -646,16 +697,30 @@ class ServiceClient:
             if not current_session:
                 return
             run_id = event.get("run_id")
+            request_id = payload.get("request_id") if isinstance(payload, dict) else None
             if isinstance(run_id, str):
                 self.control.accept_run(run_id)
-            await self.bus.accept_one_input()
+            if isinstance(request_id, str) and isinstance(run_id, str):
+                await self.bus.accept_one_input(request_id, run_id)
+            else:
+                await self.bus.accept_one_input()
+        elif event_type == "run.started" and current_session:
+            run_id = event.get("run_id")
+            if isinstance(run_id, str):
+                await self.bus.put_remote_output(
+                    {"type": "system_control", "metadata": {"_remote_run_started": True}},
+                    run_id=run_id,
+                )
         elif event_type == "run.output" and isinstance(payload, dict):
             if not current_session:
                 return
             message = payload.get("message")
             if isinstance(message, dict):
-                await self.bus.put_remote_output(message)
-        elif event_type in {"run.completed", "run.cancelled", "run.failed"}:
+                run_id = event.get("run_id")
+                await self.bus.put_remote_output(
+                    message, run_id=run_id if isinstance(run_id, str) else None
+                )
+        elif event_type in {"run.completed", "run.cancelled", "run.failed", "input.recalled"}:
             if not current_session:
                 return
             run_id = event.get("run_id")
@@ -673,11 +738,15 @@ class ServiceClient:
             sessions = snapshot.get("sessions")
             if isinstance(sessions, list):
                 for entry in sessions:
-                    if not isinstance(entry, dict) or entry.get("workspace_id") != self.workspace_id:
+                    if (
+                        not isinstance(entry, dict)
+                        or entry.get("workspace_id") != self.workspace_id
+                    ):
                         continue
                     session = entry.get("snapshot")
                     if (
-                        not isinstance(session, dict) or session.get("session_id") != self.session_id
+                        not isinstance(session, dict)
+                        or session.get("session_id") != self.session_id
                         or entry.get("claim_version") != self.claim_version
                     ):
                         continue
@@ -693,8 +762,7 @@ class ServiceClient:
             if "pending_confirmation" in snapshot:
                 pending = snapshot["pending_confirmation"]
                 token = (
-                    pending.get("payload", {}).get("token")
-                    if isinstance(pending, dict) else None
+                    pending.get("payload", {}).get("token") if isinstance(pending, dict) else None
                 )
                 for local, (candidate, _owner) in tuple(self.confirmation._items.items()):
                     if candidate != token:
@@ -763,8 +831,9 @@ class ServiceClient:
         session_id: str | None,
         claim_version: int | None,
         payload: dict[str, object],
+        request_id: str | None = None,
     ) -> dict[str, object]:
-        request_id = str(uuid4())
+        request_id = str(uuid4()) if request_id is None else request_id
         command = {
             "request_id": request_id,
             "type": command_type,
@@ -791,13 +860,31 @@ class ServiceClient:
         finally:
             self._pending.pop(request_id, None)
 
-    async def submit_input(self, text: str) -> dict[str, object]:
+    async def submit_user_input(
+        self,
+        text: str,
+        *,
+        request_id: str | None = None,
+    ) -> dict[str, object]:
         return await self._command(
             "input",
             workspace_id=self.workspace_id,
             session_id=self.session_id,
             claim_version=self.claim_version,
             payload={"text": text},
+            request_id=request_id,
+        )
+
+    async def submit_input(self, text: str) -> dict[str, object]:
+        return await self.submit_user_input(text)
+
+    async def recall_queued_inputs(self) -> dict[str, object]:
+        return await self._command(
+            "recall_queued_inputs",
+            workspace_id=self.workspace_id,
+            session_id=self.session_id,
+            claim_version=self.claim_version,
+            payload={},
         )
 
     async def claim_session(self, session_id: str) -> dict[str, object]:
@@ -866,6 +953,23 @@ class ServiceClient:
             claim_version=self.claim_version,
             payload={"run_id": run_id},
         )
+
+    async def execute_management_command(self, command: str) -> dict[str, object]:
+        return await self.management("dispatch", {"command": command})
+
+    async def get_input_capabilities(self) -> dict[str, object]:
+        response = await self._http_request("GET", "/api/v1/input-capabilities")
+        command_tokens = response.get("management_commands")
+        metadata = _skill_metadata(response.get("skill_metadata"))
+        if (
+            not isinstance(command_tokens, list)
+            or any(
+                not isinstance(token, str) or not token.startswith("/") for token in command_tokens
+            )
+            or metadata is None
+        ):
+            raise ServiceStartupError("service_protocol_error", "Input capabilities are invalid.")
+        return {"management_commands": tuple(command_tokens), "skill_metadata": metadata}
 
     async def decide_confirmation(self, token: str, decision: ConfirmationDecision) -> None:
         await self._command(

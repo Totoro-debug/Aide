@@ -29,6 +29,52 @@ def _validator(definition: str) -> Draft202012Validator:
 
 
 @pytest.mark.parametrize(
+    ("definition", "value"),
+    [
+        (
+            "submit_user_input_result",
+            {
+                "kind": "conversation_input",
+                "run_id": "run-1",
+                "live_state": None,
+            },
+        ),
+        (
+            "submit_user_input_result",
+            {
+                "kind": "management",
+                "management_result": _encode_management_result(
+                    ManagementCommandResult(handled=True, output="status")
+                ),
+            },
+        ),
+        (
+            "recall_queued_inputs_result",
+            {
+                "recalled_inputs": [{"run_id": "run-b", "text": " original B\n"}],
+                "live_state": None,
+            },
+        ),
+        (
+            "input_capabilities_response",
+            {
+                "management_commands": ["/status"],
+                "skill_metadata": [],
+            },
+        ),
+    ],
+)
+def test_input_operation_dtos_reject_incomplete_results(
+    definition: str, value: dict[str, object]
+) -> None:
+    validator = _validator(definition)
+    validator.validate(value)
+    for field in value:
+        with pytest.raises(ValidationError):
+            validator.validate({key: item for key, item in value.items() if key != field})
+
+
+@pytest.mark.parametrize(
     ("definition", "selection"),
     [
         ("runtime_status_request", {}),
@@ -370,6 +416,12 @@ def test_client_commands_require_claim_identity_and_typed_payloads() -> None:
         validator.validate({**command, "claim_version": None})
     with pytest.raises(ValidationError):
         validator.validate({**command, "payload": {"text": ""}})
+
+    validator.validate({**command, "type": "recall_queued_inputs", "payload": {}})
+    with pytest.raises(ValidationError):
+        validator.validate(
+            {**command, "type": "recall_queued_inputs", "claim_version": None, "payload": {}}
+        )
 
     decision = {
         **command,

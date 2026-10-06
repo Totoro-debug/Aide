@@ -134,6 +134,8 @@ class ManagementCommandResult:
     restore_plan: RestorePlan | None = None
     restore_result: RestoreResult | None = None
     status_view: RuntimeStatus | None = None
+    submitted: bool = False
+    submitted_run_id: str | None = None
 
 
 class ManagementCommandDispatcher:
@@ -141,6 +143,10 @@ class ManagementCommandDispatcher:
 
     def __init__(self, management: ManagementPort) -> None:
         self._management = management
+
+    async def submit_user_input(self, text: str) -> ManagementCommandResult:
+        """Classify a user submission through this dispatcher's authority."""
+        return await self.dispatch(text)
 
     @staticmethod
     def _skill_reload_failure() -> ManagementCommandResult:

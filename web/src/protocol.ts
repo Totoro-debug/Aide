@@ -67,6 +67,7 @@ export type ClientCommandType =
   | "input"
   | "session_model_configure"
   | "cancel"
+  | "recall_queued_inputs"
   | "confirmation_decide"
   | "subscribe";
 
@@ -428,6 +429,7 @@ export interface SessionSummary {
 
 export interface SessionSnapshot {
   active_model_configuration?: SessionModelConfiguration | null;
+  model_configuration_available?: boolean;
   session_id: string;
   messages: Record<string, unknown>[];
   restore_anchors: RestoreAnchor[];
@@ -533,6 +535,7 @@ export interface ManagementResult {
   skill_metadata?: SkillMetadata[];
   restore_plan?: RestorePlan;
   restore_result?: RestoreResult | null;
+  restore_listing?: { session_id: string; anchors: RestoreAnchor[] };
 }
 
 export interface ManagementResponse {
@@ -552,6 +555,34 @@ export interface ProjectSessionsResponse {
   workspace_id: string;
   sessions: SessionSummary[];
   next_cursor: string | null;
+}
+
+export interface ConversationInputAccepted {
+  kind: "conversation_input";
+  run_id: string;
+  live_state: SessionLiveState | null;
+}
+
+export interface ManagementInputResult {
+  kind: "management";
+  management_result: ManagementResult;
+}
+
+export type SubmitUserInputResult = ConversationInputAccepted | ManagementInputResult;
+
+export interface RecalledConversationInput {
+  run_id: string;
+  text: string;
+}
+
+export interface RecallQueuedInputsResult {
+  recalled_inputs: RecalledConversationInput[];
+  live_state: SessionLiveState | null;
+}
+
+export interface InputCapabilitiesResponse {
+  management_commands: string[];
+  skill_metadata: SkillMetadata[];
 }
 
 export interface WorkspaceSessionsResponse {

@@ -48,6 +48,20 @@ try {
   await page.addInitScript(() => {
     const Original = window.WebSocket;
     window.WebSocket = class extends Original {
+      addEventListener(type, listener, options) {
+        if (type !== "message" || typeof listener !== "function") {
+          return super.addEventListener(type, listener, options);
+        }
+        return super.addEventListener(type, (event) => {
+          const value = JSON.parse(event.data);
+          if (window.delayRecallResponse && value.accepted && value.result?.recalled_inputs) {
+            window.recallResponsePending = true;
+            window.releaseRecallResponse = () => listener.call(this, event);
+            return;
+          }
+          listener.call(this, event);
+        }, options);
+      }
       constructor(...args) {
         super(...args);
         window.chatControl = args[1][1];
@@ -124,6 +138,10 @@ try {
     console.log((await page.locator("#main-content").innerText()).slice(0, 1600));
     throw error;
   }
+  const inputCapabilities = await api("/input-capabilities");
+  assert.equal(inputCapabilities.status, 200);
+  assert.ok(inputCapabilities.body.management_commands.includes("/status"));
+  assert.ok(Array.isArray(inputCapabilities.body.skill_metadata));
   const firstDirectory = join(control.details.home_root, ".omni", "chat");
   assert.deepEqual(await readdir(join(firstDirectory, ".omni", "sessions")), [], "An empty draft was persisted");
   const sessionModel = page.getByRole("combobox", { name: "Session model", exact: true });
@@ -164,6 +182,35 @@ try {
   assert.equal(firstTurnObservation.model, "small-model");
   assert.equal(firstTurnObservation.reasoning_effort, "high");
   assert.equal(firstTurnObservation.max_output, 1024);
+
+  await control.command("queue-arm");
+  const messageInput = page.getByRole("textbox", { name: "Message input", exact: true });
+  await messageInput.fill("queue recall barrier");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await control.command("queue-wait");
+  for (const queuedText of ["  queued B  ", "queued C\nline two"]) {
+    await messageInput.fill(queuedText);
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+  }
+  const recallButton = page.getByRole("button", { name: "Take back 2 queued", exact: true });
+  await expect(recallButton).toBeVisible();
+  await messageInput.fill("keep this draft");
+  await recallButton.click();
+  await expect(messageInput).toHaveValue("  queued B  \nqueued C\nline two\nkeep this draft");
+  await expect(page.locator("article[data-run-id]").filter({ hasText: "queued B" })).toHaveCount(0);
+  await expect(page.locator("article[data-run-id]").filter({ hasText: "queued C" })).toHaveCount(0);
+  await control.command("queue-release");
+  await expect(page.getByRole("log").getByText("Fixture response.", { exact: true })).toHaveCount(2);
+  await page.waitForTimeout(500);
+  const observationsAfterRecall = (await readFile(control.details.provider_observation_path, "utf8"))
+    .trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(observationsAfterRecall.filter(observation => observation.prompt.includes("queued B")).length, 0);
+  assert.equal(observationsAfterRecall.filter(observation => observation.prompt.includes("queued C")).length, 0);
+  await messageInput.fill("/status");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByRole("status").filter({ hasText: "chat_model" }).last()).toBeVisible();
+  await expect(page.locator("article[data-run-id]").filter({ hasText: "/status" })).toHaveCount(0);
+
   let releaseModels;
   let modelsRequested;
   const modelsGate = new Promise(resolve => { releaseModels = resolve; });
@@ -179,10 +226,13 @@ try {
   await modelsStarted;
   await expect(page.getByRole("textbox", { name: "Message input", exact: true })).toBeEnabled();
   await page.getByRole("textbox", { name: "Message input", exact: true }).fill("unsent model check");
-  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
   releaseModels();
-  await expect(page.getByRole("link", { name: "Configure models", exact: true })).toHaveAttribute("href", "/settings");
-  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeDisabled();
+  await expect(page.getByRole("link", { name: "Configure models", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+  await page.getByRole("textbox", { name: "Message input", exact: true }).fill("/status");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByRole("status").filter({ hasText: "chat_model" }).last()).toBeVisible();
   await page.unroute("**/api/v1/models/available");
   await page.reload();
   await expect(sessionModel).toHaveValue(JSON.stringify(["primary", "small-model"]));
@@ -190,9 +240,12 @@ try {
   assert.equal((await api("/projects")).body.projects.length, 0);
   const forbidden = await api("/workspaces/attach", "POST", { request_id: "chat-attach-denied", path: control.details.cli_workspace });
   assert.equal(forbidden.status, 403, "Web gained arbitrary CLI directory attachment");
-  await page.getByRole("textbox", { name: "Message input", exact: true }).fill("streaming");
+  await control.command("queue-arm");
+  await page.getByRole("textbox", { name: "Message input", exact: true }).fill("queue recall barrier");
   await page.getByRole("button", { name: "Send", exact: true }).click();
+  await control.command("queue-wait");
   await page.getByRole("button", { name: "Cancel run", exact: true }).click();
+  await control.command("queue-release");
   await expect(page.getByRole("textbox", { name: "Message input", exact: true })).toBeEnabled();
   const nextDirectory = join(control.details.home_root, "chat-next");
   await changeDirectory(nextDirectory);
@@ -211,8 +264,43 @@ try {
   const historyNavigation = page.getByRole("navigation", { name: "Conversations", exact: true });
   await historyNavigation.getByTitle(firstConversation.directory).click();
   await expect(page.getByRole("log").getByText("chat acceptance message", { exact: true })).toBeVisible();
+  await control.command("queue-arm");
+  await messageInput.fill("queue recall barrier");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await control.command("queue-wait");
+  await messageInput.fill("queued switched draft");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await page.evaluate(() => { window.delayRecallResponse = true; });
+  await page.getByRole("button", { name: "Take back 1 queued", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.recallResponsePending === true)).toBe(true);
   await historyNavigation.getByTitle(secondConversation.directory).click();
   await expect(page.getByRole("log").getByText("second directory acceptance message", { exact: true })).toBeVisible();
+  await messageInput.fill("keep other conversation draft");
+  await page.evaluate(() => { window.delayRecallResponse = false; window.releaseRecallResponse(); });
+  await expect(messageInput).toHaveValue("keep other conversation draft");
+  await historyNavigation.getByTitle(firstConversation.directory).click();
+  await expect(messageInput).toHaveValue("queued switched draft");
+  await messageInput.fill("queued after returning");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await page.evaluate(() => {
+    window.delayRecallResponse = true;
+    window.recallResponsePending = false;
+  });
+  await page.getByRole("button", { name: "Take back 1 queued", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.recallResponsePending === true)).toBe(true);
+  await historyNavigation.getByTitle(secondConversation.directory).click();
+  await expect(messageInput).toHaveValue("keep other conversation draft");
+  await historyNavigation.getByTitle(firstConversation.directory).click();
+  await expect(page.getByRole("log").getByText("chat acceptance message", { exact: true })).toBeVisible();
+  await messageInput.fill("typed after returning");
+  await page.evaluate(() => { window.delayRecallResponse = false; window.releaseRecallResponse(); });
+  await expect(messageInput).toHaveValue("queued after returning\ntyped after returning");
+  await messageInput.fill("");
+  await control.command("queue-release");
+  await expect(page.getByRole("log").getByText("Fixture response.", { exact: true })).toHaveCount(3);
+  await historyNavigation.getByTitle(secondConversation.directory).click();
+  await expect(messageInput).toHaveValue("keep other conversation draft");
+  await messageInput.fill("");
   const fileDirectory = join(control.details.home_root, "chat-file");
   await writeFile(fileDirectory, "not a directory");
   await changeDirectory(fileDirectory);
@@ -458,9 +546,13 @@ try {
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByRole("log").getByText("Fixture response.", { exact: true })).toHaveCount(2);
   const restoreEntry = page.getByRole("article").filter({ hasText: "shared chat branch to restore" });
-  await restoreEntry.locator("summary").click();
-  await restoreEntry.getByRole("group", { name: "Restore options for this message", exact: true })
-    .getByRole("button", { name: "Restore conversation to before this message", exact: true }).click();
+  const restoreMenuTrigger = restoreEntry.locator('summary[aria-label="Restore options for this message"]');
+  await expect(restoreMenuTrigger).toBeVisible();
+  await restoreMenuTrigger.click();
+  const restoreConversationAction = restoreEntry.getByRole("group", { name: "Restore options for this message", exact: true })
+    .getByRole("button", { name: "Restore conversation to before this message", exact: true });
+  await expect(restoreConversationAction).toBeVisible();
+  await restoreConversationAction.click();
   await expect(page.locator("#restore-anchor-select")).toHaveValue("2");
   await page.getByRole("button", { name: "Inspect restore", exact: true }).click();
   await expect(page.getByText("Restore preview", { exact: true })).toBeVisible();
@@ -480,9 +572,13 @@ try {
   const chatTitleAfterAutoTitle = (await api("/chat/sessions")).body.sessions.find(session => session.id === secondConversation.id);
   assert.equal(chatTitleAfterAutoTitle.title, "Renamed shared chat");
   const fileRestoreEntry = page.getByRole("article").filter({ hasText: "file restore menu branch" });
-  await fileRestoreEntry.locator("summary").click();
-  await fileRestoreEntry.getByRole("group", { name: "Restore options for this message", exact: true })
-    .getByRole("button", { name: "Restore conversation and files to before this message", exact: true }).click();
+  const fileRestoreMenuTrigger = fileRestoreEntry.locator('summary[aria-label="Restore options for this message"]');
+  await expect(fileRestoreMenuTrigger).toBeVisible();
+  await fileRestoreMenuTrigger.click();
+  const restoreFilesAction = fileRestoreEntry.getByRole("group", { name: "Restore options for this message", exact: true })
+    .getByRole("button", { name: "Restore conversation and files to before this message", exact: true });
+  await expect(restoreFilesAction).toBeVisible();
+  await restoreFilesAction.click();
   await expect(page.locator("#restore-anchor-select")).toHaveValue("3");
   await page.getByRole("button", { name: "Inspect restore", exact: true }).click();
   await expect(page.locator('input[name="restore-mode"][value="files"]')).toBeDisabled();

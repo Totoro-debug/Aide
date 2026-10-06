@@ -446,32 +446,44 @@ export function getInputCapabilities(): Promise<InputCapabilitiesResponse> {
   return request<InputCapabilitiesResponse>("/input-capabilities");
 }
 
+type ConfigEditOptions = {
+  baseline?: ConfigFields;
+  baselineSecrets?: Record<string, string | null>;
+  overwriteConflicts?: boolean;
+  editorId?: string;
+  editSequence?: number;
+};
+
+function configEditBody(
+  revision: string,
+  fields: ConfigPatchFields,
+  secrets: ConfigSecrets,
+  requestId: string,
+  options: ConfigEditOptions,
+): Record<string, unknown> {
+  return {
+    request_id: requestId,
+    revision,
+    fields,
+    secrets,
+    ...(options.baseline === undefined ? {} : { baseline: options.baseline }),
+    ...(options.baselineSecrets === undefined ? {} : { baseline_secrets: options.baselineSecrets }),
+    ...(options.overwriteConflicts === undefined ? {} : { overwrite_conflicts: options.overwriteConflicts }),
+    ...(options.editorId === undefined ? {} : { editor_id: options.editorId, edit_sequence: options.editSequence }),
+  };
+}
+
 export function patchConfig(
   revision: string,
   fields: ConfigPatchFields,
   secrets: ConfigSecrets,
   requestId: string = createRequestId(),
-  options: {
-    baseline?: ConfigFields;
-    baselineSecrets?: Record<string, string | null>;
-    overwriteConflicts?: boolean;
-    editorId?: string;
-    editSequence?: number;
-  } = {},
+  options: ConfigEditOptions = {},
 ): Promise<ConfigPatchResponse> {
   return request<ConfigPatchResponse>("/config", {
     method: "PATCH",
     mutation: true,
-    body: {
-      request_id: requestId,
-      revision,
-      fields,
-      secrets,
-      ...(options.baseline === undefined ? {} : { baseline: options.baseline }),
-      ...(options.baselineSecrets === undefined ? {} : { baseline_secrets: options.baselineSecrets }),
-      ...(options.overwriteConflicts === undefined ? {} : { overwrite_conflicts: options.overwriteConflicts }),
-      ...(options.editorId === undefined ? {} : { editor_id: options.editorId, edit_sequence: options.editSequence }),
-    },
+    body: configEditBody(revision, fields, secrets, requestId, options),
   });
 }
 
@@ -480,27 +492,12 @@ export function repairConfig(
   fields: ConfigPatchFields,
   secrets: ConfigSecrets,
   requestId: string = createRequestId(),
-  options: {
-    baseline?: ConfigFields;
-    baselineSecrets?: Record<string, string | null>;
-    overwriteConflicts?: boolean;
-    editorId?: string;
-    editSequence?: number;
-  } = {},
+  options: ConfigEditOptions = {},
 ): Promise<ConfigPatchResponse> {
   return request<ConfigPatchResponse>("/config/repair", {
     method: "POST",
     mutation: true,
-    body: {
-      request_id: requestId,
-      revision,
-      fields,
-      secrets,
-      ...(options.baseline === undefined ? {} : { baseline: options.baseline }),
-      ...(options.baselineSecrets === undefined ? {} : { baseline_secrets: options.baselineSecrets }),
-      ...(options.overwriteConflicts === undefined ? {} : { overwrite_conflicts: options.overwriteConflicts }),
-      ...(options.editorId === undefined ? {} : { editor_id: options.editorId, edit_sequence: options.editSequence }),
-    },
+    body: configEditBody(revision, fields, secrets, requestId, options),
   });
 }
 

@@ -94,6 +94,47 @@ async def test_config_http_auth_csrf_client_and_unknown_fields_preserve_bytes(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "operation"),
+    [("PATCH", "/api/v1/config", "request"), ("POST", "/api/v1/config/repair", "repair")],
+)
+async def test_config_mutation_shape_errors_preserve_contract_and_file(
+    security_http: SecurityHttp, method: str, path: str, operation: str,
+) -> None:
+    service, server, headers, _ = security_http
+    payload = _patch(service)
+    config_path = service.agent_home.path / "config.toml"
+    before = config_path.read_bytes()
+    fields_message = f"Configuration {operation} fields are invalid."
+    cases: list[tuple[dict[str, object], str, dict[str, str]]] = [
+        ({key: value for key, value in payload.items() if key != missing}, fields_message, {})
+        for missing in ("request_id", "revision", "fields", "secrets")
+    ]
+    cases.append(({**payload, "unknown": True}, fields_message, {}))
+    for field, invalid, message, field_error in (
+        ("revision", "", "Configuration revision is required.", "must be a nonempty string"),
+        ("revision", 1, "Configuration revision is required.", "must be a nonempty string"),
+        ("fields", [], "Configuration fields must be an object.", "must be an object"),
+        ("secrets", [], "Configuration secret operations must be an object.", "must be an object"),
+        ("baseline", [], "Configuration baseline must be an object.", "must be an object"),
+        ("baseline_secrets", [], "Configuration secret baseline must be an object.", "must be an object"),
+        ("overwrite_conflicts", 1, "Configuration conflict resolution must be a boolean.", "must be a boolean"),
+    ):
+        cases.append(({**payload, field: invalid}, message, {field: field_error}))
+    async with aiohttp.ClientSession() as http:
+        for body, message, field_errors in cases:
+            response = await http.request(method, server.make_url(path), headers=headers, json=body)
+            result = await response.json()
+            assert response.status == 422
+            assert result["code"] == "validation_error"
+            assert result["message"] == message
+            assert result["field_errors"] == field_errors
+            assert result["retryable"] is False
+            assert config_path.read_bytes() == before
+    assert not tuple(service.agent_home.path.glob("config.toml.backup.*"))
+
+
+@pytest.mark.asyncio
 async def test_browser_cookie_config_requires_current_control_and_csrf(
     security_http: SecurityHttp,
 ) -> None:
@@ -158,6 +199,7 @@ async def test_config_http_idempotency_body_action_and_client_reuse(
         )
         saved = await saved_response.json()
         assert saved_response.status == 200
+        assert "backup_id" not in saved
         _assert_schema(saved)
         before = (service.agent_home.path / "config.toml").read_bytes()
         replay_response = await http.patch(
@@ -176,9 +218,11 @@ async def test_config_http_idempotency_body_action_and_client_reuse(
         other_action = await http.post(
             server.make_url("/api/v1/config/repair"),
             headers=first,
-            json={**payload, "revision": saved["revision"]},
+            json=payload,
         )
         assert changed_body.status == other_client.status == other_action.status == 409
+        assert sum(event["type"] == "config.application"
+                   for event in service.client(first["X-Omni-Client"]).events) == 1
         assert (service.agent_home.path / "config.toml").read_bytes() == before
         current_response = await http.get(server.make_url("/api/v1/config"), headers=first)
         assert current_response.status == 200

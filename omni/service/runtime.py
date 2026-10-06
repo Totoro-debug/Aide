@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from time import monotonic
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from uuid import uuid4
 
 from tzlocal import get_localzone_name
@@ -3095,6 +3095,51 @@ class AgentService:
         edit_sequence: int | None = None,
     ) -> dict[str, object]:
         """Persist one safe configuration patch for the next service startup."""
+        return await self._persist_configuration_edit(
+            "patch",
+            request_id, expected_revision, fields, secrets,
+            client_id=client_id, baseline=baseline, baseline_secrets=baseline_secrets,
+            overwrite_conflicts=overwrite_conflicts, editor_id=editor_id, edit_sequence=edit_sequence,
+        )
+
+    async def repair_configuration(
+        self,
+        request_id: str,
+        expected_revision: str,
+        fields: Mapping[str, object],
+        secrets: Mapping[str, object] | None = None,
+        *,
+        client_id: str | None = None,
+        baseline: Mapping[str, object] | None = None,
+        baseline_secrets: Mapping[str, object] | None = None,
+        overwrite_conflicts: bool = False,
+        editor_id: str | None = None,
+        edit_sequence: int | None = None,
+    ) -> dict[str, object]:
+        """Persist a first-use or malformed-file repair for the next service startup."""
+        return await self._persist_configuration_edit(
+            "repair",
+            request_id, expected_revision, fields, secrets,
+            client_id=client_id, baseline=baseline, baseline_secrets=baseline_secrets,
+            overwrite_conflicts=overwrite_conflicts, editor_id=editor_id, edit_sequence=edit_sequence,
+        )
+
+    async def _persist_configuration_edit(
+        self,
+        action: Literal["patch", "repair"],
+        request_id: str,
+        expected_revision: str,
+        fields: Mapping[str, object],
+        secrets: Mapping[str, object] | None = None,
+        *,
+        client_id: str | None = None,
+        baseline: Mapping[str, object] | None = None,
+        baseline_secrets: Mapping[str, object] | None = None,
+        overwrite_conflicts: bool = False,
+        editor_id: str | None = None,
+        edit_sequence: int | None = None,
+    ) -> dict[str, object]:
+        """Coordinate one configuration save without replacing startup resources."""
         if not request_id:
             raise service_error("validation_error", "Request ID is required.", status=422)
         if client_id is not None:
@@ -3103,7 +3148,7 @@ class AgentService:
             raise service_error("admission_closed", "The local service is stopping.")
         fingerprint = _configuration_request_fingerprint(
             client_id,
-            "patch",
+            action,
             {
                 "revision": expected_revision,
                 "baseline": baseline,
@@ -3123,7 +3168,12 @@ class AgentService:
                 client_id, editor_id, edit_sequence, fields, secrets, baseline, baseline_secrets
             )
             try:
-                result = self._config_loader.patch_editable_fields(
+                persist = (
+                    self._config_loader.patch_editable_fields
+                    if action == "patch"
+                    else self._config_loader.repair_editable_fields
+                )
+                result = persist(
                     expected_revision,
                     fields,
                     secrets,
@@ -3181,119 +3231,8 @@ class AgentService:
                 "active" if result.revision == self._config_active_revision else "restart-required"
             )
             response = self._config_response()
-            self._config_request_results[request_id] = response
-            self._config_request_fingerprints[request_id] = fingerprint
-            if len(self._config_request_results) > 256:
-                oldest = next(iter(self._config_request_results))
-                self._config_request_results.pop(oldest, None)
-                self._config_request_fingerprints.pop(oldest, None)
-        await self._emit_configuration_event()
-        return response
-
-    async def repair_configuration(
-        self,
-        request_id: str,
-        expected_revision: str,
-        fields: Mapping[str, object],
-        secrets: Mapping[str, object] | None = None,
-        *,
-        client_id: str | None = None,
-        baseline: Mapping[str, object] | None = None,
-        baseline_secrets: Mapping[str, object] | None = None,
-        overwrite_conflicts: bool = False,
-        editor_id: str | None = None,
-        edit_sequence: int | None = None,
-    ) -> dict[str, object]:
-        """Persist a first-use or malformed-file repair for the next service startup."""
-        if not request_id:
-            raise service_error("validation_error", "Request ID is required.", status=422)
-        if client_id is not None:
-            self._require_client(client_id)
-        if self.state in {"draining", "stopped"}:
-            raise service_error("admission_closed", "The local service is stopping.")
-        fingerprint = _configuration_request_fingerprint(
-            client_id,
-            "repair",
-            {
-                "revision": expected_revision,
-                "baseline": baseline,
-                "baseline_secrets": baseline_secrets,
-                "overwrite_conflicts": overwrite_conflicts,
-                "editor_id": editor_id,
-                "edit_sequence": edit_sequence,
-                "fields": fields,
-                "secrets": secrets or {},
-            },
-        )
-        async with self._config_lock:
-            existing = self._configuration_request_result(request_id, fingerprint)
-            if existing is not None:
-                return existing
-            coordinated, coordinated_secrets = self._prepare_configuration_edit(
-                client_id, editor_id, edit_sequence, fields, secrets, baseline, baseline_secrets
-            )
-            try:
-                result = self._config_loader.repair_editable_fields(
-                    expected_revision,
-                    fields,
-                    secrets,
-                    coordinated,
-                    coordinated_secrets,
-                    overwrite_conflicts,
-                )
-            except ConfigRevisionConflict as error:
-                raise service_error(
-                    "config_revision_conflict",
-                    error.error.message,
-                    status=409,
-                    retryable=True,
-                    field_errors=error.field_errors,
-                ) from error
-            except ConfigFieldError as error:
-                raise service_error(
-                    error.error.code,
-                    error.error.message,
-                    status=422,
-                    field_errors=error.field_errors,
-                ) from error
-            except ConfigError as error:
-                raise service_error(
-                    error.error.code,
-                    "The complete User Configuration is invalid.",
-                    status=422,
-                    field_errors=error.field_errors,
-                ) from error
-            except OSError as error:
-                raise service_error(
-                    "persistence_error",
-                    "User Configuration could not be written.",
-                    status=500,
-                    retryable=True,
-                ) from error
-
-            self._config_saved_configuration = result.configuration
-            self._config_saved_revision = result.revision
-            self._config_fields = {
-                section: dict(values) for section, values in result.fields.items()
-            }
-            self._config_secret_revisions = dict(
-                self._config_loader.secret_revisions(result.configuration)
-            )
-            self._record_configuration_edit(
-                client_id, editor_id, edit_sequence, fields, secrets, baseline, baseline_secrets, result.previous_fields, result.previous_secret_revisions
-            )
-            self._config_state = "active"
-            self._config_repair_required = False
-            self._config_backup_required = False
-            self._config_requires_secret_reentry = False
-            self._config_projection_error = None
-            self._config_status = (
-                "active" if result.revision == self._config_active_revision else "restart-required"
-            )
-            response = {
-                "backup_id": result.backup_id,
-                **self._config_response(),
-            }
+            if action == "repair":
+                response = {"backup_id": result.backup_id, **response}
             self._config_request_results[request_id] = response
             self._config_request_fingerprints[request_id] = fingerprint
             if len(self._config_request_results) > 256:

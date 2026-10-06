@@ -274,6 +274,30 @@ export interface RuntimeStatus {
   };
 }
 
+export interface MemoryViewResponse {
+  request_id: string;
+  workspace_id: string;
+  content: string;
+}
+
+export interface DreamRunResponse {
+  request_id: string;
+  workspace_id: string;
+  result: DreamResult;
+}
+
+export interface SkillReloadResponse {
+  request_id: string;
+  workspace_id: string;
+  skills: SkillMetadata[];
+}
+
+export interface RuntimeStatusResponse {
+  request_id: string;
+  workspace_id: string;
+  status: RuntimeStatus;
+}
+
 export type ProjectScheduleState =
   | "available"
   | "unavailable"

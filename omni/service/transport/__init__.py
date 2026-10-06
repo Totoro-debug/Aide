@@ -20,7 +20,7 @@ from aiohttp import WSMsgType, web
 from ...config.config import ConfigError
 from ..discovery import identity_proof
 from ..errors import ServiceError, service_error
-from ..runtime import AgentService, ServiceSink
+from ..runtime import WEB_TICKET_TTL_SECONDS, AgentService, ServiceSink
 
 _API_PREFIX = "/api/v1"
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
@@ -28,7 +28,7 @@ _CSRF_HEADER = "X-Omni-CSRF"
 _CLIENT_HEADER = "X-Omni-Client"
 _WEB_CONTROL_HEADER = "X-Omni-Control"
 _WEB_SESSION_COOKIE = "omni_session"
-_WEB_TICKET_TTL_SECONDS = 25.0
+_WEB_TICKET_TTL_SECONDS = WEB_TICKET_TTL_SECONDS
 _WEB_SESSION_MAX_AGE_SECONDS = 24 * 60 * 60
 _STATIC_CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
@@ -212,6 +212,22 @@ class AgentServiceTransport:
             f"{_API_PREFIX}/workspaces/{{workspace_id}}/schedule/jobs/{{job_id}}",
             self._delete_schedule_job,
         )
+        app.router.add_post(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/memory/read",
+            self._get_memory_view,
+        )
+        app.router.add_post(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/memory/dream",
+            self._run_dream,
+        )
+        app.router.add_post(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/runtime/status",
+            self._get_runtime_status,
+        )
+        app.router.add_post(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/skills/reload",
+            self._reload_skill_catalog,
+        )
         app.router.add_get(
             f"{_API_PREFIX}/workspaces/{{workspace_id}}/management/{{action:.*}}",
             self._management,
@@ -310,23 +326,14 @@ class AgentServiceTransport:
             return await self._web_exchange(request)
         context = self._authenticate(request, mutation=True, client_required=True)
         client_id = _context_client_id(context)
-        if self.service.client(client_id).kind != "cli":
-            raise service_error(
-                "forbidden", "Only CLI clients may open the Web Interface.", status=403
-            )
         body = await _json_object(request)
         request_id = _require_request_id(body)
-        ticket = secrets.token_urlsafe(32)
+        result = self.service.open_web_interface(client_id, request_id)
+        ticket = result["ticket"]
         async with self._web_auth_lock:
             self._prune_web_tickets()
             self._web_tickets[ticket] = time.monotonic() + _WEB_TICKET_TTL_SECONDS
-        return web.json_response(
-            {
-                "request_id": request_id,
-                "ticket": ticket,
-                "expires_in": int(_WEB_TICKET_TTL_SECONDS),
-            }
-        )
+        return web.json_response(result)
 
     async def _web_exchange(self, request: web.Request) -> web.Response:
         self._check_host_origin(request, websocket=False, require_origin=True)
@@ -372,14 +379,7 @@ class AgentServiceTransport:
 
     async def _service_info(self, request: web.Request) -> web.Response:
         self._authenticate(request)
-        return web.json_response(
-            {
-                "service_instance_id": self.service.service_instance_id,
-                "protocol_version": self.service.protocol_version,
-                "state": self.service.state,
-                "active_workspace_count": len(self.service.workspaces),
-            }
-        )
+        return web.json_response(self.service.get_service_status())
 
     async def _config(self, request: web.Request) -> web.Response:
         self._authenticate(request, client_required=True)
@@ -1098,6 +1098,58 @@ class AgentServiceTransport:
         )
         return web.json_response(result)
 
+    async def _get_memory_view(self, request: web.Request) -> web.Response:
+        return await self._call_session_operation(request, self.service.get_memory_view)
+
+    async def _run_dream(self, request: web.Request) -> web.Response:
+        return await self._call_session_operation(request, self.service.run_dream)
+
+    async def _get_runtime_status(self, request: web.Request) -> web.Response:
+        return await self._call_session_operation(request, self.service.get_runtime_status)
+
+    async def _reload_skill_catalog(self, request: web.Request) -> web.Response:
+        return await self._call_session_operation(request, self.service.reload_skill_catalog)
+
+    async def _call_session_operation(
+        self,
+        request: web.Request,
+        operation: Callable[
+            [str, str, str, str, int, str], Awaitable[Mapping[str, object]]
+        ],
+    ) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        body = await _json_object(request)
+        if set(body) != {"request_id", "current_session_id", "claim_version"}:
+            raise service_error(
+                "validation_error", "Management operation fields are invalid.", status=422
+            )
+        request_id = _require_request_id(body)
+        session_id = body.get("current_session_id")
+        claim_version = body.get("claim_version")
+        request["omni.request_id"] = request_id
+        claim_credential = request.headers.get("X-Omni-Claim")
+        if not isinstance(session_id, str) or not session_id:
+            raise service_error("validation_error", "Session ID is required.", status=422)
+        if (
+            isinstance(claim_version, bool)
+            or not isinstance(claim_version, int)
+            or claim_version < 1
+            or not isinstance(claim_credential, str)
+            or not claim_credential
+        ):
+            raise service_error(
+                "stale_claim", "Conversation Session Claim is missing or stale.", retryable=True
+            )
+        result = await operation(
+            _context_client_id(context),
+            request.match_info["workspace_id"],
+            session_id,
+            request_id,
+            claim_version,
+            claim_credential,
+        )
+        return web.json_response(result)
+
     async def _management(self, request: web.Request) -> web.Response:
         if request.match_info["action"] in {"memory", "dream", "skills/reload"}:
             if request.method != "POST":
@@ -1234,12 +1286,7 @@ class AgentServiceTransport:
         self._authenticate(request, mutation=True)
         body = await _json_object(request)
         request_id = _require_request_id(body)
-        operation_id = secrets.token_urlsafe(16)
-        task = asyncio.create_task(self.service.stop())
-        task.add_done_callback(_consume_task_result)
-        return web.json_response(
-            {"request_id": request_id, "accepted": True, "operation_id": operation_id}
-        )
+        return web.json_response(self.service.request_service_stop(request_id))
 
     async def _events(self, request: web.Request) -> web.StreamResponse:
         context = self._authenticate(request, websocket=True, client_required=True)
@@ -1438,6 +1485,9 @@ def _bearer_token(request: web.Request) -> str | None:
 
 
 def _request_id_from_request(request: web.Request) -> str:
+    request_id = request.get("omni.request_id")
+    if isinstance(request_id, str):
+        return request_id
     return request.headers.get("X-Omni-Request", "transport") or "transport"
 
 

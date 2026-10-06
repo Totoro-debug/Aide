@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import os
+import secrets
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
@@ -97,10 +98,18 @@ from omni.service.contracts import (
     ConversationOpenDTO,
     ConversationOpenError,
     ConversationOpenFailureDTO,
+    DreamRunDTO,
+    MemoryViewDTO,
     ProjectJobSummaryDTO,
     ProjectListDTO,
     ProjectRegistrationDTO,
     ProjectSummaryDTO,
+    RuntimeStatusDTO,
+    ServiceStatusDTO,
+    ServiceStopDTO,
+    SkillMetadataDTO,
+    SkillReloadDTO,
+    WebLaunchTicketDTO,
 )
 from omni.service.conversation_workspaces import (
     ConversationWorkspaceCatalog,
@@ -161,6 +170,12 @@ _CONFIG_INVALID_ERROR = {
 }
 _MAX_SESSION_PAGE_SIZE = 100
 _MISSING = object()
+WEB_TICKET_TTL_SECONDS = 25.0
+
+
+def _consume_background_task_result(task: asyncio.Task[Any]) -> None:
+    if not task.cancelled():
+        task.exception()
 
 
 def _schedule_job_projection(
@@ -2469,6 +2484,8 @@ class AgentService:
         self._built_in_tool_catalog: BuiltInToolCatalog | None = None
         self._global_reconnect_task: asyncio.Task[None] | None = None
         self._stop_task: asyncio.Task[None] | None = None
+        self._stop_operation_id: str | None = None
+        self._stop_request_results: dict[str, ServiceStopDTO] = {}
         self._stop_failed = False
         self._closed = asyncio.Event()
         self._start_lock = asyncio.Lock()
@@ -2499,6 +2516,47 @@ class AgentService:
         self._chat_effort_override: ReasoningEffort | None = None
         self.projects = ProjectCatalog(agent_home)
         self.conversation_workspaces = ConversationWorkspaceCatalog(agent_home)
+
+    def get_service_status(self) -> ServiceStatusDTO:
+        return {
+            "service_instance_id": self.service_instance_id,
+            "protocol_version": self.protocol_version,
+            "state": self.state,
+            "active_workspace_count": len(self._workspaces),
+        }
+
+    def open_web_interface(self, client_id: str, request_id: str) -> WebLaunchTicketDTO:
+        client = self._require_client(client_id)
+        if client.kind != "cli":
+            raise service_error(
+                "forbidden", "Only CLI clients may open the Web Interface.", status=403
+            )
+        if not request_id:
+            raise service_error("validation_error", "request_id is required.", status=422)
+        return {
+            "request_id": request_id,
+            "ticket": secrets.token_urlsafe(32),
+            "expires_in": int(WEB_TICKET_TTL_SECONDS),
+        }
+
+    def request_service_stop(self, request_id: str) -> ServiceStopDTO:
+        if not request_id:
+            raise service_error("validation_error", "request_id is required.", status=422)
+        existing = self._stop_request_results.get(request_id)
+        if existing is not None:
+            return existing.copy()
+        if self._stop_operation_id is None:
+            self._stop_operation_id = str(uuid4())
+        if self._stop_task is None:
+            self._stop_task = asyncio.create_task(self._stop_owned())
+            self._stop_task.add_done_callback(_consume_background_task_result)
+        result: ServiceStopDTO = {
+            "request_id": request_id,
+            "accepted": True,
+            "operation_id": self._stop_operation_id,
+        }
+        self._stop_request_results[request_id] = result
+        return result.copy()
 
     async def _activate_workspace(self, workspace: WorkspaceRecord) -> None:
         async with workspace._lock:
@@ -5161,6 +5219,142 @@ class AgentService:
             claim_version=claim_version,
             claim_credential=claim_credential,
         )
+
+    async def _run_named_session_management(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        action: str,
+        request_id: str,
+        claim_version: int,
+        claim_credential: str,
+    ) -> dict[str, object]:
+        result = await self.handle_management(
+            client_id,
+            workspace_id,
+            session_id,
+            action,
+            {"request_id": request_id},
+            claim_version=claim_version,
+            claim_credential=claim_credential,
+        )
+        failure = result.get("management_error")
+        if isinstance(failure, dict):
+            code = failure.get("code")
+            message = failure.get("message")
+            if isinstance(code, str) and isinstance(message, str):
+                field_errors = failure.get("field_errors")
+                raise service_error(
+                    code,
+                    message,
+                    status=409 if code == "model_invalid_request" else 500,
+                    retryable=failure.get("retryable") is True,
+                    field_errors=field_errors if isinstance(field_errors, dict) else None,
+                )
+        return result
+
+    async def get_memory_view(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        request_id: str,
+        claim_version: int,
+        claim_credential: str,
+    ) -> MemoryViewDTO:
+        result = await self._run_named_session_management(
+            client_id,
+            workspace_id,
+            session_id,
+            "memory",
+            request_id,
+            claim_version,
+            claim_credential,
+        )
+        content = result.get("memory_content")
+        if not isinstance(content, str):
+            raise service_error("service_protocol_error", "Memory result is invalid.", status=500)
+        return {"request_id": request_id, "workspace_id": workspace_id, "content": content}
+
+    async def run_dream(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        request_id: str,
+        claim_version: int,
+        claim_credential: str,
+    ) -> DreamRunDTO:
+        result = await self._run_named_session_management(
+            client_id,
+            workspace_id,
+            session_id,
+            "dream",
+            request_id,
+            claim_version,
+            claim_credential,
+        )
+        dream_result = result.get("dream_result")
+        if not isinstance(dream_result, dict):
+            raise service_error("service_protocol_error", "Dream result is invalid.", status=500)
+        return {"request_id": request_id, "workspace_id": workspace_id, "result": dream_result}
+
+    async def get_runtime_status(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        request_id: str,
+        claim_version: int,
+        claim_credential: str,
+    ) -> RuntimeStatusDTO:
+        result = await self._run_named_session_management(
+            client_id,
+            workspace_id,
+            session_id,
+            "status",
+            request_id,
+            claim_version,
+            claim_credential,
+        )
+        status = result.get("status_view")
+        if not isinstance(status, dict):
+            raise service_error("service_protocol_error", "Runtime status is invalid.", status=500)
+        return {"request_id": request_id, "workspace_id": workspace_id, "status": status}
+
+    async def reload_skill_catalog(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        request_id: str,
+        claim_version: int,
+        claim_credential: str,
+    ) -> SkillReloadDTO:
+        result = await self._run_named_session_management(
+            client_id,
+            workspace_id,
+            session_id,
+            "skills/reload",
+            request_id,
+            claim_version,
+            claim_credential,
+        )
+        metadata = result.get("skill_metadata")
+        if not isinstance(metadata, list) or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("name"), str)
+            or not isinstance(item.get("description"), str)
+            or not isinstance(item.get("path"), str)
+            for item in metadata
+        ):
+            raise service_error("service_protocol_error", "Skill metadata is invalid.", status=500)
+        skills: list[SkillMetadataDTO] = [
+            {"name": item["name"], "description": item["description"], "path": item["path"]}
+            for item in metadata
+        ]
+        return {"request_id": request_id, "workspace_id": workspace_id, "skills": skills}
 
     async def handle_management(
         self,

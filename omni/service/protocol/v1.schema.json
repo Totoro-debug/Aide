@@ -695,6 +695,46 @@
         "result": {"$ref": "#/$defs/management_result"}
       }
     },
+    "memory_view_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "workspace_id", "content"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "content": {"type": "string"}
+      }
+    },
+    "dream_run_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "workspace_id", "result"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "result": {"$ref": "#/$defs/dream_result"}
+      }
+    },
+    "skill_reload_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "workspace_id", "skills"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "skills": {"type": "array", "items": {"$ref": "#/$defs/skill_metadata"}}
+      }
+    },
+    "runtime_status_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "workspace_id", "status"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "status": {"$ref": "#/$defs/runtime_status"}
+      }
+    },
     "error": {
       "type": "object",
       "additionalProperties": false,

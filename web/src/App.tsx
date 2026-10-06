@@ -52,7 +52,6 @@ import {
   cancelConversationRun,
   configureConversationModel,
   decideServiceConfirmation,
-  exchangeTicket,
   getProjectRemoval,
   getProjectSession,
   getRestoreResult,
@@ -63,14 +62,11 @@ import {
   getProjects,
   getRuntimeMemory,
   getRuntimeStatus,
-  getServiceStatus,
   getConfig,
   getAvailableModels,
-  openEventStream,
   releaseProjectSession,
   releaseWorkspaceSession,
   registerProject,
-  registerWebClient,
   reloadRuntimeSkills,
   renameProjectSession,
   renameWorkspaceSession,
@@ -88,7 +84,6 @@ import {
   getScheduleJob,
   getScheduleJobHistory,
   inspectRestore,
-  restoreBrowserSession,
   recallQueuedInputs,
   ServiceCommandError,
   triggerRuntimeDream,
@@ -97,7 +92,9 @@ import {
   updateRuntimeEffort,
   updateRuntimePermission,
   submitUserInput,
+  subscribeState,
 } from "./api";
+import { WebServiceClient } from "./serviceClient";
 import type {
   ClientCommand,
   ConfirmationRequest,
@@ -269,12 +266,8 @@ export default function App() {
   }, []);
   const [settingsVisited, setSettingsVisited] = useState(location.pathname === "/settings");
   const mainContentRef = useRef<HTMLElement | null>(null);
-  const bootstrapPromise = useRef<Promise<RegisteredClient> | null>(null);
-  const eventStreamRef = useRef<ReturnType<typeof openEventStream> | null>(null);
+  const serviceClientRef = useRef<WebServiceClient | null>(null);
   const eventListenersRef = useRef(new Set<ServiceEventListener>());
-  const eventCursorRef = useRef<{
-    serviceInstanceId: string; clientId: string; streamId: string; seq: number;
-  } | null>(null);
   const pendingConfirmationRef = useRef<PendingConfirmation | null>(null);
   const confirmationTriggerRef = useRef<HTMLElement | null>(null);
   const nextProjectSessionRequestRef = useRef(0);
@@ -366,11 +359,11 @@ export default function App() {
   }, []);
   const sendServiceCommand = useCallback(
     (command: ClientCommand): Promise<ServiceCommandResult> => {
-      const connection = eventStreamRef.current;
-      if (connection === null) {
+      const client = serviceClientRef.current;
+      if (client === null) {
         return Promise.reject(new ServiceCommandError(null, false));
       }
-      return connection.sendCommand(command);
+      return client.sendCommand(command);
     },
     [],
   );
@@ -544,57 +537,18 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    let retryTimer: number | null = null;
-    let statusTimer: number | null = null;
-    let active = true;
-
-    async function authenticate(): Promise<RegisteredClient> {
-      if (initialLaunchTicket !== null) {
-        await exchangeTicket(initialLaunchTicket);
-      } else if ((await restoreBrowserSession()) === null) {
-        throw new ApiError(401, null);
-      }
-      return registerWebClient();
-    }
-
-    function scheduleReconnect(recovering: boolean) {
-      if (!active || retryTimer !== null) return;
-      if (recovering) setConnectionState("recovering");
-      retryTimer = window.setTimeout(() => {
-        retryTimer = null;
-        void connect(false);
-      }, recovering ? 1000 : 3000);
-    }
-
-    async function refreshStatus() {
-      try {
-        const current = await getServiceStatus();
-        if (active) setServiceStatus(current);
-      } catch {
-        // The socket lifecycle reports connection failures separately.
-      }
-    }
-
-    async function connect(initial: boolean) {
-      try {
-        let client: RegisteredClient;
-        if (initial) {
-          bootstrapPromise.current ??= authenticate();
-          client = await bootstrapPromise.current;
-        } else {
-          client = await registerWebClient();
-        }
-        const current = await getServiceStatus();
-        if (!active) {
-          return;
-        }
-        const previousServiceInstanceId = serviceInstanceIdRef.current;
-        const serviceChanged = previousServiceInstanceId !== null
-          && previousServiceInstanceId !== current.service_instance_id;
-        serviceInstanceIdRef.current = current.service_instance_id;
+    const serviceClient = serviceClientRef.current ?? new WebServiceClient({
+      onAuthState: setAuthState,
+      onConnectionState: setConnectionState,
+      onServiceStatus: setServiceStatus,
+      onRegisteredClient: setRegisteredClient,
+      onServiceInstanceChange: (currentInstanceId, previousInstanceId, initial) => {
+        const serviceChanged = previousInstanceId !== null
+          && previousInstanceId !== currentInstanceId;
+        serviceInstanceIdRef.current = currentInstanceId;
         const savedRecovery = readBrowserRecoverySnapshot();
         if (serviceChanged || (savedRecovery !== null
-          && savedRecovery.service_instance_id !== current.service_instance_id)) {
+          && savedRecovery.service_instance_id !== currentInstanceId)) {
           clearBrowserRecoverySnapshot();
           setBrowserRecovery(null);
           if ((initial || serviceChanged) && isConversationPath(window.location.pathname)) {
@@ -612,109 +566,23 @@ export default function App() {
         } else {
           setBrowserRecovery(null);
         }
-        if (
-          eventCursorRef.current !== null
-          && (eventCursorRef.current.serviceInstanceId !== current.service_instance_id
-            || eventCursorRef.current.clientId !== client.client_id)
-        ) {
-          eventCursorRef.current = null;
-        }
-        setServiceStatus(current);
-        setRegisteredClient(client);
-        setAuthState("ready");
+      },
+      onConnectionOpen: () => setSessionEventVersion((version) => version + 1),
+      onConnectionClose: () => {
+        pendingConfirmationRef.current = null;
+        resolvingConfirmationTokenRef.current = null;
+        setPendingConfirmation(null);
         setSessionEventVersion((version) => version + 1);
-        statusTimer ??= window.setInterval(() => void refreshStatus(), 5000);
-        const connection = openEventStream(
-          () => {
-            setConnectionState("online");
-            setSessionEventVersion((version) => version + 1);
-            const activeConnection = eventStreamRef.current;
-            if (activeConnection !== null) {
-              void activeConnection.sendCommand({
-                request_id: createRequestId(),
-                type: "subscribe",
-                workspace_id: null,
-                session_id: null,
-                claim_version: null,
-                payload: {
-                  last_seq: eventCursorRef.current?.seq ?? null,
-                  stream_id: eventCursorRef.current?.streamId ?? null,
-                },
-              }).catch(() => {
-                activeConnection.close();
-              });
-            }
-          },
-          () => {
-            pendingConfirmationRef.current = null;
-            resolvingConfirmationTokenRef.current = null;
-            setPendingConfirmation(null);
-            setSessionEventVersion((version) => version + 1);
-            scheduleReconnect(true);
-          },
-          (event) => {
-            const cursor = eventCursorRef.current;
-            const sameStream = cursor !== null
-              && cursor.serviceInstanceId === event.service_instance_id
-              && cursor.clientId === client.client_id
-              && cursor.streamId === event.stream_id;
-            if (
-              sameStream
-              && event.seq <= cursor.seq
-            ) {
-              return;
-            }
-            if (
-              sameStream
-              && event.seq > cursor.seq + 1
-              && event.type !== "snapshot.required"
-            ) {
-              const activeConnection = eventStreamRef.current;
-              if (activeConnection !== null) {
-                void activeConnection.sendCommand({
-                  request_id: createRequestId(), type: "subscribe", workspace_id: null,
-                  session_id: null, claim_version: null,
-                  payload: { last_seq: null, stream_id: event.stream_id },
-                }).catch(() => activeConnection.close());
-              }
-              return;
-            }
-            eventCursorRef.current = {
-              serviceInstanceId: event.service_instance_id,
-              clientId: client.client_id,
-              streamId: event.stream_id,
-              seq: event.seq,
-            };
-            for (const listener of eventListenersRef.current) listener(event);
-            if (event.type.startsWith("session.")
-              || ["run.completed", "run.failed", "run.cancelled"].includes(event.type)) {
-              setSessionEventVersion((version) => version + 1);
-            }
-            void refreshStatus();
-          },
-        );
-        eventStreamRef.current = connection;
-      } catch (error) {
-        if (!active) {
-          return;
-        }
-        if (initial || (error instanceof ApiError && error.status === 401)) {
-          setAuthState(error instanceof ApiError && error.status === 401 ? "required" : "error");
-        }
-        setConnectionState("offline");
-        if (!initial && !(error instanceof ApiError && error.status === 401)) {
-          scheduleReconnect(false);
-        }
-      }
-    }
-
-    void connect(true);
+      },
+      onEvent: (event) => {
+        for (const listener of eventListenersRef.current) listener(event);
+      },
+      onSessionEvent: () => setSessionEventVersion((version) => version + 1),
+    }, initialLaunchTicket);
+    serviceClientRef.current = serviceClient;
+    serviceClient.start();
     return () => {
-      active = false;
-      if (retryTimer !== null) window.clearTimeout(retryTimer);
-      if (statusTimer !== null) window.clearInterval(statusTimer);
-      eventStreamRef.current?.close();
-      eventStreamRef.current = null;
+      serviceClient.close();
     };
   }, []);
 
@@ -1741,13 +1609,15 @@ function SettingsView({
         runtimeClaim.reconnect_credential,
       );
       if (skillReloadVersionRef.current !== version) return;
-      if (result.management_error !== undefined || !Array.isArray(result.skill_metadata)) {
+      if (!Array.isArray(result.skills)) {
         setSkillReloadError("management.skillsError");
         return;
       }
-      setSkillMetadata(result.skill_metadata);
+      setSkillMetadata(result.skills);
     } catch (reason: unknown) {
-      if (skillReloadVersionRef.current === version) setSkillReloadError(managementErrorKey(reason));
+      if (skillReloadVersionRef.current === version) {
+        setSkillReloadError(operationManagementErrorKey(reason, "management.skillsError"));
+      }
     } finally {
       if (skillReloadVersionRef.current === version) setSkillReloadBusy(false);
     }
@@ -3259,15 +3129,15 @@ function RuntimeManagementDialog({
       claim.reconnect_credential,
     ).then((result) => {
       if (!active) return;
-      if (result.status_view === undefined) {
+      if (result.status === undefined) {
         setError("management.invalidStatus");
         setLoadState("ready");
         return;
       }
-      setStatus(result.status_view);
-      setPermission(result.status_view.current_permission_level);
-      onPermissionChanged(result.status_view.current_permission_level);
-      setEffort(result.status_view.chat_reasoning_effort);
+      setStatus(result.status);
+      setPermission(result.status.current_permission_level);
+      onPermissionChanged(result.status.current_permission_level);
+      setEffort(result.status.chat_reasoning_effort);
       setLoadState("ready");
     }).catch((reason: unknown) => {
       if (!active) return;
@@ -3362,15 +3232,15 @@ function RuntimeManagementDialog({
         claim.reconnect_credential,
       );
       if (epoch !== requestEpoch.current) return;
-      if (result.management_error !== undefined || typeof result.memory_content !== "string") {
+      if (typeof result.content !== "string") {
         setError("management.memoryError");
         return;
       }
-      setMemoryContent(result.memory_content);
+      setMemoryContent(result.content);
       setNotice("management.memoryLoaded");
     } catch (reason: unknown) {
       if (epoch !== requestEpoch.current) return;
-      setError(managementErrorKey(reason));
+      setError(operationManagementErrorKey(reason, "management.memoryError"));
     } finally {
       if (epoch === requestEpoch.current) setOperation(null);
     }
@@ -3392,11 +3262,11 @@ function RuntimeManagementDialog({
         claim.reconnect_credential,
       );
       if (epoch !== dreamEpoch.current) return;
-      if (result.management_error !== undefined || result.dream_result === undefined) {
+      if (result.result === undefined) {
         setError("management.dreamError");
         return;
       }
-      const nextDream = result.dream_result;
+      const nextDream = result.result;
       setDreamResult(nextDream);
       setNotice(nextDream.error === null
         ? nextDream.status === "No pending summaries"
@@ -3407,7 +3277,7 @@ function RuntimeManagementDialog({
           : "management.dreamFailed");
     } catch (reason: unknown) {
       if (epoch !== dreamEpoch.current) return;
-      setError(managementErrorKey(reason));
+      setError(operationManagementErrorKey(reason, "management.dreamError"));
     } finally {
       if (epoch === dreamEpoch.current) {
         dreamInFlight.current = false;
@@ -3649,6 +3519,14 @@ function managementErrorKey(error: unknown): string {
     }
   }
   return "management.actionError";
+}
+
+function operationManagementErrorKey(error: unknown, operationError: string): string {
+  if (error instanceof ApiError && error.body?.code !== undefined) {
+    const errorKey = managementErrorKey(error);
+    return errorKey === "management.actionError" ? operationError : errorKey;
+  }
+  return managementErrorKey(error);
 }
 
 interface ProjectsViewProps {
@@ -6881,9 +6759,9 @@ function ProjectSessionsContent({
       claim.claim_version,
       claim.reconnect_credential,
     ).then((result) => {
-      if (active && result.status_view !== undefined
-        && PERMISSION_LEVELS.includes(result.status_view.current_permission_level)) {
-        setClientPermission(result.status_view.current_permission_level);
+      if (active && result.status !== undefined
+        && PERMISSION_LEVELS.includes(result.status.current_permission_level)) {
+        setClientPermission(result.status.current_permission_level);
       }
     }).catch(() => {});
     return () => { active = false; };
@@ -7308,10 +7186,7 @@ function ProjectSessionsContent({
 
   useEffect(() => {
     if (connectionState !== "online" || sessions?.workspace_id === undefined) return;
-    void sendServiceCommand({
-      request_id: createRequestId(), type: "subscribe", workspace_id: null,
-      session_id: null, claim_version: null, payload: { last_seq: null },
-    }).catch(() => {});
+    void subscribeState(sendServiceCommand).catch(() => {});
   }, [connectionState, sessions?.workspace_id, sendServiceCommand]);
 
   useEffect(() => {

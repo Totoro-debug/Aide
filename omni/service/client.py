@@ -11,7 +11,7 @@ import socket
 import subprocess
 import sys
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -396,6 +396,11 @@ class ServiceClient:
         self.claim_credential = ""
         self._socket: aiohttp.ClientWebSocketResponse | None = None
         self._reader_task: asyncio.Task[None] | None = None
+        self._reconnect_task: asyncio.Task[None] | None = None
+        self._subscription_task: asyncio.Task[None] | None = None
+        self._event_cursor: tuple[str, int] | None = None
+        self._awaiting_snapshot = False
+        self._state_listeners: set[Callable[[Mapping[str, object]], None]] = set()
         self._send_lock = asyncio.Lock()
         self._pending: dict[str, asyncio.Future[dict[str, object]]] = {}
         self._closed = False
@@ -599,6 +604,121 @@ class ServiceClient:
             heartbeat=20.0,
         )
         self._reader_task = asyncio.create_task(self._read_events())
+        if self._event_cursor is not None:
+            stream_id, sequence = self._event_cursor
+            await self._command(
+                "subscribe", workspace_id=None, session_id=None, claim_version=None,
+                payload={"last_seq": sequence, "stream_id": stream_id},
+            )
+        await self.subscribe_state()
+
+    def add_state_listener(
+        self, listener: Callable[[Mapping[str, object]], None]
+    ) -> Callable[[], None]:
+        """Deliver authenticated state events without retaining UI drafts."""
+        self._state_listeners.add(listener)
+        return lambda: self._state_listeners.discard(listener)
+
+    async def subscribe_state(self) -> dict[str, object]:
+        return await self._command(
+            "subscribe",
+            workspace_id=None,
+            session_id=None,
+            claim_version=None,
+            payload={"last_seq": None, "stream_id": None},
+        )
+
+    async def _restore_subscription(self) -> None:
+        try:
+            await self.subscribe_state()
+        except (ServiceError, ServiceStartupError, aiohttp.ClientError):
+            if self._socket is not None:
+                await self._socket.close()
+        finally:
+            self._subscription_task = None
+
+    async def _receive_event(self, event: Mapping[str, object]) -> None:
+        if (event.get("service_instance_id") != self.discovery.service_instance_id
+                or event.get("protocol_version") != self.discovery.protocol_version):
+            return
+        stream_id, sequence = event.get("stream_id"), event.get("seq")
+        if (not isinstance(stream_id, str) or not stream_id or isinstance(sequence, bool)
+                or not isinstance(sequence, int) or sequence < 1):
+            return
+        snapshot = event.get("type") == "snapshot.required"
+        cursor = self._event_cursor
+        if cursor is not None:
+            if stream_id != cursor[0]:
+                return
+            if stream_id == cursor[0] and sequence <= cursor[1]:
+                return
+            if stream_id == cursor[0] and sequence > cursor[1] + 1 and not snapshot:
+                self._awaiting_snapshot = True
+                self.control.set_admitted(False)
+                if self._subscription_task is None:
+                    self._subscription_task = asyncio.create_task(self._restore_subscription())
+                return
+        if self._awaiting_snapshot and not snapshot:
+            return
+        recover_display = self._awaiting_snapshot
+        if snapshot:
+            self._awaiting_snapshot = False
+        self._event_cursor = (stream_id, sequence)
+        await self._handle_event(event, recover_display=recover_display)
+        for listener in tuple(self._state_listeners):
+            with suppress(Exception):
+                listener(event)
+
+    async def _reconnect(self) -> None:
+        try:
+            while not self._closed:
+                await asyncio.sleep(1)
+                try:
+                    discovery = read_discovery(self.agent_home)
+                    token = _read_token_safely(self.agent_home)
+                    if discovery is None or token is None:
+                        continue
+                    info = await self._probe(discovery, token)
+                    if info is None:
+                        continue
+                    _validate_protocol(info, discovery)
+                    same_instance = discovery.service_instance_id == self.discovery.service_instance_id
+                    self.discovery, self.token = discovery, token
+                    reconnect = self.reconnect_credential if same_instance else None
+                    try:
+                        registered = await self._http_request(
+                            "POST", "/api/v1/clients", mutation=True,
+                            payload={"request_id": str(uuid4()), "kind": "cli",
+                                     "reconnect_credential": reconnect},
+                        )
+                    except ServiceError as error:
+                        if error.code != "stale_client":
+                            raise
+                        registered = await self._http_request(
+                            "POST", "/api/v1/clients", mutation=True,
+                            payload={"request_id": str(uuid4()), "kind": "cli",
+                                     "reconnect_credential": None},
+                        )
+                    client_id = _require_string(registered, "client_id")
+                    if not same_instance or client_id != self.client_id:
+                        self.workspace_id = ""
+                        self.session_id = ""
+                        self.claim_version = 0
+                        self.claim_credential = ""
+                        self._event_cursor = None
+                        self.control.clear_runs()
+                    self.client_id = client_id
+                    self.reconnect_credential = _require_string(registered, "reconnect_credential")
+                    await self._open_socket()
+                    if self._socket is None or self._socket.closed:
+                        continue
+                    return
+                except (OSError, ValueError, ServiceError, ServiceStartupError, aiohttp.ClientError):
+                    if self._socket is not None:
+                        await self._socket.close()
+                    continue
+        finally:
+            self._reconnect_task = None
 
     async def _read_events(self) -> None:
         socket = self._socket
@@ -621,7 +741,7 @@ class ServiceClient:
                             else:
                                 future.set_exception(_service_error_from_wire(value))
                         continue
-                    await self._handle_event(value)
+                    await self._receive_event(value)
                 elif message.type in {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR}:
                     break
         except asyncio.CancelledError:
@@ -629,6 +749,7 @@ class ServiceClient:
         except Exception:
             return
         finally:
+            self._socket = None
             for future in self._pending.values():
                 if not future.done():
                     future.set_exception(
@@ -636,16 +757,25 @@ class ServiceClient:
                     )
             self.control.set_admitted(False)
             self.control.clear_runs()
+            if not socket.closed:
+                with suppress(Exception):
+                    await socket.close()
             if not self._closed:
+                for local in tuple(self.confirmation._items):
+                    await self.confirmation._dismiss_local(local)
                 await self.bus.put_remote_output(
                     {
                         "type": "system_control",
                         "content": "Local service connection closed.",
-                        "metadata": {},
+                        "metadata": {"_remote_connection_state": "recovering"},
                     }
                 )
+                if self._reconnect_task is None:
+                    self._reconnect_task = asyncio.create_task(self._reconnect())
 
-    async def _handle_event(self, event: Mapping[str, object]) -> None:
+    async def _handle_event(
+        self, event: Mapping[str, object], *, recover_display: bool = False,
+    ) -> None:
         event_type = event.get("type")
         payload = event.get("payload")
         current_session = (
@@ -718,6 +848,14 @@ class ServiceClient:
                         if isinstance(run, dict) and isinstance(run.get("run_id"), str):
                             self.control.accept_run(run["run_id"])
                     self.control.set_admitted(True)
+                    await self.bus.put_remote_output({
+                        "type": "system_control",
+                        "metadata": {"_remote_state_snapshot": session,
+                                     "_remote_snapshot_rebuild": recover_display,
+                                     "_remote_snapshot_reason": (
+                                         payload.get("reason") if isinstance(payload, dict) else None
+                                     )},
+                    })
             if "pending_confirmation" in snapshot:
                 pending = snapshot["pending_confirmation"]
                 token = (
@@ -761,6 +899,7 @@ class ServiceClient:
     async def _apply_snapshot(self, snapshot: Mapping[str, object]) -> None:
         projection = _projection(snapshot)
         self.control.set_projection(projection)
+        self.control.set_admitted(self.claim_version >= 1 and bool(self.claim_credential))
 
     async def _http_request(
         self,
@@ -963,6 +1102,64 @@ class ServiceClient:
     async def acknowledge_restore_failure(self) -> dict[str, object]:
         return await self.management("restore/acknowledge", {})
 
+    async def _named_session_operation(self, operation: str) -> dict[str, object]:
+        if (
+            not self.workspace_id
+            or not self.session_id
+            or self.claim_version < 1
+            or not self.claim_credential
+        ):
+            raise ServiceStartupError("stale_claim", "A current Conversation Claim is required.")
+        request_id = str(uuid4())
+        response = await self._http_request(
+            "POST",
+            f"/api/v1/workspaces/{self.workspace_id}/{operation}",
+            payload={
+                "request_id": request_id,
+                "current_session_id": self.session_id,
+                "claim_version": self.claim_version,
+            },
+            mutation=True,
+            extra_headers={"X-Omni-Claim": self.claim_credential},
+        )
+        if (
+            response.get("request_id") != request_id
+            or response.get("workspace_id") != self.workspace_id
+        ):
+            raise ServiceStartupError("service_protocol_error", "Service operation response is invalid.")
+        return response
+
+    async def get_runtime_memory(self) -> dict[str, object]:
+        """Read the current Workspace's Long-term Memory through its named operation."""
+        response = await self._named_session_operation("memory/read")
+        if not isinstance(response.get("content"), str):
+            raise ServiceStartupError("service_protocol_error", "Memory response is invalid.")
+        return response
+
+    async def run_dream(self) -> dict[str, object]:
+        """Run Dream for the current foreground Session and return its typed result."""
+        response = await self._named_session_operation("memory/dream")
+        if not isinstance(response.get("result"), dict):
+            raise ServiceStartupError("service_protocol_error", "Dream response is invalid.")
+        return response
+
+    async def reload_runtime_skills(self) -> dict[str, object]:
+        """Reload the shared Skill catalog and return published metadata."""
+        response = await self._named_session_operation("skills/reload")
+        skills = response.get("skills")
+        if not isinstance(skills, list) or any(
+            not isinstance(item, dict) for item in skills
+        ):
+            raise ServiceStartupError("service_protocol_error", "Skill response is invalid.")
+        return response
+
+    async def get_runtime_status(self) -> dict[str, object]:
+        """Read the current foreground Session's Runtime Status projection."""
+        response = await self._named_session_operation("runtime/status")
+        if not isinstance(response.get("status"), dict):
+            raise ServiceStartupError("service_protocol_error", "Runtime status response is invalid.")
+        return response
+
     async def get_input_capabilities(self) -> dict[str, object]:
         response = await self._http_request("GET", "/api/v1/input-capabilities")
         command_tokens = response.get("management_commands")
@@ -1044,6 +1241,11 @@ class ServiceClient:
         if self._closed:
             return
         self._closed = True
+        for task in (self._reconnect_task, self._subscription_task):
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
         if self._reader_task is not None:
             self._reader_task.cancel()
             with suppress(asyncio.CancelledError):

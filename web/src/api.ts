@@ -49,6 +49,10 @@ import type {
   ConfigPatchFields,
   ConfigSecrets,
   AvailableModelsResponse,
+  MemoryViewResponse,
+  DreamRunResponse,
+  SkillReloadResponse,
+  RuntimeStatusResponse,
 } from "./protocol";
 
 const API_PREFIX = "/api/v1";
@@ -85,6 +89,18 @@ export interface EventStreamConnection {
 }
 
 export type ClientCommandSender = EventStreamConnection["sendCommand"];
+export function subscribeState(
+  sendCommand: ClientCommandSender,
+  lastSeq: number | null = null,
+  streamId: string | null = null,
+): Promise<ServiceCommandResult> {
+  return sendCommand({
+    request_id: createRequestId(), type: "subscribe", workspace_id: null,
+    session_id: null, claim_version: null,
+    payload: { last_seq: lastSeq, stream_id: streamId },
+  });
+}
+
 export type ConversationCommandContext = Pick<SessionClaim,
   "workspace_id" | "session_id" | "claim_version">;
 
@@ -515,21 +531,10 @@ export async function getRuntimeStatus(
   sessionId: string,
   claimVersion: number,
   claimCredential: string,
-): Promise<ManagementResult> {
-  const response = await request<ManagementResponse>(
-    `/workspaces/${encodeURIComponent(workspaceId)}/management/status`,
-    {
-      method: "POST",
-      mutation: true,
-      body: {
-        request_id: createRequestId(),
-        current_session_id: sessionId,
-        claim_version: claimVersion,
-      },
-      extraHeaders: { "X-Omni-Claim": claimCredential },
-    },
+): Promise<RuntimeStatusResponse> {
+  return postWorkspaceSessionOperation(
+    workspaceId, sessionId, claimVersion, claimCredential, "runtime/status",
   );
-  return response.result;
 }
 
 export async function updateRuntimePermission(
@@ -580,15 +585,15 @@ export async function updateRuntimeEffort(
   return response.result;
 }
 
-async function postRuntimeManagement(
+function postWorkspaceSessionOperation<T>(
   workspaceId: string,
   sessionId: string,
   claimVersion: number,
   claimCredential: string,
-  action: "memory" | "dream" | "skills/reload",
-): Promise<ManagementResult> {
-  const response = await request<ManagementResponse>(
-    `/workspaces/${encodeURIComponent(workspaceId)}/management/${action}`,
+  operation: "memory/read" | "memory/dream" | "skills/reload" | "runtime/status",
+): Promise<T> {
+  return request<T>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/${operation}`,
     {
       method: "POST",
       mutation: true,
@@ -600,7 +605,6 @@ async function postRuntimeManagement(
       extraHeaders: { "X-Omni-Claim": claimCredential },
     },
   );
-  return response.result;
 }
 
 export function getRuntimeMemory(
@@ -608,8 +612,10 @@ export function getRuntimeMemory(
   sessionId: string,
   claimVersion: number,
   claimCredential: string,
-): Promise<ManagementResult> {
-  return postRuntimeManagement(workspaceId, sessionId, claimVersion, claimCredential, "memory");
+): Promise<MemoryViewResponse> {
+  return postWorkspaceSessionOperation(
+    workspaceId, sessionId, claimVersion, claimCredential, "memory/read",
+  );
 }
 
 export function triggerRuntimeDream(
@@ -617,8 +623,10 @@ export function triggerRuntimeDream(
   sessionId: string,
   claimVersion: number,
   claimCredential: string,
-): Promise<ManagementResult> {
-  return postRuntimeManagement(workspaceId, sessionId, claimVersion, claimCredential, "dream");
+): Promise<DreamRunResponse> {
+  return postWorkspaceSessionOperation(
+    workspaceId, sessionId, claimVersion, claimCredential, "memory/dream",
+  );
 }
 
 export function reloadRuntimeSkills(
@@ -626,8 +634,10 @@ export function reloadRuntimeSkills(
   sessionId: string,
   claimVersion: number,
   claimCredential: string,
-): Promise<ManagementResult> {
-  return postRuntimeManagement(workspaceId, sessionId, claimVersion, claimCredential, "skills/reload");
+): Promise<SkillReloadResponse> {
+  return postWorkspaceSessionOperation(
+    workspaceId, sessionId, claimVersion, claimCredential, "skills/reload",
+  );
 }
 
 export function getProjects(): Promise<ProjectListResponse> {

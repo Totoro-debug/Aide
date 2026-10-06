@@ -714,6 +714,116 @@ async def test_new_management_http_actions_reject_get_and_head_without_execution
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["memory/read", "memory/dream", "skills/reload", "runtime/status"])
+async def test_named_management_operations_reject_stale_claims(
+    management_case: ManagementCase, operation: str,
+) -> None:
+    case = management_case
+    token = create_credential(case.service.agent_home)
+    async with TestServer(create_app(case.service)) as server, aiohttp.ClientSession() as http:
+        async with http.post(
+            server.make_url(f"/api/v1/workspaces/{case.workspace.workspace_id}/{operation}"),
+            headers={"Authorization": f"Bearer {token}", "X-Omni-CSRF": token,
+                     "X-Omni-Client": case.first.client_id, "X-Omni-Claim": case.claim.credential},
+            json={"request_id": "stale-operation", "current_session_id": case.claim.session_id,
+                  "claim_version": case.claim.version + 1},
+        ) as response:
+            assert response.status == 409
+            result = await response.json()
+            assert result["code"] == "stale_claim"
+            assert result["request_id"] == "stale-operation"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["memory/read", "skills/reload"])
+async def test_named_management_failure_is_an_error_and_preserves_previous_data(
+    management_case: ManagementCase, operation: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = management_case
+    resources = case.workspace.resources
+    assert resources is not None
+    previous_skills = case.service.skill_loader.metadata
+    if operation == "memory/read":
+        resources.memory_manager.long_term_path.write_bytes(b"\xff")
+        error_code = "persistence_error"
+    else:
+        def fail_reload(*_args: object, **_kwargs: object) -> None:
+            raise OSError("private skill failure")
+        monkeypatch.setattr(case.service.skill_loader, "load", fail_reload)
+        error_code = "skill_reload_failed"
+    token = create_credential(case.service.agent_home)
+    async with TestServer(create_app(case.service)) as server, aiohttp.ClientSession() as http:
+        async with http.post(
+            server.make_url(f"/api/v1/workspaces/{case.workspace.workspace_id}/{operation}"),
+            headers={"Authorization": f"Bearer {token}", "X-Omni-CSRF": token,
+                     "X-Omni-Client": case.first.client_id, "X-Omni-Claim": case.claim.credential},
+            json={"request_id": "failed-operation", "current_session_id": case.claim.session_id,
+                  "claim_version": case.claim.version},
+        ) as response:
+            assert response.status == 500
+            result = await response.json()
+            assert result["code"] == error_code
+            assert result["request_id"] == "failed-operation"
+            assert "private" not in result["message"]
+    assert case.service.skill_loader.metadata == previous_skills
+    if operation == "memory/read":
+        assert resources.memory_manager.long_term_path.read_bytes() == b"\xff"
+
+
+@pytest.mark.asyncio
+async def test_named_management_operations_return_operation_specific_contracts(
+    management_case: ManagementCase,
+) -> None:
+    case = management_case
+    skills = case.service.agent_home.skills_directory / "planner" / "SKILL.md"
+    skills.parent.mkdir(parents=True)
+    skills.write_text(
+        "---\nname: planner\ndescription: Planning support\n---\nUse a plan.\n",
+        encoding="utf-8",
+    )
+    token = create_credential(case.service.agent_home)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Omni-CSRF": token,
+        "X-Omni-Client": case.first.client_id,
+        "X-Omni-Claim": case.claim.credential,
+    }
+    base = f"/api/v1/workspaces/{case.workspace.workspace_id}"
+    context = {
+        "current_session_id": case.claim.session_id,
+        "claim_version": case.claim.version,
+    }
+    async with TestServer(create_app(case.service)) as server, aiohttp.ClientSession() as http:
+        async def post(path: str, request_id: str) -> dict[str, Any]:
+            async with http.post(
+                server.make_url(path),
+                headers=headers,
+                json={"request_id": request_id, **context},
+            ) as response:
+                assert response.status == 200
+                return cast(dict[str, Any], await response.json())
+
+        memory = await post(f"{base}/memory/read", "named-memory")
+        assert memory["request_id"] == "named-memory"
+        assert memory["workspace_id"] == case.workspace.workspace_id
+        assert isinstance(memory["content"], str)
+
+        dream = await post(f"{base}/memory/dream", "named-dream")
+        assert dream["request_id"] == "named-dream"
+        assert dream["workspace_id"] == case.workspace.workspace_id
+        assert dream["result"]["status"] == "No pending summaries"
+        assert await post(f"{base}/memory/dream", "named-dream") == dream
+
+        reload = await post(f"{base}/skills/reload", "named-skill-reload")
+        assert reload["request_id"] == "named-skill-reload"
+        assert [skill["name"] for skill in reload["skills"]] == ["planner"]
+
+        status = await post(f"{base}/runtime/status", "named-runtime-status")
+        assert status["request_id"] == "named-runtime-status"
+        _validator("runtime_status").validate(status["status"])
+
+
+@pytest.mark.asyncio
 async def test_http_reload_preserves_active_run_snapshot_resources_and_next_run_skills(
     management_case: ManagementCase,
     monkeypatch: pytest.MonkeyPatch,

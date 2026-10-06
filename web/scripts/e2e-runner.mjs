@@ -1224,7 +1224,7 @@ try {
       body: JSON.stringify(body),
     });
   };
-  await page.route("**/management/dream", delayDreamResponse);
+  await page.route("**/memory/dream", delayDreamResponse);
   await managementDialog.getByRole("button", { name: "Run Dream", exact: true }).click();
   await dreamArrival;
   await managementDialog.press("Escape");
@@ -1234,7 +1234,7 @@ try {
   releaseDream();
   await managementDialog.getByRole("region", { name: "Dream", exact: true })
     .getByRole("status").getByText("No pending summaries.", { exact: true }).waitFor();
-  await page.unroute("**/management/dream", delayDreamResponse);
+  await page.unroute("**/memory/dream", delayDreamResponse);
   for (const [code, message, notice] of [
     ["memory_task_running", "A Memory Task is already running.", "Dream is already running for this Workspace."],
     ["persistence_error", "Long-term Memory could not be written.", "Dream failed."],
@@ -1242,15 +1242,15 @@ try {
     const failDream = async (route) => {
       const response = await route.fetch();
       const body = await response.json();
-      body.result.dream_result.error = { code, message, retryable: false, retry_after_seconds: null };
+      body.result.error = { code, message, retryable: false, retry_after_seconds: null };
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
     };
-    await page.route("**/management/dream", failDream);
+    await page.route("**/memory/dream", failDream);
     await managementDialog.getByRole("button", { name: "Run Dream", exact: true }).click();
     const result = managementDialog.getByRole("region", { name: "Dream", exact: true }).getByRole("status");
     await result.getByText(notice, { exact: true }).waitFor();
     await result.getByText(`${code}: ${message}`, { exact: true }).waitFor();
-    await page.unroute("**/management/dream", failDream);
+    await page.unroute("**/memory/dream", failDream);
   }
   await managementDialog.getByRole("button", { name: "Run Dream", exact: true }).click();
   await managementDialog.getByRole("region", { name: "Dream", exact: true })
@@ -1266,27 +1266,21 @@ try {
     const response = await route.fetch();
     const body = await response.json();
     await route.fulfill({
-      status: response.status(),
+      status: 500,
       contentType: "application/json",
       body: JSON.stringify({
-        ...body,
-        result: {
-          ...body.result,
-          skill_metadata: null,
-          management_error: {
-            code: "skill_reload_failed",
-            message: "Skill reload failed.",
-            retryable: false,
-            retry_after_seconds: null,
-          },
-        },
+        request_id: body.request_id,
+        code: "skill_reload_failed",
+        message: "Skill reload failed.",
+        field_errors: {},
+        retryable: false,
       }),
     });
   };
-  await page.route("**/management/skills/reload", failSkillReload);
+  await page.route("**/skills/reload", failSkillReload);
   await page.getByRole("button", { name: "Reload Skills", exact: true }).click();
   await page.getByRole("alert").getByText("Skills could not be reloaded.", { exact: true }).waitFor();
-  await page.unroute("**/management/skills/reload", failSkillReload);
+  await page.unroute("**/skills/reload", failSkillReload);
   await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
 
   let releaseOldMemory;
@@ -1307,11 +1301,11 @@ try {
       contentType: "application/json",
       body: JSON.stringify({
         ...body,
-        result: { ...body.result, memory_content: "STALE_MEMORY_RESPONSE" },
+        content: "STALE_MEMORY_RESPONSE",
       }),
     });
   };
-  await page.route("**/management/memory", delayFirstMemoryResponse);
+  await page.route("**/memory/read", delayFirstMemoryResponse);
   await openWorkspacePanel("Workspace Memory and Dream");
   await managementDialog.getByRole("button", { name: "View Memory", exact: true }).click();
   await oldMemoryArrival;
@@ -1319,7 +1313,7 @@ try {
   await expect(managementTrigger).toBeFocused();
   await openWorkspacePanel("Workspace Memory and Dream");
   releaseOldMemory();
-  await page.unroute("**/management/memory", delayFirstMemoryResponse);
+  await page.unroute("**/memory/read", delayFirstMemoryResponse);
   await expect(managementDialog.getByText("STALE_MEMORY_RESPONSE", { exact: true })).toHaveCount(0);
   await managementDialog.press("Escape");
   await openWorkspacePanel("Runtime status and controls");

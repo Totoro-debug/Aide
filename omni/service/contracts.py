@@ -71,3 +71,52 @@ class ProjectRegistrationDTO(TypedDict):
     workspace_id: str
     schedule_state: str
     saved_jobs: list[ProjectJobSummaryDTO]
+
+
+class ServiceStatusDTO(TypedDict):
+    service_instance_id: str
+    protocol_version: int
+    state: str
+    active_workspace_count: int
+
+
+class MemoryViewDTO(TypedDict):
+    request_id: str
+    workspace_id: str
+    content: str
+
+
+class DreamRunDTO(TypedDict):
+    request_id: str
+    workspace_id: str
+    result: dict[str, object]
+
+
+class SkillMetadataDTO(TypedDict):
+    name: str
+    description: str
+    path: str
+
+
+class SkillReloadDTO(TypedDict):
+    request_id: str
+    workspace_id: str
+    skills: list[SkillMetadataDTO]
+
+
+class RuntimeStatusDTO(TypedDict):
+    request_id: str
+    workspace_id: str
+    status: dict[str, object]
+
+
+class ServiceStopDTO(TypedDict):
+    request_id: str
+    accepted: bool
+    operation_id: str
+
+
+class WebLaunchTicketDTO(TypedDict):
+    request_id: str
+    ticket: str
+    expires_in: int

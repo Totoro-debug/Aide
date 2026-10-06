@@ -3931,6 +3931,86 @@ class TerminalConversationApp(App[None]):
         if promoted:
             self._run_ready.set()
 
+    async def _consume_service_state(self, outbound: OutboundMessage) -> bool:
+        if "_remote_connection_state" in outbound.metadata:
+            await self._mount_management_output(outbound.content, scroll=False)
+            return True
+        snapshot = outbound.metadata.get("_remote_state_snapshot")
+        if not isinstance(snapshot, dict):
+            return False
+        session_id = snapshot.get("session_id")
+        if (not isinstance(session_id, str)
+                or session_id != self._control.project_foreground_conversation().session_id):
+            return True
+        messages = snapshot.get("messages")
+        if not isinstance(messages, list):
+            return True
+        projection = ForegroundConversationProjection(
+            session_id, tuple(message for message in messages if isinstance(message, dict)),
+        )
+        live = snapshot.get("live_state")
+        runs = live.get("runs") if isinstance(live, dict) else None
+        if not isinstance(runs, list):
+            return True
+        live_ids = [run.get("run_id") for run in runs if isinstance(run, dict)]
+        if (outbound.metadata.get("_remote_snapshot_reason") == "initial_subscribe"
+                and outbound.metadata.get("_remote_snapshot_rebuild") is not True
+                and live_ids == [run.run_id for run in self._consumed_runs]):
+            return True
+        previous = {run.run_id: run for run in self._consumed_runs}
+        for run in self._consumed_runs:
+            await run.projection.close()
+        self._consumed_runs.clear()
+        await self._replace_display_from_projection(projection)
+        for state in runs:
+            if not isinstance(state, dict) or not isinstance(state.get("run_id"), str):
+                continue
+            old = previous.get(state["run_id"])
+            turn_id = old.turn_id if old is not None else uuid4()
+            current = _ConsumedRun(
+                turn_id, str(state.get("prompt", "")), _MessageBusRunProjection(self, turn_id),
+                run_id=state["run_id"],
+            )
+            self._consumed_runs.append(current)
+            if state.get("status") == "accepted":
+                continue
+            await self._start_consumed_run(current)
+            segments = state.get("response_segments", [])
+            tools = state.get("tools", [])
+            if not isinstance(segments, list) or not isinstance(tools, list):
+                continue
+            for index, tool in enumerate(tools):
+                if index < len(segments) and isinstance(segments[index], str) and segments[index]:
+                    await current.projection.consume(OutboundMessage(
+                        "model_response", segments[index], {"_stream_delta": True},
+                    ))
+                if not isinstance(tool, dict):
+                    continue
+                await current.projection.consume(OutboundMessage(
+                    "tool_call", str(tool.get("name", "")),
+                    {"tool_call_id": tool.get("tool_call_id"), "arguments": tool.get("arguments")},
+                ))
+                status = {"completed": "success", "failed": "error", "rejected": "refused"}.get(
+                    str(tool.get("status")),
+                )
+                if status is not None:
+                    await current.projection.consume(OutboundMessage(
+                        "tool_call", str(tool.get("name", "")),
+                        {"tool_call_id": tool.get("tool_call_id"), "status": status},
+                    ))
+            if segments and isinstance(segments[-1], str) and segments[-1]:
+                await current.projection.consume(OutboundMessage(
+                    "model_response", segments[-1], {"_stream_delta": True},
+                ))
+        input_area = self._conversation_input
+        if input_area is not None:
+            input_area.active_turn_token = self._consumed_runs[0].turn_id if self._consumed_runs else None
+        self._set_working(bool(self._consumed_runs))
+        self._refresh_pending_queue()
+        if self._consumed_runs:
+            self._run_ready.set()
+        return True
+
     async def _consume_outbound(self) -> None:
         try:
             buffered: OutboundMessage | None = None
@@ -3948,6 +4028,8 @@ class TerminalConversationApp(App[None]):
                 buffered = None
                 if outbound is None:
                     outbound = await self._bus.get_outbound()
+                if await self._consume_service_state(outbound):
+                    continue
                 remote_run_id = outbound.metadata.pop("_remote_run_id", None)
                 if isinstance(remote_run_id, str):
                     remote_run = next(
@@ -3989,6 +4071,8 @@ class TerminalConversationApp(App[None]):
                 )
                 if outbound in done:
                     message = outbound.result()
+                    if await self._consume_service_state(message):
+                        continue
                     if self._submitting_input and not self._consumed_runs:
                         await self._run_ready.wait()
                     if run_ready in done or self._consumed_runs:

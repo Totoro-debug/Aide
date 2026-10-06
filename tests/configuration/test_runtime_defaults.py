@@ -33,7 +33,7 @@ model = "model"
 context_window = 100000
 max_output = 2048
 temperature = 0.2
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 30
 """
 
@@ -121,12 +121,12 @@ DEFAULTABLE_FIELDS = (
     ),
     (
         "models.routes.default.reasoning_effort",
-        'reasoning_effort = "medium"',
+        'reasoning_effort = "mid"',
         'reasoning_effort = "high"',
         'reasoning_effort = "turbo"',
-        "medium",
+        "mid",
         "high",
-        "'medium'",
+        "'mid'",
         "turbo",
     ),
 )
@@ -273,11 +273,11 @@ def test_config_view_exposes_effective_permission_and_exec_shell(tmp_path: Path)
             "'0 * * * *'",
         ),
         (
-            'reasoning_effort = "medium"',
+            'reasoning_effort = "mid"',
             'reasoning_effort = ["not-an-effort"]',
             "models.routes.default.reasoning_effort",
-            "medium",
-            "'medium'",
+            "mid",
+            "'mid'",
         ),
     ),
 )
@@ -305,7 +305,7 @@ def test_untyped_defaultable_values_use_sanitized_fallbacks(
 def _config_with_route_reasoning(route_name: str, reasoning_line: str | None) -> str:
     if route_name == "default":
         replacement = "" if reasoning_line is None else reasoning_line
-        return BASE_CONFIG.replace('reasoning_effort = "medium"', replacement)
+        return BASE_CONFIG.replace('reasoning_effort = "mid"', replacement)
     route = f"""
 
 [models.routes.{route_name}]
@@ -325,8 +325,8 @@ timeout = 30
     ("reasoning_line", "expected", "diagnostic_count"),
     (
         ('reasoning_effort = "high"', "high", 0),
-        (None, "medium", 0),
-        ('reasoning_effort = ["route-secret"]', "medium", 1),
+        (None, "mid", 0),
+        ('reasoning_effort = ["route-secret"]', "mid", 1),
     ),
     ids=("valid", "missing", "invalid"),
 )

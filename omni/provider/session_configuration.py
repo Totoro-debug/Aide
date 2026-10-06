@@ -6,10 +6,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final, Literal, cast
 
-type ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
+type ReasoningEffort = Literal["low", "mid", "high", "xhigh", "max"]
 REASONING_EFFORT_LEVELS: Final[tuple[ReasoningEffort, ...]] = (
     "low",
-    "medium",
+    "mid",
     "high",
     "xhigh",
     "max",

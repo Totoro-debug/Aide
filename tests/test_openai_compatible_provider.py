@@ -222,9 +222,20 @@ async def test_stream_translates_text_and_usage_through_official_sdk_boundary() 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max", None])
+@pytest.mark.parametrize(
+    ("effort", "wire_effort"),
+    [
+        ("low", "low"),
+        ("mid", "medium"),
+        ("high", "high"),
+        ("xhigh", "xhigh"),
+        ("max", "max"),
+        (None, None),
+    ],
+)
 async def test_stream_maps_or_omits_each_reasoning_effort(
     effort: str | None,
+    wire_effort: str | None,
 ) -> None:
     stream = FakeOpenAIStream(
         SimpleNamespace(
@@ -264,13 +275,24 @@ async def test_stream_maps_or_omits_each_reasoning_effort(
         for key, value in client.chat.completions.calls[0].items()
         if key in {"reasoning_effort", "output_config"}
     }
-    assert reasoning_arguments == ({} if effort is None else {"reasoning_effort": effort})
+    assert reasoning_arguments == ({} if effort is None else {"reasoning_effort": wire_effort})
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max", None])
+@pytest.mark.parametrize(
+    ("effort", "wire_effort"),
+    [
+        ("low", "low"),
+        ("mid", "medium"),
+        ("high", "high"),
+        ("xhigh", "xhigh"),
+        ("max", "max"),
+        (None, None),
+    ],
+)
 async def test_complete_maps_or_omits_each_reasoning_effort(
     effort: str | None,
+    wire_effort: str | None,
 ) -> None:
     sdk_response = SimpleNamespace(
         choices=[
@@ -295,7 +317,7 @@ async def test_complete_maps_or_omits_each_reasoning_effort(
         for key, value in client.chat.completions.calls[0].items()
         if key in {"reasoning_effort", "output_config"}
     }
-    assert reasoning_arguments == ({} if effort is None else {"reasoning_effort": effort})
+    assert reasoning_arguments == ({} if effort is None else {"reasoning_effort": wire_effort})
 
 
 @pytest.mark.asyncio

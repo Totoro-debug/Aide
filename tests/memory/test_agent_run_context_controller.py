@@ -81,7 +81,7 @@ def _router_configuration(
             context_window=context_window,
             max_output=max_output,
             temperature=0,
-            reasoning_effort="medium",
+            reasoning_effort="mid",
             timeout=30,
         )
 

@@ -225,7 +225,7 @@ export interface ConfigPatchResponse extends ConfigResponse {
 }
 
 export type ToolPermissionLevel = "read-only" | "workspace-write" | "full-access";
-export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+export type ReasoningEffort = "low" | "mid" | "high" | "xhigh" | "max";
 
 export interface ManagementError {
   code: string;

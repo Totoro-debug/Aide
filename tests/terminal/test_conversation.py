@@ -6963,7 +6963,7 @@ async def test_status_view_and_bar_show_current_values_and_clear_failed_reads() 
     status_data = RuntimeStatus(
         version="0.1.0",
         chat_model="test/chat-model",
-        chat_reasoning_effort="medium",
+        chat_reasoning_effort="mid",
         uptime_seconds=10,
         context_window=100,
         max_output=10,
@@ -7505,7 +7505,7 @@ class _BlockingEffortManagement(_EffortManagement):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("initial", ("low", "medium", "high", "xhigh", "max"))
+@pytest.mark.parametrize("initial", ("low", "mid", "high", "xhigh", "max"))
 @pytest.mark.parametrize("cancel_key", ("escape", "ctrl+c"))
 async def test_effort_selector_cancels_without_rows_or_runtime_updates(
     initial: str,
@@ -7534,7 +7534,7 @@ async def test_effort_selector_cancels_without_rows_or_runtime_updates(
         assert f"Current: {initial} | Pending: {initial}" in visible_text
         assert all(
             re.search(rf"(?<![a-z]){level}(?![a-z])", visible_text) is not None
-            for level in ("low", "medium", "high", "xhigh", "max")
+            for level in ("low", "mid", "high", "xhigh", "max")
         )
 
         await pilot.press("right", cancel_key)
@@ -7556,7 +7556,7 @@ async def test_effort_selector_cancels_without_rows_or_runtime_updates(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", ((40, 15), (80, 24), (120, 32)))
 async def test_effort_selector_mouse_commits_selected_value(size: tuple[int, int]) -> None:
-    management = _EffortManagement("medium")
+    management = _EffortManagement("mid")
     app = _terminal_app(
         cast(Any, _terminal_backend(ScriptedRunSource())),
         management_dispatcher=ManagementCommandDispatcher(cast(Any, management)),
@@ -7581,7 +7581,7 @@ async def test_effort_selector_mouse_commits_selected_value(size: tuple[int, int
 async def test_effort_selector_commits_selected_value_and_restores_composer() -> None:
     conversation = ScriptedRunSource()
     runtime = _terminal_backend(conversation)
-    management = _EffortManagement("medium")
+    management = _EffortManagement("mid")
     app = _terminal_app(
         cast(Any, runtime),
         management_dispatcher=ManagementCommandDispatcher(cast(Any, management)),
@@ -7609,7 +7609,7 @@ async def test_effort_selector_commits_selected_value_and_restores_composer() ->
 async def test_effort_selector_accepts_only_one_confirm_while_update_is_pending() -> None:
     conversation = ScriptedRunSource()
     runtime = _terminal_backend(conversation)
-    management = _BlockingEffortManagement("medium")
+    management = _BlockingEffortManagement("mid")
     app = _terminal_app(
         cast(Any, runtime),
         management_dispatcher=ManagementCommandDispatcher(cast(Any, management)),
@@ -7641,7 +7641,7 @@ async def test_effort_selector_accepts_only_one_confirm_while_update_is_pending(
 async def test_effort_selector_clamps_navigation_at_both_boundaries() -> None:
     conversation = ScriptedRunSource()
     runtime = _terminal_backend(conversation)
-    management = _EffortManagement("medium")
+    management = _EffortManagement("mid")
     app = _terminal_app(
         cast(Any, runtime),
         management_dispatcher=ManagementCommandDispatcher(cast(Any, management)),
@@ -8010,7 +8010,7 @@ async def test_effort_persistence_failure_does_not_interrupt_active_run_or_next_
         await _wait_for_turn(app)
 
         assert [request.reasoning_effort for request in provider.stream_requests] == [
-            "medium",
+            "mid",
             "high",
         ]
         assert app._control is initial

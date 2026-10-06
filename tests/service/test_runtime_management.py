@@ -296,7 +296,7 @@ async def test_management_revalidates_claim_after_waiting_for_client_lock(
     assert stale.value.code == "stale_claim"
     assert case.service.client_permission(case.first.client_id).current() == "workspace-write"
     assert case.workspace.resources is not None
-    assert case.workspace.resources.router.reasoning_effort == "medium"
+    assert case.workspace.resources.router.reasoning_effort == "mid"
 
 
 @pytest.mark.asyncio
@@ -426,7 +426,7 @@ async def test_invalid_effort_does_not_publish_or_persist_and_preserves_cli_erro
     assert result["published_effort"] is None
     assert cast(str, result["output"]).startswith("config_invalid:")
     assert config_path.read_bytes() == original
-    assert (await _status(case))["chat_reasoning_effort"] == "medium"
+    assert (await _status(case))["chat_reasoning_effort"] == "mid"
 
 
 @pytest.mark.asyncio
@@ -486,7 +486,7 @@ async def test_concurrent_client_effort_updates_keep_last_runtime_and_persisted_
         source.write(
             "\n# Preserve this configuration comment.\n[models.routes.chat]\n"
             "provider_id = 'primary'\nmodel = 'small-model'\ncontext_window = 8192\n"
-            "max_output = 1024\ntemperature = 0\ntimeout = 30\nreasoning_effort = 'medium'\n"
+            "max_output = 1024\ntemperature = 0\ntimeout = 30\nreasoning_effort = 'mid'\n"
         )
     published: list[str] = []
     original = ConfigLoader.update_reasoning_effort

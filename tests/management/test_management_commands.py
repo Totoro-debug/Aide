@@ -119,7 +119,7 @@ def test_management_command_catalog_owns_ordered_tokens_and_descriptions() -> No
 
 
 class _EffortManagement:
-    def __init__(self, effort: str = "medium") -> None:
+    def __init__(self, effort: str = "mid") -> None:
         self.effort = effort
         self.updated: list[str] = []
 
@@ -133,7 +133,7 @@ class _EffortManagement:
 
 
 class _TypedManagement(_EffortManagement):
-    def __init__(self, effort: str = "medium", permission: str = "workspace-write") -> None:
+    def __init__(self, effort: str = "mid", permission: str = "workspace-write") -> None:
         super().__init__(effort)
         self.permission = permission
 
@@ -503,7 +503,7 @@ model = "replace-with-a-model-id"
 context_window = 200000
 max_output = 8192
 temperature = 0.2
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 120
 
 [models.routes.chat]
@@ -512,7 +512,7 @@ model = "replace-with-a-model-id"
 context_window = 200000
 max_output = 8192
 temperature = 0.2
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 120
 
 [models.routes.memory]
@@ -521,7 +521,7 @@ model = "replace-with-a-model-id"
 context_window = 200000
 max_output = 8192
 temperature = 0.2
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 120
 
 [models.routes.schedule]
@@ -530,7 +530,7 @@ model = "replace-with-a-model-id"
 context_window = 200000
 max_output = 8192
 temperature = 0.2
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 120
 """
 
@@ -934,7 +934,7 @@ async def test_status_command_renders_actual_runtime_and_session_state(
     assert json.loads(result.output or "") == {
         "version": "0.1.0",
         "chat_model": "fallback/chat-model",
-        "chat_reasoning_effort": "medium",
+        "chat_reasoning_effort": "mid",
         "uptime_seconds": 65,
         "context_window": 8,
         "max_output": 0,

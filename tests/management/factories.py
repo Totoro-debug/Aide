@@ -39,7 +39,7 @@ class _DefaultDream:
 
 
 class _DefaultReasoningEffortControl:
-    def __init__(self, effort: ReasoningEffort = "medium") -> None:
+    def __init__(self, effort: ReasoningEffort = "mid") -> None:
         self.effort = effort
 
     @property

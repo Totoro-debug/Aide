@@ -411,7 +411,7 @@ class _ReasoningEffortSelector(Static):
     class Cancelled(Message):
         pass
 
-    def __init__(self, effort: ReasoningEffort = "medium", *, id: str | None = None) -> None:
+    def __init__(self, effort: ReasoningEffort = "mid", *, id: str | None = None) -> None:
         super().__init__("", id=id, markup=False)
         self._selected_index = 0
         self._current_effort = effort

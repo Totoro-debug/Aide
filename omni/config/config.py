@@ -27,7 +27,7 @@ from omni.utils.host_filesystem import HOST_FILESYSTEM
 
 DEFAULT_CONFIG_TEMPLATE: Final = load_template("default-config.md")
 
-type ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
+type ReasoningEffort = Literal["low", "mid", "high", "xhigh", "max"]
 type MCPTransport = Literal["stdio", "streamable-http"]
 type PermissionLevel = Literal["read-only", "workspace-write", "full-access"]
 type ExecShell = Literal["auto", "powershell", "pwsh"]
@@ -47,7 +47,7 @@ _DEFAULT_PERMISSION_LEVEL: Final[PermissionLevel] = "workspace-write"
 _DEFAULT_EXEC_SHELL: Final[ExecShell] = "auto"
 _DEFAULT_MEMORY_BATCH_SIZE: Final = 10
 _DEFAULT_MEMORY_SCHEDULE: Final = "0 * * * *"
-_DEFAULT_REASONING_EFFORT: Final[ReasoningEffort] = "medium"
+_DEFAULT_REASONING_EFFORT: Final[ReasoningEffort] = "mid"
 _API_KEY_FIELD_PATTERN: Final = re.compile(r"api[-_]?key", flags=re.IGNORECASE)
 _TOML_KEY_SEGMENT_PATTERN: Final = r"""(?:[a-z0-9_-]+|"(?:[^"\\\r\n]|\\.)*"|'[^'\r\n]*')"""
 
@@ -831,7 +831,9 @@ def _parse_default_exec_shell(value: object) -> ExecShell | None:
 
 
 def _parse_default_reasoning_effort(value: object) -> ReasoningEffort | None:
-    if not isinstance(value, str) or value not in {"low", "medium", "high", "xhigh", "max"}:
+    if value == "medium":
+        return "mid"
+    if not isinstance(value, str) or value not in {"low", "mid", "high", "xhigh", "max"}:
         return None
     return cast(ReasoningEffort, value)
 
@@ -1585,8 +1587,8 @@ def _validate_route_fields(route_name: str, value: object) -> dict[str, object]:
         normalized["temperature"] = _number(table["temperature"], f"{field}.temperature", 0, 2)
     if "reasoning_effort" in table:
         reasoning_effort = _string(table["reasoning_effort"], f"{field}.reasoning_effort")
-        if _parse_default_reasoning_effort(reasoning_effort) is None:
-            _invalid(f"{field}.reasoning_effort", "must be low, medium, high, xhigh, or max")
+        if reasoning_effort not in {"low", "mid", "high", "xhigh", "max"}:
+            _invalid(f"{field}.reasoning_effort", "must be low, mid, high, xhigh, or max")
         normalized["reasoning_effort"] = reasoning_effort
     if "timeout" in table:
         normalized["timeout"] = _integer(table["timeout"], f"{field}.timeout", 1, 600)
@@ -2874,10 +2876,10 @@ class ConfigLoader:
 
     def update_reasoning_effort(self, effort: ReasoningEffort) -> None:
         """Persist a Runtime-Lifetime Reasoning Effort in the latest configuration."""
-        if effort not in {"low", "medium", "high", "xhigh", "max"}:
+        if effort not in {"low", "mid", "high", "xhigh", "max"}:
             _invalid(
                 "models.routes.default.reasoning_effort",
-                "must be low, medium, high, xhigh, or max",
+                "must be low, mid, high, xhigh, or max",
             )
 
         lock_path = self.path.with_name(f".{self.path.name}.lock")

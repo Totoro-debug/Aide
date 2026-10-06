@@ -144,6 +144,8 @@ Schedule Tool 和 Web Schedule 页面可创建、查看及删除任务；已有�
 | `/dream` | 将待处理的会话摘要整理为长期记忆 |
 | `/reload_skill` | 重新加载 `~/.omni/skills/` 中的 Skill |
 
+推理强度依次为 `low`、`mid`、`high`、`xhigh`、`max`，默认使用 `mid`。CLI 和 Web 均直接显示这些原值。旧配置中的 `medium` 在读取时兼容为 `mid`。
+
 ## Session Restore
 
 CLI 的 `/restore` 和 Web Restore 都只恢复当前前台 Conversation Session。界面列出已提交的用户消息作为 Restore Anchor；当前会话仍有活动运行或排队输入时不能开始。选择 anchor 后会删除该消息及其后的会话内容，并恢复输入前的会话状态，保留原 Session ID。

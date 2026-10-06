@@ -44,7 +44,7 @@ from omni.utils.json_types import JsonObject, JsonValue
 _REASONING_EFFORT_MAP: Final[Mapping[ReasoningEffort, str]] = MappingProxyType(
     {
         "low": "low",
-        "medium": "medium",
+        "mid": "medium",
         "high": "high",
         "xhigh": "xhigh",
         "max": "max",

@@ -45,7 +45,7 @@ try {
   });
   await page.goto(`${control.details.url}/#ticket=${control.details.ticket}`);
   await expect(model).toBeEnabled();
-  await expect(effort).toHaveValue("medium");
+  await expect(effort).toHaveValue("mid");
   await control.command("effort high");
   await expect(effort).toHaveValue("high");
 
@@ -74,12 +74,12 @@ try {
   await page.unroute("**/api/v1/models/available");
 
   await page.locator("#composer-model-trigger").click();
-  await effort.selectOption("medium");
+  await effort.selectOption("mid");
   await expect(model).toHaveValue(JSON.stringify(["primary", "small-model"]));
   const explicit = await snapshot();
   await control.command("effort high");
   await delay(5500);
-  await expect(effort).toHaveValue("medium");
+  await expect(effort).toHaveValue("mid");
   assert.equal((await snapshot()).model_configuration_version, explicit.model_configuration_version);
 
   await page.locator("#app-sidebar").getByRole("link", { name: "New conversation", exact: true }).click();

@@ -60,7 +60,7 @@ def configuration() -> UserConfiguration:
         context_window=100_000,
         max_output=4096,
         temperature=0.2,
-        reasoning_effort="medium",
+        reasoning_effort="mid",
         timeout=120,
     )
     return UserConfiguration(
@@ -649,7 +649,7 @@ async def test_model_router_falls_back_after_a_permanent_requested_route_failure
         fallback_request.temperature,
         fallback_request.reasoning_effort,
         fallback_request.timeout,
-    ) == ("default-model", 4096, 0.2, "medium", 120)
+    ) == ("default-model", 4096, 0.2, "mid", 120)
     assert clock.sleeps == [0.5]
 
 

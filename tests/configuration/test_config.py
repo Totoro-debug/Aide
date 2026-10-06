@@ -62,7 +62,7 @@ model = "replace-with-a-model-id"
 context_window = 200000
 max_output = 8192
 temperature = 0.2
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 120
 
 [models.routes.chat]
@@ -71,7 +71,7 @@ model = "replace-with-a-model-id"
 context_window = 200000
 max_output = 8192
 temperature = 0.2
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 120
 
 [models.routes.memory]
@@ -80,7 +80,7 @@ model = "replace-with-a-model-id"
 context_window = 200000
 max_output = 8192
 temperature = 0.2
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 120
 
 [models.routes.schedule]
@@ -89,7 +89,7 @@ model = "replace-with-a-model-id"
 context_window = 200000
 max_output = 8192
 temperature = 0.2
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 120
 """
 
@@ -113,7 +113,7 @@ model = "claude-model"
 context_window = 200000
 max_output = 8192
 temperature = 0.2
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 120
 """
 
@@ -415,7 +415,7 @@ def test_generated_configuration_scaffolds_one_provider_and_all_model_routes(
             200000,
             8192,
             0.2,
-            "medium",
+            "mid",
             120,
         )
 
@@ -672,23 +672,48 @@ def test_valid_configuration_loads_as_typed_values(agent_home: Path) -> None:
         12,
         "15 * * * *",
         ("claude-model",),
-        "medium",
+        "mid",
         120,
     )
 
 
-@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
-def test_all_reasoning_effort_levels_load_as_route_values(agent_home: Path, effort: str) -> None:
+@pytest.mark.parametrize(
+    ("effort", "expected"),
+    [
+        ("low", "low"),
+        ("mid", "mid"),
+        ("medium", "mid"),
+        ("high", "high"),
+        ("xhigh", "xhigh"),
+        ("max", "max"),
+    ],
+)
+def test_all_reasoning_effort_levels_load_as_route_values(
+    agent_home: Path, effort: str, expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     loader = ConfigLoader(AgentHome(agent_home))
     loader.ensure_default()
     loader.path.write_text(
-        VALID_CONFIG.replace('reasoning_effort = "medium"', f'reasoning_effort = "{effort}"'),
+        VALID_CONFIG.replace('reasoning_effort = "mid"', f'reasoning_effort = "{effort}"'),
         encoding="utf-8",
     )
 
+    before = loader.path.read_bytes()
+
+    def unexpected_write(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Reading Reasoning Effort must not write configuration")
+
+    monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_text", unexpected_write)
+    monkeypatch.setattr(Path, "write_text", unexpected_write)
+    monkeypatch.setattr(Path, "write_bytes", unexpected_write)
     configuration = loader.load()
 
-    assert configuration.models.routes["default"].reasoning_effort == effort
+    assert all(route.reasoning_effort == expected for route in configuration.models.routes.values())
+    assert loader.diagnostics == ()
+    routes = loader.editable_snapshot().fields["models"]["routes"]
+    assert isinstance(routes, dict)
+    assert all(route["reasoning_effort"] == expected for route in routes.values())
+    assert loader.path.read_bytes() == before
 
 
 def test_explicit_always_load_setting_loads_as_a_boolean(agent_home: Path) -> None:
@@ -746,7 +771,7 @@ def test_omitted_defaulted_configuration_fields_use_accepted_defaults(
         configuration.memory.schedule,
         configuration.models.routes["default"].reasoning_effort,
         configuration.runtime.enable_skill_always_load,
-    ) == (4096, 0.9, "workspace-write", "auto", 10, "0 * * * *", "medium", False)
+    ) == (4096, 0.9, "workspace-write", "auto", 10, "0 * * * *", "mid", False)
     assert write_operations == []
     assert loader.path.read_text(encoding="utf-8") == before_load
 
@@ -1418,7 +1443,7 @@ def test_update_reasoning_effort_publishes_a_valid_candidate_once(
 
     monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_text", record_replacement)
 
-    loader.update_reasoning_effort("medium")
+    loader.update_reasoning_effort("mid")
 
     assert len(replacement_calls) == 1
     target, candidate = replacement_calls[0]

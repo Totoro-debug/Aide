@@ -35,7 +35,7 @@ from omni.provider.models import (
 _REASONING_EFFORT_MAP: Final[Mapping[ReasoningEffort, str]] = MappingProxyType(
     {
         "low": "low",
-        "medium": "medium",
+        "mid": "medium",
         "high": "high",
         "xhigh": "xhigh",
         "max": "max",

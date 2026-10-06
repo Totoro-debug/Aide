@@ -130,7 +130,7 @@ async def test_available_models_exposes_active_capacity_and_default_without_secr
         "default_combination": {
             "provider_id": "primary",
             "model": "small-model",
-            "reasoning_effort": "medium",
+            "reasoning_effort": "mid",
         },
     }
     assert "minimal-secret" not in str(initial)

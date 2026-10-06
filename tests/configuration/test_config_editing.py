@@ -29,7 +29,7 @@ model = "small-model"
 context_window = 8192
 max_output = 1024
 temperature = 0
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 30
 
 [models.routes.chat]
@@ -56,7 +56,7 @@ model = "small-model"
 context_window = 8192
 max_output = 1024
 temperature = 0
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 30
 
 [mcp.servers.http]
@@ -363,7 +363,7 @@ def test_model_route_mcp_patch_replaces_collections_and_secrets_atomically(tmp_p
                         "context_window": 16384,
                         "max_output": 2048,
                         "temperature": 0.2,
-                        "reasoning_effort": "medium",
+                        "reasoning_effort": "mid",
                         "timeout": 60,
                     },
                     "memory": {
@@ -507,7 +507,7 @@ def test_dangling_route_candidate_keeps_original_bytes(tmp_path: Path) -> None:
                             "context_window": 8192,
                             "max_output": 1024,
                             "temperature": 0,
-                            "reasoning_effort": "medium",
+                            "reasoning_effort": "mid",
                             "timeout": 30,
                         },
                     },
@@ -613,6 +613,7 @@ def test_partial_mcp_patch_cannot_ignore_incompatible_fields(
         ("routes", "chat", "temperature", 2.1),
         ("routes", "chat", "temperature", float("nan")),
         ("routes", "chat", "reasoning_effort", "invalid"),
+        ("routes", "chat", "reasoning_effort", "medium"),
         ("routes", "chat", "timeout", 601),
         ("routes", "chat", "timeout", False),
         ("mcp", "http", "enabled", 1),

@@ -78,7 +78,7 @@ def test_invalid_row_retains_siblings_secrets_and_unknown_fields(
 
 
 def test_valid_projection_uses_original_optional_defaults(tmp_path: Path) -> None:
-    content = MINIMAL_VALID_CONFIG.replace('reasoning_effort = "medium"\n', "")
+    content = MINIMAL_VALID_CONFIG.replace('reasoning_effort = "mid"\n', "")
     loader = _loader(tmp_path, content.encode())
     assert loader.web_snapshot().state == "active"
     assert loader.web_snapshot().configuration == loader.load_for_startup()

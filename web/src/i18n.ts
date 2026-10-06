@@ -131,7 +131,6 @@ const resources = {
         maxOutput: "Maximum output",
         temperature: "Temperature",
         reasoningEffort: "Reasoning effort",
-        reasoningEfforts: { low: "Low", medium: "Medium", high: "High", xhigh: "Very high", max: "Maximum" },
         timeout: "Timeout (seconds)",
         addRoute: "Add route",
         removeRoute: "Remove route",
@@ -272,13 +271,6 @@ const resources = {
           "read-only": "Read only",
           "workspace-write": "Workspace write",
           "full-access": "Full access",
-        },
-        effortLevels: {
-          low: "Low",
-          medium: "Medium",
-          high: "High",
-          xhigh: "Very high",
-          max: "Maximum",
         },
       },
       projects: {
@@ -715,7 +707,6 @@ const resources = {
         maxOutput: "最大输出",
         temperature: "温度",
         reasoningEffort: "推理强度",
-        reasoningEfforts: { low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高" },
         timeout: "超时（秒）",
         addRoute: "添加路由",
         removeRoute: "删除路由",
@@ -856,13 +847,6 @@ const resources = {
           "read-only": "只读",
           "workspace-write": "工作区写入",
           "full-access": "完全访问",
-        },
-        effortLevels: {
-          low: "低",
-          medium: "中",
-          high: "高",
-          xhigh: "很高",
-          max: "最高",
         },
       },
       projects: {

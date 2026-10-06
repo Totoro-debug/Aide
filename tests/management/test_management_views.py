@@ -109,7 +109,7 @@ class _DreamRunner:
 class _ReasoningEffortControl:
     def __init__(
         self,
-        effort: ReasoningEffort = "medium",
+        effort: ReasoningEffort = "mid",
         *,
         events: list[str] | None = None,
     ) -> None:
@@ -449,7 +449,7 @@ async def test_status_reports_prepared_session_and_frozen_utf8_token_estimate(
     assert status == RuntimeStatus(
         version="0.1.0",
         chat_model="primary/model-id",
-        chat_reasoning_effort="medium",
+        chat_reasoning_effort="mid",
         uptime_seconds=12,
         context_window=10,
         max_output=0,

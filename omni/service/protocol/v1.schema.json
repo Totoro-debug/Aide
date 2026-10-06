@@ -16,7 +16,7 @@
     "request_id": {"$ref": "#/$defs/identifier"},
     "claim_version": {"type": "integer", "minimum": 1},
     "tool_permission_level": {"enum": ["read-only", "workspace-write", "full-access"]},
-    "reasoning_effort": {"enum": ["low", "medium", "high", "xhigh", "max"]},
+    "reasoning_effort": {"enum": ["low", "mid", "high", "xhigh", "max"]},
     "config_runtime_fields": {
       "type": "object", "additionalProperties": false,
       "properties": {

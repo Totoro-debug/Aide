@@ -189,7 +189,7 @@ interface PendingConfirmation {
 const THEME_KEY = "omni.theme";
 const initialLaunchTicket = readAndClearTicket();
 const PERMISSION_LEVELS: ToolPermissionLevel[] = ["read-only", "workspace-write", "full-access"];
-const REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
+const REASONING_EFFORTS: ReasoningEffort[] = ["low", "mid", "high", "xhigh", "max"];
 
 function usePanelKeyboard(open: boolean, setOpen: (open: boolean) => void, panelId: string, triggerId: string) {
   useEffect(() => {
@@ -1874,7 +1874,7 @@ function SettingsView({
             context_window: "8192",
             max_output: "1024",
             temperature: "0",
-            reasoning_effort: "medium",
+            reasoning_effort: "mid",
             timeout: "60",
           },
         },
@@ -2823,7 +2823,7 @@ function SettingsView({
                       <label className={styles.settingsField} htmlFor={fieldId(`models.routes.${route.name}.reasoning_effort`)}>
                         <span className={styles.fieldLabel}>{t("settings.reasoningEffort")}</span>
                         <select className={styles.selectInput} id={fieldId(`models.routes.${route.name}.reasoning_effort`)} value={route.reasoning_effort} disabled={controlDisabled} onChange={(event) => updateRoute(route.name, { reasoning_effort: event.currentTarget.value as ReasoningEffort })}>
-                          {(["low", "medium", "high", "xhigh", "max"] as ReasoningEffort[]).map((effort) => <option key={effort} value={effort}>{t(`settings.reasoningEfforts.${effort}`)}</option>)}
+                          {REASONING_EFFORTS.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
                         </select>
                       </label>
                       <SettingsNumberField id={fieldId(`models.routes.${route.name}.timeout`)} label={t("settings.timeout")} value={route.timeout} error={fieldError(`models.routes.${route.name}.timeout`)} disabled={controlDisabled} onChange={(value) => updateRoute(route.name, { timeout: value })} onBlur={() => blurField(`models.routes.${route.name}.timeout`, route.timeout)} />
@@ -3145,7 +3145,7 @@ function RuntimeManagementDialog({
   const { i18n, t } = useTranslation();
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const [permission, setPermission] = useState<ToolPermissionLevel>("workspace-write");
-  const [effort, setEffort] = useState<ReasoningEffort>("medium");
+  const [effort, setEffort] = useState<ReasoningEffort>("mid");
   const [loadState, setLoadState] = useState<"idle" | "loading" | "ready">("idle");
   const [saving, setSaving] = useState<"permission" | "effort" | null>(null);
   const [operation, setOperation] = useState<"memory" | "dream" | null>(null);
@@ -3438,7 +3438,7 @@ function RuntimeManagementDialog({
                 </div>
                 <div className={styles.managementMetric}>
                   <dt>{t("management.effort")}</dt>
-                  <dd>{t(`management.effortLevels.${status.chat_reasoning_effort}`)}</dd>
+                  <dd>{status.chat_reasoning_effort}</dd>
                 </div>
                 <div className={styles.managementMetric}>
                   <dt>{t("management.messages")}</dt>
@@ -3479,7 +3479,7 @@ function RuntimeManagementDialog({
                     onChange={(event) => setEffort(event.target.value as ReasoningEffort)}
                   >
                     {REASONING_EFFORTS.map((level) => (
-                      <option key={level} value={level}>{t(`management.effortLevels.${level}`)}</option>
+                      <option key={level} value={level}>{level}</option>
                     ))}
                   </select>
                   <button className={styles.secondaryButton} type="submit" disabled={saving !== null || connectionState !== "online"}>
@@ -6953,7 +6953,7 @@ function ProjectSessionsContent({
         }
         setComposerError(null);
         setComposerNotice(typeof output === "string" ? output
-          : typeof effort === "string" ? t(`settings.reasoningEfforts.${effort}`)
+          : typeof effort === "string" ? effort
             : typeof permission === "string" ? t(`settings.permissionLevels.${permission}`)
               : t("conversation.managementCompleted"));
         return;
@@ -7796,7 +7796,7 @@ function ProjectSessionsContent({
   const displayedModel = savedSessionModel ?? chatDefaultModel;
   const displayedEffort = savedSessionModel?.reasoning_effort
     ?? chatDefaultModel?.reasoning_effort
-    ?? "medium";
+    ?? "mid";
   const modelSelectionNeedsAttention = snapshot?.model_configuration_available === false
     || (savedSessionModel === null && (availableModelsState !== "ready" || chatDefaultModel === null));
   const selectedRestoreAnchor = snapshot?.restore_anchors?.find(
@@ -8491,7 +8491,7 @@ function ProjectSessionsContent({
                     permissionDisabled={clientPermissionSaving}
                     onPermissionChange={(level) => void saveClientPermission(level)}
                     modelSummary={displayedModel?.model ?? t("conversation.modelsUnavailable")}
-                    effortSummary={t(`settings.reasoningEfforts.${displayedEffort}`, { lng: "en" })}
+                    effortSummary={displayedEffort}
                     disabled={connectionState !== "online"}
                   >
                     <label className={styles.composerSetting}>
@@ -8559,7 +8559,7 @@ function ProjectSessionsContent({
                       >
                         {REASONING_EFFORTS.map((effort) => (
                           <option key={effort} value={effort}>
-                            {t(`settings.reasoningEfforts.${effort}`, { lng: "en" })}
+                            {effort}
                           </option>
                         ))}
                       </select>

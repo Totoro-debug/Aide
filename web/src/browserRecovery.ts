@@ -1,7 +1,7 @@
 import type { ReasoningEffort, SessionModelConfiguration } from "./protocol";
 
 const BROWSER_RECOVERY_KEY = "omni.browser-recovery";
-const REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
+const REASONING_EFFORTS: ReasoningEffort[] = ["low", "mid", "high", "xhigh", "max"];
 
 export type BrowserRecoveryTarget =
   | { kind: "project"; project_id: string }
@@ -37,6 +37,10 @@ export function readBrowserRecoverySnapshot(): BrowserRecoverySnapshot | null {
     const raw = window.localStorage.getItem(BROWSER_RECOVERY_KEY);
     if (raw === null) return null;
     const value: unknown = JSON.parse(raw);
+    if (isRecord(value) && isRecord(value.model_configuration)
+      && value.model_configuration.reasoning_effort === "medium") {
+      value.model_configuration.reasoning_effort = "mid";
+    }
     return isBrowserRecoverySnapshot(value) ? value : null;
   } catch {
     return null;

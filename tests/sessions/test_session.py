@@ -93,6 +93,56 @@ def _assert_local_timestamp(value: Any) -> None:
     assert parsed.utcoffset() == datetime.now().astimezone().utcoffset()
 
 
+def test_legacy_reasoning_effort_loads_and_restores_as_mid_without_read_time_writes(
+    agent_home: Path,
+    workspace: Path,
+) -> None:
+    state = _state(workspace, agent_home)
+    header = _header()
+    metadata = header["metadata"]
+    metadata.update(
+        {
+            "model_configuration": {
+                "provider_id": "primary",
+                "model": "model-1",
+                "reasoning_effort": "medium",
+            },
+            "model_configuration_version": 1,
+            "restore_next_anchor_id": 2,
+        }
+    )
+    message = {
+        "role": "user",
+        "content": "Legacy model selection",
+        "timestamp": UPDATED_AT.isoformat(timespec="milliseconds"),
+        "restore_anchor_id": 1,
+        "restore_run_token": str(RESTORE_TOKENS[0]),
+        "restore_before": {"metadata": copy.deepcopy(metadata), "last_compacted": 0},
+    }
+    path = _write_jsonl(state, [header, message])
+    before = path.read_bytes()
+    before_modified = path.stat().st_mtime_ns
+
+    session = Session.load(state, SESSION_ID)
+
+    assert session.model_configuration is not None
+    assert session.model_configuration.reasoning_effort == "mid"
+    assert session.model_configuration_version == 1
+    assert session.messages[0]["restore_before"]["metadata"]["model_configuration"][
+        "reasoning_effort"
+    ] == "mid"
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == before_modified
+
+    session.restore_before_durably(1)
+
+    assert session.model_configuration.reasoning_effort == "mid"
+    assert session.model_configuration_version == 1
+    assert session.messages == []
+    assert b'"medium"' not in path.read_bytes()
+    assert Session.load(state, SESSION_ID).model_configuration == session.model_configuration
+
+
 def test_create_starts_a_memory_only_session_with_private_identity_generation(
     agent_home: Path,
     workspace: Path,

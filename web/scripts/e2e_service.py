@@ -78,7 +78,7 @@ model = "small-model"
 context_window = 8192
 max_output = 1024
 temperature = 0
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 30
 
 [models.routes.chat]
@@ -87,7 +87,7 @@ model = "small-model"
 context_window = 8192
 max_output = 1024
 temperature = 0
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 30
 
 [models.routes.memory]
@@ -105,7 +105,7 @@ model = "small-model"
 context_window = 8192
 max_output = 1024
 temperature = 0
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 30
 
 [mcp.servers.fixture]

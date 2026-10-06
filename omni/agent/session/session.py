@@ -1027,6 +1027,9 @@ def _parse_datetime(value: Any, *, field: str) -> datetime:
 
 def _parse_message(record: dict[str, Any]) -> dict[str, Any]:
     message = _copy_json_object(record, field="message")
+    restore_before = message.get("restore_before")
+    if isinstance(restore_before, dict) and isinstance(restore_before.get("metadata"), dict):
+        _normalize_legacy_model_configuration(restore_before["metadata"])
     if any(key in message for key in ("record_" + "type", "schema_" + "version")):
         raise ValueError("legacy Session message fields are unsupported")
     try:
@@ -1071,9 +1074,16 @@ def _validate_metadata(metadata: dict[str, Any]) -> None:
 
 def _copy_loaded_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     copied = copy.deepcopy(metadata)
+    _normalize_legacy_model_configuration(copied)
     _normalize_blackboard_metadata(copied, invalid_is_absent=True)
     copied.setdefault("summary", "")
     return _copy_json_object(copied, field="metadata")
+
+
+def _normalize_legacy_model_configuration(metadata: dict[str, Any]) -> None:
+    configuration = metadata.get(_SESSION_MODEL_CONFIGURATION)
+    if isinstance(configuration, dict) and configuration.get("reasoning_effort") == "medium":
+        configuration["reasoning_effort"] = "mid"
 
 
 def _validate_action_summary(value: Any, *, field: str) -> None:

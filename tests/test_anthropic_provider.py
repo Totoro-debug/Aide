@@ -194,9 +194,20 @@ async def test_stream_translates_text_and_usage_through_official_sdk_boundary() 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max", None])
+@pytest.mark.parametrize(
+    ("effort", "wire_effort"),
+    [
+        ("low", "low"),
+        ("mid", "medium"),
+        ("high", "high"),
+        ("xhigh", "xhigh"),
+        ("max", "max"),
+        (None, None),
+    ],
+)
 async def test_stream_maps_or_omits_each_reasoning_effort(
     effort: str | None,
+    wire_effort: str | None,
 ) -> None:
     stream = FakeAnthropicStream(
         SimpleNamespace(
@@ -231,13 +242,24 @@ async def test_stream_maps_or_omits_each_reasoning_effort(
         for key, value in client.messages.calls[0].items()
         if key in {"output_config", "reasoning_effort"}
     }
-    assert reasoning_arguments == ({} if effort is None else {"output_config": {"effort": effort}})
+    assert reasoning_arguments == ({} if effort is None else {"output_config": {"effort": wire_effort}})
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max", None])
+@pytest.mark.parametrize(
+    ("effort", "wire_effort"),
+    [
+        ("low", "low"),
+        ("mid", "medium"),
+        ("high", "high"),
+        ("xhigh", "xhigh"),
+        ("max", "max"),
+        (None, None),
+    ],
+)
 async def test_complete_maps_or_omits_each_reasoning_effort(
     effort: str | None,
+    wire_effort: str | None,
 ) -> None:
     sdk_message = SimpleNamespace(
         content=[SimpleNamespace(type="text", text="Done")],
@@ -255,7 +277,7 @@ async def test_complete_maps_or_omits_each_reasoning_effort(
         for key, value in client.messages.calls[0].items()
         if key in {"output_config", "reasoning_effort"}
     }
-    assert reasoning_arguments == ({} if effort is None else {"output_config": {"effort": effort}})
+    assert reasoning_arguments == ({} if effort is None else {"output_config": {"effort": wire_effort}})
 
 
 @pytest.mark.asyncio

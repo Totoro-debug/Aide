@@ -12,7 +12,7 @@ def test_runtime_status_exposes_the_documented_management_fields() -> None:
     status = RuntimeStatus(
         version="0.1.0",
         chat_model="anthropic-default/model-id",
-        chat_reasoning_effort="medium",
+        chat_reasoning_effort="mid",
         uptime_seconds=123,
         context_window=200000,
         max_output=0,
@@ -35,7 +35,7 @@ def test_runtime_status_exposes_the_documented_management_fields() -> None:
     assert status.to_dict() == {
         "version": "0.1.0",
         "chat_model": "anthropic-default/model-id",
-        "chat_reasoning_effort": "medium",
+        "chat_reasoning_effort": "mid",
         "uptime_seconds": 123,
         "context_window": 200000,
         "max_output": 0,
@@ -62,7 +62,7 @@ def test_runtime_status_rejects_negative_or_boolean_counters() -> None:
     status = RuntimeStatus(
         version="0.1.0",
         chat_model="anthropic-default/model-id",
-        chat_reasoning_effort="medium",
+        chat_reasoning_effort="mid",
         uptime_seconds=123,
         context_window=200000,
         max_output=0,

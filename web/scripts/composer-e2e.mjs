@@ -10,7 +10,7 @@ export default async function composerAcceptance(page) {
   const model = page.locator("#composer-model-trigger");
   const permissionMenu = page.locator("#composer-permission-menu");
   const modelMenu = page.locator("#composer-model-menu");
-  const effortLabels = ["Low", "Medium", "High", "Very high", "Maximum"];
+  const effortLabels = ["low", "mid", "high", "xhigh", "max"];
   const output = resolve("test-results", "composer");
   await mkdir(output, { recursive: true });
   const originalViewport = page.viewportSize();
@@ -61,7 +61,7 @@ export default async function composerAcceptance(page) {
         assert.ok(layout.input.bottom <= layout.permission.top + 1
           && layout.permission.bottom <= layout.box.bottom && layout.send.bottom <= layout.box.bottom,
         `Composer toolbar must stay below the text and inside the input box: ${JSON.stringify(layout)}`);
-        await expect(model).toContainText("High");
+        await expect(model).toContainText("high");
 
         await model.click();
         await expect(modelMenu).toBeVisible();
@@ -103,11 +103,11 @@ export default async function composerAcceptance(page) {
     await expect(modelSelect).toBeEnabled();
   }
   const effort = page.getByLabel("Reasoning effort", { exact: true });
-  for (const value of ["low", "medium", "high", "xhigh", "max", "high"]) {
+  for (const value of ["low", "mid", "high", "xhigh", "max", "high"]) {
     await model.click();
     await effort.selectOption(value);
     await expect(effort).toHaveValue(value);
     await expect(effort).toBeEnabled();
   }
-  console.log("Composer E2E: 12 layout/language/theme combinations, English effort labels, five effort selections, keyboard and menu dismissal passed");
+  console.log("Composer E2E: 12 layout/language/theme combinations, raw effort labels, five effort selections, keyboard and menu dismissal passed");
 }

@@ -51,7 +51,7 @@ model = "replace-with-a-model-id"
 context_window = 200000
 max_output = 8192
 temperature = 0.2
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 120
 
 [models.routes.chat]
@@ -60,7 +60,7 @@ model = "replace-with-a-model-id"
 context_window = 200000
 max_output = 8192
 temperature = 0.2
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 120
 
 [models.routes.memory]
@@ -69,7 +69,7 @@ model = "replace-with-a-model-id"
 context_window = 200000
 max_output = 8192
 temperature = 0.2
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 120
 
 [models.routes.schedule]
@@ -78,5 +78,5 @@ model = "replace-with-a-model-id"
 context_window = 200000
 max_output = 8192
 temperature = 0.2
-reasoning_effort = "medium"
+reasoning_effort = "mid"
 timeout = 120

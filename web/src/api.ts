@@ -17,8 +17,6 @@ import type {
   ChatSessionsResponse,
   ChatWorkspaceEntry,
   ConversationOpenResponse,
-  SessionClaimResponse,
-  SessionCreation,
   SessionDeletion,
   SessionDeletionStatus,
   SessionDeletionClaim,
@@ -207,8 +205,6 @@ export function decideServiceConfirmation(
   });
 }
 
-type WorkspaceSessionCreation = Omit<SessionCreation, "project_id"> & { project_id: null };
-type WorkspaceSessionClaimResponse = Omit<SessionClaimResponse, "project_id"> & { project_id: null };
 type WorkspaceSessionDeletion = Omit<SessionDeletion, "project_id">;
 type WorkspaceSessionDeletionClaim = Omit<SessionDeletionClaim, "project_id"> & { project_id: null };
 type WorkspaceSessionDeletionStatus = Omit<SessionDeletionStatus, "project_id"> & { project_id: null };
@@ -260,23 +256,6 @@ export async function getWorkspaceSessions(
     `/workspaces/${encodeURIComponent(workspaceId)}/sessions${queryString ? `?${queryString}` : ""}`,
   );
   return { ...response, workspace_id: workspaceId };
-}
-
-export function createWorkspaceSession(workspaceId: string): Promise<WorkspaceSessionCreation> {
-  return request<WorkspaceSessionCreation>(
-    `/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
-    { method: "POST", mutation: true, body: { request_id: createRequestId() } },
-  );
-}
-
-export function claimWorkspaceSession(
-  workspaceId: string,
-  sessionId: string,
-): Promise<WorkspaceSessionClaimResponse> {
-  return request<WorkspaceSessionClaimResponse>(
-    `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/claim`,
-    { method: "POST", mutation: true, body: { request_id: createRequestId() } },
-  );
 }
 
 export function getWorkspaceSession(
@@ -916,31 +895,6 @@ export function acknowledgeRestore(
     claimCredential,
     "restore/acknowledge",
   ).then((result) => result.restore_result ?? null);
-}
-
-export function createProjectSession(projectId: string): Promise<SessionCreation> {
-  return request<SessionCreation>(
-    `/projects/${encodeURIComponent(projectId)}/sessions`,
-    {
-      method: "POST",
-      mutation: true,
-      body: { request_id: createRequestId() },
-    },
-  );
-}
-
-export function claimProjectSession(
-  projectId: string,
-  sessionId: string,
-): Promise<SessionClaimResponse> {
-  return request<SessionClaimResponse>(
-    `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/claim`,
-    {
-      method: "POST",
-      mutation: true,
-      body: { request_id: createRequestId() },
-    },
-  );
 }
 
 export function releaseProjectSession(

@@ -17,7 +17,7 @@ import type {
   ServiceStatus,
 } from "./protocol";
 
-export type WebServiceAuthState = "checking" | "ready" | "required" | "error";
+export type WebServiceAuthState = "checking" | "ready" | "required" | "error" | "conflict";
 export type WebServiceConnectionState = "checking" | "online" | "offline" | "recovering";
 
 export interface WebServiceClientHandlers {
@@ -158,6 +158,11 @@ export class WebServiceClient {
       this.connection = connection;
     } catch (error) {
       if (!this.active || generation !== this.generation) return;
+      if (error instanceof ApiError && error.body?.code === "web_client_exists") {
+        this.handlers.onAuthState("conflict");
+        this.handlers.onConnectionState("offline");
+        return;
+      }
       if (initial || (error instanceof ApiError && error.status === 401)) {
         this.handlers.onAuthState(error instanceof ApiError && error.status === 401 ? "required" : "error");
       }

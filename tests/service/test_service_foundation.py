@@ -801,7 +801,7 @@ async def test_removed_project_re_registration_keeps_saved_jobs_paused_until_res
         assert stale.value.code == "stale_schedule_review"
         assert not workspace.schedule_admitted
 
-        other_client = await second_service.register_client("web")
+        other_client = await second_service.register_client("cli")
         await second_service.connect_client(other_client.client_id, Sink())
         results = await asyncio.gather(
             *(
@@ -1252,8 +1252,8 @@ async def test_background_confirmation_broadcast_has_job_source_without_session_
     status_sink = Sink()
     unrelated_sink = Sink()
     try:
-        first = await service.register_client("web")
-        second = await service.register_client("web")
+        first = await service.register_client("cli")
+        second = await service.register_client("cli")
         status_page = await service.register_client("web")
         unrelated_cli = await service.register_client("cli")
         await service.attach_workspace(unrelated_cli.client_id, unrelated_workspace_path)

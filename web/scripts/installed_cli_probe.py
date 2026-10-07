@@ -545,6 +545,21 @@ async def _run_joint_scenario(
     initial_session_id = client.session_id
     removal_prompt = "project removal barrier"
     settings_prompt = "settings generation barrier"
+    confirmation_path = Path(os.environ["OMNI_JOINT_BROWSER_READY"] + ".confirmation")
+
+    async def compete_for_confirmation() -> None:
+        await _wait_for_file(confirmation_path)
+        request = json.loads(confirmation_path.read_text(encoding="utf-8"))
+        try:
+            await client.decide_confirmation(request["token"], "approved")
+            result = {"accepted": True}
+        except ServiceError as error:
+            result = error.to_dict(request["request_id"])
+        confirmation_path.with_suffix(".result").write_text(
+            json.dumps(result), encoding="utf-8"
+        )
+
+    confirmation_competitor = asyncio.create_task(compete_for_confirmation())
     ready_path.write_text(
         json.dumps(
             {
@@ -716,6 +731,10 @@ async def _run_joint_scenario(
             encoding="utf-8",
         )
         raise
+
+    finally:
+        confirmation_competitor.cancel()
+        await asyncio.gather(confirmation_competitor, return_exceptions=True)
 
 
 async def headless_terminal(self: Any, **_kwargs: object) -> None:

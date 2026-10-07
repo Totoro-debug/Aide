@@ -279,7 +279,7 @@ async function settingsRowCollisionAcceptance({ page, configPath, openSettings, 
   }
 }
 
-export async function settingsModelMcpAcceptance({ page, secondPage, control, output }) {
+export async function settingsModelMcpAcceptance({ page, control, output }) {
   const configPath = resolve(control.details.home_root, ".omni", "config.toml");
   const providerObservationPath = process.env.OMNI_E2E_PROVIDER_OBSERVATION_PATH;
   const mcpV1Path = process.env.OMNI_E2E_MCP_V1_PATH;
@@ -297,7 +297,6 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
     });
   };
   captureConfigResponses(page);
-  captureConfigResponses(secondPage);
 
   const field = (target, id) => target.locator(`[id="${id}"]`);
   const openRestartedPage = async (target, launchUrl) => {
@@ -556,7 +555,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   // An unreferenced provider may keep an empty model list and cleared key.
   await save(page);
   await waitForSavedSettings(page);
-  const addedProvider = await openSettings(secondPage);
+  const addedProvider = await control.command("config-read");
   assert.equal(addedProvider.fields.models.providers["review-provider-302"].protocol, "anthropic");
   assert.deepEqual(addedProvider.fields.models.providers["review-provider-302"].models, []);
   await field(page, "settings-models-providers-review-provider-302").getByRole("button", { name: "Remove provider", exact: true }).click();
@@ -579,7 +578,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   }
   await save(page);
   await waitForSavedSettings(page);
-  let readback = await openSettings(secondPage);
+  let readback = await control.command("config-read");
   assert.deepEqual(readback.fields.mcp[customName].args, exactArgs);
   assert.equal(readback.fields.mcp[customName].cwd, null);
   await field(page, `settings-mcp-${customName}-transport`).selectOption("streamable-http");
@@ -591,7 +590,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await field(page, `settings-mcp-${customName}-headers-Authorization-value`).fill("custom-header-canary-302");
   await save(page);
   await waitForSavedSettings(page);
-  readback = await openSettings(secondPage);
+  readback = await control.command("config-read");
   assert.equal(readback.fields.mcp[customName].url, "http://127.0.0.1:1/custom");
   assert.deepEqual(readback.fields.mcp[customName].headers, { "X-Api-Key": { configured: true } });
   for (const [name, row, secret] of [["X.Test", "X-Header-2", "dot-header-canary-302"], ["X-Test", "X-Header-3", "dash-header-canary-302"]]) {
@@ -602,7 +601,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   }
   await save(page);
   await waitForSavedSettings(page);
-  readback = await openSettings(secondPage);
+  readback = await control.command("config-read");
   assert.equal(readback.fields.mcp[customName].url, "http://127.0.0.1:1/custom");
   assert.equal(await field(page, `settings-mcp-${customName}-url`).inputValue(), "http://127.0.0.1:1/custom");
   await field(page, `settings-mcp-${customName}-headers-X-Header-2-action`).selectOption("replace");
@@ -613,10 +612,11 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await expect(field(page, `settings-mcp-${customName}-headers-X-Header-2-value`)).toBeFocused();
   await field(page, `settings-mcp-${customName}-headers-X-Header-2-value`).fill("dot-header-canary-302");
   await field(page, `settings-mcp-${customName}-transport`).selectOption("stdio");
+  await save(page, 422);
   await field(page, `settings-mcp-${customName}-command`).fill("python");
   await save(page);
   await waitForSavedSettings(page);
-  readback = await openSettings(secondPage);
+  readback = await control.command("config-read");
   assert.deepEqual(readback.fields.mcp[customName].headers, {});
   await customCard.getByRole("button", { name: "Remove MCP server", exact: true }).click();
   await save(page);
@@ -664,17 +664,10 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   await defaultModel(page).fill("large-model");
   await defaultModel(page).press("Tab");
   await staleSaveArrival;
-  await openSettings(secondPage);
-  const competingSave = secondPage.waitForResponse(response => (
-    response.url().endsWith("/api/v1/config") && response.request().method() === "PATCH"
-    && response.request().postDataJSON()?.fields?.models?.routes?.chat?.temperature === 0.1
-  ));
-  await field(secondPage, "settings-models-routes-chat-temperature").fill("0.1");
-  await save(secondPage);
-  const competingResponse = await competingSave;
-  assert.equal(competingResponse.status(), 200);
-  assert.equal((await competingResponse.json()).fields.models.routes.chat.temperature, 0.1);
-  await waitForSavedSettings(secondPage);
+  const competingRoutes = (await control.command("config-read")).fields.models.routes;
+  competingRoutes.chat.temperature = 0.1;
+  const competing = await control.command(`config-patch ${JSON.stringify({ models: { routes: competingRoutes } })}`);
+  assert.equal(competing.fields.models.routes.chat.temperature, 0.1);
   const beforeConflict = await readFile(configPath);
   await page.bringToFront();
   releaseStaleSave();
@@ -710,7 +703,6 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
 
   const v1Startup = await control.restart();
   await openRestartedPage(page, `${v1Startup.url}/#ticket=${encodeURIComponent(v1Startup.ticket)}`);
-  await openRestartedPage(secondPage, `${v1Startup.url}/#ticket=${encodeURIComponent(v1Startup.second_ticket)}`);
   await openSettings(page);
   assert.equal(await largeModelContextWindow(page).inputValue(), "65536");
   const restartedModels = await availableModels(page);
@@ -778,7 +770,6 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   )), false, "Saved MCP settings activated before restart");
   const v2Startup = await control.restart();
   await openRestartedPage(page, `${v2Startup.url}/#ticket=${encodeURIComponent(v2Startup.ticket)}`);
-  await openRestartedPage(secondPage, `${v2Startup.url}/#ticket=${encodeURIComponent(v2Startup.second_ticket)}`);
   await openSettings(page);
   console.log("Settings model/provider/route/MCP E2E: explicit restart activated v2 settings");
 
@@ -817,8 +808,9 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   assert.ok(mcpV2Requests.some((request) => request.method === "tools/list"));
   assert.ok(mcpV2Requests.some((request) => request.method === "tools/call"));
 
-  await page.getByRole("button", { name: "Release session", exact: true }).click();
-  await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
+  await page.locator("#app-sidebar").getByRole("link", { name: "New conversation", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Conversation", exact: true })
+    .getByRole("heading", { name: "New Session draft", exact: true })).toBeVisible({ timeout: 15000 });
   await openSettings(page);
   for (const language of ["en", "zh-CN"]) {
     await setInterfaceLanguage(page, language);
@@ -860,7 +852,7 @@ export async function settingsModelMcpAcceptance({ page, secondPage, control, ou
   console.log("Settings model/provider/route/MCP E2E: structured safe readback, secret replace/keep/clear, invalid bytes, stale CAS, saved settings with an active Run, and real old/new model plus stdio MCP resources passed");
 }
 
-export default async function settingsAcceptance({ page, secondPage, control, output, viewports }) {
+export default async function settingsAcceptance({ page, control, output, viewports }) {
   const settings = async (target) => {
     await target.bringToFront();
     await setInterfaceLanguage(target, "en");
@@ -965,11 +957,7 @@ export default async function settingsAcceptance({ page, secondPage, control, ou
     "A valid field must save on blur: submitted=" + submittedIterations + " " + automaticSaveBody,
   );
   await waitForSavedSettings(page);
-  await settings(secondPage);
-  await runtimeSettings(secondPage);
-  await memorySettings(secondPage);
-  await secondPage.getByLabel("Memory batch size", { exact: true }).fill("12");
-  const competing = await save(secondPage);
+  const competing = await control.command('config-patch {"memory":{"batch_size":12}}');
   await page.bringToFront();
   await expect(page.getByRole("definition").filter({ hasText: competing.revision })).toHaveCount(1);
   await expect(page.getByLabel("Maximum iterations", { exact: true })).toHaveValue("61");

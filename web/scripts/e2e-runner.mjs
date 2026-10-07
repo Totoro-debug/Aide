@@ -29,7 +29,6 @@ const conversationViewports = [
 const output = resolve("test-results");
 let control;
 let browser;
-let secondContext;
 let acceptanceError;
 
 async function verifyConversationMessages(page, viewport) {
@@ -222,30 +221,6 @@ try {
   await openChatAndStatus(page, launchUrl);
   assert.match(page.url(), /\/status$/);
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light", "First-use theme should be light");
-  secondContext = await browser.newContext();
-  await secondContext.addInitScript(() => {
-    const OriginalWebSocket = window.WebSocket;
-    window.__omniTestMessages = [];
-    window.WebSocket = class extends OriginalWebSocket {
-      constructor(...args) {
-        super(...args);
-        window.__omniTestControlCredential = Array.isArray(args[1]) ? args[1][1] : null;
-        window.__omniTestSocket = this;
-        this.addEventListener("message", (event) => {
-          try {
-            window.__omniTestMessages.push(JSON.parse(event.data));
-          } catch {
-            // Only JSON service messages are relevant to this test.
-          }
-        });
-      }
-    };
-  });
-  const secondPage = await secondContext.newPage();
-  await openChatAndStatus(
-    secondPage,
-    `${url}/#ticket=${encodeURIComponent(control.details.second_ticket)}`,
-  );
   const replay = await browser.newContext();
   const reusedTicket = await replay.request.post(`${url}/api/v1/web/ticket`, {
     headers: { Origin: url },
@@ -254,7 +229,7 @@ try {
   assert.equal(reusedTicket.status(), 401, "A consumed browser ticket was accepted again");
   await replay.close();
 
-  await settingsAcceptance({ page, secondPage, control, output, viewports });
+  await settingsAcceptance({ page, control, output, viewports });
   await openServiceStatus(page);
 
   for (const language of ["en", "zh-CN"]) {
@@ -1095,7 +1070,7 @@ try {
   assert.equal(typeof draftId, "string");
   const sessionPanel = page.locator("#app-sidebar");
   await sessionPanel.getByText("Empty draft", { exact: true }).waitFor();
-  await page.getByRole("button", { name: "Release session" }).click();
+  await sessionList.getByRole("button", { name: /Web available history/ }).click();
   await sessionPanel.getByText("Empty draft", { exact: true }).waitFor({ state: "detached" });
   const sessionFiles = await readdir(resolve(firstProject, ".omni", "sessions"));
   assert.equal(sessionFiles.includes(`${draftId}.jsonl`), false, "Released empty draft was persisted");
@@ -1951,28 +1926,8 @@ try {
   } finally {
     await duplicatePage.close();
   }
-  await secondPage.getByRole("button", { name: /^(Back to app|返回应用)$/ }).click();
-  await secondPage.locator("#app-sidebar").getByRole("button", { name: "project-one", exact: true }).click();
-  await secondPage.getByRole("heading", { name: "project-one", exact: true }).waitFor();
-  const secondSessionList = secondPage.locator("#app-sidebar").getByRole("list", { name: /^project-one (Sessions|会话)$/ });
-  await secondSessionList.getByRole("button", { name: /CLI occupied history/ }).waitFor();
-  await secondSessionList
-    .getByRole("button", { name: /CLI occupied history/ })
-    .getByText(/Occupied|已占用/, { exact: true })
-    .waitFor();
-  const occupiedClaimResponse = secondPage.waitForResponse((response) => (
-    response.request().method() === "POST"
-    && new URL(response.url()).pathname.endsWith("/conversations/open")
-    && response.request().postDataJSON()?.session_id === control.details.available_session_id
-  ));
-  await secondSessionList.getByRole("button", { name: /Web available history/ }).click();
-  assert.equal((await occupiedClaimResponse).status(), 409);
-  await secondPage.getByRole("region", { name: "Conversation", exact: true })
-    .getByText("This Session is occupied by another client.", { exact: true }).waitFor();
-  assert.equal(
-    await secondPage.getByText("Available history loaded after a successful Claim", { exact: true }).count(),
-    0,
-  );
+  const competingClaim = await control.command(`cli-claim ${control.details.available_session_id}`);
+  assert.equal(competingClaim.code, "session_claimed", "CLI loaded the Web client's claimed history");
 
   const confirmationPath = control.details.confirmation_path;
   assert.ok(confirmationPath.endsWith("confirmation-outside.txt"));
@@ -2002,25 +1957,19 @@ try {
   const confirmationRuns = [];
   for (const language of ["en", "zh-CN"]) {
     await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
-    await secondPage.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
     for (const theme of ["light", "dark"]) {
       await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
-      await secondPage.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
-        await secondPage.setViewportSize(viewport);
         confirmationCombinations.push({ language, theme, viewport });
         const primaryTitle = language === "en" ? "Tool Confirmation" : "工具确认";
-        const secondaryTitle = primaryTitle;
         const primaryDialog = page.getByRole("dialog", { name: primaryTitle, exact: true });
-        const secondaryDialog = secondPage.getByRole("dialog", { name: secondaryTitle, exact: true });
         const input = page.locator("textarea");
         const previousPromptCount = await page.getByRole("log", { includeHidden: true })
           .getByText("confirmation", { exact: true }).count();
         await input.fill("confirmation");
         await input.press("Enter");
         await primaryDialog.waitFor();
-        await secondaryDialog.waitFor();
         const originalRequest = await page.evaluate(() => [...window.__omniTestMessages]
           .reverse().find((event) => event.type === "confirmation.requested"));
         const priorMessages = await page.evaluate(() => window.__omniTestMessages);
@@ -2062,8 +2011,6 @@ try {
           "A previous confirmation notice overlaps the active dialog");
 
         const primaryText = await primaryDialog.innerText();
-        const secondaryText = await secondaryDialog.innerText();
-        assert.equal(primaryText, secondaryText, "Clients received different confirmation facts");
         assert.ok(primaryText.includes("read_file"), "Confirmation omitted the exact Tool name");
         assert.ok(primaryText.includes("confirmation-outside.txt"), "Confirmation omitted exact parameters");
         assert.ok(primaryText.includes(control.details.available_session_id), "Confirmation omitted its Session source");
@@ -2088,8 +2035,8 @@ try {
 
         const combinationIndex = confirmationCombinations.length - 1;
         if (combinationIndex === 0 || combinationIndex === viewports.length) {
-          await secondaryDialog.getByRole("button", { name: language === "en" ? "Approve" : "批准" }).focus();
-          await secondPage.keyboard.press("Enter");
+          await primaryDialog.getByRole("button", { name: language === "en" ? "Approve" : "批准" }).focus();
+          await page.keyboard.press("Enter");
         } else if (combinationIndex === 1) {
           await primaryDialog.getByRole("button", { name: language === "en" ? "Close" : "关闭" }).click();
         } else if (combinationIndex === 2) {
@@ -2100,7 +2047,6 @@ try {
           await primaryDialog.getByRole("button", { name: language === "en" ? "Decline" : "拒绝" }).click();
         }
         await primaryDialog.waitFor({ state: "hidden" });
-        await secondaryDialog.waitFor({ state: "hidden" });
         const completedRun = await waitForConfirmationRunCompletion();
         const completedActivity = page.getByRole("log").getByRole("group", {
           name: "Run activity", exact: true,
@@ -2182,7 +2128,6 @@ try {
   )).length, 0, "Declined confirmations exposed Tool output");
 
   await page.setViewportSize(viewports[0]);
-  await secondPage.setViewportSize(viewports[0]);
   await page.getByRole("button", { name: "EN", exact: true }).click();
   for (const prompt of ["process cycles", "process cancel gap"]) {
     await control.command("process-arm");
@@ -2262,32 +2207,12 @@ try {
   await expect(failedActivity.locator("summary")).toContainText("Failed");
   await failedActivity.locator("summary").click();
   await expect(failedActivity).toContainText(failedReason);
-  const releaseResponsePromise = page.waitForResponse((response) => (
-    response.request().method() === "POST" && response.url().includes("/release")
-  ));
-  const releaseButton = page.getByRole("button", { name: /Release session|释放会话/ });
-  await releaseButton.click();
-  assert.equal((await releaseResponsePromise).status(), 200);
-  const refreshResponsePromise = secondPage.waitForResponse((response) => (
-    response.request().method() === "GET"
-    && response.url().includes("/api/v1/projects/")
-    && new URL(response.url()).pathname.endsWith("/sessions")
-  ));
-  await secondPage.getByRole("main").getByRole("button", { name: /Refresh sessions|刷新会话/ }).click();
-  assert.equal((await refreshResponsePromise).status(), 200);
-  const releasedSession = secondSessionList.getByRole("button", { name: /Web available history/ });
-  await releasedSession.getByText(/Occupied|已占用/, { exact: true }).waitFor({ state: "detached" });
-  const handoffClaimPromise = secondPage.waitForResponse((response) => (
-    response.request().method() === "POST"
-    && new URL(response.url()).pathname.endsWith("/conversations/open")
-    && response.request().postDataJSON()?.session_id === control.details.available_session_id
-  ));
-  await releasedSession.click();
-  const handoffClaimResponse = await handoffClaimPromise;
-  assert.equal(handoffClaimResponse.status(), 200, await handoffClaimResponse.text());
-  await secondPage.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
-  await secondPage.getByRole("button", { name: /Release session|释放会话/ }).click();
-  await secondPage.getByRole("button", { name: /Release session|释放会话/ }).waitFor({ state: "detached" });
+  await page.getByRole("button", { name: "New session", exact: true }).click();
+  const handoff = await control.command(`cli-claim ${control.details.available_session_id}`);
+  assert.ok(handoff.snapshot.messages.some(message => message.content === "Available history loaded after a successful Claim"));
+  await control.command("cli-release");
+  await sessionList.getByRole("button", { name: /Web available history/ }).click();
+  await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
 
   const sessionSearch = page.locator("#app-sidebar").getByRole("listitem").filter({
     has: page.getByRole("button", { name: "project-one", exact: true }),
@@ -2420,7 +2345,6 @@ try {
   await page.evaluate(() => new Promise((resolveFrame) => window.requestAnimationFrame(() => window.requestAnimationFrame(resolveFrame))));
   await page.getByText("No Sessions match this title.", { exact: true }).waitFor();
   await page.unroute(restoredClaimUrl, interceptAvailableSessionOpen);
-  await page.getByRole("button", { name: /Release session|释放会话/ }).click();
 
   await sessionSearch.fill("");
   for (const language of ["en", "zh-CN"]) {
@@ -2436,7 +2360,7 @@ try {
         const { session_id: deleteId } = await (await creation).json();
         await page.getByRole("region", { name: language === "en" ? "Conversation" : "对话" })
           .getByRole("heading", { name: language === "en" ? "New Session draft" : "新会话草稿", exact: true }).waitFor();
-        await page.getByRole("button", { name: language === "en" ? "Release session" : "释放会话", exact: true }).waitFor();
+        await expect(page.getByRole("button", { name: /Release session|释放会话/ })).toHaveCount(0);
         const prompt = `retry once delete review ${language} ${theme} ${viewport.width}`;
         await page.locator("#conversation-input").fill(prompt);
         await page.locator("#conversation-input").press("Enter");
@@ -2641,7 +2565,6 @@ try {
         }
         assert.equal(await page.getByRole("heading", { name: "project-one", exact: true }).evaluate(
           (element) => element === document.activeElement), true, "Deletion did not restore focus");
-        if (otherPrompt !== null) await page.getByRole("button", { name: "Release session", exact: true }).click();
       }
     }
   }
@@ -2809,10 +2732,6 @@ try {
     assert.notEqual(newServiceRecovery.recovery.session_id, previousRecovery.session_id,
       "The previous service Session was restored into the new service");
   }
-  await openChatAndStatus(
-    secondPage,
-    `${restarted.url}/#ticket=${encodeURIComponent(restarted.second_ticket)}`,
-  );
   await page.setViewportSize(viewports[0]);
   await page.locator("#app-sidebar").getByRole("button", { name: "project-one", exact: true }).waitFor();
   await page.getByText("Schedule paused for review").waitFor();
@@ -2928,7 +2847,7 @@ try {
   await openProjectMenu(projectItemByPath(page, firstProject));
   await page.getByRole("button", { name: "Resume schedule" }).waitFor();
 
-  await settingsModelMcpAcceptance({ page: secondPage, secondPage: page, control, output });
+  await settingsModelMcpAcceptance({ page, control, output });
 
   const activeService = await page.evaluate(async () => (
     window.fetch("/api/v1/service", { credentials: "include" }).then((response) => response.json())
@@ -2988,7 +2907,6 @@ try {
   console.error("E2E failed:", error);
   throw error;
 } finally {
-  await secondContext?.close();
   await browser?.close();
   await shutdownControl();
 }

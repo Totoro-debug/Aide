@@ -214,7 +214,7 @@ async def test_other_client_cannot_inspect_execute_read_or_ack_restore(
     action: str,
 ) -> None:
     service, workspace, _owner, claim, target = restore_case
-    stranger = await service.register_client("web")
+    stranger = await service.register_client("cli")
     await service.attach_workspace(stranger.client_id, workspace.workspace_path)
     with pytest.raises(ServiceError) as error:
         await _restore_request(
@@ -393,7 +393,7 @@ async def test_restore_preserves_an_unrelated_active_run(
 ) -> None:
     service, workspace, owner, claim, target = restore_case
     provider = restore_provider
-    other = await service.register_client("web")
+    other = await service.register_client("cli")
     await service.attach_workspace(other.client_id, workspace.workspace_path)
     sink = _CollectingSink()
     await service.connect_client(other.client_id, sink)
@@ -456,7 +456,7 @@ async def test_failed_restore_result_and_ack_survive_new_client_and_restart(
     result = executed["restore_result"]
     assert isinstance(result, dict) and result["file_results"][0]["status"] == "failed"
     await workspace.release(owner, claim.session_id)
-    new = await service.register_client("web")
+    new = await service.register_client("cli")
     await service.attach_workspace(new.client_id, workspace.workspace_path)
     next_claim = await workspace.claim(new.client_id, claim.session_id)
     fetched = await _restore_request(
@@ -489,7 +489,7 @@ async def test_failed_restore_result_and_ack_survive_new_client_and_restart(
             active.workspace_state, claim.session_id
         ).has_pending_transaction()
         await active.release(client.client_id, claim.session_id)
-        fresh = await restarted.register_client("web")
+        fresh = await restarted.register_client("cli")
         await restarted.attach_workspace(fresh.client_id, active.workspace_path)
         fresh_claim = await active.claim(fresh.client_id, claim.session_id)
         fetched = await _restore_request(
@@ -546,7 +546,7 @@ async def test_restore_management_requires_claim_is_idempotent_and_preserves_oth
     await service.start()
     try:
         owner = await service.register_client("web")
-        other = await service.register_client("web")
+        other = await service.register_client("cli")
         workspace = await service.attach_workspace(owner.client_id, workspace_path)
         await service.attach_workspace(other.client_id, workspace_path)
         claim = await workspace.claim(owner.client_id, session.session_id)

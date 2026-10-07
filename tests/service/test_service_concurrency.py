@@ -899,7 +899,7 @@ async def test_session_deletion_entries_preserve_status_and_claim_contracts(
     await service.start()
     try:
         client = await service.register_client("web")
-        other = await service.register_client("web")
+        other = await service.register_client("cli")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
         identity: dict[str, object] = {"workspace_id": workspace.workspace_id}
         status: Callable[[str, str, str], Awaitable[dict[str, object]]]
@@ -1062,7 +1062,7 @@ async def test_pending_delete_after_restart_claims_cleanup_without_reopening_ses
                 replacement.client_id, record.project_id, session_id
             )
         assert reopen.value.code == "session_deleting"
-        other = await restarted.register_client("web")
+        other = await restarted.register_client("cli")
         with pytest.raises(ServiceError) as contested:
             await restarted.claim_project_session_deletion(
                 other.client_id, record.project_id, session_id

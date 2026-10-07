@@ -19,7 +19,6 @@ import {
   Gauge,
   Info,
   Languages,
-  LogOut,
   Menu,
   MessageSquare,
   MoreHorizontal,
@@ -153,7 +152,7 @@ import {
 } from "./browserRecovery";
 import type { BrowserRecoverySnapshot, SessionBrowserRecoverySnapshot } from "./browserRecovery";
 
-type AuthState = "checking" | "ready" | "required" | "error";
+type AuthState = "checking" | "ready" | "required" | "error" | "conflict";
 type ConnectionState = "checking" | "online" | "offline" | "recovering";
 type Theme = "system" | "light" | "dark";
 type ProjectsLoadState = "idle" | "loading" | "ready" | "error";
@@ -809,6 +808,12 @@ export default function App() {
           ref={mainContentRef}
           tabIndex={-1}
         >
+          {authState === "conflict" ? (
+            <div className={styles.errorBanner} role="alert">
+              <CircleAlert size={16} aria-hidden="true" />
+              <span>{t("status.webClientExists")}</span>
+            </div>
+          ) : null}
           <div style={{ display: location.pathname === "/settings" ? "none" : "contents" }}>
             <Routes location={conversationLocation}>
               <Route
@@ -7055,6 +7060,9 @@ function ProjectSessionsContent({
     if (event.workspace_id !== workspaceIdRef.current || event.session_id === null) return;
     const sessionId = event.session_id;
     if (event.type === "session.released") {
+      if (claimsBySessionRef.current[sessionId] !== undefined) {
+        onNavigationDraftReleased?.(sessionId, snapshotsBySessionRef.current[sessionId]?.messages.length === 0);
+      }
       delete claimsBySessionRef.current[sessionId];
       delete snapshotsBySessionRef.current[sessionId];
       delete sessionCursorRef.current[sessionId];
@@ -7113,7 +7121,7 @@ function ProjectSessionsContent({
     if (event.run_id !== null && (event.type === "run.completed" || event.type === "run.failed")) {
       void refreshRunSnapshot(sessionId, event.run_id);
     }
-  }, [adoptSnapshot, readRunSnapshot, refreshRunSnapshot, updateLiveRuns]);
+  }, [adoptSnapshot, onNavigationDraftReleased, readRunSnapshot, refreshRunSnapshot, updateLiveRuns]);
 
   useEffect(() => subscribeServiceEvents(handleServiceEvent), [handleServiceEvent, subscribeServiceEvents]);
 
@@ -7293,45 +7301,6 @@ function ProjectSessionsContent({
       recoveredDraftRef.current = null;
     })();
   }, [busySessionId, createDraft, isChat, loadState, navigate, recreateBrowserDraft, setComposerInputText, workspaceDirectory]);
-
-  async function releaseCurrent() {
-    const current = claimRef.current;
-    if (current === null) return;
-    if (pendingDeletionRef.current?.attempted && pendingDeletionRef.current.claim.session_id === current.session_id) return;
-    const releasedEmptyDraft = draft && snapshotRef.current?.messages.length === 0;
-    if (registeredClient !== null) {
-      attemptedRestoreRef.current = registeredClient.web_control_credential;
-    }
-    onRestoreConsumed();
-    setManagementOpen(false);
-    setBusySessionId(current.session_id);
-    setActionError(null);
-    if (!isChat) navigate(`/projects/${encodeURIComponent(sessionScopeId)}`, { replace: true });
-    try {
-      await releaseSessionClaim(current);
-      onNavigationDraftReleased?.(current.session_id, releasedEmptyDraft);
-      if (releasedEmptyDraft) onBrowserRecoveryChange(null);
-      delete claimsBySessionRef.current[current.session_id];
-      delete snapshotsBySessionRef.current[current.session_id];
-      claimRef.current = null;
-      snapshotRef.current = null;
-      setClaim(null);
-      setSnapshot(null);
-      setSelectedSessionId(null);
-      selectedSessionRef.current = null;
-      setRestoreOpen(false);
-      setRestorePlan(null);
-      setRestoreNotice(null);
-      delete draftsBySessionRef.current[current.session_id];
-      setComposerInputText("");
-      setDraft(false);
-      await refreshSessions();
-    } catch (error) {
-      setActionError(sessionErrorKey(error));
-    } finally {
-      setBusySessionId(null);
-    }
-  }
 
   const saveSessionModelConfiguration = useCallback(async (nextConfiguration: SessionModelConfiguration) => {
     const currentClaim = claimRef.current;
@@ -8142,15 +8111,6 @@ function ProjectSessionsContent({
                         ) : null}
                       </>
                     ) : null}
-                    <button
-                      className={styles.secondaryButton}
-                      type="button"
-                      disabled={busySessionId !== null}
-                      onClick={() => void releaseCurrent()}
-                    >
-                      <LogOut size={15} aria-hidden="true" />
-                      {t("controls.releaseSession")}
-                    </button>
                   </div>
                 </div>
                 <div

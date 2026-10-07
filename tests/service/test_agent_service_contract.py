@@ -345,7 +345,7 @@ async def test_open_conversation_returns_snapshot_and_preserves_context_on_occup
         second = await service.open_conversation(
             owner.client_id, project_id=second_record.project_id, create_new=True
         )
-        other = await service.register_client("web")
+        other = await service.register_client("cli")
         await service.open_conversation(
             other.client_id,
             project_id=first_record.project_id,

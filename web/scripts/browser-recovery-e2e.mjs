@@ -185,15 +185,10 @@ export default async function browserRecoveryAcceptance({ page: initialPage, con
   assert.equal(await page.getByRole("log").getByText("unknown input must never be resent", { exact: true }).count(), 0);
 
   // Keep an existing Claim while restoring a different, occupied target.
-  const occupiedContext = await context.browser().newContext({ locale: "en" });
   let availableRecovery;
   try {
-    const occupant = await occupiedContext.newPage();
-    const occupiedUrl = new URL(freshAuthorizationUrl());
-    occupiedUrl.pathname = `/projects/${encodeURIComponent(projectId)}`;
-    occupiedUrl.searchParams.set("session", control.details.restore_session_id);
-    await occupant.goto(occupiedUrl.toString());
-    await expect(occupant.getByRole("log").getByText("Restore branch should disappear from history", { exact: true })).toBeVisible();
+    const occupied = await control.command(`cli-claim ${control.details.restore_session_id}`);
+    assert.equal(occupied.session_id, control.details.restore_session_id);
     await page.goto(`${origin}/projects/${encodeURIComponent(projectId)}?session=${control.details.available_session_id}`);
     await expect(page.getByRole("log").getByText("Available history loaded after a successful Claim", { exact: true })).toBeVisible();
     await expect.poll(async () => {
@@ -218,7 +213,7 @@ export default async function browserRecoveryAcceptance({ page: initialPage, con
       .getByRole("button", { name: "New session", exact: true }).click();
     await expect(input()).toBeEnabled();
   } finally {
-    await occupiedContext.close();
+    await control.command("cli-release");
   }
 
   for (const target of [
@@ -272,7 +267,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     await page.getByLabel("Message input").fill("Browser recovery history fixture");
     await page.getByRole("button", { name: "Send", exact: true }).click();
     await expect(page.getByRole("log").getByText("Fixture response.", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Release session", exact: true }).click();
+    await page.locator("#app-sidebar").getByRole("link", { name: "New conversation", exact: true }).click();
     if (process.env.OMNI_E2E_RECOVERY_SHARED_DIRECTORY === "1") {
       await mkdir(`${control.details.home_root}\\chat-next`);
       await control.command("project-history-seed");

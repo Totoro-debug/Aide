@@ -3282,6 +3282,13 @@ class AgentService:
             or client.current_workspace_id == workspace_id
         )
 
+    def require_web_client_available(self) -> None:
+        """Reject another Web participant until the current one's cleanup finishes."""
+        if any(client.kind == "web" for client in self._clients.values()):
+            raise service_error(
+                "web_client_exists", "Another Web Client is already open.", status=409
+            )
+
     async def register_client(
         self,
         kind: str,
@@ -3302,6 +3309,8 @@ class AgentService:
                     "project_reentry_required",
                     "This CLI must explicitly re-enter the Project after removal.",
                 )
+            if client.kind == kind == "web" and client.connected:
+                self.require_web_client_available()
             if client.kind != kind or client.connected:
                 raise service_error(
                     "client_already_connected",
@@ -3312,6 +3321,8 @@ class AgentService:
             client.web_control_credential = str(uuid4()) if kind == "web" else None
             self._client_by_reconnect[client.reconnect_credential] = client_id
             return client
+        if kind == "web":
+            self.require_web_client_available()
         permission = (
             self.configuration.runtime.permission_level if self.configuration else "workspace-write"
         )
@@ -3320,6 +3331,12 @@ class AgentService:
             client.web_control_credential = str(uuid4())
         self._clients[client.client_id] = client
         self._client_by_reconnect[client.reconnect_credential] = client.client_id
+        if kind == "web":
+            deadline = self._monotonic() + self.reconnect_timeout
+            client.reconnect_deadline = deadline
+            client.disconnect_task = asyncio.create_task(
+                self._expire_client_later(client.client_id, deadline)
+            )
         return client
 
     def client_permission(self, client_id: str | None) -> RuntimePermissionControl:

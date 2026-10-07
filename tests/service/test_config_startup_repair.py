@@ -61,12 +61,10 @@ async def repair_http(
     service = AgentService(home, None, reconnect_timeout=3600)
     await service.start()
     token = create_credential(home)
-    client = await service.register_client("web")
-    assert client.web_control_credential is not None
+    client = await service.register_client("cli")
     headers = {
         "Authorization": f"Bearer {token}",
         "X-Omni-Client": client.client_id,
-        "X-Omni-Control": client.web_control_credential,
     }
     async with TestServer(create_app(service), host="127.0.0.1") as server:
         yield service, server, headers
@@ -305,7 +303,7 @@ async def test_repair_http_security_validation_cas_and_secret_safe_replay(
         assert await replay.json() == first_body
         reuse = await http.post(url, headers=mutation_headers, json={**payload, "fields": {}})
         assert reuse.status == 409
-        other = await service.register_client("web")
+        other = await service.register_client("cli")
         other_headers = {
             **mutation_headers,
             "X-Omni-Client": other.client_id,

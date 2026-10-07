@@ -731,9 +731,9 @@ try {
   await page.getByRole("button", { name: "Cancel run", exact: true }).click();
   await control.command("settings-release");
   await expect(page.getByRole("textbox", { name: "Message input", exact: true })).toBeEnabled();
-  await page.getByRole("button", { name: "Release session", exact: true }).click();
+  await projectSessions.getByRole("button", { name: /Saved project/ }).click();
   await expect(draftButton).toHaveCount(0);
-  await expect(projectSessions.locator('[aria-current="page"]')).toHaveCount(0);
+  await expect(projectSessions.getByRole("button", { name: /Saved project/ })).toHaveAttribute("aria-current", "page");
 
   // Project pagination keeps later pages visible through Claim refreshes.
   console.log("Chat E2E: checking project pagination");

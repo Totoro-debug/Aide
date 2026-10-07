@@ -351,12 +351,29 @@ class AgentServiceTransport:
                 raise service_error(
                     "unauthenticated", "The Web launch ticket is invalid or expired.", status=401
                 )
+            self._prune_web_tickets()
+            existing_cookie = request.cookies.get(_WEB_SESSION_COOKIE, "")
+            existing_session = self._web_sessions.get(existing_cookie)
+            if existing_session is not None and existing_session.client_id is not None:
+                try:
+                    existing_client = self.service.client(existing_session.client_id)
+                except ServiceError as error:
+                    if error.code not in {"stale_client", "unauthenticated"}:
+                        raise
+                else:
+                    if existing_client.connected:
+                        self.service.require_web_client_available()
+                    return web.json_response(
+                        {"authenticated": True, "csrf_token": existing_session.csrf_token}
+                    )
+            client = await self.service.register_client("web")
             session_cookie = secrets.token_urlsafe(32)
             csrf_token = secrets.token_urlsafe(32)
-            self._prune_web_tickets()
             self._web_sessions[session_cookie] = _WebSession(
                 csrf_token=csrf_token,
                 expires_at=time.monotonic() + _WEB_SESSION_MAX_AGE_SECONDS,
+                client_id=client.client_id,
+                reconnect_credential=client.reconnect_credential,
             )
         response = web.json_response({"authenticated": True, "csrf_token": csrf_token})
         response.set_cookie(

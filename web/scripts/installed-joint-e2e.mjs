@@ -277,13 +277,9 @@ try {
   const firstWorkspaceId = first.workspace_id;
   const secondPage = await secondContext.newPage();
   secondPage.on("pageerror", (error) => browserErrors.push(error.message));
-  const secondClientResponse = secondPage.waitForResponse((response) => (
-    response.request().method() === "POST" && response.url().endsWith("/api/v1/clients")
-  ));
   await secondPage.goto(`${baseUrl}/#ticket=${encodeURIComponent(secondTicket)}`);
-  await expect(secondPage.getByRole("status").filter({ hasText: /^(Online|在线)$/ }).first()).toHaveText(/^(Online|在线)$/);
-  const secondClient = await (await secondClientResponse).json();
-  assert.notEqual(secondClient.client_id, (await webClient.json()).client_id);
+  await expect(secondPage.getByRole("alert").filter({ hasText: /Another Web client|已有 Web 端/ })).toBeVisible();
+  await secondPage.close();
   const background = await scheduleJob(
     context.request,
     firstWorkspaceId,
@@ -320,8 +316,6 @@ try {
   assert.match(backgroundText, new RegExp(backgroundJobId));
   const confirmationButtons = backgroundDialog.getByRole("button");
   await expect(confirmationButtons).toHaveCount(3);
-  const secondDialog = secondPage.locator('[role="dialog"][data-confirmation-origin="background"]');
-  await secondDialog.waitFor();
   const recoveryRegistration = page.waitForResponse((response) => (
     response.request().method() === "POST" && response.url().endsWith("/api/v1/clients")
   ));
@@ -335,18 +329,21 @@ try {
   assert.deepEqual(recovered?.payload.request, confirmation.payload.request);
   const decisions = await Promise.all([
     decide(page, confirmation.payload.token, "installed-confirmation-race-one"),
-    decide(secondPage, confirmation.payload.token, "installed-confirmation-race-two"),
+    (async () => {
+      await writeFile(`${browserReadyPath}.confirmation`, JSON.stringify({
+        token: confirmation.payload.token, request_id: "installed-confirmation-race-two",
+      }));
+      return waitForJson(`${browserReadyPath}.result`);
+    })(),
   ]);
   assert.equal(decisions.filter((result) => result.accepted === true).length, 1);
   assert.equal(decisions.filter((result) => result.code === "confirmation_resolved").length, 1);
   await backgroundDialog.waitFor({ state: "hidden" });
-  await secondDialog.waitFor({ state: "hidden" });
   const persistedConfirmation = await waitForPersistedConfirmationResult(workspace);
   assert.match(persistedConfirmation.content, /confirmation fixture content/);
   const toolRecords = (await readFile(join(workspace, ".omni", "schedule-sessions", `schedule_${backgroundJobId}.jsonl`), "utf8"))
     .split("\n").filter(Boolean).map((line) => JSON.parse(line));
   assert.equal(toolRecords.filter((record) => record.role === "tool" && record.tool_call_id === "call-confirmation").length, 1);
-  await secondPage.close();
   const backgroundEvidence = {
     source: "background",
     job_id: backgroundJobId,

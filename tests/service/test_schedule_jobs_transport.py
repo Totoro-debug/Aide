@@ -472,7 +472,7 @@ async def test_schedule_job_http_delete_cancels_a_running_job_and_keeps_deleted_
     try:
         await service.connect_client(client.client_id, _SilentSink())
         workspace = await service.attach_workspace(client.client_id, workspace_path)
-        other_client = await service.register_client("web")
+        other_client = await service.register_client("cli")
         other_workspace = await service.attach_workspace(
             other_client.client_id, other_workspace_path
         )

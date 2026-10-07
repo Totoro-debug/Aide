@@ -18,6 +18,16 @@ Each client owns its current foreground Tool Permission Level, shared across tha
 
 ## Project admission, reconnection, and shutdown
 
+One service admits at most one Web Client, alongside any number of CLI Clients.
+Web admission reserves that place from ticket exchange through initial connection,
+reconnect grace and completed expiry cleanup. An initial connection that never
+arrives expires after the same 30-second window. Additional browser pages receive
+`web_client_exists` (HTTP 409), preserving the original page's browser credentials
+and connection. Refresh and valid reconnect reuse the original Client. Web does
+not expose manual Session release: switching releases idle Claims automatically,
+and switched Sessions with accepted work retain their Claims until completion.
+Closing the Web page releases its Claims after reconnect expiry and cleanup.
+
 Each registered Project is a durable reference to an existing Workspace directory. Registration does not copy data or automatically enroll CLI Workspaces. Available registered Projects run Schedule Jobs while the service has online clients. An unregistered CLI Workspace admits new Schedule work only while a connected client uses it; its last disconnection pauses admission immediately, and expiry cancels and drains its abandoned work while preserving resident Session history, saved Jobs and user files.
 
 A client may switch away while an accepted run continues. Its 30-second reconnect grace retains Session Claims, accepted input, live output, and pending confirmation; replay or a current snapshot restores presentation. Expiry cancels abandoned work and releases claims. After the final online client disconnects, the service stops new Schedule admission immediately, allows the same 30-second reconnect period, then drains work and exits. `omni service stop` begins draining immediately.

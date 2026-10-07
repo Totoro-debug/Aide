@@ -860,6 +860,7 @@ async def _run_e2e(provider_base_url: str) -> None:
         client = await ServiceClient.connect_or_start(home, cli_workspace, port=port)
         project_client = await ServiceClient.connect_or_start(home, first_project, port=port)
         await project_client.open_conversation(session_id=occupied_session_id)
+        peer_client: ServiceClient | None = None
         try:
 
             async def announce() -> None:
@@ -902,6 +903,41 @@ async def _run_e2e(provider_base_url: str) -> None:
                     QUEUE_RECALL_RELEASE.set()
                     MODEL_MCP_RELEASE.set()
                     break
+                if command.strip() == "config-read":
+                    print(json.dumps(await client.get_config()), flush=True)
+                    continue
+                if command.strip() == "web-ticket":
+                    print(json.dumps({"url": await client.create_web_ticket()}), flush=True)
+                    continue
+                if command.startswith("config-patch "):
+                    current = await client.get_config()
+                    result = await client._http_request(
+                        "PATCH", "/api/v1/config", mutation=True,
+                        payload={
+                            "request_id": str(uuid4()), "revision": current["revision"],
+                            "fields": json.loads(command.split(" ", 1)[1]), "secrets": {},
+                        },
+                    )
+                    print(json.dumps(result), flush=True)
+                    continue
+                if command.startswith("cli-claim "):
+                    if peer_client is None:
+                        peer_client = await ServiceClient.connect_or_start(
+                            home, first_project, port=port
+                        )
+                    try:
+                        result = await peer_client.open_conversation(
+                            session_id=command.strip().split()[1]
+                        )
+                    except ServiceError as error:
+                        result = error.to_dict("cli-claim")
+                    print(json.dumps(result), flush=True)
+                    continue
+                if command.strip() == "cli-release":
+                    assert peer_client is not None
+                    await peer_client.release_session()
+                    print(json.dumps({"released": True}), flush=True)
+                    continue
                 if command.startswith("effort "):
                     result = await client.management("effort", {"effort": command.strip().split()[1]})
                     print(json.dumps(result), flush=True)
@@ -1025,6 +1061,9 @@ async def _run_e2e(provider_base_url: str) -> None:
                     continue
                 if command.strip() != "restart":
                     continue
+                if peer_client is not None:
+                    await peer_client.close()
+                    peer_client = None
                 await project_client.close()
                 await client.close()
                 await _stop_service(home, port)
@@ -1035,6 +1074,8 @@ async def _run_e2e(provider_base_url: str) -> None:
                 )
                 await announce()
         finally:
+            if peer_client is not None:
+                await peer_client.close()
             await project_client.close()
             await client.close()
             await _stop_service(home, port)

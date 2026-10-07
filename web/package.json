@@ -12,6 +12,8 @@
     "pretest:e2e": "npm run build",
     "test:e2e": "node scripts/e2e-runner.mjs",
     "test:e2e:client": "node scripts/client-e2e.mjs",
+    "pretest:e2e:restore": "npm run build",
+    "test:e2e:restore": "node scripts/restore-e2e.mjs",
     "pretest:e2e:chat": "npm run build",
     "test:e2e:chat": "node scripts/chat-e2e.mjs",
     "pretest:e2e:projects": "npm run build",

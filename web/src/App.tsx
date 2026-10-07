@@ -7795,6 +7795,10 @@ function ProjectSessionsContent({
     if (currentClaim === null || currentPlan === null || restoreBusyRef.current
       || currentPlan.session_id !== currentClaim.session_id
       || restorePlanClaimRef.current !== currentClaim) return;
+    const anchorContent = snapshotRef.current?.restore_anchors?.find(
+      (anchor) => anchor.anchor_id === currentPlan.anchor_id,
+    )?.content;
+    if (anchorContent === undefined) return;
     restoreBusyRef.current = true;
     setRestoreBusy(true);
     setRestoreError(null);
@@ -7818,6 +7822,9 @@ function ProjectSessionsContent({
       setPendingRestoreFailure(executed.result.file_results.some((item) => item.status === "failed")
         && !executed.result.failure_notification_acknowledged ? executed.result : null);
       rememberSession(nextClaim, executed.snapshot);
+      draftsBySessionRef.current[nextClaim.session_id] = anchorContent;
+      setComposerInputText(anchorContent);
+      persistSelectedBrowserRecovery({ inputText: anchorContent });
       restoreFocusPendingRef.current = true;
       setRestoreOpen(false);
       setRestorePlan(null);

@@ -1,3 +1,4 @@
+import { registerProjectFromSidebar, projectMenuAction } from "./project-ui.mjs";
 import assert from "node:assert/strict";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -252,8 +253,8 @@ try {
   ));
   await page.goto(`${baseUrl}/#ticket=${encodeURIComponent(ticket)}`);
   await page.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
-  await expect(page.getByRole("status").first()).toHaveText(/^(Online|在线)$/);
-  await expect(page.getByRole("status").first()).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: /^(Online|在线)$/ }).first()).toHaveText(/^(Online|在线)$/);
+  await expect(page.getByRole("status").filter({ hasText: /^(Online|在线)$/ }).first()).toBeVisible();
   const webClient = await webClientResponse;
   assert.equal(webClient.status(), 200);
   webControlCredential = (await webClient.json()).web_control_credential;
@@ -267,23 +268,8 @@ try {
   csrfToken = (await sessionResponse.json()).csrf_token;
   assert.equal(typeof csrfToken, "string");
 
-  await page.locator("#app-sidebar").getByRole("link", { name: /Projects|项目/, exact: true }).click();
-  await page.getByRole("main").getByRole("heading", { name: /^(Projects|项目)$/ }).waitFor();
-
   async function registerProject() {
-    await page.getByRole("main").getByRole("button", { name: /Add project|登记项目/ }).first().click();
-    const dialog = page.getByRole("dialog");
-    await dialog.getByLabel(/Absolute local path|本地绝对路径/).fill(workspace);
-    const responsePromise = page.waitForResponse((response) => (
-      response.request().method() === "POST" && response.url().endsWith("/api/v1/projects")
-    ));
-    await dialog.getByRole("button", { name: /Register project|登记项目/ }).click();
-    const response = await responsePromise;
-    assert.equal(response.status(), 200, await response.text());
-    const registered = await response.json();
-    await dialog.waitFor({ state: "hidden" });
-    await page.getByRole("heading", { name: "workspace", exact: true }).waitFor();
-    return registered;
+    return registerProjectFromSidebar(page, workspace);
   }
 
   const first = await registerProject();
@@ -295,7 +281,7 @@ try {
     response.request().method() === "POST" && response.url().endsWith("/api/v1/clients")
   ));
   await secondPage.goto(`${baseUrl}/#ticket=${encodeURIComponent(secondTicket)}`);
-  await expect(secondPage.getByRole("status").first()).toHaveText(/^(Online|在线)$/);
+  await expect(secondPage.getByRole("status").filter({ hasText: /^(Online|在线)$/ }).first()).toHaveText(/^(Online|在线)$/);
   const secondClient = await (await secondClientResponse).json();
   assert.notEqual(secondClient.client_id, (await webClient.json()).client_id);
   const background = await scheduleJob(
@@ -406,12 +392,9 @@ try {
   );
   const removalSavedJobId = removalSavedJob.job.job_id;
   await waitForObservations(observationPath, removalPrompt, 1);
-  const removableProject = page.getByRole("main").getByRole("list", { name: /Projects|项目/ }).filter({
-    has: page.getByRole("heading", { name: "workspace", exact: true }),
-  });
-  const projectButtons = removableProject.getByRole("button");
-  await expect(projectButtons).toHaveCount(1);
-  await projectButtons.click();
+  const removableProject = page.locator('#app-sidebar ul[aria-label="Projects"], #app-sidebar ul[aria-label="项目"]')
+    .getByRole("listitem").filter({ has: page.getByRole("button", { name: "workspace", exact: true }) });
+  await projectMenuAction(removableProject, /Remove registration|移除登记/);
   const removalDialog = page.getByRole("dialog", { name: /Remove project registration\?|移除项目登记[?？]/ });
   await removalDialog.waitFor();
   const removalResponsePromise = page.waitForResponse((response) => (

@@ -14,6 +14,8 @@
     "test:e2e:client": "node scripts/client-e2e.mjs",
     "pretest:e2e:chat": "npm run build",
     "test:e2e:chat": "node scripts/chat-e2e.mjs",
+    "pretest:e2e:projects": "npm run build",
+    "test:e2e:projects": "node scripts/project-e2e.mjs",
     "pretest:e2e:startup": "npm run build",
     "test:e2e:startup": "node scripts/config-startup-e2e.mjs"
   },

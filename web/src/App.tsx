@@ -70,6 +70,7 @@ import {
   releaseProjectSession,
   releaseWorkspaceSession,
   registerProject,
+  pickProjectDirectory,
   reloadRuntimeSkills,
   renameProjectSession,
   renameWorkspaceSession,
@@ -143,7 +144,7 @@ import type {
 import styles from "./App.module.css";
 import ComposerControls from "./ComposerControls";
 import NavigationSidebar from "./NavigationSidebar";
-import type { NavigationSession, NavigationSessionAction } from "./NavigationSidebar";
+import type { NavigationSession, NavigationSessionAction, NavigationProjectAction } from "./NavigationSidebar";
 import {
   browserRecoveryRoute,
   clearBrowserRecoverySnapshot,
@@ -248,6 +249,9 @@ export default function App() {
   const [sessionEventVersion, setSessionEventVersion] = useState(0);
   const [newChatVersion, setNewChatVersion] = useState(0);
   const [addProjectRequest, setAddProjectRequest] = useState(0);
+  const [addingProject, setAddingProject] = useState(false);
+  const [pendingProjectAction, setPendingProjectAction] = useState<NavigationProjectAction | null>(null);
+  const consumeProjectAction = useCallback(() => setPendingProjectAction(null), []);
   const [sessionNavigationVersion, setSessionNavigationVersion] = useState(0);
   const [activeNavigationSession, setActiveNavigationSession] = useState<NavigationSession | null>(null);
   const [activeNavigationClaim, setActiveNavigationClaim] = useState<SessionClaim | null>(null);
@@ -307,9 +311,7 @@ export default function App() {
   }, []);
   const requestAddProject = useCallback(() => {
     setAddProjectRequest((request) => request + 1);
-    navigate("/projects");
-    setSidebarOpen(false);
-  }, [navigate]);
+  }, []);
   const requestProjectSession = useCallback((projectId: string) => {
     const requestId = ++nextProjectSessionRequestRef.current;
     setProjectSessionRequest({ projectId, requestId });
@@ -698,6 +700,9 @@ export default function App() {
             setSessionNavigationVersion((version) => version + 1);
           }}
           onAddProject={requestAddProject}
+          addingProject={addingProject}
+          projectSelectionReady={connectionState === "online"}
+          onProjectAction={setPendingProjectAction}
           onNewProjectSession={requestProjectSession}
           onSessionAction={requestSessionAction}
           onClose={() => setSidebarOpen(false)}
@@ -904,21 +909,7 @@ export default function App() {
                 }
               />
               <Route path="/settings" element={null} />
-              <Route
-                path="/projects"
-                element={
-                  <ProjectsView
-                    authState={authState}
-                    error={projectsError}
-                    loadState={projectsLoadState}
-                    openRegistrationRequest={addProjectRequest}
-                    onRegistrationRequestConsumed={consumeAddProjectRequest}
-                    onRefresh={refreshProjects}
-                    projects={projects}
-                    subscribeServiceEvents={subscribeServiceEvents}
-                  />
-                }
-              />
+              <Route path="/projects" element={<Navigate replace to="/" />} />
               <Route
                 path="/projects/:projectId"
                 element={
@@ -1001,6 +992,19 @@ export default function App() {
           </div>
         ) : null}
       </div>
+      <ProjectActions
+        authState={authState}
+        connectionState={connectionState}
+        openRegistrationRequest={addProjectRequest}
+        onRegistrationRequestConsumed={consumeAddProjectRequest}
+        onAddingChange={setAddingProject}
+        onRetryRegistration={requestAddProject}
+        actionRequest={pendingProjectAction}
+        onActionRequestConsumed={consumeProjectAction}
+        onRefresh={refreshProjects}
+        projects={projects}
+        subscribeServiceEvents={subscribeServiceEvents}
+      />
       <ConfirmationDialog
         confirmation={pendingConfirmation}
         onOpenChange={(open) => { if (!open) decideConfirmation("declined"); }}
@@ -3585,34 +3589,32 @@ function operationManagementErrorKey(error: unknown, operationError: string): st
   return managementErrorKey(error);
 }
 
-interface ProjectsViewProps {
+interface ProjectActionsProps {
   authState: AuthState;
-  error: string | null;
-  loadState: ProjectsLoadState;
+  connectionState: ConnectionState;
   openRegistrationRequest: number;
   onRegistrationRequestConsumed: () => void;
+  onAddingChange: (adding: boolean) => void;
+  onRetryRegistration: () => void;
+  actionRequest: NavigationProjectAction | null;
+  onActionRequestConsumed: () => void;
   onRefresh: () => Promise<void>;
   projects: RegisteredProject[];
   subscribeServiceEvents: (listener: ServiceEventListener) => () => void;
 }
 
-function ProjectsView({
-  authState,
-  error,
-  loadState,
-  openRegistrationRequest,
-  onRegistrationRequestConsumed,
-  onRefresh,
-  projects,
-  subscribeServiceEvents,
-}: ProjectsViewProps) {
+function ProjectActions({
+  authState, connectionState, openRegistrationRequest, onRegistrationRequestConsumed,
+  onAddingChange, onRetryRegistration, actionRequest, onActionRequestConsumed,
+  onRefresh, projects, subscribeServiceEvents,
+}: ProjectActionsProps) {
   const { i18n, t } = useTranslation();
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [path, setPath] = useState("");
-  const [pathError, setPathError] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const location = useLocation();
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  const [registrationFailed, setRegistrationFailed] = useState(false);
+  const registrationAbortRef = useRef<AbortController | null>(null);
   const [resumingProjectId, setResumingProjectId] = useState<string | null>(null);
   const [reviewProjectId, setReviewProjectId] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
@@ -3620,21 +3622,72 @@ function ProjectsView({
   const [removingProjectId, setRemovingProjectId] = useState<string | null>(null);
   const [removalOperationId, setRemovalOperationId] = useState<string | null>(null);
   const [activeRemoval, setActiveRemoval] = useState<{ projectId: string; operationId: string } | null>(null);
-  const registrationTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const reviewTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const removalTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const reviewTriggerRef = useRef<HTMLElement | null>(null);
+  const removalTriggerRef = useRef<HTMLElement | null>(null);
   const reviewProject = projects.find((project) => project.project_id === reviewProjectId);
   const removalProject = projects.find((project) => project.project_id === removalProjectId);
+
+  const returnFromRemovedProject = useCallback((projectId: string) => {
+    const projectPath = `/projects/${encodeURIComponent(projectId)}`;
+    if (location.pathname === projectPath || location.pathname.startsWith(`${projectPath}/`)) {
+      navigate("/", { replace: true });
+    }
+  }, [location.pathname, navigate]);
+
+  const startRegistration = useCallback(async () => {
+    if (registrationAbortRef.current !== null || authState !== "ready" || connectionState !== "online") return;
+    const controller = new AbortController();
+    registrationAbortRef.current = controller;
+    onAddingChange(true);
+    setActionError(null);
+    setNotice(null);
+    setRegistrationFailed(false);
+    try {
+      const selection = await pickProjectDirectory(controller.signal);
+      if (controller.signal.aborted || selection.path === null) return;
+      const result = await registerProject(selection.path, controller.signal);
+      if (controller.signal.aborted) return;
+      await onRefresh();
+      setNotice(result.saved_jobs.length > 0 ? "projects.registeredPausedNotice" : "projects.registeredNotice");
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setActionError(projectPathError(error) ?? projectErrorKey(error));
+        setRegistrationFailed(true);
+      }
+    } finally {
+      registrationAbortRef.current = null;
+      onAddingChange(false);
+      document.getElementById("add-project-button")?.focus();
+    }
+  }, [authState, connectionState, onAddingChange, onRefresh]);
 
   useEffect(() => {
     if (openRegistrationRequest === 0) return;
     onRegistrationRequestConsumed();
-    registrationTriggerRef.current = null;
-    setPath("");
-    setPathError(null);
+    void startRegistration();
+  }, [openRegistrationRequest, onRegistrationRequestConsumed, startRegistration]);
+
+  useEffect(() => {
+    if (authState !== "ready" || connectionState !== "online") registrationAbortRef.current?.abort();
+  }, [authState, connectionState]);
+  useEffect(() => () => registrationAbortRef.current?.abort(), []);
+
+  useEffect(() => {
+    if (actionRequest === null) return;
+    onActionRequestConsumed();
     setActionError(null);
-    setDialogOpen(true);
-  }, [openRegistrationRequest, onRegistrationRequestConsumed]);
+    setNotice(null);
+    setRegistrationFailed(false);
+    if (actionRequest.action === "resume") {
+      reviewTriggerRef.current = actionRequest.trigger;
+      setReviewError(null);
+      setReviewProjectId(actionRequest.projectId);
+    } else {
+      removalTriggerRef.current = actionRequest.trigger;
+      setRemovalProjectId(actionRequest.projectId);
+      setRemovalOperationId(null);
+    }
+  }, [actionRequest, onActionRequestConsumed]);
 
   useEffect(() => {
     if (notice === null) return;
@@ -3651,6 +3704,9 @@ function ProjectsView({
         || event.type === "project.removed"
       ) {
         void onRefresh();
+        if (event.type === "project.removed" || event.type === "project.removal.completed") {
+          returnFromRemovedProject(String(event.payload.project_id));
+        }
       }
       if (
         activeRemoval !== null
@@ -3663,7 +3719,7 @@ function ProjectsView({
         setActiveRemoval(null);
       }
     });
-  }, [activeRemoval, onRefresh, subscribeServiceEvents]);
+  }, [activeRemoval, onRefresh, subscribeServiceEvents, returnFromRemovedProject]);
 
   useEffect(() => {
     if (activeRemoval === null) return;
@@ -3676,6 +3732,7 @@ function ProjectsView({
         setNotice(result.status === "completed"
           ? "projects.removalCompletedNotice" : "projects.removalFailedError");
         setActiveRemoval(null);
+        if (result.status === "completed") returnFromRemovedProject(activeRemoval.projectId);
         void onRefresh();
       } catch {
         // The event stream or the next status check may still deliver the outcome.
@@ -3684,48 +3741,7 @@ function ProjectsView({
     void refreshRemovalStatus();
     const timer = window.setInterval(() => void refreshRemovalStatus(), 2000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [activeRemoval, onRefresh]);
-
-  function openRegistration(event: React.MouseEvent<HTMLButtonElement>) {
-    registrationTriggerRef.current = event.currentTarget;
-    setPath("");
-    setPathError(null);
-    setActionError(null);
-    setDialogOpen(true);
-  }
-
-  async function submitRegistration(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const submittedPath = path.trim();
-    if (!submittedPath) {
-      setPathError("projects.pathHint");
-      return;
-    }
-    setSubmitting(true);
-    setPathError(null);
-    setActionError(null);
-    setNotice(null);
-    try {
-      const result = await registerProject(submittedPath);
-      await onRefresh();
-      setPath("");
-      setDialogOpen(false);
-      setNotice(
-        result.saved_jobs.length > 0
-          ? "projects.registeredPausedNotice"
-          : "projects.registeredNotice",
-      );
-    } catch (error) {
-      const fieldError = projectPathError(error);
-      if (fieldError !== null) {
-        setPathError(fieldError);
-      } else {
-        setActionError(projectErrorKey(error));
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  }
+  }, [activeRemoval, onRefresh, returnFromRemovedProject]);
 
   async function handleResume(project: RegisteredProject) {
     setResumingProjectId(project.project_id);
@@ -3746,17 +3762,6 @@ function ProjectsView({
     }
   }
 
-  function openRemoval(
-    project: RegisteredProject,
-    event: React.MouseEvent<HTMLButtonElement>,
-  ) {
-    removalTriggerRef.current = event.currentTarget;
-    setRemovalProjectId(project.project_id);
-    setActionError(null);
-    setNotice(null);
-    setRemovalOperationId(null);
-  }
-
   async function handleRemoval() {
     if (removalProject === undefined) return;
     const projectId = removalProject.project_id;
@@ -3768,6 +3773,7 @@ function ProjectsView({
       setRemovalOperationId(result.operation_id);
       await onRefresh();
       setRemovalProjectId(null);
+      if (result.status === "completed") returnFromRemovedProject(projectId);
       if (result.status === "completed" || result.status === "failed") {
         setNotice(result.status === "completed"
           ? "projects.removalCompletedNotice" : "projects.removalFailedError");
@@ -3782,295 +3788,18 @@ function ProjectsView({
     }
   }
 
-  const authUnavailable = authState !== "ready";
   return (
-    <section className={styles.projectsPage} aria-labelledby="projects-heading">
-      <div className={styles.pageHeading}>
-        <div>
-          <p className={styles.eyebrow}>{t("nav.projects")}</p>
-          <h1 id="projects-heading" tabIndex={-1}>{t("projects.title")}</h1>
-          <p className={styles.pageDescription}>{t("projects.description")}</p>
-        </div>
-        <div className={styles.pageActions}>
-          <button
-            className={styles.iconButton}
-            type="button"
-            aria-label={t("controls.refresh")}
-            title={t("controls.refresh")}
-            disabled={authUnavailable || loadState === "loading"}
-            onClick={() => void onRefresh()}
-          >
-            <RefreshCw size={16} aria-hidden="true" />
-          </button>
-          <button
-            className={styles.primaryButton}
-            type="button"
-            disabled={authUnavailable}
-            onClick={openRegistration}
-          >
-            <Plus size={16} aria-hidden="true" />
-            {t("controls.addProject")}
-          </button>
-        </div>
-      </div>
-
-      {notice !== null ? (
-        <div className={styles.notice} role="status" aria-live="polite">
-          <Check size={16} aria-hidden="true" />
-          {t(notice, { operationId: removalOperationId ?? undefined })}
-        </div>
-      ) : null}
-      {actionError !== null ? (
-        <div className={styles.errorBanner} role="alert">
-          <CircleAlert size={17} aria-hidden="true" />
-          <span>{t(actionError)}</span>
-        </div>
-      ) : null}
-
-      {authUnavailable ? (
-        <div className={styles.emptyState} role="status">
-          <div className={styles.emptyIcon} aria-hidden="true">
-            <Info size={22} />
-          </div>
-          <div>
-            <h2>{t("projects.authenticationRequired")}</h2>
-            <p>{t("status.unavailable")}</p>
-          </div>
-        </div>
-      ) : loadState === "loading" && projects.length === 0 ? (
-        <div className={styles.emptyState} role="status" aria-live="polite">
-          <div className={styles.emptyIcon} aria-hidden="true">
-            <RefreshCw size={22} className={styles.spin} />
-          </div>
-          <div>
-            <h2>{t("projects.loading")}</h2>
-          </div>
-        </div>
-      ) : loadState === "error" && projects.length === 0 ? (
-        <div className={styles.emptyState} role="alert">
-          <div className={styles.emptyIcon} aria-hidden="true">
-            <CircleAlert size={22} />
-          </div>
-          <div>
-            <h2>{t("projects.loadError")}</h2>
-            <p>{t(error ?? "projects.actionError")}</p>
-            <button className={styles.secondaryButton} type="button" onClick={() => void onRefresh()}>
-              {t("controls.retry")}
-            </button>
-          </div>
-        </div>
-      ) : projects.length === 0 ? (
-        <div className={styles.emptyState}>
-          <div className={styles.emptyIcon} aria-hidden="true">
-            <FolderOpen size={22} />
-          </div>
-          <div>
-            <h2>{t("projects.emptyTitle")}</h2>
-            <p>{t("projects.emptyDescription")}</p>
-            <button className={styles.secondaryButton} type="button" onClick={openRegistration}>
-              <Plus size={16} aria-hidden="true" />
-              {t("controls.addProject")}
-            </button>
-          </div>
-        </div>
-      ) : (
-        <>
-          {loadState === "error" ? (
-            <div className={styles.errorBanner} role="alert">
-              <CircleAlert size={17} aria-hidden="true" />
-              <span>{t(error ?? "projects.loadError")}</span>
-            </div>
+    <>
+      {notice !== null || (actionError !== null && removalProject === undefined) ? (
+        <div className={styles.projectFeedback} role={actionError !== null ? "alert" : "status"} aria-live="polite">
+          <span>{t(actionError ?? notice!, { operationId: removalOperationId ?? undefined })}</span>
+          {registrationFailed ? (
+            <button className={styles.sidebarTextButton} type="button" onClick={onRetryRegistration}>{t("controls.retry")}</button>
           ) : null}
-          <ul className={styles.projectList} aria-label={t("nav.projects")}>
-            {projects.map((project) => {
-              const removalPending = project.schedule_state === "removing"
-                && project.removal_error === undefined;
-              const removalBlocked = project.schedule_state === "failed"
-                || project.removal_error !== undefined;
-              const admissionClosed = !project.available || removalPending || removalBlocked;
-              return (
-                <li className={styles.projectItem} id={`project-${project.project_id}`} key={project.project_id}>
-                <div className={styles.projectItemHeader}>
-                  <div className={styles.projectTitleBlock}>
-                    <FolderOpen size={19} aria-hidden="true" />
-                    <div>
-                      <h2>{project.name || project.path}</h2>
-                      <p className={styles.projectPath}>{project.path}</p>
-                    </div>
-                  </div>
-                  <span
-                    className={styles.availabilityBadge}
-                    data-available={project.available}
-                    role="status"
-                  >
-                    <span className={styles.statusDot} aria-hidden="true" />
-                    {project.available ? t("projects.available") : t("projects.unavailable")}
-                  </span>
-                </div>
-                <div className={styles.projectDetails}>
-                  <div className={styles.projectActionRow}>
-                    {admissionClosed ? (
-                      <button className={styles.secondaryButton} type="button" disabled>
-                        <MessageSquare size={15} aria-hidden="true" />
-                        {t("controls.openSessions")}
-                      </button>
-                    ) : (
-                      <Link className={styles.secondaryButton} to={`/projects/${project.project_id}`}>
-                        <MessageSquare size={15} aria-hidden="true" />
-                        {t("controls.openSessions")}
-                      </Link>
-                    )}
-                    {admissionClosed ? (
-                      <button className={styles.secondaryButton} type="button" disabled>
-                        <CalendarClock size={15} aria-hidden="true" />
-                        {t("controls.openSchedule")}
-                      </button>
-                    ) : (
-                      <Link
-                        className={styles.secondaryButton}
-                        to={`/projects/${project.project_id}/schedule`}
-                      >
-                        <CalendarClock size={15} aria-hidden="true" />
-                        {t("controls.openSchedule")}
-                      </Link>
-                    )}
-                    <button
-                      className={styles.dangerButton}
-                      type="button"
-                      disabled={authUnavailable || removingProjectId !== null || removalPending}
-                      onClick={(event) => openRemoval(project, event)}
-                    >
-                      {removalBlocked ? (
-                        <RefreshCw size={15} aria-hidden="true" />
-                      ) : (
-                        <Trash2 size={15} aria-hidden="true" />
-                      )}
-                      {removingProjectId === project.project_id
-                        ? t("controls.removingProject")
-                        : removalBlocked
-                          ? t("controls.retryRemoval")
-                          : t("controls.removeProject")}
-                    </button>
-                  </div>
-                  <span
-                    className={styles.scheduleBadge}
-                    data-paused={project.schedule_status?.admitted !== true}
-                  >
-                    {projectScheduleLabel(project, t)}
-                  </span>
-                  {project.removal_error !== undefined ? (
-                    <div className={styles.projectRemovalError} role="alert">
-                      <CircleAlert size={16} aria-hidden="true" />
-                      <span>{t("projects.removalFailed", { message: project.removal_error })}</span>
-                    </div>
-                  ) : null}
-                  {project.schedule_state === "awaiting_resume" ? (
-                    <div className={styles.scheduleReview}>
-                      <div>
-                        <h3>{t("projects.savedJobs")}</h3>
-                        {project.saved_jobs.length > 0 ? (
-                          <ul className={styles.jobList}>
-                            {project.saved_jobs.map((job) => (
-                              <li key={job.job_id}>
-                                <span>{job.title}</span>
-                                <span className={styles.jobSchedule}>{scheduleText(job, t)}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        ) : (
-                          <p className={styles.jobEmpty}>{t("projects.noSavedJobs")}</p>
-                        )}
-                      </div>
-                      <button
-                        className={styles.secondaryButton}
-                        type="button"
-                        disabled={!project.available || resumingProjectId !== null}
-                        onClick={(event) => {
-                          reviewTriggerRef.current = event.currentTarget;
-                          setReviewError(null);
-                          setReviewProjectId(project.project_id);
-                        }}
-                      >
-                        <Play size={15} aria-hidden="true" />
-                        {resumingProjectId === project.project_id
-                          ? t("controls.resuming")
-                          : t("controls.resumeSchedule")}
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
-                </li>
-              );
-            })}
-          </ul>
-        </>
-      )}
-
-      <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
-        <Dialog.Portal>
-          <Dialog.Overlay className={styles.dialogOverlay} />
-          <Dialog.Content
-            className={styles.dialogContent}
-            onCloseAutoFocus={(event) => {
-              event.preventDefault();
-              registrationTriggerRef.current?.focus();
-            }}
-          >
-            <div className={styles.dialogHeader}>
-              <div>
-                <Dialog.Title className={styles.dialogTitle}>{t("projects.addTitle")}</Dialog.Title>
-                <Dialog.Description className={styles.dialogDescription}>
-                  {t("projects.pathHint")}
-                </Dialog.Description>
-              </div>
-              <Dialog.Close asChild>
-                <button className={styles.iconButton} type="button" aria-label={t("controls.close")}>
-                  <X size={17} aria-hidden="true" />
-                </button>
-              </Dialog.Close>
-            </div>
-            <form className={styles.projectForm} onSubmit={(event) => void submitRegistration(event)}>
-              <label className={styles.fieldLabel} htmlFor="project-path">
-                {t("projects.pathLabel")}
-              </label>
-              <input
-                autoFocus
-                className={styles.textInput}
-                id="project-path"
-                inputMode="text"
-                placeholder={t("projects.pathPlaceholder")}
-                type="text"
-                value={path}
-                aria-describedby="project-path-hint project-path-error"
-                aria-invalid={pathError !== null}
-                onChange={(event) => {
-                  setPath(event.target.value);
-                  if (pathError !== null) setPathError(null);
-                }}
-              />
-              <p className={styles.fieldHint} id="project-path-hint">
-                {t("projects.pathHint")}
-              </p>
-              {pathError !== null ? (
-                <p className={styles.fieldError} id="project-path-error" role="alert">
-                  {t(pathError)}
-                </p>
-              ) : null}
-              <div className={styles.dialogActions}>
-                <Dialog.Close asChild>
-                  <button className={styles.secondaryButton} type="button">
-                    {t("controls.cancel")}
-                  </button>
-                </Dialog.Close>
-                <button className={styles.primaryButton} type="submit" disabled={submitting || !path.trim()}>
-                  <FolderOpen size={16} aria-hidden="true" />
-                  {submitting ? t("controls.registering") : t("controls.register")}
-                </button>
-              </div>
-            </form>
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
+          <button className={styles.iconButton} type="button" aria-label={t("controls.close")}
+            onClick={() => { setNotice(null); setActionError(null); }}><X size={15} aria-hidden="true" /></button>
+        </div>
+      ) : null}
       <Dialog.Root
         open={removalProject !== undefined}
         onOpenChange={(open) => { if (!open && removingProjectId === null) setRemovalProjectId(null); }}
@@ -4098,6 +3827,7 @@ function ProjectsView({
                 </button>
               </Dialog.Close>
             </div>
+            {actionError !== null ? <p className={styles.fieldError} role="alert">{t(actionError)}</p> : null}
             <div className={styles.removalWarning}>
               <TriangleAlert size={18} aria-hidden="true" />
               <p>{t("projects.removeDataNotice")}</p>
@@ -4182,7 +3912,7 @@ function ProjectsView({
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
-    </section>
+    </>
   );
 }
 
@@ -8167,9 +7897,9 @@ function ProjectSessionsContent({
       <div className={styles.pageHeading}>
         <div>
           {!isChat ? (
-            <Link className={styles.backLink} to="/projects">
+            <Link className={styles.backLink} to="/">
               <ArrowLeft size={15} aria-hidden="true" />
-              {t("controls.backToProjects")}
+              {t("controls.backToChat")}
             </Link>
           ) : null}
           <p className={styles.eyebrow}>{t(isChat ? "nav.chatHistory" : "nav.sessions")}</p>
@@ -8301,7 +8031,7 @@ function ProjectSessionsContent({
       ) : !isChat && project === undefined ? (
         <div className={styles.emptyState} role="alert">
           <div className={styles.emptyIcon} aria-hidden="true"><CircleAlert size={22} /></div>
-          <div><h2>{t("sessions.notFound")}</h2><Link className={styles.secondaryButton} to="/projects">{t("controls.backToProjects")}</Link></div>
+          <div><h2>{t("sessions.notFound")}</h2><Link className={styles.secondaryButton} to="/">{t("controls.backToChat")}</Link></div>
         </div>
       ) : !isChat && project !== undefined && project.available !== true ? (
         <div className={styles.emptyState} role="status">
@@ -9084,28 +8814,6 @@ function scheduleText(job: RegisteredProject["saved_jobs"][number], t: (key: str
   return t("projects.atSchedule", { time: job.schedule.at_time });
 }
 
-function projectScheduleLabel(
-  project: RegisteredProject,
-  t: (key: string, options?: Record<string, unknown>) => string,
-): string {
-  if (!project.available) {
-    return t("projects.scheduleUnavailable");
-  }
-  if (project.schedule_state !== "available") {
-    return t(`projects.scheduleState.${project.schedule_state}`);
-  }
-  if (project.schedule_status === null) {
-    return t("projects.scheduleUnavailable");
-  }
-  if (project.schedule_status.status === "faulted") {
-    return t("projects.scheduleUnavailable");
-  }
-  if (!project.schedule_status.admitted) return t("projects.schedulePaused");
-  return project.schedule_status.active_job_count > 0
-    ? t("projects.scheduleRunning", { count: project.schedule_status.active_job_count })
-    : t("projects.scheduleState.available");
-}
-
 function projectPathError(error: unknown): string | null {
   if (!(error instanceof ApiError)) return null;
   const value = error.body?.field_errors.path;
@@ -9118,6 +8826,8 @@ function projectPathError(error: unknown): string | null {
 
 function projectErrorKey(error: unknown): string {
   if (error instanceof ApiError) {
+    if (error.body?.code === "directory_picker_busy") return "projects.pickerBusyError";
+    if (error.body?.code === "directory_picker_unavailable") return "projects.pickerUnavailableError";
     if (error.body?.code === "stale_schedule_review") return "projects.staleReviewError";
     if (error.body?.code === "persistence_error") return "projects.persistenceError";
     if (error.body?.code === "admission_closed") return "projects.removalInProgressError";

@@ -1,3 +1,4 @@
+import { registerProjectFromSidebar, selectProjectDirectory } from "./project-ui.mjs";
 import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -345,11 +346,7 @@ try {
   // Persisted fixtures exercise the real service list, pagination and Claim paths.
   const seeded = await control.command("chat-history-seed");
   const projectsNavigation = page.locator("#app-sidebar").getByRole("region", { name: "Projects", exact: true });
-  await projectsNavigation.getByRole("button", { name: "Add project", exact: true }).click();
-  const projectDialog = page.getByRole("dialog");
-  await projectDialog.getByLabel("Absolute local path", { exact: true }).fill(nextDirectory);
-  await projectDialog.getByRole("button", { name: "Register project", exact: true }).click();
-  await expect(projectDialog).toBeHidden();
+  await registerProjectFromSidebar(page, nextDirectory);
   const projectDisclosure = projectsNavigation.getByRole("button", { name: "Expand sessions for chat-next", exact: true });
   await projectDisclosure.click();
   const projectSessions = projectsNavigation.getByRole("list", { name: "chat-next Sessions", exact: true });
@@ -466,15 +463,12 @@ try {
     await page.unroute(openPattern);
   }
 
-  // Returning to project management must not replay a consumed Add request.
-  await projectsNavigation.getByRole("link", { name: "Projects", exact: true }).click();
-  await expect(page.locator("#main-content").getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
-  await expect(page.getByRole("dialog")).toHaveCount(0);
+  // Cancelling a folder selection keeps the current conversation and opens no Web dialog.
+  const selectedProjectUrl = page.url();
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    await projectsNavigation.getByRole("button", { name: "Add project", exact: true }).click();
-    await expect(page.getByRole("dialog")).toBeVisible();
-    await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+    await selectProjectDirectory(page, null);
     await expect(page.getByRole("dialog")).toHaveCount(0);
+    assert.equal(page.url(), selectedProjectUrl);
   }
 
   assert.equal((await newChat()).status, 200);

@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from aiohttp import WSMsgType, web
 
 from ...config.config import ConfigError
+from ..directory_picker import DirectoryPicker
 from ..discovery import identity_proof
 from ..errors import ServiceError, service_error
 from ..runtime import WEB_TICKET_TTL_SECONDS, AgentService, ServiceSink
@@ -77,6 +78,7 @@ class AgentServiceTransport:
         self._web_tickets: dict[str, float] = {}
         self._web_sessions: dict[str, _WebSession] = {}
         self._web_auth_lock = asyncio.Lock()
+        self._directory_picker = DirectoryPicker()
 
     def _prune_web_tickets(self) -> None:
         now = time.monotonic()
@@ -90,6 +92,7 @@ class AgentServiceTransport:
     def create_app(self) -> web.Application:
         app = web.Application(middlewares=[self._error_middleware])
         app["omni.service"] = self.service
+        app.on_shutdown.append(self._close_directory_picker)
         app.router.add_get("/", self._static_index)
         app.router.add_post(f"{_API_PREFIX}/web/ticket", self._web_ticket)
         app.router.add_get(f"{_API_PREFIX}/web/session", self._web_session_info)
@@ -111,6 +114,7 @@ class AgentServiceTransport:
         app.router.add_get(f"{_API_PREFIX}/chat/sessions", self._list_chat_sessions)
         app.router.add_get(f"{_API_PREFIX}/projects", self._list_projects)
         app.router.add_post(f"{_API_PREFIX}/projects", self._register_project)
+        app.router.add_post(f"{_API_PREFIX}/projects/directory-picker", self._pick_project_directory)
         app.router.add_delete(f"{_API_PREFIX}/projects/{{project_id}}", self._remove_project)
         app.router.add_get(
             f"{_API_PREFIX}/projects/{{project_id}}/removal/{{operation_id}}",
@@ -664,6 +668,26 @@ class AgentServiceTransport:
             limit=_optional_page_limit(request),
         )
         return web.json_response(page)
+
+    async def _close_directory_picker(self, app: web.Application) -> None:
+        await self._directory_picker.close()
+
+    async def _pick_project_directory(self, request: web.Request) -> web.Response:
+        self._authenticate(request, mutation=True, client_required=True)
+        request_id = _require_request_id(await _json_object(request))
+        selection = asyncio.create_task(self._directory_picker.pick())
+        try:
+            while not selection.done():
+                await asyncio.wait({selection}, timeout=0.2)
+                if request.transport is None or request.transport.is_closing():
+                    raise asyncio.CancelledError
+                self._authenticate(request, mutation=True, client_required=True)
+            path = await selection
+            return web.json_response({"request_id": request_id, "path": path})
+        finally:
+            if not selection.done():
+                selection.cancel()
+            await asyncio.gather(selection, return_exceptions=True)
 
     async def _register_project(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, mutation=True, client_required=True)

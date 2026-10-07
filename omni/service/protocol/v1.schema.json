@@ -1122,6 +1122,15 @@
         "projects": {"type": "array", "items": {"$ref": "#/$defs/project"}}
       }
     },
+    "directory_picker_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "path"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "path": {"type": ["string", "null"], "minLength": 1}
+      }
+    },
     "project_registration": {
       "type": "object",
       "additionalProperties": false,

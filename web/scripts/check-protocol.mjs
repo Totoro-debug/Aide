@@ -233,4 +233,6 @@ const managementFields = [
 checkMembers("ManagementResult", interfaceDeclaration("ManagementResult").members, {
   properties: Object.fromEntries(managementFields.map((field) => [field, definitions.management_result.properties[field]])),
 }, false);
+checkMembers("DirectoryPickerResult", interfaceDeclaration("DirectoryPickerResult").members, definitions.directory_picker_result);
+
 console.log("Protocol schema compatibility: passed");

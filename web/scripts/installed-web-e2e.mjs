@@ -1,3 +1,4 @@
+import { registerProjectFromSidebar } from "./project-ui.mjs";
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -101,7 +102,7 @@ try {
   stage = "authentication";
   await page.goto(`${baseUrl}/#ticket=${encodeURIComponent(ticket)}`);
   await page.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
-  await expect(page.getByRole("status").first()).toHaveText(/^(Online|在线)$/);
+  await expect(page.getByRole("status").filter({ hasText: /^(Online|在线)$/ }).first()).toHaveText(/^(Online|在线)$/);
   assert.match(page.url(), /\/status$/);
   assert.ok(websocketObserved, "Installed Web app did not open its authenticated WebSocket");
   const serviceResponse = await context.request.get(`${baseUrl}/api/v1/service`);
@@ -111,7 +112,7 @@ try {
 
   await page.goto(`${baseUrl}/status`);
   await page.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
-  await expect(page.getByRole("status").first()).toHaveText(/^(Online|在线)$/);
+  await expect(page.getByRole("status").filter({ hasText: /^(Online|在线)$/ }).first()).toHaveText(/^(Online|在线)$/);
 
   await page.locator("#app-sidebar").getByRole("link", { name: /Settings|设置/, exact: true }).click();
   await page.getByRole("heading", { name: /Settings|设置/ }).waitFor();
@@ -120,23 +121,8 @@ try {
   await page.goto(`${baseUrl}/settings`);
   await page.getByRole("heading", { name: /Runtime|运行时/ }).waitFor();
 
-  const projectsLink = page.locator("#app-sidebar").getByRole("link", { name: /Projects|项目/, exact: true });
-  await projectsLink.click();
-  await page.getByRole("main").getByRole("heading", { name: /^(Projects|项目)$/ }).waitFor();
-  const addProject = page.getByRole("main").getByRole("button", { name: /Add project|添加项目|登记项目/ }).first();
-  await addProject.click();
-  const dialog = page.getByRole("dialog");
-  await dialog.getByLabel(/Absolute local path|本地绝对路径/).fill(workspace);
-  const registered = page.waitForResponse((response) => (
-    response.url() === `${baseUrl}/api/v1/projects` && response.request().method() === "POST"
-  ));
-  await dialog.getByRole("button", { name: /Register project|注册项目|登记项目/ }).click();
-  const registeredResponse = await registered;
-  assert.equal(registeredResponse.status(), 200, await registeredResponse.text());
-  await dialog.waitFor({ state: "hidden" });
-
-  await page.getByRole("heading", { name: "workspace", exact: true }).waitFor();
-  await page.getByRole("link", { name: /Open sessions|打开会话/ }).click();
+  await registerProjectFromSidebar(page, workspace);
+  await page.locator("#app-sidebar").getByRole("button", { name: "workspace", exact: true }).click();
   const newSession = page.getByRole("button", { name: /New session|新建会话/ });
   stage = "first-draft";
   const firstSession = await createClaimedDraft(newSession);

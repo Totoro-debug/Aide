@@ -462,6 +462,11 @@ export interface SessionSnapshot {
   model_configuration_version: number;
 }
 
+export interface DirectoryPickerResult {
+  request_id: string;
+  path: string | null;
+}
+
 export interface SessionLiveState {
   stream_id: string;
   seq: number;

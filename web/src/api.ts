@@ -6,6 +6,7 @@ import type {
   ProjectRemoval,
   ProjectRemovalStatus,
   ProjectRegistration,
+  DirectoryPickerResult,
   ProjectScheduleResume,
   ScheduleJobInput,
   ScheduleJobHistoryResponse,
@@ -363,6 +364,7 @@ async function request<T>(
     body?: Record<string, unknown>;
     mutation?: boolean;
     extraHeaders?: Record<string, string>;
+    signal?: AbortSignal;
   } = {},
 ): Promise<T> {
   const headers = new Headers({ Accept: "application/json" });
@@ -387,6 +389,7 @@ async function request<T>(
     method: options.method ?? "GET",
     headers,
     credentials: "include",
+    signal: options.signal,
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
   const value: unknown = await response.json().catch(() => null);
@@ -620,11 +623,18 @@ export function getProjects(): Promise<ProjectListResponse> {
   return request<ProjectListResponse>("/projects");
 }
 
-export function registerProject(path: string): Promise<ProjectRegistration> {
+export function pickProjectDirectory(signal?: AbortSignal): Promise<DirectoryPickerResult> {
+  return request("/projects/directory-picker", {
+    method: "POST", mutation: true, body: { request_id: createRequestId() }, signal,
+  });
+}
+
+export function registerProject(path: string, signal?: AbortSignal): Promise<ProjectRegistration> {
   return request<ProjectRegistration>("/projects", {
     method: "POST",
     mutation: true,
     body: { request_id: createRequestId(), path },
+    signal,
   });
 }
 

@@ -212,7 +212,7 @@
 .projectNavigationRow {
   display: grid;
   min-width: 0;
-  grid-template-columns: 30px minmax(0, 1fr) 30px;
+  grid-template-columns: 30px minmax(0, 1fr) 30px 28px;
   align-items: center;
   gap: 2px;
 }
@@ -4029,6 +4029,27 @@ h1 {
   flex: 0 0 28px;
 }
 
+.projectFeedback {
+  position: fixed;
+  z-index: 50;
+  right: 20px;
+  bottom: 20px;
+  display: flex;
+  max-width: min(520px, calc(100vw - 40px));
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-panel);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 14%);
+  padding: 10px 12px;
+  overflow-wrap: anywhere;
+}
+
+.projectFeedback > span {
+  min-width: 0;
+}
+
 .sessionActionMenu > summary {
   list-style: none;
 }
@@ -4053,6 +4074,11 @@ h1 {
   background: var(--surface-hover);
   color: var(--text-primary);
   outline: none;
+}
+
+.sessionActionTrigger:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
 }
 
 .sessionActionItems {

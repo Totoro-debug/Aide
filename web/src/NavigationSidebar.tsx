@@ -35,6 +35,12 @@ export interface NavigationSessionAction {
   trigger: HTMLElement;
 }
 
+export interface NavigationProjectAction {
+  action: "resume" | "remove";
+  projectId: string;
+  trigger: HTMLElement;
+}
+
 interface NavigationSidebarProps {
   authReady: boolean;
   projects: RegisteredProject[];
@@ -47,6 +53,9 @@ interface NavigationSidebarProps {
   onNewChat: () => void;
   onSessionNavigation: () => void;
   onAddProject: () => void;
+  addingProject: boolean;
+  projectSelectionReady: boolean;
+  onProjectAction: (action: NavigationProjectAction) => void;
   onNewProjectSession: (projectId: string) => void;
   onSessionAction: (action: NavigationSessionAction) => void;
   onClose: () => void;
@@ -64,6 +73,9 @@ export default function NavigationSidebar({
   onNewChat,
   onSessionNavigation,
   onAddProject,
+  addingProject,
+  projectSelectionReady,
+  onProjectAction,
   onNewProjectSession,
   onSessionAction,
   onClose,
@@ -185,15 +197,22 @@ export default function NavigationSidebar({
 
       <section className={styles.sidebarSection} aria-label={t("nav.projects")}>
         <div className={styles.sidebarSectionHeader}>
-          <h2 className={styles.sidebarSectionTitle}>
-            <Link to="/projects" onClick={onClose}>{t("nav.projects")}</Link>
+          <h2 className={styles.sidebarSectionTitle} id="projects-heading" tabIndex={-1}>
+            {t("nav.projects")}
           </h2>
+          <button className={styles.sidebarIconButton} type="button"
+            aria-label={t("controls.refresh")} title={t("controls.refresh")}
+            disabled={!authReady || projectsLoadState === "loading"} onClick={onRefreshProjects}>
+            <RefreshCw size={14} aria-hidden="true" />
+          </button>
           <button
             className={styles.sidebarIconButton}
+            id="add-project-button"
             type="button"
             aria-label={t("controls.addProject")}
             title={t("controls.addProject")}
-            disabled={!authReady}
+            disabled={!authReady || !projectSelectionReady || addingProject}
+            aria-busy={addingProject}
             onClick={onAddProject}
           >
             <Plus size={16} aria-hidden="true" />
@@ -229,6 +248,11 @@ export default function NavigationSidebar({
                 onNewSession={() => onNewProjectSession(project.project_id)}
                 onOpenSession={(sessionId) => openProjectSession(project.project_id, sessionId)}
                 onSessionAction={onSessionAction}
+                onProjectAction={onProjectAction}
+                onOpenSchedule={() => {
+                  navigate(`/projects/${encodeURIComponent(project.project_id)}/schedule`);
+                  onClose();
+                }}
                 onViewDirectory={(title, directory, trigger) => {
                   directoryTriggerRef.current = trigger;
                   setDirectoryDetails({ title, directory });
@@ -364,6 +388,8 @@ function ProjectNavigationItem({
   onOpenSession,
   onSessionAction,
   onViewDirectory,
+  onProjectAction,
+  onOpenSchedule,
 }: {
   project: RegisteredProject;
   authReady: boolean;
@@ -377,6 +403,8 @@ function ProjectNavigationItem({
   onOpenSession: (sessionId: string) => void;
   onSessionAction: (action: NavigationSessionAction) => void;
   onViewDirectory: (title: string, directory: string, trigger: HTMLElement) => void;
+  onProjectAction: (action: NavigationProjectAction) => void;
+  onOpenSchedule: () => void;
 }) {
   const { t } = useTranslation();
   const [sessionSearch, setSessionSearch] = useState("");
@@ -429,6 +457,13 @@ function ProjectNavigationItem({
   }, [expanded, project.available, refreshSessions, refreshVersion]);
 
   const projectName = project.name || project.path;
+  const scheduleStatus = project.schedule_status;
+  const statusLabel = !project.available ? t("projects.unavailable")
+    : project.schedule_state !== "available" ? t(`projects.scheduleState.${project.schedule_state}`)
+    : scheduleStatus === null || scheduleStatus.status === "faulted" ? t("projects.scheduleUnavailable")
+    : !scheduleStatus.admitted ? t("projects.schedulePaused")
+    : scheduleStatus.active_job_count > 0 ? t("projects.scheduleRunning", { count: scheduleStatus.active_job_count })
+    : t("projects.scheduleReady");
   const toggleLabel = t(expanded ? "nav.collapseProjectSessions" : "nav.expandProjectSessions", {
     project: projectName,
   });
@@ -450,10 +485,14 @@ function ProjectNavigationItem({
         <button
           className={styles.projectNavigationLink}
           type="button"
+          title={project.path}
+          aria-label={projectName}
+          aria-description={statusLabel}
           aria-current={activeSessionId !== null ? "page" : undefined}
           onClick={onOpenProject}
         >
-          <span className={styles.projectNavigationDot} data-available={project.available} />
+          <span className={styles.projectNavigationDot} data-available={project.available} aria-hidden="true"
+            title={statusLabel} />
           <span>{projectName}</span>
         </button>
         <button
@@ -466,7 +505,21 @@ function ProjectNavigationItem({
         >
           <Plus size={15} aria-hidden="true" />
         </button>
+        <ProjectActionMenu
+          project={project}
+          authReady={authReady}
+          onOpenSchedule={onOpenSchedule}
+          onAction={onProjectAction}
+          onViewDirectory={(trigger) => onViewDirectory(projectName, project.path, trigger)}
+        />
       </div>
+      {project.schedule_state === "awaiting_resume" || project.schedule_state === "removing" ? (
+        <p className={styles.sidebarStatus} role="status" title={project.removal_error}>
+          {t(project.removal_error ? "projects.removalFailedError" : `projects.scheduleState.${project.schedule_state}`)}
+        </p>
+      ) : project.schedule_state === "failed" ? (
+        <p className={styles.sidebarError} role="alert">{t("projects.removalFailedError")}</p>
+      ) : null}
       {expanded ? (
         <div className={styles.projectSessionTree} id={sessionListId}>
           {project.available ? (
@@ -566,6 +619,56 @@ function ProjectNavigationItem({
         </div>
       ) : null}
     </li>
+  );
+}
+
+function ProjectActionMenu({ project, authReady, onOpenSchedule, onAction, onViewDirectory }: {
+  project: RegisteredProject;
+  authReady: boolean;
+  onOpenSchedule: () => void;
+  onAction: (action: NavigationProjectAction) => void;
+  onViewDirectory: (trigger: HTMLElement) => void;
+}) {
+  const { t } = useTranslation();
+  const label = t("controls.projectActions", { project: project.name || project.path });
+  const removalPending = project.schedule_state === "removing" && !project.removal_error;
+  const removalFailed = project.schedule_state === "failed" || Boolean(project.removal_error);
+  function act(event: React.MouseEvent<HTMLButtonElement>, callback: (trigger: HTMLElement) => void) {
+    const menu = event.currentTarget.closest("details");
+    const trigger = menu?.querySelector("summary");
+    menu?.removeAttribute("open");
+    if (trigger instanceof HTMLElement) callback(trigger);
+  }
+  return (
+    <details className={styles.sessionActionMenu}>
+      <summary className={styles.sessionActionTrigger} aria-label={label} title={label}>
+        <MoreHorizontal size={15} aria-hidden="true" />
+      </summary>
+      <div className={styles.sessionActionItems} role="group" aria-label={label}>
+        <button className={styles.sessionActionMenuItem} type="button"
+          onClick={(event) => act(event, onViewDirectory)}>
+          <FolderOpen size={14} aria-hidden="true" />{t("controls.viewWorkspaceDirectory")}
+        </button>
+        <button className={styles.sessionActionMenuItem} type="button"
+          disabled={!authReady || !project.available || removalPending || removalFailed}
+          onClick={(event) => act(event, onOpenSchedule)}>
+          {t("controls.openSchedule")}
+        </button>
+        {project.schedule_state === "awaiting_resume" ? (
+          <button className={styles.sessionActionMenuItem} type="button"
+            disabled={!authReady || !project.available}
+            onClick={(event) => act(event, (trigger) => onAction({ action: "resume", projectId: project.project_id, trigger }))}>
+            {t("controls.resumeSchedule")}
+          </button>
+        ) : null}
+        <button className={`${styles.sessionActionMenuItem} ${styles.sessionActionDelete}`} type="button"
+          disabled={!authReady || removalPending}
+          onClick={(event) => act(event, (trigger) => onAction({ action: "remove", projectId: project.project_id, trigger }))}>
+          <Trash2 size={14} aria-hidden="true" />
+          {t(removalFailed ? "controls.retryRemoval" : removalPending ? "controls.removingProject" : "controls.removeProject")}
+        </button>
+      </div>
+    </details>
   );
 }
 

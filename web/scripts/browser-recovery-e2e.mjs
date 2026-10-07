@@ -1,3 +1,4 @@
+import { registerProjectFromSidebar } from "./project-ui.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdir } from "node:fs/promises";
@@ -110,14 +111,7 @@ export default async function browserRecoveryAcceptance({ page: initialPage, con
   }
   await page.reload();
   await expect(input()).toBeEnabled();
-  await page.locator("#app-sidebar").getByRole("button", { name: "Add project", exact: true }).click();
-  const projectDialog = page.getByRole("dialog");
-  await projectDialog.getByLabel("Absolute local path", { exact: true }).fill(control.details.first_project);
-  const registeredResponse = page.waitForResponse(response => response.request().method() === "POST"
-    && response.url().endsWith("/api/v1/projects"));
-  await projectDialog.getByRole("button", { name: "Register project", exact: true }).click();
-  const projectId = (await (await registeredResponse).json()).project_id;
-  await expect(projectDialog).toBeHidden();
+  const projectId = (await registerProjectFromSidebar(page, control.details.first_project)).project_id;
   const chat = await page.evaluate(async () => (await (await window.fetch("/api/v1/chat/sessions?limit=100", { headers: { "X-Omni-Control": window.recoveryControl } })).json()).sessions
     .find(session => session.available));
   assert.ok(chat, "The fixture must contain an available chat history");
@@ -282,12 +276,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (process.env.OMNI_E2E_RECOVERY_SHARED_DIRECTORY === "1") {
       await mkdir(`${control.details.home_root}\\chat-next`);
       await control.command("project-history-seed");
-      await page.locator("#app-sidebar").getByRole("button", { name: "Add project", exact: true }).click();
-      const sharedProjectDialog = page.getByRole("dialog");
-      await sharedProjectDialog.getByLabel("Absolute local path", { exact: true })
-        .fill(`${control.details.home_root}\\chat-next`);
-      await sharedProjectDialog.getByRole("button", { name: "Register project", exact: true }).click();
-      await expect(sharedProjectDialog).toBeHidden();
+      await registerProjectFromSidebar(page, `${control.details.home_root}\\chat-next`);
       await page.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
       await page.getByRole("navigation", { name: "Settings sections", exact: true })
         .getByRole("button", { name: "General & appearance", exact: true }).click();

@@ -22,18 +22,18 @@ JobStatus = Literal["ok", "error"]
 DREAM_JOB_ID = "dream"
 DREAM_JOB_TITLE = "Dream"
 
-_OLD_JOB_FIELDS = frozenset(
+_JOB_FIELDS = frozenset(
     {
         "job_id",
         "source",
         "message",
+        "title",
         "schedule",
         "state",
         "created_at_ms",
         "updated_at_ms",
     }
 )
-_JOB_FIELDS = _OLD_JOB_FIELDS | {"title"}
 _SCHEDULE_FIELDS = frozenset({"kind", "at_time", "every_seconds", "cron_expr", "timezone"})
 _STATE_FIELDS = frozenset({"last_finished_at_ms", "last_status", "last_error"})
 _RFC3339_MILLISECONDS = re.compile(
@@ -245,13 +245,12 @@ class ScheduleJob:
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> ScheduleJob:
         fields = set(value)
-        legacy = fields == _OLD_JOB_FIELDS
-        if not legacy and fields != _JOB_FIELDS:
+        if fields != _JOB_FIELDS:
             raise ValueError("Schedule Job fields do not match the persisted schema")
         job_id = value["job_id"]
         source = value["source"]
         message = value["message"]
-        title = value.get("title")
+        title = value["title"]
         schedule_value = value["schedule"]
         state_value = value["state"]
         created_at_ms = value["created_at_ms"]
@@ -262,7 +261,7 @@ class ScheduleJob:
             raise ValueError("source must be a string")
         if not isinstance(message, str):
             raise ValueError("message must be a string")
-        if not legacy and not isinstance(title, str):
+        if not isinstance(title, str):
             raise ValueError("title must be a string")
         if not isinstance(schedule_value, dict):
             raise ValueError("schedule must be an object")
@@ -282,9 +281,9 @@ class ScheduleJob:
             updated_at_ms=updated_at_ms,
             source=cast(JobSource, source),
             state=state,
-            title=cast(str | None, None if legacy else title),
+            title=title,
         )
-        if not legacy and job.title != title:
+        if job.title != title:
             raise ValueError("title must be canonical")
         return job
 

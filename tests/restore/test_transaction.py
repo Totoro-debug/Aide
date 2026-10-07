@@ -43,12 +43,12 @@ def _commit_user(session: Session, content: str, token: UUID) -> None:
     )
 
 
-def _write_v1_state(path: Path) -> None:
+def _write_v2_unknown_state(path: Path) -> None:
     body: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "next_operation_id": 2,
         "revision": 1,
-        "journal_operation_ids": [1],
+        "active_operations": [{"operation_id": 1, "run_token": None}],
         "discarded_operation_ids": [],
     }
     signed = dict(body)
@@ -432,7 +432,7 @@ async def test_conversation_only_restore_tombstones_missing_entry_without_reopen
 
 
 @pytest.mark.asyncio
-async def test_unknown_v1_integrity_issue_disables_files_but_allows_conversation_restore(
+async def test_unknown_v2_integrity_issue_disables_files_but_allows_conversation_restore(
     workspace: Path,
 ) -> None:
     state = WorkspaceState(workspace)
@@ -445,7 +445,7 @@ async def test_unknown_v1_integrity_issue_disables_files_but_allows_conversation
     assert ticket is not None
     root = workspace / ".omni" / "restore" / session.session_id
     (root / "entries" / "1.json").unlink()
-    _write_v1_state(root / "state.json")
+    _write_v2_unknown_state(root / "state.json")
     await session.wait_for_pending_persist()
 
     manager = RestoreManager(state, session.session_id, now=lambda: NOW)

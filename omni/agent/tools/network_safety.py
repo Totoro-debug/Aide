@@ -11,8 +11,6 @@ from typing import Protocol
 from omni.agent.tools.base import is_public_ip
 from omni.agent.tools.permission import NetworkTargetRisk
 
-type TargetRisk = NetworkTargetRisk
-
 
 class DNSResolver(Protocol):
     """Resolve every TCP address for one network target."""
@@ -35,18 +33,11 @@ class SocketDNSResolver:
 
 
 @dataclass(frozen=True, slots=True)
-class TargetAssessment:
-    """The shared safety assessment for one network target."""
-
-    risk: TargetRisk | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class TargetResolution:
     """One resolver result, including the exact addresses used for one hop."""
 
     addresses: tuple[str, ...]
-    risk: TargetRisk | None = None
+    risk: NetworkTargetRisk | None = None
     error_message: str | None = None
 
 
@@ -82,22 +73,9 @@ async def resolve_target(
     )
 
 
-async def assess_target(
-    hostname: str,
-    port: int,
-    resolver: DNSResolver,
-) -> TargetAssessment:
-    """Assess whether one literal or DNS name resolves only to global addresses."""
-    resolution = await resolve_target(hostname, port, resolver)
-    return TargetAssessment(risk=resolution.risk)
-
-
 __all__ = [
     "DNSResolver",
     "SocketDNSResolver",
-    "TargetAssessment",
     "TargetResolution",
-    "TargetRisk",
-    "assess_target",
     "resolve_target",
 ]

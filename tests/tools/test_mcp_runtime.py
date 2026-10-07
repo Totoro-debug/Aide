@@ -32,13 +32,22 @@ from tests.fixtures.mcp_wire import (
 )
 
 
+@pytest.mark.parametrize(
+    ("workspace", "transport"),
+    [(None, "stdio"), (Path("."), "streamable-http"), (None, "mixed")],
+)
+def test_manager_rejects_invalid_transport_scopes(workspace: Path | None, transport: Any) -> None:
+    with pytest.raises(ValueError):
+        MCPRuntimeManager(workspace, transport=transport)
+
+
 @pytest.mark.asyncio
 async def test_real_idle_stdio_eof_invalidates_old_tool_without_reconnecting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed = ObservedLifetimes(monkeypatch)
-    manager = MCPRuntimeManager(tmp_path)
+    manager = MCPRuntimeManager(tmp_path, transport="stdio")
     configuration = stdio_wire_configuration(tmp_path, {})
     tasks_before = asyncio.all_tasks()
     try:
@@ -78,14 +87,15 @@ async def test_real_stdio_disconnect_preserves_healthy_http_and_snapshot(
             connect_timeout=10,
             call_timeout=5,
         )
-        manager = MCPRuntimeManager(tmp_path)
+        shared = MCPRuntimeManager(None, transport="streamable-http")
+        manager = MCPWorkspaceRuntimeManager(tmp_path, shared_runtime=shared)
         try:
-            initial = await manager.start(
-                {
-                    "remote": stdio_wire_configuration(tmp_path, {}),
-                    "healthy": healthy_configuration,
-                }
-            )
+            configuration = {
+                "remote": stdio_wire_configuration(tmp_path, {}),
+                "healthy": healthy_configuration,
+            }
+            await shared.start(configuration)
+            initial = await manager.start(configuration)
             assert {tool.server_name for tool in initial.snapshot} == {"healthy", "remote"}
             schemas = [tool.to_schema() for tool in initial.snapshot]
             await observed.stop(0)
@@ -103,6 +113,7 @@ async def test_real_stdio_disconnect_preserves_healthy_http_and_snapshot(
         finally:
             async with asyncio.timeout(10):
                 await manager.close()
+                await shared.close()
     observed.assert_closed()
 
 
@@ -113,16 +124,15 @@ async def test_real_wire_envelope_failure_is_isolated_to_one_server(
     page: dict[str, Any],
 ) -> None:
     async with http_wire_server({}) as (healthy, http_configuration):
-        manager = MCPRuntimeManager(tmp_path)
+        shared = MCPRuntimeManager(None, transport="streamable-http")
+        manager = MCPWorkspaceRuntimeManager(tmp_path, shared_runtime=shared)
         try:
-            report = await manager.start(
-                {
-                    "remote": http_configuration,
-                    "broken": stdio_wire_configuration(
-                        tmp_path, {"pages": {"": page}}, name="broken"
-                    ),
-                }
-            )
+            configuration = {
+                "remote": http_configuration,
+                "broken": stdio_wire_configuration(tmp_path, {"pages": {"": page}}, name="broken"),
+            }
+            await shared.start(configuration)
+            report = await manager.start(configuration)
             assert report.failed_servers == ("broken",)
             assert len(report.failures) == 1
             assert report.skipped_tool_counts == ()
@@ -133,6 +143,7 @@ async def test_real_wire_envelope_failure_is_isolated_to_one_server(
             assert [r["method"] for r in healthy.requests].count("tools/list") == 1
         finally:
             await manager.close()
+            await shared.close()
 
 
 @pytest.mark.asyncio
@@ -145,7 +156,7 @@ async def test_real_sdk_call_failures_do_not_reconnect_healthy_http_session(
     async with http_wire_server(scenario) as (server, configuration):
         if failure == "timeout":
             configuration = replace(configuration, call_timeout=1)
-        manager = MCPRuntimeManager(tmp_path)
+        manager = MCPRuntimeManager(None, transport="streamable-http")
         try:
             report = await manager.start({"remote": configuration})
             tool = report.snapshot[0]
@@ -385,6 +396,7 @@ def _manager(
 ) -> _ObservedManager:
     return _ObservedManager(
         Path("."),
+        transport="stdio",
         built_in_names=built_in_names,
         connection_factory=lambda configuration, workspace: connections[configuration.mcp_name],
     )
@@ -411,6 +423,7 @@ async def test_service_http_connections_are_reused_by_workspace_stdio_managers(
 
     service_runtime = MCPRuntimeManager(
         None,
+        transport="streamable-http",
         connection_factory=factory,
     )
     await service_runtime.start(configurations)
@@ -470,7 +483,7 @@ async def test_workspace_snapshot_keeps_stdio_discovery_and_http_collisions_scop
         discovered[workspace] = tools
         return _FakeConnection(configuration, tools)
 
-    shared = MCPRuntimeManager(None, connection_factory=factory)
+    shared = MCPRuntimeManager(None, transport="streamable-http", connection_factory=factory)
     await shared.start(configurations)
     first = MCPWorkspaceRuntimeManager(
         tmp_path / "first", shared_runtime=shared, connection_factory=factory
@@ -597,7 +610,7 @@ async def test_default_connection_discovers_provider_safe_names_and_reuses_tools
     session = Session()
     monkeypatch.setattr(mcp_adapter, "_transport_for", transport)
     monkeypatch.setattr(mcp_adapter, "_new_client_session", lambda read, write, **kwargs: session)
-    manager = MCPRuntimeManager(Path("."))
+    manager = MCPRuntimeManager(Path("."), transport="stdio")
     try:
         report = await manager.start({"alpha": configuration})
 

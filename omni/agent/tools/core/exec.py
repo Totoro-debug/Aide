@@ -18,12 +18,11 @@ from omni.agent.tools.core.exec_host import (
     resolve_exec_shell,
 )
 from omni.agent.tools.core.exec_policy import (
-    CatastrophicMatch,
     ExecAssessment,
     catastrophic_matches,
     destructive_matches,
 )
-from omni.agent.tools.network_safety import DNSResolver, SocketDNSResolver, assess_target
+from omni.agent.tools.network_safety import DNSResolver, SocketDNSResolver, resolve_target
 from omni.agent.tools.permission import (
     NetworkAssessment,
     NetworkTargetRisk,
@@ -149,10 +148,14 @@ class ExecTool(BaseTool):
             raise ToolError("Exec failed to start the selected shell.") from error
         if outcome.timed_out:
             raise ToolError(
-                _format_timeout(timeout=timeout, stdout=outcome.stdout, stderr=outcome.stderr)
+                _format_streams(
+                    heading=f"Exec timed out after {timeout} seconds.",
+                    stdout=outcome.stdout,
+                    stderr=outcome.stderr,
+                )
             )
-        return _format_result(
-            exit_code=outcome.exit_code,
+        return _format_streams(
+            heading=f"Exit code: {outcome.exit_code}",
             stdout=outcome.stdout,
             stderr=outcome.stderr,
         )
@@ -236,7 +239,7 @@ class ExecTool(BaseTool):
             port=effective_port,
         )
         if risk is None:
-            risk = (await assess_target(hostname, effective_port, self._resolver)).risk
+            risk = (await resolve_target(hostname, effective_port, self._resolver)).risk
         return NetworkAssessment(target=target, static_risk=risk)
 
 
@@ -245,7 +248,11 @@ def _complete_command_risk_facts(
     command: str,
 ) -> ExecAssessment:
     """Keep command-level risk facts complete across custom Host adapters."""
-    catastrophic = _merge_matches(assessment.catastrophic_matches, catastrophic_matches(command))
+    seen = {item.rule for item in assessment.catastrophic_matches}
+    catastrophic = (
+        *assessment.catastrophic_matches,
+        *(item for item in catastrophic_matches(command) if item.rule not in seen),
+    )
     destructive = tuple(
         dict.fromkeys((*assessment.destructive_matches, *destructive_matches(command)))
     )
@@ -258,29 +265,6 @@ def _complete_command_risk_facts(
         assessment,
         catastrophic_matches=catastrophic,
         destructive_matches=destructive,
-    )
-
-
-def _merge_matches(
-    existing: tuple[CatastrophicMatch, ...],
-    additions: tuple[CatastrophicMatch, ...],
-) -> tuple[CatastrophicMatch, ...]:
-    seen = {item.rule for item in existing}
-    return (*existing, *(item for item in additions if item.rule not in seen))
-
-def _format_result(*, exit_code: int | None, stdout: bytes, stderr: bytes) -> str:
-    return _format_streams(
-        heading=f"Exit code: {exit_code}",
-        stdout=stdout,
-        stderr=stderr,
-    )
-
-
-def _format_timeout(*, timeout: int, stdout: bytes, stderr: bytes) -> str:
-    return _format_streams(
-        heading=f"Exec timed out after {timeout} seconds.",
-        stdout=stdout,
-        stderr=stderr,
     )
 
 

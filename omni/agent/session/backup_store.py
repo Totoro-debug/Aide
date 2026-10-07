@@ -50,6 +50,10 @@ class BackupStoreError(Exception):
     """A generic persistence or journal validation failure."""
 
 
+class _UnsupportedStateVersion(BackupStoreError):
+    """An identified unsupported state must never be rebuilt as current data."""
+
+
 class _JournalIdentityMismatch(BackupStoreError):
     """A decoded journal entry does not match its Store-state identity."""
 
@@ -255,6 +259,8 @@ class FileBackupStore:
                         operation_id, run_token, requested, canonical, recorded=False
                     )
                 return BackupTicket(operation_id, run_token, requested, canonical, recorded=True)
+            except _UnsupportedStateVersion:
+                return None
             except Exception:
                 if paths is None:
                     return None
@@ -500,13 +506,12 @@ class FileBackupStore:
 
     def _load_state(self, paths: _StorePaths) -> _StoreState:
         state: _StoreState | None = None
-        state_schema_version: int | None = None
         needs_write = False
         if HOST_FILESYSTEM.entry_exists(HOST_FILESYSTEM.path_for_io(paths.state)):
             try:
                 raw = _read_owned_file(paths.state, within=paths.root)
-                state, state_schema_version = _decode_state(raw)
-            except PermissionError:
+                state = _decode_state(raw)
+            except (PermissionError, _UnsupportedStateVersion):
                 raise
             except (OSError, ValueError, TypeError, BackupStoreError):
                 state = None
@@ -549,7 +554,7 @@ class FileBackupStore:
                 _ActiveOperation(
                     operation_id,
                     entry_tokens.get(operation_id)
-                    if state_schema_version == 1 or operation_id not in existing_operations
+                    if operation_id not in existing_operations
                     else existing_operations[operation_id].run_token,
                 )
                 for operation_id in sorted(active_operation_ids)
@@ -559,7 +564,6 @@ class FileBackupStore:
                 or revision != state.revision
                 or active_operations != state.active_operations
                 or discarded_operation_ids != state.discarded_operation_ids
-                or state_schema_version != _STATE_SCHEMA_VERSION
             ):
                 state = _StoreState(
                     next_id,
@@ -924,58 +928,21 @@ def _decode_state_id_list(
     return operation_ids
 
 
-def _decode_state(content: bytes) -> tuple[_StoreState, int]:
+def _decode_state(content: bytes) -> _StoreState:
     value = _decode_signed_json(content)
+    schema_version = value.get("schema_version")
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != _STATE_SCHEMA_VERSION
+    ):
+        raise _UnsupportedStateVersion("Restore state schema version is unsupported.")
     next_id = value.get("next_operation_id")
     revision = value.get("revision")
     if isinstance(next_id, bool) or not isinstance(next_id, int) or next_id < 1:
         raise BackupStoreError("Restore state operation counter is invalid.")
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
         raise BackupStoreError("Restore state revision is invalid.")
-
-    schema_version = value.get("schema_version")
-    if (
-        isinstance(schema_version, bool)
-        or not isinstance(schema_version, int)
-        or schema_version not in (1, _STATE_SCHEMA_VERSION)
-    ):
-        raise BackupStoreError("Restore state schema version is unsupported.")
-
-    if schema_version == 1:
-        if set(value) not in (
-            {
-                "schema_version",
-                "next_operation_id",
-                "revision",
-                "journal_operation_ids",
-            },
-            {
-                "schema_version",
-                "next_operation_id",
-                "revision",
-                "journal_operation_ids",
-                "discarded_operation_ids",
-            },
-        ):
-            raise BackupStoreError("Restore state fields do not match the schema.")
-        operation_ids = _decode_state_id_list(
-            value["journal_operation_ids"],
-            next_operation_id=next_id,
-            message="Restore state journal operation IDs are invalid.",
-        )
-        discarded_ids = _decode_state_id_list(
-            value.get("discarded_operation_ids", []),
-            next_operation_id=next_id,
-            message="Restore state discarded operation IDs are invalid.",
-        )
-        if set(operation_ids).intersection(discarded_ids):
-            raise BackupStoreError(
-                "Restore state operation IDs cannot be both active and discarded."
-            )
-        active_operations = tuple(
-            _ActiveOperation(operation_id, None) for operation_id in operation_ids
-        )
-        return _StoreState(next_id, revision, active_operations, discarded_ids), 1
 
     if set(value) != {
         "schema_version",
@@ -1027,7 +994,7 @@ def _decode_state(content: bytes) -> tuple[_StoreState, int]:
         raise BackupStoreError(
             "Restore state operation IDs cannot be both active and discarded."
         )
-    return _StoreState(next_id, revision, tuple(active_operations_list), discarded_ids), 2
+    return _StoreState(next_id, revision, tuple(active_operations_list), discarded_ids)
 
 
 def _file_state_object(state: FileState) -> dict[str, object]:

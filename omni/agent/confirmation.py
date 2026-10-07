@@ -410,56 +410,8 @@ class ToolConfirmationCoordinator:
             return
 
 
-class CallbackConfirmationRequester:
-    """Compatibility adapter for tests and non-coordinator control surfaces."""
-
-    def __init__(self, callback: Callable[[Any], None]) -> None:
-        self._callback = callback
-        self._request: Any | None = None
-        self._future: asyncio.Future[ConfirmationDecision] | None = None
-
-    async def request(self, request: Any) -> ConfirmationDecision:
-        if self._request is not None:
-            raise RuntimeError("A foreground confirmation request is already pending")
-        future: asyncio.Future[ConfirmationDecision] = asyncio.get_running_loop().create_future()
-        self._request = request
-        self._future = future
-        try:
-            self._callback(request)
-            return await future
-        finally:
-            if self._request is request:
-                self._request = None
-                self._future = None
-
-    def respond(self, confirmation_id: UUID, decision: ConfirmationDecision) -> None:
-        if decision not in {"approved", "declined"}:
-            raise ValueError("confirmation decision must be approved or declined")
-        request = self._request
-        future = self._future
-        if (
-            request is None
-            or future is None
-            or request.confirmation_id != confirmation_id
-            or future.done()
-        ):
-            raise ValueError("Confirmation response is late or unknown")
-        future.set_result(decision)
-
-    def cancel(self) -> None:
-        future = self._future
-        if future is not None and not future.done():
-            future.cancel()
-
-    def unbind(self, callback: Callable[[Any], None]) -> None:
-        if self._callback is callback:
-            self._callback = lambda _request: None
-            self.cancel()
-
-
 __all__ = [
     "BackgroundConfirmationOwner",
-    "CallbackConfirmationRequester",
     "ConfirmationAborted",
     "ConfirmationDecision",
     "ConfirmationEnvelope",

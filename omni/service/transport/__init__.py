@@ -1133,7 +1133,6 @@ class AgentServiceTransport:
             "restore/result",
             "restore/cancel",
             "restore/acknowledge",
-            "restore/acknowledge-failure",
         }
         if action in restore_actions:
             if claim_version is None or claim_credential is None or session_value is None:

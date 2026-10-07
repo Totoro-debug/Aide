@@ -344,9 +344,9 @@ async def test_two_cli_clients_complete_distinct_sessions_through_transport(
         second = await ServiceClient.connect_or_start(home, workspace_path, port=port)
         assert first.workspace_id == second.workspace_id
         assert first.session_id != second.session_id
-        await first.submit_input("session-a")
+        await first.submit_user_input("session-a")
         await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
-        await second.submit_input("session-b")
+        await second.submit_user_input("session-b")
         second_output = await _client_output(second)
         assert "answer from session B" in second_output
         assert not provider.release_a.is_set()
@@ -390,7 +390,7 @@ async def test_cli_switch_does_not_display_background_session_output(
         client = await ServiceClient.connect_or_start(home, workspace_path, port=port)
         other = await ServiceClient.connect_or_start(home, workspace_path, port=port)
         background_session = client.session_id
-        await client.submit_input("session-a")
+        await client.submit_user_input("session-a")
         await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
         draft = await client._http_request(
             "POST",
@@ -399,18 +399,18 @@ async def test_cli_switch_does_not_display_background_session_output(
             mutation=True,
         )
         selected_session = cast(str, draft["session_id"])
-        await client.switch_session(selected_session)
+        await client.open_conversation(session_id=selected_session)
         with pytest.raises(ServiceError) as occupied:
-            await other.claim_session(background_session)
+            await other.open_conversation(session_id=background_session)
         assert occupied.value.code == "session_claimed"
         provider.release_a.set()
-        await client.submit_input("session-b")
+        await client.submit_user_input("session-b")
         output = await _client_output(client)
         assert "answer from session B" in output
         assert "answer from session A" not in output
         for _ in range(100):
             try:
-                await other.claim_session(background_session)
+                await other.open_conversation(session_id=background_session)
                 break
             except ServiceError as error:
                 assert error.code == "session_claimed"
@@ -445,7 +445,7 @@ async def test_claim_race_denies_loser_content_over_http_events_and_reconnect(
         first = await ServiceClient.connect_or_start(home, workspace_path, port=port)
         second = await ServiceClient.connect_or_start(home, workspace_path, port=port)
         contested_session = first.session_id
-        await first.submit_input("private claim marker")
+        await first.submit_user_input("private claim marker")
         await _client_output(first)
         draft = await first._http_request(
             "POST",
@@ -453,10 +453,10 @@ async def test_claim_race_denies_loser_content_over_http_events_and_reconnect(
             payload={"request_id": str(uuid4())},
             mutation=True,
         )
-        await first.switch_session(cast(str, draft["session_id"]))
+        await first.open_conversation(session_id=cast(str, draft["session_id"]))
         attempts = await asyncio.gather(
-            first.claim_session(contested_session),
-            second.claim_session(contested_session),
+            first.open_conversation(session_id=contested_session),
+            second.open_conversation(session_id=contested_session),
             return_exceptions=True,
         )
         assert sum(isinstance(result, dict) for result in attempts) == 1
@@ -487,7 +487,7 @@ async def test_claim_race_denies_loser_content_over_http_events_and_reconnect(
             "GET", f"/api/v1/workspaces/{owner.workspace_id}/sessions"
         )
         assert "private claim marker" not in json.dumps(listing)
-        await owner.submit_input("owner private message")
+        await owner.submit_user_input("owner private message")
         await _client_output(owner)
         await asyncio.sleep(0)
         assert not any(
@@ -548,8 +548,8 @@ async def test_distinct_sessions_run_in_parallel_and_cancel_is_scoped(
         await service.connect_client(first.client_id, first_sink)
         await service.connect_client(second.client_id, second_sink)
 
-        session_a = await workspace.create_draft(first.client_id)
-        session_b = await second_workspace.create_draft(second.client_id)
+        session_a = await workspace.create_draft(first.client_id, creation_scope="chat")
+        session_b = await second_workspace.create_draft(second.client_id, creation_scope="chat")
         claim_a = await service.claim(first.client_id, workspace.workspace_id, session_a)
         claim_b = await service.claim(second.client_id, second_workspace.workspace_id, session_b)
         version_a = _claim_version(claim_a)
@@ -615,7 +615,7 @@ async def test_cancel_returns_without_waiting_for_the_next_queued_run(
         client = await service.register_client("cli")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
         await service.connect_client(client.client_id, sink)
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
         version = _claim_version(claim)
         await workspace.input(client.client_id, session_id, version, "session-a", "queued-a")
@@ -657,7 +657,7 @@ async def test_closing_session_drains_its_processor_and_run_tasks(
         client = await service.register_client("cli")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
         await service.connect_client(client.client_id, _CollectingSink())
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
         await workspace.input(
             client.client_id, session_id, _claim_version(claim), "session-a", "closing-run"
@@ -696,7 +696,7 @@ async def test_input_during_processor_retirement_is_not_stranded(
         client = await service.register_client("cli")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
         await service.connect_client(client.client_id, sink)
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
         version = _claim_version(claim)
         state = workspace.loops[session_id]
@@ -749,7 +749,7 @@ async def test_session_processor_preserves_fifo_and_retires_when_idle(
         client = await service.register_client("cli")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
         await service.connect_client(client.client_id, sink)
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
         version = _claim_version(claim)
         run_ids = [f"fifo-{index}" for index in range(20)]
@@ -836,7 +836,7 @@ async def test_loaded_sessions_leave_no_on_demand_processor_when_idle(
             client = await service.register_client("cli")
             workspace = await service.attach_workspace(client.client_id, workspace_path)
             await service.connect_client(client.client_id, sink)
-            session_id = await workspace.create_draft(client.client_id, reuse_startup_session=False)
+            session_id = await workspace.create_draft(client.client_id, reuse_startup_session=False, creation_scope="chat")
             claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
             sessions.append(
                 (client.client_id, session_id, _claim_version(claim), f"loaded-run-{index}")
@@ -923,7 +923,7 @@ async def test_session_deletion_entries_preserve_status_and_claim_contracts(
                 assert (invalid.value.code, invalid.value.status) == ("validation_error", 422)
             return
         if scenario in {"draft", "active_owner", "active_other"}:
-            session_id = await workspace.create_draft(client.client_id)
+            session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         identity["session_id"] = session_id
         if scenario in {"no_pending", "draft"}:
             assert await status(client.client_id, target_id, session_id) == {
@@ -1111,7 +1111,7 @@ async def test_cancelled_delete_preserves_writer_fence_and_retry(
     try:
         client = await service.register_client("web")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         await service.claim(client.client_id, workspace.workspace_id, session_id)
         claim = workspace._claims[session_id]
         session = claim.loop.session
@@ -1178,7 +1178,7 @@ async def test_completed_restore_result_does_not_block_session_deletion(tmp_path
     try:
         client = await service.register_client("web")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         await service.claim(client.client_id, workspace.workspace_id, session_id)
         claim = workspace._claims[session_id]
         session = claim.loop.session
@@ -1230,7 +1230,7 @@ async def test_session_delete_rejects_active_work_and_restore_barriers(
         client = await service.register_client("cli")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
         await service.connect_client(client.client_id, sink)
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
         version = _claim_version(claim)
         credential = cast(dict[str, object], claim["claim"])["reconnect_credential"]
@@ -1252,7 +1252,7 @@ async def test_session_delete_rejects_active_work_and_restore_barriers(
         )
         assert deleted["deleted"] is True
 
-        retained_id = await workspace.create_draft(client.client_id, reuse_startup_session=False)
+        retained_id = await workspace.create_draft(client.client_id, reuse_startup_session=False, creation_scope="chat")
         retained_claim = await service.claim(client.client_id, workspace.workspace_id, retained_id)
         retained_version = _claim_version(retained_claim)
         retained_credential = cast(dict[str, object], retained_claim["claim"])[
@@ -1332,13 +1332,13 @@ async def test_switch_keeps_active_claim_until_run_terminates_then_releases_it(
         await service.connect_client(first.client_id, first_sink)
         await service.connect_client(second.client_id, second_sink)
 
-        session_a = await workspace.create_draft(first.client_id)
+        session_a = await workspace.create_draft(first.client_id, creation_scope="chat")
         claim_a = await service.claim(first.client_id, workspace.workspace_id, session_a)
         version_a = _claim_version(claim_a)
         await workspace.input(first.client_id, session_a, version_a, "session-a", "run-a")
         await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
 
-        session_b = await workspace.create_draft(first.client_id)
+        session_b = await workspace.create_draft(first.client_id, creation_scope="chat")
         await service.claim(first.client_id, workspace.workspace_id, session_b)
         with pytest.raises(Exception) as occupied:
             await service.claim(second.client_id, workspace.workspace_id, session_a)
@@ -1404,7 +1404,7 @@ async def test_queued_session_output_flows_while_next_run_is_blocked(
         client = await service.register_client("cli")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
         await service.connect_client(client.client_id, sink)
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
         version = _claim_version(claim)
         await workspace.input(client.client_id, session_id, version, "session-b", "first-run")
@@ -1432,7 +1432,7 @@ async def test_duplicate_command_request_id_does_not_start_a_second_run(
     try:
         client = await service.register_client("cli")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         claimed = await service.claim(client.client_id, workspace.workspace_id, session_id)
         claim_version = _claim_version(claimed)
         original_input = workspace.input
@@ -1487,7 +1487,7 @@ async def test_stale_release_command_cannot_release_a_newer_claim(tmp_path: Path
     try:
         client = await service.register_client("cli")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         first = await service.claim(client.client_id, workspace.workspace_id, session_id)
         first_version = _claim_version(first)
         await workspace.release(client.client_id, session_id)
@@ -1540,7 +1540,7 @@ async def test_workspace_schedule_and_memory_are_shared_across_clients(
         session_b = second.session_id
         assert session_a != session_b
         await asyncio.gather(
-            first.submit_input("session A memory"), second.submit_input("session B memory")
+            first.submit_user_input("session A memory"), second.submit_user_input("session B memory")
         )
         await asyncio.gather(_client_output(first), _client_output(second))
         assert Session.load(workspace.workspace_state, session_a).messages
@@ -1609,9 +1609,9 @@ async def test_project_removal_cancels_foreground_and_schedule_runs(
         workspace_id = first.workspace_id
         session_ids = (first.session_id, second.session_id)
 
-        await first.submit_input("session-a")
+        await first.submit_user_input("session-a")
         await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
-        await second.submit_input("session-b")
+        await second.submit_user_input("session-b")
         await asyncio.wait_for(provider.session_b_started.wait(), timeout=2)
 
         job = ScheduleJob(
@@ -1655,7 +1655,7 @@ async def test_project_removal_cancels_foreground_and_schedule_runs(
         assert not workspace._schedule_loops
         assert workspace.schedule_service.status_snapshot().to_dict()["active_job_count"] == 0
         assert not workspace._claims
-        assert workspace_id not in service.workspaces
+        assert workspace_id not in service._workspaces
         saved_jobs = await WorkspaceScheduleStore(workspace.workspace_state).public_snapshot()
         assert [saved.job_id for saved in saved_jobs] == [job.job_id]
         assert workspace_path.is_dir()
@@ -1726,10 +1726,10 @@ async def test_due_job_runs_once_in_unselected_registered_project(
         cli_runtime = service.workspace(client.workspace_id).resources
         assert cli_runtime is runtime
         assert cli_runtime.memory_manager is runtime.memory_manager
-        assert len(service.workspaces) == 2
+        assert len(service._workspaces) == 2
         unselected_workspace = next(
             workspace
-            for workspace in service.workspaces.values()
+            for workspace in service._workspaces.values()
             if workspace.workspace_path == unselected_project.resolve()
         )
         await asyncio.wait_for(provider.started.wait(), timeout=2)
@@ -1791,7 +1791,7 @@ async def test_client_expiry_keeps_claim_until_cancelled_run_cleanup_finishes(
         await service.connect_client(first.client_id, first_sink)
         await service.connect_client(second.client_id, second_sink)
 
-        session_id = await workspace.create_draft(first.client_id)
+        session_id = await workspace.create_draft(first.client_id, creation_scope="chat")
         claimed = await service.claim(first.client_id, workspace.workspace_id, session_id)
         claim_data = cast(dict[str, object], claimed["claim"])
         claim_version = cast(int, claim_data["claim_version"])
@@ -1929,7 +1929,7 @@ async def test_expiry_discards_backpressured_output_before_resident_session_take
         await service.connect_client(second.client_id, second_sink)
         workspace = await service.attach_workspace(first.client_id, path)
         await service.attach_workspace(second.client_id, path)
-        session_id = await workspace.create_draft(first.client_id)
+        session_id = await workspace.create_draft(first.client_id, creation_scope="chat")
         old_claim = await service.claim(first.client_id, workspace.workspace_id, session_id)
         old_version = _claim_version(old_claim)
         state = workspace.loops[session_id]
@@ -2240,13 +2240,13 @@ async def test_snapshot_resync_includes_selected_and_switched_away_claims(
         client = await service.register_client("web")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
         await service.connect_client(client.client_id, initial_sink, wait_for_subscribe=True)
-        first_session = await workspace.create_draft(client.client_id)
+        first_session = await workspace.create_draft(client.client_id, creation_scope="chat")
         first_claim = await service.claim(client.client_id, workspace.workspace_id, first_session)
         await workspace.input(
             client.client_id, first_session, _claim_version(first_claim), "session-a", "run-a"
         )
         await asyncio.wait_for(provider.session_a_started.wait(), timeout=2)
-        second_session = await workspace.create_draft(client.client_id, reuse_startup_session=False)
+        second_session = await workspace.create_draft(client.client_id, reuse_startup_session=False, creation_scope="chat")
         second_claim = await service.claim(client.client_id, workspace.workspace_id, second_session)
         await workspace.input(
             client.client_id, second_session, _claim_version(second_claim), "session-b", "run-b"
@@ -2409,7 +2409,7 @@ async def test_snapshot_recovers_accepted_input_and_live_output_without_executio
         sink = _CollectingSink()
         await service.connect_client(client.client_id, sink)
         workspace = await service.attach_workspace(client.client_id, path)
-        session = await workspace.create_draft(client.client_id)
+        session = await workspace.create_draft(client.client_id, creation_scope="chat")
         claimed = await service.claim(client.client_id, workspace.workspace_id, session)
         command = {"request_id": "original-input", "type": "input",
                    "workspace_id": workspace.workspace_id, "session_id": session,
@@ -2471,7 +2471,7 @@ async def test_snapshot_and_output_share_cursor_and_do_not_duplicate_committed_h
         sink = PausingSink()
         await service.connect_client(client.client_id, sink)
         workspace = await service.attach_workspace(client.client_id, path)
-        session = await workspace.create_draft(client.client_id)
+        session = await workspace.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, workspace.workspace_id, session)
         previous_messages = []
         if legacy_history:
@@ -2523,7 +2523,7 @@ async def test_same_text_inputs_keep_distinct_request_ids_and_only_current_run_i
         sink = _CollectingSink()
         await service.connect_client(client.client_id, sink)
         workspace = await service.attach_workspace(client.client_id, path)
-        session = await workspace.create_draft(client.client_id)
+        session = await workspace.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, workspace.workspace_id, session)
         commands = [{"type": "input", "request_id": request_id,
             "workspace_id": workspace.workspace_id, "session_id": session,
@@ -2560,7 +2560,7 @@ async def test_submit_user_input_routes_management_and_unknown_slash_as_service_
         sink = _CollectingSink()
         await service.connect_client(client.client_id, sink)
         workspace = await service.attach_workspace(client.client_id, path)
-        session = await workspace.create_draft(client.client_id)
+        session = await workspace.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, workspace.workspace_id, session)
         base = {
             "workspace_id": workspace.workspace_id,
@@ -2635,7 +2635,7 @@ async def test_raw_management_inputs_never_enter_foreground_fifo(
         sink = _CollectingSink()
         await service.connect_client(client.client_id, sink)
         workspace = await service.attach_workspace(client.client_id, path)
-        session = await workspace.create_draft(client.client_id)
+        session = await workspace.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, workspace.workspace_id, session)
         ack = await service.handle_command(
             client.client_id,
@@ -2682,7 +2682,7 @@ async def test_recall_queued_inputs_is_atomic_fifo_and_idempotent(
         sink = _CollectingSink()
         await service.connect_client(client.client_id, sink)
         workspace = await service.attach_workspace(client.client_id, path)
-        session = await workspace.create_draft(client.client_id)
+        session = await workspace.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, workspace.workspace_id, session)
         context = {
             "workspace_id": workspace.workspace_id,
@@ -2768,7 +2768,7 @@ async def test_recall_racing_with_next_run_start_never_executes_and_recalls_same
         sink = _CollectingSink()
         await service.connect_client(client.client_id, sink)
         workspace = await service.attach_workspace(client.client_id, path)
-        session = await workspace.create_draft(client.client_id)
+        session = await workspace.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, workspace.workspace_id, session)
         context = {
             "workspace_id": workspace.workspace_id,
@@ -2852,7 +2852,7 @@ async def test_expiring_unregistered_workspace_drains_running_schedule_or_resume
         await service.connect_client(client.client_id, _CollectingSink())
         await service.connect_client(other.client_id, _CollectingSink())
         workspace = await service.attach_workspace(client.client_id, path)
-        session = await workspace.create_draft(client.client_id)
+        session = await workspace.create_draft(client.client_id, creation_scope="chat")
         claimed = await service.claim(client.client_id, workspace.workspace_id, session)
         job = ScheduleJob(job_id=str(uuid4()), message="scheduled removal job",
             schedule=JobSchedule.every(3600), created_at_ms=1, updated_at_ms=1)
@@ -2874,7 +2874,7 @@ async def test_expiring_unregistered_workspace_drains_running_schedule_or_resume
             wake.set()
             await asyncio.wait_for(cast(asyncio.Task[None], expiry_client.disconnect_task), 3)
             assert provider.schedule_cancelled.is_set()
-            assert service.workspaces[workspace.workspace_id] is workspace
+            assert service._workspaces[workspace.workspace_id] is workspace
             assert session in workspace.loops
             assert workspace.schedule_status()["active_job_count"] == 0
             persisted = Session.load(workspace.workspace_state, job.session_id)

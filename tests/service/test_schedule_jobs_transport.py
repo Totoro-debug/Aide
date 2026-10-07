@@ -289,7 +289,7 @@ async def test_schedule_job_history_groups_existing_schedule_session_and_paginat
     schedule_http: tuple[AgentService, TestServer, str, dict[str, str]],
 ) -> None:
     service, server, jobs_url, headers = schedule_http
-    workspace = next(iter(service.workspaces.values()))
+    workspace = next(iter(service._workspaces.values()))
     async with aiohttp.ClientSession() as http:
         async with http.post(
             jobs_url,
@@ -570,7 +570,7 @@ async def test_schedule_field_errors_leave_disk_unchanged(
     errors: set[str],
 ) -> None:
     service, _server, url, headers = schedule_http
-    workspace = next(iter(service.workspaces.values()))
+    workspace = next(iter(service._workspaces.values()))
     before = workspace.workspace_state.schedule_path.read_bytes()
     async with aiohttp.ClientSession() as http:
         async with http.post(
@@ -589,7 +589,7 @@ async def test_schedule_queued_retry_rechecks_current_identity(
     invalidated: str,
 ) -> None:
     service, _server, url, headers = schedule_http
-    workspace = next(iter(service.workspaces.values()))
+    workspace = next(iter(service._workspaces.values()))
     payload = {"request_id": "queued", "message": "task", "at_time": "2099-01-01T00:00:00Z"}
     async with aiohttp.ClientSession() as http:
         async with http.post(url, headers=headers, json=payload) as response:

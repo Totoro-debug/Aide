@@ -555,7 +555,7 @@ async def test_catalog_orders_builtins_servers_and_remote_tools(
     class Connection:
         unavailable = False
 
-        def __init__(self, configuration: MCPServerConfiguration, workspace: Path) -> None:
+        def __init__(self, configuration: MCPServerConfiguration, workspace: Path | None) -> None:
             self.name = configuration.mcp_name
 
         async def connect(self) -> tuple[MCPTool, ...]:
@@ -576,7 +576,7 @@ async def test_catalog_orders_builtins_servers_and_remote_tools(
         async def close(self) -> None:
             pass
 
-    manager = MCPRuntimeManager(workspace, connection_factory=Connection)
+    manager = MCPRuntimeManager(workspace, transport="stdio", connection_factory=Connection)
     report = await manager.start(
         {
             name: MCPServerConfiguration(

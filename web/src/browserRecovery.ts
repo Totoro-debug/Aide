@@ -1,7 +1,8 @@
+import { REASONING_EFFORTS } from "./reasoningEffort.ts";
+import { isNonEmptyString, isRecord } from "./validation.ts";
 import type { ReasoningEffort, SessionModelConfiguration } from "./protocol";
 
 const BROWSER_RECOVERY_KEY = "omni.browser-recovery";
-const REASONING_EFFORTS: ReasoningEffort[] = ["low", "mid", "high", "xhigh", "max"];
 
 export type BrowserRecoveryTarget =
   | { kind: "project"; project_id: string }
@@ -37,10 +38,6 @@ export function readBrowserRecoverySnapshot(): BrowserRecoverySnapshot | null {
     const raw = window.localStorage.getItem(BROWSER_RECOVERY_KEY);
     if (raw === null) return null;
     const value: unknown = JSON.parse(raw);
-    if (isRecord(value) && isRecord(value.model_configuration)
-      && value.model_configuration.reasoning_effort === "medium") {
-      value.model_configuration.reasoning_effort = "mid";
-    }
     return isBrowserRecoverySnapshot(value) ? value : null;
   } catch {
     return null;
@@ -115,14 +112,6 @@ function isSessionModelConfiguration(value: unknown): value is SessionModelConfi
     && isNonEmptyString(value.model)
     && typeof value.reasoning_effort === "string"
     && REASONING_EFFORTS.includes(value.reasoning_effort as ReasoningEffort);
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, keys: string[]): boolean {

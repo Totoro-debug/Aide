@@ -81,7 +81,7 @@ async def test_backpressured_run_survives_reconnect_at_29_seconds(
         await service.connect_client(other.client_id, _CollectingSink())
         workspace = await service.attach_workspace(client.client_id, path)
         await service.attach_workspace(other.client_id, path)
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         claimed = await service.claim(client.client_id, workspace.workspace_id, session_id)
         state = workspace.loops[session_id]
         authority = state.loop.session
@@ -191,8 +191,8 @@ async def test_backpressured_client_expiry_preserves_another_active_session(
         second_workspace = await service.attach_workspace(second.client_id, second_path)
         # Keep both Workspaces attached so expiry only cleans the target Client's work.
         await service.attach_workspace(second.client_id, path)
-        session_a = await workspace.create_draft(first.client_id)
-        session_b = await second_workspace.create_draft(second.client_id)
+        session_a = await workspace.create_draft(first.client_id, creation_scope="chat")
+        session_b = await second_workspace.create_draft(second.client_id, creation_scope="chat")
         claim_a = await service.claim(first.client_id, workspace.workspace_id, session_a)
         claim_b = await service.claim(second.client_id, second_workspace.workspace_id, session_b)
         state_a, state_b = workspace.loops[session_a], second_workspace.loops[session_b]
@@ -281,7 +281,7 @@ async def test_agent_service_is_the_runtime_composition_root(tmp_path: Path) -> 
     try:
         client = await service.register_client("cli")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         executor = workspace.loops[session_id].loop
 
         assert type(executor) is SessionExecution
@@ -302,7 +302,7 @@ async def test_releasing_claim_retains_session_authority(tmp_path: Path) -> None
     try:
         client = await service.register_client("cli")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         first = await service.claim(client.client_id, workspace.workspace_id, session_id)
         state = workspace.loops[session_id]
         authority = state.loop.session
@@ -503,8 +503,8 @@ async def test_takeover_captures_current_client_permission_and_retires_executors
             await service.connect_client(client.client_id, sink)
             client.subscribed = True
             await service.attach_workspace(client.client_id, path)
-        workspace = next(iter(service.workspaces.values()))
-        session_id = await workspace.create_draft(clients[0].client_id)
+        workspace = next(iter(service._workspaces.values()))
+        session_id = await workspace.create_draft(clients[0].client_id, creation_scope="chat")
         authority = workspace.loops[session_id].loop.session
         for index, (client, level) in enumerate(zip(clients, ("full-access", "read-only"), strict=True)):
             service.client_permission(client.client_id).select(cast(Any, level))
@@ -535,7 +535,7 @@ async def test_shutdown_flushes_remaining_sessions_after_one_failure(
     await service.start()
     client = await service.register_client("cli")
     workspace = await service.attach_workspace(client.client_id, path)
-    ids = [await workspace.create_draft(client.client_id, reuse_startup_session=False) for _ in range(2)]
+    ids = [await workspace.create_draft(client.client_id, reuse_startup_session=False, creation_scope="chat") for _ in range(2)]
     first, second = (workspace.loops[session_id].loop for session_id in ids)
 
     async def fail() -> None:
@@ -609,7 +609,7 @@ async def test_departure_cancels_blocked_title_and_flushes_retained_history(
         sink = _CollectingSink()
         await service.connect_client(client.client_id, sink)
         workspace = await service.attach_workspace(client.client_id, path)
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         await service.claim(client.client_id, workspace.workspace_id, session_id)
         authority = workspace.loops[session_id].loop.session
         claim = workspace._claims[session_id]

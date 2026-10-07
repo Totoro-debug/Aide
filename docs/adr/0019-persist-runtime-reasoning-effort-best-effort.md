@@ -6,7 +6,7 @@ status: accepted
 
 Reasoning Effort has five levels: `low`, `mid`, `high`, `xhigh`, and `max`, with `mid` as the configuration default. Runtime selection applies to `chat` and `default` requests and survives Session replacement; explicitly configured `memory` and `schedule` routes retain their own values.
 
-CLI and Web display these lowercase values directly in every interface language. Configuration, persisted Session metadata (including Restore Anchor snapshots), and browser recovery records normalize the legacy `medium` value to `mid` in memory without writing during reads. New selections and writes use `mid`. Anthropic and OpenAI-compatible adapters map `mid` to the existing Provider wire value `medium`; other levels retain their existing mappings.
+CLI and Web display these lowercase values directly in every interface language. Configuration uses its existing default-value policy for unsupported values. Persisted Session metadata (including Restore Anchor snapshots) and browser recovery records accept only the current five levels. Reads do not migrate or rewrite unsupported values. Anthropic and OpenAI-compatible adapters map `mid` to the existing Provider wire value `medium`; other levels retain their existing mappings.
 
 The Workspace runtime's shared `ModelRouter` is the immediate authority for its current Reasoning Effort. A successful
 `/effort` update publishes that in-memory value before it performs any User Configuration I/O. The Management

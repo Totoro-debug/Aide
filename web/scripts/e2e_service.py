@@ -662,7 +662,7 @@ async def _seed_session(
     title: str,
     content: str,
     created_at: datetime,
-    creation_scope: str | None = None,
+    creation_scope: str | None,
 ) -> str:
     state = WorkspaceState(workspace)
     state.initialize(agent_home_root=home.path, allow_agent_home_chat=True)
@@ -693,7 +693,7 @@ async def _seed_restore_session(
     state = WorkspaceState(workspace)
     state.initialize(agent_home_root=home.path)
     session = Session.create(state, now=lambda: created_at)
-    session.update_metadata(title=title)
+    session.update_metadata(title=title, creation_scope="project")
     target = workspace / target_name
     target.write_text("content before Restore\n", encoding="utf-8")
     run_token = uuid4()
@@ -822,6 +822,7 @@ async def _run_e2e(provider_base_url: str) -> None:
             title="CLI occupied history",
             content="CLI-only history must remain private",
             created_at=datetime(2026, 9, 1, tzinfo=UTC),
+            creation_scope="project",
         )
         available_session_id = await _seed_session(
             home,
@@ -829,6 +830,7 @@ async def _run_e2e(provider_base_url: str) -> None:
             title="Web available history",
             content="Available history loaded after a successful Claim",
             created_at=datetime(2026, 9, 2, tzinfo=UTC),
+            creation_scope="project",
         )
         restore_session_id, restore_target = await _seed_restore_session(
             home,
@@ -857,7 +859,7 @@ async def _run_e2e(provider_base_url: str) -> None:
         port = _free_port()
         client = await ServiceClient.connect_or_start(home, cli_workspace, port=port)
         project_client = await ServiceClient.connect_or_start(home, first_project, port=port)
-        await project_client.claim_session(occupied_session_id)
+        await project_client.open_conversation(session_id=occupied_session_id)
         try:
 
             async def announce() -> None:
@@ -944,7 +946,7 @@ async def _run_e2e(provider_base_url: str) -> None:
                     SETTINGS_RELEASE.clear()
                     for _ in range(1200):
                         try:
-                            await client.submit_input("settings generation barrier")
+                            await client.submit_user_input("settings generation barrier")
                         except ServiceError as error:
                             if error.code != "admission_closed":
                                 raise
@@ -1004,8 +1006,10 @@ async def _run_e2e(provider_base_url: str) -> None:
                         )
                         history.append({"id": session_id, "title": title})
                     for title, directory, scope in (
-                        ("Legacy chat", home.path / "chat", None),
-                        ("Legacy project", path / "chat-next", None),
+                        ("Saved chat", home.path / "chat", "chat"),
+                        ("Unscoped chat", home.path / "chat", None),
+                        ("Saved project", path / "chat-next", "project"),
+                        ("Unscoped project", path / "chat-next", None),
                         ("Explicit project", path / "chat-next", "project"),
                     ):
                         session_id = await _seed_session(

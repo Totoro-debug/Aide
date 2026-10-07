@@ -333,26 +333,15 @@ def _parse_document(content: str) -> tuple[ScheduleJob, ...]:
         raise ValueError("Schedule state root must be a JSON array")
     jobs: list[ScheduleJob] = []
     seen: set[str] = set()
-    document_has_titles: bool | None = None
     for value in loaded:
         if not isinstance(value, dict):
             raise ValueError("Schedule state entries must be JSON objects")
-        has_title = "title" in value
-        if document_has_titles is None:
-            document_has_titles = has_title
-        elif has_title != document_has_titles:
-            raise ValueError("Schedule state mixes persisted schema versions")
         job = ScheduleJob.from_dict(value)
         if job.job_id in seen:
             raise ValueError("Schedule state contains duplicate Job IDs")
         seen.add(job.job_id)
         jobs.append(job)
-    canonical_values: list[dict[str, object]] = []
-    for job, value in zip(jobs, loaded, strict=True):
-        canonical = job.to_dict()
-        if "title" not in value:
-            canonical.pop("title")
-        canonical_values.append(canonical)
+    canonical_values = [job.to_dict() for job in jobs]
     if canonical_values != loaded:
         raise ValueError("Schedule state contains non-canonical values")
     return tuple(jobs)

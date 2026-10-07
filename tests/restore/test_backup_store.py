@@ -447,66 +447,48 @@ def test_journal_identity_mismatch_uses_authoritative_store_token(
     )
 
 
-def test_v1_state_without_entry_uses_unknown_scope_and_upgrades_to_v2(
+@pytest.mark.parametrize("schema_version", [1, 0, 3, "2", True, None])
+@pytest.mark.parametrize("missing_entry", [False, True])
+def test_unsupported_state_is_rejected_without_rebuilding_or_writing(
     workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    schema_version: object,
+    missing_entry: bool,
 ) -> None:
     store = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
-    target = workspace.parent / "legacy-missing.bin"
+    target = workspace.parent / "unsupported.bin"
     target.write_bytes(b"before")
     ticket = store.before_write(uuid4(), target)
     assert ticket is not None
     root = workspace / ".omni" / "restore" / SESSION_ID
-    (root / "entries" / "1.json").unlink()
+    if missing_entry:
+        (root / "entries" / "1.json").unlink()
     _write_signed_json(
         root / "state.json",
         {
-            "schema_version": 1,
-            "next_operation_id": 2,
-            "revision": 1,
-            "journal_operation_ids": [1],
-            "discarded_operation_ids": [],
-        },
-    )
-
-    reopened = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
-    journal = reopened.inspect()
-    state = json.loads((root / "state.json").read_bytes())
-
-    assert journal.integrity_issues == (
-        BackupIntegrityIssue(1, "missing_journal_entry", None),
-    )
-    assert state["schema_version"] == 2
-    assert state["active_operations"] == [{"operation_id": 1, "run_token": None}]
-
-
-def test_v1_state_recovers_entry_token_and_upgrades_to_v2(workspace: Path) -> None:
-    store = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
-    target = workspace.parent / "legacy-valid.bin"
-    target.write_bytes(b"before")
-    run_token = uuid4()
-    ticket = store.before_write(run_token, target)
-    assert ticket is not None
-    root = workspace / ".omni" / "restore" / SESSION_ID
-    _write_signed_json(
-        root / "state.json",
-        {
-            "schema_version": 1,
+            "schema_version": schema_version,
             "next_operation_id": 2,
             "revision": 1,
             "journal_operation_ids": [1],
         },
     )
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    writes: list[Path] = []
 
+    def unexpected_write(path: Path, content: bytes) -> None:
+        writes.append(path)
+        pytest.fail("Unsupported state must not be rewritten")
+
+    monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_bytes", unexpected_write)
     reopened = FileBackupStore(WorkspaceState(workspace), SESSION_ID)
-    journal = reopened.inspect()
-    state = json.loads((root / "state.json").read_bytes())
-
-    assert journal.integrity_issues == ()
-    assert journal.entries[0].run_token == run_token
-    assert state["schema_version"] == 2
-    assert state["active_operations"] == [
-        {"operation_id": 1, "run_token": str(run_token)}
-    ]
+    with pytest.raises(BackupStoreError, match="schema version is unsupported"):
+        reopened.inspect()
+    with pytest.raises(BackupStoreError, match="schema version is unsupported"):
+        reopened.discard_run_tokens((uuid4(),))
+    assert reopened.before_write(uuid4(), target) is None
+    reopened.after_write(ticket)
+    assert writes == []
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
 
 
 @pytest.mark.parametrize(

@@ -116,10 +116,6 @@ class ScheduleDispatcher:
         self._closed = False
 
     @property
-    def service_count(self) -> int:
-        return len(self._services)
-
-    @property
     def task(self) -> asyncio.Task[None] | None:
         return self._task
 

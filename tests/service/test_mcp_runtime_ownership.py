@@ -169,7 +169,7 @@ async def test_service_owns_http_and_workspace_owns_stdio_connections(
             gateways = []
             for workspace in (first_workspace, second_workspace):
                 for _ in range(10):
-                    session_id = await workspace.create_draft(client.client_id)
+                    session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
                     loop = workspace.loops[session_id].loop
                     gateway = loop._create_executor()._tool_gateway.for_run(
                         exposed_names=(first_http.name,),
@@ -222,7 +222,7 @@ async def test_service_owns_http_and_workspace_owns_stdio_connections(
             assert first_record.project_id not in {
                 record.project_id for record in service.projects.list()
             }
-            assert second_workspace.workspace_id in service.workspaces
+            assert second_workspace.workspace_id in service._workspaces
             assert await second_http.execute_prepared({}) == "wire text"
             assert sum(process.returncode is not None for process in observed.processes) == 1
         finally:

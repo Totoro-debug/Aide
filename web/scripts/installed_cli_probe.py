@@ -231,7 +231,7 @@ async def _run_competition_scenario(
     draft = await client.create_session(client.workspace_id)
     session_id = draft.get("session_id")
     assert isinstance(session_id, str), draft
-    await client.switch_session(session_id)
+    await client.open_conversation(session_id=session_id)
     discovery = read_discovery(AgentHome.production())
     assert discovery is not None
     session_path = Path.cwd() / ".omni" / "sessions" / f"{session_id}.jsonl"
@@ -540,7 +540,7 @@ async def _run_joint_scenario(
     draft = await client.create_session(client.workspace_id)
     session_id = draft.get("session_id")
     assert isinstance(session_id, str), draft
-    await client.switch_session(session_id)
+    await client.open_conversation(session_id=session_id)
     initial_workspace_id = client.workspace_id
     initial_session_id = client.session_id
     removal_prompt = "project removal barrier"
@@ -626,7 +626,7 @@ async def _run_joint_scenario(
         new_draft = await client.create_session(new_workspace_id)
         new_session_id = new_draft.get("session_id")
         assert isinstance(new_session_id, str), new_draft
-        await client.switch_session(new_session_id)
+        await client.open_conversation(session_id=new_session_id)
         settings_session_path = Path.cwd() / ".omni" / "sessions" / f"{new_session_id}.jsonl"
         settings_ready_path.write_text(
             json.dumps(
@@ -778,7 +778,7 @@ async def headless_terminal(self: Any, **_kwargs: object) -> None:
             contested_session_id = os.environ["OMNI_CLI_CONTESTED_SESSION"]
             try:
                 try:
-                    await client.switch_session(contested_session_id)
+                    await client.open_conversation(session_id=contested_session_id)
                 except ServiceError as error:
                     claim_error_code = error.code
                     claim_error_text = str(error)

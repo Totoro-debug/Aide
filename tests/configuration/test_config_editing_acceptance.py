@@ -107,7 +107,7 @@ def test_atomic_write_failure_keeps_configuration_bytes_and_diagnostics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     loader = _loader(tmp_path)
-    revision = loader.editable_snapshot().revision
+    revision = loader.web_snapshot().revision
     before, diagnostics = loader.path.read_bytes(), loader.diagnostics
 
     def fail(target: Path, content: str) -> None:

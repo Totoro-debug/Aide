@@ -1916,7 +1916,7 @@ async def test_global_dispatcher_runs_registered_workspace_services_from_one_tas
     try:
         await _wait_until(lambda: len(first_callback.calls) == 1)
         await _wait_until(lambda: len(second_callback.calls) == 1)
-        assert dispatcher.service_count == 2
+        assert len(dispatcher._services) == 2
         assert dispatcher.task is not None
         assert first._loop_task is None
         assert second._loop_task is None

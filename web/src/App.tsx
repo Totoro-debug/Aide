@@ -1,3 +1,5 @@
+import { REASONING_EFFORTS } from "./reasoningEffort.ts";
+import { isNonEmptyString, isRecord } from "./validation.ts";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   ArrowLeft,
@@ -189,7 +191,6 @@ interface PendingConfirmation {
 const THEME_KEY = "omni.theme";
 const initialLaunchTicket = readAndClearTicket();
 const PERMISSION_LEVELS: ToolPermissionLevel[] = ["read-only", "workspace-write", "full-access"];
-const REASONING_EFFORTS: ReasoningEffort[] = ["low", "mid", "high", "xhigh", "max"];
 
 function usePanelKeyboard(open: boolean, setOpen: (open: boolean) => void, panelId: string, triggerId: string) {
   useEffect(() => {
@@ -9026,12 +9027,8 @@ function formatConfirmationDetails(details: Record<string, unknown>): string {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function readString(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 ? value : null;
+  return isNonEmptyString(value) ? value : null;
 }
 
 function historyRoleLabel(

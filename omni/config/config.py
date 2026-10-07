@@ -22,12 +22,13 @@ from croniter import croniter  # type: ignore[import-untyped]
 
 from omni.config.agent_home import AgentHome
 from omni.errors import ErrorInfo
+from omni.provider.session_configuration import REASONING_EFFORT_LEVELS
+from omni.provider.session_configuration import ReasoningEffort as ReasoningEffort
 from omni.templates import load_template
 from omni.utils.host_filesystem import HOST_FILESYSTEM
 
 DEFAULT_CONFIG_TEMPLATE: Final = load_template("default-config.md")
 
-type ReasoningEffort = Literal["low", "mid", "high", "xhigh", "max"]
 type MCPTransport = Literal["stdio", "streamable-http"]
 type PermissionLevel = Literal["read-only", "workspace-write", "full-access"]
 type ExecShell = Literal["auto", "powershell", "pwsh"]
@@ -404,16 +405,6 @@ class ConfigView:
             f"{self.service_status_text}{error_text}{self.effective_values_text()}{self.diagnostics_text()}"
             f"Path: {self.path}\n"
         )
-
-
-@dataclass(frozen=True, slots=True)
-class ConfigEditableSnapshot:
-    """Safe editable configuration values exposed to an authenticated editor."""
-
-    revision: str
-    fields: Mapping[str, Mapping[str, object]]
-    configuration: UserConfiguration
-    diagnostics: tuple[ConfigurationDiagnosticValue, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -831,11 +822,9 @@ def _parse_default_exec_shell(value: object) -> ExecShell | None:
 
 
 def _parse_default_reasoning_effort(value: object) -> ReasoningEffort | None:
-    if value == "medium":
-        return "mid"
-    if not isinstance(value, str) or value not in {"low", "mid", "high", "xhigh", "max"}:
+    if not isinstance(value, str) or value not in REASONING_EFFORT_LEVELS:
         return None
-    return cast(ReasoningEffort, value)
+    return value
 
 
 def _parse_runtime(
@@ -1587,7 +1576,7 @@ def _validate_route_fields(route_name: str, value: object) -> dict[str, object]:
         normalized["temperature"] = _number(table["temperature"], f"{field}.temperature", 0, 2)
     if "reasoning_effort" in table:
         reasoning_effort = _string(table["reasoning_effort"], f"{field}.reasoning_effort")
-        if reasoning_effort not in {"low", "mid", "high", "xhigh", "max"}:
+        if reasoning_effort not in REASONING_EFFORT_LEVELS:
             _invalid(f"{field}.reasoning_effort", "must be low, mid, high, xhigh, or max")
         normalized["reasoning_effort"] = reasoning_effort
     if "timeout" in table:
@@ -2492,30 +2481,6 @@ class ConfigLoader:
             )
         )
 
-    def editable_snapshot(self) -> ConfigEditableSnapshot:
-        """Read the safe structured configuration projection for a Web editor."""
-        try:
-            content = self.path.read_bytes()
-            document = _table(tomllib.loads(content.decode("utf-8")), "configuration")
-        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
-            if isinstance(error, OSError):
-                raise
-            raise ConfigError(
-                ErrorInfo(
-                    "config_parse_error",
-                    "User Configuration TOML could not be parsed.",
-                )
-            ) from error
-        diagnostics: list[ConfigurationDiagnosticValue] = []
-        configuration = _parse_configuration(document, diagnostics=diagnostics)
-        self._diagnostics = tuple(diagnostics)
-        return ConfigEditableSnapshot(
-            revision=_configuration_revision(content),
-            fields=_editable_configuration_fields(configuration),
-            configuration=configuration,
-            diagnostics=tuple(diagnostics),
-        )
-
     def web_snapshot(self) -> ConfigWebSnapshot:
         """Return a redacted projection that remains available during first-use repair."""
         try:
@@ -2876,7 +2841,7 @@ class ConfigLoader:
 
     def update_reasoning_effort(self, effort: ReasoningEffort) -> None:
         """Persist a Runtime-Lifetime Reasoning Effort in the latest configuration."""
-        if effort not in {"low", "mid", "high", "xhigh", "max"}:
+        if effort not in REASONING_EFFORT_LEVELS:
             _invalid(
                 "models.routes.default.reasoning_effort",
                 "must be low, mid, high, xhigh, or max",

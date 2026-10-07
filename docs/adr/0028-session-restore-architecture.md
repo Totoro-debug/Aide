@@ -81,6 +81,8 @@ If both backup persistence and Gap-marker persistence fail and the process
 crashes, the missing coverage can remain unknowable; this is an accepted
 limitation.
 
+The signed Store state accepts only schema version 2, whose active operations retain their authoritative run-token identities. An identified unsupported version stops loading without reconstruction or file writes. Missing or damaged current state still uses journal recovery; no old-format upgrade or token backfill is performed.
+
 Journal records retain the run token. A record whose run never commits a User
 message is orphaned after a crash and is not mapped to a Restore Anchor. It is
 therefore not silently treated as a tracked branch mutation.

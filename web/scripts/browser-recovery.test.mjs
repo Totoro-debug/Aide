@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   readBrowserRecoverySnapshot,
-  writeBrowserRecoverySnapshot,
 } from "../src/browserRecovery.ts";
 
 function recovery(effort, draft = true) {
@@ -43,23 +42,7 @@ for (const effort of ["low", "mid", "high", "xhigh", "max"]) {
   });
 }
 
-for (const draft of [false, true]) {
-  test(`normalizes legacy medium for ${draft ? "draft" : "history"} recovery`, t => {
-    const legacy = recovery("medium", draft);
-    const state = storage(t, legacy);
-    const snapshot = readBrowserRecoverySnapshot();
-    assert.deepEqual(snapshot, recovery("mid", draft));
-    assert.equal(state.raw, JSON.stringify(legacy));
-    assert.equal(state.writes, 0);
-
-    writeBrowserRecoverySnapshot(snapshot);
-    assert.equal(JSON.parse(state.raw).model_configuration.reasoning_effort, "mid");
-    assert.equal(state.writes, 1);
-    assert.deepEqual(readBrowserRecoverySnapshot(), snapshot);
-  });
-}
-
-for (const effort of ["unknown", "MID", null, 1]) {
+for (const effort of ["medium", "unknown", "MID", null, 1]) {
   test(`rejects malformed effort ${JSON.stringify(effort)} without writing`, t => {
     const state = storage(t, recovery(effort));
     assert.equal(readBrowserRecoverySnapshot(), null);

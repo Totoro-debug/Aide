@@ -1815,7 +1815,7 @@ try {
   assert.ok(selectedRecoveryModel, "The empty draft exposed no selectable model");
   await page.locator("#composer-model-trigger").click();
   await recoveryModel.selectOption(selectedRecoveryModel);
-  const recoveryEffort = page.getByLabel("Reasoning effort");
+  const recoveryEffort = page.getByLabel("Reasoning effort", { exact: true });
   await page.locator("#composer-model-trigger").click();
   await recoveryEffort.selectOption("high");
   await expect(recoveryEffort).toHaveValue("high");
@@ -1893,7 +1893,7 @@ try {
     .toHaveAttribute("aria-expanded", "true");
   await expect(page.getByLabel("Message input")).toHaveValue(recoveryText);
   await expect(page.getByLabel("Session model")).toHaveValue(selectedRecoveryModel);
-  await expect(page.getByLabel("Reasoning effort")).toHaveValue("high");
+  await expect(page.getByLabel("Reasoning effort", { exact: true })).toHaveValue("high");
   assert.equal(await page.getByRole("log").getByText(recoveryText, { exact: true }).count(), 0,
     "Browser recovery automatically resent the unsent draft text");
   const afterRecoverySession = await page.evaluate(async () => {
@@ -1959,6 +1959,7 @@ try {
   } finally {
     await duplicatePage.close();
   }
+  await secondPage.getByRole("button", { name: /^(Back to app|返回应用)$/ }).click();
   await secondPage.locator("#app-sidebar").getByRole("link", { name: /Projects|项目/ }).click();
   await secondPage.getByRole("main").getByRole("heading", { name: /^(Projects|项目)$/ }).waitFor();
   await secondPage.locator("#app-sidebar").getByRole("button", { name: "project-one", exact: true }).click();
@@ -1989,6 +1990,7 @@ try {
   await page.locator('#composer-permission-menu [data-value="workspace-write"]').click();
   await expect(page.locator("#composer-permission-trigger")).toBeEnabled();
   const settingsConfirmationRunId = await settingsConfirmationAcceptance({ page, control });
+  await page.getByRole("button", { name: "Back to app", exact: true }).click();
   await page.locator("#app-sidebar").getByRole("button", { name: "project-one", exact: true }).click();
   const availableHistory = page.locator("#app-sidebar").getByRole("list", { name: "project-one Sessions", exact: true })
     .getByRole("button", { name: /Web available history/ });

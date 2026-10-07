@@ -190,8 +190,8 @@ def test_history_keeps_tool_messages_and_long_markdown_in_one_group(tmp_path: Pa
     assert messages[-1]["content"] == long_markdown
 
 
-def test_history_reads_legacy_records_as_unknown_without_inventing_outcome(
-    tmp_path: Path,
+def test_history_rejects_legacy_records_without_reparsing_or_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = _workspace(tmp_path)
     session_id = Session.schedule_session_id(UUID(_SECOND_JOB))
@@ -237,13 +237,28 @@ def test_history_reads_legacy_records_as_unknown_without_inventing_outcome(
         encoding="utf-8",
     )
 
-    result = read_schedule_history(state, _SECOND_JOB, workspace_id="workspace")
+    path = directory / f"{session_id}.jsonl"
+    before = path.read_bytes()
+    read_bytes = Path.read_bytes
+    reads: list[Path] = []
 
-    groups = result["groups"]
-    assert isinstance(groups, list)
-    assert len(groups) == 1
-    assert groups[0]["result_state"] == "unknown"
-    assert groups[0]["complete"] is False
+    def counted_read(target: Path) -> bytes:
+        reads.append(target)
+        return read_bytes(target)
+
+    def unexpected_write(*args: object, **kwargs: object) -> None:
+        pytest.fail("History reads must not rewrite unsupported records")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", counted_read)
+        patch.setattr(Path, "write_bytes", unexpected_write)
+        patch.setattr(Path, "write_text", unexpected_write)
+        with pytest.raises(ScheduleHistoryPersistenceError):
+            read_schedule_history(state, _SECOND_JOB, workspace_id="workspace")
+
+    assert len(reads) == 1
+    assert reads[0].samefile(path)
+    assert path.read_bytes() == before
 
 
 def test_empty_history_has_no_groups(tmp_path: Path) -> None:
@@ -439,7 +454,7 @@ def test_history_rejects_cursor_inside_an_occurrence(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "change", ["calls_type", "completed_error", "error_without_detail", "status_type"]
 )
-def test_legacy_terminal_fields_must_be_consistent_before_reporting_result(
+def test_history_rejects_malformed_terminal_fields(
     tmp_path: Path, change: str
 ) -> None:
     state = _workspace(tmp_path)
@@ -463,8 +478,5 @@ def test_legacy_terminal_fields_must_be_consistent_before_reporting_result(
     else:
         records[-1]["status"] = {"completed": True}
     path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
-    groups = read_schedule_history(state, _FIRST_JOB)["groups"]
-    assert isinstance(groups, list)
-    assert len(groups) == 1
-    assert groups[0]["result_state"] == "unknown"
-    assert groups[0]["complete"] is False
+    with pytest.raises(ScheduleHistoryPersistenceError):
+        read_schedule_history(state, _FIRST_JOB)

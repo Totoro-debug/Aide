@@ -137,7 +137,7 @@ async def test_http_dreams_in_different_workspaces_reach_model_concurrently(
     other_path = tmp_path / "independent-workspace"
     other_path.mkdir()
     other = await case.service.attach_workspace(case.second.client_id, other_path)
-    draft = await other.create_draft(case.second.client_id)
+    draft = await other.create_draft(case.second.client_id, creation_scope="chat")
     await case.service.claim(case.second.client_id, other.workspace_id, draft)
     other_claim = other._claims[draft]
     assert case.workspace.resources is not None and other.resources is not None
@@ -242,7 +242,7 @@ async def test_http_dream_shutdown_waits_for_cancel_cleanup_and_releases_workspa
             client.client_id, case.workspace.workspace_path
         )
         assert workspace.resources is not None and workspace.resources is not runtime
-        session = await workspace.create_draft(client.client_id)
+        session = await workspace.create_draft(client.client_id, creation_scope="chat")
         await replacement.claim(client.client_id, workspace.workspace_id, session)
         await workspace.resources.memory_manager.append_summary(
             "Fresh update after restart", case.clock.now()

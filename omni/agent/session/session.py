@@ -308,21 +308,6 @@ class Session:
     def updated_at(self) -> datetime:
         return self._updated_at
 
-    def clone(self) -> Self:
-        """Return an unpublished in-memory copy with the same durable identity."""
-        self._ensure_not_abandoned()
-        return self._from_state(
-            workspace_state=self._workspace_state,
-            session_id=self._session_id,
-            created_at=self._created_at,
-            updated_at=self._updated_at,
-            messages=copy.deepcopy(self.messages),
-            metadata=copy.deepcopy(self.metadata),
-            last_compacted=self.last_compacted,
-            partition=self._storage_partition,
-            now=self._now,
-        )
-
     @property
     def metadata_version(self) -> int:
         """Return the durable optimistic-concurrency version for Session metadata."""
@@ -1027,9 +1012,6 @@ def _parse_datetime(value: Any, *, field: str) -> datetime:
 
 def _parse_message(record: dict[str, Any]) -> dict[str, Any]:
     message = _copy_json_object(record, field="message")
-    restore_before = message.get("restore_before")
-    if isinstance(restore_before, dict) and isinstance(restore_before.get("metadata"), dict):
-        _normalize_legacy_model_configuration(restore_before["metadata"])
     if any(key in message for key in ("record_" + "type", "schema_" + "version")):
         raise ValueError("legacy Session message fields are unsupported")
     try:
@@ -1074,16 +1056,9 @@ def _validate_metadata(metadata: dict[str, Any]) -> None:
 
 def _copy_loaded_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     copied = copy.deepcopy(metadata)
-    _normalize_legacy_model_configuration(copied)
     _normalize_blackboard_metadata(copied, invalid_is_absent=True)
     copied.setdefault("summary", "")
     return _copy_json_object(copied, field="metadata")
-
-
-def _normalize_legacy_model_configuration(metadata: dict[str, Any]) -> None:
-    configuration = metadata.get(_SESSION_MODEL_CONFIGURATION)
-    if isinstance(configuration, dict) and configuration.get("reasoning_effort") == "medium":
-        configuration["reasoning_effort"] = "mid"
 
 
 def _validate_action_summary(value: Any, *, field: str) -> None:

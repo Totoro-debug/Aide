@@ -138,7 +138,7 @@ async def _session_case(service: AgentService, path: Path) -> _SessionCase:
     sink = _CollectingSink()
     await service.connect_client(client.client_id, sink)
     workspace = await service.attach_workspace(client.client_id, path)
-    session_id = await workspace.create_draft(client.client_id, reuse_startup_session=False)
+    session_id = await workspace.create_draft(client.client_id, reuse_startup_session=False, creation_scope="chat")
     await service.claim(client.client_id, workspace.workspace_id, session_id)
     claim = await workspace.claim(client.client_id, session_id)
     return _SessionCase(workspace, claim, client.client_id, sink)
@@ -312,8 +312,8 @@ async def test_terminal_store_failure_blocks_project_removal_without_stopping_ot
             partition=SessionStoragePartition.SCHEDULE,
         )
         assert [message["role"] for message in history.messages] == ["user", "assistant"]
-        assert service.schedule_dispatcher.task is not None
-        assert not service.schedule_dispatcher.task.done()
+        assert service.workspace_resources.dispatcher.task is not None
+        assert not service.workspace_resources.dispatcher.task.done()
     finally:
         with pytest.raises(ServiceError) as failed:
             await service.stop()
@@ -552,10 +552,10 @@ async def test_service_owns_workspace_memory_dream_and_one_schedule_dispatcher(
         assert first_resources.memory_manager is not second_resources.memory_manager
         assert first_resources.dream is first.workspace.dream
         assert second_resources.dream is second.workspace.dream
-        assert first_resources.schedule_service.dispatcher is service.schedule_dispatcher
-        assert second_resources.schedule_service.dispatcher is service.schedule_dispatcher
-        assert service.schedule_dispatcher.service_count == 2
-        assert service.schedule_dispatcher.task is not None
+        assert first_resources.schedule_service.dispatcher is service.workspace_resources.dispatcher
+        assert second_resources.schedule_service.dispatcher is service.workspace_resources.dispatcher
+        assert len(service.workspace_resources.dispatcher._services) == 2
+        assert service.workspace_resources.dispatcher.task is not None
 
         same_workspace = await _session_case(service, tmp_path / "workspace-a")
         assert same_workspace.workspace.memory_manager is first_resources.memory_manager
@@ -591,7 +591,7 @@ async def test_service_owns_workspace_memory_dream_and_one_schedule_dispatcher(
             assert len([job for job in jobs if job.source == "system"]) == 1
 
         await first.workspace.close()
-        assert service.schedule_dispatcher.service_count == 1
+        assert len(service.workspace_resources.dispatcher._services) == 1
         assert service.workspace_resources.get(second.workspace.workspace_id) is second_resources
     finally:
         await service.stop()

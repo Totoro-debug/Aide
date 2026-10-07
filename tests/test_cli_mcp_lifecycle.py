@@ -118,7 +118,7 @@ async def test_cli_real_mcp_flow_persists_result_reuses_session_snapshot_and_clo
             assert original is not None
             old_tools = original.mcp_snapshot
             schemas = [tool.to_schema() for tool in old_tools]
-            await client.submit_input("first echo")
+            await client.submit_user_input("first echo")
             assert "done" in await _client_output(client)
             selected = await client.management_dispatcher.resume(client.session_id)
             assert selected.resumed_session_id == client.session_id
@@ -135,7 +135,7 @@ async def test_cli_real_mcp_flow_persists_result_reuses_session_snapshot_and_clo
                 assert workspace.resources is original
                 assert [tool.to_schema() for tool in old_tools] == schemas
                 assert len(observed.processes) == 1
-            await client.submit_input("second echo")
+            await client.submit_user_input("second echo")
             assert "done" in await _client_output(client)
             claim = workspace.require_claim(
                 client.client_id, client.session_id, client.claim_version

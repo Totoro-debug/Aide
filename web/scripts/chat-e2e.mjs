@@ -106,6 +106,11 @@ try {
     await page.getByLabel("Default conversation workspace", { exact: true }).fill(directory);
     await page.getByLabel("Default conversation workspace", { exact: true }).blur();
     assert.equal((await saved).status(), 200);
+    const restarted = await control.restart();
+    await page.goto("about:blank");
+    await page.goto(`${restarted.url}/settings#ticket=${restarted.ticket}`);
+    await page.getByRole("button", { name: "Back to app", exact: true }).click();
+    await expect(page).toHaveURL(`${restarted.url}/`);
   }
   async function createScheduleJob(title, message) {
     await page.locator("#schedule-field-message").fill(message);
@@ -348,7 +353,8 @@ try {
   const projectDisclosure = projectsNavigation.getByRole("button", { name: "Expand sessions for chat-next", exact: true });
   await projectDisclosure.click();
   const projectSessions = projectsNavigation.getByRole("list", { name: "chat-next Sessions", exact: true });
-  await expect(projectSessions.getByRole("button", { name: /Legacy project/ })).toBeVisible();
+  await expect(projectSessions.getByRole("button", { name: /Saved project/ })).toBeVisible();
+  await expect(projectSessions.getByRole("button", { name: /Unscoped project/ })).toHaveCount(0);
   await expect(projectSessions.getByRole("button", { name: /Explicit project/ })).toBeVisible();
   await expect(projectSessions.getByRole("button")).toHaveCount(2);
 
@@ -364,10 +370,10 @@ try {
     .some(session => session.id === createdProjectSession.session_id)).toBe(true);
   await expect(page.getByRole("complementary", { name: "Conversation Sessions", exact: true })).toHaveCount(0);
 
-  await projectSessions.getByRole("button", { name: /Legacy project/ }).click();
-  await expect(page.getByRole("log").getByText("Legacy project body", { exact: true })).toBeVisible();
+  await projectSessions.getByRole("button", { name: /Saved project/ }).click();
+  await expect(page.getByRole("log").getByText("Saved project body", { exact: true })).toBeVisible();
   await page.reload();
-  await expect(page.getByRole("log").getByText("Legacy project body", { exact: true })).toBeVisible();
+  await expect(page.getByRole("log").getByText("Saved project body", { exact: true })).toBeVisible();
   await expect(projectsNavigation.getByRole("button", { name: "Collapse sessions for chat-next", exact: true }))
     .toHaveAttribute("aria-expanded", "true");
 
@@ -396,15 +402,15 @@ try {
     const timer = setTimeout(() => reject(new Error("Delayed Claim was not requested")), 30000);
     timer.unref();
   })]);
-  const legacyProject = seeded.history.find(session => session.title === "Legacy project");
+  const savedProject = seeded.history.find(session => session.title === "Saved project");
   const newestClaim = page.waitForResponse(response => response.request().method() === "POST"
     && new URL(response.url()).pathname.endsWith("/conversations/open")
-    && response.request().postDataJSON()?.session_id === legacyProject.id);
-  await projectSessions.getByRole("button", { name: /Legacy project/ }).click();
+    && response.request().postDataJSON()?.session_id === savedProject.id);
+  await projectSessions.getByRole("button", { name: /Saved project/ }).click();
   releaseClaim();
   await newestClaim;
-  await expect(page.getByRole("log").getByText("Legacy project body", { exact: true })).toBeVisible();
-  await expect(projectSessions.getByRole("button", { name: /Legacy project/ })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("log").getByText("Saved project body", { exact: true })).toBeVisible();
+  await expect(projectSessions.getByRole("button", { name: /Saved project/ })).toHaveAttribute("aria-current", "page");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.unroute(openPattern);
 
@@ -474,8 +480,9 @@ try {
   assert.equal((await newChat()).status, 200);
   const conversationList = restartedNavigation.getByRole("list", { name: "Conversations", exact: true });
   await expect(conversationList.getByRole("button")).toHaveCount(100);
-  await expect(restartedNavigation.getByText("Legacy chat", { exact: true })).toBeVisible();
-  await expect(restartedNavigation.getByText("Legacy project", { exact: true })).toHaveCount(0);
+  await expect(restartedNavigation.getByText("Saved chat", { exact: true })).toBeVisible();
+  await expect(restartedNavigation.getByText("Unscoped chat", { exact: true })).toHaveCount(0);
+  await expect(restartedNavigation.getByText("Saved project", { exact: true })).toHaveCount(0);
   await expect(restartedNavigation.getByText("Explicit project", { exact: true })).toHaveCount(0);
   await expect(restartedNavigation.getByTitle(secondConversation.directory)).toBeVisible();
   await restartedNavigation.getByRole("button", { name: "Load more", exact: true }).click();
@@ -486,8 +493,8 @@ try {
   await expect(page.getByRole("log").getByText("Paginated chat 000 body", { exact: true })).toBeVisible();
   await expect(restartedNavigation.getByRole("button", { name: /Paginated chat 000/ })).toHaveAttribute("aria-current", "page");
   await expect(page.getByText(firstConversation.directory, { exact: true }).last()).toBeVisible();
-  await restartedNavigation.getByRole("button", { name: /Legacy chat/ }).click();
-  await expect(page.getByRole("log").getByText("Legacy chat body", { exact: true })).toBeVisible();
+  await restartedNavigation.getByRole("button", { name: /Saved chat/ }).click();
+  await expect(page.getByRole("log").getByText("Saved chat body", { exact: true })).toBeVisible();
   await restartedNavigation.getByTitle(secondConversation.directory).click();
   await expect(page.getByRole("log").getByText("second directory acceptance message", { exact: true })).toBeVisible();
   const secondConversationRow = restartedNavigation.getByTitle(secondConversation.directory).locator("xpath=../..");
@@ -552,16 +559,16 @@ try {
   const chatScheduleJobTitle = "Chat-only schedule job";
   await createScheduleJob(chatScheduleJobTitle, "chat Workspace schedule acceptance task");
 
-  const legacyProjectActions = projectSessions.getByRole("group", { name: "Session actions for Legacy project", exact: true });
-  await projectSessions.locator('summary[aria-label="Session actions for Legacy project"]').click();
-  await legacyProjectActions.getByRole("button", { name: "View workspace directory", exact: true }).click();
+  const savedProjectActions = projectSessions.getByRole("group", { name: "Session actions for Saved project", exact: true });
+  await projectSessions.locator('summary[aria-label="Session actions for Saved project"]').click();
+  await savedProjectActions.getByRole("button", { name: "View workspace directory", exact: true }).click();
   const projectDirectoryDialog = page.getByRole("dialog", { name: "Workspace directory", exact: true });
   await expect(projectDirectoryDialog.getByText(nextDirectory, { exact: true })).toBeVisible();
   await projectDirectoryDialog.getByRole("button", { name: "Close", exact: true }).click();
-  await expect(projectSessions.locator('summary[aria-label="Session actions for Legacy project"]')).toBeFocused();
+  await expect(projectSessions.locator('summary[aria-label="Session actions for Saved project"]')).toBeFocused();
 
-  await projectSessions.getByRole("button", { name: /Legacy project/ }).click();
-  await expect(page.getByRole("log").getByText("Legacy project body", { exact: true })).toBeVisible();
+  await projectSessions.getByRole("button", { name: /Saved project/ }).click();
+  await expect(page.getByRole("log").getByText("Saved project body", { exact: true })).toBeVisible();
   const openProjectSchedule = page.waitForURL(url => url.pathname === `/projects/${sharedProjectId}/schedule`);
   await openSessionMore("Schedule tasks");
   await openProjectSchedule;
@@ -585,7 +592,7 @@ try {
   await expect(page.getByRole("listitem").filter({ hasText: projectScheduleJobTitle })).toHaveCount(0);
   await deleteScheduleJob(chatScheduleJobTitle);
 
-  await projectSessions.getByRole("button", { name: /Legacy project/ }).click();
+  await projectSessions.getByRole("button", { name: /Saved project/ }).click();
   const deleteProjectSchedule = page.waitForURL(url => url.pathname === `/projects/${sharedProjectId}/schedule`);
   await openSessionMore("Schedule tasks");
   await deleteProjectSchedule;
@@ -659,18 +666,18 @@ try {
   await expect.poll(async () => (await api("/chat/sessions")).body.sessions.some(session => session.id === secondConversation.id)).toBe(false);
   const remainingProjectSessions = (await api(`/projects/${sharedProjectId}/sessions`)).body.sessions;
   assert.deepEqual(new Set(remainingProjectSessions.map(session => session.title)), new Set([
-    "Legacy project",
+    "Saved project",
     "Explicit project",
     "Fixture response.",
   ]));
 
-  const legacyProjectMenu = projectSessions.getByRole("group", { name: "Session actions for Legacy project", exact: true });
-  await projectSessions.locator('summary[aria-label="Session actions for Legacy project"]').click();
-  await legacyProjectMenu.getByRole("button", { name: "View workspace directory", exact: true }).click();
+  const savedProjectMenu = projectSessions.getByRole("group", { name: "Session actions for Saved project", exact: true });
+  await projectSessions.locator('summary[aria-label="Session actions for Saved project"]').click();
+  await savedProjectMenu.getByRole("button", { name: "View workspace directory", exact: true }).click();
   const legacyDirectoryDialog = page.getByRole("dialog", { name: "Workspace directory", exact: true });
   await expect(legacyDirectoryDialog.getByText(nextDirectory, { exact: true })).toBeVisible();
   await legacyDirectoryDialog.getByRole("button", { name: "Close", exact: true }).click();
-  await expect(projectSessions.locator('summary[aria-label="Session actions for Legacy project"]')).toBeFocused();
+  await expect(projectSessions.locator('summary[aria-label="Session actions for Saved project"]')).toBeFocused();
 
   const explicitProjectMenu = projectSessions.getByRole("group", { name: "Session actions for Explicit project", exact: true });
   await projectSessions.locator('summary[aria-label="Session actions for Explicit project"]').click();
@@ -723,8 +730,8 @@ try {
   await expect(draftActivity).not.toHaveAttribute("open");
   await draftActivity.locator("summary").click();
   await expect(page.getByRole("log").getByText("Streamed answer", { exact: true })).toBeVisible();
-  await projectSessions.getByRole("button", { name: /Legacy project/ }).click();
-  await expect(page.getByRole("log").getByText("Legacy project body", { exact: true })).toBeVisible();
+  await projectSessions.getByRole("button", { name: /Saved project/ }).click();
+  await expect(page.getByRole("log").getByText("Saved project body", { exact: true })).toBeVisible();
   await draftButton.click();
   await expect(page.getByRole("button", { name: "Cancel run", exact: true })).toBeEnabled();
   await page.getByRole("button", { name: "Cancel run", exact: true }).click();
@@ -754,7 +761,7 @@ try {
   await expect(page.getByRole("navigation", { name: "Conversations", exact: true })).toBeVisible();
   await expect(page.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true })).toBeVisible();
   assert.deepEqual(errors, []);
-  console.log("Chat E2E: cross-directory/restart history, pagination, legacy and shared-directory classification, Claim, rename/restore/delete ownership, unavailable history, mobile navigation, draft/send/cancel/settings and CLI boundary passed");
+  console.log("Chat E2E: cross-directory/restart history, pagination, explicit and shared-directory classification, Claim, rename/restore/delete ownership, unavailable history, mobile navigation, draft/send/cancel/settings and CLI boundary passed");
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.keyboard.press("Escape");
   await browserRecoveryAcceptance({ page, control });

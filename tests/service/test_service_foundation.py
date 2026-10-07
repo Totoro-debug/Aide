@@ -68,6 +68,58 @@ def test_discovery_file_has_no_credential_and_round_trips_atomically(tmp_path: P
     assert token not in (home.path / "service.json").read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("boundary", ["discovery", "projects"])
+def test_catalog_writes_reuse_atomic_text_and_preserve_exact_json_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str,
+) -> None:
+    home = AgentHome(tmp_path / "agent-home")
+    calls: list[tuple[Path, str]] = []
+    atomic_replace = HOST_FILESYSTEM.atomic_replace_text
+
+    def observed_replace(path: Path, content: str) -> None:
+        calls.append((path, content))
+        atomic_replace(path, content)
+
+    monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_text", observed_replace)
+    if boundary == "discovery":
+        discovery = ServiceDiscovery("instance-1", SERVICE_PROTOCOL_VERSION, "127.0.0.1", 8765, 42)
+        write_discovery(home, discovery)
+        expected = json.dumps(discovery.to_dict(), ensure_ascii=True, separators=(",", ":")) + "\n"
+        path = home.path / "service.json"
+    else:
+        directory = tmp_path / "项目"
+        directory.mkdir()
+        catalog = ProjectCatalog(home)
+        record = catalog.register(directory)
+        expected = json.dumps({"format_version": 1, "projects": [record.to_dict()]}, ensure_ascii=True, indent=2) + "\n"
+        path = catalog.path
+    assert calls == [(path, expected)]
+    assert path.read_bytes() == expected.encode("utf-8")
+    assert not tuple(home.path.glob(".*.tmp"))
+
+
+def test_discovery_atomic_failure_preserves_original_bytes_and_removes_temporary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = AgentHome(tmp_path / "agent-home")
+    original = ServiceDiscovery("original", SERVICE_PROTOCOL_VERSION, "127.0.0.1", 8765, 42)
+    write_discovery(home, original)
+    path = home.path / "service.json"
+    before = path.read_bytes()
+
+    def fail_replace(source: Any, target: Any) -> None:
+        raise OSError("injected publication failure")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(OSError, match="injected publication failure"):
+        write_discovery(
+            home, ServiceDiscovery("updated", SERVICE_PROTOCOL_VERSION, "127.0.0.1", 8766, 43)
+        )
+    assert path.read_bytes() == before
+    assert not tuple(home.path.glob(".service.json.*.tmp"))
+
+
 def test_startup_lock_is_reentrant_across_sequential_starters(tmp_path: Path) -> None:
     home = AgentHome(tmp_path / "agent-home")
     with startup_lock(home):
@@ -240,7 +292,7 @@ def test_project_catalog_keeps_previous_publication_when_replace_fails(
     original_replace = os.replace
 
     def fail_catalog_replace(source: Any, target: Any) -> None:
-        if Path(os.fspath(target)) == catalog.path:
+        if Path(os.fspath(target)) == HOST_FILESYSTEM.path_for_io(catalog.path):
             raise OSError("injected publication failure")
         original_replace(source, target)
 
@@ -248,6 +300,7 @@ def test_project_catalog_keeps_previous_publication_when_replace_fails(
     with pytest.raises(OSError):
         catalog.register(second_path)
 
+    assert not tuple(home.path.glob(".projects.json.*.tmp"))
     assert catalog.path.read_bytes() == original
     assert [record.path for record in catalog.list()] == [first_path.resolve()]
     assert [record.path for record in ProjectCatalog(home).list()] == [first_path.resolve()]
@@ -305,20 +358,20 @@ async def test_registered_projects_start_once_and_removal_releases_claims(tmp_pa
     service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
     await service.start()
     try:
-        assert len(service.workspaces) == 1
+        assert len(service._workspaces) == 1
         client = await service.register_client("cli")
         first, second = await asyncio.gather(
             service.attach_workspace(client.client_id, project),
             service.attach_workspace(client.client_id, project / "."),
         )
         assert first is second
-        assert len(service.workspaces) == 1
-        session_id = await first.create_draft(client.client_id)
+        assert len(service._workspaces) == 1
+        session_id = await first.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, first.workspace_id, session_id)
         assert cast(dict[str, object], claim["claim"])["claim_version"] == 1
 
         await complete_project_removal(service, client.client_id, record.project_id)
-        assert len(service.workspaces) == 0
+        assert len(service._workspaces) == 0
         assert not client.claimed
         assert ProjectCatalog(home).list() == ()
         assert project.is_dir()
@@ -337,7 +390,7 @@ async def test_project_removal_closes_admission_clears_claims_and_blocks_reentry
     await service.start()
     client = await service.register_client("cli")
     record, workspace, _jobs = await service.register_project(client.client_id, project)
-    session_id = await workspace.create_draft(client.client_id)
+    session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
     await service.claim(client.client_id, workspace.workspace_id, session_id)
     reconnect_credential = client.reconnect_credential
     close_started = asyncio.Event()
@@ -488,7 +541,7 @@ async def test_project_removal_waits_for_restore_transaction(
         await asyncio.sleep(0)
         assert response["status"] == "removing"
         assert ProjectCatalog(home).list()[0].schedule_state == "removing"
-        assert workspace.workspace_id in service.workspaces
+        assert workspace.workspace_id in service._workspaces
         assert not restore_task.done()
         release_restore.set()
         committed = await asyncio.wait_for(restore_task, timeout=2)
@@ -513,7 +566,7 @@ async def test_project_removal_keeps_failed_loop_for_retry(
     await service.start()
     client = await service.register_client("cli")
     record, workspace, _jobs = await service.register_project(client.client_id, project)
-    session_id = await workspace.create_draft(client.client_id)
+    session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
     await service.claim(client.client_id, workspace.workspace_id, session_id)
     loop = workspace.loops[session_id].loop
     original_close = loop.close
@@ -587,7 +640,7 @@ async def test_project_schedule_stays_paused_across_service_restart_until_resume
     second_client = await second_service.register_client("web")
     await second_service.connect_client(second_client.client_id, sink)
     try:
-        assert len(second_service.workspaces) == 0
+        assert len(second_service._workspaces) == 0
         persisted = ProjectCatalog(home).list()
         assert [(item.project_id, item.schedule_state) for item in persisted] == [
             (record.project_id, "awaiting_resume")
@@ -839,7 +892,7 @@ async def test_schedule_activation_rechecks_service_gate_after_wait(
     client = await service.register_client("web")
     entered = asyncio.Event()
     release = asyncio.Event()
-    first = next(iter(service.workspaces.values()))
+    first = next(iter(service._workspaces.values()))
     original_activate = first.activate_schedule
     observed: list[tuple[str, bool]] = []
 
@@ -871,7 +924,7 @@ async def test_schedule_activation_rechecks_service_gate_after_wait(
         release.set()
         await asyncio.gather(connecting, changing)
         assert observed == [(expected_state, False)]
-        assert all(not workspace.schedule_admitted for workspace in service.workspaces.values())
+        assert all(not workspace.schedule_admitted for workspace in service._workspaces.values())
     finally:
         release.set()
         await service.stop()
@@ -964,7 +1017,7 @@ async def test_project_snapshot_cannot_recreate_a_removed_workspace(
         release.set()
         await snapshot
         await removing
-        assert not service.workspaces
+        assert not service._workspaces
         assert await service.project_schedule_snapshot(record) == ((), None)
     finally:
         await service.stop()
@@ -980,7 +1033,7 @@ async def test_reacquired_claim_rejects_the_previous_version(tmp_path: Path) -> 
     try:
         client = await service.register_client("cli")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         first = await service.claim(client.client_id, workspace.workspace_id, session_id)
         await workspace.release(client.client_id, session_id)
         second = await service.claim(client.client_id, workspace.workspace_id, session_id)
@@ -1010,7 +1063,7 @@ async def test_foreground_confirmation_is_broadcast_to_workspace_clients_and_res
         await service.attach_workspace(owner.client_id, unrelated_workspace_path)
         workspace = await service.attach_workspace(owner.client_id, workspace_path)
         await service.attach_workspace(other.client_id, workspace_path)
-        session_id = await workspace.create_draft(owner.client_id)
+        session_id = await workspace.create_draft(owner.client_id, creation_scope="chat")
         await service.claim(owner.client_id, workspace.workspace_id, session_id)
         envelope = ConfirmationEnvelope(
             request=ConfirmationRequest(uuid4(), "call-1", "exec", "Run command", {}),
@@ -1133,7 +1186,7 @@ async def test_confirmation_resolved_cannot_overtake_requested_for_another_clien
         second = await service.register_client("cli")
         workspace = await service.attach_workspace(first.client_id, workspace_path)
         await service.attach_workspace(second.client_id, workspace_path)
-        session_id = await workspace.create_draft(first.client_id)
+        session_id = await workspace.create_draft(first.client_id, creation_scope="chat")
         await service.claim(first.client_id, workspace.workspace_id, session_id)
         await service.connect_client(first.client_id, SlowSink())
         envelope = ConfirmationEnvelope(
@@ -1265,7 +1318,7 @@ async def test_service_stop_aborts_confirmation_and_invalidates_token(tmp_path: 
     try:
         client = await service.register_client("cli")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         await service.claim(client.client_id, workspace.workspace_id, session_id)
         envelope = ConfirmationEnvelope(
             request=ConfirmationRequest(uuid4(), "call-1", "exec", "Run command", {}),
@@ -1317,7 +1370,7 @@ async def test_project_removal_aborts_pending_confirmation_and_resolves_clients(
         other = await service.register_client("web")
         workspace = await service.attach_workspace(owner.client_id, project)
         await service.attach_workspace(other.client_id, project)
-        session_id = await workspace.create_draft(owner.client_id)
+        session_id = await workspace.create_draft(owner.client_id, creation_scope="chat")
         await service.claim(owner.client_id, workspace.workspace_id, session_id)
         envelope = ConfirmationEnvelope(
             request=ConfirmationRequest(uuid4(), "call-1", "exec", "Run command", {}),
@@ -1334,7 +1387,7 @@ async def test_project_removal_aborts_pending_confirmation_and_resolves_clients(
         await complete_project_removal(service, owner.client_id, record.project_id)
         with pytest.raises(ConfirmationAborted):
             await asyncio.wait_for(pending, timeout=1)
-        assert not service.workspaces
+        assert not service._workspaces
         assert all(
             any(event["type"] == "confirmation.resolved" for event in client.events)
             for client in (owner, other)
@@ -1363,7 +1416,7 @@ async def test_client_disconnect_expiry_aborts_owned_confirmation(tmp_path: Path
         await service.attach_workspace(other.client_id, workspace_path)
         await service.connect_client(owner.client_id, sink)
         await service.connect_client(other.client_id, sink)
-        session_id = await workspace.create_draft(owner.client_id)
+        session_id = await workspace.create_draft(owner.client_id, creation_scope="chat")
         await service.claim(owner.client_id, workspace.workspace_id, session_id)
         envelope = ConfirmationEnvelope(
             request=ConfirmationRequest(uuid4(), "call-1", "exec", "Run command", {}),
@@ -1625,7 +1678,7 @@ async def test_failed_project_removal_stays_blocked_after_service_restart(
     await restarted.start()
     restarted_client = await restarted.register_client("cli")
     try:
-        assert not restarted.workspaces
+        assert not restarted._workspaces
         with pytest.raises(ServiceError) as blocked:
             await restarted.attach_workspace(restarted_client.client_id, project)
         assert blocked.value.code == "admission_closed"
@@ -1657,7 +1710,7 @@ async def test_interrupted_project_removal_is_retryable_after_restart(
 
     monkeypatch.setattr(WorkspaceRecord, "start", record_start)
     try:
-        assert not service.workspaces
+        assert not service._workspaces
         interrupted = ProjectCatalog(home).list()[0]
         assert interrupted.schedule_state == "removing"
         assert interrupted.removal_error is not None
@@ -1686,7 +1739,7 @@ async def test_stale_run_id_cannot_cancel_the_next_run(
     try:
         client = await service.register_client("cli")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
-        session_id = await workspace.create_draft(client.client_id)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         await service.claim(client.client_id, workspace.workspace_id, session_id)
         claim = workspace._claims[session_id]
         workspace.loops[session_id].run_ids.append("current-run")
@@ -1779,12 +1832,12 @@ async def test_unregistered_workspace_pauses_schedule_and_retains_authority_at_l
             while "B" not in starts:
                 await asyncio.sleep(0)
         assert starts == ["A with remaining user", "B"]
-        assert a.workspace_id in service.workspaces
+        assert a.workspace_id in service._workspaces
         clock.advance(1)
         await asyncio.wait_for(cast(asyncio.Task[None], clients[1].disconnect_task), 2)
-        assert a.workspace_id in service.workspaces
+        assert a.workspace_id in service._workspaces
         assert not a.schedule_admitted
-        assert b.workspace_id in service.workspaces
+        assert b.workspace_id in service._workspaces
         assert len(await a.schedule_service.public_snapshot()) == 1
         fresh = await service.register_client("cli")
         reopened = await service.attach_workspace(fresh.client_id, paths[0])
@@ -1806,7 +1859,7 @@ async def test_subscribe_restores_only_valid_original_confirmation(
     try:
         client = await service.register_client("web")
         workspace = await service.attach_workspace(client.client_id, path)
-        session = await workspace.create_draft(client.client_id)
+        session = await workspace.create_draft(client.client_id, creation_scope="chat")
         await service.claim(client.client_id, workspace.workspace_id, session)
         envelope = ConfirmationEnvelope(
             request=ConfirmationRequest(uuid4(), "call", "exec", "Exact command", {"command": "echo ok"}),
@@ -1863,7 +1916,7 @@ async def test_confirmation_snapshot_audience_competing_decision_and_cancel(
         outsider = await service.register_client("cli")
         workspace = await service.attach_workspace(owner.client_id, path)
         await service.attach_workspace(peer.client_id, path)
-        session = await workspace.create_draft(owner.client_id)
+        session = await workspace.create_draft(owner.client_id, creation_scope="chat")
         await service.claim(owner.client_id, workspace.workspace_id, session)
         generation = workspace.loops[session].loop.generation_id
         job_id = str(uuid4())
@@ -1953,8 +2006,8 @@ async def test_workspace_expiry_serializes_reentry_and_registration(
         result = await asyncio.wait_for(reentry, 2)
         reopened = cast(WorkspaceRecord, result[1] if isinstance(result, tuple) else result)
         assert reopened is workspace
-        assert reopened.workspace_id in service.workspaces
-        assert workspace.workspace_id in service.workspaces
+        assert reopened.workspace_id in service._workspaces
+        assert workspace.workspace_id in service._workspaces
     finally:
         release.set()
         await service.stop()
@@ -1990,7 +2043,7 @@ async def test_workspace_expiry_cleanup_failure_keeps_owned_runtime_and_closes_a
         clock.advance(30)
         wake.set()
         await asyncio.wait_for(cast(asyncio.Task[None], owner.disconnect_task), 2)
-        assert workspace.workspace_id in service.workspaces
+        assert workspace.workspace_id in service._workspaces
         assert service.state == "draining"
         assert any(event["type"] == "service.cleanup_failed" for event in sink.events)
         with pytest.raises(ServiceError) as unavailable:

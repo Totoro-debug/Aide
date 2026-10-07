@@ -144,7 +144,7 @@ Schedule Tool 和 Web Schedule 页面可创建、查看及删除任务；已有�
 | `/dream` | 将待处理的会话摘要整理为长期记忆 |
 | `/reload_skill` | 重新加载 `~/.omni/skills/` 中的 Skill |
 
-推理强度依次为 `low`、`mid`、`high`、`xhigh`、`max`，默认使用 `mid`。CLI 和 Web 均直接显示这些原值。旧配置中的 `medium` 在读取时兼容为 `mid`。
+推理强度依次为 `low`、`mid`、`high`、`xhigh`、`max`，默认使用 `mid`。CLI 和 Web 均直接显示这些原值。配置中的不支持值按默认值策略处理；Session 和浏览器恢复记录只接受当前五档值。
 
 ## Session Restore
 

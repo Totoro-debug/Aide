@@ -88,10 +88,10 @@ def _loader(tmp_path: Path, content: str = MINIMAL_VALID_CONFIG) -> ConfigLoader
     return ConfigLoader(home)
 
 
-def test_editable_snapshot_exposes_all_safe_fields_without_secrets(tmp_path: Path) -> None:
+def test_web_snapshot_exposes_all_safe_fields_without_secrets(tmp_path: Path) -> None:
     loader = _loader(tmp_path)
 
-    snapshot = loader.editable_snapshot()
+    snapshot = loader.web_snapshot()
 
     assert snapshot.revision.startswith("sha256:")
     assert snapshot.fields["runtime"] == {
@@ -113,7 +113,7 @@ def test_editable_snapshot_exposes_all_safe_fields_without_secrets(tmp_path: Pat
 def test_default_chat_workspace_is_editable_and_persisted(tmp_path: Path) -> None:
     loader = _loader(tmp_path)
 
-    snapshot = loader.editable_snapshot()
+    snapshot = loader.web_snapshot()
 
     assert snapshot.fields["web"]["default_chat_workspace"] == "~/.omni/chat"
     target = tmp_path / "conversations"
@@ -123,7 +123,7 @@ def test_default_chat_workspace_is_editable_and_persisted(tmp_path: Path) -> Non
     )
 
     assert result.configuration.web.default_chat_workspace == str(target)
-    assert ConfigLoader(loader.agent_home).editable_snapshot().fields["web"][
+    assert ConfigLoader(loader.agent_home).web_snapshot().fields["web"][
         "default_chat_workspace"
     ] == str(target)
 
@@ -134,7 +134,7 @@ def test_valid_patch_preserves_comments_and_unknown_toml(tmp_path: Path) -> None
     before = loader.path.read_bytes()
 
     result = loader.patch_editable_fields(
-        loader.editable_snapshot().revision,
+        loader.web_snapshot().revision,
         {"runtime": {"max_iterations": 77}, "memory": {"batch_size": 21}},
     )
 
@@ -151,7 +151,7 @@ def test_valid_patch_preserves_comments_and_unknown_toml(tmp_path: Path) -> None
 def test_invalid_patch_does_not_change_bytes(tmp_path: Path) -> None:
     loader = _loader(tmp_path)
     before = loader.path.read_bytes()
-    revision = loader.editable_snapshot().revision
+    revision = loader.web_snapshot().revision
 
     with pytest.raises(ConfigError):
         loader.patch_editable_fields(revision, {"runtime": {"max_iterations": 1}})
@@ -161,7 +161,7 @@ def test_invalid_patch_does_not_change_bytes(tmp_path: Path) -> None:
 
 def test_stale_patch_does_not_change_bytes(tmp_path: Path) -> None:
     loader = _loader(tmp_path)
-    revision = loader.editable_snapshot().revision
+    revision = loader.web_snapshot().revision
     loader.patch_editable_fields(revision, {"runtime": {"max_iterations": 60}})
     before = loader.path.read_bytes()
 
@@ -174,7 +174,7 @@ def test_stale_patch_does_not_change_bytes(tmp_path: Path) -> None:
 def test_two_writers_with_one_revision_only_one_succeeds(tmp_path: Path) -> None:
     first = _loader(tmp_path)
     second = ConfigLoader(first.agent_home)
-    revision = first.editable_snapshot().revision
+    revision = first.web_snapshot().revision
 
     first.patch_editable_fields(revision, {"memory": {"batch_size": 11}})
 
@@ -184,12 +184,12 @@ def test_two_writers_with_one_revision_only_one_succeeds(tmp_path: Path) -> None
     assert first.load().memory.batch_size == 11
 
 
-def test_editable_snapshot_projects_all_model_route_and_mcp_fields_without_secrets(
+def test_web_snapshot_projects_all_model_route_and_mcp_fields_without_secrets(
     tmp_path: Path,
 ) -> None:
     loader = _loader(tmp_path, FULL_EDITABLE_CONFIG)
 
-    fields = loader.editable_snapshot().fields
+    fields = loader.web_snapshot().fields
     models = fields["models"]
     providers = cast(Mapping[str, object], models["providers"])
     routes = cast(Mapping[str, object], models["routes"])
@@ -237,7 +237,7 @@ models = ["large-model"]
 "large-model" = 65536
 '''
     loader = _loader(tmp_path, content)
-    before = loader.editable_snapshot()
+    before = loader.web_snapshot()
     primary = cast(
         Mapping[str, object], before.fields["models"]["providers"]
     )["primary"]
@@ -283,7 +283,7 @@ def test_larger_model_context_window_allows_output_above_legacy_route_capacity(
     tmp_path: Path,
 ) -> None:
     loader = _loader(tmp_path, FULL_EDITABLE_CONFIG)
-    snapshot = loader.editable_snapshot()
+    snapshot = loader.web_snapshot()
     result = loader.patch_editable_fields(
         snapshot.revision,
         {
@@ -311,7 +311,7 @@ def test_model_context_window_not_greater_than_route_output_keeps_original_bytes
 
     with pytest.raises(ConfigError) as error:
         loader.patch_editable_fields(
-            loader.editable_snapshot().revision,
+            loader.web_snapshot().revision,
             {
                 "models": {
                     "providers": {
@@ -329,7 +329,7 @@ def test_model_context_window_not_greater_than_route_output_keeps_original_bytes
 
 def test_model_route_mcp_patch_replaces_collections_and_secrets_atomically(tmp_path: Path) -> None:
     loader = _loader(tmp_path, FULL_EDITABLE_CONFIG + "\n[future]\nvalue = 7\n")
-    revision = loader.editable_snapshot().revision
+    revision = loader.web_snapshot().revision
 
     result = loader.patch_editable_fields(
         revision,
@@ -436,7 +436,7 @@ def test_stdio_mcp_fields_patch_preserves_http_secrets(tmp_path: Path) -> None:
     loader = _loader(tmp_path, FULL_EDITABLE_CONFIG)
 
     loader.patch_editable_fields(
-        loader.editable_snapshot().revision,
+        loader.web_snapshot().revision,
         {
             "mcp": {
                 "http": {},
@@ -466,7 +466,7 @@ def test_secret_clear_removes_provider_key_and_mcp_header_without_echoing_value(
     tmp_path: Path,
 ) -> None:
     loader = _loader(tmp_path, FULL_EDITABLE_CONFIG)
-    revision = loader.editable_snapshot().revision
+    revision = loader.web_snapshot().revision
 
     loader.patch_editable_fields(
         revision,
@@ -480,8 +480,8 @@ def test_secret_clear_removes_provider_key_and_mcp_header_without_echoing_value(
     configuration = loader.load()
     assert configuration.models.providers["retired"].api_key == ""
     assert configuration.mcp["http"].headers == {}
-    assert "provider-secret-canary-302" not in repr(loader.editable_snapshot().fields)
-    assert "mcp-header-canary-302" not in repr(loader.editable_snapshot().fields)
+    assert "provider-secret-canary-302" not in repr(loader.web_snapshot().fields)
+    assert "mcp-header-canary-302" not in repr(loader.web_snapshot().fields)
 
 
 def test_dangling_route_candidate_keeps_original_bytes(tmp_path: Path) -> None:
@@ -490,7 +490,7 @@ def test_dangling_route_candidate_keeps_original_bytes(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError):
         loader.patch_editable_fields(
-            loader.editable_snapshot().revision,
+            loader.web_snapshot().revision,
             {
                 "models": {
                     "providers": {

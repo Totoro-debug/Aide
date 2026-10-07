@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
 from omni.agent.workspace_state import normalize_workspace_path
 from omni.config.agent_home import AgentHome
+from omni.utils.host_filesystem import HOST_FILESYSTEM
 
 PROJECTS_FILENAME = "projects.json"
 PROJECTS_FORMAT_VERSION = 1
@@ -245,25 +245,8 @@ class ProjectCatalog:
             "format_version": PROJECTS_FORMAT_VERSION,
             "projects": [record.to_dict() for record in self._records.values()],
         }
-        target = self.path
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=f".{target.name}.",
-            suffix=".tmp",
-            dir=target.parent,
-        )
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
-                fd = -1
-                json.dump(payload, stream, ensure_ascii=True, indent=2)
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, target)
-        finally:
-            if fd >= 0:
-                os.close(fd)
-            temporary.unlink(missing_ok=True)
+        content = json.dumps(payload, ensure_ascii=True, indent=2) + "\n"
+        HOST_FILESYSTEM.atomic_replace_text(self.path, content)
 
     @staticmethod
     def _identity(path: Path) -> str:

@@ -83,7 +83,6 @@ from omni.schedule.history import (
 )
 from omni.schedule.model import JobSchedule, ScheduleJob
 from omni.schedule.service import (
-    ScheduleDispatcher,
     ScheduleOccurrence,
     ScheduleService,
     ScheduleStaleRemovalError,
@@ -901,10 +900,12 @@ class WorkspaceRecord:
         client_id: str,
         *,
         reuse_startup_session: bool = True,
-        creation_scope: str | None = None,
+        creation_scope: Literal["chat", "project"],
     ) -> str:
         if self._closed:
             raise service_error("admission_closed", "Workspace admission is closed.")
+        if creation_scope not in {"chat", "project"}:
+            raise ValueError("Session creation scope must be chat or project")
         startup_session_id = (
             None if self._restore_result is None else self._restore_result.session_id
         )
@@ -919,9 +920,8 @@ class WorkspaceRecord:
             loop_state = await self._create_loop(None, client_id=client_id)
             is_draft = True
         session_id = loop_state.loop.session.session_id
-        if is_draft and creation_scope is not None:
-            loop_state.loop.session.update_metadata(creation_scope=creation_scope)
         if is_draft:
+            loop_state.loop.session.update_metadata(creation_scope=creation_scope)
             self._draft_clients[session_id] = client_id
         return session_id
 
@@ -1291,7 +1291,6 @@ class WorkspaceRecord:
         cursor: str | None = None,
         limit: int | None = None,
         creation_scope: str | None = None,
-        legacy_creation_scope: str | None = None,
     ) -> dict[str, object]:
         """Return a filtered page of durable foreground Session metadata."""
         if limit is not None and (limit < 1 or limit > _MAX_SESSION_PAGE_SIZE):
@@ -1331,7 +1330,7 @@ class WorkspaceRecord:
                     continue
             summary = self._session_summary(session, client_id)
             if creation_scope is not None:
-                session_scope = session.metadata.get("creation_scope", legacy_creation_scope)
+                session_scope = session.metadata.get("creation_scope")
                 if session_scope != creation_scope:
                     continue
             session_title = cast(str, summary["title"])
@@ -2743,16 +2742,8 @@ class AgentService:
         self._global_reconnect_task = asyncio.create_task(self._stop_after_grace())
 
     @property
-    def workspaces(self) -> Mapping[str, WorkspaceRecord]:
-        return self._workspaces
-
-    @property
     def workspace_resources(self) -> WorkspaceResourceManager:
         return self._workspace_resources
-
-    @property
-    def schedule_dispatcher(self) -> ScheduleDispatcher:
-        return self._workspace_resources.dispatcher
 
     @property
     def skill_loader(self) -> SkillLoader:
@@ -2809,6 +2800,7 @@ class AgentService:
         if self._mcp_manager is None:
             self._mcp_manager = MCPRuntimeManager(
                 None,
+                transport="streamable-http",
                 built_in_names=BUILT_IN_TOOL_NAMES,
             )
 
@@ -3908,7 +3900,6 @@ class AgentService:
                     cursor=cursor,
                     limit=limit,
                     creation_scope="project",
-                    legacy_creation_scope="project",
                 ),
             )
 
@@ -4209,14 +4200,17 @@ class AgentService:
             session_id = client.current_session_id
         created = session_id is None
         if session_id is None:
-            creation_scope = "project" if project_id is not None else None
-            reuse_startup_session = project_id is None and client.kind != "web" and not create_new
-            if (
-                project_id is None
-                and client.kind == "web"
-                and self.conversation_workspaces.contains(workspace.workspace_path)
+            creation_scope: Literal["chat", "project"] = "chat"
+            if project_id is not None or (
+                client.kind == "cli"
+                and any(
+                    os.path.normcase(str(record.path))
+                    == os.path.normcase(str(workspace.workspace_path))
+                    for record in self.projects.list()
+                )
             ):
-                creation_scope = "chat"
+                creation_scope = "project"
+            reuse_startup_session = project_id is None and client.kind != "web" and not create_new
             session_id = await workspace.create_draft(
                 client.client_id,
                 reuse_startup_session=reuse_startup_session,
@@ -4656,11 +4650,15 @@ class AgentService:
     async def create_session(self, client_id: str, workspace_id: str) -> dict[str, object]:
         client = self._require_client(client_id)
         workspace = self.workspace(workspace_id)
-        creation_scope = (
-            "chat"
-            if client.kind == "web"
-            and self.conversation_workspaces.contains(workspace.workspace_path)
-            else None
+        creation_scope: Literal["chat", "project"] = (
+            "project"
+            if client.kind == "cli"
+            and any(
+                os.path.normcase(str(record.path))
+                == os.path.normcase(str(workspace.workspace_path))
+                for record in self.projects.list()
+            )
+            else "chat"
         )
         session_id = await workspace.create_draft(
             client_id, reuse_startup_session=client.kind != "web", creation_scope=creation_scope
@@ -4755,25 +4753,14 @@ class AgentService:
         workspace = self.workspace(workspace_id)
         client.attached_workspaces.add(workspace_id)
         creation_scope: str | None = None
-        legacy_creation_scope: str | None = None
         if client.kind == "web" and self.conversation_workspaces.contains(workspace.workspace_path):
             creation_scope = "chat"
-            workspace_key = os.path.normcase(str(workspace.workspace_path.resolve(strict=False)))
-            legacy_creation_scope = (
-                "project"
-                if any(
-                    os.path.normcase(str(record.path.resolve(strict=False))) == workspace_key
-                    for record in self.projects.list()
-                )
-                else "chat"
-            )
         return await workspace.list_sessions_page(
             client_id,
             title=title,
             cursor=cursor,
             limit=limit,
             creation_scope=creation_scope,
-            legacy_creation_scope=legacy_creation_scope,
         )
 
     def list_chat_sessions_page(
@@ -4802,12 +4789,6 @@ class AgentService:
         cursor_key = None if cursor is None else _decode_chat_session_cursor(cursor, title_filter)
         try:
             directories = self.conversation_workspaces.list()
-            project_paths = {
-                os.path.normcase(str(record.path.resolve(strict=False)))
-                for record in self.projects.list()
-            }
-        except ProjectCatalogError as error:
-            raise _project_catalog_service_error(error) from error
         except ConversationWorkspaceCatalogError as error:
             raise service_error(
                 "persistence_error",
@@ -4823,7 +4804,6 @@ class AgentService:
         ] = []
         unavailable_directories: list[str] = []
         for path in directories:
-            directory_identity = os.path.normcase(str(path.resolve(strict=False)))
             state = WorkspaceState(path)
             try:
                 sessions_directory = state.existing_sessions_directory()
@@ -4849,10 +4829,7 @@ class AgentService:
                     )
                 except (OSError, UnicodeError, ValueError, RuntimeError):
                     continue
-                if "creation_scope" in metadata:
-                    if metadata.get("creation_scope") != "chat":
-                        continue
-                elif directory_identity in project_paths:
+                if metadata.get("creation_scope") != "chat":
                     continue
                 session_title = metadata.get("title", "Untitled session")
                 if not isinstance(session_title, str):
@@ -5385,7 +5362,6 @@ class AgentService:
             "restore/result",
             "restore/cancel",
             "restore/acknowledge",
-            "restore/acknowledge-failure",
         }
         requires_restore_claim = action in restore_actions or (
             action == "dispatch" and payload.get("command") == "/restore"
@@ -5472,7 +5448,7 @@ class AgentService:
             result = await dispatcher.restore_result()
         elif action == "restore/cancel":
             result = await dispatcher.restore_cancel()
-        elif action in {"restore/acknowledge", "restore/acknowledge-failure"}:
+        elif action == "restore/acknowledge":
             result = await dispatcher.restore_acknowledge_failure()
         else:
             raise service_error("validation_error", "Unsupported management action.", status=422)

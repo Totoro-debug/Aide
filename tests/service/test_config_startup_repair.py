@@ -104,7 +104,7 @@ async def test_missing_configuration_keeps_service_online_but_blocks_runtime(
     assert body["configuration"]["state"] == "missing"
     assert body["application"]["status"] == "pending-repair"
     assert not (service.agent_home.path / "config.toml").exists()
-    assert service.workspaces == {}
+    assert service._workspaces == {}
     with pytest.raises(ServiceError) as blocked:
         await service.attach_workspace(headers["X-Omni-Client"], project)
     assert blocked.value.code == "config_invalid"

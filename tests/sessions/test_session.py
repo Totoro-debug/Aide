@@ -93,9 +93,11 @@ def _assert_local_timestamp(value: Any) -> None:
     assert parsed.utcoffset() == datetime.now().astimezone().utcoffset()
 
 
-def test_legacy_reasoning_effort_loads_and_restores_as_mid_without_read_time_writes(
+@pytest.mark.parametrize("legacy_location", ["metadata", "restore-anchor"])
+def test_unsupported_reasoning_effort_is_rejected_without_writes(
     agent_home: Path,
     workspace: Path,
+    legacy_location: str,
 ) -> None:
     state = _state(workspace, agent_home)
     header = _header()
@@ -119,28 +121,17 @@ def test_legacy_reasoning_effort_loads_and_restores_as_mid_without_read_time_wri
         "restore_run_token": str(RESTORE_TOKENS[0]),
         "restore_before": {"metadata": copy.deepcopy(metadata), "last_compacted": 0},
     }
+    if legacy_location == "restore-anchor":
+        metadata["model_configuration"]["reasoning_effort"] = "mid"
     path = _write_jsonl(state, [header, message])
     before = path.read_bytes()
     before_modified = path.stat().st_mtime_ns
 
-    session = Session.load(state, SESSION_ID)
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        Session.load(state, SESSION_ID)
 
-    assert session.model_configuration is not None
-    assert session.model_configuration.reasoning_effort == "mid"
-    assert session.model_configuration_version == 1
-    assert session.messages[0]["restore_before"]["metadata"]["model_configuration"][
-        "reasoning_effort"
-    ] == "mid"
     assert path.read_bytes() == before
     assert path.stat().st_mtime_ns == before_modified
-
-    session.restore_before_durably(1)
-
-    assert session.model_configuration.reasoning_effort == "mid"
-    assert session.model_configuration_version == 1
-    assert session.messages == []
-    assert b'"medium"' not in path.read_bytes()
-    assert Session.load(state, SESSION_ID).model_configuration == session.model_configuration
 
 
 def test_create_starts_a_memory_only_session_with_private_identity_generation(

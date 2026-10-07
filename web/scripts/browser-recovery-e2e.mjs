@@ -137,9 +137,15 @@ export default async function browserRecoveryAcceptance({ page: initialPage, con
       await expect(input()).toBeEnabled();
       if (draft) {
         await page.locator("#composer-model-trigger").click();
-        await model().selectOption(JSON.stringify(["primary", "small-model"]));
+        const selectedModel = JSON.stringify(["primary", "small-model"]);
+        await model().selectOption(selectedModel);
+        await expect(page.locator("#composer-model-menu")).toBeHidden();
+        await expect(model()).toHaveValue(selectedModel);
+        await expect(model()).toBeEnabled();
         await page.locator("#composer-model-trigger").click();
         await effort().selectOption("xhigh");
+        await expect(page.locator("#composer-model-menu")).toBeHidden();
+        await expect(effort()).toHaveValue("xhigh");
         await expect(effort()).toBeEnabled();
       }
       const text = `Unsent ${scope} ${draft ? "draft" : "history"}\n逐字恢复 😀`;

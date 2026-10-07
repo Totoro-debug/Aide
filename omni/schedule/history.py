@@ -11,7 +11,6 @@ from typing import Any, cast
 
 from omni.agent.session.session import Session, SessionStoragePartition
 from omni.agent.workspace_state import WorkspaceState
-from omni.utils.host_filesystem import HOST_FILESYSTEM
 
 _DEFAULT_LIMIT = 20
 _MAX_LIMIT = 100
@@ -139,63 +138,11 @@ def _load_messages(workspace_state: WorkspaceState, session_id: str) -> list[dic
         )
     except FileNotFoundError:
         return []
-    except (TypeError, UnicodeError, ValueError):
-        try:
-            return _load_legacy_messages(workspace_state, session_id)
-        except FileNotFoundError:
-            return []
-        except (OSError, TypeError, UnicodeError, ValueError) as error:
-            raise ScheduleHistoryPersistenceError(
-                "Schedule history could not be loaded safely."
-            ) from error
+    except (OSError, TypeError, UnicodeError, ValueError) as error:
+        raise ScheduleHistoryPersistenceError(
+            "Schedule history could not be loaded safely."
+        ) from error
     return copy.deepcopy(session.messages)
-
-
-def _load_legacy_messages(workspace_state: WorkspaceState, session_id: str) -> list[dict[str, Any]]:
-    directory = workspace_state.existing_schedule_sessions_directory()
-    if directory is None:
-        return []
-    path = directory / f"{session_id}.jsonl"
-    owned_path = HOST_FILESYSTEM.require_owned_regular_file(path, within=directory)
-    content = owned_path.read_bytes()
-    if not content.endswith(b"\n"):
-        raise ValueError("Schedule Session JSONL must end with a newline")
-    records: list[dict[str, Any]] = []
-    for line in content.splitlines(keepends=False):
-        if not line:
-            raise ValueError("Schedule Session JSONL contains an incomplete record")
-        try:
-            record = json.loads(line.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ValueError("Schedule Session JSONL contains invalid JSON") from error
-        if not isinstance(record, dict):
-            raise ValueError("Schedule Session JSONL records must be objects")
-        records.append(cast(dict[str, Any], record))
-    if not records or records[0].get("session_id") != session_id:
-        raise ValueError("Schedule Session metadata ID does not match its file name")
-    records = records[1:]
-    return [_legacy_message(record) for record in records]
-
-
-def _legacy_message(record: dict[str, Any]) -> dict[str, Any]:
-    if record.get("role") not in ("user", "assistant", "tool") or not isinstance(
-        record.get("content"), str
-    ):
-        raise ValueError("Schedule history contains a malformed message")
-    allowed = {
-        "role",
-        "content",
-        "timestamp",
-        "status",
-        "error",
-        "tool_calls",
-        "tool_call_id",
-        "name",
-        "artifact",
-        "context_usage",
-        "token_usage",
-    }
-    return {key: copy.deepcopy(value) for key, value in record.items() if key in allowed}
 
 
 def _group_messages(messages: list[dict[str, Any]]) -> list[_HistoryGroup]:

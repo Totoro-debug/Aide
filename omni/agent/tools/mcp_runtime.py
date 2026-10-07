@@ -8,12 +8,12 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol
 
 from loguru import logger
 
 from omni.agent.tools.mcp import MCPServerConnection, MCPTool
-from omni.config.config import MCPServerConfiguration
+from omni.config.config import MCPServerConfiguration, MCPTransport
 from omni.utils.async_tasks import await_task_preserving_cancellation
 
 _MAX_MODEL_TOOL_NAME_LENGTH = 64
@@ -44,8 +44,7 @@ class MCPConnectionAdapter(Protocol):
     async def close(self) -> None: ...
 
 
-type MCPConnectionFactory = Callable[[MCPServerConfiguration, Path], MCPConnectionAdapter]
-type _ScopedMCPConnectionFactory = Callable[
+type MCPConnectionFactory = Callable[
     [MCPServerConfiguration, Path | None], MCPConnectionAdapter
 ]
 
@@ -127,33 +126,27 @@ def _skipped_tool_count(connection: MCPConnectionAdapter) -> int:
 class MCPRuntimeManager:
     """Own MCP connections for one runtime scope and prepare tool snapshots.
 
-    A manager with no Workspace owns the service-global HTTP connections. The
-    historical Path-based form continues to own all configured transports and
-    is retained for direct callers while Workspace Runtime migration is staged.
+    HTTP connections belong to the service and have no Workspace. Stdio
+    connections belong to one explicit Workspace.
     """
 
     def __init__(
         self,
         workspace: Path | None,
         *,
-        connection_factory: MCPConnectionFactory | _ScopedMCPConnectionFactory | None = None,
+        connection_factory: MCPConnectionFactory | None = None,
         built_in_names: Iterable[str] = (),
-        _transports: Iterable[str] | None = None,
+        transport: MCPTransport,
     ) -> None:
         if workspace is not None and not isinstance(workspace, Path):
             raise TypeError("MCP Runtime Manager requires a Path workspace or None")
         self._workspace = workspace
-        self._connection_factory = cast(
-            _ScopedMCPConnectionFactory,
-            connection_factory or _default_connection_factory,
-        )
-        if _transports is None:
-            transports = None if workspace is not None else frozenset({"streamable-http"})
-        else:
-            transports = frozenset(_transports)
-            if not transports.issubset({"stdio", "streamable-http"}):
-                raise ValueError("MCP Runtime Manager transport selection is invalid")
-        self._transports = transports
+        if transport not in {"stdio", "streamable-http"}:
+            raise ValueError("MCP Runtime Manager transport selection is invalid")
+        if (transport == "stdio") != (workspace is not None):
+            raise ValueError("Stdio requires a Workspace; HTTP requires no Workspace")
+        self._connection_factory = connection_factory or _default_connection_factory
+        self._transport = transport
         names = list(built_in_names)
         if any(not isinstance(name, str) or not name for name in names):
             raise ValueError("Built-in Tool names must be non-empty strings")
@@ -175,7 +168,7 @@ class MCPRuntimeManager:
         configuration: Mapping[str, MCPServerConfiguration],
     ) -> MCPStartupReport:
         """Connect enabled Servers and publish the startup snapshot."""
-        normalized = _select_transports(_normalize_configuration(configuration), self._transports)
+        normalized = _select_transport(_normalize_configuration(configuration), self._transport)
         if self._started or self._connections:
             await self.close()
 
@@ -358,7 +351,7 @@ class MCPWorkspaceRuntimeManager:
         workspace: Path,
         *,
         shared_runtime: MCPRuntimeManager,
-        connection_factory: MCPConnectionFactory | _ScopedMCPConnectionFactory | None = None,
+        connection_factory: MCPConnectionFactory | None = None,
         built_in_names: Iterable[str] = (),
     ) -> None:
         if not isinstance(workspace, Path):
@@ -370,7 +363,7 @@ class MCPWorkspaceRuntimeManager:
             workspace,
             connection_factory=connection_factory,
             built_in_names=built_in_names,
-            _transports=("stdio",),
+            transport="stdio",
         )
         self._snapshot: MCPToolSnapshot = ()
         self._startup_report: MCPStartupReport | None = None
@@ -478,16 +471,14 @@ def _normalize_configuration(
     return normalized
 
 
-def _select_transports(
+def _select_transport(
     configuration: Mapping[str, MCPServerConfiguration],
-    transports: frozenset[str] | None,
+    transport: MCPTransport,
 ) -> dict[str, MCPServerConfiguration]:
-    if transports is None:
-        return dict(configuration)
     return {
         mcp_name: server_configuration
         for mcp_name, server_configuration in configuration.items()
-        if server_configuration.transport in transports
+        if server_configuration.transport == transport
     }
 
 

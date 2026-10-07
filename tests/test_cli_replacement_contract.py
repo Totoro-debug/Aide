@@ -59,7 +59,7 @@ async def test_cli_session_selection_preserves_workspace_resources_and_client_se
             assert selection.permission_selection == permission
             effort = await client.management_dispatcher.dispatch("/effort")
             assert effort.effort_selection == "max"
-            await client.submit_input("session-b")
+            await client.submit_user_input("session-b")
             assert "answer from session B" in await _client_output(client)
             loaded = Session.load(workspace.workspace_state, target)
             assert loaded.messages[0]["content"] == "Durable target input"
@@ -97,7 +97,7 @@ async def test_cli_failed_resume_leaves_current_claim_and_management_usable(
             assert client.session_id == previous
             status = await client.management_dispatcher.dispatch("/status")
             assert status.handled and status.status_view is not None
-            await client.submit_input("session-b")
+            await client.submit_user_input("session-b")
             assert "answer from session B" in await _client_output(client)
         finally:
             await client.close()

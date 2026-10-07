@@ -38,7 +38,7 @@ async def test_external_valid_file_requires_restart_after_invalid_startup(
             "active_revision": None,
             "restart_required": True,
         }
-        assert service.workspaces == {} and not service.configuration_ready
+        assert service._workspaces == {} and not service.configuration_ready
         with pytest.raises(ServiceError) as blocked:
             await service.attach_workspace(client.client_id, project)
         assert blocked.value.code == "config_invalid"
@@ -48,7 +48,7 @@ async def test_external_valid_file_requires_restart_after_invalid_startup(
     restarted = AgentService(home, reconnect_timeout=3600)
     try:
         await restarted.start()
-        assert restarted.configuration_ready and len(restarted.workspaces) == 1
+        assert restarted.configuration_ready and len(restarted._workspaces) == 1
         assert (
             cast(dict[str, object], restarted.config_view()["application"])["restart_required"]
             is False

@@ -77,11 +77,6 @@ def _print_error_info(error: ErrorInfo | ServiceStartupError | ServiceError) -> 
     )
 
 
-def _print_error(error: ErrorInfo, path: object) -> None:
-    _print_error_info(error)
-    console.print(f"Path: {path}", markup=False, highlight=False, soft_wrap=True)
-
-
 def _approved_error_info(
     error: Exception,
     *,

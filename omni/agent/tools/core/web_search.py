@@ -63,7 +63,7 @@ def _format_results(results: list[Mapping[str, object]]) -> str:
     blocks: list[str] = []
     for index, result in enumerate(results, start=1):
         title = _collapse_whitespace(result.get("title"))
-        url = _url_value(result)
+        url = _first_text(result, "href", "url").strip()
         snippet = _collapse_whitespace(_first_text(result, "body", "snippet"))
         blocks.append(f"{index}. Title: {title}\n   URL: {url}\n   Snippet: {snippet}")
     return "\n\n".join(blocks)
@@ -71,11 +71,6 @@ def _format_results(results: list[Mapping[str, object]]) -> str:
 
 def _collapse_whitespace(value: object) -> str:
     return " ".join(value.split()) if isinstance(value, str) else ""
-
-
-def _url_value(result: Mapping[str, object]) -> str:
-    value = _first_text(result, "href", "url")
-    return value.strip()
 
 
 def _first_text(result: Mapping[str, object], *names: str) -> str:

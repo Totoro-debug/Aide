@@ -9,7 +9,7 @@ import pytest
 from loguru import logger
 
 from omni.agent.tools.mcp import MCPTool
-from omni.agent.tools.mcp_runtime import MCPRuntimeManager
+from omni.agent.tools.mcp_runtime import MCPRuntimeManager, MCPWorkspaceRuntimeManager
 from omni.config.config import MCPServerConfiguration
 from omni.logging.process import configure_process_logging
 from omni.terminal.process_entry import run
@@ -105,8 +105,14 @@ async def test_mcp_process_logging_exposes_only_sanitized_failure_metadata(
             headers={"Authorization": "Bearer header-secret"},
         ),
     }
-    manager = MCPRuntimeManager(
+    shared = MCPRuntimeManager(
+        None,
+        transport="streamable-http",
+        connection_factory=lambda configuration, workspace: FailingConnection(),
+    )
+    manager = MCPWorkspaceRuntimeManager(
         tmp_path,
+        shared_runtime=shared,
         connection_factory=lambda configuration, workspace: FailingConnection(),
     )
     configure_process_logging()
@@ -118,10 +124,12 @@ async def test_mcp_process_logging_exposes_only_sanitized_failure_metadata(
         diagnose=False,
     )
     try:
+        await shared.start(configurations)
         report = await manager.start(configurations)
     finally:
         logger.remove(capture_id)
         await manager.close()
+        await shared.close()
 
     process_output = capsys.readouterr().err
     assert sorted(process_output.splitlines()) == [

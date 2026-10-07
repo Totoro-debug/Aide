@@ -97,7 +97,7 @@ persistence remain part of the integration contract.
 For P configured Providers used by Runs, H enabled HTTP MCP Servers, S enabled
 stdio MCP Servers, and W active Workspaces, successful stable initialization
 creates P Provider clients, H HTTP connections, and W * S stdio connections.
-Opening more Sessions does not create additional clients or connections. There
+MCP managers select exactly one transport explicitly: service-global HTTP accepts no Workspace, and stdio requires one Workspace. Their connection factories receive `Path | None` under that same contract. Opening more Sessions does not create additional clients or connections. There
 is one current global Skill snapshot and one shared Built-in Tool catalog;
 workspace-specific stdio discovery remains scoped to its Workspace.
 

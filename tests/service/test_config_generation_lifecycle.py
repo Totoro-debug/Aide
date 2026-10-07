@@ -44,7 +44,7 @@ async def test_external_changes_preserve_resources_and_admission(
         later_path.mkdir()
         later = await service.attach_workspace(client.client_id, later_path)
         assert later.configuration is startup
-        session = await later.create_draft(client.client_id)
+        session = await later.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, later.workspace_id, session)
         before = later.session_snapshot(session)
         assert (await service.claim(client.client_id, later.workspace_id, session))[

@@ -1033,9 +1033,6 @@ class ServiceClient:
             request_id=request_id,
         )
 
-    async def submit_input(self, text: str) -> dict[str, object]:
-        return await self.submit_user_input(text)
-
     async def recall_queued_inputs(self) -> dict[str, object]:
         return await self._command(
             "recall_queued_inputs",
@@ -1044,9 +1041,6 @@ class ServiceClient:
             claim_version=self.claim_version,
             payload={},
         )
-
-    async def claim_session(self, session_id: str) -> dict[str, object]:
-        return await self.open_conversation(session_id=session_id)
 
     async def open_conversation(
         self,
@@ -1149,9 +1143,6 @@ class ServiceClient:
         )
         self.claim_version = 0
         self.claim_credential = ""
-
-    async def switch_session(self, session_id: str) -> None:
-        await self.claim_session(session_id)
 
     async def cancel_run(self, run_id: str) -> None:
         await self._command(

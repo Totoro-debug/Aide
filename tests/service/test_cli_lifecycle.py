@@ -97,14 +97,14 @@ async def test_cli_disconnect_leaves_other_client_runtime_and_schedule_alive(
             assert workspace.resources is runtime
             assert workspace.schedule_service is schedule
             assert service.state == "ready"
-            await second.submit_input("session-b")
+            await second.submit_user_input("session-b")
             assert "answer from session B" in await _client_output(second)
             status = await second.management_dispatcher.dispatch("/status")
             assert status.status_view is not None
         finally:
             await second.close()
-    assert not service.workspaces or all(
-        workspace._closed for workspace in service.workspaces.values()
+    assert not service._workspaces or all(
+        workspace._closed for workspace in service._workspaces.values()
     )
     assert not service.workspace_resources.resources
 

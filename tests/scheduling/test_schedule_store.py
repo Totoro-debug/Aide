@@ -189,70 +189,23 @@ async def test_write_failure_leaves_the_last_complete_document_for_restart(
     assert await restarted.snapshot() == (initial,)
 
 
-@pytest.mark.asyncio
-async def test_exact_old_schema_derives_title_and_rewrites_on_next_successful_mutation(
-    workspace: Path,
-) -> None:
+@pytest.mark.parametrize("source", ["user", "system"])
+def test_old_schema_is_rejected_without_writes(workspace: Path, source: str) -> None:
     state = _state(workspace)
-    legacy = _job(message="First line\nSecond line").to_dict()
-    legacy.pop("title")
-    state.schedule_path.write_text(json.dumps([legacy], separators=(",", ":")), encoding="utf-8")
-
-    store = WorkspaceScheduleStore(state)
-
-    assert (await store.snapshot())[0].title == "First line"
-    assert json.loads(state.schedule_path.read_text(encoding="utf-8")) == [legacy]
-
-    await store.add_user_job(_job(OTHER_ID, message="New job"))
-
-    persisted = json.loads(state.schedule_path.read_text(encoding="utf-8"))
-    assert [item["title"] for item in persisted] == ["First line", "New job"]
-    assert all(set(item) == set(_job().to_dict()) for item in persisted)
-    restarted = WorkspaceScheduleStore(state)
-    assert [job.title for job in await restarted.snapshot()] == ["First line", "New job"]
-
-
-@pytest.mark.asyncio
-async def test_exact_old_dream_schema_uses_the_fixed_title(workspace: Path) -> None:
-    state = _state(workspace)
-    legacy = _job(
-        SYSTEM_ID,
-        source="system",
-        message="Unstable internal message.",
-    ).to_dict()
-    legacy.pop("title")
-    state.schedule_path.write_text(json.dumps([legacy], separators=(",", ":")), encoding="utf-8")
-
-    store = WorkspaceScheduleStore(state)
-
-    assert (await store.snapshot())[0].title == "Dream"
-
-
-@pytest.mark.asyncio
-async def test_failed_mutation_does_not_claim_old_schema_migration(
-    workspace: Path,
-) -> None:
-    state = _state(workspace)
-    legacy = _job(message="Legacy title").to_dict()
+    legacy = _job(SYSTEM_ID if source == "system" else JOB_ID, source=source).to_dict()
     legacy.pop("title")
     document = json.dumps([legacy], separators=(",", ":"))
     state.schedule_path.write_text(document, encoding="utf-8")
+    writes: list[str] = []
 
-    def fail_replace(path: Path, content: str) -> None:
-        del path, content
-        raise OSError("injected replacement failure")
+    def record_replace(path: Path, content: str) -> None:
+        writes.append(content)
 
-    store = WorkspaceScheduleStore(state, replace_text=fail_replace)
-    with pytest.raises(OSError, match="injected replacement failure"):
-        await store.commit_terminal(JOB_ID, finished_at_ms=20, status="ok")
+    with pytest.raises(ScheduleStateError):
+        WorkspaceScheduleStore(state, replace_text=record_replace)
 
+    assert writes == []
     assert state.schedule_path.read_text(encoding="utf-8") == document
-    assert (await store.snapshot())[0].state == ScheduleJobState()
-
-    restarted = WorkspaceScheduleStore(state)
-    await restarted.add_user_job(_job(OTHER_ID, message="Migration retry"))
-    persisted = json.loads(state.schedule_path.read_text(encoding="utf-8"))
-    assert [item["title"] for item in persisted] == ["Legacy title", "Migration retry"]
 
 
 @pytest.mark.asyncio

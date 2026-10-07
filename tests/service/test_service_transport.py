@@ -140,6 +140,46 @@ async def _persist_session(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["cli", "web"])
+@pytest.mark.parametrize("registered", [False, True])
+@pytest.mark.parametrize("entry", ["create", "open"])
+async def test_all_foreground_creation_entries_record_explicit_scope(
+    tmp_path: Path,
+    kind: str,
+    registered: bool,
+    entry: str,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    if registered:
+        service.projects.register(directory)
+    await service.start()
+    try:
+        client = await service.register_client(kind)
+        workspace = await service.attach_workspace(client.client_id, directory)
+        if entry == "create":
+            result = await service.create_session(client.client_id, workspace.workspace_id)
+        else:
+            result = cast(
+                dict[str, object],
+                await service.open_conversation(
+                    client.client_id,
+                    workspace_id=workspace.workspace_id,
+                    create_new=True,
+                ),
+            )
+        session_id = cast(str, result["session_id"])
+        session = workspace._loops[session_id].loop.session
+        expected = "project" if kind == "cli" and registered else "chat"
+        assert session.metadata["creation_scope"] == expected
+        assert not (directory / ".omni" / "sessions" / f"{session_id}.jsonl").exists()
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
 async def test_chat_draft_does_not_reuse_or_reclassify_restored_project_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -162,7 +202,7 @@ async def test_chat_draft_does_not_reuse_or_reclassify_restored_project_history(
     await service.start()
     try:
         client = await service.register_client("web")
-        workspace = next(iter(service.workspaces.values()))
+        workspace = next(iter(service._workspaces.values()))
         monkeypatch.setattr(workspace, "_restore_result", SimpleNamespace(session_id=restored_id))
         created = await service.create_session(client.client_id, workspace.workspace_id)
         draft_id = cast(str, created["session_id"])
@@ -327,16 +367,28 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
         created_at=now + timedelta(seconds=2),
         content="legacy project body",
     )
-    expected_legacy_chat_id = await _persist_session(
+    expected_other_chat_id = await _persist_session(
         old_chat,
         home=home,
-        title="Legacy chat",
+        title="Other chat",
         created_at=now + timedelta(seconds=3),
-        content="legacy chat body",
+        content="other chat body",
+        creation_scope="chat",
     )
-    legacy_chat_path = old_chat / ".omni" / "sessions" / f"{expected_legacy_chat_id}.jsonl"
+    legacy_chat_path = old_chat / ".omni" / "sessions" / f"{expected_other_chat_id}.jsonl"
     legacy_chat_header = legacy_chat_path.read_bytes().split(b"\n", 1)[0]
     legacy_chat_path.write_bytes(legacy_chat_header + b"\nnot-loaded-by-history-listing\n")
+    unscoped_id = await _persist_session(
+        old_chat,
+        home=home,
+        title="Unscoped",
+        created_at=now + timedelta(seconds=4),
+        content="unscoped body",
+    )
+    unscoped_path = old_chat / ".omni" / "sessions" / f"{unscoped_id}.jsonl"
+    unscoped_before = unscoped_path.read_bytes()
+    legacy_project_path = shared / ".omni" / "sessions" / f"{expected_legacy_project_id}.jsonl"
+    legacy_project_before = legacy_project_path.read_bytes()
     token = create_credential(home)
     server = TestServer(create_app(service))
     await service.start()
@@ -378,7 +430,7 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
                 filtered_page = await response.json()
 
         sessions = first_page["sessions"] + second_page["sessions"]
-        assert [item["id"] for item in sessions] == [expected_legacy_chat_id, expected_chat_id]
+        assert [item["id"] for item in sessions] == [expected_other_chat_id, expected_chat_id]
         assert filtered_page["sessions"] == second_page["sessions"]
         assert filtered_page["next_cursor"] is None
         for item, expected_time in zip(sessions, (now + timedelta(seconds=3), now), strict=True):
@@ -388,20 +440,36 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
         assert second_page["unavailable_directories"] == []
         assert {item["id"] for item in sessions} == {
             expected_chat_id,
-            expected_legacy_chat_id,
+            expected_other_chat_id,
         }
         assert {item["title"] for item in sessions} == {
             "Chat scoped",
-            "Legacy chat",
+            "Other chat",
         }
         assert {item["id"] for item in project_page["sessions"]} == {
             expected_project_id,
-            expected_legacy_project_id,
         }
         assert {item["title"] for item in project_page["sessions"]} == {
             "Project scoped",
-            "Legacy project",
         }
+        assert unscoped_path.read_bytes() == unscoped_before
+        assert legacy_project_path.read_bytes() == legacy_project_before
+        service.projects.remove(project_id)
+        chat_page = service.list_chat_sessions_page(client.client_id)
+        assert [item["id"] for item in cast(list[dict[str, object]], chat_page["sessions"])] == [
+            expected_other_chat_id,
+            expected_chat_id,
+        ]
+        reregistered = service.projects.register(shared)
+        _, _, reregistered_page = await service.list_project_sessions_page(
+            client.client_id,
+            reregistered.project_id,
+        )
+        assert [
+            item["id"] for item in cast(list[dict[str, object]], reregistered_page["sessions"])
+        ] == [expected_project_id]
+        assert unscoped_path.read_bytes() == unscoped_before
+        assert legacy_project_path.read_bytes() == legacy_project_before
         assert all("messages" not in item for item in sessions)
         assert any(item["directory"] == str(old_chat.resolve()) for item in sessions)
         assert all(
@@ -617,7 +685,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
         assert effort.published_effort == "high"
 
         with pytest.raises(ServiceError) as raised:
-            await second.claim_session(first.session_id)
+            await second.open_conversation(session_id=first.session_id)
         assert raised.value.code == "session_claimed"
 
         async with aiohttp.ClientSession() as http:
@@ -907,6 +975,7 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
         home=home,
         title="Older project session",
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        creation_scope="project",
         content="project-only older content",
     )
     newer_id = await _persist_session(
@@ -914,6 +983,7 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
         home=home,
         title="Newer project session",
         created_at=datetime(2026, 2, 1, 9, tzinfo=UTC),
+        creation_scope="project",
         content="project-only newer content",
     )
     offset_id = await _persist_session(
@@ -921,6 +991,7 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
         home=home,
         title="Offset project session",
         created_at=datetime(2026, 2, 1, 10, tzinfo=timezone(timedelta(hours=8))),
+        creation_scope="project",
         content="project-only offset content",
     )
     other_id = await _persist_session(
@@ -928,6 +999,7 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
         home=home,
         title="Other project session",
         created_at=datetime(2026, 3, 1, tzinfo=UTC),
+        creation_scope="project",
         content="other-project content",
     )
     project_state = WorkspaceState(project)
@@ -1103,6 +1175,7 @@ async def test_session_page_limit_preserves_optional_and_validation_contract(
             title=f"Session {index}",
             created_at=datetime(2026, 2, index + 1, tzinfo=UTC),
             content="Private history",
+            creation_scope="project",
         )
     service = AgentService(home, ConfigLoader(home).load_for_startup())
     token = create_credential(home)
@@ -1281,7 +1354,7 @@ async def test_workspace_session_rename_requires_claim_and_persists_metadata_ver
             "X-Omni-Client": client.client_id,
         }
         async with aiohttp.ClientSession() as http:
-            await client.claim_session(session_id)
+            await client.open_conversation(session_id=session_id)
             claim_version = client.claim_version
             claim_credential = client.claim_credential
             claim_headers = {
@@ -1371,7 +1444,7 @@ async def test_workspace_session_rename_requires_claim_and_persists_metadata_ver
                 assert response.status == 200
                 draft = await response.json()
             draft_id = cast(str, draft["session_id"])
-            await client.claim_session(draft_id)
+            await client.open_conversation(session_id=draft_id)
             draft_claim_version = client.claim_version
             draft_claim_credential = client.claim_credential
             async with http.patch(
@@ -1451,7 +1524,7 @@ async def test_workspace_session_delete_requires_confirmation_and_cleans_only_se
     client: ServiceClient | None = None
     try:
         client = await ServiceClient.connect_or_start(home, workspace, port=port)
-        await client.claim_session(target_id)
+        await client.open_conversation(session_id=target_id)
         headers = {
             "Authorization": f"Bearer {client.token}",
             "X-Omni-CSRF": client.token,
@@ -1531,7 +1604,7 @@ async def test_project_session_delete_returns_project_identity(
     client: ServiceClient | None = None
     try:
         client = await ServiceClient.connect_or_start(home, project, port=port)
-        await client.claim_session(session_id)
+        await client.open_conversation(session_id=session_id)
         headers = {
             "Authorization": f"Bearer {client.token}",
             "X-Omni-CSRF": client.token,
@@ -1583,7 +1656,7 @@ async def test_session_delete_requires_the_current_client_claim(
     try:
         owner = await ServiceClient.connect_or_start(home, workspace, port=port)
         other = await ServiceClient.connect_or_start(home, workspace, port=port)
-        await owner.claim_session(session_id)
+        await owner.open_conversation(session_id=session_id)
         headers = {
             "Authorization": f"Bearer {other.token}",
             "X-Omni-CSRF": other.token,
@@ -1630,7 +1703,7 @@ async def test_web_draft_stays_empty_when_workspace_has_startup_restore(
     await service.start()
     try:
         client = await service.register_client("web")
-        workspace = next(iter(service.workspaces.values()))
+        workspace = next(iter(service._workspaces.values()))
         from types import SimpleNamespace
         monkeypatch.setattr(workspace, "_restore_result", SimpleNamespace(session_id=restored_id))
         created = await service.create_project_session(client.client_id, record.project_id)
@@ -1901,7 +1974,7 @@ async def test_cli_restore_refreshes_claim_and_conversation_projection(tmp_path:
     client: ServiceClient | None = None
     try:
         client = await ServiceClient.connect_or_start(home, workspace, port=port)
-        await client.switch_session(session.session_id)
+        await client.open_conversation(session_id=session.session_id)
         original_version = client.claim_version
         listing = await client.management_dispatcher.dispatch("/restore")
         assert listing.restore_listing is not None

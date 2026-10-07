@@ -7,7 +7,6 @@ import hmac
 import json
 import os
 import secrets
-import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -97,24 +96,8 @@ def read_discovery(agent_home: AgentHome) -> ServiceDiscovery | None:
 def write_discovery(agent_home: AgentHome, discovery: ServiceDiscovery) -> None:
     agent_home.initialize()
     target = discovery_path(agent_home)
-    fd, temporary_name = tempfile.mkstemp(
-        prefix=f".{target.name}.",
-        suffix=".tmp",
-        dir=target.parent,
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
-            fd = -1
-            json.dump(discovery.to_dict(), stream, ensure_ascii=True, separators=(",", ":"))
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, target)
-    finally:
-        if fd >= 0:
-            os.close(fd)
-        temporary.unlink(missing_ok=True)
+    content = json.dumps(discovery.to_dict(), ensure_ascii=True, separators=(",", ":")) + "\n"
+    HOST_FILESYSTEM.atomic_replace_text(target, content)
 
 
 def remove_discovery(agent_home: AgentHome, *, instance_id: str | None = None) -> None:

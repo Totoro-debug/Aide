@@ -682,7 +682,6 @@ def test_valid_configuration_loads_as_typed_values(agent_home: Path) -> None:
     [
         ("low", "low"),
         ("mid", "mid"),
-        ("medium", "mid"),
         ("high", "high"),
         ("xhigh", "xhigh"),
         ("max", "max"),
@@ -710,9 +709,21 @@ def test_all_reasoning_effort_levels_load_as_route_values(
 
     assert all(route.reasoning_effort == expected for route in configuration.models.routes.values())
     assert loader.diagnostics == ()
-    routes = loader.editable_snapshot().fields["models"]["routes"]
+    routes = loader.web_snapshot().fields["models"]["routes"]
     assert isinstance(routes, dict)
     assert all(route["reasoning_effort"] == expected for route in routes.values())
+    assert loader.path.read_bytes() == before
+
+
+def test_unsupported_reasoning_effort_uses_default_policy_without_rewriting(agent_home: Path) -> None:
+    loader = ConfigLoader(AgentHome(agent_home))
+    loader.ensure_default()
+    loader.path.write_text(VALID_CONFIG.replace('reasoning_effort = "mid"', 'reasoning_effort = "medium"'), encoding="utf-8")
+    before = loader.path.read_bytes()
+    configuration = loader.load_for_startup()
+    assert all(route.reasoning_effort == "mid" for route in configuration.models.routes.values())
+    assert loader.diagnostics
+    assert loader.web_snapshot().fields["models"]["routes"]
     assert loader.path.read_bytes() == before
 
 

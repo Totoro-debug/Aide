@@ -461,7 +461,9 @@ def _probe_powershell_version(executable: str, environment: dict[str, str]) -> t
     return tuple(int(part) for part in match.group(1).split("."))
 
 
-class _BaseExecHost:
+class PowerShellExecHost:
+    """Windows PowerShell Host with a static Parser.ParseInput inspector."""
+
     def __init__(self, resolved_shell: ResolvedExecShell) -> None:
         if resolved_shell.platform != "windows" or resolved_shell.family not in {"powershell", "pwsh"}:
             raise ValueError("Exec requires a Windows PowerShell Host")
@@ -579,10 +581,6 @@ class _BaseExecHost:
             raise ExecHostError(
                 f"Exec failed to start {self.resolved_shell.family}: {error}"
             ) from error
-
-
-class PowerShellExecHost(_BaseExecHost):
-    """Windows PowerShell Host with a static Parser.ParseInput inspector."""
 
     async def inspect(self, command: str, cwd: Path) -> ExecAssessment:
         try:

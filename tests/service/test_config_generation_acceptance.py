@@ -279,7 +279,7 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
         await cli.management("permission", {"permission_level": "read-only"})
         confirmation = _ConfirmationBarrier()
         cli.confirmation.bind_presenter(confirmation)
-        await cli.submit_input("session-a")
+        await cli.submit_user_input("session-a")
         old_provider = providers[0]
         await asyncio.wait_for(old_provider.session_a_started.wait(), 5)
         job = ScheduleJob(
@@ -324,7 +324,7 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
                 assert saved["application"]["status"] == "restart-required"
                 assert saved["application"]["active_revision"] == revision
                 assert not old_provider.closed
-                await cli.submit_input("new work continues")
+                await cli.submit_user_input("new work continues")
                 old_provider.release_a.set()
                 await asyncio.wait_for(confirmation.presented.wait(), 5)
                 assert _application(service)["status"] == "restart-required"
@@ -371,7 +371,7 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
         assert next(item for item in jobs if item.job_id == job.job_id).state.last_status == "ok"
         assert len(workspace._schedule_loops) == 1
         assert "answer from session B" in await _client_output(cli)
-        await cli.submit_input("session-b")
+        await cli.submit_user_input("session-b")
         assert "answer from session B" in await _client_output(cli)
         assert len(providers) == 1
         persisted = Session.load(cast(Any, old_state), cli.session_id)
@@ -486,7 +486,7 @@ async def test_save_preserves_auto_title_after_foreground_run_has_finished(
         workspace = service.workspace(cli.workspace_id)
         old_runtime = workspace.resources
         assert old_runtime is not None
-        await cli.submit_input("Complete this foreground message")
+        await cli.submit_user_input("Complete this foreground message")
         async with asyncio.timeout(5):
             while not providers:
                 await asyncio.sleep(0)

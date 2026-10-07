@@ -182,7 +182,7 @@ args = {json.dumps(list(stdio.args))}
                         lane_client = await service.register_client("cli")
                         await service.connect_client(lane_client.client_id, sink)
                         await service.attach_workspace(lane_client.client_id, workspace_path)
-                        session = await workspace.create_draft(lane_client.client_id)
+                        session = await workspace.create_draft(lane_client.client_id, creation_scope="chat")
                         claim = await service.claim(
                             lane_client.client_id, workspace.workspace_id, session
                         )

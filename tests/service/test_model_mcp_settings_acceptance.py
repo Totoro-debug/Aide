@@ -170,7 +170,7 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
         state = workspace.workspace_state
         socket = cli._socket
         claim = (cli.session_id, cli.claim_version, cli.claim_credential)
-        await cli.submit_input("foreground-old")
+        await cli.submit_user_input("foreground-old")
         await asyncio.wait_for(arrived["foreground-old"].wait(), 10)
         job = ScheduleJob(
             job_id=str(uuid4()),
@@ -303,7 +303,7 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
                 )
                 observed.append(await conflict.text())
                 assert conflict.status == 409
-        await cli.submit_input("foreground-new")
+        await cli.submit_user_input("foreground-new")
         assert "foreground-new finished" in await _client_output(cli)
         new_job = ScheduleJob(
             job_id=str(uuid4()),

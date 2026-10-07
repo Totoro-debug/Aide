@@ -397,7 +397,7 @@ async def test_restore_preserves_an_unrelated_active_run(
     await service.attach_workspace(other.client_id, workspace.workspace_path)
     sink = _CollectingSink()
     await service.connect_client(other.client_id, sink)
-    other_id = await workspace.create_draft(other.client_id)
+    other_id = await workspace.create_draft(other.client_id, creation_scope="chat")
     await service.claim(other.client_id, workspace.workspace_id, other_id)
     other_claim = workspace._claims[other_id]
     run_id = str(uuid4())
@@ -517,6 +517,7 @@ async def test_restore_management_requires_claim_is_idempotent_and_preserves_oth
         state,
         now=lambda: datetime(2026, 10, 1, 12, 0, tzinfo=UTC),
     )
+    session.update_metadata(creation_scope="chat")
     target = workspace_path / "tracked.txt"
     target.write_bytes(b"before restore")
     run_token = uuid4()
@@ -616,6 +617,8 @@ async def test_restore_management_requires_claim_is_idempotent_and_preserves_oth
 
         assert duplicate == executed
         assert target.read_bytes() == b"before restore"
+        assert workspace._loops[session.session_id].loop.session.metadata["creation_scope"] == "chat"
+        assert Session.load(state, session.session_id).metadata["creation_scope"] == "chat"
         assert workspace._claims[other_session_id] is other_claim
         assert other_claim.client_id == other.client_id
         restore_result = executed["restore_result"]

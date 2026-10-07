@@ -88,7 +88,7 @@ async def management_case(
         await service.attach_workspace(second.client_id, path)
         await service.claim(first.client_id, workspace.workspace_id, session_id)
         claim = workspace._claims[session_id]
-        other_id = await workspace.create_draft(second.client_id)
+        other_id = await workspace.create_draft(second.client_id, creation_scope="chat")
         await service.claim(second.client_id, workspace.workspace_id, other_id)
         yield ManagementCase(
             service,
@@ -186,7 +186,7 @@ async def test_client_permission_survives_session_workspace_and_reconnect_withou
     assert (await _status(case, client=case.second, claim=case.other_claim))[
         "current_permission_level"
     ] == "workspace-write"
-    next_id = await case.workspace.create_draft(case.first.client_id)
+    next_id = await case.workspace.create_draft(case.first.client_id, creation_scope="chat")
     await case.service.claim(case.first.client_id, case.workspace.workspace_id, next_id)
     next_claim = case.workspace._claims[next_id]
     assert (await _status(case, claim=next_claim))["current_permission_level"] == "read-only"
@@ -194,7 +194,7 @@ async def test_client_permission_survives_session_workspace_and_reconnect_withou
     other_path = tmp_path / "other-workspace"
     other_path.mkdir()
     other_workspace = await case.service.attach_workspace(case.first.client_id, other_path)
-    draft_id = await other_workspace.create_draft(case.first.client_id)
+    draft_id = await other_workspace.create_draft(case.first.client_id, creation_scope="chat")
     await case.service.claim(case.first.client_id, other_workspace.workspace_id, draft_id)
     other_claim = other_workspace._claims[draft_id]
     assert (await _status(case, workspace=other_workspace, claim=other_claim))[
@@ -238,7 +238,7 @@ async def test_permission_resets_only_after_client_expiry_at_thirty_seconds(
     assert case.first.client_id not in case.service._clients
     replacement = await case.service.register_client("web")
     await case.service.connect_client(replacement.client_id, _CollectingSink())
-    next_id = await case.workspace.create_draft(replacement.client_id)
+    next_id = await case.workspace.create_draft(replacement.client_id, creation_scope="chat")
     await case.service.claim(replacement.client_id, case.workspace.workspace_id, next_id)
     status = await _status(case, client=replacement, claim=case.workspace._claims[next_id])
     assert status["current_permission_level"] == "workspace-write"
@@ -390,7 +390,7 @@ async def test_request_id_reuse_cannot_change_payload_action_session_or_workspac
         with pytest.raises(ServiceError) as reused:
             await _request(case, action, request_id="unique", **attempt)
         assert reused.value.code == "request_reused"
-    next_id = await case.workspace.create_draft(case.first.client_id)
+    next_id = await case.workspace.create_draft(case.first.client_id, creation_scope="chat")
     next_claim = await case.workspace.claim(case.first.client_id, next_id)
     with pytest.raises(ServiceError) as session_reused:
         await _request(
@@ -400,7 +400,7 @@ async def test_request_id_reuse_cannot_change_payload_action_session_or_workspac
     path = tmp_path / "different-workspace"
     path.mkdir()
     workspace = await case.service.attach_workspace(case.first.client_id, path)
-    session_id = await workspace.create_draft(case.first.client_id)
+    session_id = await workspace.create_draft(case.first.client_id, creation_scope="chat")
     claim = await workspace.claim(case.first.client_id, session_id)
     with pytest.raises(ServiceError) as workspace_reused:
         await _request(
@@ -452,7 +452,7 @@ async def test_effort_is_global_runtime_control_with_shared_cli_and_persistence_
     path = tmp_path / "new-runtime"
     path.mkdir()
     workspace = await case.service.attach_workspace(case.first.client_id, path)
-    draft = await workspace.create_draft(case.first.client_id)
+    draft = await workspace.create_draft(case.first.client_id, creation_scope="chat")
     claim = await workspace.claim(case.first.client_id, draft)
     assert (await _status(case, workspace=workspace, claim=claim))[
         "chat_reasoning_effort"

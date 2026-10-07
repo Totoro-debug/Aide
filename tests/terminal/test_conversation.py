@@ -1281,85 +1281,6 @@ def test_terminal_constructor_does_not_expose_runtime_lifecycle_parameters() -> 
 
 
 @pytest.mark.asyncio
-async def test_rebind_agent_loop_only_replaces_generation_presentation() -> None:
-    bus = MessageBus()
-    initial_control = _DirectControl()
-    target_control = _DirectControl()
-    initial_metadata = (
-        SkillMetadata(
-            name="initial",
-            description="Initial skill",
-            path=Path("C:/agent-home/skills/initial/SKILL.md"),
-        ),
-    )
-    target_metadata = (
-        SkillMetadata(
-            name="target",
-            description="Target skill",
-            path=Path("C:/agent-home/skills/target/SKILL.md"),
-        ),
-    )
-    app = TerminalConversationApp(
-        bus=bus,
-        control=initial_control,
-        management_dispatcher=_management_dispatcher(),
-        skill_metadata=initial_metadata,
-    )
-
-    async with app.run_test(size=(80, 24)) as pilot:
-        await app.rebind_agent_loop(
-            control=target_control,
-            skill_metadata=target_metadata,
-            session_projection=ForegroundConversationProjection(
-                session_id="target-session",
-                messages=({"role": "user", "content": "Target projection"},),
-            ),
-        )
-        await pilot.pause()
-
-        assert app._bus is bus
-        assert isinstance(app._management_dispatcher, ManagementCommandDispatcher)
-        assert app._control is target_control
-        assert app._skill_metadata == target_metadata
-        assert "Target projection" in _visible_screen_text(app)
-
-
-@pytest.mark.asyncio
-async def test_rebind_discards_a_stale_inbound_snapshot_callback() -> None:
-    bus = MessageBus()
-    initial_control = _DirectControl()
-    target_control = _DirectControl()
-    app = TerminalConversationApp(
-        bus=bus,
-        control=initial_control,
-        management_dispatcher=_management_dispatcher(),
-    )
-
-    async with app.run_test(size=(80, 24)):
-        old_callback = app._bus_callback
-        assert old_callback is not None
-        await app.rebind_agent_loop(
-            control=target_control,
-            skill_metadata=(),
-            session_projection=ForegroundConversationProjection(
-                session_id="target-session",
-                messages=(),
-            ),
-        )
-        app._inbound_snapshot_changed(
-            app.InboundSnapshotChanged(
-                bus,
-                (InboundMessage(content="stale old input"),),
-                promote_removed=True,
-                callback=old_callback,
-            )
-        )
-
-        assert app._bus_snapshot == ()
-        assert not app.has_pending_input
-
-
-@pytest.mark.asyncio
 async def test_terminal_unmount_clears_ui_owned_generation_state() -> None:
     app = TerminalConversationApp(
         bus=MessageBus(),
@@ -7888,47 +7809,6 @@ async def test_permission_warning_external_dismiss_and_unmount_leave_selection_u
     assert management.level == "workspace-write"
     assert management.updated == []
     assert app._permission_warning_result is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("open_warning", [False, True], ids=["selector", "warning"])
-async def test_permission_presenter_is_cleared_before_generation_rebind(
-    open_warning: bool,
-) -> None:
-    bus = MessageBus()
-    initial_control = _DirectControl()
-    target_control = _DirectControl()
-    management = _PermissionManagement("workspace-write")
-    app = TerminalConversationApp(
-        bus=bus,
-        control=initial_control,
-        management_dispatcher=ManagementCommandDispatcher(cast(Any, management)),
-    )
-
-    async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.press(*list("/permission"), "enter")
-        await pilot.pause()
-        if open_warning:
-            await pilot.press("right", "enter")
-            await pilot.pause()
-            assert app.screen.id == "permission-warning"
-
-        await app.rebind_agent_loop(
-            control=target_control,
-            skill_metadata=(),
-            session_projection=ForegroundConversationProjection(
-                session_id="target-session",
-                messages=(),
-            ),
-        )
-        await pilot.pause()
-
-        assert len(app.screen_stack) == 1
-        assert app.screen.id == "_default"
-        assert app.query_one("#conversation-input", TextArea).display
-        assert not app.query_one("#permission-selector", Static).display
-        assert app._permission_warning_result is None
-        assert management.updated == []
 
 
 @pytest.mark.asyncio

@@ -1246,8 +1246,10 @@ async def test_schedule_oversized_result_uses_canonical_schedule_artifact_sessio
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", (False, True))
 async def test_schedule_agent_loop_micro_compression_keeps_artifacts_and_session_history_complete(
     tmp_path: Path,
+    enabled: bool,
 ) -> None:
     router = _ScheduleRouter(
         *(
@@ -1267,7 +1269,8 @@ async def test_schedule_agent_loop_micro_compression_keeps_artifacts_and_session
         router,
         config_text=MINIMAL_VALID_CONFIG.replace(
             "compact_ratio = 0.9",
-            "compact_ratio = 0.9\nmax_tool_result_chars = 1000",
+            "compact_ratio = 0.9\nmax_tool_result_chars = 1000\n"
+            f"enable_tool_micro_compression = {str(enabled).lower()}",
         ),
     )
     (state.workspace_path / "large.txt").write_text("x" * 4000, encoding="utf-8")
@@ -1285,7 +1288,7 @@ async def test_schedule_agent_loop_micro_compression_keeps_artifacts_and_session
             message["content"] == "[read_file result omitted from context]"
             for message in previous_tools
         )
-        == 10
+        == (10 if enabled else 0)
     )
     assert len(previous_tools[-1]["content"]) > 512
 
@@ -1297,7 +1300,7 @@ async def test_schedule_agent_loop_micro_compression_keeps_artifacts_and_session
             message["content"] == "[read_file result omitted from context]"
             for message in final_tools
         )
-        == 11
+        == (11 if enabled else 0)
     )
     assert len(final_tools[-1]["content"]) > 512
 

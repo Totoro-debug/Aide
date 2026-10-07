@@ -663,6 +663,50 @@ def _planner_skill_loader(tmp_path: Path) -> SkillLoader:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", (False, True))
+async def test_foreground_run_uses_configured_tool_micro_compression(
+    tmp_path: Path,
+    enabled: bool,
+) -> None:
+    router = _CapturingRouter([
+        *(
+            _response("", tool_call=ModelToolCall(
+                id=f"read-{number}", name="read_file", arguments='{"path":"large.txt"}'
+            ))
+            for number in range(11)
+        ),
+        _response("done"),
+    ])
+    loop, session, bus = _runtime(
+        tmp_path,
+        router,
+        config_text=MINIMAL_VALID_CONFIG.replace(
+            "compact_ratio = 0.9",
+            f"compact_ratio = 0.9\nenable_tool_micro_compression = {str(enabled).lower()}",
+        ),
+    )
+    (session.workspace_state.workspace_path / "large.txt").write_text("x" * 513, encoding="utf-8")
+
+    await loop.start()
+    try:
+        await bus.put_inbound(InboundMessage("read the file repeatedly"))
+        await _terminals(bus, 1)
+    finally:
+        await loop.close()
+
+    assert len(router.requests) == 12
+    request_tools = [message for message in router.requests[-1] if message.get("role") == "tool"]
+    assert sum(
+        message["content"] == "[read_file result omitted from context]" for message in request_tools
+    ) == (10 if enabled else 0)
+    assert request_tools[-1]["content"] == "x" * 513
+    persisted = Session.load(session.workspace_state, session.session_id)
+    assert [message["content"] for message in persisted.messages if message.get("role") == "tool"] == [
+        "x" * 513
+    ] * 11
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_status_projection_starts_uptime_only_after_activation(
     tmp_path: Path,
 ) -> None:

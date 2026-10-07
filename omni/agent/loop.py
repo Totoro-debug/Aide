@@ -854,6 +854,7 @@ class AgentRunExecutor:
             project_messages=project_messages,
             current_user=current_user,
             compact_ratio=self._configuration.runtime.compact_ratio,
+            enable_tool_micro_compression=self._configuration.runtime.enable_tool_micro_compression,
         )
         return _AgentRunContext(
             route=route,

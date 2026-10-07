@@ -13,6 +13,7 @@ EXPECTED_DEFAULT_CONFIG = """[runtime]
 max_tool_result_chars = 4096
 max_iterations = 50
 enable_skill_always_load = false
+enable_tool_micro_compression = false
 compact_ratio = 0.9
 permission_level = "workspace-write"
 exec_shell = "auto"
@@ -782,7 +783,8 @@ def test_omitted_defaulted_configuration_fields_use_accepted_defaults(
         configuration.memory.schedule,
         configuration.models.routes["default"].reasoning_effort,
         configuration.runtime.enable_skill_always_load,
-    ) == (4096, 0.9, "workspace-write", "auto", 10, "0 * * * *", "mid", False)
+        configuration.runtime.enable_tool_micro_compression,
+    ) == (4096, 0.9, "workspace-write", "auto", 10, "0 * * * *", "mid", False, False)
     assert write_operations == []
     assert loader.path.read_text(encoding="utf-8") == before_load
 

@@ -75,6 +75,7 @@ async def _run_once(
     history: list[dict[str, Any]],
     *,
     last_compacted: int = 0,
+    enable_tool_micro_compression: bool = False,
 ) -> tuple[list[dict[str, object]], AgentRunnerResult, Session, ScriptedFakeProvider]:
     state = WorkspaceState(workspace)
     state.initialize(agent_home_root=agent_home)
@@ -132,6 +133,7 @@ async def _run_once(
             *deepcopy(list(messages)),
         ],
         current_user={"role": "user", "content": "current request"},
+        enable_tool_micro_compression=enable_tool_micro_compression,
     )
     remote = MCPTool(
         MCPToolSpec(
@@ -170,23 +172,27 @@ async def _run_once(
 @pytest.mark.parametrize("count", (10, 11))
 @pytest.mark.parametrize("length", (512, 513))
 @pytest.mark.parametrize("status", ("success", "error", "refused"))
+@pytest.mark.parametrize("enabled", (False, True))
 async def test_retained_result_threshold_and_length_are_provider_only(
     workspace: Path,
     agent_home: Path,
     count: int,
     length: int,
     status: str,
+    enabled: bool,
 ) -> None:
     history = _history(count, length, status, "read_file")
     original = deepcopy(history)
 
-    request, result, session, provider = await _run_once(workspace, agent_home, history)
+    request, result, session, provider = await _run_once(
+        workspace, agent_home, history, enable_tool_micro_compression=enabled
+    )
 
     request_tools = [message for message in request if message["role"] == "tool"]
     assert len(request_tools) == count
     assert sum(
         message["content"] == "[read_file result omitted from context]" for message in request_tools
-    ) == (count - 1 if count == 11 and length == 513 else 0)
+    ) == (count - 1 if enabled and count == 11 and length == 513 else 0)
     assert request_tools[-1]["content"] == "x" * length
     assert [message["artifact"] for message in request_tools] == [
         message["artifact"] for message in history if message["role"] == "tool"
@@ -221,7 +227,8 @@ async def test_catalog_origin_controls_omission_even_without_tool_exposure(
     eligible: bool,
 ) -> None:
     request, _, _, provider = await _run_once(
-        workspace, agent_home, _history(11, 513, "success", name)
+        workspace, agent_home, _history(11, 513, "success", name),
+        enable_tool_micro_compression=True,
     )
 
     assert provider.stream_requests[0].tools == ()
@@ -241,7 +248,9 @@ async def test_no_completed_cycle_keeps_all_results(
         if message["role"] != "assistant"
     ]
 
-    request, _, _, _ = await _run_once(workspace, agent_home, history)
+    request, _, _, _ = await _run_once(
+        workspace, agent_home, history, enable_tool_micro_compression=True
+    )
 
     assert [message["content"] for message in request if message["role"] == "tool"] == [
         "x" * 513
@@ -259,7 +268,9 @@ async def test_retained_count_and_cycle_boundary_follow_compacted_prefix(
 ) -> None:
     history = _history(count, 513, "success", "read_file")
 
-    request, _, session, _ = await _run_once(workspace, agent_home, history, last_compacted=cursor)
+    request, _, session, _ = await _run_once(
+        workspace, agent_home, history, last_compacted=cursor, enable_tool_micro_compression=True
+    )
 
     tools = [message for message in request if message["role"] == "tool"]
     assert len(tools) == count - (cursor // 3)

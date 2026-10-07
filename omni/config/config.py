@@ -43,6 +43,7 @@ _MCP_MAX_TIMEOUT: Final = 600
 _DEFAULT_MAX_TOOL_RESULT_CHARS: Final = 4_096
 _DEFAULT_MAX_ITERATIONS: Final = 50
 _DEFAULT_ENABLE_SKILL_ALWAYS_LOAD: Final = False
+_DEFAULT_ENABLE_TOOL_MICRO_COMPRESSION: Final = False
 _DEFAULT_COMPACT_RATIO: Final = 0.9
 _DEFAULT_PERMISSION_LEVEL: Final[PermissionLevel] = "workspace-write"
 _DEFAULT_EXEC_SHELL: Final[ExecShell] = "auto"
@@ -126,6 +127,7 @@ class RuntimeConfiguration:
     compact_ratio: float = _DEFAULT_COMPACT_RATIO
     permission_level: PermissionLevel = _DEFAULT_PERMISSION_LEVEL
     exec_shell: ExecShell = _DEFAULT_EXEC_SHELL
+    enable_tool_micro_compression: bool = _DEFAULT_ENABLE_TOOL_MICRO_COMPRESSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -858,6 +860,14 @@ def _parse_runtime(
             parse=_parse_default_boolean,
             diagnostics=diagnostics,
         ),
+        enable_tool_micro_compression=_defaulted(
+            table,
+            "enable_tool_micro_compression",
+            field="runtime.enable_tool_micro_compression",
+            default=_DEFAULT_ENABLE_TOOL_MICRO_COMPRESSION,
+            parse=_parse_default_boolean,
+            diagnostics=diagnostics,
+        ),
         compact_ratio=_defaulted(
             table,
             "compact_ratio",
@@ -1398,6 +1408,7 @@ def _editable_configuration_fields(
             "max_tool_result_chars": configuration.runtime.max_tool_result_chars,
             "max_iterations": configuration.runtime.max_iterations,
             "enable_skill_always_load": configuration.runtime.enable_skill_always_load,
+            "enable_tool_micro_compression": configuration.runtime.enable_tool_micro_compression,
             "compact_ratio": configuration.runtime.compact_ratio,
             "permission_level": configuration.runtime.permission_level,
             "exec_shell": configuration.runtime.exec_shell,
@@ -1440,7 +1451,7 @@ def _editable_field_value(section: str, field: str, value: object) -> object:
             if _parse_default_integer(value, 50, None) is None:
                 raise ConfigFieldError(name, "must be an integer at least 50")
             return value
-        if field == "enable_skill_always_load":
+        if field in {"enable_skill_always_load", "enable_tool_micro_compression"}:
             if _parse_default_boolean(value) is None:
                 raise ConfigFieldError(name, "must be a boolean")
             return value

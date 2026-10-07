@@ -94,6 +94,7 @@ export interface ConfigFields {
     max_tool_result_chars: number;
     max_iterations: number;
     enable_skill_always_load: boolean;
+    enable_tool_micro_compression: boolean;
     compact_ratio: number;
     permission_level: ToolPermissionLevel;
     exec_shell: "auto" | "powershell" | "pwsh";

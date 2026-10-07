@@ -925,6 +925,7 @@ class AgentRunContextRequestPreparer:
         project_messages: CompactionProjection,
         current_user: dict[str, Any] | None = None,
         compact_ratio: float = 0.9,
+        enable_tool_micro_compression: bool = False,
         estimator_version: str = CONTEXT_ESTIMATOR_VERSION,
     ) -> None:
         self._controller = controller
@@ -933,6 +934,7 @@ class AgentRunContextRequestPreparer:
         self._project_messages = project_messages
         self._current_user = None if current_user is None else deepcopy(current_user)
         self._compact_ratio = compact_ratio
+        self._enable_tool_micro_compression = enable_tool_micro_compression
         self._estimator_version = estimator_version
         self._micro_compression_enabled = False
 
@@ -966,7 +968,8 @@ class AgentRunContextRequestPreparer:
         )
         request_messages = deepcopy(list(prepared_messages))
         micro_compression_enabled = (
-            is_micro_compression_eligible is not None
+            self._enable_tool_micro_compression
+            and is_micro_compression_eligible is not None
             and _micro_compression_eligible_count(
                 request_messages, is_micro_compression_eligible=is_micro_compression_eligible
             )

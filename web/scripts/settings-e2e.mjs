@@ -287,6 +287,79 @@ async function settingsRowCollisionAcceptance({ page, configPath, openSettings, 
   }
 }
 
+export async function settingsMicroCompressionAcceptance({ page, configPath }) {
+  const toggle = page.locator("#settings-runtime-enable_tool_micro_compression");
+  const requests = [];
+  const recordSave = (request) => {
+    if (request.method() === "PATCH" && request.url().endsWith("/api/v1/config")) {
+      requests.push(request.postDataJSON());
+    }
+  };
+  const savedToggle = (enabled) => page.waitForResponse((response) => (
+    response.url().endsWith("/api/v1/config") && response.request().method() === "PATCH"
+    && response.request().postDataJSON()?.fields?.runtime?.enable_tool_micro_compression === enabled
+  ));
+  const viewport = page.viewportSize();
+  page.on("request", recordSave);
+  try {
+    for (const language of ["en", "zh-CN"]) {
+      await setInterfaceLanguage(page, language);
+      await settingsSection(page, "Runtime");
+      await page.setViewportSize(language === "en" ? { width: 1440, height: 900 } : { width: 390, height: 844 });
+      await expect(toggle).toBeEnabled();
+      await expect(toggle).not.toBeChecked();
+      const dialog = page.getByRole("dialog", {
+        name: language === "en" ? "Enable Tool micro-compression?" : "启用 Tool 微压缩？", exact: true,
+      });
+      const before = requests.length;
+      for (const dismiss of ["cancel", "escape", "close", "outside"]) {
+        await toggle.click();
+        await expect(dialog).toBeVisible();
+        await expect(dialog).toContainText(language === "en" ? "may miss details" : "可能因此遗漏细节");
+        await expect(dialog).toContainText(language === "en" ? "conversation history are retained" : "会话记录仍会保留");
+        await expect(dialog).toContainText(language === "en" ? "Restart Omni" : "重启 Omni");
+        await expect(toggle).not.toBeChecked();
+        if (dismiss === "cancel") await dialog.getByRole("button", { name: language === "en" ? "Cancel" : "取消", exact: true }).click();
+        else if (dismiss === "escape") await page.keyboard.press("Escape");
+        else if (dismiss === "close") await dialog.getByRole("button", { name: language === "en" ? "Close" : "关闭", exact: true }).click();
+        else await page.mouse.click(2, 2);
+        await expect(dialog).toBeHidden();
+        await expect(toggle).not.toBeChecked();
+        await expect(toggle).toBeFocused();
+      }
+      assert.equal(requests.length, before, "Dismissal must not save the setting");
+      assert.doesNotMatch(await readFile(configPath, "utf8"), /enable_tool_micro_compression\s*=\s*true/);
+
+      await toggle.press("Space");
+      await expect(dialog).toBeVisible();
+      const enabledResponse = savedToggle(true);
+      await dialog.getByRole("button", { name: language === "en" ? "Confirm enable" : "确认启用", exact: true }).press("Enter");
+      const saved = await enabledResponse;
+      assert.equal(saved.status(), 200);
+      assert.equal((await saved.json()).application.status, "restart-required");
+      await expect(dialog).toBeHidden();
+      await expect(toggle).toBeChecked();
+      assert.match(await readFile(configPath, "utf8"), /enable_tool_micro_compression\s*=\s*true/);
+      await page.reload();
+      await settingsSection(page, "Runtime");
+      await expect(toggle).toBeChecked();
+      await expect(dialog).toBeHidden();
+
+      const disabledResponse = savedToggle(false);
+      await toggle.click();
+      assert.equal((await disabledResponse).status(), 200);
+      await expect(toggle).not.toBeChecked();
+      await expect(dialog).toBeHidden();
+      assert.match(await readFile(configPath, "utf8"), /enable_tool_micro_compression\s*=\s*false/);
+    }
+  } finally {
+    page.off("request", recordSave);
+    if (viewport !== null) await page.setViewportSize(viewport);
+  }
+  await setInterfaceLanguage(page, "en");
+  console.log("Tool micro-compression E2E: defaults, four dismissal paths, keyboard confirmation, persistence, reload and disable passed in English and Chinese");
+}
+
 export async function settingsModelMcpAcceptance({ page, control, output }) {
   const configPath = resolve(control.details.home_root, ".omni", "config.toml");
   const providerObservationPath = process.env.OMNI_E2E_PROVIDER_OBSERVATION_PATH;
@@ -1152,5 +1225,6 @@ export default async function settingsAcceptance({ page, control, output, viewpo
   }
   await page.setViewportSize(viewports[0]);
   await setInterfaceLanguage(page, "en");
+  await settingsMicroCompressionAcceptance({ page, configPath });
   console.log("Settings production CSP E2E: global without Claim, invalid bytes, cross-client stale CAS and explicit reload, dirty late poll, real active Run save/restart with same PID/WS, save remains independent of resource preparation, versions, keyboard and 4 locale/theme x 4 viewports passed");
 }

@@ -2340,8 +2340,10 @@ async def test_request_preparer_reuses_run_start_revision_without_duplicate_summ
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", (False, True))
 async def test_runner_final_projection_changes_revision_and_repeats_stably(
     workspace: Path,
+    enabled: bool,
 ) -> None:
     state = _state(workspace)
     session = Session.create(state)
@@ -2357,6 +2359,7 @@ async def test_runner_final_projection_changes_revision_and_repeats_stably(
         requested_route="chat",
         project_messages=_project_messages_with_tool_calls,
         current_user={"role": "user", "content": "current request"},
+        enable_tool_micro_compression=enabled,
     )
 
     increment = tuple(
@@ -2381,7 +2384,7 @@ async def test_runner_final_projection_changes_revision_and_repeats_stably(
             message.get("content") == "[read_file result omitted from context]"
             for message in requests[0]
         )
-        == 10
+        == (10 if enabled else 0)
     )
     assert requests[0][-1]["content"] == increment[-1]["content"]
     assert increment == original_increment

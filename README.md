@@ -90,6 +90,8 @@ omni service stop
 
 **Skill 与 MCP**：将 Skill 放在 `~/.omni/skills/<技能名>/SKILL.md`，文件使用包含 `name`、`description` 的 YAML frontmatter；输入 `/<技能名> 任务描述` 调用。修改后用 `/reload_skill` 重新加载。MCP 可在 Web 设置中配置，示例见[配置模板](omni/templates/default-config.md)。
 
+**Tool 微压缩**：默认关闭，可在 Web「设置 → 运行时」中启用，或在配置文件的 `[runtime]` 中设置 `enable_tool_micro_compression = true`，保存后需重启 Omni。启用时，模型上下文中符合条件的 Tool 结果超过 10 条后，较早的长结果可能被省略，最新完整调用周期仍保留。这样可减少上下文占用，但模型可能遗漏细节或需要再次调用工具；原始结果和会话记录仍会保留。Web 启用前会弹窗说明影响，确认后才保存。
+
 CLI 中，`Enter` 提交、`Ctrl+J` 换行、`Ctrl+C` 取消当前回复，输入 `exit` 或 `quit` 退出。以下管理命令需单独输入：
 
 | 命令 | 用途 |

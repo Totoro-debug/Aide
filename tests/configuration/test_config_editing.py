@@ -98,6 +98,7 @@ def test_web_snapshot_exposes_all_safe_fields_without_secrets(tmp_path: Path) ->
         "max_tool_result_chars": 4096,
         "max_iterations": 50,
         "enable_skill_always_load": False,
+        "enable_tool_micro_compression": False,
         "compact_ratio": 0.9,
         "permission_level": "workspace-write",
         "exec_shell": "auto",
@@ -108,6 +109,39 @@ def test_web_snapshot_exposes_all_safe_fields_without_secrets(tmp_path: Path) ->
     primary = cast(Mapping[str, object], providers["primary"])
     assert primary["api_key"] == {"configured": True}
     assert "minimal-secret" not in str(snapshot.fields)
+
+
+@pytest.mark.parametrize("enabled", (True, False))
+def test_tool_micro_compression_is_editable_and_persisted(tmp_path: Path, enabled: bool) -> None:
+    loader = _loader(tmp_path)
+    loader.patch_editable_fields(
+        loader.web_snapshot().revision,
+        {"runtime": {"enable_tool_micro_compression": not enabled}},
+    )
+
+    result = loader.patch_editable_fields(
+        loader.web_snapshot().revision,
+        {"runtime": {"enable_tool_micro_compression": enabled}},
+    )
+
+    assert result.configuration.runtime.enable_tool_micro_compression is enabled
+    assert ConfigLoader(loader.agent_home).web_snapshot().fields["runtime"][
+        "enable_tool_micro_compression"
+    ] is enabled
+
+
+@pytest.mark.parametrize("value", ("true", 1, None))
+def test_invalid_tool_micro_compression_patch_preserves_file(tmp_path: Path, value: object) -> None:
+    loader = _loader(tmp_path)
+    before = loader.path.read_bytes()
+
+    with pytest.raises(ConfigError):
+        loader.patch_editable_fields(
+            loader.web_snapshot().revision,
+            {"runtime": {"enable_tool_micro_compression": value}},
+        )
+
+    assert loader.path.read_bytes() == before
 
 
 def test_default_chat_workspace_is_editable_and_persisted(tmp_path: Path) -> None:

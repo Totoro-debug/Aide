@@ -23,6 +23,7 @@
         "max_tool_result_chars": {"type": "integer", "minimum": 1000, "maximum": 1000000},
         "max_iterations": {"type": "integer", "minimum": 50},
         "enable_skill_always_load": {"type": "boolean"},
+        "enable_tool_micro_compression": {"type": "boolean"},
         "compact_ratio": {"type": "number", "minimum": 0.5, "maximum": 0.95},
         "permission_level": {"$ref": "#/$defs/tool_permission_level"},
         "exec_shell": {"enum": ["auto", "powershell", "pwsh"]}
@@ -345,7 +346,7 @@
       "properties": {
         "runtime": {
           "$ref": "#/$defs/config_runtime_fields",
-          "required": ["max_tool_result_chars", "max_iterations", "enable_skill_always_load", "compact_ratio", "permission_level", "exec_shell"]
+          "required": ["max_tool_result_chars", "max_iterations", "enable_skill_always_load", "enable_tool_micro_compression", "compact_ratio", "permission_level", "exec_shell"]
         },
         "memory": {"$ref": "#/$defs/config_memory_fields", "required": ["batch_size", "schedule"]},
         "web": {"$ref": "#/$defs/config_web_fields"},

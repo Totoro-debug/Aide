@@ -13,6 +13,7 @@ BASE_CONFIG = """[runtime]
 max_tool_result_chars = 4096
 max_iterations = 50
 enable_skill_always_load = false
+enable_tool_micro_compression = false
 compact_ratio = 0.9
 permission_level = "workspace-write"
 exec_shell = "auto"
@@ -39,6 +40,16 @@ timeout = 30
 
 
 DEFAULTABLE_FIELDS = (
+    (
+        "runtime.enable_tool_micro_compression",
+        "enable_tool_micro_compression = false",
+        "enable_tool_micro_compression = true",
+        'enable_tool_micro_compression = "true"',
+        False,
+        True,
+        "false",
+        '"true"',
+    ),
     (
         "runtime.max_tool_result_chars",
         "max_tool_result_chars = 4096",

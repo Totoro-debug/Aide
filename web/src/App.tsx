@@ -1164,6 +1164,7 @@ interface SettingsForm {
     max_tool_result_chars: string;
     max_iterations: string;
     enable_skill_always_load: boolean;
+    enable_tool_micro_compression: boolean;
     compact_ratio: string;
     permission_level: ToolPermissionLevel;
     exec_shell: "auto" | "powershell" | "pwsh";
@@ -1282,6 +1283,7 @@ function formFromConfig(
       max_tool_result_chars: String(fields.runtime.max_tool_result_chars),
       max_iterations: String(fields.runtime.max_iterations),
       enable_skill_always_load: fields.runtime.enable_skill_always_load,
+      enable_tool_micro_compression: fields.runtime.enable_tool_micro_compression ?? false,
       compact_ratio: String(fields.runtime.compact_ratio),
       permission_level: fields.runtime.permission_level,
       exec_shell: fields.runtime.exec_shell,
@@ -1405,6 +1407,7 @@ function configFromForm(form: SettingsForm): { fields: ConfigPatchFields; secret
       max_tool_result_chars: Number(form.runtime.max_tool_result_chars),
       max_iterations: Number(form.runtime.max_iterations),
       enable_skill_always_load: form.runtime.enable_skill_always_load,
+      enable_tool_micro_compression: form.runtime.enable_tool_micro_compression,
       compact_ratio: Number(form.runtime.compact_ratio),
       permission_level: form.runtime.permission_level,
       exec_shell: form.runtime.exec_shell,
@@ -1664,6 +1667,8 @@ function SettingsView({
   const [saveFailed, setSaveFailed] = useState(false);
   const [conflictedPaths, setConflictedPaths] = useState<string[]>([]);
   const [restartOpen, setRestartOpen] = useState(false);
+  const [microCompressionOpen, setMicroCompressionOpen] = useState(false);
+  const microCompressionTriggerRef = useRef<HTMLInputElement | null>(null);
   const [restartBusy, setRestartBusy] = useState(false);
   const [restartError, setRestartError] = useState<string | null>(null);
   const restartingInstanceRef = useRef<string | null>(null);
@@ -2253,6 +2258,7 @@ function SettingsView({
       "runtime.max_tool_result_chars": t("settings.maxToolResultChars"),
       "runtime.max_iterations": t("settings.maxIterations"),
       "runtime.enable_skill_always_load": t("settings.enableSkillAlwaysLoad"),
+      "runtime.enable_tool_micro_compression": t("settings.enableToolMicroCompression"),
       "runtime.compact_ratio": t("settings.compactRatio"),
       "runtime.permission_level": t("settings.permissionLevel"),
       "runtime.exec_shell": t("settings.execShell"),
@@ -2498,6 +2504,38 @@ function SettingsView({
         </div>
       ) : null}
 
+      <Dialog.Root open={microCompressionOpen} onOpenChange={setMicroCompressionOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className={styles.dialogOverlay} />
+          <Dialog.Content className={styles.dialogContent} onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            microCompressionTriggerRef.current?.focus();
+          }}>
+            <div className={styles.dialogHeader}>
+              <div>
+                <Dialog.Title className={styles.dialogTitle}>{t("settings.microCompressionTitle")}</Dialog.Title>
+                <Dialog.Description className={styles.dialogDescription}>{t("settings.microCompressionImpact")}</Dialog.Description>
+              </div>
+              <Dialog.Close asChild>
+                <button className={styles.iconButton} type="button" aria-label={t("controls.close")}>
+                  <X size={17} aria-hidden="true" />
+                </button>
+              </Dialog.Close>
+            </div>
+            <div className={styles.actionRow}>
+              <Dialog.Close asChild>
+                <button className={styles.secondaryButton} type="button">{t("controls.cancel")}</button>
+              </Dialog.Close>
+              <button className={styles.primaryButton} type="button" disabled={controlDisabled}
+                onClick={() => {
+                  updateField("runtime.enable_tool_micro_compression", true);
+                  setMicroCompressionOpen(false);
+                  void saveDraft(false, false, "runtime");
+                }}>{t("settings.confirmMicroCompression")}</button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
       <Dialog.Root open={restartOpen} onOpenChange={(open) => { if (!restartBusy) setRestartOpen(open); }}>
         <Dialog.Portal>
           <Dialog.Overlay className={styles.dialogOverlay} />
@@ -2681,6 +2719,25 @@ function SettingsView({
                 <span>
                   <strong>{t("settings.enableSkillAlwaysLoad")}</strong>
                   <small>{draft.runtime.enable_skill_always_load ? t("settings.yes") : t("settings.no")}</small>
+                </span>
+              </label>
+              <label className={styles.settingsToggle} htmlFor={fieldId("runtime.enable_tool_micro_compression")}>
+                <input
+                  ref={microCompressionTriggerRef}
+                  id={fieldId("runtime.enable_tool_micro_compression")}
+                  type="checkbox"
+                  checked={draft.runtime.enable_tool_micro_compression}
+                  disabled={controlDisabled}
+                  aria-describedby="settings-micro-compression-hint"
+                  onChange={(event) => {
+                    if (event.currentTarget.checked) setMicroCompressionOpen(true);
+                    else updateField("runtime.enable_tool_micro_compression", false);
+                  }}
+                />
+                <span>
+                  <strong>{t("settings.enableToolMicroCompression")}</strong>
+                  <small>{draft.runtime.enable_tool_micro_compression ? t("settings.yes") : t("settings.no")}</small>
+                  <small id="settings-micro-compression-hint">{t("settings.microCompressionHint")}</small>
                 </span>
               </label>
             </div>

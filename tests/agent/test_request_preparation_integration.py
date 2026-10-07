@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Literal
 
 import pytest
 
+from omni.agent.session.execution_state import TitleWork
 from omni.agent.session.session import Session, SessionStoragePartition
 from omni.agent.tools.tool_gateway import ModelToolCall
 from omni.provider.session_configuration import SessionModelConfiguration
@@ -179,14 +181,19 @@ async def test_model_is_captured_before_title_and_kept_through_tools_until_next_
     first = SessionModelConfiguration("anthropic-default", "selected-small", "high")
     second = SessionModelConfiguration("anthropic-default", "large-model", "max")
     loop.session.configure_model_durably(first, expected_version=0)
-    original_title = loop._start_title_if_needed
+    original_title = loop._session_run_state.start_title
 
-    def change_selection_at_title(session: Session, content: str) -> Any:
-        work = original_title(session, content)
+    def change_selection_at_title(
+        session: Session,
+        content: str,
+        resolve_title: Callable[[str], Awaitable[tuple[str, dict[str, int] | None]]],
+        is_aborted: Callable[[], bool],
+    ) -> TitleWork | None:
+        work = original_title(session, content, resolve_title, is_aborted)
         session.configure_model_durably(second, expected_version=1)
         return work
 
-    loop._start_title_if_needed = change_selection_at_title  # type: ignore[method-assign]
+    object.__setattr__(loop._session_run_state, "start_title", change_selection_at_title)
     task = asyncio.create_task(collect_foreground_outbound(bus, "first request"))
     try:
         await loop.start()

@@ -3,16 +3,18 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from datetime import datetime
-from types import SimpleNamespace
-from typing import Any, cast
-from uuid import UUID
+from pathlib import Path
+from typing import cast
+from uuid import UUID, uuid4
 
 import pytest
 from textual.widgets import Input, OptionList, Static
 
-from omni.agent.loop import AgentRunExecutor, ForegroundConversationProjection
+from omni.agent.loop import ForegroundConversationProjection
 from omni.agent.message_bus import MessageBus
-from omni.agent.session.session import RestoreAnchor
+from omni.agent.session.execution_state import SessionRunState
+from omni.agent.session.session import RestoreAnchor, Session
+from omni.agent.workspace_state import WorkspaceState
 from omni.management.commands import (
     ManagementCommandDispatcher,
     ManagementPort,
@@ -73,34 +75,40 @@ async def test_restore_command_lists_persisted_anchors_without_exposing_restore_
 
 
 @pytest.mark.asyncio
-async def test_restore_waiter_cancellation_does_not_cancel_title_work() -> None:
+async def test_restore_waiter_cancellation_does_not_cancel_title_work(workspace: Path) -> None:
+    title_started = asyncio.Event()
     title_finished = asyncio.Event()
     pending_persist_called = False
 
-    async def title_work() -> None:
+    async def resolve_title(_content: str) -> tuple[str, dict[str, int] | None]:
+        title_started.set()
         await title_finished.wait()
+        return "Generated title", None
 
-    class PendingSession:
-        async def wait_for_pending_persist(self) -> None:
-            nonlocal pending_persist_called
-            pending_persist_called = True
+    async def persist() -> None:
+        nonlocal pending_persist_called
+        pending_persist_called = True
 
-    title_task = asyncio.create_task(title_work())
-    loop = object.__new__(AgentRunExecutor)
-    cast(Any, loop)._aborted = False
-    cast(Any, loop)._title_work = {"session": SimpleNamespace(task=title_task)}
-    cast(Any, loop)._session = PendingSession()
-    waiter = asyncio.create_task(loop.wait_for_restore_idle())
+    run_state = SessionRunState(uuid4())
+    session = Session.create(WorkspaceState(workspace))
+    work = run_state.start_title(session, "input", resolve_title, lambda: False)
+    assert work is not None
+    work.coordination.prepared.set_result(False)
+    work.coordination.preparation_started.set()
+    await asyncio.wait_for(title_started.wait(), timeout=1)
+    waiter = asyncio.create_task(run_state.wait_for_title_idle(persist))
     await asyncio.sleep(0)
 
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiter
 
-    assert not title_task.done()
+    assert not work.task.done()
     assert pending_persist_called is False
     title_finished.set()
-    await title_task
+    await work.task
+    await run_state.wait_for_title_idle(persist)
+    assert pending_persist_called is True
 
 
 @pytest.mark.asyncio

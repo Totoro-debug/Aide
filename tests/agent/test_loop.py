@@ -26,6 +26,7 @@ from omni.agent.permission import PermissionSnapshot, RuntimePermissionControl
 from omni.agent.run_errors import CommittableAgentRunError
 from omni.agent.runner import AgentRunner, AgentRunnerResult, AgentRunnerRouter
 from omni.agent.session.backup_store import FileBackupStore
+from omni.agent.session.execution_state import SessionRunState
 from omni.agent.session.session import Session
 from omni.agent.tools.base import BaseTool
 from omni.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
@@ -363,6 +364,7 @@ def test_agent_loop_constructor_is_the_generation_composition_boundary() -> None
         "skill_loader",
         "session",
         "built_in_catalog",
+        "session_run_state",
     )
 
 
@@ -597,6 +599,7 @@ def _runtime(
         else TaskFramingRouterAdapter(router, task_framing_outcomes)
     )
     model_router.bind_configuration(configuration)
+    run_state = SessionRunState(uuid4())
     loop = AgentRunExecutor(
         workspace_path=(
             workspace if constructor_workspace_path is None else constructor_workspace_path
@@ -620,13 +623,14 @@ def _runtime(
         permission_control=RuntimePermissionControl(configuration.runtime.permission_level),
         mcp_tools=mcp_tools,
         skill_loader=loaded_skill_loader(agent_home, configuration) if skill_loader is None else skill_loader,
+        session_run_state=run_state,
     )
     if title_prompt is None:
 
-        def disable_title(_session: Session, _content: str) -> None:
+        def disable_title(_session: Session, _content: str, _resolve: object, _aborted: object) -> None:
             return None
 
-        object.__setattr__(loop, "_start_title_if_needed", disable_title)
+        object.__setattr__(run_state, "start_title", disable_title)
     else:
 
         def build_title_messages(content: str) -> list[dict[str, Any]]:
@@ -1114,7 +1118,7 @@ async def test_foreground_captures_once_before_title_and_framing_and_switches_ne
             current_user_input=current_user_input,
         )
 
-    def start_title(_session: Session, _content: str) -> None:
+    def start_title(_session: Session, _content: str, _resolve: object, _aborted: object) -> None:
         events.append("title")
 
     def build_foreground(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
@@ -1139,7 +1143,7 @@ async def test_foreground_captures_once_before_title_and_framing_and_switches_ne
 
     monkeypatch.setattr(RuntimePermissionControl, "snapshot", snapshot)
     monkeypatch.setattr(Blackboard, "generate", classmethod(generate))
-    object.__setattr__(loop, "_start_title_if_needed", start_title)
+    object.__setattr__(loop._session_run_state, "start_title", start_title)
     object.__setattr__(loop._context_builder, "build_foreground_messages", build_foreground)
     object.__setattr__(loop, "_new_run_gateway", new_run_gateway)
 
@@ -2753,6 +2757,7 @@ async def test_slow_title_keeps_one_session_log_owner_across_the_next_fifo_turn(
             active_contexts -= 1
 
     monkeypatch.setattr("omni.agent.loop.session_log", observed_session_log)
+    monkeypatch.setattr("omni.agent.session.execution_state.session_log", observed_session_log)
     await loop.start()
     try:
         await _bus.put_inbound(InboundMessage("first input"))
@@ -3355,7 +3360,6 @@ async def test_framing_cancellation_reclaims_first_title_task_without_commit(
         "total_tokens": 0,
     }
     assert framer.cancelled.is_set()
-    assert not loop._title_work
 
 
 @pytest.mark.asyncio

@@ -481,6 +481,7 @@ async def test_save_preserves_auto_title_after_foreground_run_has_finished(
     service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
     server, port = await _serve(service, home)
     cli: ServiceClient | None = None
+    title_idle: asyncio.Task[None] | None = None
     try:
         cli = await ServiceClient.connect_or_start(home, project, port=port)
         workspace = service.workspace(cli.workspace_id)
@@ -497,8 +498,13 @@ async def test_save_preserves_auto_title_after_foreground_run_has_finished(
         async with asyncio.timeout(5):
             while old_loop.has_active_run:
                 await asyncio.sleep(0)
-        title_task = old_loop._title_work[cli.session_id].task
-        assert not title_task.done()
+        generation_id = old_loop.generation_id
+        await cli.submit_user_input("Complete a second foreground message")
+        assert "answer from session B" in await _client_output(cli)
+        assert old_loop.generation_id == generation_id
+        title_idle = asyncio.create_task(old_loop.wait_for_restore_idle())
+        await asyncio.sleep(0)
+        assert not title_idle.done()
         await old_loop.session.wait_for_pending_persist()
         run_updated_at = old_loop.session.updated_at
         await service.update_configuration(
@@ -509,9 +515,9 @@ async def test_save_preserves_auto_title_after_foreground_run_has_finished(
         assert _application(service)["status"] == "restart-required"
         assert _application(service)["restart_required"] is True
         assert workspace.resources is old_runtime and not old_provider.closed
-        assert not title_task.done() and not workspace._closed
+        assert not title_idle.done() and not workspace._closed
         old_provider.release_background.set()
-        await asyncio.wait_for(asyncio.shield(title_task), 5)
+        await asyncio.wait_for(asyncio.shield(title_idle), 5)
         assert _application(service)["status"] == "restart-required"
         assert not old_provider.background_cancelled.is_set() and not old_provider.closed
         current = workspace.loops[cli.session_id].loop.session
@@ -524,6 +530,8 @@ async def test_save_preserves_auto_title_after_foreground_run_has_finished(
     finally:
         for provider in providers:
             provider.release_background.set()
+        if title_idle is not None:
+            await asyncio.gather(title_idle, return_exceptions=True)
         if cli is not None:
             await cli.close()
         await server.close()

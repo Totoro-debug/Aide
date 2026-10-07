@@ -607,7 +607,8 @@ def _reload_runtime(
     service._skill_loader = loop._skill_loader
     workspace = WorkspaceRecord(service, session.workspace_state.workspace_path, loop._configuration)
     handle = SessionExecution(
-        session, bus, lambda: loop, service.reload_skills, loop.execution.runtime_status_input
+        session, bus, lambda _state: loop, service.reload_skills, loop.execution.runtime_status_input,
+        run_state=loop._session_run_state,
     )
     workspace._loops[session.session_id] = service_runtime._LoopState(loop=handle, bus=bus, owner_client_id=None)
     service._workspaces[workspace.workspace_id] = workspace

@@ -52,6 +52,7 @@ from omni.agent.runner import (
     _build_assistant_repair_message,
 )
 from omni.agent.session.backup_store import FileBackupStore
+from omni.agent.session.execution_state import SessionRunState, TitleWork
 from omni.agent.session.session import (
     Session,
     SessionRestoreBefore,
@@ -172,37 +173,6 @@ type RuntimeConfirmationRequester = Callable[
 
 
 @dataclass(slots=True)
-class _TitleCoordination:
-    preparation_started: asyncio.Event
-    prepared: asyncio.Future[bool]
-    log_ready: asyncio.Event
-    foreground_idle: asyncio.Event
-    active_foregrounds: int = 0
-
-    def attach_foreground(self) -> None:
-        self.active_foregrounds += 1
-        self.foreground_idle.clear()
-
-    def release_foreground(self) -> None:
-        self.active_foregrounds -= 1
-        if self.active_foregrounds == 0:
-            self.foreground_idle.set()
-
-    async def wait_until_foreground_idle(self) -> None:
-        while True:
-            await self.foreground_idle.wait()
-            await asyncio.sleep(0)
-            if self.active_foregrounds == 0:
-                return
-
-
-@dataclass(frozen=True, slots=True)
-class _TitleWork:
-    task: asyncio.Task[None]
-    coordination: _TitleCoordination
-
-
-@dataclass(slots=True)
 class _AgentRunContext:
     """Run-local budget, projection and guarded Router collaborators."""
 
@@ -240,6 +210,7 @@ class AgentRunExecutor:
         skill_loader: SkillLoader,
         session: Session | None = None,
         built_in_catalog: BuiltInToolCatalog | None = None,
+        session_run_state: SessionRunState | None = None,
     ) -> None:
         if workspace_state.workspace_path != workspace_path:
             raise ValueError("Agent Loop Workspace State must belong to the Workspace")
@@ -296,7 +267,9 @@ class AgentRunExecutor:
             )
         )
 
-        self._generation_id = new_uuid()
+        self._session_run_state = (
+            SessionRunState(new_uuid()) if session_run_state is None else session_run_state
+        )
         self._workspace_state = workspace_state
         self._configuration = configuration
         self._session = active_session
@@ -322,7 +295,6 @@ class AgentRunExecutor:
         self._aborted_tasks: set[asyncio.Task[Any]] = set()
         self._abort_task: asyncio.Task[None] | None = None
         self._execution_ready: asyncio.Event | None = None
-        self._title_work: dict[str, _TitleWork] = {}
         self._confirmation_requester: RuntimeConfirmationRequester | None = None
         self._active_foreground_owner: ForegroundConfirmationOwner | None = None
         self._cancel_requested = False
@@ -345,7 +317,7 @@ class AgentRunExecutor:
     @property
     def generation_id(self) -> UUID:
         """Return the immutable identity of this Runtime Generation."""
-        return self._generation_id
+        return self._session_run_state.generation_id
 
     @property
     def tool_schemas(self) -> tuple[dict[str, Any], ...]:
@@ -370,17 +342,7 @@ class AgentRunExecutor:
         """Drain title work before the strict Session restore write."""
         if self._aborted:
             raise RuntimeError("Agent Loop is no longer active")
-        while True:
-            title_tasks = tuple(
-                work.task for work in self._title_work.values() if not work.task.done()
-            )
-            if title_tasks:
-                for title_task in title_tasks:
-                    await asyncio.shield(title_task)
-                continue
-            await self._session.wait_for_pending_persist()
-            if not any(not work.task.done() for work in self._title_work.values()):
-                return
+        await self._session_run_state.wait_for_title_idle(self._session.wait_for_pending_persist)
 
     def bind_confirmation_requester(self, requester: RuntimeConfirmationRequester) -> None:
         """Bind the Runtime Lifetime requester without taking ownership of its queue."""
@@ -505,7 +467,7 @@ class AgentRunExecutor:
         for task in (self._execution_task,):
             if task is not None:
                 tasks.append(task)
-        tasks.extend(work.task for work in self._title_work.values())
+        tasks.extend(self._session_run_state.title_tasks)
         tasks.extend(self._schedule_tasks)
         return tuple(dict.fromkeys(tasks))
 
@@ -529,7 +491,7 @@ class AgentRunExecutor:
     def _clear_owned_task_references(self) -> None:
         self._execution_task = None
         self._execution_ready = None
-        self._title_work.clear()
+        self._session_run_state.clear_title_work()
         self._schedule_tasks.clear()
         self._aborted_tasks.clear()
 
@@ -617,7 +579,7 @@ class AgentRunExecutor:
         background_owner: BackgroundConfirmationOwner | None = None
         if occurrence is not None and occurrence.permission_snapshot is not None:
             background_owner = BackgroundConfirmationOwner(
-                generation_id=self._generation_id,
+                generation_id=self._session_run_state.generation_id,
                 job_id=job.job_id,
                 occurrence_id=occurrence.occurrence_id,
             )
@@ -1029,9 +991,11 @@ class AgentRunExecutor:
         manual_invocation = self._skill_loader.resolve_manual(inbound.content)
         start_title = not active_session.messages
         created_title_work = (
-            self._start_title_if_needed(active_session, inbound.content) if start_title else None
+            self._session_run_state.start_title(
+                active_session, inbound.content, self._resolve_title, lambda: self._aborted
+            ) if start_title else None
         )
-        title_work = created_title_work or self._title_work.get(active_session.session_id)
+        title_work = created_title_work or self._session_run_state.title_for(active_session.session_id)
         if title_work is not None and title_work.task.done():
             title_work = None
         title_coordination = None if title_work is None else title_work.coordination
@@ -1077,18 +1041,16 @@ class AgentRunExecutor:
                 if not created_coordination.prepared.done():
                     created_coordination.prepared.set_result(False)
                 if not committed:
-                    if not created_title_work.task.done():
-                        created_title_work.task.cancel()
-                    await asyncio.gather(created_title_work.task, return_exceptions=True)
-                    if self._title_work.get(active_session.session_id) is created_title_work:
-                        self._title_work.pop(active_session.session_id)
+                    await self._session_run_state.discard_uncommitted_title(
+                        active_session.session_id, created_title_work
+                    )
 
     async def _execute_foreground_logged(
         self,
         active_session: Session,
         inbound: InboundMessage,
         *,
-        title_work: _TitleWork | None,
+        title_work: TitleWork | None,
         manual_invocation: ManualSkillInvocation | None = None,
         execution_ready: asyncio.Event,
         permission_snapshot: PermissionSnapshot,
@@ -1233,7 +1195,7 @@ class AgentRunExecutor:
         if title_work is not None and not title_work.coordination.prepared.done():
             title_work.coordination.prepared.set_result(True)
         foreground_owner = ForegroundConfirmationOwner(
-            generation_id=self._generation_id,
+            generation_id=self._session_run_state.generation_id,
             run_id=self._new_uuid(),
         )
         self._active_foreground_owner = foreground_owner
@@ -1562,85 +1524,6 @@ class AgentRunExecutor:
             )
         raise RuntimeError("Agent Loop confirmation requester is not bound")
 
-    def _start_title_if_needed(
-        self,
-        session: Session,
-        content: str,
-    ) -> _TitleWork | None:
-        if (
-            self._aborted
-            or not content.strip()
-            or session.metadata.get("title") != "Untitled session"
-            or session.has_manual_title
-            or session.session_id in self._title_work
-        ):
-            return None
-        preparation_started = asyncio.Event()
-        prepared: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-        log_ready = asyncio.Event()
-        foreground_idle = asyncio.Event()
-        foreground_idle.set()
-        coordination = _TitleCoordination(
-            preparation_started=preparation_started,
-            prepared=prepared,
-            log_ready=log_ready,
-            foreground_idle=foreground_idle,
-        )
-        task = asyncio.create_task(
-            self._generate_title(
-                session,
-                content,
-                coordination=coordination,
-            )
-        )
-        work = _TitleWork(
-            task=task,
-            coordination=coordination,
-        )
-        self._title_work[session.session_id] = work
-        task.add_done_callback(self._title_done)
-        return work
-
-    def _title_done(self, task: asyncio.Task[None]) -> None:
-        try:
-            task.result()
-        except asyncio.CancelledError:
-            return
-        except Exception as error:
-            logger.opt(exception=error).error(
-                "Session title task failed type={}", type(error).__name__
-            )
-
-    async def _generate_title(
-        self,
-        session: Session,
-        content: str,
-        *,
-        coordination: _TitleCoordination,
-    ) -> None:
-        with session_log(session):
-            coordination.log_ready.set()
-            try:
-                await coordination.preparation_started.wait()
-                title, usage_delta = await self._resolve_title(content)
-                if (
-                    await coordination.prepared
-                    and not session.has_manual_title
-                    and session.metadata.get("title") == "Untitled session"
-                ):
-                    session.update_automatic_title(title, usage_delta=usage_delta)
-            except asyncio.CancelledError:
-                if (
-                    not self._aborted
-                    and coordination.prepared.done()
-                    and coordination.prepared.result()
-                    and not session.has_manual_title
-                    and session.metadata.get("title") == "Untitled session"
-                ):
-                    session.update_automatic_title(normalize_title(content))
-                raise
-            finally:
-                await coordination.wait_until_foreground_idle()
 
     async def _resolve_title(self, content: str) -> tuple[str, dict[str, int] | None]:
         title = normalize_title(content)

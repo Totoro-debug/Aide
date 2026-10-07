@@ -46,6 +46,7 @@ from omni.agent.session.deletion import (
     session_deletion_status,
     session_restore_pending,
 )
+from omni.agent.session.execution_state import SessionRunState
 from omni.agent.session.restore import (
     RestoreManager,
     RestoreRecoveryRequired,
@@ -2146,17 +2147,21 @@ class WorkspaceRecord:
                 else Session.load(self.workspace_state, session_id, now=local_now)
             )
 
-        def create_executor() -> AgentRunExecutor:
+        run_state = SessionRunState(uuid4())
+
+        def create_executor(session_state: SessionRunState) -> AgentRunExecutor:
             state = self._loops.get(authority.session_id)
             owner = None if state is None else state.owner_client_id
             loop_kwargs["permission_control"] = (
                 self._schedule_permission if owner is None else self.service.client_permission(owner)
             )
-            executor = AgentRunExecutor(session=authority, session_id=None, **loop_kwargs)
+            executor = AgentRunExecutor(
+                session=authority, session_id=None, session_run_state=session_state, **loop_kwargs
+            )
             executor.bind_confirmation_requester(self.service.confirmation.request)
             return executor
 
-        prepared = create_executor()
+        prepared = create_executor(run_state)
         prepared.preflight()
         await prepared.start()
         tool_schemas = prepared.tool_schemas
@@ -2172,7 +2177,10 @@ class WorkspaceRecord:
                 tool_schemas=tool_schemas, generation_started_at=self.service._started_at,
             )
 
-        handle = SessionExecution(authority, selected_bus, create_executor, self.service.reload_skills, status_input)
+        handle = SessionExecution(
+            authority, selected_bus, create_executor, self.service.reload_skills, status_input,
+            run_state=run_state,
+        )
         return handle, selected_bus
 
     async def _get_schedule_loop(self, job_id: str, *, title: str | None = None) -> _LoopState:

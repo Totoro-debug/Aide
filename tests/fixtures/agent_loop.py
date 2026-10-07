@@ -103,10 +103,10 @@ class DrivenExecutor(AgentRunExecutor):
         self._foreground_consumer_enabled = True
         self._retired = False
         self.execution = SessionExecution(
-            self.session, self._bus, lambda: self,
+            self.session, self._bus, lambda _state: self,
             lambda: self._skill_loader.metadata, self._status_input,
+            run_state=self._session_run_state,
         )
-        self.execution._title_work = self._title_work
         self.control = ExecutorControl(self)
 
 

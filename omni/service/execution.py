@@ -11,9 +11,9 @@ from omni.agent.loop import (
     AgentRunExecutor,
     ForegroundConversationProjection,
     _project_terminal_message,
-    _TitleWork,
 )
 from omni.agent.message_bus import InboundMessage, MessageBus
+from omni.agent.session.execution_state import SessionRunState
 from omni.agent.session.session import Session
 from omni.management.service import RuntimeStatusInput
 from omni.provider.session_configuration import SessionModelConfiguration
@@ -29,22 +29,27 @@ class SessionExecution:
         self,
         session: Session,
         bus: MessageBus,
-        create_executor: Callable[[], AgentRunExecutor],
+        create_executor: Callable[[SessionRunState], AgentRunExecutor],
         reload_skills: Callable[[], tuple[SkillMetadata, ...]],
         status_input: Callable[[], RuntimeStatusInput],
+        *,
+        run_state: SessionRunState | None = None,
     ) -> None:
         self.session = session
-        self.generation_id: UUID = uuid4()
+        self._run_state = SessionRunState(uuid4()) if run_state is None else run_state
         self._bus = bus
-        self._create_executor = create_executor
+        self._create_executor: Callable[[], AgentRunExecutor] = lambda: create_executor(self._run_state)
         self._reload_skills = reload_skills
         self._status_input = status_input
         self._active: AgentRunExecutor | None = None
         self._pending_flushes: set[asyncio.Task[None]] = set()
         self._flush_errors: list[Exception] = []
-        self._title_work: dict[str, _TitleWork] = {}
         self._replacement_barrier_held = False
         self._closed = False
+
+    @property
+    def generation_id(self) -> UUID:
+        return self._run_state.generation_id
 
     @property
     def has_active_run(self) -> bool:
@@ -61,8 +66,6 @@ class SessionExecution:
         if not self.foreground_input_admitted() or self._active is not None:
             raise RuntimeError("Session is unavailable for execution")
         executor = self._create_executor()
-        executor._generation_id = self.generation_id
-        executor._title_work = self._title_work
         self._active = executor
         try:
             await executor.start()
@@ -86,7 +89,6 @@ class SessionExecution:
         if self._closed or self._active is not None:
             raise RuntimeError("Schedule Session is unavailable for execution")
         executor = self._create_executor()
-        executor._generation_id = self.generation_id
         self._active = executor
         try:
             await executor.start()
@@ -113,19 +115,13 @@ class SessionExecution:
     async def finish_work(self) -> None:
         """Cancel departing work and flush without closing the resident Session."""
         await self.cancel_active_run()
-        titles = tuple(work.task for work in self._title_work.values())
-        self.cancel_title_work()
-        await asyncio.gather(*titles, return_exceptions=True)
-        self._title_work.clear()
+        await self._run_state.finish_title_work()
         await self.wait_for_restore_idle()
         await self.session.persist_pending_automatic_title()
 
     def cancel_title_work(self) -> None:
         """Release natural title waiters before shutdown acquires Workspace locks."""
-        for work in self._title_work.values():
-            task = work.task
-            if not task.done():
-                task.cancel()
+        self._run_state.cancel_title_work()
 
     async def close(self) -> None:
         self._closed = True
@@ -137,11 +133,7 @@ class SessionExecution:
         self._closed = True
         if self._active is not None:
             await self._active.abort()
-        titles = tuple(work.task for work in self._title_work.values())
-        for task in titles:
-            task.cancel()
-        await asyncio.gather(*titles, return_exceptions=True)
-        self._title_work.clear()
+        await self._run_state.finish_title_work()
         for task in self._pending_flushes:
             task.cancel()
         await asyncio.gather(*self._pending_flushes, return_exceptions=True)

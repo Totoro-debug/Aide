@@ -94,6 +94,8 @@ class SubAgentSessionCoordinator(Protocol):
         timeout_ms: int | None = None,
     ) -> tuple[SubAgentWaitResult, ...]: ...
 
+    def cancel(self, agent_id: str) -> bool: ...
+
 
 class SubAgentEventPublisher(Protocol):
     """Publish an event independently of Main Agent Run output and busy state."""

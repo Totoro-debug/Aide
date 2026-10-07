@@ -915,6 +915,11 @@ def _resolve_partition(
     return resolved
 
 
+def validate_session_id(session_id: str) -> None:
+    """Validate a Session identifier before using it as a Workspace-owned path component."""
+    Session._require_id(session_id)
+
+
 def _storage_directory(
     workspace_state: WorkspaceState,
     partition: SessionStoragePartition,

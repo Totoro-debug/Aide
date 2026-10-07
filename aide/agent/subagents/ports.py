@@ -1,0 +1,99 @@
+"""Narrow boundaries shared by independent SubAgent implementation tasks."""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Protocol
+
+from aide.agent.subagents.models import (
+    SubAgentCreatorSnapshot,
+    SubAgentEvent,
+    SubAgentExecutionResult,
+    SubAgentPage,
+    SubAgentRecord,
+    SubAgentSource,
+    SubAgentStatus,
+    SubAgentWaitResult,
+)
+
+
+class SubAgentRecordRepository(Protocol):
+    """Persistence boundary for one Session's SubAgent records."""
+
+    @property
+    def session_id(self) -> str: ...
+
+    def register(
+        self,
+        *,
+        title: str,
+        task: str,
+        parent_run_id: str,
+        source: SubAgentSource,
+        creator_snapshot: SubAgentCreatorSnapshot,
+    ) -> SubAgentRecord: ...
+
+    def save(self, record: SubAgentRecord) -> SubAgentRecord: ...
+
+    def get(self, agent_id: str) -> SubAgentRecord | None: ...
+
+    def list(
+        self,
+        *,
+        status: SubAgentStatus | str | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+    ) -> SubAgentPage: ...
+
+    def recover(self) -> None: ...
+
+
+class SubAgentExecutor(Protocol):
+    """Run one registered task once and emit only SubAgent-scoped events."""
+
+    async def execute(
+        self,
+        record: SubAgentRecord,
+        *,
+        emit: Callable[[SubAgentEvent], Awaitable[None]],
+    ) -> SubAgentExecutionResult: ...
+
+
+class SubAgentSessionCoordinator(Protocol):
+    """Coordinate submission, listing, and terminal-result waits for one Session."""
+
+    @property
+    def session_id(self) -> str: ...
+
+    def submit(
+        self,
+        *,
+        title: str,
+        task: str,
+        parent_run_id: str,
+        source: SubAgentSource,
+        creator_snapshot: SubAgentCreatorSnapshot,
+    ) -> SubAgentRecord: ...
+
+    def get(self, agent_id: str) -> SubAgentRecord | None: ...
+
+    def list(
+        self,
+        *,
+        status: SubAgentStatus | str | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+    ) -> SubAgentPage: ...
+
+    async def wait(
+        self,
+        agent_ids: Sequence[str],
+        *,
+        timeout_ms: int | None = None,
+    ) -> tuple[SubAgentWaitResult, ...]: ...
+
+
+class SubAgentEventPublisher(Protocol):
+    """Publish an event independently of Main Agent Run output and busy state."""
+
+    async def publish(self, event: SubAgentEvent) -> None: ...

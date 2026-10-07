@@ -69,6 +69,11 @@ class WorkspaceState:
         return self.path / "sessions"
 
     @property
+    def subagents_directory(self) -> Path:
+        """Canonical Workspace-owned root for Session-scoped SubAgent records."""
+        return self.path / "subagents"
+
+    @property
     def schedule_sessions_directory(self) -> Path:
         """Dedicated, lazily-created storage for Schedule Sessions."""
         return self.path / "schedule-sessions"
@@ -100,6 +105,10 @@ class WorkspaceState:
         """Return the validated Schedule Session directory without materializing state."""
         return self._existing_sessions_directory(self.schedule_sessions_directory)
 
+    def existing_subagents_directory(self) -> Path | None:
+        """Return the validated SubAgent directory without materializing state."""
+        return self._existing_sessions_directory(self.subagents_directory)
+
     def _existing_sessions_directory(self, path: Path) -> Path | None:
         workspace_root = self._owned_workspace_root()
         state_root = self._existing_owned_directory(self.path, within=workspace_root)
@@ -114,6 +123,10 @@ class WorkspaceState:
     def prepare_schedule_sessions_directory(self) -> Path:
         """Lazily prepare and validate the owned Schedule Session directory for writes."""
         return self._prepare_sessions_directory(self.schedule_sessions_directory)
+
+    def prepare_subagents_directory(self) -> Path:
+        """Lazily prepare and validate the owned SubAgent directory for writes."""
+        return self._prepare_sessions_directory(self.subagents_directory)
 
     def _prepare_sessions_directory(self, path: Path) -> Path:
         workspace_root = self._owned_workspace_root()

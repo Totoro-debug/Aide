@@ -325,6 +325,7 @@ class ToolGateway:
         *,
         exposed_names: Collection[str],
         excluded_names: Collection[str] = (),
+        allowed_names: Collection[str] | None = None,
         run_tools: Sequence[BaseTool] = (),
         permission_policy: ToolPermissionPolicy | None = None,
         permission_context: PermissionContext | None = None,
@@ -334,12 +335,19 @@ class ToolGateway:
         """Create an isolated Run view over this Gateway's reusable Tool instances."""
         excluded = _normalize_tool_names(excluded_names, label="Excluded Tool names")
         excluded_set = set(excluded)
+        allowed = (
+            None
+            if allowed_names is None
+            else set(_normalize_tool_names(allowed_names, label="Allowed Tool names"))
+        )
         additions = tuple(run_tools)
         if any(not isinstance(tool, BaseTool) for tool in additions):
             raise TypeError("Run Tools must be BaseTool instances")
 
         catalog = tuple(
-            tool for tool in (*self._catalog, *additions) if tool.name not in excluded_set
+            tool
+            for tool in (*self._catalog, *additions)
+            if tool.name not in excluded_set and (allowed is None or tool.name in allowed)
         )
         if len({tool.name for tool in catalog}) != len(catalog):
             raise ValueError("Run Tool names must be unique")

@@ -22,7 +22,6 @@ from aide.agent.context.budget import (
     reported_model_usage_total,
     request_fits_model_context,
 )
-from aide.agent.memory.manager import MemoryManager
 from aide.agent.run_errors import CommittableAgentRunError
 from aide.agent.session.session import Session
 from aide.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
@@ -51,6 +50,7 @@ __all__ = [
     "AgentRunContextRequestPreparer",
     "AgentRunContextSnapshot",
     "AgentRunTerminalCommitValues",
+    "ConversationSummaryAppender",
     "agent_run_attempt_guard",
     "latest_main_agent_usage_anchor",
 ]
@@ -67,6 +67,12 @@ class AgentRunContextModelRouter(Protocol):
         tools: Sequence[dict[str, Any]],
         guard: ModelAttemptGuard | None = None,
     ) -> ModelResponse: ...
+
+
+class ConversationSummaryAppender(Protocol):
+    """Persistence boundary for summaries produced during context compaction."""
+
+    async def append_summary(self, content: str, timestamp: datetime) -> object: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +138,7 @@ class AgentRunContextController:
         *,
         snapshot: AgentRunContextSnapshot,
         provider: AgentRunContextModelRouter,
-        memory_manager: MemoryManager,
+        memory_manager: ConversationSummaryAppender,
         now: Callable[[], datetime],
     ) -> None:
         self._snapshot = AgentRunContextSnapshot(
@@ -166,7 +172,7 @@ class AgentRunContextController:
         session: Session,
         *,
         provider: AgentRunContextModelRouter,
-        memory_manager: MemoryManager,
+        memory_manager: ConversationSummaryAppender,
         now: Callable[[], datetime],
     ) -> AgentRunContextController:
         """Create a controller without retaining the writable Session object."""

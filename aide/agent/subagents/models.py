@@ -436,8 +436,11 @@ class SubAgentExecutionResult:
             SubAgentStatus.COMPLETED,
             SubAgentStatus.FAILED,
             SubAgentStatus.CANCELLED,
+            SubAgentStatus.INTERRUPTED,
         }:
-            raise ValueError("SubAgent execution result must be completed, failed, or cancelled")
+            raise ValueError(
+                "SubAgent execution result must be completed, failed, cancelled, or interrupted"
+            )
         if any(not isinstance(message, dict) for message in self.conversation):
             raise ValueError("SubAgent conversation entries must be objects")
         _ensure_json_value(list(self.conversation), field="conversation")
@@ -454,6 +457,8 @@ class SubAgentExecutionResult:
             raise ValueError("completed SubAgent requires a result")
         if self.status is SubAgentStatus.FAILED and self.error is None:
             raise ValueError("failed SubAgent requires an error")
+        if self.status is SubAgentStatus.INTERRUPTED and self.error is None:
+            raise ValueError("interrupted SubAgent requires an error")
 
 
 @dataclass(frozen=True, slots=True)

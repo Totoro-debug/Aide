@@ -58,6 +58,8 @@ class SubAgentExecutor(Protocol):
         emit: Callable[[SubAgentEvent], Awaitable[None]],
     ) -> SubAgentExecutionResult: ...
 
+    def request_cancel(self, agent_id: str, *, interrupted: bool = False) -> bool: ...
+
 
 class SubAgentSessionCoordinator(Protocol):
     """Coordinate submission, listing, and terminal-result waits for one Session."""

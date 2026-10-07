@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping, Sequence
 
 from aide.agent.tools.base import BaseTool
+from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.core.tool_search import ToolSearchTool
 from aide.agent.tools.permission import PermissionContext, PermissionSnapshot
 from aide.agent.tools.search import (
@@ -30,9 +31,11 @@ def build_agent_run_gateway(
     gateway: ToolGateway,
     *,
     excluded_names: Collection[str] = (),
+    allowed_names: Collection[str] | None = None,
     mcp_keywords: Mapping[str, Sequence[str]] | None = None,
     permission_snapshot: PermissionSnapshot | None = None,
     permission_context: PermissionContext | None = None,
+    tool_context: ToolRunContext | None = None,
 ) -> ToolGateway:
     """Build one isolated deferred-exposure Gateway view.
 
@@ -44,6 +47,21 @@ def build_agent_run_gateway(
     keyword_mapping = {} if mcp_keywords is None else mcp_keywords
     if not isinstance(keyword_mapping, Mapping):
         raise TypeError("Agent Run MCP keywords must be a mapping")
+    if allowed_names is not None and (
+        isinstance(allowed_names, (str, bytes))
+        or any(not isinstance(name, str) or not name for name in allowed_names)
+    ):
+        raise TypeError("Agent Run allowed Tool names must be a collection of non-empty strings")
+
+    allowed = None if allowed_names is None else frozenset(allowed_names)
+    base_catalog_names = frozenset(tool.name for tool in gateway.catalog)
+    search_allowed = allowed is None or "tool_search" in allowed
+    baseline_names = tuple(
+        name
+        for name in RUN_BASELINE_TOOL_NAMES
+        if (allowed is None or name in allowed)
+        and (name in base_catalog_names or (name == "tool_search" and search_allowed))
+    )
 
     run_gateway: ToolGateway | None = None
     search_index: ToolSearchIndex | None = None
@@ -57,12 +75,14 @@ def build_agent_run_gateway(
 
     run_gateway = gateway.for_run(
         excluded_names=excluded_names,
-        exposed_names=RUN_BASELINE_TOOL_NAMES,
-        run_tools=(ToolSearchTool(search_and_activate),),
+        allowed_names=allowed_names,
+        exposed_names=baseline_names,
+        run_tools=(ToolSearchTool(search_and_activate),) if search_allowed else (),
         permission_snapshot=permission_snapshot,
         permission_context=permission_context,
+        tool_context=tool_context,
     )
-    baseline_names = frozenset(RUN_BASELINE_TOOL_NAMES)
+    baseline_set = frozenset(RUN_BASELINE_TOOL_NAMES)
     documents = tuple(
         _document_for_tool(
             tool,
@@ -70,7 +90,7 @@ def build_agent_run_gateway(
             mcp_keywords=keyword_mapping,
         )
         for catalog_order, tool in enumerate(run_gateway.catalog)
-        if tool.name not in baseline_names
+        if tool.name not in baseline_set
     )
     search_index = ToolSearchIndex(documents)
     return run_gateway

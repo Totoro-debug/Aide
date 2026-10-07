@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal, Protocol
@@ -43,6 +43,9 @@ type AgentRunnerOutput = (
     | AgentRunnerToolCallStarted
     | AgentRunnerToolCallFinished
 )
+type AgentRunnerCheckpointCallback = Callable[
+    [Sequence[dict[str, Any]], dict[str, int]], Awaitable[None]
+]
 
 _MAX_ITERATIONS_MESSAGE = (
     "Aide 本轮对话已经达到最大循环次数，仍没有输出最终结果。"  # noqa: RUF001
@@ -195,6 +198,7 @@ class AgentRunner:
         stop_on_tool_error: bool = False,
         propagate_unexpected_errors: bool = False,
         tool_calls_as_tasks: bool = True,
+        on_checkpoint: AgentRunnerCheckpointCallback | None = None,
     ) -> AgentRunnerResult:
         _validate_max_iterations(max_iterations)
 
@@ -231,6 +235,25 @@ class AgentRunner:
                 raise _PropagatedFailure(
                     error,
                     "Agent Runner output callback failed",
+                ) from error
+
+        async def checkpoint() -> None:
+            if on_checkpoint is None:
+                return
+            try:
+                await on_checkpoint(deepcopy(increment), dict(usage))
+            except asyncio.CancelledError as error:
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise
+                raise _PropagatedFailure(
+                    error,
+                    "Agent Runner checkpoint callback failed",
+                ) from error
+            except BaseException as error:
+                raise _PropagatedFailure(
+                    error,
+                    "Agent Runner checkpoint callback failed",
                 ) from error
 
         async def close_segment() -> None:
@@ -377,6 +400,7 @@ class AgentRunner:
                     return finish_cancelled(final_content="")
 
                 if not pending_tool_calls:
+                    await checkpoint()
                     return AgentRunnerResult(
                         messages=increment,
                         final_content=response.message.content,
@@ -449,6 +473,7 @@ class AgentRunner:
                         )
                     )
                     if stop_on_tool_error and result.status != "success":
+                        await checkpoint()
                         return AgentRunnerResult(
                             messages=increment,
                             final_content="",
@@ -472,6 +497,7 @@ class AgentRunner:
                             model_calls=0,
                         ),
                     )
+                    await checkpoint()
                     return AgentRunnerResult(
                         messages=increment,
                         final_content=_MAX_ITERATIONS_MESSAGE,
@@ -480,6 +506,7 @@ class AgentRunner:
                         error=limit_error,
                     )
 
+                await checkpoint()
                 continuation = continuation_for_next_call
         except _PropagatedFailure as failure:
             raise failure.error from failure

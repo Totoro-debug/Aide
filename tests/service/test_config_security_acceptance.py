@@ -451,7 +451,7 @@ async def test_secret_replacement_persistence_failure_is_safe(
     def fail(*args: object, **kwargs: object) -> None:
         raise OSError(f"Injected persistence failure {secret}")
 
-    monkeypatch.setattr(service._config_loader, "patch_editable_fields", fail)
+    monkeypatch.setattr(ConfigLoader, "patch_editable_fields", fail)
     try:
         async with aiohttp.ClientSession() as http:
             response = await http.patch(

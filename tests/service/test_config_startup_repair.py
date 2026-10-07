@@ -316,5 +316,4 @@ async def test_repair_http_security_validation_cas_and_secret_safe_replay(
         combined = str([first_body, public, await reuse.json(), await cross_client.json()])
         assert "http-repair-secret-303" not in combined + caplog.text
         assert "malformed-secret-303" not in combined + caplog.text
-        assert "http-repair-secret-303" not in str(service._config_request_fingerprints)
         assert ConfigLoader(service.agent_home).web_snapshot().state == "active"

@@ -10,9 +10,8 @@ import secrets
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass, field, fields, is_dataclass, replace
+from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import UTC, datetime, timedelta
-from hashlib import sha256
 from pathlib import Path
 from time import monotonic
 from typing import Any, Literal, Protocol, cast
@@ -65,9 +64,7 @@ from omni.agent.workspace_state import WorkspaceState, WorkspaceStateError
 from omni.config.agent_home import AgentHome
 from omni.config.config import (
     ConfigError,
-    ConfigFieldError,
     ConfigLoader,
-    ConfigRevisionConflict,
     ReasoningEffort,
     UserConfiguration,
 )
@@ -92,6 +89,7 @@ from omni.schedule.store import (
     ScheduleStoreFaultedError,
     WorkspaceScheduleStore,
 )
+from omni.service.configuration import ConfigurationEdit, ConfigurationEditor
 from omni.service.contracts import (
     ConversationClaimDTO,
     ConversationOpenDTO,
@@ -443,62 +441,6 @@ def _project_catalog_service_error(error: ProjectCatalogError) -> ServiceError:
         status=422,
         field_errors={"path": detail},
     )
-
-
-def _configuration_request_fingerprint(
-    client_id: str | None,
-    action: str,
-    payload: object,
-) -> str:
-    serialized = json.dumps(
-        [client_id, action, payload],
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return sha256(serialized.encode("utf-8")).hexdigest()
-
-
-_CONFIG_EDIT_MISSING = object()
-
-
-def _advance_configuration_baseline(
-    baseline: object, previous_baseline: object, before: object, saved: object
-) -> object:
-    """Recognize committed edits from this editor while retaining external conflicts."""
-    if all(isinstance(value, Mapping) for value in (baseline, previous_baseline, before, saved)):
-        base = cast(Mapping[str, object], baseline)
-        old_base = cast(Mapping[str, object], previous_baseline)
-        prior = cast(Mapping[str, object], before)
-        accepted = cast(Mapping[str, object], saved)
-        result: dict[str, object] = {}
-        for key in base.keys() | prior.keys() | accepted.keys():
-            value = _advance_configuration_baseline(
-                base.get(key, _CONFIG_EDIT_MISSING), old_base.get(key, _CONFIG_EDIT_MISSING),
-                prior.get(key, _CONFIG_EDIT_MISSING), accepted.get(key, _CONFIG_EDIT_MISSING),
-            )
-            if value is not _CONFIG_EDIT_MISSING:
-                result[key] = value
-        return result
-    baseline, previous_baseline, before, saved = (
-        list(value) if isinstance(value, tuple) else value
-        for value in (baseline, previous_baseline, before, saved)
-    )
-    if before != saved and (baseline == previous_baseline or baseline == before):
-        return saved
-    return baseline
-
-
-@dataclass(frozen=True, slots=True)
-class _ConfigurationEdit:
-    sequence: int
-    baseline: object
-    before: object
-    saved: object
-    baseline_secrets: Mapping[str, object]
-    saved_secrets: Mapping[str, object]
-    before_secrets: Mapping[str, object]
-    changed_secrets: frozenset[str]
 
 
 def _consume_task_result(task: asyncio.Task[object]) -> None:
@@ -2496,23 +2438,7 @@ class AgentService:
         self._schedule_removal_jobs: dict[tuple[str, str], tuple[ScheduleJob, bool]] = {}
         self._project_lifecycle_lock = asyncio.Lock()
         self._project_removals: dict[str, _ProjectRemoval] = {}
-        self._config_loader = ConfigLoader(agent_home)
-        self._config_lock = asyncio.Lock()
-        self._config_request_results: dict[str, dict[str, object]] = {}
-        self._config_request_fingerprints: dict[str, str] = {}
-        self._config_edits: dict[tuple[str | None, str, str], deque[_ConfigurationEdit]] = {}
-        self._config_saved_configuration = configuration
-        self._config_saved_revision: str | None = None
-        self._config_active_revision: str | None = None
-        self._config_fields: dict[str, dict[str, object]] | None = None
-        self._config_secret_revisions: dict[str, str | None] = {}
-        self._config_status = "active" if configuration is not None else "pending-repair"
-        self._config_state = "active" if configuration is not None else "missing"
-        self._config_repair_required = configuration is None
-        self._config_backup_required = False
-        self._config_requires_secret_reentry = configuration is None
-        self._config_projection_error: dict[str, str] | None = None
-        self._config_startup_diagnostics: tuple[str, ...] = ()
+        self._configuration_editor = ConfigurationEditor(ConfigLoader(agent_home), configuration)
         self._chat_effort_override: ReasoningEffort | None = None
         self.projects = ProjectCatalog(agent_home)
         self.conversation_workspaces = ConversationWorkspaceCatalog(agent_home)
@@ -2567,7 +2493,7 @@ class AgentService:
             raise service_error(
                 "validation_error", "request_id and saved_revision are required.", status=422
             )
-        async with self._config_lock:
+        def restart() -> ServiceStopDTO:
             previous = self._restart_request_results.get(request_id)
             if previous is not None:
                 if previous[0] != saved_revision:
@@ -2588,6 +2514,8 @@ class AgentService:
             result = self.request_service_stop(request_id)
             self._restart_request_results[request_id] = (saved_revision, result)
             return result.copy()
+
+        return await self._configuration_editor.coordinate_restart(restart)
 
     def replacement_after_restart(self) -> AgentService:
         """Create the next Runtime Lifetime with the restart receipt retained."""
@@ -2740,33 +2668,11 @@ class AgentService:
         if self.state != "starting":
             return
         self.agent_home.initialize()
-        snapshot = self._config_loader.web_snapshot()
-        self._config_startup_diagnostics = tuple(
-            diagnostic.message for diagnostic in self._config_loader.diagnostics
-        )
-        self._config_saved_revision = snapshot.revision
-        self._config_fields = {section: dict(values) for section, values in snapshot.fields.items()}
-        self._config_secret_revisions = dict(
-            self._config_loader.secret_revisions(snapshot.configuration)
-        )
-        self._config_state = snapshot.state
-        self._config_repair_required = snapshot.repair_required
-        self._config_backup_required = snapshot.backup_required
-        self._config_requires_secret_reentry = snapshot.requires_secret_reentry
-        self._config_projection_error = None if snapshot.error is None else dict(snapshot.error)
-        if snapshot.state == "active":
-            self.configuration = snapshot.configuration
-            self._config_saved_configuration = snapshot.configuration
-            self._config_active_revision = snapshot.revision
-            self._config_status = "active"
-            self._initialize_shared_resources(snapshot.configuration)
+        self.configuration = self._configuration_editor.start()
+        if self.configuration is not None:
+            self._initialize_shared_resources(self.configuration)
             assert self._mcp_manager is not None
-            await self._mcp_manager.start(snapshot.configuration.mcp)
-        else:
-            self.configuration = None
-            self._config_saved_configuration = None
-            self._config_active_revision = None
-            self._config_status = "pending-repair"
+            await self._mcp_manager.start(self.configuration.mcp)
         self.confirmation.bind_presenter(self._presenter)
         for record in self.projects.list():
             if record.schedule_state == "removing" and record.removal_error is None:
@@ -2775,7 +2681,7 @@ class AgentService:
                     "Project removal was interrupted; retry to finish stopping its work.",
                 )
             if (
-                snapshot.state == "active"
+                self.configuration is not None
                 and record.schedule_state == "available"
                 and record.path.is_dir()
             ):
@@ -2864,159 +2770,18 @@ class AgentService:
         """Return whether new Agent and Schedule work may be admitted."""
         return (
             self.configuration is not None
-            and self._config_active_revision is not None
+            and self._configuration_editor.ready
         )
 
     def config_view(self) -> dict[str, object]:
-        """Read saved settings without changing this service's startup configuration."""
-        snapshot = self._config_loader.web_snapshot()
-        self._config_saved_revision = snapshot.revision
-        self._config_saved_configuration = (
-            snapshot.configuration if snapshot.state == "active" else None
-        )
-        self._config_state = snapshot.state
-        self._config_repair_required = snapshot.repair_required
-        self._config_backup_required = snapshot.backup_required
-        self._config_requires_secret_reentry = snapshot.requires_secret_reentry
-        self._config_projection_error = None if snapshot.error is None else dict(snapshot.error)
-        self._config_fields = {section: dict(values) for section, values in snapshot.fields.items()}
-        self._config_secret_revisions = dict(
-            self._config_loader.secret_revisions(snapshot.configuration)
-        )
-        self._config_status = (
-            "pending-repair"
-            if snapshot.repair_required
-            else "active"
-            if snapshot.revision == self._config_active_revision
-            else "restart-required"
-        )
-        return self._config_response()
+        return self._configuration_editor.view()
 
     def configuration_text_view(self) -> dict[str, object]:
-        """Return the redacted text view used by the CLI config command."""
-        try:
-            self._config_loader.ensure_default()
-            self.config_view()
-            view = self._config_loader.view()
-            view = replace(view, service_status_text=self.configuration_status_text())
-        except (OSError, UnicodeError) as error:
-            raise service_error(
-                "persistence_error",
-                "User Configuration could not be read or written.\n"
-                f"Path: {self._config_loader.path}",
-                status=500,
-            ) from error
-        return {
-            "header_text": view.header_text(),
-            "redacted_content": view.redacted_content,
-            "error_code": None if view.error is None else view.error.code,
-        }
+        return self._configuration_editor.text_view()
 
     def configuration_startup_view(self) -> dict[str, object]:
-        """Prepare the CLI configuration template and report Service startup eligibility."""
-        result = self.config_view()
-        available = self._config_active_revision is not None
-        error = None if available else self._config_projection_error
-        if not available and error is None:
-            error = {
-                "code": "config_restart_required",
-                "message": "User Configuration was saved; restart the Agent Service before starting a conversation.",
-            }
-        if not available and self._config_state == "missing":
-            self.configuration_text_view()
-            error = {
-                "code": "config_missing",
-                "message": "A default User Configuration was created; edit it before starting Omni.\n"
-                f"Path: {self._config_loader.path}",
-            }
-        return {
-            **result,
-            "startup": {
-                "available": available,
-                "diagnostics": list(self._config_startup_diagnostics),
-                "error": error,
-            },
-        }
+        return self._configuration_editor.startup_view()
 
-    def _prepare_configuration_edit(
-        self,
-        client_id: str | None,
-        editor_id: str | None,
-        edit_sequence: int | None,
-        fields: Mapping[str, object],
-        secrets: Mapping[str, object] | None,
-        baseline: Mapping[str, object] | None,
-        baseline_secrets: Mapping[str, object] | None,
-    ) -> tuple[Mapping[str, object] | None, Mapping[str, object] | None]:
-        if editor_id is None and edit_sequence is None:
-            return baseline, baseline_secrets
-        if (
-            not isinstance(editor_id, str)
-            or not editor_id
-            or isinstance(edit_sequence, bool)
-            or not isinstance(edit_sequence, int)
-            or edit_sequence < 1
-            or baseline is None
-        ):
-            raise service_error(
-                "validation_error", "Configuration edit identity is invalid.", status=422
-            )
-        coordinated = dict(baseline)
-        coordinated_secrets = dict(baseline_secrets or {})
-        sections = set(fields) | {path.split(".")[0] for path in (secrets or {})}
-        for section in sections:
-            history = self._config_edits.get((client_id, editor_id, section))
-            if not history:
-                continue
-            if edit_sequence <= history[-1].sequence:
-                raise service_error(
-                    "config_edit_superseded", "A newer configuration edit was already saved.", status=409
-                )
-            value = baseline.get(section, _CONFIG_EDIT_MISSING)
-            for previous in history:
-                value = _advance_configuration_baseline(
-                    value, previous.baseline, previous.before, previous.saved
-                )
-                for path in previous.changed_secrets:
-                    if coordinated_secrets.get(path) in (previous.baseline_secrets.get(path), previous.before_secrets.get(path)):
-                        coordinated_secrets[path] = previous.saved_secrets.get(path)
-            if value is not _CONFIG_EDIT_MISSING:
-                coordinated[section] = value
-        return coordinated, coordinated_secrets
-
-    def _record_configuration_edit(
-        self,
-        client_id: str | None,
-        editor_id: str | None,
-        edit_sequence: int | None,
-        fields: Mapping[str, object],
-        secrets: Mapping[str, object] | None,
-        baseline: Mapping[str, object] | None,
-        baseline_secrets: Mapping[str, object] | None,
-        previous_fields: Mapping[str, Mapping[str, object]],
-        previous_secret_revisions: Mapping[str, str | None],
-    ) -> None:
-        if editor_id is None or edit_sequence is None or baseline is None:
-            return
-        sections = set(fields) | {path.split(".")[0] for path in (secrets or {})}
-        for section in sections:
-            history = self._config_edits.setdefault((client_id, editor_id, section), deque(maxlen=32))
-            history.append(_ConfigurationEdit(
-                edit_sequence,
-                baseline.get(section, {}),
-                previous_fields.get(section, {}),
-                (self._config_fields or {}).get(section, {}),
-                baseline_secrets or {},
-                dict(self._config_secret_revisions),
-                previous_secret_revisions,
-                frozenset(
-                    path for path in previous_secret_revisions.keys() | self._config_secret_revisions.keys()
-                    if path.split(".")[0] == section
-                    and previous_secret_revisions.get(path) != self._config_secret_revisions.get(path)
-                ),
-            ))
-        while len(self._config_edits) > 256:
-            self._config_edits.pop(next(iter(self._config_edits)))
 
     def available_models_view(self) -> dict[str, object]:
         """Return active provider models with capacities and the effective chat route."""
@@ -3065,56 +2830,9 @@ class AgentService:
             ],
         }
 
-    def _configuration_request_result(
-        self, request_id: str, fingerprint: str
-    ) -> dict[str, object] | None:
-        previous = self._config_request_fingerprints.get(request_id)
-        if previous is not None and previous != fingerprint:
-            raise service_error(
-                "request_conflict",
-                "Request ID was already used for a different operation.",
-                status=409,
-            )
-        return self._config_request_results.get(request_id)
-
-    def _config_response(self) -> dict[str, object]:
-        saved_revision = self._config_saved_revision or ConfigLoader.revision_from_bytes(b"")
-        fields = {} if self._config_fields is None else self._config_fields
-        return {
-            "revision": saved_revision,
-            "fields": {section: dict(values) for section, values in fields.items()},
-            "secret_revisions": dict(self._config_secret_revisions),
-            "configuration": {
-                "state": self._config_state,
-                "repair_required": self._config_repair_required,
-                "backup_required": self._config_backup_required,
-                "requires_secret_reentry": self._config_requires_secret_reentry,
-                "error": (
-                    None
-                    if self._config_projection_error is None
-                    else dict(self._config_projection_error)
-                ),
-            },
-            "application": {
-                "status": self._config_status,
-                "saved_revision": saved_revision,
-                "active_revision": self._config_active_revision,
-                "restart_required": (
-                    not self._config_repair_required
-                    and saved_revision != self._config_active_revision
-                ),
-            },
-        }
 
     def configuration_status_text(self) -> str:
-        """Render the same save/restart state for Command-line management."""
-        application = cast(dict[str, object], self.config_view()["application"])
-        restart = "yes" if application["restart_required"] else "no"
-        return (
-            f"Saved version: {application['saved_revision']}\n"
-            f"Startup version: {application['active_revision'] or '-'}\n"
-            f"Restart required: {restart}\n"
-        )
+        return self._configuration_editor.status_text()
 
     async def update_configuration(
         self,
@@ -3175,108 +2893,22 @@ class AgentService:
         editor_id: str | None = None,
         edit_sequence: int | None = None,
     ) -> dict[str, object]:
-        """Coordinate one configuration save without replacing startup resources."""
+        """Validate service admission and publish a completed configuration save."""
         if not request_id:
             raise service_error("validation_error", "Request ID is required.", status=422)
         if client_id is not None:
             self._require_client(client_id)
         if self.state in {"draining", "stopped"}:
             raise service_error("admission_closed", "The local service is stopping.")
-        fingerprint = _configuration_request_fingerprint(
-            client_id,
-            action,
-            {
-                "revision": expected_revision,
-                "baseline": baseline,
-                "baseline_secrets": baseline_secrets,
-                "overwrite_conflicts": overwrite_conflicts,
-                "editor_id": editor_id,
-                "edit_sequence": edit_sequence,
-                "fields": fields,
-                "secrets": secrets or {},
-            },
-        )
-        async with self._config_lock:
-            existing = self._configuration_request_result(request_id, fingerprint)
-            if existing is not None:
-                return existing
-            coordinated, coordinated_secrets = self._prepare_configuration_edit(
-                client_id, editor_id, edit_sequence, fields, secrets, baseline, baseline_secrets
-            )
-            try:
-                persist = (
-                    self._config_loader.patch_editable_fields
-                    if action == "patch"
-                    else self._config_loader.repair_editable_fields
-                )
-                result = persist(
-                    expected_revision,
-                    fields,
-                    secrets,
-                    coordinated,
-                    coordinated_secrets,
-                    overwrite_conflicts,
-                )
-            except ConfigRevisionConflict as error:
-                raise service_error(
-                    "config_revision_conflict",
-                    error.error.message,
-                    status=409,
-                    retryable=True,
-                    field_errors=error.field_errors,
-                ) from error
-            except ConfigFieldError as error:
-                raise service_error(
-                    error.error.code,
-                    error.error.message,
-                    status=422,
-                    field_errors=error.field_errors,
-                ) from error
-            except ConfigError as error:
-                raise service_error(
-                    error.error.code,
-                    "The complete User Configuration is invalid.",
-                    status=422,
-                    field_errors=error.field_errors,
-                ) from error
-            except OSError as error:
-                raise service_error(
-                    "persistence_error",
-                    "User Configuration could not be written.",
-                    status=500,
-                    retryable=True,
-                ) from error
-
-            self._config_saved_configuration = result.configuration
-            self._config_saved_revision = result.revision
-            self._config_fields = {
-                section: dict(values) for section, values in result.fields.items()
-            }
-            self._config_secret_revisions = dict(
-                self._config_loader.secret_revisions(result.configuration)
-            )
-            self._record_configuration_edit(
-                client_id, editor_id, edit_sequence, fields, secrets, baseline, baseline_secrets, result.previous_fields, result.previous_secret_revisions
-            )
-            self._config_state = "active"
-            self._config_repair_required = False
-            self._config_backup_required = False
-            self._config_requires_secret_reentry = False
-            self._config_projection_error = None
-            self._config_status = (
-                "active" if result.revision == self._config_active_revision else "restart-required"
-            )
-            response = self._config_response()
-            if action == "repair":
-                response = {"backup_id": result.backup_id, **response}
-            self._config_request_results[request_id] = response
-            self._config_request_fingerprints[request_id] = fingerprint
-            if len(self._config_request_results) > 256:
-                oldest = next(iter(self._config_request_results))
-                self._config_request_results.pop(oldest, None)
-                self._config_request_fingerprints.pop(oldest, None)
-        await self._emit_configuration_event()
-        return response
+        saved = await self._configuration_editor.save(ConfigurationEdit(
+            action=action, request_id=request_id, expected_revision=expected_revision,
+            fields=fields, secrets=secrets, client_id=client_id, baseline=baseline,
+            baseline_secrets=baseline_secrets, overwrite_conflicts=overwrite_conflicts,
+            editor_id=editor_id, edit_sequence=edit_sequence,
+        ))
+        if saved.changed:
+            await self._emit_configuration_event()
+        return saved.view
 
     @property
     def reasoning_effort(self) -> ReasoningEffort:
@@ -3295,15 +2927,13 @@ class AgentService:
 
     async def persist_reasoning_effort(self, effort: ReasoningEffort) -> None:
         """Best-effort persistence does not activate other saved settings."""
-        async with self._config_lock:
-            self._config_loader.update_reasoning_effort(effort)
-            self.config_view()
+        await self._configuration_editor.persist_reasoning_effort(effort)
         await self._emit_configuration_event()
 
     async def _emit_configuration_event(self) -> None:
-        if self._config_saved_revision is None:
+        application = self._configuration_editor.application()
+        if application is None:
             return
-        application = cast(dict[str, object], self._config_response()["application"])
         await self.emit(
             "config.application",
             workspace_id=None,
@@ -3536,7 +3166,7 @@ class AgentService:
                         "admission_closed", "Workspace cleanup has not completed.", retryable=True
                     )
                 return runtime
-            if self.configuration is None or self._config_active_revision is None:
+            if self.configuration is None or not self._configuration_editor.ready:
                 raise service_error(
                     "config_invalid", "User Configuration is unavailable.", status=422
                 )
@@ -3584,7 +3214,7 @@ class AgentService:
     ) -> tuple[ProjectRecord, WorkspaceRecord, tuple[ScheduleJob, ...]]:
         async with self._project_lifecycle_lock:
             self._require_client(client_id)
-            if self.configuration is None or self._config_active_revision is None:
+            if self.configuration is None or not self._configuration_editor.ready:
                 raise service_error(
                     "config_invalid", "User Configuration is unavailable.", status=422
                 )
@@ -4043,7 +3673,7 @@ class AgentService:
             known_directories = self.conversation_workspaces.list()
             if directory is None:
                 configured_path = Path(
-                    self._config_loader.load().web.default_chat_workspace
+                    self._configuration_editor.default_chat_workspace()
                 ).expanduser()
                 path = self.conversation_workspaces.validate(configured_path)
                 path.mkdir(parents=True, exist_ok=True)

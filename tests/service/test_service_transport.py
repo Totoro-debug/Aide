@@ -20,16 +20,16 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from yarl import URL
 
-import omni.service.runtime as service_runtime
-import omni.terminal.cli as cli
-from omni.agent.session.restore import RestoreMode
-from omni.agent.session.session import Session
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.management.commands import ManagementCommandDispatcher
-from omni.schedule.model import JobSchedule, ScheduleJob
-from omni.service.client import (
+import aide.service.runtime as service_runtime
+import aide.terminal.cli as cli
+from aide.agent.session.restore import RestoreMode
+from aide.agent.session.session import Session
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.management.commands import ManagementCommandDispatcher
+from aide.schedule.model import JobSchedule, ScheduleJob
+from aide.service.client import (
     RemoteConfirmationCoordinator,
     RemoteControl,
     RemoteManagementCommandDispatcher,
@@ -37,8 +37,8 @@ from omni.service.client import (
     ServiceClient,
     ServiceStartupError,
 )
-from omni.service.conversation_workspaces import ConversationWorkspaceCatalog
-from omni.service.discovery import (
+from aide.service.conversation_workspaces import ConversationWorkspaceCatalog
+from aide.service.discovery import (
     ServiceDiscovery,
     create_credential,
     identity_proof,
@@ -46,11 +46,11 @@ from omni.service.discovery import (
     read_discovery,
     write_discovery,
 )
-from omni.service.errors import ServiceError
-from omni.service.projects import ProjectCatalog
-from omni.service.runtime import AgentService, _project_job_summary
-from omni.service.transport import create_app
-from omni.terminal.conversation import TerminalConversationApp, _ConversationInput
+from aide.service.errors import ServiceError
+from aide.service.projects import ProjectCatalog
+from aide.service.runtime import AgentService, _project_job_summary
+from aide.service.transport import create_app
+from aide.terminal.conversation import TerminalConversationApp, _ConversationInput
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
 
@@ -174,7 +174,7 @@ async def test_all_foreground_creation_entries_record_explicit_scope(
         session = workspace._loops[session_id].loop.session
         expected = "project" if kind == "cli" and registered else "chat"
         assert session.metadata["creation_scope"] == expected
-        assert not (directory / ".omni" / "sessions" / f"{session_id}.jsonl").exists()
+        assert not (directory / ".aide" / "sessions" / f"{session_id}.jsonl").exists()
     finally:
         await service.stop()
 
@@ -210,7 +210,7 @@ async def test_chat_draft_does_not_reuse_or_reclassify_restored_project_history(
         claimed = await service.claim(client.client_id, workspace.workspace_id, draft_id)
         assert cast(dict[str, object], claimed["snapshot"])["messages"] == []
         assert workspace._loops[draft_id].loop.session.metadata["creation_scope"] == "chat"
-        assert not (shared / ".omni" / "sessions" / f"{draft_id}.jsonl").exists()
+        assert not (shared / ".aide" / "sessions" / f"{draft_id}.jsonl").exists()
         restored = await workspace._create_loop(restored_id, client_id=client.client_id)
         assert restored.loop.session.metadata["creation_scope"] == "project"
     finally:
@@ -264,8 +264,8 @@ async def test_web_can_enter_the_default_conversation_workspace_under_agent_home
         await server.start_server()
         headers = {
             "Authorization": f"Bearer {token}",
-            "X-Omni-Client": client.client_id,
-            "X-Omni-CSRF": token,
+            "X-Aide-Client": client.client_id,
+            "X-Aide-CSRF": token,
         }
         async with aiohttp.ClientSession() as http:
             async with http.post(
@@ -292,7 +292,7 @@ async def test_web_can_enter_the_default_conversation_workspace_under_agent_home
             session_id = opened["session_id"]
             claim = opened["claim"]
             assert opened["snapshot"]["session_id"] == session_id
-            session_path = chat / ".omni" / "sessions" / f"{session_id}.jsonl"
+            session_path = chat / ".aide" / "sessions" / f"{session_id}.jsonl"
             assert not session_path.exists()
             workspace = service.workspace(workspace_id)
             draft = workspace._loops[session_id].loop.session
@@ -313,7 +313,7 @@ async def test_web_can_enter_the_default_conversation_workspace_under_agent_home
 
             async with http.post(
                 server.make_url(f"/api/v1/workspaces/{workspace_id}/sessions/{session_id}/release"),
-                headers={**headers, "X-Omni-Claim": claim["reconnect_credential"]},
+                headers={**headers, "X-Aide-Claim": claim["reconnect_credential"]},
                 json={"request_id": "release-chat-draft", "claim_version": claim["claim_version"]},
             ) as response:
                 assert response.status == 200
@@ -321,7 +321,7 @@ async def test_web_can_enter_the_default_conversation_workspace_under_agent_home
 
         assert result["directory"] == str(chat.resolve())
         assert result["project_id"] is None
-        assert (chat / ".omni" / "sessions").is_dir()
+        assert (chat / ".aide" / "sessions").is_dir()
         assert ConversationWorkspaceCatalog(home).list() == (chat.resolve(),)
         assert service.workspace(result["workspace_id"]).workspace_path == chat.resolve()
         assert service.projects.list() == ()
@@ -375,7 +375,7 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
         content="other chat body",
         creation_scope="chat",
     )
-    legacy_chat_path = old_chat / ".omni" / "sessions" / f"{expected_other_chat_id}.jsonl"
+    legacy_chat_path = old_chat / ".aide" / "sessions" / f"{expected_other_chat_id}.jsonl"
     legacy_chat_header = legacy_chat_path.read_bytes().split(b"\n", 1)[0]
     legacy_chat_path.write_bytes(legacy_chat_header + b"\nnot-loaded-by-history-listing\n")
     unscoped_id = await _persist_session(
@@ -385,9 +385,9 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
         created_at=now + timedelta(seconds=4),
         content="unscoped body",
     )
-    unscoped_path = old_chat / ".omni" / "sessions" / f"{unscoped_id}.jsonl"
+    unscoped_path = old_chat / ".aide" / "sessions" / f"{unscoped_id}.jsonl"
     unscoped_before = unscoped_path.read_bytes()
-    legacy_project_path = shared / ".omni" / "sessions" / f"{expected_legacy_project_id}.jsonl"
+    legacy_project_path = shared / ".aide" / "sessions" / f"{expected_legacy_project_id}.jsonl"
     legacy_project_before = legacy_project_path.read_bytes()
     token = create_credential(home)
     server = TestServer(create_app(service))
@@ -397,7 +397,7 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
         await server.start_server()
         headers = {
             "Authorization": f"Bearer {token}",
-            "X-Omni-Client": client.client_id,
+            "X-Aide-Client": client.client_id,
         }
         async with aiohttp.ClientSession() as http:
             async with http.get(
@@ -508,7 +508,7 @@ async def test_chat_history_reports_unavailable_workspace_without_recreating_it(
         original_iterdir = Path.iterdir
 
         def inaccessible_iterdir(directory: Path) -> Iterator[Path]:
-            if directory == old_chat / ".omni" / "sessions":
+            if directory == old_chat / ".aide" / "sessions":
                 raise PermissionError("History directory cannot be enumerated")
             return original_iterdir(directory)
 
@@ -521,7 +521,7 @@ async def test_chat_history_reports_unavailable_workspace_without_recreating_it(
         await server.start_server()
         headers = {
             "Authorization": f"Bearer {token}",
-            "X-Omni-Client": client.client_id,
+            "X-Aide-Client": client.client_id,
         }
         async with aiohttp.ClientSession() as http:
             async with http.get(
@@ -569,7 +569,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                 f"/api/v1/workspaces/{first.workspace_id}/management/status"
                 f"?session_id={first.session_id}&claim_version={first.claim_version}"
             ),
-            extra_headers={"X-Omni-Claim": first.claim_credential},
+            extra_headers={"X-Aide-Claim": first.claim_credential},
         )
         status_view = cast(
             dict[str, object], cast(dict[str, object], status_response["result"])["status_view"]
@@ -590,7 +590,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                 "permission_level": "read-only",
             },
             mutation=True,
-            extra_headers={"X-Omni-Claim": first.claim_credential},
+            extra_headers={"X-Aide-Claim": first.claim_credential},
         )
         typed_permission_result = cast(dict[str, object], typed_permission["result"])
         assert typed_permission_result["published_permission_level"] == "read-only"
@@ -605,7 +605,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                 "permission_level": "read-only",
             },
             mutation=True,
-            extra_headers={"X-Omni-Claim": first.claim_credential},
+            extra_headers={"X-Aide-Claim": first.claim_credential},
         )
         assert replay == typed_permission
 
@@ -618,7 +618,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                 "claim_version": first.claim_version,
             },
             mutation=True,
-            extra_headers={"X-Omni-Claim": first.claim_credential},
+            extra_headers={"X-Aide-Claim": first.claim_credential},
         )
         first_status_view = cast(
             dict[str, object],
@@ -635,7 +635,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                 "claim_version": second.claim_version,
             },
             mutation=True,
-            extra_headers={"X-Omni-Claim": second.claim_credential},
+            extra_headers={"X-Aide-Claim": second.claim_credential},
         )
         second_status_view = cast(
             dict[str, object], cast(dict[str, object], second_status["result"])["status_view"]
@@ -652,7 +652,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                 "effort": "high",
             },
             mutation=True,
-            extra_headers={"X-Omni-Claim": first.claim_credential},
+            extra_headers={"X-Aide-Claim": first.claim_credential},
         )
         typed_effort_result = cast(dict[str, object], typed_effort["result"])
         assert typed_effort_result["published_effort"] == "high"
@@ -665,8 +665,8 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                     f"?session_id={first.session_id}&claim_version={first.claim_version}"
                 ),
                 extra_headers={
-                    "X-Omni-Claim": "wrong-claim",
-                    "X-Omni-Request": "stale-status",
+                    "X-Aide-Claim": "wrong-claim",
+                    "X-Aide-Request": "stale-status",
                 },
             )
         assert stale.value.code == "stale_claim"
@@ -730,7 +730,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                     f"{first.base_url}/api/v1/events",
                     headers={
                         "Authorization": f"Bearer {first.token}",
-                        "X-Omni-Client": first.client_id,
+                        "X-Aide-Client": first.client_id,
                     },
                 )
             assert handshake.value.status == 403
@@ -738,7 +738,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
                 f"{first.base_url}/api/v1/clients",
                 headers={
                     "Authorization": f"Bearer {first.token}",
-                    "X-Omni-CSRF": first.token,
+                    "X-Aide-CSRF": first.token,
                 },
                 json={
                     "request_id": "duplicate-online-client",
@@ -790,8 +790,8 @@ async def test_project_http_contract_reports_path_errors_and_keeps_cli_workspace
         cli_client = await ServiceClient.connect_or_start(home, cli_workspace, port=port)
         headers = {
             "Authorization": f"Bearer {client.token}",
-            "X-Omni-CSRF": client.token,
-            "X-Omni-Client": client.client_id,
+            "X-Aide-CSRF": client.token,
+            "X-Aide-Client": client.client_id,
         }
         async with aiohttp.ClientSession() as http:
             async with http.post(
@@ -888,8 +888,8 @@ async def test_project_http_delete_returns_operation_and_preserves_directory(
         client = await ServiceClient.connect_or_start(home, project, port=port)
         headers = {
             "Authorization": f"Bearer {client.token}",
-            "X-Omni-CSRF": client.token,
-            "X-Omni-Client": client.client_id,
+            "X-Aide-CSRF": client.token,
+            "X-Aide-Client": client.client_id,
         }
         async with aiohttp.ClientSession() as http:
             async with http.post(
@@ -1020,8 +1020,8 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
         second = await ServiceClient.connect_or_start(home, other_project, port=port)
         headers = {
             "Authorization": f"Bearer {first.token}",
-            "X-Omni-CSRF": first.token,
-            "X-Omni-Client": first.client_id,
+            "X-Aide-CSRF": first.token,
+            "X-Aide-Client": first.client_id,
         }
         async with aiohttp.ClientSession() as http:
             async with http.post(
@@ -1069,7 +1069,7 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
                 f"{first.base_url}/api/v1/projects/{project_id}/sessions/{newer_id}",
                 headers={
                     **headers,
-                    "X-Omni-Claim": cast(str, claim_data["reconnect_credential"]),
+                    "X-Aide-Claim": cast(str, claim_data["reconnect_credential"]),
                 },
                 json={
                     "request_id": "rename-project-session",
@@ -1086,8 +1086,8 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
 
             second_headers = {
                 "Authorization": f"Bearer {second.token}",
-                "X-Omni-CSRF": second.token,
-                "X-Omni-Client": second.client_id,
+                "X-Aide-CSRF": second.token,
+                "X-Aide-Client": second.client_id,
             }
             async with http.post(
                 f"{second.base_url}/api/v1/projects/{project_id}/sessions/{newer_id}/claim",
@@ -1103,7 +1103,7 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
                 ),
                 headers={
                     **second_headers,
-                    "X-Omni-Claim": cast(str, claim_data["reconnect_credential"]),
+                    "X-Aide-Claim": cast(str, claim_data["reconnect_credential"]),
                 },
             ) as response:
                 assert response.status == 409
@@ -1113,7 +1113,7 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
                 f"{first.base_url}/api/v1/projects/{project_id}/sessions/{newer_id}/release",
                 headers={
                     **headers,
-                    "X-Omni-Claim": cast(str, claim_data["reconnect_credential"]),
+                    "X-Aide-Claim": cast(str, claim_data["reconnect_credential"]),
                 },
                 json={
                     "request_id": "release-newer",
@@ -1134,7 +1134,7 @@ async def test_project_session_http_scope_claim_and_empty_draft_contract(
                 f"{first.base_url}/api/v1/projects/{project_id}/sessions/{draft_id}/release",
                 headers={
                     **headers,
-                    "X-Omni-Claim": cast(str, empty_claim_data["reconnect_credential"]),
+                    "X-Aide-Claim": cast(str, empty_claim_data["reconnect_credential"]),
                 },
                 json={
                     "request_id": "release-empty-draft",
@@ -1189,7 +1189,7 @@ async def test_session_page_limit_preserves_optional_and_validation_contract(
         async with aiohttp.ClientSession() as http:
             async with http.get(
                 server.make_url(f"/api/v1/{scope}/{identity}/sessions"),
-                headers={"Authorization": f"Bearer {token}", "X-Omni-Client": client.client_id},
+                headers={"Authorization": f"Bearer {token}", "X-Aide-Client": client.client_id},
                 params={} if limit is None else {"limit": limit},
             ) as response:
                 body = await response.json()
@@ -1256,7 +1256,7 @@ async def test_workspace_session_listing_filters_titles_and_pages_without_histor
         other = await ServiceClient.connect_or_start(home, other_project, port=port)
         headers = {
             "Authorization": f"Bearer {first.token}",
-            "X-Omni-Client": first.client_id,
+            "X-Aide-Client": first.client_id,
         }
         async with aiohttp.ClientSession() as http:
             async with http.get(
@@ -1287,7 +1287,7 @@ async def test_workspace_session_listing_filters_titles_and_pages_without_histor
                 f"{other.base_url}/api/v1/workspaces/{other.workspace_id}/sessions",
                 headers={
                     "Authorization": f"Bearer {other.token}",
-                    "X-Omni-Client": other.client_id,
+                    "X-Aide-Client": other.client_id,
                 },
                 params={"title": "BUILD API", "cursor": first_page["next_cursor"]},
             ) as response:
@@ -1313,7 +1313,7 @@ async def test_workspace_session_listing_filters_titles_and_pages_without_histor
                 f"{other.base_url}/api/v1/workspaces/{other.workspace_id}/sessions",
                 headers={
                     "Authorization": f"Bearer {other.token}",
-                    "X-Omni-Client": other.client_id,
+                    "X-Aide-Client": other.client_id,
                 },
                 params={"title": "build"},
             ) as response:
@@ -1350,8 +1350,8 @@ async def test_workspace_session_rename_requires_claim_and_persists_metadata_ver
         client = await ServiceClient.connect_or_start(home, workspace, port=port)
         headers = {
             "Authorization": f"Bearer {client.token}",
-            "X-Omni-CSRF": client.token,
-            "X-Omni-Client": client.client_id,
+            "X-Aide-CSRF": client.token,
+            "X-Aide-Client": client.client_id,
         }
         async with aiohttp.ClientSession() as http:
             await client.open_conversation(session_id=session_id)
@@ -1359,7 +1359,7 @@ async def test_workspace_session_rename_requires_claim_and_persists_metadata_ver
             claim_credential = client.claim_credential
             claim_headers = {
                 **headers,
-                "X-Omni-Claim": claim_credential,
+                "X-Aide-Claim": claim_credential,
             }
 
             async with http.patch(
@@ -1412,7 +1412,7 @@ async def test_workspace_session_rename_requires_claim_and_persists_metadata_ver
                 assert response.status == 422
             async with http.patch(
                 f"{client.base_url}/api/v1/workspaces/{client.workspace_id}/sessions/{session_id}",
-                headers={**claim_headers, "X-Omni-Claim": "invalid-claim"},
+                headers={**claim_headers, "X-Aide-Claim": "invalid-claim"},
                 json={
                     "request_id": "rename-session",
                     "claim_version": claim_version,
@@ -1451,7 +1451,7 @@ async def test_workspace_session_rename_requires_claim_and_persists_metadata_ver
                 f"{client.base_url}/api/v1/workspaces/{client.workspace_id}/sessions/{draft_id}",
                 headers={
                     **headers,
-                    "X-Omni-Claim": draft_claim_credential,
+                    "X-Aide-Claim": draft_claim_credential,
                 },
                 json={
                     "request_id": "rename-draft",
@@ -1527,9 +1527,9 @@ async def test_workspace_session_delete_requires_confirmation_and_cleans_only_se
         await client.open_conversation(session_id=target_id)
         headers = {
             "Authorization": f"Bearer {client.token}",
-            "X-Omni-CSRF": client.token,
-            "X-Omni-Client": client.client_id,
-            "X-Omni-Claim": client.claim_credential,
+            "X-Aide-CSRF": client.token,
+            "X-Aide-Client": client.client_id,
+            "X-Aide-Claim": client.claim_credential,
         }
         delete_url = (
             f"{client.base_url}/api/v1/workspaces/{client.workspace_id}/sessions/{target_id}"
@@ -1607,9 +1607,9 @@ async def test_project_session_delete_returns_project_identity(
         await client.open_conversation(session_id=session_id)
         headers = {
             "Authorization": f"Bearer {client.token}",
-            "X-Omni-CSRF": client.token,
-            "X-Omni-Client": client.client_id,
-            "X-Omni-Claim": client.claim_credential,
+            "X-Aide-CSRF": client.token,
+            "X-Aide-Client": client.client_id,
+            "X-Aide-Claim": client.claim_credential,
         }
         async with aiohttp.ClientSession() as http:
             async with http.delete(
@@ -1659,9 +1659,9 @@ async def test_session_delete_requires_the_current_client_claim(
         await owner.open_conversation(session_id=session_id)
         headers = {
             "Authorization": f"Bearer {other.token}",
-            "X-Omni-CSRF": other.token,
-            "X-Omni-Client": other.client_id,
-            "X-Omni-Claim": owner.claim_credential,
+            "X-Aide-CSRF": other.token,
+            "X-Aide-Client": other.client_id,
+            "X-Aide-Claim": owner.claim_credential,
         }
         async with aiohttp.ClientSession() as http:
             async with http.delete(
@@ -1736,8 +1736,8 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from omni.config.agent_home import AgentHome
-from omni.service.client import ServiceClient
+from aide.config.agent_home import AgentHome
+from aide.service.client import ServiceClient
 
 async def main():
     client = await ServiceClient.connect_or_start(
@@ -2038,7 +2038,7 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
             async with browser.get(f"{client.base_url}/") as response:
                 assert response.status == 200
                 index = await response.text()
-                assert "Omni" in index
+                assert "Aide" in index
                 assert client.token not in index
 
             async with browser.get(
@@ -2057,8 +2057,8 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
                 assert isinstance(exchanged["csrf_token"], str)
                 assert client.token not in await response.text()
                 cookies = browser.cookie_jar.filter_cookies(URL(client.base_url))
-                assert "omni_session" in cookies
-                assert "omni_csrf" not in cookies
+                assert "aide_session" in cookies
+                assert "aide_csrf" not in cookies
 
             async with browser.post(
                 f"{client.base_url}/api/v1/web/ticket",
@@ -2070,7 +2070,7 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
             csrf = exchanged["csrf_token"]
             async with browser.post(
                 f"{client.base_url}/api/v1/clients",
-                headers={"Origin": client.base_url, "X-Omni-CSRF": csrf},
+                headers={"Origin": client.base_url, "X-Aide-CSRF": csrf},
                 json={"request_id": "browser-client", "kind": "web"},
             ) as response:
                 assert response.status == 200
@@ -2081,8 +2081,8 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
 
             web_headers = {
                 "Origin": client.base_url,
-                "X-Omni-CSRF": csrf,
-                "X-Omni-Control": control,
+                "X-Aide-CSRF": csrf,
+                "X-Aide-Control": control,
             }
             async with browser.post(
                 f"{client.base_url}/api/v1/projects",
@@ -2095,7 +2095,7 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
             socket = await browser.ws_connect(
                 f"{client.base_url}/api/v1/events",
                 headers={"Origin": client.base_url},
-                protocols=("omni-v1", control),
+                protocols=("aide-v1", control),
             )
             try:
                 async with browser.post(
@@ -2109,7 +2109,7 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
 
                 async with browser.post(
                     f"{client.base_url}/api/v1/projects/{project_id}/sessions/{session_id}/claim",
-                    headers={"Origin": client.base_url, "X-Omni-CSRF": csrf},
+                    headers={"Origin": client.base_url, "X-Aide-CSRF": csrf},
                     json={"request_id": "copied-tab-claim"},
                 ) as response:
                     assert response.status == 403
@@ -2123,7 +2123,7 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
                     ),
                     headers={
                         "Origin": client.base_url,
-                        "X-Omni-Claim": claim_data["reconnect_credential"],
+                        "X-Aide-Claim": claim_data["reconnect_credential"],
                     },
                 ) as response:
                     assert response.status == 403
@@ -2137,7 +2137,7 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
                 assert handshake.value.status == 403
                 async with browser.post(
                     f"{client.base_url}/api/v1/clients",
-                    headers={"Origin": client.base_url, "X-Omni-CSRF": csrf},
+                    headers={"Origin": client.base_url, "X-Aide-CSRF": csrf},
                     json={"request_id": "copied-tab-register", "kind": "web"},
                 ) as response:
                     assert response.status == 409
@@ -2160,7 +2160,7 @@ async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_boun
             await asyncio.sleep(31)
             async with browser.post(
                 f"{client.base_url}/api/v1/clients",
-                headers={"Origin": client.base_url, "X-Omni-CSRF": csrf},
+                headers={"Origin": client.base_url, "X-Aide-CSRF": csrf},
                 json={"request_id": "browser-client-after-expiry", "kind": "web"},
             ) as response:
                 assert response.status == 200, await response.text()

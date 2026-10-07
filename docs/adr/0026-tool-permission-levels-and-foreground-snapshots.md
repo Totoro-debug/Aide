@@ -4,7 +4,7 @@ status: accepted
 
 # Use Run-Local Tool Permission Snapshots
 
-Omni authorizes detached invocation facts against immutable Run snapshots, keeping reusable Tools free of mutable authorization state. Permission selection is described in [README](../../README.md#使用须知). Full-Access does not provide an OS sandbox.
+Aide authorizes detached invocation facts against immutable Run snapshots, keeping reusable Tools free of mutable authorization state. Permission selection is described in [README](../../README.md#使用须知). Full-Access does not provide an OS sandbox.
 
 | Level | Workspace File reads | Workspace File writes | External Files / MCP |
 | --- | --- | --- | --- |

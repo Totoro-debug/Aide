@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from omni.terminal.keyboard import EnhancedKeyboardAction, EnhancedKeyboardAdapter
+from aide.terminal.keyboard import EnhancedKeyboardAction, EnhancedKeyboardAdapter
 
 
 class RecordingTerminal:

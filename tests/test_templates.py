@@ -3,7 +3,7 @@ from string import Formatter
 
 import pytest
 
-from omni.templates import load_template, render_template
+from aide.templates import load_template, render_template
 
 TEMPLATE_NAMES = {
     "blackboard-system-prompt.md",
@@ -49,7 +49,7 @@ def _template_fields(source: str) -> tuple[str, ...]:
 
 
 def test_all_versioned_templates_are_package_resources() -> None:
-    root = files("omni.templates")
+    root = files("aide.templates")
     names = {
         resource.name
         for resource in root.iterdir()
@@ -60,7 +60,7 @@ def test_all_versioned_templates_are_package_resources() -> None:
 
 
 def test_assembly_only_templates_are_not_packaged() -> None:
-    root = files("omni.templates")
+    root = files("aide.templates")
 
     assert [
         name for name in sorted(ASSEMBLY_ONLY_TEMPLATE_NAMES) if root.joinpath(name).is_file()
@@ -77,7 +77,8 @@ def test_template_loader_rejects_non_markdown_or_nonlocal_names(name: str) -> No
 
 
 def test_generated_file_templates_preserve_their_terminal_newline() -> None:
-    assert load_template("default-config.md").endswith("timeout = 120\n")
+    configuration = load_template("default-config.md")
+    assert configuration.endswith("\n") and not configuration.endswith("\n\n")
     assert load_template("long-term-memory.md").endswith("## Lesson\n")
 
 

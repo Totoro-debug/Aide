@@ -23,10 +23,10 @@ export default async function browserRecoveryAcceptance({ page: initialPage, con
     });
     await target.addInitScript(() => {
       if (window.top === window && window.location.protocol === "http:") {
-        const staged = window.sessionStorage.getItem("omni.test-recovery");
+        const staged = window.sessionStorage.getItem("aide.test-recovery");
         if (staged !== null) {
-          window.localStorage.setItem("omni.browser-recovery", staged);
-          window.sessionStorage.removeItem("omni.test-recovery");
+          window.localStorage.setItem("aide.browser-recovery", staged);
+          window.sessionStorage.removeItem("aide.test-recovery");
         }
       }
       const Original = window.WebSocket;
@@ -57,10 +57,10 @@ export default async function browserRecoveryAcceptance({ page: initialPage, con
     const launch = spawnSync("python", ["-c", [
       "import asyncio, sys",
       "from pathlib import Path",
-      "from omni.config.agent_home import AgentHome",
-      "from omni.service.client import ServiceClient",
+      "from aide.config.agent_home import AgentHome",
+      "from aide.service.client import ServiceClient",
       "async def run():",
-      "    client = await ServiceClient.connect_or_start(AgentHome(Path(sys.argv[1]) / '.omni'), Path(sys.argv[2]))",
+      "    client = await ServiceClient.connect_or_start(AgentHome(Path(sys.argv[1]) / '.aide'), Path(sys.argv[2]))",
       "    try:",
       "        print(await client.create_web_ticket())",
       "    finally:",
@@ -77,12 +77,12 @@ export default async function browserRecoveryAcceptance({ page: initialPage, con
   const input = () => page.getByRole("textbox", { name: "Message input", exact: true });
   const model = () => page.getByLabel("Session model", { exact: true });
   const effort = () => page.getByLabel("Reasoning effort", { exact: true });
-  const snapshot = () => page.evaluate(() => JSON.parse(window.localStorage.getItem("omni.browser-recovery")));
+  const snapshot = () => page.evaluate(() => JSON.parse(window.localStorage.getItem("aide.browser-recovery")));
   async function printRecoveryDiagnostic(label) {
     console.error(label, await page.evaluate(() => ({
       route: window.location.pathname + window.location.search,
       main: document.querySelector("main")?.innerText.slice(0, 2000),
-      recovery: JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null"),
+      recovery: JSON.parse(window.localStorage.getItem("aide.browser-recovery") ?? "null"),
     })));
   }
   async function clientId() {
@@ -112,7 +112,7 @@ export default async function browserRecoveryAcceptance({ page: initialPage, con
   await page.reload();
   await expect(input()).toBeEnabled();
   const projectId = (await registerProjectFromSidebar(page, control.details.first_project)).project_id;
-  const chat = await page.evaluate(async () => (await (await window.fetch("/api/v1/chat/sessions?limit=100", { headers: { "X-Omni-Control": window.recoveryControl } })).json()).sessions
+  const chat = await page.evaluate(async () => (await (await window.fetch("/api/v1/chat/sessions?limit=100", { headers: { "X-Aide-Control": window.recoveryControl } })).json()).sessions
     .find(session => session.available));
   assert.ok(chat, "The fixture must contain an available chat history");
   for (const scope of ["project", "chat"]) {
@@ -167,7 +167,7 @@ export default async function browserRecoveryAcceptance({ page: initialPage, con
   const beforeAuthorization = await snapshot();
   await context.clearCookies();
   await page.reload();
-  await page.getByText("Open this workbench from the local Omni command.", { exact: true }).waitFor();
+  await page.getByText("Open this workbench from the local Aide command.", { exact: true }).waitFor();
   await delay(31000);
   await page.goto(freshAuthorizationUrl());
   await assertRecovered(beforeAuthorization, beforeAuthorization.input_text);
@@ -197,7 +197,7 @@ export default async function browserRecoveryAcceptance({ page: initialPage, con
         && saved.session_id === control.details.available_session_id;
     }, { timeout: 15000 }).toBe(true);
     availableRecovery = await snapshot();
-    await page.evaluate(saved => window.sessionStorage.setItem("omni.test-recovery", JSON.stringify(saved)), {
+    await page.evaluate(saved => window.sessionStorage.setItem("aide.test-recovery", JSON.stringify(saved)), {
       ...availableRecovery, session_id: control.details.restore_session_id, draft: false, input_text: "", model_configuration: null,
     });
     await page.goto(origin);
@@ -220,7 +220,7 @@ export default async function browserRecoveryAcceptance({ page: initialPage, con
     { kind: "chat", directory: chat.directory },
   ]) {
     const saved = await snapshot() ?? availableRecovery;
-    await page.evaluate(value => window.sessionStorage.setItem("omni.test-recovery", JSON.stringify(value)), {
+    await page.evaluate(value => window.sessionStorage.setItem("aide.test-recovery", JSON.stringify(value)), {
       ...saved, target, session_id: "20261005-000000-000000_00000000-0000-4000-8000-000000000322", draft: false, input_text: "", model_configuration: null,
     });
     await page.goto(origin);
@@ -258,7 +258,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const control = await setup({ shutdownTimeoutMs: 60000 });
   let browser;
   try {
-    browser = await chromium.launch({ channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge" });
+    browser = await chromium.launch({ channel: process.env.AIDE_E2E_BROWSER_CHANNEL ?? "msedge" });
     const context = await browser.newContext({ locale: "en", viewport: { width: 1280, height: 900 } });
     const page = await context.newPage();
     await page.goto(`${control.details.url}/#ticket=${encodeURIComponent(control.details.ticket)}`);
@@ -267,7 +267,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     await page.getByRole("button", { name: "Send", exact: true }).click();
     await expect(page.getByRole("log").getByText("Fixture response.", { exact: true })).toBeVisible();
     await page.locator("#app-sidebar").getByRole("link", { name: "New conversation", exact: true }).click();
-    if (process.env.OMNI_E2E_RECOVERY_SHARED_DIRECTORY === "1") {
+    if (process.env.AIDE_E2E_RECOVERY_SHARED_DIRECTORY === "1") {
       await mkdir(`${control.details.home_root}\\chat-next`);
       await control.command("project-history-seed");
       await registerProjectFromSidebar(page, `${control.details.home_root}\\chat-next`);

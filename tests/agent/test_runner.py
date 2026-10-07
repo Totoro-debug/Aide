@@ -10,9 +10,9 @@ from uuid import uuid4
 
 import pytest
 
-from omni.agent.confirmation import ConfirmationAborted
-from omni.agent.run_errors import CommittableAgentRunError
-from omni.agent.runner import (
+from aide.agent.confirmation import ConfirmationAborted
+from aide.agent.run_errors import CommittableAgentRunError
+from aide.agent.runner import (
     AgentRunner,
     AgentRunnerResponseSegmentEnd,
     AgentRunnerResult,
@@ -20,16 +20,16 @@ from omni.agent.runner import (
     AgentRunnerToolCallFinished,
     AgentRunnerToolCallStarted,
 )
-from omni.agent.tools.base import ArtifactReference
-from omni.agent.tools.tool_gateway import (
+from aide.agent.tools.base import ArtifactReference
+from aide.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ModelToolCall,
     ToolResult,
 )
-from omni.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
-from omni.provider.errors import ModelCallError
-from omni.provider.models import (
+from aide.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
+from aide.provider.errors import ModelCallError
+from aide.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,
@@ -1564,7 +1564,7 @@ async def test_runner_externalizes_tool_result() -> None:
             result,
             content="preview",
             artifact=ArtifactReference(
-                path=".omni/artifacts/session/call.txt",
+                path=".aide/artifacts/session/call.txt",
                 total_chars=5,
                 preview_chars=5,
             ),
@@ -1584,7 +1584,7 @@ async def test_runner_externalizes_tool_result() -> None:
     assert result.finish_reason == "completed"
     assert result.messages[1]["content"] == "preview"
     assert result.messages[1]["artifact"] == {
-        "path": ".omni/artifacts/session/call.txt",
+        "path": ".aide/artifacts/session/call.txt",
         "total_chars": 5,
         "preview_chars": 5,
     }
@@ -1697,7 +1697,7 @@ async def test_runner_stops_after_fiftieth_tool_iteration_without_a_new_model_ca
     assert result.error is not None
     assert result.error.code == "agent_iteration_limit"
     assert result.final_content == (
-        "Omni 本轮对话已经达到最大循环次数，仍没有输出最终结果。"  # noqa: RUF001
+        "Aide 本轮对话已经达到最大循环次数，仍没有输出最终结果。"  # noqa: RUF001
         "可以再次尝试本次请求或者尝试给出更明确的任务目标。"
     )
     assert len(provider.stream_requests) == 50

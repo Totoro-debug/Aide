@@ -13,14 +13,14 @@ import aiohttp
 import pytest
 from aiohttp.test_utils import TestServer
 
-from omni.agent.session.session import Session
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.provider.session_configuration import SessionModelConfiguration
-from omni.service.discovery import create_credential
-from omni.service.errors import ServiceError
-from omni.service.runtime import AgentService, ClientState, SessionClaim, WorkspaceRecord
-from omni.service.transport import create_app
+from aide.agent.session.session import Session
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.provider.session_configuration import SessionModelConfiguration
+from aide.service.discovery import create_credential
+from aide.service.errors import ServiceError
+from aide.service.runtime import AgentService, ClientState, SessionClaim, WorkspaceRecord
+from aide.service.transport import create_app
 from tests.service.test_service_transport import _persist_session, _prepare_agent_home
 
 
@@ -100,9 +100,9 @@ async def _metadata_service(
                 server,
                 {
                     "Authorization": f"Bearer {token}",
-                    "X-Omni-CSRF": token,
-                    "X-Omni-Client": client.client_id,
-                    "X-Omni-Claim": claim.credential,
+                    "X-Aide-CSRF": token,
+                    "X-Aide-Client": client.client_id,
+                    "X-Aide-Claim": claim.credential,
                 },
             )
     finally:

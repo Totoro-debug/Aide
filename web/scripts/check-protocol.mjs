@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import ts from "typescript";
 
-const schemaPath = resolve(process.cwd(), "../omni/service/protocol/v1.schema.json");
+const schemaPath = resolve(process.cwd(), "../aide/service/protocol/v1.schema.json");
 const schema = JSON.parse(await readFile(schemaPath, "utf8"));
 const definitions = schema.$defs;
 const protocolSource = ts.createSourceFile(
@@ -96,6 +96,8 @@ const referenceTypes = {
   config_models_fields: "ConfigModelsFields",
   config_mcp_fields: "ConfigMcpFields",
   config_provider_fields: "ConfigProviderFields",
+  config_model_fields: "ConfigModelFields",
+  config_model_migration_candidate: "ConfigModelMigrationCandidate",
   config_route_fields: "ConfigRouteFields",
   config_redacted_secret: "ConfigRedactedSecret",
   config_secret_revisions: "Record<string,string|null>",
@@ -209,6 +211,10 @@ for (const [name, definitionName] of [
   ["ConversationOpenFailure", "conversation_open_failure"],
   ["ServiceErrorBody", "error"],
   ["SessionModelConfiguration", "session_model_configuration"],
+  ["ConfigModelFields", "config_model_fields"],
+  ["ConfigModelMigrationCandidate", "config_model_migration_candidate"],
+  ["ConfigProviderFields", "config_provider_fields"],
+  ["ConfigRouteFields", "config_route_fields"],
   ["RestoreAnchor", "restore_anchor"],
 ]) {
   checkMembers(name, interfaceDeclaration(name).members, definitions[definitionName]);

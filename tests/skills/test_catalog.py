@@ -7,8 +7,8 @@ from typing import Any, Self, cast
 import pytest
 from loguru import logger
 
-from omni.management.commands import MANAGEMENT_COMMANDS
-from omni.skills.catalog import LoadedSkill, SkillLoader
+from aide.management.commands import MANAGEMENT_COMMANDS
+from aide.skills.catalog import LoadedSkill, SkillLoader
 
 
 def _loader(

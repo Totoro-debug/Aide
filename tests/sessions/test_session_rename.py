@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from omni.agent.session.session import Session
-from omni.agent.workspace_state import WorkspaceState
-from omni.provider.session_configuration import SessionModelConfiguration
+from aide.agent.session.session import Session
+from aide.agent.workspace_state import WorkspaceState
+from aide.provider.session_configuration import SessionModelConfiguration
 
 CREATED_AT = datetime(2026, 10, 1, tzinfo=UTC)
 RENAMED_AT = CREATED_AT + timedelta(seconds=10)

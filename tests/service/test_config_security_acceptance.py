@@ -13,12 +13,12 @@ from aiohttp.test_utils import BaseTestServer, TestServer
 from jsonschema import Draft202012Validator
 from loguru import logger
 
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.service.discovery import create_credential
-from omni.service.runtime import AgentService
-from omni.service.transport import create_app
-from omni.utils.host_filesystem import HOST_FILESYSTEM
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.service.discovery import create_credential
+from aide.service.runtime import AgentService
+from aide.service.transport import create_app
+from aide.utils.host_filesystem import HOST_FILESYSTEM
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
 SecurityHttp = tuple[AgentService, BaseTestServer, dict[str, str], dict[str, str]]
@@ -38,8 +38,8 @@ async def security_http(tmp_path: Path) -> AsyncIterator[SecurityHttp]:
         headers.append(
             {
                 "Authorization": f"Bearer {token}",
-                "X-Omni-CSRF": token,
-                "X-Omni-Client": client.client_id,
+                "X-Aide-CSRF": token,
+                "X-Aide-Client": client.client_id,
             }
         )
     async with TestServer(create_app(service), host="127.0.0.1") as server:
@@ -57,7 +57,7 @@ def _patch(service: AgentService, request_id: str = "security-save") -> dict[str
 
 
 def _assert_schema(response: dict[str, object]) -> None:
-    path = Path(__file__).resolve().parents[2] / "omni/service/protocol/v1.schema.json"
+    path = Path(__file__).resolve().parents[2] / "aide/service/protocol/v1.schema.json"
     schema = json.loads(path.read_text(encoding="utf-8"))
     name = "config_mutation_response" if "request_id" in response else "config_response"
     Draft202012Validator({"$ref": f"#/$defs/{name}", "$defs": schema["$defs"]}).validate(response)
@@ -73,8 +73,8 @@ async def test_config_http_auth_csrf_client_and_unknown_fields_preserve_bytes(
     async with aiohttp.ClientSession() as http:
         cases = [
             ({}, payload),
-            ({key: value for key, value in headers.items() if key != "X-Omni-CSRF"}, payload),
-            ({**headers, "X-Omni-Client": "missing-client"}, payload),
+            ({key: value for key, value in headers.items() if key != "X-Aide-CSRF"}, payload),
+            ({**headers, "X-Aide-Client": "missing-client"}, payload),
             (headers, {**payload, "unknown": "canary"}),
             (headers, {**payload, "fields": {"providers": {"api_key": "canary"}}}),
             (headers, {**payload, "fields": {"runtime": {"unknown": 1}}}),
@@ -143,7 +143,7 @@ async def test_browser_cookie_config_requires_current_control_and_csrf(
     async with aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True)) as http:
         ticket_response = await http.post(
             server.make_url("/api/v1/web/ticket"),
-            headers={**bearer_headers, "X-Omni-Client": cli.client_id},
+            headers={**bearer_headers, "X-Aide-Client": cli.client_id},
             json={"request_id": "browser-ticket"},
         )
         assert ticket_response.status == 200
@@ -155,7 +155,7 @@ async def test_browser_cookie_config_requires_current_control_and_csrf(
         )
         assert exchanged_response.status == 200
         exchanged = await exchanged_response.json()
-        browser_headers = {"Origin": origin, "X-Omni-CSRF": exchanged["csrf_token"]}
+        browser_headers = {"Origin": origin, "X-Aide-CSRF": exchanged["csrf_token"]}
         registered_response = await http.post(
             server.make_url("/api/v1/clients"),
             headers=browser_headers,
@@ -163,12 +163,12 @@ async def test_browser_cookie_config_requires_current_control_and_csrf(
         )
         assert registered_response.status == 200
         registered = await registered_response.json()
-        owned = {**browser_headers, "X-Omni-Control": registered["web_control_credential"]}
+        owned = {**browser_headers, "X-Aide-Control": registered["web_control_credential"]}
         for headers in (
             browser_headers,
-            {**owned, "X-Omni-Control": "wrong-control"},
-            {**owned, "X-Omni-Client": cli.client_id},
-            {key: value for key, value in owned.items() if key != "X-Omni-CSRF"},
+            {**owned, "X-Aide-Control": "wrong-control"},
+            {**owned, "X-Aide-Client": cli.client_id},
+            {key: value for key, value in owned.items() if key != "X-Aide-CSRF"},
             {**owned, "Origin": "http://example.invalid"},
         ):
             response = await http.patch(
@@ -220,7 +220,7 @@ async def test_config_http_idempotency_body_action_and_client_reuse(
         )
         assert changed_body.status == other_client.status == other_action.status == 409
         assert sum(event["type"] == "config.application"
-                   for event in service.client(first["X-Omni-Client"]).events) == 1
+                   for event in service.client(first["X-Aide-Client"]).events) == 1
         assert (service.agent_home.path / "config.toml").read_bytes() == before
         current_response = await http.get(server.make_url("/api/v1/config"), headers=first)
         assert current_response.status == 200
@@ -373,7 +373,7 @@ async def test_config_http_ws_errors_and_logs_never_expose_existing_secrets(
             async with http.ws_connect(
                 server.make_url("/api/v1/events"),
                 headers={**headers, "Origin": str(server.make_url("/")).rstrip("/")},
-                protocols=("omni-v1",),
+                protocols=("aide-v1",),
             ) as socket:
                 await socket.send_json(
                     {

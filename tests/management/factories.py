@@ -4,17 +4,17 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from omni.agent.memory.dream import DreamResult
-from omni.agent.memory.manager import MemoryManager
-from omni.agent.permission import RuntimePermissionControl
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
-from omni.management.service import (
+from aide.agent.memory.dream import DreamResult
+from aide.agent.memory.manager import MemoryManager
+from aide.agent.permission import RuntimePermissionControl
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
+from aide.management.service import (
     ManagementViewService,
     RuntimeStatusInput,
 )
-from omni.provider.models import ReasoningEffort
-from omni.skills.catalog import SkillMetadata
+from aide.provider.models import ReasoningEffort
+from aide.skills.catalog import SkillMetadata
 
 
 class _DefaultLoop:

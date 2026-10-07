@@ -20,16 +20,16 @@ from uuid import uuid4
 
 import aiohttp
 
-import omni
-import omni.terminal.cli as cli
-from omni.agent.message_bus import InboundMessage
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
-from omni.schedule.store import WorkspaceScheduleStore
-from omni.service.client import ServiceClient
-from omni.service.discovery import read_credential, read_discovery
-from omni.service.errors import ServiceError
-from omni.terminal.conversation import TerminalConversationApp
+import aide
+import aide.terminal.cli as cli
+from aide.agent.message_bus import InboundMessage
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
+from aide.schedule.store import WorkspaceScheduleStore
+from aide.service.client import ServiceClient
+from aide.service.discovery import read_credential, read_discovery
+from aide.service.errors import ServiceError
+from aide.terminal.conversation import TerminalConversationApp
 
 
 class _ProcessExitWitness:
@@ -201,7 +201,7 @@ async def _authenticated_json(
 ) -> dict[str, object]:
     headers = {"Authorization": f"Bearer {read_credential(home)}"}
     if client_id is not None:
-        headers["X-Omni-Client"] = client_id
+        headers["X-Aide-Client"] = client_id
     async with aiohttp.ClientSession() as http:
         async with http.get(url, headers=headers) as response:
             body = await response.json()
@@ -234,7 +234,7 @@ async def _run_competition_scenario(
     await client.open_conversation(session_id=session_id)
     discovery = read_discovery(AgentHome.production())
     assert discovery is not None
-    session_path = Path.cwd() / ".omni" / "sessions" / f"{session_id}.jsonl"
+    session_path = Path.cwd() / ".aide" / "sessions" / f"{session_id}.jsonl"
     ready_path.write_text(
         json.dumps(
             {
@@ -367,7 +367,7 @@ async def _run_last_client_grace_scenario(
         assert observed_job["state"]["last_status"] is None, observed_job
         assert datetime.now(UTC) > due_time
         assert not (
-            Path.cwd() / ".omni" / "schedule-sessions" / f"schedule_{job_id}.jsonl"
+            Path.cwd() / ".aide" / "schedule-sessions" / f"schedule_{job_id}.jsonl"
         ).exists()
 
         reconnected = await ServiceClient.connect_or_start(
@@ -388,11 +388,11 @@ async def _run_last_client_grace_scenario(
             assert status_after_reconnect["admitted"] is True, schedule_after_reconnect
             expiry_prompt = "installed expiry barrier"
             expiry_session_path = (
-                Path.cwd() / ".omni" / "sessions" / f"{reconnected.session_id}.jsonl"
+                Path.cwd() / ".aide" / "sessions" / f"{reconnected.session_id}.jsonl"
             )
             await reconnected.bus.put_inbound(InboundMessage(expiry_prompt))
             await _wait_for_observation(
-                Path(os.environ["OMNI_PROVIDER_OBSERVATION_PATH"]), expiry_prompt
+                Path(os.environ["AIDE_PROVIDER_OBSERVATION_PATH"]), expiry_prompt
             )
             expiry_job_prompt = f"installed expiry grace Job must not run {uuid4()}"
             expiry_job_due = datetime.now(UTC) + timedelta(seconds=10)
@@ -451,7 +451,7 @@ async def _run_last_client_grace_scenario(
             assert not expiry_schedule_path.exists()
             provider_records = [
                 json.loads(line)
-                for line in Path(os.environ["OMNI_PROVIDER_OBSERVATION_PATH"])
+                for line in Path(os.environ["AIDE_PROVIDER_OBSERVATION_PATH"])
                 .read_text(encoding="utf-8")
                 .splitlines()
                 if line.strip()
@@ -545,7 +545,7 @@ async def _run_joint_scenario(
     initial_session_id = client.session_id
     removal_prompt = "project removal barrier"
     settings_prompt = "settings generation barrier"
-    confirmation_path = Path(os.environ["OMNI_JOINT_BROWSER_READY"] + ".confirmation")
+    confirmation_path = Path(os.environ["AIDE_JOINT_BROWSER_READY"] + ".confirmation")
 
     async def compete_for_confirmation() -> None:
         await _wait_for_file(confirmation_path)
@@ -606,7 +606,7 @@ async def _run_joint_scenario(
         notice = "Project registration was removed; its work has stopped."
         assert notice in notices, notices
         await _wait_for_cancelled_session(
-            Path.cwd() / ".omni" / "sessions" / f"{initial_session_id}.jsonl", removal_prompt
+            Path.cwd() / ".aide" / "sessions" / f"{initial_session_id}.jsonl", removal_prompt
         )
         removal_done_path.write_text(
             json.dumps(
@@ -642,7 +642,7 @@ async def _run_joint_scenario(
         new_session_id = new_draft.get("session_id")
         assert isinstance(new_session_id, str), new_draft
         await client.open_conversation(session_id=new_session_id)
-        settings_session_path = Path.cwd() / ".omni" / "sessions" / f"{new_session_id}.jsonl"
+        settings_session_path = Path.cwd() / ".aide" / "sessions" / f"{new_session_id}.jsonl"
         settings_ready_path.write_text(
             json.dumps(
                 {
@@ -657,7 +657,7 @@ async def _run_joint_scenario(
         )
         await client.bus.put_inbound(InboundMessage(settings_prompt))
         await _wait_for_observation(observation_path, settings_prompt)
-        await _wait_for_file(Path(os.environ["OMNI_CLI_SETTINGS_RELEASE"]))
+        await _wait_for_file(Path(os.environ["AIDE_CLI_SETTINGS_RELEASE"]))
         await _wait_for_prompt_completion(settings_session_path, settings_prompt)
         config = await client._http_request("GET", "/api/v1/config")
         application = config.get("application")
@@ -705,7 +705,7 @@ async def _run_joint_scenario(
             ),
             encoding="utf-8",
         )
-        done_path = Path(os.environ["OMNI_CLI_DONE"])
+        done_path = Path(os.environ["AIDE_CLI_DONE"])
         done_path.write_text(
             json.dumps(
                 {
@@ -726,7 +726,7 @@ async def _run_joint_scenario(
             encoding="utf-8",
         )
     except BaseException as error:
-        Path(os.environ["OMNI_CLI_DONE"]).write_text(
+        Path(os.environ["AIDE_CLI_DONE"]).write_text(
             json.dumps({"status": "failed", "error": f"{type(error).__name__}: {error}"}),
             encoding="utf-8",
         )
@@ -741,7 +741,7 @@ async def headless_terminal(self: Any, **_kwargs: object) -> None:
     async with self.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         assert self.query_one("#conversation-input")
-        scenario = os.environ.get("OMNI_CLI_SCENARIO")
+        scenario = os.environ.get("AIDE_CLI_SCENARIO")
         current_discovery = read_discovery(AgentHome.production())
         if scenario not in {"competition", "last-client-grace"}:
             assert current_discovery == before
@@ -753,17 +753,17 @@ async def headless_terminal(self: Any, **_kwargs: object) -> None:
         if scenario == "competition":
             await _run_competition_scenario(
                 client=client,
-                ready_path=Path(os.environ["OMNI_CLI_READY"]),
-                done_path=Path(os.environ["OMNI_CLI_DONE"]),
-                prompt=os.environ["OMNI_CLI_PROMPT"],
+                ready_path=Path(os.environ["AIDE_CLI_READY"]),
+                done_path=Path(os.environ["AIDE_CLI_DONE"]),
+                prompt=os.environ["AIDE_CLI_PROMPT"],
                 entry_value=console_entry.value,
             )
         elif scenario == "last-client-grace":
             await _run_last_client_grace_scenario(
                 client=client,
-                ready_path=Path(os.environ["OMNI_CLI_READY"]),
-                done_path=Path(os.environ["OMNI_CLI_DONE"]),
-                release_path=Path(os.environ["OMNI_CLI_RELEASE"]),
+                ready_path=Path(os.environ["AIDE_CLI_READY"]),
+                done_path=Path(os.environ["AIDE_CLI_DONE"]),
+                release_path=Path(os.environ["AIDE_CLI_RELEASE"]),
                 entry_value=console_entry.value,
             )
         elif scenario == "joint":
@@ -780,21 +780,21 @@ async def headless_terminal(self: Any, **_kwargs: object) -> None:
             with patch.object(bus, "put_remote_output", observe_output):
                 await _run_joint_scenario(
                     client=client,
-                    ready_path=Path(os.environ["OMNI_CLI_READY"]),
-                    foreground_ready_path=Path(os.environ["OMNI_CLI_FOREGROUND_READY"]),
-                    removal_done_path=Path(os.environ["OMNI_CLI_REMOVAL_DONE"]),
-                    settings_ready_path=Path(os.environ["OMNI_CLI_SETTINGS_READY"]),
-                    settings_done_path=Path(os.environ["OMNI_CLI_SETTINGS_DONE"]),
-                    settings_start_path=Path(os.environ["OMNI_CLI_SETTINGS_START"]),
-                    observation_path=Path(os.environ["OMNI_PROVIDER_OBSERVATION_PATH"]),
+                    ready_path=Path(os.environ["AIDE_CLI_READY"]),
+                    foreground_ready_path=Path(os.environ["AIDE_CLI_FOREGROUND_READY"]),
+                    removal_done_path=Path(os.environ["AIDE_CLI_REMOVAL_DONE"]),
+                    settings_ready_path=Path(os.environ["AIDE_CLI_SETTINGS_READY"]),
+                    settings_done_path=Path(os.environ["AIDE_CLI_SETTINGS_DONE"]),
+                    settings_start_path=Path(os.environ["AIDE_CLI_SETTINGS_START"]),
+                    observation_path=Path(os.environ["AIDE_PROVIDER_OBSERVATION_PATH"]),
                     entry_value=console_entry.value,
                     notices=notices,
                 )
         elif scenario == "cross-client":
-            ready_path = Path(os.environ["OMNI_CLI_READY"])
-            done_path = Path(os.environ["OMNI_CLI_DONE"])
-            prompt = os.environ["OMNI_CLI_PROMPT"]
-            contested_session_id = os.environ["OMNI_CLI_CONTESTED_SESSION"]
+            ready_path = Path(os.environ["AIDE_CLI_READY"])
+            done_path = Path(os.environ["AIDE_CLI_DONE"])
+            prompt = os.environ["AIDE_CLI_PROMPT"]
+            contested_session_id = os.environ["AIDE_CLI_CONTESTED_SESSION"]
             try:
                 try:
                     await client.open_conversation(session_id=contested_session_id)
@@ -804,24 +804,24 @@ async def headless_terminal(self: Any, **_kwargs: object) -> None:
                 else:
                     raise AssertionError("The installed CLI claimed the browser Session")
                 assert claim_error_code == "session_claimed"
-                assert os.environ["OMNI_CLI_PRIVATE_MARKER"] not in claim_error_text
+                assert os.environ["AIDE_CLI_PRIVATE_MARKER"] not in claim_error_text
                 try:
                     await client._http_request(
                         "GET",
                         f"/api/v1/workspaces/{client.workspace_id}/sessions/{contested_session_id}"
                         f"?claim_version={client.claim_version}",
-                        extra_headers={"X-Omni-Claim": client.claim_credential},
+                        extra_headers={"X-Aide-Claim": client.claim_credential},
                     )
                 except ServiceError as error:
                     assert error.code in {"stale_claim", "session_claimed"}, error.code
-                    assert os.environ["OMNI_CLI_PRIVATE_MARKER"] not in str(error)
+                    assert os.environ["AIDE_CLI_PRIVATE_MARKER"] not in str(error)
                 else:
                     raise AssertionError("Claim loser could read the browser Session body")
                 await bus.put_inbound(InboundMessage(prompt))
                 await _wait_for_observation(
-                    Path(os.environ["OMNI_PROVIDER_OBSERVATION_PATH"]), prompt
+                    Path(os.environ["AIDE_PROVIDER_OBSERVATION_PATH"]), prompt
                 )
-                session_path = Path.cwd() / ".omni" / "sessions" / f"{client.session_id}.jsonl"
+                session_path = Path.cwd() / ".aide" / "sessions" / f"{client.session_id}.jsonl"
                 ready_path.write_text(
                     json.dumps(
                         {
@@ -868,18 +868,18 @@ async def headless_terminal(self: Any, **_kwargs: object) -> None:
         self.exit()
 
 
-assert Path(omni.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+assert Path(aide.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
 assert shutil.which("node") is None and shutil.which("npm") is None
-scenario = os.environ.get("OMNI_CLI_SCENARIO")
+scenario = os.environ.get("AIDE_CLI_SCENARIO")
 before = read_discovery(AgentHome.production())
 if scenario not in {"competition", "last-client-grace", "joint"}:
     assert before is not None
     assert before.service_instance_id == sys.argv[1]
     assert before.pid == int(sys.argv[2])
 # Replace only terminal I/O; retain the installed entry, CLI composition and client.
-console_entry = next(iter(entry_points(group="console_scripts", name="omni")))
+console_entry = next(iter(entry_points(group="console_scripts", name="aide")))
 entry = console_entry
-sys.argv = ["omni"]
+sys.argv = ["aide"]
 with (
     patch.object(cli, "is_interactive_terminal", return_value=True),
     patch.object(TerminalConversationApp, "run_async", headless_terminal),

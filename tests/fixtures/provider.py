@@ -6,11 +6,11 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from omni.config.config import ProviderConfiguration
-from omni.errors import ErrorInfo
-from omni.provider.errors import ModelCallError
-from omni.provider.model_router import ModelAttemptGuard, ModelRouteStatus
-from omni.provider.models import (
+from aide.config.config import ProviderConfiguration
+from aide.errors import ErrorInfo
+from aide.provider.errors import ModelCallError
+from aide.provider.model_router import ModelAttemptGuard, ModelRouteStatus
+from aide.provider.models import (
     ModelContinuation,
     ModelProvider,
     ModelResponse,
@@ -19,7 +19,7 @@ from omni.provider.models import (
     ReasoningEffort,
     SessionModelConfiguration,
 )
-from omni.templates import render_template
+from aide.templates import render_template
 
 
 def unexpected_provider_factory(configuration: ProviderConfiguration) -> ModelProvider:

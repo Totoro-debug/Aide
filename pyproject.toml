@@ -4,7 +4,7 @@ build-backend = "scripts.build_backend"
 backend-path = ["."]
 
 [project]
-name = "omni"
+name = "aide"
 version = "0.1.0"
 description = "Windows local-first Personal Agent runtime"
 readme = "README.md"
@@ -43,16 +43,16 @@ dev = [
 ]
 
 [project.scripts]
-omni = "omni.terminal.process_entry:run"
+aide = "aide.terminal.process_entry:run"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["omni*"]
+include = ["aide*"]
 
 [tool.setuptools.package-data]
-"omni.templates" = ["*.md"]
-"omni.service.protocol" = ["*.json"]
-"omni.web_assets" = [
+"aide.templates" = ["*.md"]
+"aide.service.protocol" = ["*.json"]
+"aide.web_assets" = [
     "*.html",
     "*.json",
     "*.js",
@@ -76,6 +76,6 @@ target-version = "py312"
 select = ["B", "E4", "E7", "E9", "F", "I", "RUF", "UP"]
 
 [tool.mypy]
-files = ["omni", "tests"]
+files = ["aide", "tests"]
 python_version = "3.12"
 strict = true

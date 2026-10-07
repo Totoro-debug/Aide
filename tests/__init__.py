@@ -1,1 +1,1 @@
-"""Omni test suite and reusable test support."""
+"""Aide test suite and reusable test support."""

@@ -2,7 +2,7 @@
 
 import asyncio
 
-from omni.service.runtime import AgentService
+from aide.service.runtime import AgentService
 
 
 async def wait_for_project_removal(

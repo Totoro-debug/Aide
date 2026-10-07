@@ -4,8 +4,8 @@ from typing import Any
 
 import pytest
 
-from omni.agent.tools.tool_gateway import ModelToolCall
-from omni.provider.models import (
+from aide.agent.tools.tool_gateway import ModelToolCall
+from aide.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelResponse,

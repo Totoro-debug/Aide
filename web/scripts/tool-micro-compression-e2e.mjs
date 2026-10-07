@@ -7,7 +7,7 @@ import { settingsMicroCompressionAcceptance } from "./settings-e2e.mjs";
 const control = await setup();
 let browser;
 try {
-  browser = await chromium.launch({ channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge" });
+  browser = await chromium.launch({ channel: process.env.AIDE_E2E_BROWSER_CHANNEL ?? "msedge" });
   const context = await browser.newContext({ locale: "en" });
   const page = await context.newPage();
   const errors = [];
@@ -17,14 +17,14 @@ try {
     window.WebSocket = class extends OriginalWebSocket {
       constructor(...args) {
         super(...args);
-        window.__omniTestControlCredential = Array.isArray(args[1]) ? args[1][1] : null;
+        window.__aideTestControlCredential = Array.isArray(args[1]) ? args[1][1] : null;
       }
     };
   });
   await page.goto(`${control.details.url}/#ticket=${control.details.ticket}`);
   await page.goto(new globalThis.URL("/settings", control.details.url).href);
   await settingsMicroCompressionAcceptance({
-    page, configPath: join(control.details.home_root, ".omni", "config.toml"),
+    page, configPath: join(control.details.home_root, ".aide", "config.toml"),
   });
   assert.deepEqual(errors, []);
 } finally {

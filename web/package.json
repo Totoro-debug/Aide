@@ -1,5 +1,5 @@
 {
-  "name": "omni-web",
+  "name": "aide-web",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -20,6 +20,8 @@
     "test:e2e:projects": "node scripts/project-e2e.mjs",
     "pretest:e2e:startup": "npm run build",
     "test:e2e:startup": "node scripts/config-startup-e2e.mjs",
+    "pretest:e2e:models": "npm run build",
+    "test:e2e:models": "node scripts/model-configuration-e2e.mjs",
     "pretest:e2e:layout": "npm run build",
     "test:e2e:layout": "node scripts/workspace-layout-e2e.mjs"
   },

@@ -117,9 +117,26 @@ export interface ConfigRedactedSecret {
 export interface ConfigProviderFields {
   protocol: string;
   base_url: string;
-  models: string[];
-  model_context_windows: Record<string, number>;
+  models: Record<string, ConfigModelFields>;
   api_key: ConfigRedactedSecret;
+}
+
+export interface ConfigModelFields {
+  context_window: number | null;
+  max_output: number | null;
+  temperature: number | null;
+  reasoning_effort: ReasoningEffort | null;
+  timeout: number | null;
+  migration_candidates?: ConfigModelMigrationCandidate[];
+}
+
+export interface ConfigModelMigrationCandidate {
+  route: string;
+  context_window: number;
+  max_output: number;
+  temperature: number;
+  reasoning_effort: ReasoningEffort;
+  timeout: number;
 }
 
 export interface AvailableModel {
@@ -146,11 +163,6 @@ export interface SessionModelConfiguration {
 export interface ConfigRouteFields {
   provider_id: string;
   model: string;
-  context_window: number;
-  max_output: number;
-  temperature: number;
-  reasoning_effort: ReasoningEffort;
-  timeout: number;
 }
 
 export interface ConfigMcpFields {

@@ -14,17 +14,17 @@ from uuid import uuid4
 
 import pytest
 
-import omni.agent.loop as loop_module
-import omni.service.runtime as service_runtime
-from omni.agent.context.budget import estimate_request_tokens
-from omni.agent.loop import ModelContextOverflowError
-from omni.agent.message_bus import InboundMessage, MessageBus
-from omni.agent.session.session import Session, SessionStoragePartition
-from omni.agent.tools.tool_gateway import ModelToolCall, ToolGateway
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE
-from omni.provider.models import (
+import aide.agent.loop as loop_module
+import aide.service.runtime as service_runtime
+from aide.agent.context.budget import estimate_request_tokens
+from aide.agent.loop import ModelContextOverflowError
+from aide.agent.message_bus import InboundMessage, MessageBus
+from aide.agent.session.session import Session, SessionStoragePartition
+from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE
+from aide.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,
@@ -34,11 +34,11 @@ from omni.provider.models import (
     ModelUsage,
     ReasoningEffort,
 )
-from omni.schedule.model import JobSchedule, ScheduleJob
-from omni.service.errors import ServiceError
-from omni.service.execution import SessionExecution
-from omni.service.runtime import AgentService, SessionClaim, WorkspaceRecord
-from omni.skills.catalog import LoadedSkill, SkillLoader, SkillMetadata
+from aide.schedule.model import JobSchedule, ScheduleJob
+from aide.service.errors import ServiceError
+from aide.service.execution import SessionExecution
+from aide.service.runtime import AgentService, SessionClaim, WorkspaceRecord
+from aide.skills.catalog import LoadedSkill, SkillLoader, SkillMetadata
 from tests.agent.test_context import _FrozenDateTime
 from tests.agent.test_loop import _LargeSchemaTool, _response, _Router, _runtime, _terminals
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
@@ -876,7 +876,7 @@ def test_skill_budget_uses_public_status_projection_and_complete_tools(
     empty_candidate: bool,
     over_budget: bool,
 ) -> None:
-    monkeypatch.setattr("omni.agent.context.builder.datetime", _FrozenDateTime)
+    monkeypatch.setattr("aide.agent.context.builder.datetime", _FrozenDateTime)
     instruction = tmp_path / "agent-home" / "skills" / "planner" / "SKILL.md"
     instruction.parent.mkdir(parents=True)
     instruction.write_text(

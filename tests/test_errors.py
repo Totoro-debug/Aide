@@ -2,14 +2,14 @@ from typing import Any, cast
 
 import pytest
 
-from omni.errors import (
+from aide.errors import (
     MODEL_CONTEXT_OVERFLOW_MESSAGE,
     STABLE_ERROR_CODES,
     TURN_CANCELLED_MESSAGE,
     ErrorCode,
     ErrorInfo,
 )
-from omni.provider.errors import (
+from aide.provider.errors import (
     ModelCallError,
     model_context_overflow_error,
     parse_retry_after_seconds,
@@ -17,7 +17,7 @@ from omni.provider.errors import (
 
 
 def test_turn_cancelled_message_is_the_stable_user_visible_contract() -> None:
-    assert TURN_CANCELLED_MESSAGE == "Omni 已取消本轮对话。"
+    assert TURN_CANCELLED_MESSAGE == "Aide 已取消本轮对话。"
 
 
 def test_model_context_overflow_error_returns_fresh_normalized_failures() -> None:

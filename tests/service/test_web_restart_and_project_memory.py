@@ -9,11 +9,11 @@ from typing import Any
 import aiohttp
 import pytest
 
-from omni.agent.memory.dream import DreamResult
-from omni.service.discovery import read_credential, read_discovery
-from omni.service.errors import ServiceError
-from omni.service.process import serve_service
-from omni.service.runtime import AgentService
+from aide.agent.memory.dream import DreamResult
+from aide.service.discovery import read_credential, read_discovery
+from aide.service.errors import ServiceError
+from aide.service.process import serve_service
+from aide.service.runtime import AgentService
 from tests.service.test_protocol_contract import _validator
 from tests.service.test_service_concurrency import _ConcurrentProvider
 from tests.service.test_service_transport import _prepare_agent_home
@@ -24,7 +24,7 @@ async def test_project_memory_is_scoped_and_does_not_create_sessions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = _prepare_agent_home(tmp_path / "home")
-    monkeypatch.setattr("omni.service.runtime.create_provider", lambda *_: _ConcurrentProvider())
+    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_: _ConcurrentProvider())
     service = AgentService(home)
     await service.start()
     try:
@@ -97,7 +97,7 @@ async def test_hosted_restart_applies_config_and_keeps_browser_authentication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = _prepare_agent_home(tmp_path / "home")
-    monkeypatch.setattr("omni.service.runtime.create_provider", lambda *_: _ConcurrentProvider())
+    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_: _ConcurrentProvider())
     host = asyncio.create_task(serve_service(home, port=0, reconnect_timeout=3))
     headers: dict[str, str] = {}
     base = ""
@@ -108,7 +108,7 @@ async def test_hosted_restart_applies_config_and_keeps_browser_authentication(
         credential = read_credential(home)
         assert credential is not None
         base = f"http://{discovery.host}:{discovery.port}"
-        bearer = {"Authorization": f"Bearer {credential}", "X-Omni-CSRF": credential}
+        bearer = {"Authorization": f"Bearer {credential}", "X-Aide-CSRF": credential}
         async with aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True)) as http:
             async def post(path: str, body: dict[str, object], proof: dict[str, str]) -> tuple[int, Any]:
                 async with http.post(base + path, json=body, headers=proof) as response:
@@ -116,13 +116,13 @@ async def test_hosted_restart_applies_config_and_keeps_browser_authentication(
 
             _, cli = await post("/api/v1/clients", {"request_id": "cli", "kind": "cli"}, bearer)
             _, ticket = await post("/api/v1/web/ticket", {"request_id": "ticket"},
-                                   {**bearer, "X-Omni-Client": cli["client_id"]})
+                                   {**bearer, "X-Aide-Client": cli["client_id"]})
             _, exchange = await post("/api/v1/web/ticket", {"ticket": ticket["ticket"]}, {"Origin": base})
-            headers = {"X-Omni-CSRF": exchange["csrf_token"], "Origin": base}
+            headers = {"X-Aide-CSRF": exchange["csrf_token"], "Origin": base}
             _, web_client = await post("/api/v1/clients", {"request_id": "web", "kind": "web"}, headers)
-            headers["X-Omni-Control"] = web_client["web_control_credential"]
+            headers["X-Aide-Control"] = web_client["web_control_credential"]
             socket = await http.ws_connect(base + "/api/v1/events", headers={"Origin": base},
-                                          protocols=("omni-v1", web_client["web_control_credential"]))
+                                          protocols=("aide-v1", web_client["web_control_credential"]))
             project = tmp_path / "project"
             project.mkdir()
             status, registered = await post("/api/v1/projects", {"request_id": "project", "path": str(project)}, headers)
@@ -152,9 +152,9 @@ async def test_hosted_restart_applies_config_and_keeps_browser_authentication(
             status, reconnected = await post("/api/v1/clients", {"request_id": "reconnect", "kind": "web"}, headers)
             assert status == 200
             assert reconnected["client_id"] != web_client["client_id"]
-            headers["X-Omni-Control"] = reconnected["web_control_credential"]
+            headers["X-Aide-Control"] = reconnected["web_control_credential"]
             new_socket = await http.ws_connect(base + "/api/v1/events", headers={"Origin": base},
-                                              protocols=("omni-v1", reconnected["web_control_credential"]))
+                                              protocols=("aide-v1", reconnected["web_control_credential"]))
             async with http.get(base + "/api/v1/config", headers=headers) as response:
                 assert response.status == 200
                 active = await response.json()

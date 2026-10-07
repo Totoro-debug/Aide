@@ -11,19 +11,19 @@ from uuid import UUID
 
 import pytest
 
-import omni.agent.session.restore as restore_module
-from omni.agent.session._restore_persistence import canonical_json_bytes, sha256_hex
-from omni.agent.session.backup_store import FileBackupStore
-from omni.agent.session.restore import (
+import aide.agent.session.restore as restore_module
+from aide.agent.session._restore_persistence import canonical_json_bytes, sha256_hex
+from aide.agent.session.backup_store import FileBackupStore
+from aide.agent.session.restore import (
     RestoreManager,
     RestoreMode,
     RestoreRecoveryRequired,
     RestoreSafetyError,
     StaleRestorePlan,
 )
-from omni.agent.session.session import Session
-from omni.agent.workspace_state import WorkspaceState
-from omni.utils.host_filesystem import HOST_FILESYSTEM
+from aide.agent.session.session import Session
+from aide.agent.workspace_state import WorkspaceState
+from aide.utils.host_filesystem import HOST_FILESYSTEM
 
 SESSION_ID = "20260926-120000-123456_12345678-1234-4234-8234-123456789abc"
 FIRST_TOKEN = UUID("12345678-1234-4234-8234-123456789abc")
@@ -259,7 +259,7 @@ async def test_execute_rechecks_session_digest_after_revalidation(
 
     assert target.read_bytes() == b"after"
     assert len(FileBackupStore(state, session.session_id).inspect().entries) == 1
-    assert not (workspace / ".omni" / "restore" / session.session_id / "pending.json").exists()
+    assert not (workspace / ".aide" / "restore" / session.session_id / "pending.json").exists()
 
 
 @pytest.mark.asyncio
@@ -365,7 +365,7 @@ async def test_missing_journal_entry_only_disables_files_inside_selected_range(
     _commit_user(session, "missing", SECOND_TOKEN)
     missing_ticket = store.before_write(SECOND_TOKEN, missing)
     assert missing_ticket is not None
-    (workspace / ".omni" / "restore" / session.session_id / "entries" / "2.json").unlink()
+    (workspace / ".aide" / "restore" / session.session_id / "entries" / "2.json").unlink()
     await session.wait_for_pending_persist()
 
     plan = RestoreManager(state, session.session_id, now=lambda: NOW).inspect(session, 1)
@@ -391,7 +391,7 @@ async def test_known_missing_journal_entry_outside_selected_range_does_not_disab
     _commit_user(session, "missing", FIRST_TOKEN)
     missing_ticket = store.before_write(FIRST_TOKEN, missing)
     assert missing_ticket is not None
-    (workspace / ".omni" / "restore" / session.session_id / "entries" / "1.json").unlink()
+    (workspace / ".aide" / "restore" / session.session_id / "entries" / "1.json").unlink()
     _commit_user(session, "valid", SECOND_TOKEN)
     valid_ticket = store.before_write(SECOND_TOKEN, valid)
     assert valid_ticket is not None
@@ -417,7 +417,7 @@ async def test_conversation_only_restore_tombstones_missing_entry_without_reopen
     store = FileBackupStore(state, session.session_id)
     ticket = store.before_write(FIRST_TOKEN, target)
     assert ticket is not None
-    (workspace / ".omni" / "restore" / session.session_id / "entries" / "1.json").unlink()
+    (workspace / ".aide" / "restore" / session.session_id / "entries" / "1.json").unlink()
     await session.wait_for_pending_persist()
 
     manager = RestoreManager(state, session.session_id, now=lambda: NOW)
@@ -443,7 +443,7 @@ async def test_unknown_v2_integrity_issue_disables_files_but_allows_conversation
     store = FileBackupStore(state, session.session_id)
     ticket = store.before_write(FIRST_TOKEN, target)
     assert ticket is not None
-    root = workspace / ".omni" / "restore" / session.session_id
+    root = workspace / ".aide" / "restore" / session.session_id
     (root / "entries" / "1.json").unlink()
     _write_v2_unknown_state(root / "state.json")
     await session.wait_for_pending_persist()
@@ -587,7 +587,7 @@ async def test_missing_safety_snapshot_does_not_mutate_on_recovery(
     plan = RestoreManager(state, session.session_id, now=lambda: NOW).inspect(session, 1)
 
     def remove_safety_after_intent() -> None:
-        shutil.rmtree(workspace / ".omni" / "restore" / session.session_id / "latest-safety")
+        shutil.rmtree(workspace / ".aide" / "restore" / session.session_id / "latest-safety")
         raise RuntimeError("injected crash after pending intent")
 
     after_restore_phase("pending_intent", remove_safety_after_intent)
@@ -629,7 +629,7 @@ async def test_damaged_safety_snapshot_content_does_not_mutate_on_recovery(
     plan = RestoreManager(state, session.session_id, now=lambda: NOW).inspect(session, 1)
 
     def damage_snapshot() -> None:
-        latest = workspace / ".omni" / "restore" / session.session_id / "latest-safety"
+        latest = workspace / ".aide" / "restore" / session.session_id / "latest-safety"
         manifest = json.loads((latest / "manifest.json").read_bytes())
         (latest / manifest["generation"] / damaged_name).write_bytes(b"")
         raise RuntimeError("injected crash with damaged safety snapshot")
@@ -739,7 +739,7 @@ async def test_published_snapshot_survives_old_generation_cleanup_failure(
     first_manager = RestoreManager(state, session.session_id, now=lambda: NOW)
     await first_manager.execute(first_manager.inspect(session, 1), RestoreMode.FILES)
 
-    latest = workspace / ".omni" / "restore" / session.session_id / "latest-safety"
+    latest = workspace / ".aide" / "restore" / session.session_id / "latest-safety"
     first_manifest = json.loads((latest / "manifest.json").read_bytes())
     first_generation = first_manifest["generation"]
 

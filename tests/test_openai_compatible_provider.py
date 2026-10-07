@@ -10,16 +10,16 @@ from typing import Any
 
 import pytest
 
-from omni.agent.tools.tool_gateway import ModelToolCall
-from omni.config.config import ProviderConfiguration
-from omni.provider.errors import ModelCallError
-from omni.provider.models import (
+from aide.agent.tools.tool_gateway import ModelToolCall
+from aide.config.config import ProviderConfiguration
+from aide.provider.errors import ModelCallError
+from aide.provider.models import (
     ModelCompleted,
     ModelContinuation,
     ReasoningDelta,
     TextDelta,
 )
-from omni.provider.openai_compatible import OpenAICompatibleProvider
+from aide.provider.openai_compatible import OpenAICompatibleProvider
 from tests.fixtures.provider import error_info_fields, model_response_fields
 
 READ_FILE_SCHEMA: dict[str, Any] = {
@@ -106,7 +106,7 @@ def request(*, stream: bool = True) -> dict[str, Any]:
     del stream
     return {
         "messages": [
-            {"role": "system", "content": "You are Omni."},
+            {"role": "system", "content": "You are Aide."},
             {"role": "user", "content": "Hello"},
         ],
         "tools": (READ_FILE_SCHEMA,),
@@ -235,7 +235,7 @@ async def test_stream_translates_text_and_usage_through_official_sdk_boundary() 
         {
             "max_tokens": 512,
             "messages": [
-                {"role": "system", "content": "You are Omni."},
+                {"role": "system", "content": "You are Aide."},
                 {"role": "user", "content": "Hello"},
             ],
             "model": "model-test",
@@ -538,7 +538,7 @@ async def test_stream_preserves_interleaved_reasoning_and_replays_latest_assista
 
     second_request = request()
     second_request["messages"] = [
-        {"role": "system", "content": "You are Omni."},
+        {"role": "system", "content": "You are Aide."},
         {"role": "user", "content": "Earlier question"},
         {"role": "assistant", "content": "Earlier answer"},
         {"role": "user", "content": "Read README.md"},
@@ -571,7 +571,7 @@ async def test_stream_preserves_interleaved_reasoning_and_replays_latest_assista
 
     assert isinstance(second_events[-1], ModelCompleted)
     assert client.chat.completions.calls[1]["messages"] == [
-        {"role": "system", "content": "You are Omni."},
+        {"role": "system", "content": "You are Aide."},
         {"role": "user", "content": "Earlier question"},
         {"role": "assistant", "content": "Earlier answer"},
         {"role": "user", "content": "Read README.md"},

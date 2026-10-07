@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from omni.agent.tools.network_safety import resolve_target
+from aide.agent.tools.network_safety import resolve_target
 
 
 class _UnexpectedResolver:

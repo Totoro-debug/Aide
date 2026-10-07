@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from omni.management.service import RuntimeStatus, SessionListingEntry
+from aide.management.service import RuntimeStatus, SessionListingEntry
 
 LOCAL_OFFSET = timezone(timedelta(hours=8))
 
@@ -91,14 +91,14 @@ def test_runtime_status_rejects_negative_or_boolean_counters() -> None:
 def test_session_summary_exposes_only_picker_fields_and_validates_message_count() -> None:
     summary = SessionListingEntry(
         id="20260711-153012-123456_550e8400-e29b-41d4-a716-446655440000",
-        title="Omni implementation",
+        title="Aide implementation",
         created_at=datetime(2026, 7, 11, 15, 30, 12, 123000, tzinfo=LOCAL_OFFSET),
         updated_at=datetime(2026, 7, 11, 15, 31, 2, 456000, tzinfo=LOCAL_OFFSET),
         message_count=12,
     )
 
     assert summary.id == "20260711-153012-123456_550e8400-e29b-41d4-a716-446655440000"
-    assert summary.title == "Omni implementation"
+    assert summary.title == "Aide implementation"
     assert summary.created_at == datetime(2026, 7, 11, 15, 30, 12, 123000, tzinfo=LOCAL_OFFSET)
     assert summary.updated_at == datetime(2026, 7, 11, 15, 31, 2, 456000, tzinfo=LOCAL_OFFSET)
     assert summary.message_count == 12

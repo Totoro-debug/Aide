@@ -8,20 +8,21 @@ from uuid import UUID, uuid4
 import pytest
 from loguru import logger
 
-from omni.agent.memory.dream import DreamResult
-from omni.agent.memory.manager import MemoryManager
-from omni.agent.session.session import Session
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
-from omni.errors import ErrorInfo
-from omni.management.commands import (
+from aide.agent.memory.dream import DreamResult
+from aide.agent.memory.manager import MemoryManager
+from aide.agent.session.session import Session
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
+from aide.errors import ErrorInfo
+from aide.management.commands import (
     MANAGEMENT_COMMANDS,
     RESUME_MANAGEMENT_COMMAND,
     ManagementCommandDispatcher,
     ManagementCommandResult,
 )
-from omni.management.service import ManagementError, RuntimeStatusInput
-from omni.skills.catalog import SkillMetadata
+from aide.management.service import ManagementError, RuntimeStatusInput
+from aide.skills.catalog import SkillMetadata
+from aide.templates import load_template
 from tests.fixtures.diagnostic_capture import capture_diagnostics, configured_process_logging
 from tests.fixtures.session import seed_session_state
 from tests.management.factories import management_service
@@ -450,89 +451,7 @@ class _StatusProjectionLoop:
         return self._projection
 
 
-DEFAULT_CONFIG_CONTENT = """[runtime]
-max_tool_result_chars = 4096
-max_iterations = 50
-enable_skill_always_load = false
-compact_ratio = 0.9
-permission_level = "workspace-write"
-exec_shell = "auto"
-
-[memory]
-batch_size = 10
-schedule = "0 * * * *"
-
-[web]
-default_chat_workspace = "~/.omni/chat"
-
-# Configure a trusted local MCP Server by uncommenting and editing one item.
-# [mcp.servers.filesystem]
-# enabled = true
-# transport = "stdio"
-# command = "uvx"
-# args = ["mcp-server-filesystem", "."]
-# cwd = "."
-# connect_timeout = 30
-# call_timeout = 60
-# [mcp.servers.filesystem.tool_keywords]
-# list_files = ["files", "directory", "list"]
-
-# Configure a trusted Streamable HTTP MCP Server with optional static headers.
-# [mcp.servers.search]
-# enabled = true
-# transport = "streamable-http"
-# url = "https://example.com/mcp"
-# connect_timeout = 30
-# call_timeout = 60
-# [mcp.servers.search.tool_keywords]
-# search = ["search", "query"]
-# [mcp.servers.search.headers]
-# Authorization = "Bearer replace-with-a-token"
-
-[models.providers.openai-local]
-protocol = "openai-compatible"
-base_url = ""
-api_key = ""
-models = []
-
-# Replace provider_id, model, and model limits with values supported by your provider.
-# Remove any purpose-specific route to fall back to default.
-[models.routes.default]
-provider_id = "openai-local"
-model = "replace-with-a-model-id"
-context_window = 200000
-max_output = 8192
-temperature = 0.2
-reasoning_effort = "mid"
-timeout = 120
-
-[models.routes.chat]
-provider_id = "openai-local"
-model = "replace-with-a-model-id"
-context_window = 200000
-max_output = 8192
-temperature = 0.2
-reasoning_effort = "mid"
-timeout = 120
-
-[models.routes.memory]
-provider_id = "openai-local"
-model = "replace-with-a-model-id"
-context_window = 200000
-max_output = 8192
-temperature = 0.2
-reasoning_effort = "mid"
-timeout = 120
-
-[models.routes.schedule]
-provider_id = "openai-local"
-model = "replace-with-a-model-id"
-context_window = 200000
-max_output = 8192
-temperature = 0.2
-reasoning_effort = "mid"
-timeout = 120
-"""
+DEFAULT_CONFIG_CONTENT = load_template("default-config.md")
 
 LOCAL_OFFSET = timezone(timedelta(hours=8))
 STATUS_CREATED_AT = datetime(2026, 7, 11, 15, 30, tzinfo=LOCAL_OFFSET)
@@ -691,7 +610,7 @@ async def test_memory_command_returns_renderable_complete_disk_text(
     home = AgentHome(agent_home)
     home.initialize()
     state = WorkspaceState(workspace)
-    state.initialize(agent_home_root=Path.home() / ".omni")
+    state.initialize(agent_home_root=Path.home() / ".aide")
     content = "# Long-term Memory\n\n## Lesson\n\u5b8c\u6574\u5185\u5bb9\n" + (
         "memory-line\n" * 8_000
     )
@@ -800,7 +719,7 @@ async def test_memory_command_renders_safe_persistence_failure(
     home = AgentHome(agent_home)
     home.initialize()
     state = WorkspaceState(workspace)
-    state.initialize(agent_home_root=Path.home() / ".omni")
+    state.initialize(agent_home_root=Path.home() / ".aide")
     memory_manager = MemoryManager(state)
     state.long_term_memory_path.unlink()
     dispatcher = ManagementCommandDispatcher(
@@ -996,7 +915,7 @@ async def test_management_commands_bypass_conversation_and_provider(
     home = AgentHome(agent_home)
     home.initialize()
     state = WorkspaceState(workspace)
-    state.initialize(agent_home_root=Path.home() / ".omni")
+    state.initialize(agent_home_root=Path.home() / ".aide")
     (agent_home / "config.toml").write_text(CONFIG_CONTENT, encoding="utf-8")
     state.long_term_memory_path.write_text("current memory\n", encoding="utf-8")
     reload_loop = _ReloadableLoop()

@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from omni.agent.tools.base import BaseTool
-from omni.agent.tools.core.edit_file import EditFileTool
-from omni.agent.tools.core.read_file import ReadFileTool
-from omni.agent.tools.core.write_file import WriteFileTool
-from omni.agent.tools.tool_gateway import (
+from aide.agent.tools.base import BaseTool
+from aide.agent.tools.core.edit_file import EditFileTool
+from aide.agent.tools.core.read_file import ReadFileTool
+from aide.agent.tools.core.write_file import WriteFileTool
+from aide.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ConfirmationRequester,
@@ -192,12 +192,12 @@ async def test_workspace_state_and_absolute_internal_paths_use_host_permissions(
     workspace: Path,
 ) -> None:
     identity = workspace
-    state_file = workspace / ".omni" / "sessions" / "state.txt"
+    state_file = workspace / ".aide" / "sessions" / "state.txt"
     state_file.parent.mkdir(parents=True)
     state_file.write_bytes(b"workspace state")
     gateway = _gateway(contextual_tool(ReadFileTool, workspace=identity))
 
-    relative = await gateway.call(_call("read_file", {"path": ".omni/sessions/state.txt"}))
+    relative = await gateway.call(_call("read_file", {"path": ".aide/sessions/state.txt"}))
     absolute = await gateway.call(
         _call("read_file", {"path": str(state_file)}, call_id="call_absolute")
     )

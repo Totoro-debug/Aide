@@ -7,16 +7,16 @@ from pathlib import Path
 
 import pytest
 
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigError, ConfigLoader
-from omni.utils.host_filesystem import HOST_FILESYSTEM
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigError, ConfigLoader
+from aide.utils.host_filesystem import HOST_FILESYSTEM
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
 _WORKER = """
 import sys, time
 from pathlib import Path
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader, ConfigRevisionConflict
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader, ConfigRevisionConflict
 home, ready, go, revision, operation = sys.argv[1:]
 loader = ConfigLoader(AgentHome(Path(home)))
 Path(ready).touch()

@@ -1,4 +1,4 @@
-import { newProjectConversation, openWorkspaceAction, showProjectNavigation } from "./project-ui.mjs";
+import { newProjectConversation, showProjectNavigation } from "./project-ui.mjs";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -114,7 +114,7 @@ export async function settingsConfirmationAcceptance({ page, control }) {
   await page.locator("textarea").press("Enter");
   let acceptedRun;
   await expect.poll(async () => {
-    acceptedRun = await page.evaluate((sessionId) => [...(window.__omniTestMessages ?? [])]
+    acceptedRun = await page.evaluate((sessionId) => [...(window.__aideTestMessages ?? [])]
       .reverse().find((event) => (
         event.type === "input.accepted" && event.session_id === sessionId
         && event.payload?.text === "settings generation barrier confirmation"
@@ -126,7 +126,7 @@ export async function settingsConfirmationAcceptance({ page, control }) {
   await expect(page.getByRole("log").getByText("settings generation barrier confirmation", { exact: true }))
     .toBeVisible({ timeout: 5000 });
   await expect(page.getByRole("button", { name: "Cancel run", exact: true })).toBeEnabled();
-  await expect.poll(async () => page.evaluate((runId) => window.__omniTestMessages
+  await expect.poll(async () => page.evaluate((runId) => window.__aideTestMessages
     .filter((event) => event.type === "snapshot.required")
     .some((event) => event.payload?.snapshot?.sessions?.some((entry) => (
       entry.snapshot.live_state?.runs?.some((run) => run.run_id === runId)
@@ -147,11 +147,11 @@ export async function settingsConfirmationAcceptance({ page, control }) {
   const dialog = page.getByRole("dialog", { name: "Tool Confirmation", exact: true });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("confirmation-outside.txt");
-  const original = await page.evaluate(() => [...window.__omniTestMessages]
+  const original = await page.evaluate(() => [...window.__aideTestMessages]
     .reverse().find((event) => event.type === "confirmation.requested"));
   await page.reload();
   await expect(dialog).toBeVisible({ timeout: 5000 });
-  const restored = await page.evaluate(() => [...window.__omniTestMessages]
+  const restored = await page.evaluate(() => [...window.__aideTestMessages]
     .reverse().find((event) => event.type === "snapshot.required"
       && event.payload?.snapshot?.pending_confirmation)?.payload.snapshot.pending_confirmation);
   assert.equal(restored?.payload.token, original.payload.token);
@@ -317,7 +317,7 @@ export async function settingsMicroCompressionAcceptance({ page, configPath }) {
         await expect(dialog).toBeVisible();
         await expect(dialog).toContainText(language === "en" ? "may miss details" : "可能因此遗漏细节");
         await expect(dialog).toContainText(language === "en" ? "conversation history are retained" : "会话记录仍会保留");
-        await expect(dialog).toContainText(language === "en" ? "Restart Omni" : "重启 Omni");
+        await expect(dialog).toContainText(language === "en" ? "Restart Aide" : "重启 Aide");
         await expect(toggle).not.toBeChecked();
         if (dismiss === "cancel") await dialog.getByRole("button", { name: language === "en" ? "Cancel" : "取消", exact: true }).click();
         else if (dismiss === "escape") await page.keyboard.press("Escape");
@@ -361,19 +361,23 @@ export async function settingsMicroCompressionAcceptance({ page, configPath }) {
 }
 
 export async function settingsModelMcpAcceptance({ page, control, output }) {
-  const configPath = resolve(control.details.home_root, ".omni", "config.toml");
-  const providerObservationPath = process.env.OMNI_E2E_PROVIDER_OBSERVATION_PATH;
-  const mcpV1Path = process.env.OMNI_E2E_MCP_V1_PATH;
-  const mcpV2Path = process.env.OMNI_E2E_MCP_V2_PATH;
+  const configPath = resolve(control.details.home_root, ".aide", "config.toml");
+  const providerObservationPath = process.env.AIDE_E2E_PROVIDER_OBSERVATION_PATH;
+  const mcpV1Path = process.env.AIDE_E2E_MCP_V1_PATH;
+  const mcpV2Path = process.env.AIDE_E2E_MCP_V2_PATH;
   assert.ok(providerObservationPath);
   assert.ok(mcpV1Path);
   assert.ok(mcpV2Path);
 
   const responseBodies = [];
+  let runtimeStatus;
   const captureConfigResponses = (target) => {
     target.on("response", (response) => {
       if (response.url().endsWith("/api/v1/config")) {
         responseBodies.push(response.text().catch(() => ""));
+      }
+      if (response.url().endsWith("/runtime/status") && response.ok()) {
+        void response.json().then(body => { runtimeStatus = body.status; }).catch(() => {});
       }
     });
   };
@@ -406,10 +410,10 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   };
   const openProject = async (target) => {
     const project = await target.evaluate(async () => {
-      const credential = window.__omniTestControlCredential;
+      const credential = window.__aideTestControlCredential;
       const response = await globalThis.fetch("/api/v1/projects", {
         credentials: "include",
-        headers: credential == null ? {} : { "X-Omni-Control": credential },
+        headers: credential == null ? {} : { "X-Aide-Control": credential },
       });
       if (!response.ok) throw new Error(`Project catalog request failed: ${response.status}`);
       const body = await response.json();
@@ -495,10 +499,10 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
     }
     await waitForSavedSettings(target);
     const response = await target.evaluate(async () => {
-      const credential = window.__omniTestControlCredential;
+      const credential = window.__aideTestControlCredential;
       const result = await globalThis.fetch("/api/v1/config", {
         credentials: "include",
-        headers: credential == null ? {} : { "X-Omni-Control": credential },
+        headers: credential == null ? {} : { "X-Aide-Control": credential },
       });
       if (!result.ok) throw new Error(`Configuration read failed: ${result.status}`);
       return result.json();
@@ -510,10 +514,10 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
     return text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
   };
   const availableModels = async (target) => target.evaluate(async () => {
-    const credential = window.__omniTestControlCredential;
+    const credential = window.__aideTestControlCredential;
     const response = await globalThis.fetch("/api/v1/models/available", {
       credentials: "include",
-      headers: credential == null ? {} : { "X-Omni-Control": credential },
+      headers: credential == null ? {} : { "X-Aide-Control": credential },
     });
     return { status: response.status, body: await response.json() };
   });
@@ -524,15 +528,24 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   const remoteHeaderValue = (target) => field(target, "settings-mcp-remote-headers-Authorization-value");
   const defaultModel = (target) => field(target, "settings-models-routes-default-model");
   const chatModel = (target) => field(target, "settings-models-routes-chat-model");
-  const smallModelContextWindow = (target) => field(target, "settings-models-providers-primary-model_context_windows-small-model");
-  const largeModelContextWindow = (target) => field(target, "settings-models-providers-primary-model_context_windows-large-model");
+  const smallModelContextWindow = (target) => field(target, "settings-model-primary-small-model-context_window");
+  const largeModelContextWindow = (target) => field(target, "settings-model-primary-large-model-context_window");
+  const completeModelCard = async (target, { id, context = 8192 } = {}) => {
+    if (!await target.locator("details").evaluate(element => element.open)) await target.locator("summary").click();
+    if (id !== undefined) await target.getByLabel("Model", { exact: true }).fill(id);
+    await target.getByLabel("Maximum output", { exact: true }).fill("1024");
+    await target.getByLabel("Temperature", { exact: true }).fill("0");
+    await target.getByLabel("Reasoning effort", { exact: true }).selectOption("mid");
+    await target.getByLabel("Timeout (seconds)", { exact: true }).fill("30");
+    await target.getByLabel("Context window", { exact: true }).fill(String(context));
+  };
 
   const initial = await openSettings(page);
-  assert.equal(initial.fields.models.providers.primary.models[0], "small-model");
+  assert.ok(initial.fields.models.providers.primary.models["small-model"]);
   assert.equal(initial.fields.models.routes.default.model, "small-model");
-  const defaultReasoningEffort = initial.fields.models.routes.default.reasoning_effort;
+  const defaultReasoningEffort = initial.fields.models.providers.primary.models["small-model"].migration_candidates.find(candidate => candidate.route === "default").reasoning_effort;
   assert.equal(await smallModelContextWindow(page).inputValue(), "8192");
-  assert.equal(await largeModelContextWindow(page).inputValue(), "");
+  assert.equal(initial.fields.models.providers.primary.models["large-model"].context_window, null);
   const activeModels = await availableModels(page);
   assert.equal(activeModels.status, 200);
   assert.deepEqual(activeModels.body.models, [
@@ -545,6 +558,10 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   });
   assert.equal(initial.fields.mcp.fixture.transport, "stdio");
   assert.equal(initial.fields.mcp.remote.headers.Authorization.configured, true);
+  await field(page, "settings-model-primary-small-model").getByRole("button", { name: /^Use default parameters/ }).click();
+  await completeModelCard(field(page, "settings-model-primary-large-model"), { context: 32768 });
+  await completeModelCard(field(page, "settings-model-retired-retired-model"));
+  await save(page);
   await settingsRowCollisionAcceptance({ page, configPath, openSettings, save });
   for (const secret of [
     "e2e-provider-secret-302",
@@ -554,9 +571,9 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
     assert.equal(JSON.stringify(initial).includes(secret), false, `Initial config response leaked ${secret}`);
   }
 
-  const modelList = field(page, "settings-models-providers-primary-models");
-  await modelList.getByRole("button", { name: "Add item", exact: true }).click();
-  await modelList.getByRole("textbox", { name: "Models 3", exact: true }).fill("expanded-model-302");
+  const primaryCard = field(page, "settings-models-providers-primary");
+  await primaryCard.getByRole("button", { name: "Add model", exact: true }).click();
+  await completeModelCard(primaryCard.locator('div[id^="settings-model-primary-"]').last(), { id: "expanded-model-302" });
   await primaryApiKeyAction(page).selectOption("replace");
   await primaryApiKeyValue(page).fill("e2e-provider-secret-replaced-302");
   await save(page);
@@ -636,7 +653,7 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   await waitForSavedSettings(page);
   const addedProvider = await control.command("config-read");
   assert.equal(addedProvider.fields.models.providers["review-provider-302"].protocol, "anthropic");
-  assert.deepEqual(addedProvider.fields.models.providers["review-provider-302"].models, []);
+  assert.deepEqual(addedProvider.fields.models.providers["review-provider-302"].models, {});
   await field(page, "settings-models-providers-review-provider-302").getByRole("button", { name: "Remove provider", exact: true }).click();
   await save(page);
   await waitForSavedSettings(page);
@@ -712,10 +729,14 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   await expect(keywordInput).toHaveAttribute("aria-invalid", "true");
   assert.deepEqual(await readFile(configPath), keywordsBefore);
   await keywordInput.fill("resource");
+  await save(page);
 
   await settingsSection(page, "Models");
   const beforeInvalid = await readFile(configPath);
-  await defaultModel(page).fill("missing-model-302");
+  assert.equal(await defaultModel(page).locator('option[value="missing-model-302"]').count(), 0);
+  const largeModelOutput = field(page, "settings-model-primary-large-model-max_output");
+  if (!await field(page, "settings-model-primary-large-model").locator("details").evaluate(element => element.open)) await field(page, "settings-model-primary-large-model").locator("summary").click();
+  await largeModelOutput.fill("0");
   await save(page, 422);
   await expect(page.getByRole("alert").filter({ hasText: "Settings need attention" })).toBeVisible();
   assert.deepEqual(await readFile(configPath), beforeInvalid, "Invalid model candidate changed config bytes");
@@ -726,7 +747,7 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   const staleSaveArrival = new Promise((done) => { staleSaveArrived = done; });
   const delayedStaleSave = async (route) => {
     if (route.request().method() !== "PATCH"
-      || route.request().postDataJSON()?.fields?.models?.routes?.chat?.temperature !== 0.8) return route.continue();
+      || route.request().postDataJSON()?.fields?.models?.providers?.primary?.models?.["large-model"]?.temperature !== 0.8) return route.continue();
     staleSaveArrived();
     await staleSaveGate;
     await route.continue();
@@ -734,26 +755,27 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   await page.route("**/api/v1/config", delayedStaleSave);
   const staleResponsePromise = page.waitForResponse((response) => (
     response.url().endsWith("/api/v1/config") && response.request().method() === "PATCH"
-    && response.request().postDataJSON()?.fields?.models?.routes?.chat?.temperature === 0.8
+    && response.request().postDataJSON()?.fields?.models?.providers?.primary?.models?.["large-model"]?.temperature === 0.8
   ));
   // Keep the model candidate invalid until all conflicting edits are complete.
-  const chatTemperature = field(page, "settings-models-routes-chat-temperature");
+  await largeModelOutput.fill("");
+  const chatTemperature = field(page, "settings-model-primary-large-model-temperature");
   await chatTemperature.fill("0.8");
-  await chatModel(page).fill("large-model");
-  await defaultModel(page).fill("large-model");
-  await defaultModel(page).press("Tab");
+  await largeModelOutput.fill("1024");
+  await largeModelOutput.press("Tab");
   await staleSaveArrival;
-  const competingRoutes = (await control.command("config-read")).fields.models.routes;
-  competingRoutes.chat.temperature = 0.1;
-  const competing = await control.command(`config-patch ${JSON.stringify({ models: { routes: competingRoutes } })}`);
-  assert.equal(competing.fields.models.routes.chat.temperature, 0.1);
+  const competingProviders = (await control.command("config-read")).fields.models.providers;
+  for (const provider of Object.values(competingProviders)) delete provider.api_key;
+  competingProviders.primary.models["large-model"].temperature = 0.1;
+  const competing = await control.command(`config-patch ${JSON.stringify({ models: { providers: competingProviders } })}`);
+  assert.equal(competing.fields.models.providers.primary.models["large-model"].temperature, 0.1);
   const beforeConflict = await readFile(configPath);
   await page.bringToFront();
   releaseStaleSave();
   const staleResponse = await staleResponsePromise;
   assert.equal(staleResponse.status(), 409);
   await page.unroute("**/api/v1/config", delayedStaleSave);
-  await expect(page.getByText("These settings changed elsewhere. Your edits are still here.", { exact: true })).toBeVisible();
+  await expect(page.getByText("These settings changed elsewhere. Your edits are still here.", { exact: true })).toBeVisible({ timeout: 15000 });
   assert.deepEqual(await readFile(configPath), beforeConflict, "Stale model save changed config bytes");
   await page.getByRole("button", { name: "Reload saved values", exact: true }).click();
   await expect(defaultModel(page)).toHaveValue("small-model");
@@ -761,22 +783,22 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   const capacitySave = page.waitForResponse((response) => (
     response.url().endsWith("/api/v1/config")
     && response.request().method() === "PATCH"
-    && response.request().postDataJSON()?.fields?.models?.providers?.primary?.model_context_windows?.["large-model"] === 65536
+    && response.request().postDataJSON()?.fields?.models?.providers?.primary?.models?.["large-model"]?.context_window === 65536
   ));
   await largeModelContextWindow(page).fill("65536");
   await largeModelContextWindow(page).press("Tab");
   const capacityResponse = await capacitySave;
   assert.equal(capacityResponse.status(), 200, "Model capacity must save automatically on blur");
   const capacitySaved = await capacityResponse.json();
-  assert.equal(capacitySaved.fields.models.providers.primary.model_context_windows["large-model"], 65536);
+  assert.equal(capacitySaved.fields.models.providers.primary.models["large-model"].context_window, 65536);
   assert.equal(capacitySaved.application.status, "restart-required");
   await waitForSavedSettings(page);
   const beforeCapacityRestart = await availableModels(page);
   assert.deepEqual(beforeCapacityRestart.body.models, [
     { provider_id: "primary", model: "small-model", context_window: 8192 },
   ], "Saved capacity must not replace the active model projection before restart");
-  await defaultModel(page).fill("large-model");
-  await chatModel(page).fill("large-model");
+  await defaultModel(page).selectOption("large-model");
+  await chatModel(page).selectOption("large-model");
   const conflictResolved = await save(page);
   await waitForSavedSettings(page);
 
@@ -789,6 +811,7 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   assert.deepEqual(restartedModels.body.models, [
     { provider_id: "primary", model: "small-model", context_window: 8192 },
     { provider_id: "primary", model: "large-model", context_window: 65536 },
+    { provider_id: "primary", model: "expanded-model-302", context_window: 8192 },
   ]);
   assert.deepEqual(restartedModels.body.default_combination, {
     provider_id: "primary",
@@ -811,25 +834,19 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
     && observation.tools.includes("tool_search")
   )), "The active generation did not reach the large-model Tool Search request");
 
-  const [runtime] = await Promise.all([
-    page.waitForResponse((response) => (
-      response.url().endsWith("/runtime/status") && response.request().method() === "POST"
-    )),
-    openWorkspaceAction(page, "Runtime status and controls"),
-  ]);
-  assert.equal(runtime.status(), 200);
-  const budget = (await runtime.json()).status;
+  await expect.poll(() => runtimeStatus?.chat_model).toBe("primary/large-model");
+  const budget = runtimeStatus;
   assert.equal(budget.chat_model, "primary/large-model");
   assert.equal(budget.context_window, 65536);
-  assert.equal(budget.max_output, conflictResolved.fields.models.routes.chat.max_output);
+  assert.equal(budget.max_output, conflictResolved.fields.models.providers.primary.models["large-model"].max_output);
   assert.equal(budget.available_context, 65536 - budget.max_output);
   assert.equal(budget.compact_context_window, Math.ceil(budget.available_context * budget.compact_ratio));
   assert.equal(budget.compact_ratio, conflictResolved.fields.runtime.compact_ratio);
   await page.keyboard.press("Escape");
 
   await openSettings(page);
-  await defaultModel(page).fill("small-model");
-  await chatModel(page).fill("small-model");
+  await defaultModel(page).selectOption("small-model");
+  await chatModel(page).selectOption("small-model");
   await settingsSection(page, "MCP");
   const args = field(page, "settings-mcp-fixture-args").getByRole("textbox");
   await args.last().fill(mcpV2Path);
@@ -910,7 +927,7 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openProject(page);
   const bodies = await Promise.all(responseBodies);
-  const events = await page.evaluate(() => window.__omniTestMessages ?? []);
+  const events = await page.evaluate(() => window.__aideTestMessages ?? []);
   for (const secret of [
     "e2e-provider-secret-302",
     "e2e-retired-secret-302",
@@ -975,16 +992,16 @@ export default async function settingsAcceptance({ page, control, output, viewpo
     }
     await waitForSavedSettings(target);
     return target.evaluate(async () => {
-      const credential = window.__omniTestControlCredential;
+      const credential = window.__aideTestControlCredential;
       const response = await globalThis.fetch("/api/v1/config", {
         credentials: "include",
-        headers: credential == null ? {} : { "X-Omni-Control": credential },
+        headers: credential == null ? {} : { "X-Aide-Control": credential },
       });
       if (!response.ok) throw new Error(`Configuration read failed: ${response.status}`);
       return response.json();
     });
   };
-  const configPath = resolve(control.details.home_root, ".omni", "config.toml");
+  const configPath = resolve(control.details.home_root, ".aide", "config.toml");
   await settings(page);
   await settingsSection(page, "General & appearance");
   await page.locator("#settings-theme").selectOption("light");
@@ -1046,13 +1063,13 @@ export default async function settingsAcceptance({ page, control, output, viewpo
   assert.match(await readFile(configPath, "utf8"), /large-model/);
 
   const hold = await control.command("settings-hold");
-  await page.evaluate(() => { window.__settingsSocketBefore = window.__omniTestSocket; });
+  await page.evaluate(() => { window.__settingsSocketBefore = window.__aideTestSocket; });
   await memorySettings(page);
   await page.getByLabel("Memory batch size", { exact: true }).fill("13");
   const pending = await save(page);
   assert.equal(pending.application.status, "restart-required");
   assert.equal(pending.application.active_revision, saved.application.active_revision);
-  await expect(page.getByText("Saved; restart Omni to use these settings.", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Saved; restart Aide to use these settings.", { exact: true }).first()).toBeVisible();
   await openServiceStatus(page);
   await expect(page.getByRole("heading", { name: "Service status", exact: true })).toBeVisible();
   await settings(page);
@@ -1060,10 +1077,10 @@ export default async function settingsAcceptance({ page, control, output, viewpo
   const released = await control.command("settings-release");
   assert.equal(released.pid, hold.pid, "Configuration application restarted the service");
   await waitForSavedSettings(page);
-  assert.equal(await page.evaluate(() => window.__settingsSocketBefore === window.__omniTestSocket), true,
+  assert.equal(await page.evaluate(() => window.__settingsSocketBefore === window.__aideTestSocket), true,
     "Configuration application replaced the browser connection");
 
-  const memoryPath = resolve(control.details.cli_workspace, ".omni", "memory", "memory.md");
+  const memoryPath = resolve(control.details.cli_workspace, ".aide", "memory", "memory.md");
   const memory = await readFile(memoryPath);
   try {
     await writeFile(memoryPath, Buffer.from([0xff, 0xfe]));
@@ -1155,7 +1172,7 @@ export default async function settingsAcceptance({ page, control, output, viewpo
   const iterationsField = page.getByLabel("Maximum iterations", { exact: true });
   await expect(iterationsField).toBeEnabled();
   await page.route("**/api/v1/clients", (route) => route.abort());
-  await page.evaluate(() => window.__omniTestSocket.close());
+  await page.evaluate(() => window.__aideTestSocket.close());
   await expect(iterationsField).toBeDisabled({ timeout: 10000 });
   await expect(page.getByLabel("Maximum iterations", { exact: true })).toHaveValue("71");
   await page.unroute("**/api/v1/clients");

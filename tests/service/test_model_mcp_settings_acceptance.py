@@ -14,12 +14,12 @@ import pytest
 from aiohttp import web
 from loguru import logger
 
-from omni.agent.session.session import Session
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.schedule.model import JobSchedule, ScheduleJob
-from omni.service.client import ServiceClient
-from omni.service.runtime import AgentService
+from aide.agent.session.session import Session
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.schedule.model import JobSchedule, ScheduleJob
+from aide.service.client import ServiceClient
+from aide.service.runtime import AgentService
 from tests.configuration.test_config_editing import FULL_EDITABLE_CONFIG
 from tests.fixtures.mcp_wire import WireServer, wire_result, wire_tool
 from tests.service.test_service_concurrency import _client_output, _serve
@@ -188,15 +188,15 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
         browser = await service.register_client("web")
         headers = {
             "Authorization": f"Bearer {cli.token}",
-            "X-Omni-CSRF": cli.token,
-            "X-Omni-Client": browser.client_id,
-            "X-Omni-Control": cast(str, browser.web_control_credential),
+            "X-Aide-CSRF": cli.token,
+            "X-Aide-Client": browser.client_id,
+            "X-Aide-Control": cast(str, browser.web_control_credential),
         }
         async with aiohttp.ClientSession() as http:
             async with http.ws_connect(
                 server.make_url("/api/v1/events"),
                 headers={**headers, "Origin": str(server.make_url("/")).rstrip("/")},
-                protocols=("omni-v1",),
+                protocols=("aide-v1",),
             ) as ws:
                 await ws.send_json(
                     {

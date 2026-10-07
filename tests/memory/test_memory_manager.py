@@ -4,15 +4,15 @@ from pathlib import Path
 
 import pytest
 
-from omni.agent.memory.manager import MemoryManager, SummaryClaimError
-from omni.agent.memory.records import SummaryEntry
-from omni.agent.memory.store import (
+from aide.agent.memory.manager import MemoryManager, SummaryClaimError
+from aide.agent.memory.records import SummaryEntry
+from aide.agent.memory.store import (
     WorkspaceJsonlSummaryStore,
     WorkspaceLongTermMemoryStore,
     WorkspaceSummaryCursorStore,
 )
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
 
 NOW = datetime(2026, 8, 27, 10, 0, tzinfo=timezone(timedelta(hours=8)))
 
@@ -21,7 +21,7 @@ def _state(agent_home: Path) -> WorkspaceState:
     workspace = agent_home.parent / "memory-manager-workspace"
     workspace.mkdir()
     state = WorkspaceState(workspace)
-    state.initialize(agent_home_root=Path.home() / ".omni")
+    state.initialize(agent_home_root=Path.home() / ".aide")
     return state
 
 
@@ -149,7 +149,7 @@ async def test_manager_rejects_external_hard_linked_cursor(agent_home: Path) -> 
 
 
 def test_manager_module_has_no_execution_dependencies() -> None:
-    tree = ast.parse(Path("omni/agent/memory/manager.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("aide/agent/memory/manager.py").read_text(encoding="utf-8"))
     imported_names = {
         alias.name
         for node in ast.walk(tree)
@@ -164,10 +164,10 @@ def test_manager_module_has_no_execution_dependencies() -> None:
     assert not any(
         name.startswith(
             (
-                "omni.agent.runner",
-                "omni.provider",
-                "omni.agent.tools",
-                "omni.schedule",
+                "aide.agent.runner",
+                "aide.provider",
+                "aide.agent.tools",
+                "aide.schedule",
             )
         )
         for name in imported

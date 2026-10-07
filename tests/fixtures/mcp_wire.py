@@ -18,7 +18,7 @@ from mcp.shared.message import SessionMessage
 from pydantic import TypeAdapter
 
 if TYPE_CHECKING:
-    from omni.config.config import MCPServerConfiguration
+    from aide.config.config import MCPServerConfiguration
 
 
 def wire_tool(name: str = "echo", **fields: Any) -> dict[str, Any]:
@@ -107,7 +107,7 @@ class WireServer:
 async def http_wire_server(
     scenario: dict[str, Any],
 ) -> AsyncIterator[tuple[WireServer, MCPServerConfiguration]]:
-    from omni.config.config import MCPServerConfiguration
+    from aide.config.config import MCPServerConfiguration
 
     server = WireServer(scenario)
     app = web.Application()
@@ -138,7 +138,7 @@ async def http_wire_server(
 def stdio_wire_configuration(
     directory: Path, scenario: dict[str, Any], *, name: str = "remote"
 ) -> MCPServerConfiguration:
-    from omni.config.config import MCPServerConfiguration
+    from aide.config.config import MCPServerConfiguration
 
     scenario_path = directory / f"{name}.json"
     scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
@@ -161,7 +161,7 @@ class ObservedLifetimes:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import mcp.client.stdio as stdio
 
-        import omni.agent.tools.mcp as adapter
+        import aide.agent.tools.mcp as adapter
 
         self.processes: list[Any] = []
         self.closed: list[asyncio.Event] = []

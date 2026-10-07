@@ -9,15 +9,15 @@ from typing import Any, cast
 
 import pytest
 
-from omni.agent.loop import AgentRunExecutor
-from omni.agent.message_bus import InboundMessage
-from omni.agent.permission import PermissionSnapshot, RuntimePermissionControl
-from omni.agent.session.session import Session
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.service.errors import ServiceError
-from omni.service.execution import SessionExecution
-from omni.service.runtime import AgentService
+from aide.agent.loop import AgentRunExecutor
+from aide.agent.message_bus import InboundMessage
+from aide.agent.permission import PermissionSnapshot, RuntimePermissionControl
+from aide.agent.session.session import Session
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.service.errors import ServiceError
+from aide.service.execution import SessionExecution
+from aide.service.runtime import AgentService
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
 from tests.service.test_protocol_contract import _validator
@@ -43,7 +43,7 @@ async def test_backpressured_run_survives_reconnect_at_29_seconds(
     path = tmp_path / "workspace"
     path.mkdir()
     provider = _ConcurrentProvider(early_a_delta=True)
-    monkeypatch.setattr("omni.service.runtime.create_provider", lambda _config: provider)
+    monkeypatch.setattr("aide.service.runtime.create_provider", lambda _config: provider)
     clock = FakeClock(datetime(2026, 10, 4, tzinfo=UTC))
     timer_started, wake_timer = asyncio.Event(), asyncio.Event()
     blocked, release_output = asyncio.Event(), asyncio.Event()
@@ -152,7 +152,7 @@ async def test_backpressured_client_expiry_preserves_another_active_session(
     path = tmp_path / "workspace"
     path.mkdir()
     provider = _ConcurrentProvider(block_b=True, early_a_delta=True)
-    monkeypatch.setattr("omni.service.runtime.create_provider", lambda _config: provider)
+    monkeypatch.setattr("aide.service.runtime.create_provider", lambda _config: provider)
     clock = FakeClock(datetime(2026, 10, 4, tzinfo=UTC))
     timer_started, wake_timer = asyncio.Event(), asyncio.Event()
     blocked, release_output = asyncio.Event(), asyncio.Event()
@@ -412,7 +412,7 @@ async def test_open_conversation_request_replay_preserves_one_draft_and_rejects_
         assert first == replay
         workspace = service.workspace(first["workspace_id"])
         assert list(workspace.loops) == [first["session_id"]]
-        assert not (path / ".omni" / "sessions" / f"{first['session_id']}.jsonl").exists()
+        assert not (path / ".aide" / "sessions" / f"{first['session_id']}.jsonl").exists()
         with pytest.raises(ServiceError) as reused:
             await service.open_conversation(
                 client.client_id, directory=str(path), request_id="open-once"
@@ -477,7 +477,7 @@ async def test_takeover_captures_current_client_permission_and_retires_executors
     path.mkdir()
     provider = _ConcurrentProvider()
     provider.release_b.set()
-    monkeypatch.setattr("omni.service.runtime.create_provider", lambda _config: provider)
+    monkeypatch.setattr("aide.service.runtime.create_provider", lambda _config: provider)
     service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     observed: list[str] = []
@@ -575,7 +575,7 @@ async def test_departure_cancels_blocked_title_and_flushes_retained_history(
 ) -> None:
     from collections.abc import AsyncIterator
 
-    from omni.provider.models import ModelStreamEvent
+    from aide.provider.models import ModelStreamEvent
 
     title_started, title_release, title_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
@@ -598,7 +598,7 @@ async def test_departure_cancels_blocked_title_and_flushes_retained_history(
             return title()
 
     provider = Provider()
-    monkeypatch.setattr("omni.service.runtime.create_provider", lambda _config: provider)
+    monkeypatch.setattr("aide.service.runtime.create_provider", lambda _config: provider)
     home = _home(tmp_path / "home")
     path = tmp_path / "workspace"
     path.mkdir()

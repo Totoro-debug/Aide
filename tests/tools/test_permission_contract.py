@@ -6,16 +6,16 @@ from typing import Any
 
 import pytest
 
-from omni.agent.confirmation import ConfirmationAborted
-from omni.agent.permission import ToolPermissionLevel
-from omni.agent.tools.base import BaseTool, ToolError
-from omni.agent.tools.core.exec_policy import (
+from aide.agent.confirmation import ConfirmationAborted
+from aide.agent.permission import ToolPermissionLevel
+from aide.agent.tools.base import BaseTool, ToolError
+from aide.agent.tools.core.exec_policy import (
     ExecAssessment,
     ExecCommandIdentity,
     ExecShellSelector,
     ResolvedExecShell,
 )
-from omni.agent.tools.permission import (
+from aide.agent.tools.permission import (
     NetworkAssessment,
     NetworkTargetRisk,
     NormalizedNetworkTarget,
@@ -26,7 +26,7 @@ from omni.agent.tools.permission import (
     ToolInvocationFacts,
     ToolPermissionPolicy,
 )
-from omni.agent.tools.tool_gateway import (
+from aide.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ModelToolCall,

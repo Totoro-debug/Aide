@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from omni.utils import platform
+from aide.utils import platform
 
 
 @pytest.mark.parametrize("host", ["posix", "unknown"])
@@ -20,8 +20,8 @@ def test_runtime_host_check_accepts_only_windows(
 @pytest.mark.parametrize(
     "module_name, entry, exits",
     [
-        ("omni.terminal.process_entry", "run", True),
-        ("omni.service.process", "run", False),
+        ("aide.terminal.process_entry", "run", True),
+        ("aide.service.process", "run", False),
         ("scripts.release_validation", "main", False),
         ("scripts.installed_web_validation", "main", True),
     ],
@@ -37,7 +37,7 @@ def test_unsupported_host_stops_before_initialization(
     module = importlib.import_module(module_name)
     monkeypatch.setattr(module, "is_windows_host", lambda: False)
     monkeypatch.chdir(tmp_path)
-    if module_name == "omni.terminal.process_entry":
+    if module_name == "aide.terminal.process_entry":
         def forbidden_logging() -> None:
             pytest.fail("Platform refusal must precede logging initialization")
 
@@ -50,5 +50,5 @@ def test_unsupported_host_stops_before_initialization(
         assert getattr(module, entry)([]) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == "Omni requires Windows.\n"
+    assert captured.err == "Aide requires Windows.\n"
     assert tuple(tmp_path.iterdir()) == ()

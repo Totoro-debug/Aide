@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from omni.agent.tools.base import BaseTool
-from omni.agent.tools.core.glob import GlobTool
-from omni.agent.tools.core.list_dir import ListDirTool
-from omni.agent.tools.tool_gateway import (
+from aide.agent.tools.base import BaseTool
+from aide.agent.tools.core.glob import GlobTool
+from aide.agent.tools.core.list_dir import ListDirTool
+from aide.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ConfirmationRequester,
@@ -40,8 +40,8 @@ async def test_list_dir_is_stable_recursive_hidden_state_aware_and_limited(
     (workspace / ".hidden").write_text("hidden", encoding="utf-8")
     (workspace / "nested" / "child.txt").parent.mkdir()
     (workspace / "nested" / "child.txt").write_text("child", encoding="utf-8")
-    (workspace / ".omni" / "state.txt").parent.mkdir()
-    (workspace / ".omni" / "state.txt").write_text("state", encoding="utf-8")
+    (workspace / ".aide" / "state.txt").parent.mkdir()
+    (workspace / ".aide" / "state.txt").write_text("state", encoding="utf-8")
     (workspace / "node_modules" / "ignored.txt").parent.mkdir()
     (workspace / "node_modules" / "ignored.txt").write_text("ignored", encoding="utf-8")
     (workspace / ".gitignore").write_text("z.txt\n", encoding="utf-8")
@@ -54,12 +54,12 @@ async def test_list_dir_is_stable_recursive_hidden_state_aware_and_limited(
     limited = await gateway.call(_call("list_dir", {"max_entries": 2}, call_id="call_limited"))
 
     assert shallow.status == "success"
-    assert shallow.content == ".gitignore\n.hidden\n.omni/\na.txt\nnested/\nz.txt"
+    assert shallow.content == ".aide/\n.gitignore\n.hidden\na.txt\nnested/\nz.txt"
     assert recursive.status == "success"
     assert recursive.content == (
-        ".gitignore\n.hidden\n.omni/\n.omni/state.txt\na.txt\nnested/\nnested/child.txt\nz.txt"
+        ".aide/\n.aide/state.txt\n.gitignore\n.hidden\na.txt\nnested/\nnested/child.txt\nz.txt"
     )
-    assert limited.content == ".gitignore\n.hidden"
+    assert limited.content == ".aide/\n.gitignore"
 
 
 @pytest.mark.asyncio

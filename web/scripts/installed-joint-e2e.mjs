@@ -7,26 +7,26 @@ import { URL } from "node:url";
 import { chromium, expect } from "@playwright/test";
 
 if (process.platform !== "win32") {
-  console.error("Omni requires Windows.");
+  console.error("Aide requires Windows.");
   process.exit(1);
 }
 
-const baseUrl = process.env.OMNI_E2E_URL;
-const ticket = process.env.OMNI_E2E_TICKET;
-const secondTicket = process.env.OMNI_E2E_SECOND_TICKET;
-const workspace = process.env.OMNI_E2E_WORKSPACE;
-const output = process.env.OMNI_E2E_OUTPUT;
-const expectedInstance = process.env.OMNI_E2E_INSTANCE;
-const observationPath = process.env.OMNI_PROVIDER_OBSERVATION_PATH;
-const cliReadyPath = process.env.OMNI_CLI_READY;
-const browserReadyPath = process.env.OMNI_JOINT_BROWSER_READY;
-const cliForegroundReadyPath = process.env.OMNI_CLI_FOREGROUND_READY;
-const cliRemovalDonePath = process.env.OMNI_CLI_REMOVAL_DONE;
-const cliSettingsStartPath = process.env.OMNI_CLI_SETTINGS_START;
-const cliSettingsReadyPath = process.env.OMNI_CLI_SETTINGS_READY;
-const cliSettingsDonePath = process.env.OMNI_CLI_SETTINGS_DONE;
-const cliDonePath = process.env.OMNI_CLI_DONE;
-const settingsReleasePath = process.env.OMNI_CLI_SETTINGS_RELEASE;
+const baseUrl = process.env.AIDE_E2E_URL;
+const ticket = process.env.AIDE_E2E_TICKET;
+const secondTicket = process.env.AIDE_E2E_SECOND_TICKET;
+const workspace = process.env.AIDE_E2E_WORKSPACE;
+const output = process.env.AIDE_E2E_OUTPUT;
+const expectedInstance = process.env.AIDE_E2E_INSTANCE;
+const observationPath = process.env.AIDE_PROVIDER_OBSERVATION_PATH;
+const cliReadyPath = process.env.AIDE_CLI_READY;
+const browserReadyPath = process.env.AIDE_JOINT_BROWSER_READY;
+const cliForegroundReadyPath = process.env.AIDE_CLI_FOREGROUND_READY;
+const cliRemovalDonePath = process.env.AIDE_CLI_REMOVAL_DONE;
+const cliSettingsStartPath = process.env.AIDE_CLI_SETTINGS_START;
+const cliSettingsReadyPath = process.env.AIDE_CLI_SETTINGS_READY;
+const cliSettingsDonePath = process.env.AIDE_CLI_SETTINGS_DONE;
+const cliDonePath = process.env.AIDE_CLI_DONE;
+const settingsReleasePath = process.env.AIDE_CLI_SETTINGS_RELEASE;
 let csrfToken = null;
 let webControlCredential = null;
 assert.ok(
@@ -76,7 +76,7 @@ async function waitForPersistedConfirmationResult(workspacePath) {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     try {
-      const sessionDirectory = join(workspacePath, ".omni", "schedule-sessions");
+      const sessionDirectory = join(workspacePath, ".aide", "schedule-sessions");
       const names = await readdir(sessionDirectory);
       for (const name of names) {
         if (!name.endsWith(".jsonl")) continue;
@@ -103,8 +103,8 @@ async function requestJson(request, method, path, data) {
   const response = await request[method](path, {
     headers: {
       Origin: baseUrl,
-      ...(method !== "get" ? { "X-Omni-CSRF": csrfToken } : {}),
-      ...(webControlCredential === null ? {} : { "X-Omni-Control": webControlCredential }),
+      ...(method !== "get" ? { "X-Aide-CSRF": csrfToken } : {}),
+      ...(webControlCredential === null ? {} : { "X-Aide-Control": webControlCredential }),
     },
     data,
   });
@@ -185,7 +185,7 @@ async function persistedTerminal(path, prompt, expected) {
 
 async function decide(page, token, requestId) {
   return page.evaluate(({ token, requestId }) => new Promise((resolve, reject) => {
-    const socket = window.__omniJointSocket;
+    const socket = window.__aideJointSocket;
     const timer = setTimeout(() => {
       socket.removeEventListener("message", listener);
       reject(new Error("Confirmation response timed out"));
@@ -205,7 +205,7 @@ async function decide(page, token, requestId) {
 }
 
 const browser = await chromium.launch({
-  channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge",
+  channel: process.env.AIDE_E2E_BROWSER_CHANNEL ?? "msedge",
 });
 const context = await browser.newContext();
 const secondContext = await browser.newContext();
@@ -224,14 +224,14 @@ function redact(text) {
 
 const observeWebSocket = () => {
   const OriginalWebSocket = window.WebSocket;
-  window.__omniJointEvents = [];
+  window.__aideJointEvents = [];
   window.WebSocket = class extends OriginalWebSocket {
     constructor(...args) {
       super(...args);
-      window.__omniJointSocket = this;
+      window.__aideJointSocket = this;
       this.addEventListener("message", (event) => {
         try {
-          window.__omniJointEvents.push(JSON.parse(event.data));
+          window.__aideJointEvents.push(JSON.parse(event.data));
         } catch {
           // Non-JSON frames are outside the service event contract.
         }
@@ -292,7 +292,7 @@ try {
   const backgroundJobId = background.job.job_id;
   await ensureScheduleAdmitted(context.request, firstProjectId, firstWorkspaceId);
   await expect.poll(async () => {
-    const events = await page.evaluate(() => window.__omniJointEvents);
+    const events = await page.evaluate(() => window.__aideJointEvents);
     return events.find((event) => (
       event.type === "confirmation.requested"
       && event.payload?.origin === "background"
@@ -300,7 +300,7 @@ try {
     ));
   }, { timeout: 90_000 }).toBeTruthy();
   const backgroundConfirmation = await page.evaluate((jobId) => (
-    window.__omniJointEvents.find((event) => (
+    window.__aideJointEvents.find((event) => (
       event.type === "confirmation.requested"
       && event.payload?.origin === "background"
       && event.payload?.job_id === jobId
@@ -322,7 +322,7 @@ try {
   await page.reload();
   webControlCredential = (await (await recoveryRegistration).json()).web_control_credential;
   await expect(backgroundDialog).toBeVisible({ timeout: 5000 });
-  const recovered = await page.evaluate(() => [...window.__omniJointEvents].reverse()
+  const recovered = await page.evaluate(() => [...window.__aideJointEvents].reverse()
     .find((event) => event.type === "snapshot.required"
       && event.payload?.snapshot?.pending_confirmation)?.payload.snapshot.pending_confirmation);
   assert.equal(recovered?.payload.token, confirmation.payload.token);
@@ -341,7 +341,7 @@ try {
   await backgroundDialog.waitFor({ state: "hidden" });
   const persistedConfirmation = await waitForPersistedConfirmationResult(workspace);
   assert.match(persistedConfirmation.content, /confirmation fixture content/);
-  const toolRecords = (await readFile(join(workspace, ".omni", "schedule-sessions", `schedule_${backgroundJobId}.jsonl`), "utf8"))
+  const toolRecords = (await readFile(join(workspace, ".aide", "schedule-sessions", `schedule_${backgroundJobId}.jsonl`), "utf8"))
     .split("\n").filter(Boolean).map((line) => JSON.parse(line));
   assert.equal(toolRecords.filter((record) => record.role === "tool" && record.tool_call_id === "call-confirmation").length, 1);
   const backgroundEvidence = {
@@ -409,9 +409,9 @@ try {
   assert.equal(cliRemoval.claim_released, true);
   assert.equal(cliRemoval.terminal_state, "cancelled");
   assert.equal(cliRemoval.notification_received, true);
-  await persistedTerminal(join(workspace, ".omni", "schedule-sessions", `schedule_${removalJobId}.jsonl`), removalPrompt, "cancelled");
+  await persistedTerminal(join(workspace, ".aide", "schedule-sessions", `schedule_${removalJobId}.jsonl`), removalPrompt, "cancelled");
   assert.equal(await readFile(join(workspace, "fixture.txt"), "utf8"), "joint user file\n");
-  const savedSchedule = JSON.parse(await readFile(join(workspace, ".omni", "schedule.json"), "utf8"));
+  const savedSchedule = JSON.parse(await readFile(join(workspace, ".aide", "schedule.json"), "utf8"));
   assert.match(JSON.stringify(savedSchedule), /Project removal preserved Job/);
   assert.match(JSON.stringify(savedSchedule), new RegExp(removalSavedJobId));
 
@@ -455,7 +455,7 @@ try {
   const active = await configResponse(context.request);
   assert.equal(active.application.active_revision, pending.application.active_revision);
   assert.equal(active.application.restart_required, true);
-  await persistedTerminal(join(workspace, ".omni", "schedule-sessions", `schedule_${settingsJobId}.jsonl`), settingsPrompt, "completed");
+  await persistedTerminal(join(workspace, ".aide", "schedule-sessions", `schedule_${settingsJobId}.jsonl`), settingsPrompt, "completed");
   const cliSettings = await waitForJson(cliSettingsDonePath);
   const cliDone = await waitForJson(cliDonePath);
   assert.equal(cliSettings.foreground_terminal, true);

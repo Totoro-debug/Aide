@@ -5,7 +5,7 @@ from pathlib import Path, PurePath, PureWindowsPath
 
 import pytest
 
-from omni.agent.workspace_state import (
+from aide.agent.workspace_state import (
     WorkspaceState,
     WorkspaceStateError,
     normalize_workspace_path,
@@ -33,11 +33,11 @@ def test_normalize_workspace_path_preserves_lexical_path_contract(
     with pytest.raises(ValueError, match="Workspace path must be absolute"):
         normalize_workspace_path(PurePath("Project") / "discarded" / "..")
 
-    assert normalize_workspace_path.__module__ == "omni.agent.workspace_state"
+    assert normalize_workspace_path.__module__ == "aide.agent.workspace_state"
 
 
 def test_workspace_wrapper_module_is_removed() -> None:
-    assert importlib.util.find_spec("omni.agent.workspace") is None
+    assert importlib.util.find_spec("aide.agent.workspace") is None
 
 
 def test_normalized_workspace_path_uses_the_current_hosts_native_path_type(
@@ -172,7 +172,7 @@ def test_initialization_does_not_follow_agent_home_chat_redirects(
             agent_home_root=agent_home, allow_agent_home_chat=True
         )
 
-    assert not (target / ".omni").exists()
+    assert not (target / ".aide").exists()
 
 
 def test_initialization_rejects_case_and_junction_aliases_of_agent_home(
@@ -268,7 +268,7 @@ def test_initialization_rejects_non_directory_root(
     agent_home: Path,
     workspace: Path,
 ) -> None:
-    root = workspace / ".omni"
+    root = workspace / ".aide"
     root.write_text("collision", encoding="utf-8")
 
     with pytest.raises(WorkspaceStateError) as captured:
@@ -284,7 +284,7 @@ def test_initialization_rejects_junction_root(
     workspace: Path,
     tmp_path: Path,
 ) -> None:
-    root = workspace / ".omni"
+    root = workspace / ".aide"
     target = tmp_path / "outside-junction"
     target.mkdir()
     create_directory_alias(root, target)
@@ -307,7 +307,7 @@ def test_initialization_rejects_external_memory_directory_alias(
     create_directory_alias(state.memory_directory, outside)
 
     with pytest.raises(WorkspaceStateError) as captured:
-        state.initialize(agent_home_root=Path.home() / ".omni")
+        state.initialize(agent_home_root=Path.home() / ".aide")
 
     assert captured.value.path == state.memory_directory
     assert not (outside / "memory.md").exists()
@@ -323,7 +323,7 @@ def test_initialization_rejects_external_sessions_directory_alias(
     create_directory_alias(state.sessions_directory, outside)
 
     with pytest.raises(WorkspaceStateError) as captured:
-        state.initialize(agent_home_root=Path.home() / ".omni")
+        state.initialize(agent_home_root=Path.home() / ".aide")
 
     assert captured.value.path == state.sessions_directory
 
@@ -337,7 +337,7 @@ def test_initialization_rejects_hard_linked_memory_file(workspace: Path) -> None
     state.long_term_memory_path.hardlink_to(outside)
 
     with pytest.raises(WorkspaceStateError) as captured:
-        state.initialize(agent_home_root=Path.home() / ".omni")
+        state.initialize(agent_home_root=Path.home() / ".aide")
 
     assert captured.value.path == state.long_term_memory_path
     assert outside.read_bytes() == protected_content

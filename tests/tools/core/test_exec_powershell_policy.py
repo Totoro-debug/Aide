@@ -11,15 +11,15 @@ from typing import Literal
 
 import pytest
 
-from omni.agent.tools.context import ToolRunContext
-from omni.agent.tools.core.exec import ExecTool
-from omni.agent.tools.core.exec_host import (
+from aide.agent.tools.context import ToolRunContext
+from aide.agent.tools.core.exec import ExecTool
+from aide.agent.tools.core.exec_host import (
     ExecProcessSpec,
     PowerShellExecHost,
     create_exec_host,
     resolve_exec_shell,
 )
-from omni.agent.tools.core.exec_policy import (
+from aide.agent.tools.core.exec_policy import (
     POWERSHELL_READ_CANDIDATES,
     POWERSHELL_WRITE_CANDIDATES,
     ExecAssessment,
@@ -27,8 +27,8 @@ from omni.agent.tools.core.exec_policy import (
     ExecOutcome,
     catastrophic_matches,
 )
-from omni.agent.tools.permission import PermissionContext, PermissionSnapshot
-from omni.agent.tools.tool_gateway import (
+from aide.agent.tools.permission import PermissionContext, PermissionSnapshot
+from aide.agent.tools.tool_gateway import (
     ConfirmationRequest,
     ModelToolCall,
     ToolGateway,
@@ -2044,7 +2044,7 @@ async def test_real_powershell_host_inspects_and_executes_canonical_cmdlet(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     configured_path = os.environ.get(
-        "OMNI_PWSH_PATH" if selector == "pwsh" else "OMNI_POWERSHELL_PATH"
+        "AIDE_PWSH_PATH" if selector == "pwsh" else "AIDE_POWERSHELL_PATH"
     )
     candidates = (
         [Path(configured_path)]

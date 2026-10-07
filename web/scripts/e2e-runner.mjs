@@ -12,7 +12,7 @@ import setup from "./e2e-setup.mjs";
 import settingsAcceptance, { setInterfaceLanguage, setInterfaceTheme, openServiceStatus, settingsConfirmationAcceptance, settingsModelMcpAcceptance } from "./settings-e2e.mjs";
 
 if (process.platform !== "win32") {
-  console.error("Omni requires Windows.");
+  console.error("Aide requires Windows.");
   process.exit(1);
 }
 
@@ -98,7 +98,7 @@ async function shutdownControl() {
 try {
   control = await setup();
   browser = await chromium.launch({
-    channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge",
+    channel: process.env.AIDE_E2E_BROWSER_CHANNEL ?? "msedge",
   });
   const primaryContext = await browser.newContext();
   let page = await primaryContext.newPage();
@@ -124,11 +124,11 @@ try {
   });
   async function waitForRecordedEvent(matches, description) {
     for (let attempt = 0; attempt < 200; attempt += 1) {
-      const messages = await page.evaluate(() => window.__omniTestMessages);
+      const messages = await page.evaluate(() => window.__aideTestMessages);
       if (matches(messages)) return;
       await delay(50);
     }
-    const events = await page.evaluate(() => window.__omniTestMessages.slice(-12).map(
+    const events = await page.evaluate(() => window.__aideTestMessages.slice(-12).map(
       (event) => ({ type: event.type, text: event.payload?.text, code: event.error?.code }),
     ));
     const alerts = await page.getByRole("alert").allTextContents();
@@ -149,16 +149,16 @@ try {
   }
   await page.addInitScript(() => {
     const OriginalWebSocket = window.WebSocket;
-    window.__omniTestMessages = [];
-    window.__omniTestInputs = [];
+    window.__aideTestMessages = [];
+    window.__aideTestInputs = [];
     window.WebSocket = class extends OriginalWebSocket {
       constructor(...args) {
         super(...args);
-        window.__omniTestControlCredential = Array.isArray(args[1]) ? args[1][1] : null;
-        window.__omniTestSocket = this;
+        window.__aideTestControlCredential = Array.isArray(args[1]) ? args[1][1] : null;
+        window.__aideTestSocket = this;
         this.addEventListener("message", (event) => {
           try {
-            window.__omniTestMessages.push(JSON.parse(event.data));
+            window.__aideTestMessages.push(JSON.parse(event.data));
           } catch {
             // Only JSON service messages are relevant to this test.
           }
@@ -166,12 +166,12 @@ try {
       }
       send(value) {
         const command = JSON.parse(value);
-        if (command.type === "input") window.__omniTestInputs.push(command);
+        if (command.type === "input") window.__aideTestInputs.push(command);
         super.send(value);
       }
     };
   });
-  const url = process.env.OMNI_E2E_URL;
+  const url = process.env.AIDE_E2E_URL;
   async function openChatAndStatus(targetPage, targetUrl) {
     const chatWorkspaceEntry = targetPage.waitForResponse((response) => (
       response.request().method() === "POST"
@@ -180,7 +180,7 @@ try {
     await targetPage.goto("about:blank");
     await targetPage.goto(targetUrl);
     assert.equal((await chatWorkspaceEntry).status(), 200, "The default Chat workspace did not open");
-    await targetPage.getByRole("main").getByRole("heading", { name: "Omni", exact: true, level: 1 }).waitFor();
+    await targetPage.getByRole("main").getByRole("heading", { name: "Aide", exact: true, level: 1 }).waitFor();
     assert.equal(new URL(targetPage.url()).pathname, "/", "The default Web route should open Chat");
     await targetPage.goto(`${new URL(targetPage.url()).origin}/status`);
     await targetPage.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
@@ -188,23 +188,23 @@ try {
   }
   const launch = spawnSync("python", ["-c", [
     "import sys, webbrowser",
-    "from omni.terminal.process_entry import run",
+    "from aide.terminal.process_entry import run",
     "webbrowser.open_new_tab = lambda _url: False",
-    "sys.argv = ['omni', 'web']",
+    "sys.argv = ['aide', 'web']",
     "run()",
   ].join("; ")], {
     cwd: resolve(process.cwd(), ".."),
     env: {
       ...process.env,
-      USERPROFILE: process.env.OMNI_E2E_HOME_ROOT,
-      HOME: process.env.OMNI_E2E_HOME_ROOT,
+      USERPROFILE: process.env.AIDE_E2E_HOME_ROOT,
+      HOME: process.env.AIDE_E2E_HOME_ROOT,
     },
     encoding: "utf8",
     timeout: 30000,
   });
-  assert.equal(launch.status, 0, `omni web failed: ${launch.stderr}`);
+  assert.equal(launch.status, 0, `aide web failed: ${launch.stderr}`);
   const launchUrl = launch.stdout.match(/http:\/\/127\.0\.0\.1:\d+\/#ticket=[\w-]+/)?.[0];
-  assert.ok(launchUrl?.startsWith(`${url}/#ticket=`), "omni web did not attach to the isolated service");
+  assert.ok(launchUrl?.startsWith(`${url}/#ticket=`), "aide web did not attach to the isolated service");
   const documentResponse = await primaryContext.request.get(url);
   assert.equal(documentResponse.status(), 200, "The production document did not load");
   assert.match(
@@ -320,13 +320,13 @@ try {
   ));
   await page.getByRole("link", { name: "New conversation", exact: true }).click();
   assert.equal((await chatWorkspaceEntry).status(), 200, "The default Chat workspace did not open");
-  await page.getByRole("main").getByRole("heading", { name: "Omni", exact: true, level: 1 }).waitFor();
+  await page.getByRole("main").getByRole("heading", { name: "Aide", exact: true, level: 1 }).waitFor();
   await page.locator("#app-sidebar").getByText("No projects registered", { exact: true }).waitFor();
 
-  const firstProject = process.env.OMNI_E2E_FIRST_PROJECT;
-  const projectAlias = process.env.OMNI_E2E_PROJECT_ALIAS;
-  const secondProject = process.env.OMNI_E2E_SECOND_PROJECT;
-  const cliWorkspace = process.env.OMNI_E2E_CLI_WORKSPACE;
+  const firstProject = process.env.AIDE_E2E_FIRST_PROJECT;
+  const projectAlias = process.env.AIDE_E2E_PROJECT_ALIAS;
+  const secondProject = process.env.AIDE_E2E_SECOND_PROJECT;
+  const cliWorkspace = process.env.AIDE_E2E_CLI_WORKSPACE;
   assert.ok(firstProject && projectAlias && secondProject && cliWorkspace);
   let projectItems = page.locator('#app-sidebar ul[aria-label="Projects"] > li');
 
@@ -548,7 +548,7 @@ try {
       await page.getByRole("heading", { name: "project-two", exact: true }).waitFor();
     } else {
       await page.route("**/api/v1/clients", (route) => route.abort());
-      await page.evaluate(() => window.__omniTestSocket.close());
+      await page.evaluate(() => window.__aideTestSocket.close());
       await page.getByRole("status").filter({ hasText: "Showing the last received Job status." }).waitFor();
       await expect(page.getByRole("button", { name: "Refresh Schedule history", exact: true })).toBeDisabled();
     }
@@ -857,7 +857,7 @@ try {
   await page.getByRole("button", { name: "Refresh schedule", exact: true }).click();
   await disconnectedLoadArrived;
   await page.route("**/api/v1/clients", (route) => route.abort());
-  await page.evaluate(() => window.__omniTestSocket.close());
+  await page.evaluate(() => window.__aideTestSocket.close());
   const scheduleDisconnected = page.getByRole("status").filter({ hasText: "Showing the last received Job status." });
   await scheduleDisconnected.waitFor();
   await expect(page.getByRole("button", { name: "Create Job", exact: true })).toBeDisabled();
@@ -1050,7 +1050,7 @@ try {
   await failedRestoreNotice.getByRole("button", { name: "Acknowledge" }).click();
   assert.equal((await acknowledgedFailure).status(), 200);
   await page.getByRole("button", { name: "Review restore failure" }).waitFor({ state: "hidden" });
-  const durableRestore = JSON.parse(await readFile(resolve(firstProject, ".omni", "restore", control.details.failure_restore_session_id, "pending.json"), "utf8"));
+  const durableRestore = JSON.parse(await readFile(resolve(firstProject, ".aide", "restore", control.details.failure_restore_session_id, "pending.json"), "utf8"));
   assert.equal(durableRestore.failure_notification_acknowledged, true);
 
   const draftResponsePromise = page.waitForResponse((response) => (
@@ -1066,7 +1066,7 @@ try {
   await sessionPanel.getByText("Empty draft", { exact: true }).waitFor();
   await sessionList.getByRole("button", { name: /Web available history/ }).click();
   await sessionPanel.getByText("Empty draft", { exact: true }).waitFor({ state: "detached" });
-  const sessionFiles = await readdir(resolve(firstProject, ".omni", "sessions"));
+  const sessionFiles = await readdir(resolve(firstProject, ".aide", "sessions"));
   assert.equal(sessionFiles.includes(`${draftId}.jsonl`), false, "Released empty draft was persisted");
 
   await sessionList.getByRole("button", { name: /Web available history/ }).click();
@@ -1093,11 +1093,11 @@ try {
   for (const status of ["Completed", "Failed", "Rejected", "Running"]) {
     await toolGroup.getByRole("list").getByText(status, { exact: true }).waitFor();
   }
-  const beforeToolRefresh = await page.evaluate(() => window.__omniTestMessages);
+  const beforeToolRefresh = await page.evaluate(() => window.__aideTestMessages);
   await page.reload();
   await expect(page.getByRole("log").getByText("tool states", { exact: true })).toHaveCount(1);
   await page.evaluate((messages) => {
-    window.__omniTestMessages = [...messages, ...window.__omniTestMessages];
+    window.__aideTestMessages = [...messages, ...window.__aideTestMessages];
   }, beforeToolRefresh);
   await toolGroup.locator("summary").click();
   for (const status of ["Completed", "Failed", "Rejected", "Running"]) {
@@ -1116,7 +1116,7 @@ try {
   assert.equal(typeof conversationSessionId, "string");
   assert.equal(typeof conversationWorkspaceId, "string");
   await page.getByText("Empty draft", { exact: true }).waitFor();
-  await page.getByRole("main").getByText("Omni", { exact: true }).waitFor();
+  await page.getByRole("main").getByText("Aide", { exact: true }).waitFor();
   for (const viewport of conversationViewports) {
     await page.setViewportSize(viewport);
     const input = page.getByLabel("Message input");
@@ -1339,11 +1339,11 @@ try {
   await managementDialog.getByText("Client permission updated.", { exact: true }).waitFor();
   await managementDialog.press("Escape");
 
-  const memoryPath = resolve(firstProject, ".omni", "memory", "memory.md");
+  const memoryPath = resolve(firstProject, ".aide", "memory", "memory.md");
   const originalMemory = await readFile(memoryPath, "utf8");
   const longMemory = `# Inspected memory\n<script>window.__unsafeMemory = true</script>\n${"unbroken-memory".repeat(1500)}\n`;
   await writeFile(memoryPath, longMemory, "utf8");
-  const skillRoot = resolve(control.details.home_root, ".omni", "skills");
+  const skillRoot = resolve(control.details.home_root, ".aide", "skills");
   for (const [directory, document] of [
     ["web-review", "---\nname: web-review\ndescription: Browser reload metadata\n---\nPrivate instructions excluded from metadata.\n"],
     ["invalid", "---\nname: INVALID\ndescription: PRIVATE_BAD_SKILL_SECRET\n---\nPrivate bad document.\n"],
@@ -1438,7 +1438,7 @@ try {
   assert.equal(await page.getByText("The response arrived in multiple chunks.", { exact: true }).count(), 0,
     "The complete answer appeared before its first streamed frame was observed");
   await control.command("settings-wait");
-  const beforeStreamRefresh = await page.evaluate(() => window.__omniTestMessages);
+  const beforeStreamRefresh = await page.evaluate(() => window.__aideTestMessages);
   await page.reload();
   await expect(page.getByRole("log").getByText(multilinePrompt, { exact: true })).toHaveCount(1);
   const recoveredStreamingActivity = page.locator("article[data-run-id]").filter({ hasText: multilinePrompt }).last()
@@ -1449,7 +1449,7 @@ try {
   await expect(recoveredStreamingActivity.getByRole("heading", { name: "Streamed answer", exact: true })).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Cancel run", exact: true })).toBeEnabled();
   await page.evaluate((messages) => {
-    window.__omniTestMessages = [...messages, ...window.__omniTestMessages];
+    window.__aideTestMessages = [...messages, ...window.__aideTestMessages];
   }, beforeStreamRefresh);
   await page.setViewportSize(viewports[0]);
   const runningConversationTitle = await sessionList.locator('button[data-active="true"] span').textContent();
@@ -1490,12 +1490,12 @@ try {
       accepted.type === "input.accepted" && accepted.payload?.text === multilinePrompt && accepted.run_id === event.run_id
     ))
   )), "multiline Run completion");
-  const acceptedConversation = await page.evaluate((prompt) => window.__omniTestMessages.filter((event) => (
+  const acceptedConversation = await page.evaluate((prompt) => window.__aideTestMessages.filter((event) => (
     event.type === "input.accepted" && event.payload?.text === prompt
   )), multilinePrompt);
   assert.equal(acceptedConversation.length, 1, "Multiline prompt was accepted more than once");
   const conversationRunId = acceptedConversation[0].run_id;
-  const frames = await page.evaluate((runId) => window.__omniTestMessages.filter((event) => (
+  const frames = await page.evaluate((runId) => window.__aideTestMessages.filter((event) => (
     event.type === "run.output" && event.run_id === runId
     && event.payload?.message?.metadata?._stream_delta === true
   )), conversationRunId);
@@ -1511,7 +1511,7 @@ try {
   let persistedConversation;
   for (let attempt = 0; attempt < 50; attempt += 1) {
     try {
-      const records = (await readFile(resolve(firstProject, ".omni", "sessions", `${conversationSessionId}.jsonl`), "utf8"))
+      const records = (await readFile(resolve(firstProject, ".aide", "sessions", `${conversationSessionId}.jsonl`), "utf8"))
         .trim().split("\n").map((line) => JSON.parse(line));
       if (records.some((record) => record.role === "assistant" && String(record.content).includes("Persisted Markdown"))) {
         persistedConversation = records;
@@ -1525,8 +1525,8 @@ try {
   await page.getByText("Empty draft", { exact: true }).waitFor({ state: "detached" });
 
   await page.evaluate(() => {
-    const socket = window.__omniTestSocket;
-    window.__omniRetrySocket = socket;
+    const socket = window.__aideTestSocket;
+    window.__aideRetrySocket = socket;
     const send = socket.send.bind(socket);
     socket.send = (value) => {
       send(value);
@@ -1537,9 +1537,9 @@ try {
   await page.getByLabel("Message input").press("Enter");
   let reconnected = false;
   for (let attempt = 0; attempt < 200; attempt += 1) {
-    reconnected = await page.evaluate(() => window.__omniRetrySocket.readyState === 3
-      && window.__omniTestSocket !== window.__omniRetrySocket
-      && window.__omniTestSocket.readyState === 1);
+    reconnected = await page.evaluate(() => window.__aideRetrySocket.readyState === 3
+      && window.__aideTestSocket !== window.__aideRetrySocket
+      && window.__aideTestSocket.readyState === 1);
     if (reconnected) break;
     await delay(50);
   }
@@ -1552,10 +1552,10 @@ try {
       accepted.type === "input.accepted" && accepted.payload?.text === "retry once" && accepted.run_id === event.run_id
     ))
   )), "retried Run completion");
-  assert.equal(await page.evaluate(() => new Set(window.__omniTestMessages.filter((event) => (
+  assert.equal(await page.evaluate(() => new Set(window.__aideTestMessages.filter((event) => (
     event.type === "input.accepted" && event.payload?.text === "retry once"
   )).map((event) => event.run_id)).size), 1, "Reconnect accepted a duplicate Run");
-  assert.equal(await page.evaluate(() => window.__omniTestInputs.filter(
+  assert.equal(await page.evaluate(() => window.__aideTestInputs.filter(
     (command) => command.payload.text === "retry once",
   ).length), 1, "An unknown input was automatically resent after reconnect");
 
@@ -1629,18 +1629,18 @@ try {
         await expect.poll(() => page.getByRole("log").evaluate((log) => log.scrollTop)).toBe(savedScroll);
         if (language === "en" && viewport.width === conversationViewports[0].width) {
           const recoveryBeforeReload = await page.evaluate(() => (
-            JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null")
+            JSON.parse(window.localStorage.getItem("aide.browser-recovery") ?? "null")
           ));
           assert.equal(recoveryBeforeReload.input_text, draftText,
             "The active composer text was not written to browser recovery storage");
           await expect.poll(() => page.evaluate(() => (
-            JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null")?.scroll_top ?? -1
+            JSON.parse(window.localStorage.getItem("aide.browser-recovery") ?? "null")?.scroll_top ?? -1
           ))).toBe(savedScroll);
-          const recordedMessages = await page.evaluate(() => window.__omniTestMessages);
+          const recordedMessages = await page.evaluate(() => window.__aideTestMessages);
           await page.reload();
           await expect(page.locator("#conversation-input")).toHaveValue(draftText);
           await page.evaluate(messages => {
-            window.__omniTestMessages = [...messages, ...window.__omniTestMessages];
+            window.__aideTestMessages = [...messages, ...window.__aideTestMessages];
           }, recordedMessages);
           const restoredScroll = await page.getByRole("log").evaluate((log) => ({
             scrollTop: log.scrollTop,
@@ -1737,7 +1737,7 @@ try {
   const cancelRunButton = page.getByRole("button", { name: "Cancel run" });
   const canceledRunId = await cancelRunButton.evaluate((element) => element.closest("article[data-run-id]")?.getAttribute("data-run-id"));
   assert.ok(canceledRunId, "Cancel control had no owning Run");
-  const priorCancellationCount = await page.evaluate((runId) => window.__omniTestMessages.filter((event) => (
+  const priorCancellationCount = await page.evaluate((runId) => window.__aideTestMessages.filter((event) => (
     event.type === "run.cancelled" && event.run_id === runId
   )).length, canceledRunId);
   await cancelRunButton.click();
@@ -1746,12 +1746,12 @@ try {
   )).length > priorCancellationCount, "New Tool Run cancellation event");
   await expect(cancelRunButton).toBeHidden();
   await page.screenshot({ path: resolve(output, "canceled-en-dark-1440.png") });
-  const acceptedToolRuns = await page.evaluate(() => window.__omniTestMessages.filter((event) => (
+  const acceptedToolRuns = await page.evaluate(() => window.__aideTestMessages.filter((event) => (
     event.type === "input.accepted" && event.payload?.text === "tool states"
   )));
   assert.equal(new Set(acceptedToolRuns.map((event) => event.run_id)).size, 1,
     "Tool prompt was accepted into more than one Run");
-  const canceledRunIds = await page.evaluate(() => window.__omniTestMessages
+  const canceledRunIds = await page.evaluate(() => window.__aideTestMessages
     .filter((event) => event.type === "run.cancelled").map((event) => event.run_id));
   assert.ok(canceledRunIds.includes(acceptedToolRuns[0].run_id), "Cancel did not terminate the selected Run");
   assert.equal(canceledRunIds.includes(conversationRunId), false, "Cancel affected the other Session");
@@ -1793,7 +1793,7 @@ try {
   if (await projectExpansion.getAttribute("aria-expanded") !== "true") await projectExpansion.click();
   await expect(projectExpansion).toHaveAttribute("aria-expanded", "true");
   await expect.poll(() => page.evaluate(() => {
-    const recovery = JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null");
+    const recovery = JSON.parse(window.localStorage.getItem("aide.browser-recovery") ?? "null");
     return recovery?.model_configuration?.reasoning_effort === "high";
   })).toBe(true);
   const beforeRecoverySession = await page.evaluate(async () => {
@@ -1804,7 +1804,7 @@ try {
     return { service: await serviceResponse.json(), session: await sessionResponse.json() };
   });
   const expiredDraftId = await page.evaluate(() => (
-    JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null")?.session_id ?? null
+    JSON.parse(window.localStorage.getItem("aide.browser-recovery") ?? "null")?.session_id ?? null
   ));
   assert.equal(typeof expiredDraftId, "string", "The active draft was not persisted for browser recovery");
   await page.reload();
@@ -1826,23 +1826,23 @@ try {
   page.on("pageerror", (error) => browserErrors.push(error.message));
   await page.addInitScript(() => {
     if (window.top === window && window.location.protocol === "http:") {
-      const staged = window.sessionStorage.getItem("omni.test-recovery");
+      const staged = window.sessionStorage.getItem("aide.test-recovery");
       if (staged !== null) {
-        window.localStorage.setItem("omni.browser-recovery", staged);
-        window.sessionStorage.removeItem("omni.test-recovery");
+        window.localStorage.setItem("aide.browser-recovery", staged);
+        window.sessionStorage.removeItem("aide.test-recovery");
       }
     }
     const OriginalWebSocket = window.WebSocket;
-    window.__omniTestMessages = [];
-    window.__omniTestInputs = [];
+    window.__aideTestMessages = [];
+    window.__aideTestInputs = [];
     window.WebSocket = class extends OriginalWebSocket {
       constructor(...args) {
         super(...args);
-        window.__omniTestControlCredential = Array.isArray(args[1]) ? args[1][1] : null;
-        window.__omniTestSocket = this;
+        window.__aideTestControlCredential = Array.isArray(args[1]) ? args[1][1] : null;
+        window.__aideTestSocket = this;
         this.addEventListener("message", (event) => {
           try {
-            window.__omniTestMessages.push(JSON.parse(event.data));
+            window.__aideTestMessages.push(JSON.parse(event.data));
           } catch {
             // Only JSON service messages are relevant to this test.
           }
@@ -1850,7 +1850,7 @@ try {
       }
       send(value) {
         const command = JSON.parse(value);
-        if (command.type === "input") window.__omniTestInputs.push(command);
+        if (command.type === "input") window.__aideTestInputs.push(command);
         super.send(value);
       }
     };
@@ -1873,7 +1873,7 @@ try {
     return {
       service: await serviceResponse.json(),
       session: await sessionResponse.json(),
-      recovery: JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null"),
+      recovery: JSON.parse(window.localStorage.getItem("aide.browser-recovery") ?? "null"),
     };
   });
   assert.equal(afterRecoverySession.service.service_instance_id, beforeRecoverySession.service.service_instance_id,
@@ -1918,7 +1918,7 @@ try {
       const response = await window.fetch(`/api/v1/projects/${projectId}/sessions/${sessionId}/claim`, {
         method: "POST",
         credentials: "include",
-        headers: { "Content-Type": "application/json", "X-Omni-CSRF": csrf },
+        headers: { "Content-Type": "application/json", "X-Aide-CSRF": csrf },
         body: JSON.stringify({ request_id: window.crypto.randomUUID() }),
       });
       return { status: response.status, body: await response.text() };
@@ -1946,7 +1946,7 @@ try {
     await availableHistory.click();
     try {
       await expect.poll(() => page.evaluate(() =>
-        JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null")?.session_id,
+        JSON.parse(window.localStorage.getItem("aide.browser-recovery") ?? "null")?.session_id,
       ), { timeout: 1000 }).toBe(control.details.available_session_id);
       await page.locator("textarea").waitFor({ timeout: 1000 });
       historyOpened = true;
@@ -1975,35 +1975,35 @@ try {
         await input.fill("confirmation");
         await input.press("Enter");
         await primaryDialog.waitFor();
-        const originalRequest = await page.evaluate(() => [...window.__omniTestMessages]
+        const originalRequest = await page.evaluate(() => [...window.__aideTestMessages]
           .reverse().find((event) => event.type === "confirmation.requested"));
-        const priorMessages = await page.evaluate(() => window.__omniTestMessages);
+        const priorMessages = await page.evaluate(() => window.__aideTestMessages);
         if (viewport.width === 1440) {
           await page.reload();
           await expect(primaryDialog).toBeVisible({ timeout: 5000 });
           await page.evaluate((messages) => {
-            window.__omniTestMessages = [...messages, ...window.__omniTestMessages];
+            window.__aideTestMessages = [...messages, ...window.__aideTestMessages];
           }, priorMessages);
         } else if (viewport.width === 1024) {
-          await page.evaluate(() => window.__omniTestSocket.close());
+          await page.evaluate(() => window.__aideTestSocket.close());
           await expect(primaryDialog).toBeHidden();
           await expect(primaryDialog).toBeVisible({ timeout: 5000 });
         } else {
-          const beforeSnapshots = await page.evaluate(() => window.__omniTestMessages
+          const beforeSnapshots = await page.evaluate(() => window.__aideTestMessages
             .filter((event) => event.type === "snapshot.required").length);
           await page.evaluate(() => {
-            const latest = [...window.__omniTestMessages].reverse().find((event) =>
+            const latest = [...window.__aideTestMessages].reverse().find((event) =>
               typeof event.seq === "number");
-            window.__omniTestSocket.dispatchEvent(new globalThis.MessageEvent("message", {
+            window.__aideTestSocket.dispatchEvent(new globalThis.MessageEvent("message", {
               data: JSON.stringify({ ...latest, type: "test.gap", seq: latest.seq + 2, payload: {} }),
             }));
           });
-          await expect.poll(() => page.evaluate(() => window.__omniTestMessages
+          await expect.poll(() => page.evaluate(() => window.__aideTestMessages
             .filter((event) => event.type === "snapshot.required").length))
             .toBeGreaterThan(beforeSnapshots);
         }
         {
-          const recoveredRequest = await page.evaluate(() => [...window.__omniTestMessages]
+          const recoveredRequest = await page.evaluate(() => [...window.__aideTestMessages]
             .reverse().find((event) => event.type === "snapshot.required"
               && event.payload?.snapshot?.pending_confirmation)?.payload.snapshot.pending_confirmation);
           assert.equal(recoveredRequest?.payload.token, originalRequest.payload.token);
@@ -2066,7 +2066,7 @@ try {
           await expect(finalReply).toBeVisible();
         }
         const expectedStatus = combinationIndex === 0 || combinationIndex === viewports.length ? "success" : "refused";
-        const finishedStatuses = await page.evaluate((runId) => window.__omniTestMessages
+        const finishedStatuses = await page.evaluate((runId) => window.__aideTestMessages
           .filter((event) => event.type === "run.output" && event.run_id === runId
             && event.payload?.message?.type === "tool_call"
             && event.payload?.message?.metadata?.tool_call_id === "call-confirmation"
@@ -2099,7 +2099,7 @@ try {
       }
     }
   }
-  const confirmationToolRuns = await page.evaluate((settingsRunId) => window.__omniTestMessages
+  const confirmationToolRuns = await page.evaluate((settingsRunId) => window.__aideTestMessages
     .filter((event) => event.type === "run.output"
       && event.run_id !== settingsRunId
       && event.payload?.message?.type === "tool_call"
@@ -2112,7 +2112,7 @@ try {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     persistedConfirmationResults = [];
     for (const sessionId of new Set(confirmationRuns.map((run) => run.sessionId))) {
-      const records = (await readFile(resolve(firstProject, ".omni", "sessions", `${sessionId}.jsonl`), "utf8"))
+      const records = (await readFile(resolve(firstProject, ".aide", "sessions", `${sessionId}.jsonl`), "utf8"))
         .trim().split("\n").map((line) => JSON.parse(line));
       persistedConfirmationResults.push(...records.filter((record) => (
         record.role === "tool" && record.tool_call_id === "call-confirmation"
@@ -2184,7 +2184,7 @@ try {
       await expect(activity.locator("summary")).toContainText("Canceled");
       await expect(activity).not.toHaveAttribute("open");
       await activity.locator("summary").click();
-      await expect(activity).toContainText("Omni 已取消本轮对话。");
+      await expect(activity).toContainText("Aide 已取消本轮对话。");
     }
   }
   await page.getByLabel("Message input").fill("provider failure");
@@ -2203,7 +2203,7 @@ try {
   await failedActivity.waitFor();
   await expect(failedActivity).not.toHaveAttribute("open");
   await expect(failedActivity.locator("summary")).toContainText("Failed");
-  const failedReason = await page.evaluate(() => [...window.__omniTestMessages].reverse().find((event) => (
+  const failedReason = await page.evaluate(() => [...window.__aideTestMessages].reverse().find((event) => (
     event.type === "run.output" && event.payload?.message?.type === "system_control"
     && event.payload?.message?.metadata?.finish_reason === "failed"
   ))?.payload.message.content);
@@ -2347,7 +2347,7 @@ try {
           await titleDialog.getByRole("button", { name: "Save", exact: true }).click();
           await page.getByRole("heading", { name: "A".repeat(60), exact: true }).waitFor();
         }
-        const ownedRoot = resolve(firstProject, ".omni");
+        const ownedRoot = resolve(firstProject, ".aide");
         const artifactRoot = resolve(ownedRoot, "artifacts", deleteId);
         const restoreRoot = resolve(ownedRoot, "restore", deleteId);
         await mkdir(artifactRoot, { recursive: true });
@@ -2367,7 +2367,7 @@ try {
           if (route.request().method() !== "DELETE") return route.continue();
           requestIds.push(route.request().postDataJSON().request_id);
           if (mode === "conflict") {
-            const headers = { ...route.request().headers(), "x-omni-claim": "invalid-claim" };
+            const headers = { ...route.request().headers(), "x-aide-claim": "invalid-claim" };
             const rejected = await route.fetch({ headers });
             assert.equal(rejected.status(), 409, "Invalid Claim deletion did not return a conflict");
             mode = "failure";
@@ -2671,7 +2671,7 @@ try {
   assert.equal(await page.getByText(cliWorkspace).count(), 0, "unregistered CLI Workspace leaked into Project list");
 
   const previousRecovery = await page.evaluate(() => (
-    JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null")
+    JSON.parse(window.localStorage.getItem("aide.browser-recovery") ?? "null")
   ));
   assert.ok(previousRecovery, "The browser had no active Session snapshot before service restart");
   const restarted = await control.restart();
@@ -2693,7 +2693,7 @@ try {
     const [serviceResponse] = await Promise.all([window.fetch("/api/v1/service", { credentials: "include" })]);
     return {
       service: await serviceResponse.json(),
-      recovery: JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null"),
+      recovery: JSON.parse(window.localStorage.getItem("aide.browser-recovery") ?? "null"),
     };
   });
   assert.notEqual(newServiceRecovery.service.service_instance_id, previousRecovery.service_instance_id);
@@ -2804,7 +2804,7 @@ try {
   await removalDialog.waitFor({ state: "hidden" });
   await page.getByText("Project registration removed. The directory and saved work remain on disk.").waitFor();
   await removableProject.waitFor({ state: "detached" });
-  await readdir(resolve(firstProject, ".omni"));
+  await readdir(resolve(firstProject, ".aide"));
 
   await registerProject(firstProject, "project-one");
   await page.getByText("Schedule paused for review").waitFor();
@@ -2825,7 +2825,7 @@ try {
   ));
   const missingRecoveryId = "missing-browser-recovery-session";
   await page.evaluate(({ serviceInstanceId, sessionId }) => {
-    window.sessionStorage.setItem("omni.test-recovery", JSON.stringify({
+    window.sessionStorage.setItem("aide.test-recovery", JSON.stringify({
       version: 1,
       service_instance_id: serviceInstanceId,
       target: { kind: "project", project_id: "project-one" },
@@ -2845,7 +2845,7 @@ try {
     .getByRole("heading", { name: "New Session draft", exact: true })).toBeVisible();
   await expect(page.getByLabel("Message input")).toHaveValue("");
   const recoveryAfterDeletion = await page.evaluate(() => (
-    JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null")
+    JSON.parse(window.localStorage.getItem("aide.browser-recovery") ?? "null")
   ));
   assert.notEqual(recoveryAfterDeletion.session_id, missingRecoveryId,
     "The deleted Session remained the browser recovery target");
@@ -2856,7 +2856,7 @@ try {
   await page.setViewportSize(viewports[0]);
   let testSocketReadyState = -1;
   for (let attempt = 0; attempt < 200 && testSocketReadyState !== 1; attempt += 1) {
-    testSocketReadyState = await page.evaluate(() => window.__omniTestSocket?.readyState ?? -1);
+    testSocketReadyState = await page.evaluate(() => window.__aideTestSocket?.readyState ?? -1);
     if (testSocketReadyState !== 1) await new Promise((resolveWait) => setTimeout(resolveWait, 50));
   }
   assert.equal(testSocketReadyState, 1, "The test page WebSocket did not open after restart");
@@ -2864,7 +2864,7 @@ try {
   await page.getByRole("heading", { name: /Service status|服务状态/ }).waitFor();
   await page.getByRole("status").filter({ hasText: /Online|在线/ }).first().waitFor();
   await page.route("**/api/v1/clients", (route) => route.abort());
-  await page.evaluate(() => window.__omniTestSocket.close());
+  await page.evaluate(() => window.__aideTestSocket.close());
   await page.getByRole("status").filter({ hasText: /Reconnecting|恢复连接中/ }).first().waitFor();
   await page.getByRole("status").filter({ hasText: /Offline|离线/ }).first().waitFor({ timeout: 10000 });
   await page.unroute("**/api/v1/clients");
@@ -2879,9 +2879,9 @@ try {
     await diagnosticPage.screenshot({ path: resolve(output, "acceptance-failure.png") });
     await writeFile(resolve(output, "acceptance-failure.json"), JSON.stringify(await diagnosticPage.evaluate(() => ({
       route: window.location.pathname + window.location.search,
-      socket: window.__omniTestSocket?.readyState,
+      socket: window.__aideTestSocket?.readyState,
       main: document.querySelector("main")?.innerText,
-      events: window.__omniTestMessages?.slice(-30).map(event => ({ type: event.type, code: event.code })),
+      events: window.__aideTestMessages?.slice(-30).map(event => ({ type: event.type, code: event.code })),
     })), null, 2));
   }
   console.error("E2E failed:", error);

@@ -12,12 +12,13 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import BaseTestServer, TestServer
 
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader, ProviderConfiguration
-from omni.service.discovery import create_credential
-from omni.service.runtime import AgentService
-from omni.service.transport import create_app
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader, ProviderConfiguration
+from aide.service.discovery import create_credential
+from aide.service.runtime import AgentService
+from aide.service.transport import create_app
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
+from tests.fixtures.model_configuration import complete_model_settings
 
 ConfigHttp = tuple[AgentService, BaseTestServer, str, str]
 
@@ -74,8 +75,8 @@ async def test_config_get_returns_safe_structured_fields(config_http: ConfigHttp
     token = create_credential(_service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-Client": client_id,
-        "X-Omni-Control": control,
+        "X-Aide-Client": client_id,
+        "X-Aide-Control": control,
     }
 
     async with aiohttp.ClientSession() as http:
@@ -100,8 +101,8 @@ async def test_available_models_exposes_active_capacity_and_default_without_secr
     token = create_credential(service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-Client": client_id,
-        "X-Omni-Control": control,
+        "X-Aide-Client": client_id,
+        "X-Aide-Control": control,
     }
 
     async with aiohttp.ClientSession() as http:
@@ -201,9 +202,9 @@ async def test_config_patch_rejects_invalid_values_without_writing(
     revision = cast(str, current["revision"])
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-CSRF": token,
-        "X-Omni-Client": client_id,
-        "X-Omni-Control": control,
+        "X-Aide-CSRF": token,
+        "X-Aide-Client": client_id,
+        "X-Aide-Control": control,
     }
 
     async with aiohttp.ClientSession() as http:
@@ -233,9 +234,9 @@ async def test_config_patch_reports_restart_required_and_stale_conflict(
     revision = cast(str, current["revision"])
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-CSRF": token,
-        "X-Omni-Client": client_id,
-        "X-Omni-Control": control,
+        "X-Aide-CSRF": token,
+        "X-Aide-Client": client_id,
+        "X-Aide-Control": control,
     }
     payload = {
         "request_id": "valid-config-edit",
@@ -280,9 +281,9 @@ async def test_config_patch_merges_nonoverlapping_external_changes(
     token = create_credential(service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-CSRF": token,
-        "X-Omni-Client": client_id,
-        "X-Omni-Control": control,
+        "X-Aide-CSRF": token,
+        "X-Aide-Client": client_id,
+        "X-Aide-Control": control,
     }
     baseline = service.config_view()
     revision = cast(str, baseline["revision"])
@@ -315,9 +316,9 @@ async def test_config_patch_merges_complete_browser_form_with_unchanged_model_ar
     token = create_credential(service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-CSRF": token,
-        "X-Omni-Client": client_id,
-        "X-Omni-Control": control,
+        "X-Aide-CSRF": token,
+        "X-Aide-Client": client_id,
+        "X-Aide-Control": control,
     }
     baseline = service.config_view()
     revision = cast(str, baseline["revision"])
@@ -344,7 +345,7 @@ async def test_config_patch_merges_complete_browser_form_with_unchanged_model_ar
     assert response.status == 200
     assert saved["fields"]["runtime"]["max_iterations"] == 80
     assert saved["fields"]["memory"]["batch_size"] == 14
-    assert saved["fields"]["models"]["providers"]["primary"]["models"] == ["small-model"]
+    assert set(saved["fields"]["models"]["providers"]["primary"]["models"]) == {"small-model"}
 
 
 @pytest.mark.asyncio
@@ -355,9 +356,9 @@ async def test_config_patch_rejects_duplicate_provider_ids_with_form_row_path(
     token = create_credential(service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-CSRF": token,
-        "X-Omni-Client": client_id,
-        "X-Omni-Control": control,
+        "X-Aide-CSRF": token,
+        "X-Aide-Client": client_id,
+        "X-Aide-Control": control,
     }
     baseline = service.config_view()
     revision = cast(str, baseline["revision"])
@@ -394,9 +395,9 @@ async def test_config_patch_reports_external_secret_conflict(config_http: Config
     token = create_credential(service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-CSRF": token,
-        "X-Omni-Client": client_id,
-        "X-Omni-Control": control,
+        "X-Aide-CSRF": token,
+        "X-Aide-Client": client_id,
+        "X-Aide-Control": control,
     }
     baseline = service.config_view()
     revision = cast(str, baseline["revision"])
@@ -437,9 +438,9 @@ async def test_config_editor_orders_consecutive_edits_and_preserves_external_fie
     token = create_credential(service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-CSRF": token,
-        "X-Omni-Client": client_id,
-        "X-Omni-Control": control,
+        "X-Aide-CSRF": token,
+        "X-Aide-Client": client_id,
+        "X-Aide-Control": control,
     }
     baseline = service.config_view()
     revision = cast(str, baseline["revision"])
@@ -499,9 +500,9 @@ async def test_config_editor_coordinates_consecutive_mcp_keyword_arrays(
     token = create_credential(service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-CSRF": token,
-        "X-Omni-Client": client_id,
-        "X-Omni-Control": control,
+        "X-Aide-CSRF": token,
+        "X-Aide-Client": client_id,
+        "X-Aide-Control": control,
     }
     async with aiohttp.ClientSession() as http:
         response = await http.get(server.make_url("/api/v1/config"), headers=headers)
@@ -560,6 +561,7 @@ async def test_config_structural_secret_removal_rejects_external_rotation(
     baseline = service.config_view()
     revision = cast(str, baseline["revision"])
     fields = json.loads(json.dumps(baseline["fields"]))
+    complete_model_settings(fields["models"])
     for provider in fields["models"]["providers"].values():
         provider.pop("api_key")
     secret_path = (
@@ -586,9 +588,9 @@ async def test_config_structural_secret_removal_rejects_external_rotation(
             server.make_url("/api/v1/config"),
             headers={
                 "Authorization": f"Bearer {token}",
-                "X-Omni-CSRF": token,
-                "X-Omni-Client": client_id,
-                "X-Omni-Control": control,
+                "X-Aide-CSRF": token,
+                "X-Aide-Client": client_id,
+                "X-Aide-Control": control,
             },
             json={
                 "request_id": f"remove-secret-{remove}",
@@ -639,9 +641,9 @@ async def test_config_rejects_duplicate_named_mcp_form_rows(
             server.make_url("/api/v1/config"),
             headers={
                 "Authorization": f"Bearer {token}",
-                "X-Omni-CSRF": token,
-                "X-Omni-Client": client_id,
-                "X-Omni-Control": control,
+                "X-Aide-CSRF": token,
+                "X-Aide-Client": client_id,
+                "X-Aide-Control": control,
             },
             json={
                 "request_id": f"duplicate-{duplicate}",
@@ -668,8 +670,18 @@ async def test_partial_config_edit_preserves_nonoverlapping_external_leaf_fields
     external: dict[str, object]
     fields: dict[str, object]
     if section == "models":
+        prepared = json.loads(json.dumps(cast(dict[str, object], baseline["fields"])["models"]))
+        complete_model_settings(prepared)
+        for provider in prepared["providers"].values():
+            provider.pop("api_key")
+        loader.patch_editable_fields(loader.revision(), {"models": prepared})
+        baseline = service.config_view()
         external = {"models": {"providers": {"primary": {"base_url": "https://external.example/v1"}, "retired": {}}}}
-        fields = {"models": {"providers": {"primary": {"model_context_windows": {"small-model": 16384}}, "retired": {}}}}
+        prepared = json.loads(json.dumps(cast(dict[str, object], baseline["fields"])["models"]))
+        for provider in prepared["providers"].values():
+            provider.pop("api_key")
+        prepared["providers"]["primary"]["models"]["small-model"]["context_window"] = 16384
+        fields = {"models": {"providers": prepared["providers"]}}
     else:
         external = {"mcp": {"http": {"url": "https://external.example/tools"}}}
         fields = {"mcp": {"http": {"call_timeout": 90}}}
@@ -677,8 +689,8 @@ async def test_partial_config_edit_preserves_nonoverlapping_external_leaf_fields
     token = create_credential(service.agent_home)
     async with aiohttp.ClientSession() as http:
         response = await http.patch(server.make_url("/api/v1/config"), headers={
-            "Authorization": f"Bearer {token}", "X-Omni-CSRF": token,
-            "X-Omni-Client": client_id, "X-Omni-Control": control,
+            "Authorization": f"Bearer {token}", "X-Aide-CSRF": token,
+            "X-Aide-Client": client_id, "X-Aide-Control": control,
         }, json={"request_id": f"partial-stale-{section}", "revision": baseline["revision"],
                  "baseline": baseline["fields"], "baseline_secrets": baseline["secret_revisions"],
                  "fields": fields, "secrets": {}})
@@ -707,7 +719,7 @@ async def test_pending_service_reports_saved_config_restart_requirement(tmp_path
         async with TestServer(create_app(service), host="127.0.0.1") as server:
             async with aiohttp.ClientSession() as http:
                 response = await http.get(server.make_url("/api/v1/config/startup"), headers={
-                    "Authorization": f"Bearer {token}", "X-Omni-Client": client.client_id,
+                    "Authorization": f"Bearer {token}", "X-Aide-Client": client.client_id,
                 })
                 body = await response.json()
         assert response.status == 200
@@ -732,8 +744,8 @@ async def test_config_save_reports_safe_error_after_external_toml_corruption(
     token = create_credential(service.agent_home)
     async with aiohttp.ClientSession() as http:
         response = await http.patch(server.make_url("/api/v1/config"), headers={
-            "Authorization": f"Bearer {token}", "X-Omni-CSRF": token,
-            "X-Omni-Client": client_id, "X-Omni-Control": control,
+            "Authorization": f"Bearer {token}", "X-Aide-CSRF": token,
+            "X-Aide-Client": client_id, "X-Aide-Control": control,
         }, json={"request_id": f"corrupted-save-{stale}",
                  "revision": baseline["revision"] if stale else loader.revision(),
                  "baseline": baseline["fields"], "fields": {"runtime": {"max_iterations": 80}},
@@ -801,7 +813,7 @@ async def test_config_save_preserves_workspace_and_later_activation_uses_startup
 async def full_config_http(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> AsyncIterator[ConfigHttp]:
-    from omni.agent.tools.mcp_runtime import MCPRuntimeManager, MCPStartupReport
+    from aide.agent.tools.mcp_runtime import MCPRuntimeManager, MCPStartupReport
 
     async def start(_manager: MCPRuntimeManager, _configuration: object) -> MCPStartupReport:
         return MCPStartupReport((), ())
@@ -829,9 +841,9 @@ async def test_config_patch_edits_models_routes_mcp_and_write_only_secrets(
     token = create_credential(service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-CSRF": token,
-        "X-Omni-Client": client_id,
-        "X-Omni-Control": control,
+        "X-Aide-CSRF": token,
+        "X-Aide-Client": client_id,
+        "X-Aide-Control": control,
     }
     observed: list[str] = []
 
@@ -909,9 +921,9 @@ async def test_config_patch_secret_clear_is_explicit_and_preserves_bytes_on_conf
     token = create_credential(service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-CSRF": token,
-        "X-Omni-Client": client_id,
-        "X-Omni-Control": control,
+        "X-Aide-CSRF": token,
+        "X-Aide-Client": client_id,
+        "X-Aide-Control": control,
     }
     async with aiohttp.ClientSession() as http:
         current = await (await http.get(server.make_url("/api/v1/config"), headers=headers)).json()

@@ -10,7 +10,7 @@ import pytest
 from anthropic import APIConnectionError
 from httpx import Request
 
-from omni.config.config import (
+from aide.config.config import (
     MemoryConfiguration,
     ModelsConfiguration,
     ProviderConfiguration,
@@ -18,11 +18,11 @@ from omni.config.config import (
     RuntimeConfiguration,
     UserConfiguration,
 )
-from omni.errors import ErrorInfo
-from omni.provider.anthropic import AnthropicProvider
-from omni.provider.errors import ModelCallError
-from omni.provider.model_router import ModelRouter
-from omni.provider.models import (
+from aide.errors import ErrorInfo
+from aide.provider.anthropic import AnthropicProvider
+from aide.provider.errors import ModelCallError
+from aide.provider.model_router import ModelRouter
+from aide.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,
@@ -32,7 +32,7 @@ from omni.provider.models import (
     ModelUsage,
     ReasoningEffort,
 )
-from omni.provider.openai_compatible import OpenAICompatibleProvider
+from aide.provider.openai_compatible import OpenAICompatibleProvider
 
 READ_FILE_SCHEMA: dict[str, Any] = {
     "type": "function",

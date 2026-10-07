@@ -30,11 +30,11 @@ try {
   await dev.listen();
   const address = dev.httpServer.address();
   assert.ok(address && typeof address === "object");
-  browser = await chromium.launch({ channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge" });
+  browser = await chromium.launch({ channel: process.env.AIDE_E2E_BROWSER_CHANNEL ?? "msedge" });
   const context = await browser.newContext({ locale: "en" });
   const page = await context.newPage();
   await page.addInitScript(() => {
-    if (window.localStorage.getItem("omni.language") === null) window.localStorage.setItem("omni.language", "en");
+    if (window.localStorage.getItem("aide.language") === null) window.localStorage.setItem("aide.language", "en");
   });
   const errors = [];
   const exchanges = [];
@@ -68,7 +68,7 @@ try {
   const foreign = await browser.newContext({ locale: "en" });
   try {
     const foreignPage = await foreign.newPage();
-    await foreignPage.addInitScript(() => window.localStorage.setItem("omni.language", "en"));
+    await foreignPage.addInitScript(() => window.localStorage.setItem("aide.language", "en"));
     const foreignLaunch = await control.command("web-ticket");
     await foreignPage.goto(`${appOrigin}/${new URL(foreignLaunch.url).hash}`);
     await expect(foreignPage.getByRole("alert").filter({ hasText: "Another Web client is already open" })).toBeVisible();

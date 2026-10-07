@@ -10,20 +10,20 @@ from unittest.mock import patch
 import pytest
 from mcp.types import CallToolResult
 
-from omni.agent.tools.base import BaseTool
-from omni.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES, build_agent_run_gateway
-from omni.agent.tools.mcp import MCPTool, MCPToolSpec
-from omni.agent.tools.mcp_runtime import MCPRuntimeManager, allocate_mcp_tool_name
-from omni.agent.tools.permission import PermissionContext
-from omni.agent.tools.tool_gateway import (
+from aide.agent.tools.base import BaseTool
+from aide.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES, build_agent_run_gateway
+from aide.agent.tools.mcp import MCPTool, MCPToolSpec
+from aide.agent.tools.mcp_runtime import MCPRuntimeManager, allocate_mcp_tool_name
+from aide.agent.tools.permission import PermissionContext
+from aide.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ModelToolCall,
     ToolGateway,
 )
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.config import MCPServerConfiguration
-from omni.schedule.service import ScheduleService
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.config import MCPServerConfiguration
+from aide.schedule.service import ScheduleService
 
 
 class _Clock:

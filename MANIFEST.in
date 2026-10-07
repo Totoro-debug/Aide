@@ -1,7 +1,7 @@
 include LICENSE README.md MANIFEST.in pyproject.toml setup.py
 include scripts/*.py
-include omni/web_assets/index.html
-include omni/web_assets/favicon.svg
-include omni/web_assets/manifest.json
-recursive-include omni/web_assets/assets *
+include aide/web_assets/index.html
+include aide/web_assets/favicon.svg
+include aide/web_assets/manifest.json
+recursive-include aide/web_assets/assets *
 global-exclude __pycache__ *.py[cod]

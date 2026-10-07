@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from omni.utils.async_tasks import await_task_preserving_cancellation
+from aide.utils.async_tasks import await_task_preserving_cancellation
 
 
 @pytest.mark.asyncio

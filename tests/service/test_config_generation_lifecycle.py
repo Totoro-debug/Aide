@@ -7,8 +7,8 @@ from typing import cast
 
 import pytest
 
-from omni.config.agent_home import AgentHome
-from omni.service.runtime import AgentService
+from aide.config.agent_home import AgentHome
+from aide.service.runtime import AgentService
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.service.test_service_concurrency import _CollectingSink
 

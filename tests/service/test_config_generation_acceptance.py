@@ -14,15 +14,15 @@ from uuid import uuid4
 import aiohttp
 import pytest
 
-import omni.service.runtime as service_runtime
-from omni.agent.confirmation import ConfirmationDecision, ConfirmationEnvelope
-from omni.agent.session.backup_store import FileBackupStore
-from omni.agent.session.restore import RestoreManager
-from omni.agent.session.session import Session
-from omni.agent.tools.tool_gateway import ModelToolCall
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.config import ConfigLoader
-from omni.provider.models import (
+import aide.service.runtime as service_runtime
+from aide.agent.confirmation import ConfirmationDecision, ConfirmationEnvelope
+from aide.agent.session.backup_store import FileBackupStore
+from aide.agent.session.restore import RestoreManager
+from aide.agent.session.session import Session
+from aide.agent.tools.tool_gateway import ModelToolCall
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.config import ConfigLoader
+from aide.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelMessages,
@@ -30,9 +30,9 @@ from omni.provider.models import (
     ModelStreamEvent,
     ModelUsage,
 )
-from omni.schedule.model import JobSchedule, ScheduleJob
-from omni.service.client import ServiceClient
-from omni.service.runtime import AgentService
+from aide.schedule.model import JobSchedule, ScheduleJob
+from aide.service.client import ServiceClient
+from aide.service.runtime import AgentService
 from tests.service.test_restore_management import _restore_request
 from tests.service.test_service_concurrency import (
     _client_output,
@@ -296,15 +296,15 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
         revision = service.config_view()["revision"]
         headers = {
             "Authorization": f"Bearer {cli.token}",
-            "X-Omni-CSRF": cli.token,
-            "X-Omni-Client": browser.client_id,
-            "X-Omni-Control": cast(str, browser.web_control_credential),
+            "X-Aide-CSRF": cli.token,
+            "X-Aide-Client": browser.client_id,
+            "X-Aide-Control": cast(str, browser.web_control_credential),
         }
         async with aiohttp.ClientSession() as http:
             async with http.ws_connect(
                 server.make_url("/api/v1/events"),
                 headers={**headers, "Origin": str(server.make_url("/")).rstrip("/")},
-                protocols=("omni-v1",),
+                protocols=("aide-v1",),
             ) as web_socket:
                 response = await http.patch(
                     server.make_url("/api/v1/config"),

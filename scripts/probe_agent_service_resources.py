@@ -15,12 +15,12 @@ import mcp.client.stdio as stdio_client
 import pytest
 from loguru import logger
 
-from omni.agent.tools.tool_gateway import BuiltInToolCatalog
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.provider.openai_compatible import OpenAICompatibleProvider
-from omni.service.runtime import AgentService
-from omni.skills.catalog import SkillLoader
+from aide.agent.tools.tool_gateway import BuiltInToolCatalog
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.provider.openai_compatible import OpenAICompatibleProvider
+from aide.service.runtime import AgentService
+from aide.skills.catalog import SkillLoader
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures.mcp_wire import (
     ObservedLifetimes,
@@ -60,7 +60,7 @@ def working_set_bytes() -> int:
 async def main() -> None:
     logger.remove()
     with (
-        tempfile.TemporaryDirectory(prefix="omni-resource-probe-") as directory,
+        tempfile.TemporaryDirectory(prefix="aide-resource-probe-") as directory,
         pytest.MonkeyPatch.context() as patch,
     ):
         root = Path(directory)

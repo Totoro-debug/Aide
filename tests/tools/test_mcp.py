@@ -18,9 +18,9 @@ from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, ImageContent, TextContent, Tool
 from pydantic import ValidationError
 
-import omni.agent.tools.mcp as mcp_adapter
-from omni.agent.tools.base import ToolError
-from omni.agent.tools.mcp import (
+import aide.agent.tools.mcp as mcp_adapter
+from aide.agent.tools.base import ToolError
+from aide.agent.tools.mcp import (
     MCPServerConnection,
     MCPTool,
     MCPToolSchemaError,
@@ -29,15 +29,15 @@ from omni.agent.tools.mcp import (
     mcp_tool_spec_from_remote,
     normalize_nullable,
 )
-from omni.agent.tools.permission import MCPToolIdentity, PermissionContext
-from omni.agent.tools.tool_gateway import (
+from aide.agent.tools.permission import MCPToolIdentity, PermissionContext
+from aide.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ConfirmationRequester,
     ModelToolCall,
     ToolGateway,
 )
-from omni.config.config import MCPServerConfiguration
+from aide.config.config import MCPServerConfiguration
 from tests.fixtures.gateway import SingleToolGateway
 from tests.fixtures.mcp_wire import (
     http_wire_server,
@@ -1355,7 +1355,7 @@ async def test_stdio_transport_resolves_cwd_and_inherits_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
-    monkeypatch.setenv("OMNI_MCP_TEST_ENV", "inherited")
+    monkeypatch.setenv("AIDE_MCP_TEST_ENV", "inherited")
 
     @asynccontextmanager
     async def fake_stdio(parameters: object) -> Any:
@@ -1427,7 +1427,7 @@ async def test_stdio_transport_connects_to_a_local_real_mcp_server(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("OMNI_MCP_TEST_ENV", "inherited")
+    monkeypatch.setenv("AIDE_MCP_TEST_ENV", "inherited")
     server_script = "\n".join(
         (
             "import os",
@@ -1435,7 +1435,7 @@ async def test_stdio_transport_connects_to_a_local_real_mcp_server(
             "server = MCPServer('local-stdio')",
             "@server.tool()",
             "def echo(value: str) -> str:",
-            "    return f\"{value}:{os.environ['OMNI_MCP_TEST_ENV']}\"",
+            "    return f\"{value}:{os.environ['AIDE_MCP_TEST_ENV']}\"",
             "server.run()",
         )
     )

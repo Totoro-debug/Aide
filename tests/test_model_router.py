@@ -7,10 +7,10 @@ from typing import Any, cast
 
 import pytest
 
-from omni.agent.context.budget import ContextBudget
-from omni.agent.runner import AgentRunner
-from omni.agent.tools.tool_gateway import ModelToolCall, ToolResult
-from omni.config.config import (
+from aide.agent.context.budget import ContextBudget
+from aide.agent.runner import AgentRunner
+from aide.agent.tools.tool_gateway import ModelToolCall, ToolResult
+from aide.config.config import (
     MemoryConfiguration,
     ModelsConfiguration,
     ProviderConfiguration,
@@ -18,13 +18,13 @@ from omni.config.config import (
     RuntimeConfiguration,
     UserConfiguration,
 )
-from omni.errors import (
+from aide.errors import (
     ErrorCode,
     ErrorInfo,
 )
-from omni.provider.errors import ModelCallError
-from omni.provider.model_router import ModelRouter, ModelRouteStatus
-from omni.provider.models import (
+from aide.provider.errors import ModelCallError
+from aide.provider.model_router import ModelRouter, ModelRouteStatus
+from aide.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,
@@ -192,7 +192,7 @@ def memory_configuration() -> UserConfiguration:
 def request(*, route: str = "default", stream: bool = True) -> dict[str, Any]:
     del route, stream
     return {
-        "messages": [{"role": "system", "content": "You are Omni."}],
+        "messages": [{"role": "system", "content": "You are Aide."}],
         "tools": (),
     }
 
@@ -527,7 +527,7 @@ async def test_model_router_records_only_consumed_retry_attempts(
     capture.close()
 
     records = [
-        line for line in capture.text.splitlines() if "omni.provider.model_router:" in line
+        line for line in capture.text.splitlines() if "aide.provider.model_router:" in line
     ]
     assert len(records) == 4
     for attempt, delay, record in zip(
@@ -917,7 +917,7 @@ async def test_model_router_records_failed_attempt_and_default_fallback_separate
 
     assert observed == [completed("Recovered")]
     records = [
-        line for line in capture.text.splitlines() if "omni.provider.model_router:" in line
+        line for line in capture.text.splitlines() if "aide.provider.model_router:" in line
     ]
     assert len(records) == 2
     assert "Provider attempt failed" in records[0]
@@ -1164,7 +1164,7 @@ async def test_model_router_records_static_default_fallback_without_provider_att
 
     assert observed == [completed("Static fallback")]
     records = [
-        line for line in capture.text.splitlines() if "omni.provider.model_router:" in line
+        line for line in capture.text.splitlines() if "aide.provider.model_router:" in line
     ]
     assert len(records) == 1
     assert " WARNING " in records[0]

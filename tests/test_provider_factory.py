@@ -1,9 +1,9 @@
 import pytest
 
-from omni.config.config import ProviderConfiguration
-from omni.provider.anthropic import AnthropicProvider
-from omni.provider.factory import create_provider
-from omni.provider.openai_compatible import OpenAICompatibleProvider
+from aide.config.config import ProviderConfiguration
+from aide.provider.anthropic import AnthropicProvider
+from aide.provider.factory import create_provider
+from aide.provider.openai_compatible import OpenAICompatibleProvider
 
 
 @pytest.mark.asyncio

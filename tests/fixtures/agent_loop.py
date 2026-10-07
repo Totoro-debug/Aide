@@ -5,21 +5,21 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
-from omni.agent.confirmation import ConfirmationEnvelope
-from omni.agent.loop import (
+from aide.agent.confirmation import ConfirmationEnvelope
+from aide.agent.loop import (
     AgentRunExecutor,
     ConfirmationCallback,
     ForegroundConversationProjection,
     session_runtime_status_input,
 )
-from omni.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
-from omni.agent.tools.tool_gateway import ConfirmationDecision
-from omni.config.agent_home import AgentHome
-from omni.config.config import UserConfiguration
-from omni.management.commands import MANAGEMENT_COMMANDS
-from omni.management.service import RuntimeStatusInput
-from omni.service.execution import SessionExecution
-from omni.skills.catalog import SkillLoader
+from aide.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
+from aide.agent.tools.tool_gateway import ConfirmationDecision
+from aide.config.agent_home import AgentHome
+from aide.config.config import UserConfiguration
+from aide.management.commands import MANAGEMENT_COMMANDS
+from aide.management.service import RuntimeStatusInput
+from aide.service.execution import SessionExecution
+from aide.skills.catalog import SkillLoader
 
 
 class CallbackConfirmationRequester:

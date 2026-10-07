@@ -10,9 +10,9 @@ from uuid import UUID
 
 import pytest
 
-from omni.agent.session.session import Session, SessionStoragePartition
-from omni.agent.workspace_state import WorkspaceState
-from omni.schedule.history import (
+from aide.agent.session.session import Session, SessionStoragePartition
+from aide.agent.workspace_state import WorkspaceState
+from aide.schedule.history import (
     ScheduleHistoryPersistenceError,
     ScheduleHistoryRequestError,
     read_schedule_history,

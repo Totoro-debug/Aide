@@ -14,15 +14,15 @@ from uuid import uuid4
 import pytest
 from aiohttp.test_utils import TestServer
 
-import omni.service.runtime as service_runtime
-from omni.agent.memory.manager import MemoryManager
-from omni.agent.message_bus import InboundMessage
-from omni.agent.session.deletion import begin_session_deletion
-from omni.agent.session.session import Session, SessionStoragePartition
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader, ProviderConfiguration
-from omni.provider.models import (
+import aide.service.runtime as service_runtime
+from aide.agent.memory.manager import MemoryManager
+from aide.agent.message_bus import InboundMessage
+from aide.agent.session.deletion import begin_session_deletion
+from aide.agent.session.session import Session, SessionStoragePartition
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader, ProviderConfiguration
+from aide.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelMessages,
@@ -31,14 +31,14 @@ from omni.provider.models import (
     ModelUsage,
     TextDelta,
 )
-from omni.schedule.model import JobSchedule, ScheduleJob
-from omni.schedule.store import WorkspaceScheduleStore
-from omni.service.client import ServiceClient
-from omni.service.discovery import ServiceDiscovery, create_credential, write_discovery
-from omni.service.errors import ServiceError
-from omni.service.projects import ProjectCatalog
-from omni.service.runtime import AgentService
-from omni.service.transport import create_app
+from aide.schedule.model import JobSchedule, ScheduleJob
+from aide.schedule.store import WorkspaceScheduleStore
+from aide.service.client import ServiceClient
+from aide.service.discovery import ServiceDiscovery, create_credential, write_discovery
+from aide.service.errors import ServiceError
+from aide.service.projects import ProjectCatalog
+from aide.service.runtime import AgentService
+from aide.service.transport import create_app
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
 from tests.fixtures.project_removal import complete_project_removal
@@ -480,7 +480,7 @@ async def test_claim_race_denies_loser_content_over_http_events_and_reconnect(
             await loser._http_request(
                 "GET",
                 f"{path}?claim_version={owner.claim_version}",
-                extra_headers={"X-Omni-Claim": owner.claim_credential},
+                extra_headers={"X-Aide-Claim": owner.claim_credential},
             )
         assert denied.value.code == "stale_claim"
         listing = await loser._http_request(
@@ -508,7 +508,7 @@ async def test_claim_race_denies_loser_content_over_http_events_and_reconnect(
             await reconnected._http_request(
                 "GET",
                 f"{path}?claim_version={owner.claim_version}",
-                extra_headers={"X-Omni-Claim": owner.claim_credential},
+                extra_headers={"X-Aide-Claim": owner.claim_credential},
             )
         assert denied_after_reconnect.value.code == "stale_claim"
     finally:
@@ -1168,7 +1168,7 @@ async def test_cancelled_delete_preserves_writer_fence_and_retry(
 
 @pytest.mark.asyncio
 async def test_completed_restore_result_does_not_block_session_deletion(tmp_path: Path) -> None:
-    from omni.agent.session.restore import RestoreManager, RestoreMode
+    from aide.agent.session.restore import RestoreManager, RestoreMode
 
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"

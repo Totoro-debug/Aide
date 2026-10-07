@@ -13,24 +13,24 @@ import pytest
 from loguru import logger
 from mcp.types import CallToolResult
 
-from omni.agent.loop import ConfirmationRequestView
-from omni.agent.memory.manager import MemoryManager
-from omni.agent.message_bus import MessageBus
-from omni.agent.permission import RuntimePermissionControl
-from omni.agent.session.session import Session
-from omni.agent.tools.base import BaseTool
-from omni.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
-from omni.agent.tools.core.web_fetch import AioHttpWebFetchClient, HTTPResponseBoundary
-from omni.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
-from omni.agent.tools.mcp import MCPTool, MCPToolSpec
-from omni.agent.tools.tool_gateway import ModelToolCall
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.errors import ErrorInfo
-from omni.provider.errors import ModelCallError
-from omni.provider.model_router import ModelRouter
-from omni.provider.models import (
+from aide.agent.loop import ConfirmationRequestView
+from aide.agent.memory.manager import MemoryManager
+from aide.agent.message_bus import MessageBus
+from aide.agent.permission import RuntimePermissionControl
+from aide.agent.session.session import Session
+from aide.agent.tools.base import BaseTool
+from aide.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
+from aide.agent.tools.core.web_fetch import AioHttpWebFetchClient, HTTPResponseBoundary
+from aide.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
+from aide.agent.tools.mcp import MCPTool, MCPToolSpec
+from aide.agent.tools.tool_gateway import ModelToolCall
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.errors import ErrorInfo
+from aide.provider.errors import ModelCallError
+from aide.provider.model_router import ModelRouter
+from aide.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,
@@ -39,8 +39,8 @@ from omni.provider.models import (
     ModelUsage,
     ReasoningEffort,
 )
-from omni.schedule.service import ScheduleService
-from omni.templates import render_template
+from aide.schedule.service import ScheduleService
+from aide.templates import render_template
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import TaskFramingRouterAdapter, collect_foreground_outbound
 from tests.fixtures.agent_loop import DrivenExecutor as AgentRunExecutor
@@ -646,10 +646,10 @@ async def test_agent_loop_keeps_artifact_and_log_correlation_when_persist_fails(
     artifact = tool_message["artifact"]
     assert isinstance(artifact, dict)
     assert artifact["path"] == (
-        f".omni/artifacts/{loop.session.session_id}/call_active_artifact.txt"
+        f".aide/artifacts/{loop.session.session_id}/call_active_artifact.txt"
     )
     assert (workspace / artifact["path"]).read_text(encoding="utf-8") == raw_tool_result
-    log_path = workspace / ".omni" / "logs" / f"{loop.session.session_id}.log"
+    log_path = workspace / ".aide" / "logs" / f"{loop.session.session_id}.log"
     assert "active Session correlation marker" in log_path.read_text(encoding="utf-8")
 
 
@@ -675,7 +675,7 @@ async def test_agent_loop_tool_failure_keeps_private_diagnostics_out_of_public_o
                 [OSError(f"query={query}"), ValueError("auth=PRIVATE_WEB_CREDENTIAL")],
             )
 
-    monkeypatch.setattr("omni.agent.tools.core.web_search.DDGS", FailingDDGS)
+    monkeypatch.setattr("aide.agent.tools.core.web_search.DDGS", FailingDDGS)
     provider = _FixedCatalogProvider(
         (
             _response(
@@ -700,7 +700,7 @@ async def test_agent_loop_tool_failure_keeps_private_diagnostics_out_of_public_o
     assert tool_call.metadata["arguments"] == json.dumps({"query": private_query})
     assert all(private_query not in message.content for message in messages)
     assert all("PRIVATE_WEB_CREDENTIAL" not in message.content for message in messages)
-    log_path = workspace / ".omni" / "logs" / f"{loop.session.session_id}.log"
+    log_path = workspace / ".aide" / "logs" / f"{loop.session.session_id}.log"
     log_content = log_path.read_text(encoding="utf-8")
     assert log_content.count("Tool execution failed name=web_search") == 1
     assert "RAW_PROVIDER_BODY" in log_content
@@ -731,7 +731,7 @@ async def test_agent_loop_model_failure_logs_private_cause_but_emits_safe_termin
     assert terminal.metadata["finish_reason"] == "failed"
     assert terminal.content == "The model request failed."
     assert "RAW_PROVIDER_BODY" not in terminal.content
-    log_path = workspace / ".omni" / "logs" / f"{loop.session.session_id}.log"
+    log_path = workspace / ".aide" / "logs" / f"{loop.session.session_id}.log"
     log_content = log_path.read_text(encoding="utf-8")
     assert log_content.count("Agent Run failed code=model_failed type=ModelCallError") == 1
     assert "RAW_PROVIDER_BODY auth=PRIVATE_MODEL_CREDENTIAL" in log_content
@@ -760,7 +760,7 @@ async def test_agent_loop_continues_when_session_log_path_is_unavailable(
         )
     )
     loop, router, schedule, bus = _agent_loop(agent_home, workspace, provider)
-    unavailable_logs = workspace / ".omni" / "logs"
+    unavailable_logs = workspace / ".aide" / "logs"
     unavailable_logs.write_text("Session Log unavailable", encoding="utf-8")
     try:
         await loop.start()

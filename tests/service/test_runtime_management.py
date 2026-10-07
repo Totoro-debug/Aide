@@ -17,17 +17,17 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
-from omni.agent.loop import AgentRunExecutor
-from omni.agent.memory.dream import DreamResult
-from omni.agent.tools.permission import PermissionContext
-from omni.agent.tools.tool_gateway import ModelToolCall
-from omni.config.config import ConfigLoader
-from omni.provider.models import ModelCompleted, ModelStreamEvent
-from omni.schedule.model import JobSchedule, ScheduleJob
-from omni.service.discovery import create_credential
-from omni.service.errors import ServiceError
-from omni.service.runtime import AgentService, ClientState, SessionClaim, WorkspaceRecord
-from omni.service.transport import create_app
+from aide.agent.loop import AgentRunExecutor
+from aide.agent.memory.dream import DreamResult
+from aide.agent.tools.permission import PermissionContext
+from aide.agent.tools.tool_gateway import ModelToolCall
+from aide.config.config import ConfigLoader
+from aide.provider.models import ModelCompleted, ModelStreamEvent
+from aide.schedule.model import JobSchedule, ScheduleJob
+from aide.service.discovery import create_credential
+from aide.service.errors import ServiceError
+from aide.service.runtime import AgentService, ClientState, SessionClaim, WorkspaceRecord
+from aide.service.transport import create_app
 from tests.fixtures import FakeClock
 from tests.memory.test_dream import _response
 from tests.service.test_protocol_contract import _validator
@@ -70,7 +70,7 @@ async def management_case(
         wake_timer.clear()
 
     provider = _ConcurrentProvider()
-    monkeypatch.setattr("omni.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_args: provider)
     service = AgentService(
         home,
         ConfigLoader(home).load_for_startup(),
@@ -545,8 +545,8 @@ async def test_effort_applies_to_next_real_cli_foreground_call_and_usage_matches
             server.make_url("/api/v1/models/available"),
             headers={
                 "Authorization": f"Bearer {token}",
-                "X-Omni-Client": case.second.client_id,
-                "X-Omni-Control": case.second.reconnect_credential,
+                "X-Aide-Client": case.second.client_id,
+                "X-Aide-Control": case.second.reconnect_credential,
             },
         ) as response:
             assert response.status == 200
@@ -635,9 +635,9 @@ async def test_typed_http_actions_require_auth_csrf_and_matching_client_identity
     app = create_app(case.service)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-CSRF": token,
-        "X-Omni-Client": case.second.client_id,
-        "X-Omni-Claim": case.other_claim.credential,
+        "X-Aide-CSRF": token,
+        "X-Aide-Client": case.second.client_id,
+        "X-Aide-Claim": case.other_claim.credential,
     }
     body = {
         "request_id": "http-runtime",
@@ -650,7 +650,7 @@ async def test_typed_http_actions_require_auth_csrf_and_matching_client_identity
         url = server.make_url(
             f"/api/v1/workspaces/{case.workspace.workspace_id}/management/{action}"
         )
-        for missing in ("Authorization", "X-Omni-CSRF", "X-Omni-Client"):
+        for missing in ("Authorization", "X-Aide-CSRF", "X-Aide-Client"):
             async with http.post(
                 url,
                 headers={key: value for key, value in headers.items() if key != missing},
@@ -658,11 +658,11 @@ async def test_typed_http_actions_require_auth_csrf_and_matching_client_identity
             ) as response:
                 assert response.status in {401, 403}
         async with http.post(
-            url, headers={**headers, "X-Omni-Client": "unknown-client"}, json=body
+            url, headers={**headers, "X-Aide-Client": "unknown-client"}, json=body
         ) as response:
             assert response.status in {401, 403}
         async with http.post(
-            url, headers={**headers, "X-Omni-Claim": "foreign-claim"}, json=body
+            url, headers={**headers, "X-Aide-Claim": "foreign-claim"}, json=body
         ) as response:
             assert response.status == 409
             assert (await response.json())["code"] == "stale_claim"
@@ -699,9 +699,9 @@ async def test_new_management_http_actions_reject_get_and_head_without_execution
                 url,
                 headers={
                     "Authorization": f"Bearer {token}",
-                    "X-Omni-Client": case.second.client_id,
-                    "X-Omni-Claim": case.other_claim.credential,
-                    "X-Omni-Request": "read-cannot-mutate",
+                    "X-Aide-Client": case.second.client_id,
+                    "X-Aide-Claim": case.other_claim.credential,
+                    "X-Aide-Request": "read-cannot-mutate",
                 },
                 params={
                     "session_id": case.other_claim.session_id,
@@ -723,8 +723,8 @@ async def test_named_management_operations_reject_stale_claims(
     async with TestServer(create_app(case.service)) as server, aiohttp.ClientSession() as http:
         async with http.post(
             server.make_url(f"/api/v1/workspaces/{case.workspace.workspace_id}/{operation}"),
-            headers={"Authorization": f"Bearer {token}", "X-Omni-CSRF": token,
-                     "X-Omni-Client": case.first.client_id, "X-Omni-Claim": case.claim.credential},
+            headers={"Authorization": f"Bearer {token}", "X-Aide-CSRF": token,
+                     "X-Aide-Client": case.first.client_id, "X-Aide-Claim": case.claim.credential},
             json={"request_id": "stale-operation", "current_session_id": case.claim.session_id,
                   "claim_version": case.claim.version + 1},
         ) as response:
@@ -755,8 +755,8 @@ async def test_named_management_failure_is_an_error_and_preserves_previous_data(
     async with TestServer(create_app(case.service)) as server, aiohttp.ClientSession() as http:
         async with http.post(
             server.make_url(f"/api/v1/workspaces/{case.workspace.workspace_id}/{operation}"),
-            headers={"Authorization": f"Bearer {token}", "X-Omni-CSRF": token,
-                     "X-Omni-Client": case.first.client_id, "X-Omni-Claim": case.claim.credential},
+            headers={"Authorization": f"Bearer {token}", "X-Aide-CSRF": token,
+                     "X-Aide-Client": case.first.client_id, "X-Aide-Claim": case.claim.credential},
             json={"request_id": "failed-operation", "current_session_id": case.claim.session_id,
                   "claim_version": case.claim.version},
         ) as response:
@@ -784,9 +784,9 @@ async def test_named_management_operations_return_operation_specific_contracts(
     token = create_credential(case.service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-CSRF": token,
-        "X-Omni-Client": case.first.client_id,
-        "X-Omni-Claim": case.claim.credential,
+        "X-Aide-CSRF": token,
+        "X-Aide-Client": case.first.client_id,
+        "X-Aide-Claim": case.claim.credential,
     }
     base = f"/api/v1/workspaces/{case.workspace.workspace_id}"
     context = {
@@ -876,9 +876,9 @@ async def test_http_reload_preserves_active_run_snapshot_resources_and_next_run_
     token = create_credential(case.service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-CSRF": token,
-        "X-Omni-Client": case.second.client_id,
-        "X-Omni-Claim": case.other_claim.credential,
+        "X-Aide-CSRF": token,
+        "X-Aide-Client": case.second.client_id,
+        "X-Aide-Claim": case.other_claim.credential,
     }
     sink = cast(_CollectingSink, case.second.sink)
     loop = case.other_claim.loop
@@ -987,9 +987,9 @@ async def test_http_dream_updates_memory_and_replay_does_not_repeat_model_work(
     token = create_credential(case.service.agent_home)
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-CSRF": token,
-        "X-Omni-Client": case.first.client_id,
-        "X-Omni-Claim": case.claim.credential,
+        "X-Aide-CSRF": token,
+        "X-Aide-Client": case.first.client_id,
+        "X-Aide-Claim": case.claim.credential,
     }
     async with TestServer(create_app(case.service)) as server, aiohttp.ClientSession() as http:
         base = f"/api/v1/workspaces/{case.workspace.workspace_id}/management"

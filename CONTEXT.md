@@ -313,7 +313,7 @@ A named model purpose that resolves a model request without exposing Provider se
 _Avoid_: Model string, provider selection, backend, ad hoc route
 
 **Available Model**:
-A user-configured model offered for conversation selection, with its own context-window capacity.
+A model owned by a configured Model Provider, with complete context, output, sampling, reasoning, and request-timeout defaults shared by the Model Routes that select it.
 _Avoid_: Model Route, Model Provider, active Session model
 
 **Session Model Configuration**:

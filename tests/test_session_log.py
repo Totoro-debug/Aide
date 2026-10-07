@@ -10,8 +10,8 @@ from uuid import uuid4
 import pytest
 from loguru import logger
 
-from omni.agent.workspace_state import WorkspaceState
-from omni.logging.session import session_log, without_session_log
+from aide.agent.workspace_state import WorkspaceState
+from aide.logging.session import session_log, without_session_log
 
 
 def _session_id() -> str:
@@ -35,9 +35,9 @@ def _fail_loguru_add(*args: object, **kwargs: object) -> int:
 
 def _windows_acl_inheritance(path: Path) -> tuple[bool, int]:
     environment = dict(os.environ)
-    environment["OMNI_ACL_PATH"] = str(path)
+    environment["AIDE_ACL_PATH"] = str(path)
     script = (
-        "$acl = Get-Acl -LiteralPath $env:OMNI_ACL_PATH; "
+        "$acl = Get-Acl -LiteralPath $env:AIDE_ACL_PATH; "
         "$count = @($acl.Access | Where-Object { $_.IsInherited }).Count; "
         'Write-Output ("{0}|{1}" -f $acl.AreAccessRulesProtected, $count)'
     )
@@ -106,10 +106,10 @@ def test_session_log_ignores_third_party_standard_library_records(tmp_path: Path
 
     with session_log(state, session_id):
         logging.getLogger("third_party").error("third-party diagnostic")
-        logger.error("Omni diagnostic")
+        logger.error("Aide diagnostic")
 
     content = (state.logs_directory / f"{session_id}.log").read_text(encoding="utf-8")
-    assert "Omni diagnostic" in content
+    assert "Aide diagnostic" in content
     assert "third-party diagnostic" not in content
 
 
@@ -346,7 +346,7 @@ def test_session_log_write_failure_does_not_stop_work(
 def test_session_log_rotation_failure_does_not_stop_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import omni.logging.session as session_logging
+    import aide.logging.session as session_logging
 
     state = _state(tmp_path)
     state.logs_directory.mkdir(parents=True)

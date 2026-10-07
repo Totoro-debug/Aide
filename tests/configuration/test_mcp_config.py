@@ -6,15 +6,15 @@ from typing import Any, cast
 
 import pytest
 
-from omni.config.agent_home import AgentHome
-from omni.config.config import (
+from aide.config.agent_home import AgentHome
+from aide.config.config import (
     ConfigError,
     ConfigLoader,
     ConfigurationDiagnostic,
     MCPServerConfiguration,
 )
-from omni.management.commands import ManagementCommandDispatcher
-from omni.utils.host_filesystem import HOST_FILESYSTEM
+from aide.management.commands import ManagementCommandDispatcher
+from aide.utils.host_filesystem import HOST_FILESYSTEM
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.management.factories import management_service
 

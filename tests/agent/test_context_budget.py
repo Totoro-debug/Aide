@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from omni.agent.context.budget import (
+from aide.agent.context.budget import (
     CONTEXT_ESTIMATOR_VERSION,
     ContextBudget,
     ContextProjection,

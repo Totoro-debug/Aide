@@ -14,7 +14,7 @@ import type {
 } from "./protocol";
 import styles from "./App.module.css";
 
-const EXPANDED_PROJECTS_KEY = "omni.sidebar.expanded-projects";
+const EXPANDED_PROJECTS_KEY = "aide.sidebar.expanded-projects";
 const SESSION_PAGE_SIZE = 100;
 
 type ProjectsLoadState = "idle" | "loading" | "ready" | "error";

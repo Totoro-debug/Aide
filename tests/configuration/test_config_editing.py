@@ -6,8 +6,8 @@ from typing import cast
 
 import pytest
 
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigError, ConfigLoader, ConfigRevisionConflict
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigError, ConfigLoader, ConfigRevisionConflict
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
 FULL_EDITABLE_CONFIG = """# preserve this comment
@@ -149,7 +149,7 @@ def test_default_chat_workspace_is_editable_and_persisted(tmp_path: Path) -> Non
 
     snapshot = loader.web_snapshot()
 
-    assert snapshot.fields["web"]["default_chat_workspace"] == "~/.omni/chat"
+    assert snapshot.fields["web"]["default_chat_workspace"] == "~/.aide/chat"
     target = tmp_path / "conversations"
     result = loader.patch_editable_fields(
         snapshot.revision,
@@ -229,16 +229,20 @@ def test_web_snapshot_projects_all_model_route_and_mcp_fields_without_secrets(
     routes = cast(Mapping[str, object], models["routes"])
     mcp = fields["mcp"]
 
-    assert providers["primary"] == {
+    primary = cast(Mapping[str, object], providers["primary"])
+    assert {key: value for key, value in primary.items() if key != "models"} == {
         "protocol": "openai-compatible",
         "base_url": "https://models.example/v1",
-        "models": ("small-model", "large-model"),
-        "model_context_windows": {"small-model": 8192, "large-model": 16384},
         "api_key": {"configured": True},
     }
+    model_fields = cast(Mapping[str, Mapping[str, object]], primary["models"])
+    assert set(model_fields) == {"small-model", "large-model"}
+    assert model_fields["small-model"]["context_window"] == 8192
+    assert model_fields["large-model"]["context_window"] == 16384
     assert set(routes) == {"default", "chat", "memory", "schedule"}
     chat_route = cast(Mapping[str, object], routes["chat"])
-    assert chat_route["reasoning_effort"] == "high"
+    assert chat_route == {"provider_id": "primary", "model": "large-model"}
+    assert model_fields["large-model"]["reasoning_effort"] == "high"
     assert mcp["http"] == {
         "enabled": True,
         "transport": "streamable-http",
@@ -275,7 +279,8 @@ models = ["large-model"]
     primary = cast(
         Mapping[str, object], before.fields["models"]["providers"]
     )["primary"]
-    assert cast(Mapping[str, object], primary)["model_context_windows"] == {
+    assert {model: parameters["context_window"] for model, parameters in
+            cast(Mapping[str, Mapping[str, object]], cast(Mapping[str, object], primary)["models"]).items()} == {
         "small-model": 8192,
         "large-model": 16384,
     }
@@ -334,7 +339,7 @@ def test_larger_model_context_window_allows_output_above_legacy_route_capacity(
     restarted = loader.load_for_startup().resolve_route("default").route
     assert restarted == resolved
     projected = cast(Mapping[str, object], result.fields["models"]["routes"])["default"]
-    assert cast(Mapping[str, object], projected)["max_output"] == 16384
+    assert cast(Mapping[str, object], projected) == {"provider_id": "primary", "model": "small-model"}
 
 
 def test_model_context_window_not_greater_than_route_output_keeps_original_bytes(

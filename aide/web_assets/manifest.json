@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "entry": "index.html",
+  "files": [
+    {
+      "path": "assets/index-Ba6O-DOy.js",
+      "sha256": "734d3581e1f841b463e9073f388802a1ba3c13cab1a2b7234c2900937a9d7819",
+      "bytes": 790838
+    },
+    {
+      "path": "assets/index-DCqGrVdT.css",
+      "sha256": "093ce075a76dd6c11fdb106eec3eefcdd0af80ecba7fa9df2ea0a2b540002f16",
+      "bytes": 72679
+    },
+    {
+      "path": "favicon.svg",
+      "sha256": "5aea331eac19d66966512693d6aec02946e294d31928c1f7a425c33da3d04ec0",
+      "bytes": 283
+    },
+    {
+      "path": "index.html",
+      "sha256": "832aa5f9e5052eec9352cdd28afffe5280ba4f5666b36c4c5cde8e3cbe51e82e",
+      "bytes": 483
+    }
+  ]
+}

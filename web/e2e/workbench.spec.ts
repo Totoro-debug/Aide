@@ -1,8 +1,8 @@
 import { expect, test } from "@playwright/test";
 
 test("production workbench opens from one-time ticket and remains usable", async ({ page }, testInfo) => {
-  const url = process.env.OMNI_E2E_URL;
-  const ticket = process.env.OMNI_E2E_TICKET;
+  const url = process.env.AIDE_E2E_URL;
+  const ticket = process.env.AIDE_E2E_TICKET;
   if (!url || !ticket) throw new Error("The isolated E2E service did not provide a launch ticket.");
 
   await page.goto(`${url}/#ticket=${encodeURIComponent(ticket)}`);

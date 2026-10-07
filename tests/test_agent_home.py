@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from omni.config.agent_home import AgentHome
+from aide.config.agent_home import AgentHome
 
 
 def test_production_agent_home_is_fixed(agent_home: Path) -> None:

@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from omni.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
+from aide.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
 
 JOB_ID = "550e8400-e29b-41d4-a716-446655440000"
 

@@ -8,17 +8,17 @@ from typing import Any
 from uuid import UUID
 from weakref import WeakKeyDictionary
 
-from omni.agent.tools.base import BaseTool
-from omni.agent.tools.context import ToolRunContext
-from omni.agent.tools.file_mutation import FileMutationRecorder
-from omni.agent.tools.permission import PermissionContext
-from omni.agent.tools.tool_gateway import (
+from aide.agent.tools.base import BaseTool
+from aide.agent.tools.context import ToolRunContext
+from aide.agent.tools.file_mutation import FileMutationRecorder
+from aide.agent.tools.permission import PermissionContext
+from aide.agent.tools.tool_gateway import (
     ConfirmationRequester,
     ModelToolCall,
     ToolGateway,
     ToolResult,
 )
-from omni.schedule.service import ScheduleService
+from aide.schedule.service import ScheduleService
 
 _TEST_CONTEXTS: WeakKeyDictionary[BaseTool, ToolRunContext] = WeakKeyDictionary()
 

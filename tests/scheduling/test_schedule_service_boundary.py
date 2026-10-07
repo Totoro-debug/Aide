@@ -7,17 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from omni.agent.tools.tool_gateway import ModelToolCall, ToolGateway
-from omni.agent.workspace_state import WorkspaceState
-from omni.errors import ErrorInfo
-from omni.schedule.model import JobSchedule, ScheduleJob
-from omni.schedule.service import (
+from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
+from aide.agent.workspace_state import WorkspaceState
+from aide.errors import ErrorInfo
+from aide.schedule.model import JobSchedule, ScheduleJob
+from aide.schedule.service import (
     DreamExecutor,
     ScheduleJobExecutionError,
     ScheduleJobExecutor,
     ScheduleService,
 )
-from omni.schedule.store import WorkspaceScheduleStore
+from aide.schedule.store import WorkspaceScheduleStore
 from tests.fixtures.schedule import wait_until as _wait_until
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)

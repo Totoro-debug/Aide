@@ -21,11 +21,11 @@ from anthropic import (
 )
 from httpx import Request, Response
 
-from omni.agent.tools.tool_gateway import ModelToolCall
-from omni.config.config import ProviderConfiguration
-from omni.provider.anthropic import AnthropicProvider
-from omni.provider.errors import EmptyModelResponseError, ModelCallError
-from omni.provider.models import (
+from aide.agent.tools.tool_gateway import ModelToolCall
+from aide.config.config import ProviderConfiguration
+from aide.provider.anthropic import AnthropicProvider
+from aide.provider.errors import EmptyModelResponseError, ModelCallError
+from aide.provider.models import (
     ModelCompleted,
     ModelContinuation,
     ReasoningDelta,
@@ -106,7 +106,7 @@ def request(*, stream: bool = True) -> dict[str, Any]:
     del stream
     return {
         "messages": [
-            {"role": "system", "content": "You are Omni."},
+            {"role": "system", "content": "You are Aide."},
             {"role": "user", "content": "Hello"},
         ],
         "tools": (READ_FILE_SCHEMA,),
@@ -209,7 +209,7 @@ async def test_stream_translates_text_and_usage_through_official_sdk_boundary() 
             "messages": [{"role": "user", "content": "Hello"}],
             "model": "claude-test",
             "stream": True,
-            "system": "You are Omni.",
+            "system": "You are Aide.",
             "temperature": 0.25,
             "timeout": 17,
             "output_config": {"effort": "high"},
@@ -516,7 +516,7 @@ async def test_stream_preserves_interleaved_thinking_blocks_and_replays_continua
 
     second_request = request()
     second_request["messages"] = [
-        {"role": "system", "content": "You are Omni."},
+        {"role": "system", "content": "You are Aide."},
         {"role": "user", "content": "Earlier question"},
         {"role": "assistant", "content": "Earlier answer"},
         {"role": "user", "content": "Read README.md"},
@@ -643,7 +643,7 @@ async def test_complete_translates_mixed_history_and_full_message() -> None:
     provider = AnthropicProvider(configuration(), client_factory=FakeAnthropicClientFactory(client))
     complete_request = request(stream=False)
     complete_request["messages"] = [
-        {"role": "system", "content": "You are Omni."},
+        {"role": "system", "content": "You are Aide."},
         {"role": "user", "content": "Read the file"},
         {
             "role": "assistant",
@@ -711,7 +711,7 @@ async def test_complete_translates_mixed_history_and_full_message() -> None:
             ],
             "model": "claude-test",
             "stream": False,
-            "system": "You are Omni.",
+            "system": "You are Aide.",
             "temperature": 0.25,
             "timeout": 17,
             "output_config": {"effort": "high"},

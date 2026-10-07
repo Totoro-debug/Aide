@@ -7,8 +7,8 @@ export default async function setup({ shutdownTimeoutMs = 15000, sessionModels =
     stdio: ["pipe", "pipe", "pipe"],
     env: {
       ...process.env,
-      OMNI_E2E_SHUTDOWN_TIMEOUT_MS: String(shutdownTimeoutMs),
-      ...(sessionModels ? { OMNI_E2E_SESSION_MODELS: "1" } : {}),
+      AIDE_E2E_SHUTDOWN_TIMEOUT_MS: String(shutdownTimeoutMs),
+      ...(sessionModels ? { AIDE_E2E_SESSION_MODELS: "1" } : {}),
     },
   });
   let errors = "";
@@ -96,24 +96,24 @@ export default async function setup({ shutdownTimeoutMs = 15000, sessionModels =
   }
 
   function publish(details) {
-    process.env.OMNI_E2E_URL = details.url;
-    process.env.OMNI_E2E_HOME_ROOT = details.home_root;
-    process.env.OMNI_E2E_TICKET = details.ticket;
-    process.env.OMNI_E2E_CLI_WORKSPACE = details.cli_workspace;
-    process.env.OMNI_E2E_FIRST_PROJECT = details.first_project;
-    process.env.OMNI_E2E_PROJECT_ALIAS = details.project_alias;
-    process.env.OMNI_E2E_SECOND_PROJECT = details.second_project;
-    process.env.OMNI_E2E_SECOND_TICKET = details.second_ticket;
-    process.env.OMNI_E2E_CONFIRMATION_PATH = details.confirmation_path;
-    process.env.OMNI_E2E_OCCUPIED_SESSION = details.occupied_session_id;
-    process.env.OMNI_E2E_AVAILABLE_SESSION = details.available_session_id;
-    process.env.OMNI_E2E_RESTORE_SESSION = details.restore_session_id;
-    process.env.OMNI_E2E_RESTORE_TARGET = details.restore_target;
-    process.env.OMNI_E2E_MANUAL_RESTORE_SESSION = details.manual_restore_session_id;
-    process.env.OMNI_E2E_MANUAL_RESTORE_TARGET = details.manual_restore_target;
-    process.env.OMNI_E2E_PROVIDER_OBSERVATION_PATH = details.provider_observation_path;
-    process.env.OMNI_E2E_MCP_V1_PATH = details.mcp_v1_path;
-    process.env.OMNI_E2E_MCP_V2_PATH = details.mcp_v2_path;
+    process.env.AIDE_E2E_URL = details.url;
+    process.env.AIDE_E2E_HOME_ROOT = details.home_root;
+    process.env.AIDE_E2E_TICKET = details.ticket;
+    process.env.AIDE_E2E_CLI_WORKSPACE = details.cli_workspace;
+    process.env.AIDE_E2E_FIRST_PROJECT = details.first_project;
+    process.env.AIDE_E2E_PROJECT_ALIAS = details.project_alias;
+    process.env.AIDE_E2E_SECOND_PROJECT = details.second_project;
+    process.env.AIDE_E2E_SECOND_TICKET = details.second_ticket;
+    process.env.AIDE_E2E_CONFIRMATION_PATH = details.confirmation_path;
+    process.env.AIDE_E2E_OCCUPIED_SESSION = details.occupied_session_id;
+    process.env.AIDE_E2E_AVAILABLE_SESSION = details.available_session_id;
+    process.env.AIDE_E2E_RESTORE_SESSION = details.restore_session_id;
+    process.env.AIDE_E2E_RESTORE_TARGET = details.restore_target;
+    process.env.AIDE_E2E_MANUAL_RESTORE_SESSION = details.manual_restore_session_id;
+    process.env.AIDE_E2E_MANUAL_RESTORE_TARGET = details.manual_restore_target;
+    process.env.AIDE_E2E_PROVIDER_OBSERVATION_PATH = details.provider_observation_path;
+    process.env.AIDE_E2E_MCP_V1_PATH = details.mcp_v1_path;
+    process.env.AIDE_E2E_MCP_V2_PATH = details.mcp_v2_path;
     return details;
   }
 

@@ -13,13 +13,13 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestClient, TestServer
 
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.service.directory_picker import DirectoryPicker
-from omni.service.discovery import create_credential
-from omni.service.errors import ServiceError
-from omni.service.runtime import AgentService
-from omni.service.transport import AgentServiceTransport
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.service.directory_picker import DirectoryPicker
+from aide.service.discovery import create_credential
+from aide.service.errors import ServiceError
+from aide.service.runtime import AgentService
+from aide.service.transport import AgentServiceTransport
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
 
@@ -37,8 +37,8 @@ async def picker_http(tmp_path: Path) -> AsyncIterator[TestClient[Any, Any]]:
         TestServer(transport.create_app()),
         headers={
             "Authorization": f"Bearer {token}",
-            "X-Omni-CSRF": token,
-            "X-Omni-Client": client.client_id,
+            "X-Aide-CSRF": token,
+            "X-Aide-Client": client.client_id,
         },
     )
     await http.start_server()
@@ -88,8 +88,8 @@ async def test_rejected_requests_never_open_a_dialog(
     monkeypatch.setattr(DirectoryPicker, "_run", select)
     cases = [
         ({"Authorization": "Bearer wrong"}, {"request_id": "pick"}, 401),
-        ({"X-Omni-CSRF": "wrong"}, {"request_id": "pick"}, 403),
-        ({"X-Omni-Client": "unknown"}, {"request_id": "pick"}, 401),
+        ({"X-Aide-CSRF": "wrong"}, {"request_id": "pick"}, 403),
+        ({"X-Aide-Client": "unknown"}, {"request_id": "pick"}, 401),
         ({"Origin": "https://example.com"}, {"request_id": "pick"}, 403),
         ({}, {}, 422),
     ]

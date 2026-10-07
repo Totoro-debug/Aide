@@ -9,16 +9,16 @@ from typing import Any
 
 import pytest
 
-from omni.agent.tools.base import BaseTool, ToolError
-from omni.agent.tools.context import ToolRunContext
-from omni.agent.tools.core.edit_file import EditFileTool
-from omni.agent.tools.core.exec_host import resolve_exec_shell
-from omni.agent.tools.core.glob import GlobTool
-from omni.agent.tools.core.grep import GrepTool
-from omni.agent.tools.core.list_dir import ListDirTool
-from omni.agent.tools.core.read_file import ReadFileTool
-from omni.agent.tools.core.write_file import WriteFileTool
-from omni.agent.tools.permission import (
+from aide.agent.tools.base import BaseTool, ToolError
+from aide.agent.tools.context import ToolRunContext
+from aide.agent.tools.core.edit_file import EditFileTool
+from aide.agent.tools.core.exec_host import resolve_exec_shell
+from aide.agent.tools.core.glob import GlobTool
+from aide.agent.tools.core.grep import GrepTool
+from aide.agent.tools.core.list_dir import ListDirTool
+from aide.agent.tools.core.read_file import ReadFileTool
+from aide.agent.tools.core.write_file import WriteFileTool
+from aide.agent.tools.permission import (
     PermissionContext,
     PermissionSnapshot,
     RuntimePermissionControl,
@@ -27,7 +27,7 @@ from omni.agent.tools.permission import (
     ToolPermissionLevel,
     ToolPermissionPolicy,
 )
-from omni.agent.tools.tool_gateway import (
+from aide.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ModelToolCall,

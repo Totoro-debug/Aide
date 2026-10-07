@@ -6,11 +6,11 @@ from contextlib import asynccontextmanager
 
 from aiohttp.test_utils import TestServer
 
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.service.discovery import ServiceDiscovery, create_credential, write_discovery
-from omni.service.runtime import AgentService
-from omni.service.transport import create_app
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.service.discovery import ServiceDiscovery, create_credential, write_discovery
+from aide.service.runtime import AgentService
+from aide.service.transport import create_app
 
 
 @asynccontextmanager

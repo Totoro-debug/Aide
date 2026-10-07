@@ -14,7 +14,7 @@ Each Agent Run owns its catalog view and activation state. Initial exposure incl
 
 Exposure is a context choice, not an execution gate. A catalogued Tool remains callable through the normal Gateway even before its schema is exposed; calling it does not implicitly activate it. User Schedule catalogs exclude the Schedule Tool entirely, preventing search or direct invocation from managing Jobs. Dream uses its private `edit_file` capability.
 
-Tool Search queries the existing catalog using English BM25 keywords. It performs no MCP discovery. MCP keyword examples are in the [configuration template](../../omni/templates/default-config.md). Missing keywords are generated through the existing chat route and persisted best effort; generation failure uses the remote Tool name in memory without blocking startup. A changed exposure revises the complete request and is checked against [ADR-0023](0023-manage-agent-run-context-by-projected-token-budget.md) before the next model call.
+Tool Search queries the existing catalog using English BM25 keywords. It performs no MCP discovery. MCP keyword examples are in the [configuration template](../../aide/templates/default-config.md). Missing keywords are generated through the existing chat route and persisted best effort; generation failure uses the remote Tool name in memory without blocking startup. A changed exposure revises the complete request and is checked against [ADR-0023](0023-manage-agent-run-context-by-projected-token-budget.md) before the next model call.
 
 ## MCP lifecycle and results
 

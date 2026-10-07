@@ -10,7 +10,7 @@ from setuptools import Distribution  # type: ignore[import-untyped]
 
 from scripts.validate_web_assets import WebAssetError, build_manifest, validate_web_assets
 
-ASSET_ROOT = Path(__file__).parents[1] / "omni" / "web_assets"
+ASSET_ROOT = Path(__file__).parents[1] / "aide" / "web_assets"
 
 
 def test_packaged_web_assets_have_a_verified_manifest() -> None:
@@ -89,7 +89,7 @@ def test_windows_git_checkout_preserves_manifest_bytes(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     shutil.copytree(
-        ASSET_ROOT, source / "omni/web_assets", ignore=shutil.ignore_patterns("__pycache__")
+        ASSET_ROOT, source / "aide/web_assets", ignore=shutil.ignore_patterns("__pycache__")
     )
     shutil.copy2(ASSET_ROOT.parents[1] / ".gitattributes", source / ".gitattributes")
 
@@ -125,4 +125,4 @@ def test_windows_git_checkout_preserves_manifest_bytes(tmp_path: Path) -> None:
     checkout = tmp_path / "checkout"
     git("clone", "--quiet", "-c", "core.autocrlf=true", str(source), str(checkout))
 
-    assert validate_web_assets(checkout / "omni/web_assets") == validate_web_assets(ASSET_ROOT)
+    assert validate_web_assets(checkout / "aide/web_assets") == validate_web_assets(ASSET_ROOT)

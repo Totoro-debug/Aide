@@ -9,7 +9,7 @@ import { registerProjectFromSidebar, selectProjectDirectory, projectItemByPath, 
 
 const expect = playwrightExpect.configure({ timeout: 30000 });
 const control = await setup();
-const browser = await chromium.launch({ channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge" });
+const browser = await chromium.launch({ channel: process.env.AIDE_E2E_BROWSER_CHANNEL ?? "msedge" });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 const errors = [];
 page.on("pageerror", error => errors.push(error.message));

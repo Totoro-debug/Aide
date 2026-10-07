@@ -5,7 +5,7 @@ from typing import Literal
 import pytest
 from loguru import logger
 
-from omni.agent.message_bus import (
+from aide.agent.message_bus import (
     InboundMessage,
     MessageBus,
     OutboundMessage,

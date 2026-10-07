@@ -9,20 +9,20 @@ from uuid import uuid4
 
 import pytest
 
-import omni.service.runtime as service_runtime
-from omni.agent.session.backup_store import FileBackupStore
-from omni.agent.session.session import Session, SessionStoragePartition
-from omni.agent.tools.tool_gateway import BuiltInToolCatalog, ModelToolCall
-from omni.config.config import ConfigLoader
-from omni.provider.models import (
+import aide.service.runtime as service_runtime
+from aide.agent.session.backup_store import FileBackupStore
+from aide.agent.session.session import Session, SessionStoragePartition
+from aide.agent.tools.tool_gateway import BuiltInToolCatalog, ModelToolCall
+from aide.config.config import ConfigLoader
+from aide.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelResponse,
     ModelStreamEvent,
     ModelUsage,
 )
-from omni.schedule.model import JobSchedule, ScheduleJob
-from omni.service.runtime import AgentService
+from aide.schedule.model import JobSchedule, ScheduleJob
+from aide.service.runtime import AgentService
 from tests.service.test_shared_resources import _CountingProvider, _home, _session_case
 from tests.tools.test_shared_tool_context import _RecordingExecHost
 

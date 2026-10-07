@@ -268,7 +268,7 @@ export function getWorkspaceSession(
 ): Promise<SessionSnapshot> {
   return request<{ snapshot: SessionSnapshot }>(
     `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}?claim_version=${claimVersion}`,
-    { extraHeaders: { "X-Omni-Claim": claimCredential } },
+    { extraHeaders: { "X-Aide-Claim": claimCredential } },
   ).then((response) => response.snapshot);
 }
 
@@ -284,7 +284,7 @@ export function releaseWorkspaceSession(
       method: "POST",
       mutation: true,
       body: { request_id: createRequestId(), claim_version: claimVersion },
-      extraHeaders: { "X-Omni-Claim": claimCredential },
+      extraHeaders: { "X-Aide-Claim": claimCredential },
     },
   );
 }
@@ -308,7 +308,7 @@ export function renameWorkspaceSession(
         metadata_version: metadataVersion,
         title,
       },
-      extraHeaders: { "X-Omni-Claim": claimCredential },
+      extraHeaders: { "X-Aide-Claim": claimCredential },
     },
   );
 }
@@ -326,7 +326,7 @@ export function deleteWorkspaceSession(
       method: "DELETE",
       mutation: true,
       body: { request_id: requestId, claim_version: claimVersion, confirm: true },
-      extraHeaders: { "X-Omni-Claim": claimCredential },
+      extraHeaders: { "X-Aide-Claim": claimCredential },
     },
   );
 }
@@ -376,7 +376,7 @@ async function request<T>(
     if (csrfToken === null) {
       throw new ApiError(403, null);
     }
-    headers.set("X-Omni-CSRF", csrfToken);
+    headers.set("X-Aide-CSRF", csrfToken);
   }
   if (options.extraHeaders !== undefined) {
     for (const [name, value] of Object.entries(options.extraHeaders)) {
@@ -384,7 +384,7 @@ async function request<T>(
     }
   }
   if (webControlCredential !== null) {
-    headers.set("X-Omni-Control", webControlCredential);
+    headers.set("X-Aide-Control", webControlCredential);
   }
   const response = await fetch(`${API_PREFIX}${path}`, {
     method: options.method ?? "GET",
@@ -535,7 +535,7 @@ export async function updateRuntimePermission(
         claim_version: claimVersion,
         permission_level: permissionLevel,
       },
-      extraHeaders: { "X-Omni-Claim": claimCredential },
+      extraHeaders: { "X-Aide-Claim": claimCredential },
     },
   );
   return response.result;
@@ -559,7 +559,7 @@ export async function updateRuntimeEffort(
         claim_version: claimVersion,
         effort,
       },
-      extraHeaders: { "X-Omni-Claim": claimCredential },
+      extraHeaders: { "X-Aide-Claim": claimCredential },
     },
   );
   return response.result;
@@ -582,7 +582,7 @@ function postWorkspaceSessionOperation<T>(
         current_session_id: sessionId,
         claim_version: claimVersion,
       },
-      extraHeaders: { "X-Omni-Claim": claimCredential },
+      extraHeaders: { "X-Aide-Claim": claimCredential },
     },
   );
 }
@@ -775,7 +775,7 @@ export function renameProjectSession(
         metadata_version: metadataVersion,
         title,
       },
-      extraHeaders: { "X-Omni-Claim": claimCredential },
+      extraHeaders: { "X-Aide-Claim": claimCredential },
     },
   );
 }
@@ -788,7 +788,7 @@ export function getProjectSession(
 ): Promise<SessionSnapshot> {
   return request<{ snapshot: SessionSnapshot }>(
     `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}?claim_version=${claimVersion}`,
-    { extraHeaders: { "X-Omni-Claim": claimCredential } },
+    { extraHeaders: { "X-Aide-Claim": claimCredential } },
   ).then((response) => response.snapshot);
 }
 
@@ -811,7 +811,7 @@ function postRestoreManagement(
         claim_version: claimVersion,
         ...payload,
       },
-      extraHeaders: { "X-Omni-Claim": claimCredential },
+      extraHeaders: { "X-Aide-Claim": claimCredential },
     },
   ).then((response) => response.result);
 }
@@ -861,7 +861,7 @@ export async function executeRestore(
       plan: { anchor_id: plan.anchor_id },
       mode,
     },
-    extraHeaders: { "X-Omni-Claim": claimCredential },
+    extraHeaders: { "X-Aide-Claim": claimCredential },
   });
   const nextResult = response.result.restore_result;
   const nextClaim = response.result.claim;
@@ -936,7 +936,7 @@ export function releaseProjectSession(
       method: "POST",
       mutation: true,
       body: { request_id: createRequestId(), claim_version: claimVersion },
-      extraHeaders: { "X-Omni-Claim": claimCredential },
+      extraHeaders: { "X-Aide-Claim": claimCredential },
     },
   );
 }
@@ -958,7 +958,7 @@ export function deleteProjectSession(
         claim_version: claimVersion,
         confirm: true,
       },
-      extraHeaders: { "X-Omni-Claim": claimCredential },
+      extraHeaders: { "X-Aide-Claim": claimCredential },
     },
   );
 }
@@ -985,7 +985,7 @@ export function openEventStream(
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(
     `${protocol}//${window.location.host}${API_PREFIX}/events`,
-    ["omni-v1", webControlCredential],
+    ["aide-v1", webControlCredential],
   );
   const pending = new Map<
     string,

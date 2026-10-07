@@ -11,11 +11,12 @@ from typing import Any, cast
 
 import pytest
 
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigError, ConfigLoader, ConfigRevisionConflict
-from omni.utils.host_filesystem import HOST_FILESYSTEM
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigError, ConfigLoader, ConfigRevisionConflict
+from aide.utils.host_filesystem import HOST_FILESYSTEM
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.configuration.test_config_editing import FULL_EDITABLE_CONFIG
+from tests.fixtures.model_configuration import TEST_MODEL_PARAMETERS, complete_model_settings
 
 
 def _loader(tmp_path: Path, content: bytes) -> ConfigLoader:
@@ -29,6 +30,7 @@ def _loader(tmp_path: Path, content: bytes) -> ConfigLoader:
 def _repair_fields(loader: ConfigLoader) -> dict[str, Any]:
     snapshot = loader.web_snapshot()
     fields = cast(dict[str, Any], json.loads(json.dumps(dict(snapshot.fields))))
+    complete_model_settings(fields["models"])
     for provider in fields["models"]["providers"].values():
         provider.pop("api_key")
     for server in fields["mcp"].values():
@@ -147,7 +149,7 @@ def _malformed_repair(
     fields = _repair_fields(loader)
     providers = fields["models"]["providers"]
     providers["openai-local"]["base_url"] = "http://127.0.0.1/v1"
-    providers["openai-local"]["models"] = ["test"]
+    providers["openai-local"]["models"] = {"test": dict(TEST_MODEL_PARAMETERS)}
     for route in fields["models"]["routes"].values():
         route["model"] = "test"
     return (

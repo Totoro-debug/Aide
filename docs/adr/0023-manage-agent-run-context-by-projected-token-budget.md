@@ -4,7 +4,7 @@ status: accepted
 
 # Manage Agent Run Context by Projected Token Budget
 
-Foreground and User Schedule Runs use one budget policy before execution and before each ReAct request. Token occupancy, rather than message count, controls compaction. Definitions are in [CONTEXT](../../CONTEXT.md); defaults are in the [configuration template](../../omni/templates/default-config.md).
+Foreground and User Schedule Runs use one budget policy before execution and before each ReAct request. Token occupancy, rather than message count, controls compaction. Definitions are in [CONTEXT](../../CONTEXT.md); defaults are in the [configuration template](../../aide/templates/default-config.md).
 
 ## Projection and limits
 

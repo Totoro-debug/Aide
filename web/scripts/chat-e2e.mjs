@@ -12,7 +12,7 @@ import composerAcceptance from "./composer-e2e.mjs";
 
 const expect = playwrightExpect.configure({ timeout: 30000 });
 const control = await setup({ shutdownTimeoutMs: 60000 });
-const browser = await chromium.launch({ channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge" });
+const browser = await chromium.launch({ channel: process.env.AIDE_E2E_BROWSER_CHANNEL ?? "msedge" });
 const diagnostics = [];
 let diagnosticPage;
 function redact(value) {
@@ -78,7 +78,7 @@ try {
       const session = await (await window.fetch("/api/v1/web/session")).json();
       const response = await window.fetch(`/api/v1${path}`, {
         method,
-        headers: { "Content-Type": "application/json", "X-Omni-Control": window.chatControl, "X-Omni-CSRF": session.csrf_token },
+        headers: { "Content-Type": "application/json", "X-Aide-Control": window.chatControl, "X-Aide-CSRF": session.csrf_token },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
       return { status: response.status, body: await response.json() };
@@ -134,7 +134,7 @@ try {
   }
   await page.goto(`${control.details.url}/#ticket=${control.details.ticket}`);
   await setInterfaceLanguage(page, "en");
-  await expect(page.getByRole("heading", { name: "Omni", exact: true }).last()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Aide", exact: true }).last()).toBeVisible();
   try {
     await expect(page.getByRole("textbox", { name: "Message input", exact: true })).toBeEnabled();
   } catch (error) {
@@ -145,8 +145,8 @@ try {
   assert.equal(inputCapabilities.status, 200);
   assert.ok(inputCapabilities.body.management_commands.includes("/status"));
   assert.ok(Array.isArray(inputCapabilities.body.skill_metadata));
-  const firstDirectory = join(control.details.home_root, ".omni", "chat");
-  assert.deepEqual(await readdir(join(firstDirectory, ".omni", "sessions")), [], "An empty draft was persisted");
+  const firstDirectory = join(control.details.home_root, ".aide", "chat");
+  assert.deepEqual(await readdir(join(firstDirectory, ".aide", "sessions")), [], "An empty draft was persisted");
   const sessionModel = page.getByLabel("Session model", { exact: true });
   const sessionEffort = page.getByLabel("Reasoning effort", { exact: true });
   const permission = page.getByRole("button", { name: "Client permission", exact: true });
@@ -178,7 +178,7 @@ try {
   await expect(page.getByRole("log").getByText("Fixture response.", { exact: true })).toBeVisible();
   await expect.poll(async () => (await api("/chat/sessions")).body.sessions.length).toBe(1);
   const first = (await api("/chat/sessions")).body.sessions[0];
-  const header = JSON.parse((await readFile(join(first.directory, ".omni", "sessions", `${first.id}.jsonl`), "utf8")).split("\n")[0]);
+  const header = JSON.parse((await readFile(join(first.directory, ".aide", "sessions", `${first.id}.jsonl`), "utf8")).split("\n")[0]);
   assert.equal(header.metadata.creation_scope, "chat");
   assert.deepEqual(header.metadata.model_configuration, {
     provider_id: "primary",
@@ -266,7 +266,7 @@ try {
   const entered = await newChat();
   assert.equal(entered.status, 200);
   assert.equal(entered.body.directory.toLowerCase(), nextDirectory.toLowerCase());
-  await expect(page.getByRole("heading", { name: "Omni", exact: true }).last()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Aide", exact: true }).last()).toBeVisible();
   await page.getByRole("textbox", { name: "Message input", exact: true }).fill("second directory acceptance message");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByRole("log").getByText("Fixture response.", { exact: true })).toBeVisible();
@@ -327,7 +327,7 @@ try {
   await page.goto("about:blank");
   await page.goto(`${restarted.url}/#ticket=${restarted.ticket}`);
   await setInterfaceLanguage(page, "en");
-  await expect(page.getByRole("heading", { name: "Omni", exact: true }).last()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Aide", exact: true }).last()).toBeVisible();
   const restartedSessions = (await api("/chat/sessions")).body.sessions;
   assert.ok(restartedSessions.some(session => session.id === first.id));
   assert.ok(restartedSessions.some(session => session.id === secondConversation.id));
@@ -518,8 +518,8 @@ try {
   await expect(runtimeDialog.getByText("Chat model", { exact: true })).toBeVisible();
   await runtimeDialog.getByRole("button", { name: "Close", exact: true }).click();
 
-  const firstMemoryPath = join(firstDirectory, ".omni", "memory", "memory.md");
-  const nextMemoryPath = join(nextDirectory, ".omni", "memory", "memory.md");
+  const firstMemoryPath = join(firstDirectory, ".aide", "memory", "memory.md");
+  const nextMemoryPath = join(nextDirectory, ".aide", "memory", "memory.md");
   await writeFile(firstMemoryPath, "# First workspace memory marker\n", "utf8");
   await writeFile(nextMemoryPath, "# Next workspace memory marker\n", "utf8");
   await openSessionMore("Workspace Memory and Dream");
@@ -594,7 +594,7 @@ try {
   await restartedNavigation.getByTitle(secondConversation.directory).click();
   await expect(page.getByRole("log").getByText("second directory acceptance message", { exact: true })).toBeVisible();
   const modelConfigurationBeforeRestore = JSON.parse((await readFile(
-    join(nextDirectory, ".omni", "sessions", `${secondConversation.id}.jsonl`), "utf8",
+    join(nextDirectory, ".aide", "sessions", `${secondConversation.id}.jsonl`), "utf8",
   )).split("\n")[0]).metadata.model_configuration;
   await page.getByRole("textbox", { name: "Message input", exact: true }).fill("shared chat branch to restore");
   await page.getByRole("button", { name: "Send", exact: true }).click();
@@ -616,7 +616,7 @@ try {
   const restored = (await api("/chat/sessions")).body.sessions.find(session => session.id === secondConversation.id);
   assert.equal(restored.directory.toLowerCase(), nextDirectory.toLowerCase());
   assert.equal(restored.title, "Renamed shared chat");
-  const restoredHeader = JSON.parse((await readFile(join(nextDirectory, ".omni", "sessions", `${secondConversation.id}.jsonl`), "utf8")).split("\n")[0]);
+  const restoredHeader = JSON.parse((await readFile(join(nextDirectory, ".aide", "sessions", `${secondConversation.id}.jsonl`), "utf8")).split("\n")[0]);
   assert.equal(restoredHeader.metadata.creation_scope, "chat");
   assert.deepEqual(restoredHeader.metadata.model_configuration, modelConfigurationBeforeRestore);
   await page.getByRole("status").filter({ hasText: "Restore completed" }).getByRole("button", { name: "Close", exact: true }).click();

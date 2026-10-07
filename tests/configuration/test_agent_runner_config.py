@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from omni.config.agent_home import AgentHome
-from omni.config.config import (
+from aide.config.agent_home import AgentHome
+from aide.config.config import (
     ConfigLoader,
     DefaultValueDiagnostic,
     RuntimeConfiguration,

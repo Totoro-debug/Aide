@@ -3,8 +3,8 @@
 import asyncio
 import json
 
-from omni.agent.workspace_state import WorkspaceState
-from omni.schedule.model import ScheduleJob
+from aide.agent.workspace_state import WorkspaceState
+from aide.schedule.model import ScheduleJob
 
 
 async def wait_until(predicate: object) -> None:

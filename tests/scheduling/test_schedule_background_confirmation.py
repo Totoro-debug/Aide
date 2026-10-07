@@ -8,15 +8,15 @@ from uuid import UUID
 
 import pytest
 
-from omni.agent.confirmation import (
+from aide.agent.confirmation import (
     BackgroundConfirmationOwner,
     ConfirmationAborted,
     ConfirmationEnvelope,
 )
-from omni.agent.permission import PermissionSnapshot, ToolPermissionLevel
-from omni.agent.session.session import Session
-from omni.agent.tools.core.exec_policy import ExecAssessment, ResolvedExecShell
-from omni.agent.tools.permission import (
+from aide.agent.permission import PermissionSnapshot, ToolPermissionLevel
+from aide.agent.session.session import Session
+from aide.agent.tools.core.exec_policy import ExecAssessment, ResolvedExecShell
+from aide.agent.tools.permission import (
     FileAccess,
     MCPToolIdentity,
     NetworkAssessment,
@@ -25,11 +25,11 @@ from omni.agent.tools.permission import (
     ToolInvocationFacts,
     ToolPermissionPolicy,
 )
-from omni.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRequest
-from omni.agent.workspace_state import WorkspaceState
-from omni.schedule.model import JobSchedule, ScheduleJob
-from omni.schedule.service import ScheduleOccurrence, ScheduleService
-from omni.schedule.store import ScheduleStoreFaultedError
+from aide.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRequest
+from aide.agent.workspace_state import WorkspaceState
+from aide.schedule.model import JobSchedule, ScheduleJob
+from aide.schedule.service import ScheduleOccurrence, ScheduleService
+from aide.schedule.store import ScheduleStoreFaultedError
 from tests.fixtures.schedule import wait_until as _wait_until
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)

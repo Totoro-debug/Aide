@@ -11,11 +11,11 @@ import aiohttp
 import pytest
 from aiohttp.test_utils import BaseTestServer, TestServer
 
-from omni.config.config import ConfigLoader
-from omni.provider.models import ModelResponse
-from omni.service.discovery import create_credential, read_credential
-from omni.service.runtime import AgentService, ClientState, SessionClaim, WorkspaceRecord
-from omni.service.transport import create_app
+from aide.config.config import ConfigLoader
+from aide.provider.models import ModelResponse
+from aide.service.discovery import create_credential, read_credential
+from aide.service.runtime import AgentService, ClientState, SessionClaim, WorkspaceRecord
+from aide.service.transport import create_app
 from tests.memory.test_dream import _response
 from tests.service.test_protocol_contract import _validator
 from tests.service.test_runtime_management import ManagementCase
@@ -47,9 +47,9 @@ async def _post(
         server.make_url(f"/api/v1/workspaces/{scoped.workspace_id}/management/{action}"),
         headers={
             "Authorization": f"Bearer {token}",
-            "X-Omni-CSRF": token,
-            "X-Omni-Client": owner.client_id,
-            "X-Omni-Claim": selected.credential,
+            "X-Aide-CSRF": token,
+            "X-Aide-Client": owner.client_id,
+            "X-Aide-Claim": selected.credential,
         },
         json={
             "request_id": request_id,

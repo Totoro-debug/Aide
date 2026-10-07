@@ -5,9 +5,9 @@ from uuid import UUID
 
 import pytest
 
-from omni.agent.session.session import Session, SessionStoragePartition
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
+from aide.agent.session.session import Session, SessionStoragePartition
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
 from tests.fixtures.session import seed_session_state
 from tests.management.factories import management_service
 

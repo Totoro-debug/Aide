@@ -9,22 +9,22 @@ from typing import Any
 
 import pytest
 
-from omni.agent.tools.core.exec import ExecTool
-from omni.agent.tools.core.exec_host import (
+from aide.agent.tools.core.exec import ExecTool
+from aide.agent.tools.core.exec_host import (
     EXEC_CAPABILITY_ERROR,
     ExecProcessSpec,
     PowerShellExecHost,
     create_exec_host,
     resolve_exec_shell,
 )
-from omni.agent.tools.core.exec_policy import (
+from aide.agent.tools.core.exec_policy import (
     ExecAssessment,
     ExecCommandIdentity,
     ExecOutcome,
     ExecShellSelector,
     catastrophic_matches,
 )
-from omni.agent.tools.tool_gateway import ModelToolCall, ToolResult
+from aide.agent.tools.tool_gateway import ModelToolCall, ToolResult
 from tests.fixtures import SingleToolGateway
 from tests.fixtures.gateway import contextual_tool
 
@@ -207,8 +207,8 @@ def test_resolve_exec_shell_rejects_ambiguous_or_wrong_shell_identity(
     ("returncode", "stdout"),
     (
         (0, "7\n"),
-        (1, "OMNI_PS_VERSION:7.5.0\n"),
-        (0, "noise\nOMNI_PS_VERSION:7.5.0\n"),
+        (1, "AIDE_PS_VERSION:7.5.0\n"),
+        (0, "noise\nAIDE_PS_VERSION:7.5.0\n"),
     ),
 )
 def test_real_version_probe_rejects_failed_or_spoofed_output(

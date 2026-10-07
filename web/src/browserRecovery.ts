@@ -2,7 +2,7 @@ import { REASONING_EFFORTS } from "./reasoningEffort.ts";
 import { isNonEmptyString, isRecord } from "./validation.ts";
 import type { ReasoningEffort, SessionModelConfiguration } from "./protocol";
 
-const BROWSER_RECOVERY_KEY = "omni.browser-recovery";
+const BROWSER_RECOVERY_KEY = "aide.browser-recovery";
 
 export type BrowserRecoveryTarget =
   | { kind: "project"; project_id: string }

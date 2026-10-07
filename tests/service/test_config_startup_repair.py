@@ -11,12 +11,13 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import BaseTestServer, TestServer
 
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.service.discovery import create_credential
-from omni.service.errors import ServiceError
-from omni.service.runtime import AgentService
-from omni.service.transport import create_app
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.service.discovery import create_credential
+from aide.service.errors import ServiceError
+from aide.service.runtime import AgentService
+from aide.service.transport import create_app
+from tests.fixtures.model_configuration import TEST_MODEL_PARAMETERS
 
 REPAIRABLE_CONFIG = b"""[models.providers.old]
 protocol = \"openai-compatible\"
@@ -64,7 +65,7 @@ async def repair_http(
     client = await service.register_client("cli")
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-Client": client.client_id,
+        "X-Aide-Client": client.client_id,
     }
     async with TestServer(create_app(service), host="127.0.0.1") as server:
         yield service, server, headers
@@ -77,7 +78,7 @@ def _usable_repair_fields(fields: dict[str, Any]) -> dict[str, Any]:
     provider = providers["openai-local"]
     provider.pop("api_key", None)
     provider["base_url"] = "https://models.example/v1"
-    provider["models"] = ["small-model"]
+    provider["models"] = {"small-model": dict(TEST_MODEL_PARAMETERS)}
     for route in models["routes"].values():
         route["provider_id"] = "openai-local"
         route["model"] = "small-model"
@@ -104,14 +105,14 @@ async def test_missing_configuration_keeps_service_online_but_blocks_runtime(
     assert not (service.agent_home.path / "config.toml").exists()
     assert service._workspaces == {}
     with pytest.raises(ServiceError) as blocked:
-        await service.attach_workspace(headers["X-Omni-Client"], project)
+        await service.attach_workspace(headers["X-Aide-Client"], project)
     assert blocked.value.code == "config_invalid"
     async with aiohttp.ClientSession() as http:
         listed = await http.get(server.make_url("/api/v1/projects"), headers=headers)
         projects = await listed.json()
     assert listed.status == 200
     assert projects["projects"][0]["saved_jobs"] == []
-    assert not (project / ".omni").exists()
+    assert not (project / ".aide").exists()
 
 
 @pytest.mark.asyncio
@@ -132,7 +133,7 @@ async def test_malformed_configuration_is_repaired_after_exact_private_backup(
 
         repair_headers = {
             **headers,
-            "X-Omni-CSRF": headers["Authorization"].removeprefix("Bearer "),
+            "X-Aide-CSRF": headers["Authorization"].removeprefix("Bearer "),
         }
         fields = _usable_repair_fields(cast(dict[str, Any], current["fields"]))
         repair_response = await http.post(
@@ -185,7 +186,7 @@ async def test_malformed_repair_backup_failure_leaves_original_bytes_untouched(
         raise OSError("injected backup failure")
 
     monkeypatch.setattr(
-        "omni.config.config._create_private_backup",
+        "aide.config.config._create_private_backup",
         fail_backup,
     )
 
@@ -193,7 +194,7 @@ async def test_malformed_repair_backup_failure_leaves_original_bytes_untouched(
         current = await (await http.get(server.make_url("/api/v1/config"), headers=headers)).json()
         repair_headers = {
             **headers,
-            "X-Omni-CSRF": headers["Authorization"].removeprefix("Bearer "),
+            "X-Aide-CSRF": headers["Authorization"].removeprefix("Bearer "),
         }
         fields = _usable_repair_fields(cast(dict[str, Any], current["fields"]))
         response = await http.post(
@@ -229,7 +230,7 @@ async def test_repair_http_security_validation_cas_and_secret_safe_replay(
     config_path.write_bytes(REPAIRABLE_CONFIG)
     mutation_headers = {
         **headers,
-        "X-Omni-CSRF": headers["Authorization"].removeprefix("Bearer "),
+        "X-Aide-CSRF": headers["Authorization"].removeprefix("Bearer "),
     }
     async with aiohttp.ClientSession() as http:
         current = await (await http.get(server.make_url("/api/v1/config"), headers=headers)).json()
@@ -248,7 +249,7 @@ async def test_repair_http_security_validation_cas_and_secret_safe_replay(
         for request_headers in [
             {},
             headers,
-            {key: value for key, value in mutation_headers.items() if key != "X-Omni-Client"},
+            {key: value for key, value in mutation_headers.items() if key != "X-Aide-Client"},
             {**mutation_headers, "Origin": "https://outside.example"},
         ]:
             rejected = await http.post(url, headers=request_headers, json=payload)
@@ -257,7 +258,7 @@ async def test_repair_http_security_validation_cas_and_secret_safe_replay(
         launcher = await service.register_client("cli")
         ticket_response = await http.post(
             server.make_url("/api/v1/web/ticket"),
-            headers={**mutation_headers, "X-Omni-Client": launcher.client_id},
+            headers={**mutation_headers, "X-Aide-Client": launcher.client_id},
             json={"request_id": "launch-for-repair-auth"},
         )
         ticket = (await ticket_response.json())["ticket"]
@@ -270,13 +271,13 @@ async def test_repair_http_security_validation_cas_and_secret_safe_replay(
             csrf = (await exchanged.json())["csrf_token"]
             registered = await browser.post(
                 server.make_url("/api/v1/clients"),
-                headers={"X-Omni-CSRF": csrf},
+                headers={"X-Aide-CSRF": csrf},
                 json={"request_id": "browser-repair-auth", "kind": "web"},
             )
             control = (await registered.json())["web_control_credential"]
             for browser_headers in [
-                {"X-Omni-Control": control},
-                {"X-Omni-CSRF": csrf, "X-Omni-Control": "wrong"},
+                {"X-Aide-Control": control},
+                {"X-Aide-CSRF": csrf, "X-Aide-Control": "wrong"},
             ]:
                 blocked = await browser.post(url, headers=browser_headers, json=payload)
                 assert blocked.status == 403
@@ -306,8 +307,8 @@ async def test_repair_http_security_validation_cas_and_secret_safe_replay(
         other = await service.register_client("cli")
         other_headers = {
             **mutation_headers,
-            "X-Omni-Client": other.client_id,
-            "X-Omni-Control": other.web_control_credential or "",
+            "X-Aide-Client": other.client_id,
+            "X-Aide-Control": other.web_control_credential or "",
         }
         cross_client = await http.post(url, headers=other_headers, json=payload)
         assert cross_client.status == 409

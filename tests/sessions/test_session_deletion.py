@@ -12,17 +12,17 @@ from uuid import uuid4
 
 import pytest
 
-import omni.agent.session.deletion as deletion
-import omni.utils._owned_deletion as native_deletion
-from omni.agent.session.deletion import (
+import aide.agent.session.deletion as deletion
+import aide.utils._owned_deletion as native_deletion
+from aide.agent.session.deletion import (
     SessionDeletionPending,
     begin_session_deletion,
     delete_session_data,
     recover_session_deletions,
     session_deletion_pending,
 )
-from omni.agent.session.session import Session
-from omni.agent.workspace_state import WorkspaceState
+from aide.agent.session.session import Session
+from aide.agent.workspace_state import WorkspaceState
 
 
 async def _persist_session(tmp_path: Path) -> tuple[WorkspaceState, str]:

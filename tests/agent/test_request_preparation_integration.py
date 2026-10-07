@@ -9,10 +9,10 @@ from typing import Any, Literal
 
 import pytest
 
-from omni.agent.session.execution_state import TitleWork
-from omni.agent.session.session import Session, SessionStoragePartition
-from omni.agent.tools.tool_gateway import ModelToolCall
-from omni.provider.session_configuration import SessionModelConfiguration
+from aide.agent.session.execution_state import TitleWork
+from aide.agent.session.session import Session, SessionStoragePartition
+from aide.agent.tools.tool_gateway import ModelToolCall
+from aide.provider.session_configuration import SessionModelConfiguration
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import collect_foreground_outbound
 from tests.fixtures.session import seed_session_state

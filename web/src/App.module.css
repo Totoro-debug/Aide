@@ -3312,6 +3312,44 @@ h1 {
   gap: 12px;
 }
 
+.modelCards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 12px;
+}
+
+.modelCard {
+  position: relative;
+  min-width: 0;
+  align-self: start;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+}
+
+.modelCardSummary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 42px 12px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.modelCardSummary::-webkit-details-marker { display: none; }
+.modelCardSummary > span { display: grid; min-width: 0; gap: 5px; flex: 1; }
+.modelCardSummary strong { font-size: 13px; overflow-wrap: anywhere; }
+.modelCardSummary small { color: var(--text-muted); font-size: 11px; overflow-wrap: anywhere; }
+.modelCardSummary > svg { flex-shrink: 0; }
+.modelCard details[open] > summary > svg { transform: rotate(180deg); }
+.modelCardSummary:focus-visible { outline: 2px solid var(--text-primary); outline-offset: -2px; }
+.modelCardRemove { position: absolute; top: 9px; right: 6px; }
+.modelCardFields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 0 12px 12px; }
+.modelCardFields > label:first-of-type { grid-column: 1 / -1; }
+.modelMigration { grid-column: 1 / -1; display: grid; gap: 8px; font-size: 12px; }
+.modelMigration p { margin: 0; }
+.modelMigration button { display: grid; justify-items: start; white-space: normal; text-align: left; }
+.modelMigration small { font-size: 11px; }
+
 .settingsCollectionItem {
   display: grid;
   min-width: 0;

@@ -14,15 +14,15 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
-from omni.agent.session.backup_store import FileBackupStore
-from omni.agent.session.restore import RestoreManager, RestoreMode
-from omni.agent.session.session import Session
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.config import ConfigLoader
-from omni.service.discovery import create_credential
-from omni.service.errors import ServiceError
-from omni.service.runtime import AgentService, SessionClaim, WorkspaceRecord
-from omni.service.transport import create_app
+from aide.agent.session.backup_store import FileBackupStore
+from aide.agent.session.restore import RestoreManager, RestoreMode
+from aide.agent.session.session import Session
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.config import ConfigLoader
+from aide.service.discovery import create_credential
+from aide.service.errors import ServiceError
+from aide.service.runtime import AgentService, SessionClaim, WorkspaceRecord
+from aide.service.transport import create_app
 from tests.service.test_protocol_contract import _validator
 from tests.service.test_service_concurrency import _CollectingSink, _ConcurrentProvider
 from tests.service.test_service_transport import _persist_session, _prepare_agent_home
@@ -31,7 +31,7 @@ from tests.service.test_service_transport import _persist_session, _prepare_agen
 @pytest.fixture
 def restore_provider(monkeypatch: pytest.MonkeyPatch) -> _ConcurrentProvider:
     provider = _ConcurrentProvider(block_b=True)
-    monkeypatch.setattr("omni.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_args: provider)
     return provider
 
 
@@ -674,15 +674,15 @@ async def test_restore_management_http_requires_csrf_and_claim_headers(tmp_path:
         }
         base_headers = {
             "Authorization": f"Bearer {token}",
-            "X-Omni-Client": client.client_id,
-            "X-Omni-Claim": claim.credential,
+            "X-Aide-Client": client.client_id,
+            "X-Aide-Claim": claim.credential,
         }
         async with aiohttp.ClientSession() as http:
             async with http.post(url, headers=base_headers, json=payload) as response:
                 assert response.status == 403
             async with http.post(
                 url,
-                headers={**base_headers, "X-Omni-CSRF": token},
+                headers={**base_headers, "X-Aide-CSRF": token},
                 json=payload,
             ) as response:
                 assert response.status == 200
@@ -695,8 +695,8 @@ async def test_restore_management_http_requires_csrf_and_claim_headers(tmp_path:
                 result_url,
                 headers={
                     **base_headers,
-                    "X-Omni-Request": "http-restore-result",
-                    "X-Omni-Session": session.session_id,
+                    "X-Aide-Request": "http-restore-result",
+                    "X-Aide-Session": session.session_id,
                 },
                 params={"session_id": session.session_id, "claim_version": str(claim.version)},
             ) as response:
@@ -704,7 +704,7 @@ async def test_restore_management_http_requires_csrf_and_claim_headers(tmp_path:
                 assert (await response.json())["result"].get("restore_result") is None
             async with http.post(
                 url,
-                headers={**base_headers, "X-Omni-CSRF": token},
+                headers={**base_headers, "X-Aide-CSRF": token},
                 json={**payload, "request_id": "http-restore-stale", "claim_version": 99},
             ) as response:
                 assert response.status == 409
@@ -871,7 +871,7 @@ async def test_restore_rebuild_failure_keeps_durable_result_and_closes_admission
     monkeypatch: pytest.MonkeyPatch,
     failure_point: str,
 ) -> None:
-    from omni.agent.loop import AgentRunExecutor
+    from aide.agent.loop import AgentRunExecutor
 
     service, workspace, owner, claim, target = restore_case
     await _restore_request(

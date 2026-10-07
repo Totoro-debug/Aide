@@ -9,7 +9,7 @@ const expect = playwrightExpect.configure({ timeout: 10000 });
 const control = await setup({ shutdownTimeoutMs: 60000 });
 let browser;
 try {
-  browser = await chromium.launch({ channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge" });
+  browser = await chromium.launch({ channel: process.env.AIDE_E2E_BROWSER_CHANNEL ?? "msedge" });
   const context = await browser.newContext({ locale: "en" });
   const page = await context.newPage();
   const errors = [];
@@ -31,8 +31,8 @@ try {
     return page.evaluate(async claim => {
       const path = `/api/v1/workspaces/${claim.workspace_id}/sessions/${claim.session_id}?claim_version=${claim.claim_version}`;
       const response = await window.fetch(path, { headers: {
-        "X-Omni-Control": window.modelControl,
-        "X-Omni-Claim": claim.reconnect_credential,
+        "X-Aide-Control": window.modelControl,
+        "X-Aide-Claim": claim.reconnect_credential,
       } });
       if (!response.ok) throw new Error(`Session snapshot failed (${response.status})`);
       return (await response.json()).snapshot;
@@ -49,7 +49,7 @@ try {
   await control.command("effort high");
   await expect(effort).toHaveValue("high");
 
-  const configPath = join(control.details.home_root, ".omni", "config.toml");
+  const configPath = join(control.details.home_root, ".aide", "config.toml");
   const config = await readFile(configPath);
   try {
     await writeFile(configPath, "[broken\n");

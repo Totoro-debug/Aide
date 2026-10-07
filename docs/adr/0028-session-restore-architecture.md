@@ -12,7 +12,7 @@ A committed foreground User message receives a Session-scoped monotonically incr
 
 A Run-local recorder captures authorized, actual `write_file` and `edit_file` mutations immediately before execution. It records exact pre-write bytes or nonexistence, canonical target identity, and observable post-write state. Repeated writes group by canonical target, using the earliest pre-write state in the selected range. A retargeted link is never followed during replay. Shared Tool instances carry no mutable anchor state.
 
-Records and blobs live under `.omni/restore/<session_id>/`. Backup failure does not replace the original Tool result. When possible it records a Backup Gap, disabling File Restore for that range. A total storage failure and crash can leave missing coverage unknowable. Journal entries whose Run never committed remain orphaned rather than becoming tracked anchor mutations.
+Records and blobs live under `.aide/restore/<session_id>/`. Backup failure does not replace the original Tool result. When possible it records a Backup Gap, disabling File Restore for that range. A total storage failure and crash can leave missing coverage unknowable. Journal entries whose Run never committed remain orphaned rather than becoming tracked anchor mutations.
 
 ## Transaction
 

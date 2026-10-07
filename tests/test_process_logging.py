@@ -8,11 +8,11 @@ from typing import TYPE_CHECKING
 import pytest
 from loguru import logger
 
-from omni.agent.tools.mcp import MCPTool
-from omni.agent.tools.mcp_runtime import MCPRuntimeManager, MCPWorkspaceRuntimeManager
-from omni.config.config import MCPServerConfiguration
-from omni.logging.process import configure_process_logging
-from omni.terminal.process_entry import run
+from aide.agent.tools.mcp import MCPTool
+from aide.agent.tools.mcp_runtime import MCPRuntimeManager, MCPWorkspaceRuntimeManager
+from aide.config.config import MCPServerConfiguration
+from aide.logging.process import configure_process_logging
+from aide.terminal.process_entry import run
 
 if TYPE_CHECKING:
     from loguru import Record
@@ -159,7 +159,7 @@ def test_process_entry_configures_logging_on_eager_help_path(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(sys, "argv", ["omni", "--help"])
+    monkeypatch.setattr(sys, "argv", ["aide", "--help"])
 
     with pytest.raises(SystemExit) as exited:
         run()

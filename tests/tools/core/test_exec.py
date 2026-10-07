@@ -8,16 +8,16 @@ from typing import cast
 
 import pytest
 
-from omni.agent.tools import base as tool_base_module
-from omni.agent.tools.core.exec import ExecTool
-from omni.agent.tools.core.exec_host import (
+from aide.agent.tools import base as tool_base_module
+from aide.agent.tools.core.exec import ExecTool
+from aide.agent.tools.core.exec_host import (
     ExecProcessSpec,
     PowerShellExecHost,
     resolve_exec_shell,
 )
-from omni.agent.tools.core.exec_policy import ExecAssessment, ExecOutcome, assess_command
-from omni.agent.tools.network_safety import DNSResolver
-from omni.agent.tools.tool_gateway import (
+from aide.agent.tools.core.exec_policy import ExecAssessment, ExecOutcome, assess_command
+from aide.agent.tools.network_safety import DNSResolver
+from aide.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ConfirmationRequester,

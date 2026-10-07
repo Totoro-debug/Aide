@@ -6,10 +6,10 @@ from typing import cast
 
 import pytest
 
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.service.configuration import ConfigurationEdit, ConfigurationEditor, ConfigurationSave
-from omni.service.errors import ServiceError
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.service.configuration import ConfigurationEdit, ConfigurationEditor, ConfigurationSave
+from aide.service.errors import ServiceError
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
 

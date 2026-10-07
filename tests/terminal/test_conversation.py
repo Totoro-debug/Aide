@@ -32,21 +32,21 @@ from textual.pilot import Pilot
 from textual.widget import Widget
 from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
 
-import omni.terminal.cli as cli
-from omni.agent.confirmation import (
+import aide.terminal.cli as cli
+from aide.agent.confirmation import (
     BackgroundConfirmationOwner,
     ConfirmationAborted,
     ConfirmationEnvelope,
     ToolConfirmationCoordinator,
 )
-from omni.agent.loop import (
+from aide.agent.loop import (
     ConfirmationRequestView,
     ForegroundConversationProjection,
 )
-from omni.agent.memory.dream import DreamResult
-from omni.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
-from omni.agent.session.backup_store import BackupGap, FileBackupStore
-from omni.agent.session.restore import (
+from aide.agent.memory.dream import DreamResult
+from aide.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
+from aide.agent.session.backup_store import BackupGap, FileBackupStore
+from aide.agent.session.restore import (
     RestoreFileResult,
     RestoreFileStatus,
     RestoreManager,
@@ -55,28 +55,28 @@ from omni.agent.session.restore import (
     RestoreResult,
     RestoreTarget,
 )
-from omni.agent.session.session import RestoreAnchor, Session, SessionRestoreResult
-from omni.agent.tools.permission import MCPToolIdentity
-from omni.agent.tools.tool_gateway import (
+from aide.agent.session.session import RestoreAnchor, Session, SessionRestoreResult
+from aide.agent.tools.permission import MCPToolIdentity
+from aide.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ModelToolCall,
 )
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
-from omni.errors import ErrorInfo
-from omni.management.commands import (
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
+from aide.errors import ErrorInfo
+from aide.management.commands import (
     MANAGEMENT_COMMANDS,
     ManagementCommandDispatcher,
     ManagementCommandResult,
 )
-from omni.management.service import (
+from aide.management.service import (
     FatalManagementError,
     ManagementError,
     RestoreListingReport,
     RuntimeStatus,
 )
-from omni.provider.models import (
+from aide.provider.models import (
     ModelCompleted,
     ModelContinuation,
     ModelStreamEvent,
@@ -84,21 +84,21 @@ from omni.provider.models import (
     ReasoningEffort,
     TextDelta,
 )
-from omni.service.client import RemoteManagementCommandDispatcher
-from omni.skills.catalog import SkillMetadata
-from omni.templates import render_template
-from omni.terminal.conversation import (
+from aide.service.client import RemoteManagementCommandDispatcher
+from aide.skills.catalog import SkillMetadata
+from aide.templates import render_template
+from aide.terminal.conversation import (
     TerminalConversationApp,
     _ConversationInput,
     _format_activity_duration,
     _RestoreConfirmationScreen,
     _RestoreModeScreen,
 )
-from omni.terminal.conversation import (
+from aide.terminal.conversation import (
     _MessageBusRunProjection as _AgentRunProjection,
 )
-from omni.utils.host_filesystem import HOST_FILESYSTEM
-from omni.utils.json_types import JsonObject
+from aide.utils.host_filesystem import HOST_FILESYSTEM
+from aide.utils.json_types import JsonObject
 from tests.agent.test_fixed_catalog import _agent_loop as _direct_agent_loop
 from tests.agent.test_fixed_catalog import _FixedCatalogProvider, _response
 from tests.configuration.test_config import VALID_CONFIG
@@ -1017,7 +1017,7 @@ async def _run_cli_terminal_case(
     (agent_home / "config.toml").write_text(VALID_CONFIG, encoding="utf-8")
     selected_provider = provider or _FixedCatalogProvider(())
 
-    from omni.agent.loop import AgentRunExecutor as ProductionExecutor
+    from aide.agent.loop import AgentRunExecutor as ProductionExecutor
 
     class DeterministicExecutor(ProductionExecutor):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -1030,11 +1030,11 @@ async def _run_cli_terminal_case(
             async with self.run_test(size=size) as pilot:
                 await scenario(self, pilot)
 
-    monkeypatch.setattr("omni.service.runtime.AgentRunExecutor", DeterministicExecutor)
+    monkeypatch.setattr("aide.service.runtime.AgentRunExecutor", DeterministicExecutor)
     monkeypatch.setattr(cli, "TerminalConversationApp", ScenarioApp)
     monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
     monkeypatch.setattr(
-        "omni.service.runtime.create_provider", lambda _configuration: selected_provider
+        "aide.service.runtime.create_provider", lambda _configuration: selected_provider
     )
     async with cli_service(home):
         await cli._run_service_cli_conversation(agent_home=home, workspace=workspace)
@@ -1087,7 +1087,7 @@ async def test_service_terminal_recalls_only_queued_inputs_through_up_key(
 async def test_service_terminal_preserves_output_delivered_before_submission_ack(
     agent_home: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from omni.service.client import ServiceClient
+    from aide.service.client import ServiceClient
 
     finished = asyncio.Event()
     original_event = ServiceClient._handle_event
@@ -3228,7 +3228,7 @@ async def test_terminal_conversation_starts_blank_and_focuses_input() -> None:
     async with app.run_test(size=(80, 24)):
         visible_text = _visible_screen_text(app)
 
-        assert "Message Omni" in visible_text
+        assert "Message Aide" in visible_text
         assert "Welcome" not in visible_text
         assert "Session" not in visible_text
         assert "Ready" in visible_text

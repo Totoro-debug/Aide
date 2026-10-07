@@ -6,10 +6,10 @@ from uuid import UUID
 
 import pytest
 
-from omni.agent.session.backup_store import FileBackupStore
-from omni.agent.session.restore import RestoreManager, RestoreMode
-from omni.agent.session.session import Session
-from omni.agent.workspace_state import WorkspaceState
+from aide.agent.session.backup_store import FileBackupStore
+from aide.agent.session.restore import RestoreManager, RestoreMode
+from aide.agent.session.session import Session
+from aide.agent.workspace_state import WorkspaceState
 
 RUN_TOKEN = UUID("12345678-1234-4234-8234-123456789abc")
 

@@ -16,15 +16,15 @@ from uuid import uuid4
 
 from aiohttp import web
 
-from omni.agent.session.backup_store import FileBackupStore
-from omni.agent.session.session import Session
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
-from omni.schedule.model import JobSchedule, ScheduleJob
-from omni.schedule.store import WorkspaceScheduleStore
-from omni.service.client import ServiceClient
-from omni.service.discovery import discovery_path
-from omni.service.errors import ServiceError
+from aide.agent.session.backup_store import FileBackupStore
+from aide.agent.session.session import Session
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
+from aide.schedule.model import JobSchedule, ScheduleJob
+from aide.schedule.store import WorkspaceScheduleStore
+from aide.service.client import ServiceClient
+from aide.service.discovery import discovery_path
+from aide.service.errors import ServiceError
 
 CONFIRMATION_PATH: str | None = None
 SETTINGS_ENTERED = asyncio.Event()
@@ -52,7 +52,7 @@ def _config(
 ) -> str:
     model_capacities = (
         "[models.providers.primary.model_context_windows]\nlarge-model = 65536\n"
-        if os.environ.get("OMNI_E2E_SESSION_MODELS") == "1"
+        if os.environ.get("AIDE_E2E_SESSION_MODELS") == "1"
         else ""
     )
     return f"""[models.providers.primary]
@@ -207,6 +207,7 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
                     {
                         "model": model,
                         "max_output": body.get("max_tokens"),
+                        "temperature": body.get("temperature"),
                         "prompt": user_prompt,
                         "reasoning_effort": body.get("reasoning_effort"),
                         "tools": tool_names,
@@ -439,7 +440,7 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
             (
                 "call-rejected",
                 "write_file",
-                {"path": ".omni/restore/protected.txt", "content": "must not write"},
+                {"path": ".aide/restore/protected.txt", "content": "must not write"},
             ),
             (
                 "call-cancelled",
@@ -716,7 +717,7 @@ async def _seed_restore_session(
 
 async def _stop_service(home: AgentHome, port: int) -> None:
     accepted = await ServiceClient.stop_existing(home, port=port)
-    timeout_seconds = int(os.environ.get("OMNI_E2E_SHUTDOWN_TIMEOUT_MS", "15000")) / 1000
+    timeout_seconds = int(os.environ.get("AIDE_E2E_SHUTDOWN_TIMEOUT_MS", "15000")) / 1000
     deadline = time.monotonic() + timeout_seconds
     while discovery_path(home).exists():
         if time.monotonic() >= deadline:
@@ -728,7 +729,7 @@ async def _stop_service(home: AgentHome, port: int) -> None:
 
 async def _run_e2e(provider_base_url: str) -> None:
     global CONFIRMATION_PATH, MODEL_MCP_ENTERED, MODEL_MCP_RELEASE, PROVIDER_OBSERVATION_PATH
-    with tempfile.TemporaryDirectory(prefix="omni-web-e2e-") as root:
+    with tempfile.TemporaryDirectory(prefix="aide-web-e2e-") as root:
         path = Path(root)
         repo_root = Path(__file__).resolve().parents[2]
         CONFIRMATION_PATH = str(path / "confirmation-outside.txt")
@@ -790,7 +791,7 @@ async def _run_e2e(provider_base_url: str) -> None:
         )
         mcp_command = Path(sys.executable).as_posix()
         mcp_args = [mcp_wire_path.as_posix(), mcp_v1_path.as_posix()]
-        home = AgentHome(path / ".omni")
+        home = AgentHome(path / ".aide")
         home.initialize()
         (home.path / "config.toml").write_text(
             _config(

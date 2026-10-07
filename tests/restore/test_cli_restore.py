@@ -10,20 +10,20 @@ from uuid import UUID, uuid4
 import pytest
 from textual.widgets import Input, OptionList, Static
 
-from omni.agent.loop import ForegroundConversationProjection
-from omni.agent.message_bus import MessageBus
-from omni.agent.session.execution_state import SessionRunState
-from omni.agent.session.session import RestoreAnchor, Session
-from omni.agent.workspace_state import WorkspaceState
-from omni.management.commands import (
+from aide.agent.loop import ForegroundConversationProjection
+from aide.agent.message_bus import MessageBus
+from aide.agent.session.execution_state import SessionRunState
+from aide.agent.session.session import RestoreAnchor, Session
+from aide.agent.workspace_state import WorkspaceState
+from aide.management.commands import (
     ManagementCommandDispatcher,
     ManagementPort,
     format_restore_preview,
 )
-from omni.management.service import (
+from aide.management.service import (
     RestoreListingReport,
 )
-from omni.terminal.conversation import TerminalConversationApp
+from aide.terminal.conversation import TerminalConversationApp
 
 SESSION_ID = "20260926-120000-000000_550e8400-e29b-41d4-a716-446655440000"
 ANCHOR_TOKEN = UUID("550e8400-e29b-41d4-a716-446655440001")

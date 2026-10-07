@@ -4,22 +4,22 @@ from uuid import uuid4
 
 import pytest
 
-from omni.agent.memory.manager import MemoryManager
-from omni.agent.message_bus import MessageBus
-from omni.agent.permission import RuntimePermissionControl
-from omni.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
-from omni.agent.tools.tool_gateway import ModelToolCall
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.provider.model_router import ModelRouter
-from omni.provider.models import (
+from aide.agent.memory.manager import MemoryManager
+from aide.agent.message_bus import MessageBus
+from aide.agent.permission import RuntimePermissionControl
+from aide.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
+from aide.agent.tools.tool_gateway import ModelToolCall
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.provider.model_router import ModelRouter
+from aide.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelResponse,
     ModelUsage,
 )
-from omni.schedule.service import ScheduleService
+from aide.schedule.service import ScheduleService
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import (
     FakeClock,

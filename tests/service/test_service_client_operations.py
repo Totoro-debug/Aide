@@ -12,13 +12,13 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
-from omni.config.config import ConfigLoader
-from omni.service.client import ServiceClient, ServiceStartupError
-from omni.service.discovery import ServiceDiscovery, create_credential, write_discovery
-from omni.service.errors import ServiceError
-from omni.service.runtime import AgentService
-from omni.service.transport import _WebSocketSink, create_app
-from omni.terminal.conversation import TerminalConversationApp, _ConversationInput
+from aide.config.config import ConfigLoader
+from aide.service.client import ServiceClient, ServiceStartupError
+from aide.service.discovery import ServiceDiscovery, create_credential, write_discovery
+from aide.service.errors import ServiceError
+from aide.service.runtime import AgentService
+from aide.service.transport import _WebSocketSink, create_app
+from aide.terminal.conversation import TerminalConversationApp, _ConversationInput
 from tests.service.test_protocol_contract import _validator
 from tests.service.test_service_concurrency import _CollectingSink, _ConcurrentProvider
 from tests.service.test_service_transport import _persist_session, _prepare_agent_home
@@ -41,7 +41,7 @@ async def connected_client(
     session_id = await _persist_session(
         workspace, home=home, title="Recovery", created_at=datetime.now(UTC), content="saved history",
     )
-    monkeypatch.setattr("omni.service.runtime.create_provider", lambda *_args: _ConcurrentProvider())
+    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_args: _ConcurrentProvider())
     service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     async with AsyncExitStack() as stack:
@@ -360,7 +360,7 @@ async def test_named_session_operations_send_current_claim_and_return_operation_
         assert payload["current_session_id"] == "session-1"
         assert payload["claim_version"] == 4
         assert isinstance(payload["request_id"], str)
-        assert headers == {"X-Omni-Claim": "claim-secret"}
+        assert headers == {"X-Aide-Claim": "claim-secret"}
 
 
 @pytest.mark.asyncio
@@ -526,7 +526,7 @@ async def test_textual_resume_then_recovery_preserves_draft_and_accepts_one_inpu
             await client._http_request(
                 "POST", f"/api/v1/workspaces/{client.workspace_id}/memory/read", mutation=True,
                 payload={"request_id": "old-claim", "current_session_id": target, "claim_version": 1},
-                extra_headers={"X-Omni-Claim": original_claim},
+                extra_headers={"X-Aide-Claim": original_claim},
             )
         assert stale.value.code == "stale_claim"
         input_area.text = "one input after journey"

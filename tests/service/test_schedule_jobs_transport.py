@@ -15,19 +15,19 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
-import omni.service.runtime as service_runtime
-from omni.agent.confirmation import BackgroundConfirmationOwner
-from omni.agent.session.session import Session, SessionStoragePartition
-from omni.agent.tools.core.read_file import ReadFileTool
-from omni.agent.tools.tool_gateway import ModelToolCall
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.schedule.store import WorkspaceScheduleStore
-from omni.service.client import ServiceClient
-from omni.service.discovery import create_credential
-from omni.service.runtime import AgentService
-from omni.service.transport import create_app
+import aide.service.runtime as service_runtime
+from aide.agent.confirmation import BackgroundConfirmationOwner
+from aide.agent.session.session import Session, SessionStoragePartition
+from aide.agent.tools.core.read_file import ReadFileTool
+from aide.agent.tools.tool_gateway import ModelToolCall
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.schedule.store import WorkspaceScheduleStore
+from aide.service.client import ServiceClient
+from aide.service.discovery import create_credential
+from aide.service.runtime import AgentService
+from aide.service.transport import create_app
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.scheduling.test_schedule_agent_loop import _response, _ScheduleProvider
 
@@ -48,8 +48,8 @@ def _prepare_agent_home(path: Path) -> AgentHome:
 def _headers(client: ServiceClient) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {client.token}",
-        "X-Omni-CSRF": client.token,
-        "X-Omni-Client": client.client_id,
+        "X-Aide-CSRF": client.token,
+        "X-Aide-Client": client.client_id,
     }
 
 
@@ -76,8 +76,8 @@ async def schedule_http(
     url = str(server.make_url(f"/api/v1/workspaces/{workspace.workspace_id}/schedule/jobs"))
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-CSRF": token,
-        "X-Omni-Client": client.client_id,
+        "X-Aide-CSRF": token,
+        "X-Aide-Client": client.client_id,
     }
     try:
         yield service, server, url, headers
@@ -480,8 +480,8 @@ async def test_schedule_job_http_delete_cancels_a_running_job_and_keeps_deleted_
         await server.start_server()
         headers = {
             "Authorization": f"Bearer {token}",
-            "X-Omni-CSRF": token,
-            "X-Omni-Client": client.client_id,
+            "X-Aide-CSRF": token,
+            "X-Aide-Client": client.client_id,
         }
         jobs_url = str(
             server.make_url(f"/api/v1/workspaces/{workspace.workspace_id}/schedule/jobs")
@@ -610,7 +610,7 @@ async def test_schedule_queued_retry_rechecks_current_identity(
         try:
             await asyncio.wait_for(checked.wait(), 5)
             if invalidated == "client":
-                service.client(headers["X-Omni-Client"]).expired = True
+                service.client(headers["X-Aide-Client"]).expired = True
             else:
                 record = service.projects.register(workspace.workspace_path)
                 service.projects.begin_removal(record.project_id, None)
@@ -633,7 +633,7 @@ async def test_schedule_scope_reuse_and_transport_guards(
     payload = {"request_id": "scope", "message": "task", "at_time": "2099-01-01T08:00:00+08:00"}
     other_path = tmp_path / "other"
     other_path.mkdir()
-    other = await service.attach_workspace(headers["X-Omni-Client"], other_path)
+    other = await service.attach_workspace(headers["X-Aide-Client"], other_path)
     other_url = str(server.make_url(f"/api/v1/workspaces/{other.workspace_id}/schedule/jobs"))
     async with aiohttp.ClientSession() as http:
         async with http.post(url, headers=headers, json=payload) as response:
@@ -646,7 +646,7 @@ async def test_schedule_scope_reuse_and_transport_guards(
             assert (await response.json())["code"] == "request_reused"
         for denied_headers, expected in [
             ({}, 401),
-            ({k: v for k, v in headers.items() if k != "X-Omni-CSRF"}, 403),
+            ({k: v for k, v in headers.items() if k != "X-Aide-CSRF"}, 403),
             ({**headers, "Origin": "https://example.com"}, 403),
         ]:
             async with http.post(
@@ -730,8 +730,8 @@ async def test_schedule_http_delete_drains_real_tool_and_preserves_session_termi
     url = str(server.make_url(f"/api/v1/workspaces/{workspace.workspace_id}/schedule/jobs"))
     headers = {
         "Authorization": f"Bearer {token}",
-        "X-Omni-CSRF": token,
-        "X-Omni-Client": client.client_id,
+        "X-Aide-CSRF": token,
+        "X-Aide-Client": client.client_id,
     }
     try:
         async with aiohttp.ClientSession() as http:

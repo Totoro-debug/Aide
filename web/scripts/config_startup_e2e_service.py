@@ -14,13 +14,13 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
-from omni.schedule.model import JobSchedule, ScheduleJob
-from omni.schedule.store import WorkspaceScheduleStore
-from omni.service.client import ServiceClient
-from omni.service.discovery import DEFAULT_SERVICE_PORT, discovery_path, read_discovery
-from omni.service.projects import ProjectCatalog
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
+from aide.schedule.model import JobSchedule, ScheduleJob
+from aide.schedule.store import WorkspaceScheduleStore
+from aide.service.client import ServiceClient
+from aide.service.discovery import DEFAULT_SERVICE_PORT, discovery_path, read_discovery
+from aide.service.projects import ProjectCatalog
 from web.scripts.e2e_service import _start_fixture_provider
 
 StartupState = Literal["missing", "invalid", "malformed"]
@@ -33,9 +33,9 @@ async def _launch_web(root: Path, workspace: Path) -> str:
         listener.bind(("127.0.0.1", DEFAULT_SERVICE_PORT))
     source = (
         "import sys, webbrowser; "
-        "from omni.terminal.process_entry import run; "
+        "from aide.terminal.process_entry import run; "
         "webbrowser.open_new_tab = lambda _url: False; "
-        "sys.argv = ['omni', 'web']; run()"
+        "sys.argv = ['aide', 'web']; run()"
     )
     environment = {
         **os.environ,
@@ -59,7 +59,7 @@ async def _launch_web(root: Path, workspace: Path) -> str:
         await process.wait()
         raise
     if process.returncode != 0:
-        raise RuntimeError(f"Production omni web failed: {stderr.decode()}")
+        raise RuntimeError(f"Production aide web failed: {stderr.decode()}")
     return stdout.decode().strip()
 
 
@@ -155,7 +155,7 @@ def _parse_args() -> argparse.Namespace:
 
 async def _run(state: StartupState, root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
-    home = AgentHome(root / ".omni")
+    home = AgentHome(root / ".aide")
     home.initialize()
     cli_workspace = root / "cli-workspace"
     cli_workspace.mkdir()

@@ -12,14 +12,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
-import omni.agent.context.builder as context
-from omni.agent.blackboard import Blackboard
-from omni.agent.context.builder import ContextBuilder
-from omni.agent.memory.manager import MemoryManager
-from omni.agent.tools.core.exec_host import resolve_exec_shell
-from omni.agent.tools.permission import PermissionSnapshot
-from omni.agent.workspace_state import WorkspaceState
-from omni.skills.catalog import (
+import aide.agent.context.builder as context
+from aide.agent.blackboard import Blackboard
+from aide.agent.context.builder import ContextBuilder
+from aide.agent.memory.manager import MemoryManager
+from aide.agent.tools.core.exec_host import resolve_exec_shell
+from aide.agent.tools.permission import PermissionSnapshot
+from aide.agent.workspace_state import WorkspaceState
+from aide.skills.catalog import (
     ManualSkillInvocation,
     SkillLoader,
     SkillMetadata,
@@ -165,10 +165,10 @@ def test_context_builder_builds_system_history_and_current_user_in_order(
     timezone_name: str,
     expected_time: str,
 ) -> None:
-    monkeypatch.setattr("omni.agent.context.builder.platform.system", lambda: "Windows")
-    monkeypatch.setattr("omni.agent.context.builder.platform.machine", lambda: "AMD64")
+    monkeypatch.setattr("aide.agent.context.builder.platform.system", lambda: "Windows")
+    monkeypatch.setattr("aide.agent.context.builder.platform.machine", lambda: "AMD64")
     monkeypatch.setattr(
-        "omni.agent.context.builder.platform.python_version",
+        "aide.agent.context.builder.platform.python_version",
         lambda: "3.12.13",
     )
     agent_home = workspace.parent / "agent-home"

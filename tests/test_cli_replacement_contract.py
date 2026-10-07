@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from omni.agent.permission import ToolPermissionLevel
-from omni.agent.session.session import Session
-from omni.config.agent_home import AgentHome
-from omni.service.client import ServiceClient
+from aide.agent.permission import ToolPermissionLevel
+from aide.agent.session.session import Session
+from aide.config.agent_home import AgentHome
+from aide.service.client import ServiceClient
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures.cli_service import cli_service
 from tests.service.test_service_concurrency import _client_output, _ConcurrentProvider
@@ -33,7 +33,7 @@ async def test_cli_session_selection_preserves_workspace_resources_and_client_se
         content="Durable target input",
     )
     provider = _ConcurrentProvider()
-    monkeypatch.setattr("omni.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_args: provider)
     async with cli_service(home) as service:
         client = await ServiceClient.connect_or_start(home, directory)
         try:
@@ -84,12 +84,12 @@ async def test_cli_failed_resume_leaves_current_claim_and_management_usable(
         content="Durable target input",
     )
     provider = _ConcurrentProvider()
-    monkeypatch.setattr("omni.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_args: provider)
     async with cli_service(home):
         client = await ServiceClient.connect_or_start(home, directory)
         try:
             previous = client.session_id
-            path = directory / ".omni" / "sessions" / f"{target}.jsonl"
+            path = directory / ".aide" / "sessions" / f"{target}.jsonl"
             path.write_bytes(b"PRIVATE_MALFORMED_HISTORY")
             result = await client.management_dispatcher.resume(target)
             assert result.resumed_session_id is None

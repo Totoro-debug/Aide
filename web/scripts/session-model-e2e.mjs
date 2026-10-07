@@ -8,7 +8,7 @@ const expect = playwrightExpect.configure({ timeout: 15000 });
 const control = await setup({ shutdownTimeoutMs: 60000, sessionModels: true });
 let browser;
 try {
-  browser = await chromium.launch({ channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge" });
+  browser = await chromium.launch({ channel: process.env.AIDE_E2E_BROWSER_CHANNEL ?? "msedge" });
   const context = await browser.newContext({ locale: "en" });
   const page = await context.newPage();
   const errors = [];
@@ -47,7 +47,7 @@ try {
     return page.evaluate(async current => {
       const response = await window.fetch(
         `/api/v1/workspaces/${current.workspace_id}/sessions/${current.session_id}?claim_version=${current.claim_version}`,
-        { headers: { "X-Omni-Control": window.modelControl, "X-Omni-Claim": current.reconnect_credential } },
+        { headers: { "X-Aide-Control": window.modelControl, "X-Aide-Claim": current.reconnect_credential } },
       );
       if (!response.ok) throw new Error(`Session snapshot failed (${response.status})`);
       return (await response.json()).snapshot;
@@ -58,7 +58,13 @@ try {
   const defaultValue = JSON.stringify(["primary", "small-model"]);
   const otherValue = JSON.stringify(["primary", "large-model"]);
   const commands = () => page.evaluate(() => window.modelCommands.length);
+  const openModels = async () => {
+    const trigger = page.locator("#composer-model-trigger");
+    await expect(trigger).toBeEnabled();
+    if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
+  };
   await page.goto(`${control.details.url}/#ticket=${control.details.ticket}`);
+  await openModels();
   await expect(model).toBeEnabled();
   await expect(model).toHaveValue("");
   await expect(model.locator('option[value=""]')).toHaveAttribute("disabled", "");
@@ -69,9 +75,11 @@ try {
   await expect(model).toHaveValue(otherValue);
   await expect.poll(commands).toBe(1);
   await expect(model.locator('option[value=""]')).toHaveCount(0);
+  await openModels();
   await effort.selectOption("high");
   await expect(effort).toHaveValue("high");
   await expect.poll(commands).toBe(2);
+  await openModels();
   await model.selectOption(defaultValue);
   await expect(model).toHaveValue(defaultValue);
   await expect.poll(commands).toBe(3);
@@ -83,10 +91,11 @@ try {
   await page.getByLabel("Message input", { exact: true }).fill("model selection persistence");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByRole("log").getByText("Fixture response.", { exact: true })).toBeVisible();
-  const persisted = JSON.parse((await readFile(join(control.details.home_root, ".omni", "chat", ".omni", "sessions", `${claim.session_id}.jsonl`), "utf8")).split("\n")[0]);
+  const persisted = JSON.parse((await readFile(join(control.details.home_root, ".aide", "chat", ".aide", "sessions", `${claim.session_id}.jsonl`), "utf8")).split("\n")[0]);
   assert.deepEqual(persisted.metadata.model_configuration, expected);
   assert.equal(persisted.metadata.model_configuration_version, 3);
   await page.reload();
+  await openModels();
   await expect(model).toHaveValue(defaultValue);
   await expect(effort).toHaveValue("high");
   assert.deepEqual((await snapshot()).model_configuration, expected);

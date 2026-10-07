@@ -10,9 +10,9 @@ from typing import cast
 
 import pytest
 
-from omni.agent.tools.base import ToolError
-from omni.agent.tools.core.tool_search import ToolSearchTool
-from omni.agent.tools.search import (
+from aide.agent.tools.base import ToolError
+from aide.agent.tools.core.tool_search import ToolSearchTool
+from aide.agent.tools.search import (
     BM25_B,
     BM25_K1,
     BUILTIN_TOOL_SEARCH_KEYWORDS,

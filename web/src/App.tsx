@@ -1,5 +1,8 @@
 import { REASONING_EFFORTS } from "./reasoningEffort.ts";
 import { isNonEmptyString, isRecord } from "./validation.ts";
+import { ModelSettingsCard } from "./ModelSettingsCard";
+import { modelSettingsFieldId } from "./modelSettings";
+import type { ModelForm } from "./modelSettings";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   ArrowLeft,
@@ -187,7 +190,7 @@ interface PendingConfirmation {
   title: string | null;
 }
 
-const THEME_KEY = "omni.theme";
+const THEME_KEY = "aide.theme";
 const initialLaunchTicket = readAndClearTicket();
 const PERMISSION_LEVELS: ToolPermissionLevel[] = ["read-only", "workspace-write", "full-access"];
 
@@ -1209,8 +1212,7 @@ interface ProviderForm {
   id: string;
   protocol: string;
   base_url: string;
-  models: string[];
-  model_context_windows: Record<string, string>;
+  models: Record<string, ModelForm>;
   api_key: SecretDraft;
 }
 
@@ -1218,11 +1220,6 @@ interface RouteForm {
   name: string;
   provider_id: string;
   model: string;
-  context_window: string;
-  max_output: string;
-  temperature: string;
-  reasoning_effort: ReasoningEffort;
-  timeout: string;
 }
 
 interface McpForm {
@@ -1301,19 +1298,13 @@ function formFromConfig(
         id,
         protocol: provider.protocol,
         base_url: provider.base_url,
-        models: provider.models,
-        model_context_windows: Object.fromEntries(Object.entries(provider.model_context_windows).map(([model, contextWindow]) => [model, String(contextWindow)])),
+        models: modelFormsFromConfig(provider.models, previous?.models.providers[providerRows.get(id)!]?.models, latest?.models.providers[providerRows.get(id)!]?.models),
         api_key: secretDraft(provider.api_key.configured),
       }])),
       routes: Object.fromEntries(Object.entries(fields.models.routes).map(([name, route]) => [name, {
         name,
         provider_id: route.provider_id,
         model: route.model,
-        context_window: String(route.context_window),
-        max_output: String(route.max_output),
-        temperature: String(route.temperature),
-        reasoning_effort: route.reasoning_effort,
-        timeout: String(route.timeout),
       }])),
     },
     mcp: Object.fromEntries(Object.entries(fields.mcp).map(([name, server]) => {
@@ -1347,18 +1338,62 @@ function formFromConfig(
   };
 }
 
+function modelFormsFromConfig(
+  models: import("./protocol").ConfigProviderFields["models"],
+  previous?: Record<string, ModelForm>,
+  latest?: Record<string, ModelForm>,
+): Record<string, ModelForm> {
+  const rows = settingsRowKeys(Object.keys(models), Object.entries(previous ?? {}).map(([row, model]) => [row, model.id]), Object.keys(latest ?? {}));
+  return Object.fromEntries(Object.entries(models).map(([id, model]) => [rows.get(id)!, {
+    id,
+    saved: true,
+    context_window: model.context_window === null ? "" : String(model.context_window),
+    max_output: model.max_output === null ? "" : String(model.max_output),
+    temperature: model.temperature === null ? "" : String(model.temperature),
+    reasoning_effort: model.reasoning_effort ?? "",
+    timeout: model.timeout === null ? "" : String(model.timeout),
+    ...(model.migration_candidates === undefined ? {} : { migration_candidates: model.migration_candidates }),
+  }]));
+}
+
+function isCompleteModelForm(model: ModelForm): boolean {
+  const capacity = Number(model.context_window);
+  const output = Number(model.max_output);
+  const temperature = Number(model.temperature);
+  const timeout = Number(model.timeout);
+  return model.id.trim() !== "" && Number.isInteger(capacity) && capacity >= 1024 && capacity <= 10000000
+    && Number.isInteger(output) && output >= 1 && output < capacity
+    && model.temperature.trim() !== "" && Number.isFinite(temperature) && temperature >= 0 && temperature <= 2
+    && model.reasoning_effort !== "" && Number.isInteger(timeout) && timeout >= 1 && timeout <= 600;
+}
+
+function isSelectableProvider(provider: ProviderForm): boolean {
+  let hasUrl = false;
+  try {
+    const url = new URL(provider.base_url);
+    hasUrl = ["http:", "https:"].includes(url.protocol) && url.hostname !== "";
+  } catch { /* An incomplete provider stays outside route choices. */ }
+  const hasKey = provider.api_key.action === "replace" ? provider.api_key.value.trim() !== ""
+    : provider.api_key.action === "keep" && provider.api_key.configured;
+  return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(provider.id) && ["anthropic", "openai-compatible"].includes(provider.protocol)
+    && hasUrl && hasKey && Object.values(provider.models).some(isCompleteModelForm);
+}
+
 function configFromForm(form: SettingsForm): { fields: ConfigPatchFields; secrets: ConfigSecrets } {
   const secrets: ConfigSecrets = {};
-  const providers: Record<string, { id: string; protocol: string; base_url: string; models: string[]; model_context_windows: Record<string, number> }> = {};
+  const providers: NonNullable<NonNullable<ConfigPatchFields["models"]>["providers"]> = {};
   for (const [providerRow, provider] of Object.entries(form.models.providers)) {
     providers[providerRow] = {
       id: provider.id,
       protocol: provider.protocol,
       base_url: provider.base_url,
-      models: provider.models,
-      model_context_windows: Object.fromEntries(Object.entries(provider.model_context_windows)
-        .filter(([model, contextWindow]) => provider.models.includes(model) && contextWindow.trim() !== "")
-        .map(([model, contextWindow]) => [model, Number(contextWindow)])),
+      models: Object.fromEntries(Object.values(provider.models).map((model) => [model.id, {
+        context_window: model.context_window.trim() === "" ? null : Number(model.context_window),
+        max_output: model.max_output.trim() === "" ? null : Number(model.max_output),
+        temperature: model.temperature.trim() === "" ? null : Number(model.temperature),
+        reasoning_effort: model.reasoning_effort || null,
+        timeout: model.timeout.trim() === "" ? null : Number(model.timeout),
+      }])),
     };
     secrets[`models.providers.${provider.id}.api_key`] = provider.api_key.action === "replace"
       ? { action: "replace", value: provider.api_key.value }
@@ -1369,11 +1404,6 @@ function configFromForm(form: SettingsForm): { fields: ConfigPatchFields; secret
     routes[route.name] = {
       provider_id: route.provider_id,
       model: route.model,
-      context_window: Number(route.context_window),
-      max_output: Number(route.max_output),
-      temperature: Number(route.temperature),
-      reasoning_effort: route.reasoning_effort,
-      timeout: Number(route.timeout),
     };
   }
   const mcp: Record<string, Record<string, unknown>> = {};
@@ -1518,6 +1548,9 @@ function settingsRowsForComparison<T extends { id?: string; name?: string }>(
 function changedConfigFieldPaths(baseline: ConfigFields, candidate: ConfigPatchFields): string[][] {
   const comparable = structuredClone(candidate);
   const comparableBaseline: ConfigPatchFields = structuredClone(baseline);
+  for (const provider of Object.values(comparableBaseline.models?.providers ?? {})) {
+    for (const model of Object.values(provider.models ?? {})) delete model.migration_candidates;
+  }
   for (const server of Object.values(comparableBaseline.mcp ?? {})) {
     server.header_rows = Object.entries(server.headers ?? {}).map(([name, secret]) => ({ name, secret }));
     server.tool_keyword_rows = Object.entries(server.tool_keywords ?? {}).map(([name, keywords]) => ({ name, keywords }));
@@ -1837,7 +1870,7 @@ function SettingsView({
         ...form.models,
         providers: {
           ...form.models.providers,
-          [id]: { id, protocol: "openai-compatible", base_url: "", models: [], model_context_windows: {}, api_key: secretDraft(false) },
+          [id]: { id, protocol: "openai-compatible", base_url: "", models: {}, api_key: secretDraft(false) },
         },
       },
     }));
@@ -1848,6 +1881,40 @@ function SettingsView({
       const providers = { ...current.models.providers };
       delete providers[id];
       return { ...current, models: { ...current.models, providers } };
+    });
+  }, [updateDraft]);
+
+  const addModel = useCallback((providerRow: string) => {
+    updateDraft((current) => {
+      const provider = current.models.providers[providerRow];
+      const row = createRequestId();
+      return { ...current, models: { ...current.models, providers: {
+        ...current.models.providers, [providerRow]: { ...provider, models: {
+          ...provider.models, [row]: { id: "", saved: false, context_window: "", max_output: "8192", temperature: "0.2", reasoning_effort: "mid", timeout: "120" },
+        } },
+      } } };
+    });
+  }, [updateDraft]);
+
+  const updateModel = useCallback((providerRow: string, modelRow: string, update: Partial<ModelForm>) => {
+    updateDraft((current) => {
+      const provider = current.models.providers[providerRow];
+      return { ...current, models: { ...current.models, providers: {
+        ...current.models.providers, [providerRow]: { ...provider, models: {
+          ...provider.models, [modelRow]: { ...provider.models[modelRow], ...update },
+        } },
+      } } };
+    });
+  }, [updateDraft]);
+
+  const removeModel = useCallback((providerRow: string, modelRow: string) => {
+    updateDraft((current) => {
+      const provider = current.models.providers[providerRow];
+      const models = { ...provider.models };
+      delete models[modelRow];
+      return { ...current, models: { ...current.models, providers: {
+        ...current.models.providers, [providerRow]: { ...provider, models },
+      } } };
     });
   }, [updateDraft]);
 
@@ -1868,11 +1935,6 @@ function SettingsView({
             name,
             provider_id: Object.values(form.models.providers)[0]?.id ?? "",
             model: "",
-            context_window: "8192",
-            max_output: "1024",
-            temperature: "0",
-            reasoning_effort: "mid",
-            timeout: "60",
           },
         },
       },
@@ -1970,7 +2032,8 @@ function SettingsView({
           ? [...dirtySectionsRef.current]
           : autoSection === null
             ? []
-            : allChangedSections.filter((section) => section === autoSection));
+            : allChangedSections.includes(autoSection) || dirtySectionsRef.current.has(autoSection)
+              ? [autoSection] : []);
     const candidate = pending === null
       ? {
         fields: configFieldsForSections(fullCandidate?.fields ?? {}, sections),
@@ -1983,12 +2046,43 @@ function SettingsView({
       header.action === "replace" && header.value.length === 0
     ))));
     if (incompleteReplacement && !focusError) return;
+    if (sections.includes("models")) {
+      const modelErrors: SettingsFieldError = {};
+      let incompleteModels = false;
+      for (const provider of Object.values(snapshot.models.providers)) {
+        const names = Object.values(provider.models).map((model) => model.id);
+        for (const [row, model] of Object.entries(provider.models)) {
+          if (model.id && names.filter((name) => name === model.id).length > 1) {
+            if (!model.saved || !Object.values(provider.models).some((candidate) => candidate.id === model.id && !candidate.saved)) {
+              modelErrors[`models.providers.${provider.id}.models.${row}.id`] = t("settings.duplicateModel");
+            }
+          }
+          if ([model.id, model.context_window, model.max_output, model.temperature, model.reasoning_effort, model.timeout].some((value) => value.trim() === "")) incompleteModels = true;
+        }
+      }
+      if (Object.keys(modelErrors).length > 0) {
+        setFieldErrors(modelErrors);
+        setSubmitError(t("settings.duplicateModel"));
+        return;
+      }
+      const incompleteRoute = Object.values(snapshot.models.routes).some((route) => route.provider_id === "" || route.model === "");
+      if ((incompleteModels || incompleteRoute) && !focusError) return;
+    }
     const changedPaths = fullCandidate === null ? [] : changedConfigFieldPaths(baseline, fullCandidate.fields);
     const hasFieldChanges = pending === null
       ? changedPaths.some(([section]) => sections.includes(section as ConfigSettingsSection))
       : Object.keys(candidate.fields).length > 0;
     const hasSecretChanges = Object.values(candidate.secrets).some(({ action }) => action !== "keep");
     if (!repairing && !hasFieldChanges && !hasSecretChanges) {
+      for (const section of sections) dirtySectionsRef.current.delete(section);
+      const remainingErrors = Object.fromEntries(Object.entries(fieldErrors).filter(([path]) => (
+        !sections.includes(path.split(".")[0] as ConfigSettingsSection)
+      )));
+      setFieldErrors(remainingErrors);
+      dirtyRef.current = dirtySectionsRef.current.size > 0;
+      setDirty(dirtyRef.current);
+      setSaveFailed(false);
+      if (Object.keys(remainingErrors).length === 0 && conflictPathsRef.current.length === 0) setSubmitError(null);
       return;
     }
     const inFlight = retryOperationRef.current;
@@ -2199,7 +2293,7 @@ function SettingsView({
     }
   }, [serviceStatus, t]);
 
-  async function restartOmni() {
+  async function restartAide() {
     if (restartingInstanceRef.current !== null || dirtyRef.current || mutationInFlight.current
       || response === null || serviceStatus === null || connectionState !== "online") return;
     setRestartBusy(true);
@@ -2268,9 +2362,6 @@ function SettingsView({
     return labels[path] ?? path;
   };
   const fieldId = (path: string) => `settings-${path.replaceAll(".", "-")}`;
-  const modelContextWindowFieldId = (providerId: string, model: string) => (
-    `${fieldId(`models.providers.${providerId}.model_context_windows`)}-${encodeURIComponent(model).replaceAll(".", "%2E")}`
-  );
   const headerInputId = (server: string, header: string) => `settings-mcp-${server}-headers-${encodeURIComponent(header).replaceAll(".", "%2E")}`;
   const fieldError = (path: string) => fieldErrors[path];
   const groupError = (prefix: string) => Object.entries(fieldErrors).find(([path]) => path === prefix || path.startsWith(`${prefix}.`))?.[1];
@@ -2307,13 +2398,19 @@ function SettingsView({
         }
       }
     }
-    const capacityMarker = ".model_context_windows.";
-    const capacityMarkerIndex = targetPath.indexOf(capacityMarker);
-    if (capacityMarkerIndex >= 0) {
-      const providerId = targetPath.slice("models.providers.".length, capacityMarkerIndex);
-      const model = targetPath.slice(capacityMarkerIndex + capacityMarker.length);
-      document.getElementById(modelContextWindowFieldId(providerId, model))?.focus();
-      return;
+    for (const provider of Object.values(draft?.models.providers ?? {})) {
+      for (const [row, model] of Object.entries(provider.models)) {
+        const prefixes = [row, model.id].filter(Boolean).map((name) => `models.providers.${provider.id}.models.${name}`);
+        const prefix = prefixes.find((candidate) => path === candidate || path.startsWith(`${candidate}.`));
+        if (prefix !== undefined) {
+          const target = document.getElementById(modelSettingsFieldId(provider.id, row, path === prefix ? "id" : path.slice(prefix.length + 1)));
+          if (target === null) continue;
+          const details = target?.closest("details");
+          if (details) details.open = true;
+          target?.focus();
+          return;
+        }
+      }
     }
     let target = document.getElementById(fieldId(targetPath));
     while (target === null && targetPath.includes(".")) {
@@ -2545,7 +2642,7 @@ function SettingsView({
           }}>
             <div className={styles.dialogHeader}>
               <div>
-                <Dialog.Title className={styles.dialogTitle}>{t("settings.restartOmni")}</Dialog.Title>
+                <Dialog.Title className={styles.dialogTitle}>{t("settings.restartAide")}</Dialog.Title>
                 <Dialog.Description className={styles.dialogDescription}>{t("settings.restartConfirm")}</Dialog.Description>
               </div>
             </div>
@@ -2555,7 +2652,7 @@ function SettingsView({
                 <button className={styles.secondaryButton} type="button" disabled={restartBusy}>{t("controls.cancel")}</button>
               </Dialog.Close>
               <button className={styles.primaryButton} type="button" disabled={restartBusy || dirty || saving || connectionState !== "online"}
-                onClick={() => void restartOmni()}>{t(restartBusy ? "settings.restarting" : "settings.restartOmni")}</button>
+                onClick={() => void restartAide()}>{t(restartBusy ? "settings.restarting" : "settings.restartAide")}</button>
             </div>
           </Dialog.Content>
         </Dialog.Portal>
@@ -2609,13 +2706,13 @@ function SettingsView({
                       <input
                         className={styles.textInput}
                         id={fieldId("web.default_chat_workspace")}
-                        value={draft?.web.default_chat_workspace ?? "~/.omni/chat"}
+                        value={draft?.web.default_chat_workspace ?? "~/.aide/chat"}
                         disabled={controlDisabled}
                         aria-invalid={fieldError("web.default_chat_workspace") !== undefined}
                         aria-describedby={fieldError("web.default_chat_workspace") !== undefined
                           ? `${fieldId("web.default_chat_workspace")}-error` : undefined}
                         onChange={(event) => updateField("web.default_chat_workspace", event.currentTarget.value)}
-                        onBlur={() => blurField("web.default_chat_workspace", draft?.web.default_chat_workspace ?? "~/.omni/chat")}
+                        onBlur={() => blurField("web.default_chat_workspace", draft?.web.default_chat_workspace ?? "~/.aide/chat")}
                       />
                       <span className={styles.fieldError} id={`${fieldId("web.default_chat_workspace")}-error`}>
                         {fieldError("web.default_chat_workspace") ?? ""}
@@ -2629,7 +2726,7 @@ function SettingsView({
                 <div className={styles.managementTool}>
                   <div className={styles.managementToolHeader}>
                     <div>
-                      <h3>{t("settings.restartOmni")}</h3>
+                      <h3>{t("settings.restartAide")}</h3>
                       <p className={styles.managementHint}>{t("settings.restartDescription")}</p>
                     </div>
                     <button className={styles.secondaryButton} type="button" ref={restartTriggerRef}
@@ -2637,7 +2734,7 @@ function SettingsView({
                         || response?.configuration.repair_required === true}
                       onClick={() => { setRestartError(null); setRestartOpen(true); }}>
                       <RefreshCw size={15} className={restartBusy ? styles.spin : undefined} aria-hidden="true" />
-                      {t(restartBusy ? "settings.restarting" : "settings.restartOmni")}
+                      {t(restartBusy ? "settings.restarting" : "settings.restartAide")}
                     </button>
                   </div>
                   {restartError !== null ? <p className={styles.composerError} role="alert">{restartError}</p> : null}
@@ -2850,7 +2947,7 @@ function SettingsView({
                         type="button"
                         aria-label={t("settings.removeProvider")}
                         title={t("settings.removeProvider")}
-                        disabled={controlDisabled}
+                        disabled={controlDisabled || Object.values(draft.models.routes).some((route) => route.provider_id === provider.id)}
                         onClick={() => removeProvider(providerRow)}
                       ><Trash2 size={15} aria-hidden="true" /></button>
                     </div>
@@ -2888,11 +2985,6 @@ function SettingsView({
                         />
                         <span className={styles.fieldError} id={`${fieldId(`models.providers.${provider.id}.base_url`)}-error`}>{fieldError(`models.providers.${provider.id}.base_url`) ?? ""}</span>
                       </label>
-                      <SettingsListField id={fieldId(`models.providers.${provider.id}.models`)} label={t("settings.modelsList")} values={provider.models} error={groupError(`models.providers.${provider.id}.models`)} disabled={controlDisabled} onChange={(models) => updateProvider(providerRow, { models })} />
-                      {provider.models.filter(Boolean).map((model) => {
-                        const path = `models.providers.${provider.id}.model_context_windows.${model}`;
-                        return <SettingsNumberField key={model} id={modelContextWindowFieldId(provider.id, model)} label={`${t("settings.contextWindow")} · ${model}`} value={provider.model_context_windows[model] ?? ""} error={fieldError(path)} disabled={controlDisabled} step="1" onChange={(value) => updateProvider(providerRow, { model_context_windows: { ...provider.model_context_windows, [model]: value } })} onBlur={() => blurField(path, provider.model_context_windows[model] ?? "")} />;
-                      })}
                       <SecretInput
                         id={fieldId(`models.providers.${provider.id}.api_key`)}
                         label={t("settings.apiKey")}
@@ -2901,6 +2993,18 @@ function SettingsView({
                         disabled={controlDisabled}
                         onChange={(update) => updateProvider(providerRow, { api_key: { ...provider.api_key, ...update } as SecretDraft })}
                       />
+                    </div>
+                    <div className={styles.settingsCollectionHeader}>
+                      <h4>{t("settings.modelsList")}</h4>
+                      <button className={styles.secondaryButton} type="button" aria-label={t("settings.addModel")} onClick={() => addModel(providerRow)} disabled={controlDisabled}>
+                        <Plus size={14} aria-hidden="true" />{t("settings.addModel")}
+                      </button>
+                    </div>
+                    <div className={styles.modelCards}>
+                      {Object.entries(provider.models).map(([row, model]) => <ModelSettingsCard key={row} row={row} model={model} providerId={provider.id}
+                        persisted={!response?.configuration.repair_required && model.saved} disabled={controlDisabled} errorFor={fieldError}
+                        referencedBy={Object.values(draft.models.routes).filter((route) => route.provider_id === provider.id && route.model === model.id).map((route) => route.name)}
+                        onChange={(change) => updateModel(providerRow, row, change)} onRemove={() => removeModel(providerRow, row)} />)}
                     </div>
                   </div>
                 ))}
@@ -2915,16 +3019,22 @@ function SettingsView({
                 </button>
               </div>
               <div className={styles.settingsCollection}>
-                {Object.values(draft.models.routes).map((route) => (
+                {Object.values(draft.models.routes).map((route) => {
+                  const selectableProviders = Object.values(draft.models.providers).filter(isSelectableProvider);
+                  const selectedProvider = selectableProviders.find((provider) => provider.id === route.provider_id);
+                  const selectableModels = Object.values(selectedProvider?.models ?? {}).filter(isCompleteModelForm);
+                  const unavailableProvider = route.provider_id !== "" && selectedProvider === undefined;
+                  const unavailableModel = route.model !== "" && !selectableModels.some((model) => model.id === route.model);
+                  return (
                   <div className={styles.settingsCollectionItem} key={route.name} id={fieldId(`models.routes.${route.name}`)} tabIndex={-1}>
                     <div className={styles.settingsCollectionItemHeader}>
-                      <h4>{route.name}</h4>
+                      <h4>{route.name === "default" ? t("settings.defaultFallback") : route.name}</h4>
                       <button
                         className={styles.iconButton}
                         type="button"
                         aria-label={t("settings.removeRoute")}
                         title={t("settings.removeRoute")}
-                        disabled={controlDisabled}
+                        disabled={controlDisabled || route.name === "default"}
                         onClick={() => removeRoute(route.name)}
                       ><Trash2 size={15} aria-hidden="true" /></button>
                     </div>
@@ -2935,37 +3045,35 @@ function SettingsView({
                           className={styles.selectInput}
                           id={fieldId(`models.routes.${route.name}.provider_id`)}
                           value={route.provider_id}
+                          aria-invalid={unavailableProvider || fieldError(`models.routes.${route.name}.provider_id`) !== undefined}
                           disabled={controlDisabled}
-                          onChange={(event) => updateRoute(route.name, { provider_id: event.currentTarget.value })}
+                          onChange={(event) => updateRoute(route.name, { provider_id: event.currentTarget.value, model: "" })}
                         >
-                          {!Object.values(draft.models.providers).some((provider) => provider.id === route.provider_id) ? <option value={route.provider_id}>{route.provider_id || t("settings.required")}</option> : null}
-                          {Object.entries(draft.models.providers).map(([row, provider]) => <option key={row} value={provider.id}>{provider.id}</option>)}
+                          <option value="" disabled>{t("settings.selectProvider")}</option>
+                          {unavailableProvider ? <option value={route.provider_id} disabled>{route.provider_id} · {t("settings.unavailable")}</option> : null}
+                          {selectableProviders.map((provider) => <option key={provider.id} value={provider.id}>{provider.id}</option>)}
                         </select>
                         <span className={styles.fieldError}>{fieldError(`models.routes.${route.name}.provider_id`) ?? ""}</span>
                       </label>
                       <label className={styles.settingsField} htmlFor={fieldId(`models.routes.${route.name}.model`)}>
                         <span className={styles.fieldLabel}>{t("settings.model")}</span>
-                        <input
-                          className={styles.textInput}
+                        <select
+                          className={styles.selectInput}
                           id={fieldId(`models.routes.${route.name}.model`)}
                           value={route.model}
-                          disabled={controlDisabled}
+                          aria-invalid={unavailableModel || fieldError(`models.routes.${route.name}.model`) !== undefined}
+                          disabled={controlDisabled || selectedProvider === undefined}
                           onChange={(event) => updateRoute(route.name, { model: event.currentTarget.value })}
-                        />
+                        >
+                          <option value="" disabled>{t("settings.selectModel")}</option>
+                          {unavailableModel ? <option value={route.model} disabled>{route.model} · {t("settings.unavailable")}</option> : null}
+                          {selectableModels.map((model) => <option key={model.id} value={model.id}>{model.id}</option>)}
+                        </select>
                         <span className={styles.fieldError}>{fieldError(`models.routes.${route.name}.model`) ?? ""}</span>
                       </label>
-                      <SettingsNumberField id={fieldId(`models.routes.${route.name}.max_output`)} label={t("settings.maxOutput")} value={route.max_output} error={fieldError(`models.routes.${route.name}.max_output`)} disabled={controlDisabled} onChange={(value) => updateRoute(route.name, { max_output: value })} onBlur={() => blurField(`models.routes.${route.name}.max_output`, route.max_output)} />
-                      <SettingsNumberField id={fieldId(`models.routes.${route.name}.temperature`)} label={t("settings.temperature")} value={route.temperature} error={fieldError(`models.routes.${route.name}.temperature`)} disabled={controlDisabled} step="0.1" onChange={(value) => updateRoute(route.name, { temperature: value })} onBlur={() => blurField(`models.routes.${route.name}.temperature`, route.temperature)} />
-                      <label className={styles.settingsField} htmlFor={fieldId(`models.routes.${route.name}.reasoning_effort`)}>
-                        <span className={styles.fieldLabel}>{t("settings.reasoningEffort")}</span>
-                        <select className={styles.selectInput} id={fieldId(`models.routes.${route.name}.reasoning_effort`)} value={route.reasoning_effort} disabled={controlDisabled} onChange={(event) => updateRoute(route.name, { reasoning_effort: event.currentTarget.value as ReasoningEffort })}>
-                          {REASONING_EFFORTS.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
-                        </select>
-                      </label>
-                      <SettingsNumberField id={fieldId(`models.routes.${route.name}.timeout`)} label={t("settings.timeout")} value={route.timeout} error={fieldError(`models.routes.${route.name}.timeout`)} disabled={controlDisabled} onChange={(value) => updateRoute(route.name, { timeout: value })} onBlur={() => blurField(`models.routes.${route.name}.timeout`, route.timeout)} />
                     </div>
                   </div>
-                ))}
+                ); })}
               </div>
             </div>
           </div>
@@ -5430,7 +5538,7 @@ interface PendingSessionDeletion {
 
 function readPendingDeletion(projectId: string): PendingSessionDeletion | null {
   try {
-    const value = JSON.parse(sessionStorage.getItem(`omni.session-delete.${projectId}`) ?? "null") as Partial<PendingSessionDeletion> | null;
+    const value = JSON.parse(sessionStorage.getItem(`aide.session-delete.${projectId}`) ?? "null") as Partial<PendingSessionDeletion> | null;
     if (value?.attempted !== true || typeof value.requestId !== "string"
       || typeof value.claim?.session_id !== "string" || typeof value.claim.workspace_id !== "string"
       || typeof value.claim.reconnect_credential !== "string"
@@ -6139,7 +6247,7 @@ function ChatSessionsView({
           <div className={styles.conversationStage} data-empty="true">
             <div className={styles.conversationViewport}>
               <div className={styles.emptyConversation}>
-                <h2 className={styles.emptyBrand}>Omni</h2>
+                <h2 className={styles.emptyBrand}>Aide</h2>
               </div>
             </div>
             <form className={styles.composer} onSubmit={(event) => event.preventDefault()}>
@@ -6669,14 +6777,14 @@ function ProjectSessionsContent({
   const clearPendingDeletion = useCallback(() => {
     pendingDeletionRef.current = null;
     setPendingDeletion(null);
-    try { sessionStorage.removeItem(`omni.session-delete.${sessionStorageId}`); } catch { /* Storage can be unavailable. */ }
+    try { sessionStorage.removeItem(`aide.session-delete.${sessionStorageId}`); } catch { /* Storage can be unavailable. */ }
   }, [sessionStorageId]);
 
   const rememberPendingDeletion = useCallback((operation: PendingSessionDeletion) => {
     pendingDeletionRef.current = operation;
     setPendingDeletion(operation);
     try {
-      sessionStorage.setItem(`omni.session-delete.${sessionStorageId}`, JSON.stringify(operation));
+      sessionStorage.setItem(`aide.session-delete.${sessionStorageId}`, JSON.stringify(operation));
     } catch { /* In-memory retries remain available when browser storage is unavailable. */ }
   }, [sessionStorageId]);
 
@@ -8007,7 +8115,7 @@ function ProjectSessionsContent({
           const rejectedOperation = { ...operation, attempted: false };
           pendingDeletionRef.current = rejectedOperation;
           setPendingDeletion(rejectedOperation);
-          try { sessionStorage.removeItem(`omni.session-delete.${sessionStorageId}`); } catch { /* Storage can be unavailable. */ }
+          try { sessionStorage.removeItem(`aide.session-delete.${sessionStorageId}`); } catch { /* Storage can be unavailable. */ }
           throw error;
         }
       }
@@ -8201,7 +8309,7 @@ function ProjectSessionsContent({
                   >
                     {snapshot.messages.length === 0 && selectedLiveRuns.length === 0 ? (
                       <div className={styles.emptyConversation} role="status">
-                        <h2 className={styles.emptyBrand}>Omni</h2>
+                        <h2 className={styles.emptyBrand}>Aide</h2>
                       </div>
                     ) : (
                       <div className={styles.messageHistory}>

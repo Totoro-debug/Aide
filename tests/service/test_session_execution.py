@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from omni.agent.message_bus import InboundMessage
-from omni.agent.session.session import Session
+from aide.agent.message_bus import InboundMessage
+from aide.agent.session.session import Session
 from tests.agent.test_loop import (
     _BlockingRouter,
     _response,

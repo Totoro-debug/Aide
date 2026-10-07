@@ -7,13 +7,13 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 
-import omni.agent.tools.mcp_runtime as mcp_runtime
-from omni.agent.tools.mcp import MCPTool
-from omni.agent.tools.permission import PermissionContext
-from omni.agent.tools.tool_gateway import ModelToolCall
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader, MCPServerConfiguration
-from omni.service.runtime import AgentService
+import aide.agent.tools.mcp_runtime as mcp_runtime
+from aide.agent.tools.mcp import MCPTool
+from aide.agent.tools.permission import PermissionContext
+from aide.agent.tools.tool_gateway import ModelToolCall
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader, MCPServerConfiguration
+from aide.service.runtime import AgentService
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures.mcp_wire import (
     ObservedLifetimes,

@@ -11,28 +11,28 @@ from uuid import uuid4
 
 import pytest
 
-import omni.service.runtime as service_runtime
-from omni.agent.confirmation import (
+import aide.service.runtime as service_runtime
+from aide.agent.confirmation import (
     BackgroundConfirmationOwner,
     ConfirmationAborted,
     ConfirmationEnvelope,
     ForegroundConfirmationOwner,
 )
-from omni.agent.session.restore import RestoreManager, RestoreMode
-from omni.agent.session.session import Session
-from omni.agent.tools.tool_gateway import ConfirmationRequest
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.schedule.model import JobSchedule, ScheduleJob
-from omni.schedule.service import ScheduleOccurrence, ScheduleService
-from omni.schedule.store import WorkspaceScheduleStore
-from omni.service.client import RemoteControl, ServiceClient
-from omni.service.conversation_workspaces import (
+from aide.agent.session.restore import RestoreManager, RestoreMode
+from aide.agent.session.session import Session
+from aide.agent.tools.tool_gateway import ConfirmationRequest
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.schedule.model import JobSchedule, ScheduleJob
+from aide.schedule.service import ScheduleOccurrence, ScheduleService
+from aide.schedule.store import WorkspaceScheduleStore
+from aide.service.client import RemoteControl, ServiceClient
+from aide.service.conversation_workspaces import (
     ConversationWorkspaceCatalog,
     ConversationWorkspaceCatalogError,
 )
-from omni.service.discovery import (
+from aide.service.discovery import (
     SERVICE_PROTOCOL_VERSION,
     ServiceDiscovery,
     create_credential,
@@ -41,11 +41,11 @@ from omni.service.discovery import (
     startup_lock,
     write_discovery,
 )
-from omni.service.errors import ServiceError
-from omni.service.execution import SessionExecution
-from omni.service.projects import ProjectCatalog, ProjectCatalogError
-from omni.service.runtime import AgentService, WorkspaceRecord
-from omni.utils.host_filesystem import HOST_FILESYSTEM
+from aide.service.errors import ServiceError
+from aide.service.execution import SessionExecution
+from aide.service.projects import ProjectCatalog, ProjectCatalogError
+from aide.service.runtime import AgentService, WorkspaceRecord
+from aide.utils.host_filesystem import HOST_FILESYSTEM
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
 from tests.fixtures.project_removal import complete_project_removal, wait_for_project_removal

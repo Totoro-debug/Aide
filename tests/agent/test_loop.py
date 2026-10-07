@@ -16,30 +16,30 @@ from uuid import UUID, uuid4
 import pytest
 from loguru import logger
 
-import omni.agent.context.run_context as compactor_module
-import omni.agent.loop as loop_module
-from omni.agent.blackboard import Blackboard
-from omni.agent.loop import ConfirmationRequestView, ModelContextOverflowError
-from omni.agent.memory.manager import MemoryManager
-from omni.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
-from omni.agent.permission import PermissionSnapshot, RuntimePermissionControl
-from omni.agent.run_errors import CommittableAgentRunError
-from omni.agent.runner import AgentRunner, AgentRunnerResult, AgentRunnerRouter
-from omni.agent.session.backup_store import FileBackupStore
-from omni.agent.session.execution_state import SessionRunState
-from omni.agent.session.session import Session
-from omni.agent.tools.base import BaseTool
-from omni.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
-from omni.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
-from omni.agent.tools.tool_gateway import ModelToolCall, ToolGateway
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
-from omni.logging.session import session_log as real_session_log
-from omni.provider.errors import ModelCallError
-from omni.provider.model_router import ModelRouter
-from omni.provider.models import (
+import aide.agent.context.run_context as compactor_module
+import aide.agent.loop as loop_module
+from aide.agent.blackboard import Blackboard
+from aide.agent.loop import ConfirmationRequestView, ModelContextOverflowError
+from aide.agent.memory.manager import MemoryManager
+from aide.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
+from aide.agent.permission import PermissionSnapshot, RuntimePermissionControl
+from aide.agent.run_errors import CommittableAgentRunError
+from aide.agent.runner import AgentRunner, AgentRunnerResult, AgentRunnerRouter
+from aide.agent.session.backup_store import FileBackupStore
+from aide.agent.session.execution_state import SessionRunState
+from aide.agent.session.session import Session
+from aide.agent.tools.base import BaseTool
+from aide.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
+from aide.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
+from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
+from aide.logging.session import session_log as real_session_log
+from aide.provider.errors import ModelCallError
+from aide.provider.model_router import ModelRouter
+from aide.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,
@@ -49,9 +49,9 @@ from omni.provider.models import (
     ReasoningDelta,
     TextDelta,
 )
-from omni.schedule.model import ScheduleJob
-from omni.schedule.service import ScheduleService
-from omni.skills.catalog import (
+from aide.schedule.model import ScheduleJob
+from aide.schedule.service import ScheduleService
+from aide.skills.catalog import (
     LoadedSkill,
     SkillLoader,
 )
@@ -341,7 +341,7 @@ class _TitleBehaviorRouter(_Router):
 
 
 def test_agent_loop_constructor_is_the_generation_composition_boundary() -> None:
-    from omni.agent.loop import AgentRunExecutor as ProductionExecutor
+    from aide.agent.loop import AgentRunExecutor as ProductionExecutor
 
     assert tuple(inspect.signature(ProductionExecutor).parameters) == (
         "workspace_path",
@@ -2354,7 +2354,7 @@ async def test_loop_commits_max_iteration_repair_once_before_safe_terminal(
         assert len(router.calls) == 50
         assert terminal.type == "system_control"
         assert terminal.content == (
-            "Omni 本轮对话已经达到最大循环次数，仍没有输出最终结果。"  # noqa: RUF001
+            "Aide 本轮对话已经达到最大循环次数，仍没有输出最终结果。"  # noqa: RUF001
             "可以再次尝试本次请求或者尝试给出更明确的任务目标。"
         )
         assert terminal.metadata == {
@@ -2641,7 +2641,7 @@ async def test_preparation_cancellation_publishes_the_cancelled_terminal(
         terminal = (await _terminals(_bus, 1))[0]
 
         assert terminal.type == "system_control"
-        assert terminal.content == "Omni 已取消本轮对话。"
+        assert terminal.content == "Aide 已取消本轮对话。"
         assert terminal.metadata == {
             "finish_reason": "cancelled",
             "error_code": "turn_cancelled",
@@ -2841,8 +2841,8 @@ async def test_slow_title_keeps_one_session_log_owner_across_the_next_fifo_turn(
         finally:
             active_contexts -= 1
 
-    monkeypatch.setattr("omni.agent.loop.session_log", observed_session_log)
-    monkeypatch.setattr("omni.agent.session.execution_state.session_log", observed_session_log)
+    monkeypatch.setattr("aide.agent.loop.session_log", observed_session_log)
+    monkeypatch.setattr("aide.agent.session.execution_state.session_log", observed_session_log)
     await loop.start()
     try:
         await _bus.put_inbound(InboundMessage("first input"))

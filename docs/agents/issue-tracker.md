@@ -1,6 +1,6 @@
 # Issue tracker: GitHub
 
-[GitHub Issues](https://github.com/Totoro-debug/OmniAgent/issues) are the authoritative source for product requirements and accepted discussion decisions. Local documents describe current vocabulary, usage, and consequential architectural trade-offs; Git and GitHub retain implementation history.
+[GitHub Issues](https://github.com/Totoro-debug/Aide/issues) are the authoritative source for product requirements and accepted discussion decisions. Local documents describe current vocabulary, usage, and consequential architectural trade-offs; Git and GitHub retain implementation history.
 
 Use `gh` inside the clone; it infers the repository from the Git remote.
 

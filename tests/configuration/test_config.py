@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigError, ConfigLoader
-from omni.utils.host_filesystem import HOST_FILESYSTEM
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigError, ConfigLoader
+from aide.utils.host_filesystem import HOST_FILESYSTEM
 
 EXPECTED_DEFAULT_CONFIG = """[runtime]
 max_tool_result_chars = 4096
@@ -23,7 +23,7 @@ batch_size = 10
 schedule = "0 * * * *"
 
 [web]
-default_chat_workspace = "~/.omni/chat"
+default_chat_workspace = "~/.aide/chat"
 
 # Configure a trusted local MCP Server by uncommenting and editing one item.
 # [mcp.servers.filesystem]
@@ -53,45 +53,30 @@ default_chat_workspace = "~/.omni/chat"
 protocol = "openai-compatible"
 base_url = ""
 api_key = ""
-models = []
+# Configure each model once; routes below select its Provider and model ID.
+[models.providers.openai-local.models."replace-with-a-model-id"]
+context_window = 200000
+max_output = 8192
+temperature = 0.2
+reasoning_effort = "mid"
+timeout = 120
 
-# Replace provider_id, model, and model limits with values supported by your provider.
 # Remove any purpose-specific route to fall back to default.
 [models.routes.default]
 provider_id = "openai-local"
 model = "replace-with-a-model-id"
-context_window = 200000
-max_output = 8192
-temperature = 0.2
-reasoning_effort = "mid"
-timeout = 120
 
 [models.routes.chat]
 provider_id = "openai-local"
 model = "replace-with-a-model-id"
-context_window = 200000
-max_output = 8192
-temperature = 0.2
-reasoning_effort = "mid"
-timeout = 120
 
 [models.routes.memory]
 provider_id = "openai-local"
 model = "replace-with-a-model-id"
-context_window = 200000
-max_output = 8192
-temperature = 0.2
-reasoning_effort = "mid"
-timeout = 120
 
 [models.routes.schedule]
 provider_id = "openai-local"
 model = "replace-with-a-model-id"
-context_window = 200000
-max_output = 8192
-temperature = 0.2
-reasoning_effort = "mid"
-timeout = 120
 """
 
 VALID_CONFIG = """[runtime]
@@ -396,7 +381,7 @@ def test_generated_configuration_scaffolds_one_provider_and_all_model_routes(
         "openai-compatible",
         "",
         "",
-        (),
+        ("replace-with-a-model-id",),
     )
 
     routes = models.routes
@@ -710,9 +695,10 @@ def test_all_reasoning_effort_levels_load_as_route_values(
 
     assert all(route.reasoning_effort == expected for route in configuration.models.routes.values())
     assert loader.diagnostics == ()
-    routes = loader.web_snapshot().fields["models"]["routes"]
-    assert isinstance(routes, dict)
-    assert all(route["reasoning_effort"] == expected for route in routes.values())
+    providers = loader.web_snapshot().fields["models"]["providers"]
+    assert isinstance(providers, dict)
+    assert all(model["reasoning_effort"] == expected for provider in providers.values()
+               for model in provider["models"].values())
     assert loader.path.read_bytes() == before
 
 

@@ -2,7 +2,7 @@
 
 ### 问题跟踪
 
-问题和产品需求文档（PRD）通过 GitHub Issues 进行跟踪，仓库为 `Totoro-debug/OmniAgent`。详见 `docs/agents/issue-tracker.md`。
+问题和产品需求文档（PRD）通过 GitHub Issues 进行跟踪，仓库为 `Totoro-debug/Aide`。详见 `docs/agents/issue-tracker.md`。
 
 ### 领域文档
 

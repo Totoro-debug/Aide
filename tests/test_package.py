@@ -3,14 +3,14 @@ from importlib.metadata import distribution, version
 
 
 def test_installed_package_exposes_its_version() -> None:
-    import omni
+    import aide
 
-    assert omni.__version__ == "0.1.0"
-    assert version("omni") == omni.__version__
+    assert aide.__version__ == "0.1.0"
+    assert version("aide") == aide.__version__
 
 
 def test_installed_distribution_declares_and_bundles_apache_2_license() -> None:
-    installed = distribution("omni")
+    installed = distribution("aide")
 
     assert installed.metadata.get("License-Expression") == "Apache-2.0"
     assert installed.metadata.get_all("License-File") == ["LICENSE"]

@@ -4,8 +4,8 @@ from collections.abc import Callable
 
 import pytest
 
-import omni.agent.session.restore as restore_module
-from omni.agent.workspace_state import WorkspaceState
+import aide.agent.session.restore as restore_module
+from aide.agent.workspace_state import WorkspaceState
 
 AfterRestorePhase = Callable[[str, Callable[[], None]], None]
 

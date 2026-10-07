@@ -89,7 +89,7 @@ export async function newProjectConversation(page) {
   if (response.ok()) {
     const { session_id } = await response.json();
     await expect.poll(() => page.evaluate(() => (
-      JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null")?.session_id
+      JSON.parse(window.localStorage.getItem("aide.browser-recovery") ?? "null")?.session_id
     ))).toBe(session_id);
   }
 }

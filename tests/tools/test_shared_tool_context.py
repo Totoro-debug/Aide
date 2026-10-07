@@ -9,16 +9,16 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from omni.agent.permission import PermissionSnapshot
-from omni.agent.tools.context import ToolRunContext
-from omni.agent.tools.core.edit_file import EditFileTool
-from omni.agent.tools.core.exec_host import ExecOutcome, ExecProcessSpec, resolve_exec_shell
-from omni.agent.tools.core.exec_policy import ExecAssessment
-from omni.agent.tools.core.write_file import WriteFileTool
-from omni.agent.tools.permission import PermissionContext, ToolInvocationFacts
-from omni.agent.tools.tool_gateway import BuiltInToolCatalog, ModelToolCall, ToolGateway
-from omni.agent.workspace_state import WorkspaceState
-from omni.schedule.service import ScheduleService
+from aide.agent.permission import PermissionSnapshot
+from aide.agent.tools.context import ToolRunContext
+from aide.agent.tools.core.edit_file import EditFileTool
+from aide.agent.tools.core.exec_host import ExecOutcome, ExecProcessSpec, resolve_exec_shell
+from aide.agent.tools.core.exec_policy import ExecAssessment
+from aide.agent.tools.core.write_file import WriteFileTool
+from aide.agent.tools.permission import PermissionContext, ToolInvocationFacts
+from aide.agent.tools.tool_gateway import BuiltInToolCatalog, ModelToolCall, ToolGateway
+from aide.agent.workspace_state import WorkspaceState
+from aide.schedule.service import ScheduleService
 
 
 class _Clock:
@@ -292,7 +292,7 @@ async def test_shared_exec_tool_uses_each_run_workspace_for_facts_and_execution(
 async def test_contextual_refusal_checks_the_frozen_mutation_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool_name: str
 ) -> None:
-    protected = tmp_path / ".omni" / "restore" / "index.json"
+    protected = tmp_path / ".aide" / "restore" / "index.json"
     protected.parent.mkdir(parents=True)
     protected.write_text("original", encoding="utf-8")
     catalog = BuiltInToolCatalog()

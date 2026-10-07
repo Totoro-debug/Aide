@@ -12,25 +12,25 @@ from uuid import UUID
 import pytest
 from mcp.types import CallToolResult
 
-import omni.agent.context.run_context as compactor_module
-from omni.agent.memory.manager import MemoryManager
-from omni.agent.message_bus import InboundMessage, MessageBus
-from omni.agent.permission import PermissionSnapshot, RuntimePermissionControl
-from omni.agent.run_errors import CommittableAgentRunError
-from omni.agent.runner import AgentRunner, AgentRunnerResult
-from omni.agent.session.session import Session, SessionStoragePartition
-from omni.agent.tools.base import BaseTool
-from omni.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
-from omni.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
-from omni.agent.tools.mcp import MCPTool, MCPToolSpec
-from omni.agent.tools.permission import PermissionContext
-from omni.agent.tools.tool_gateway import ModelToolCall, ToolGateway, ToolResult
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
-from omni.provider.errors import ModelCallError
-from omni.provider.models import (
+import aide.agent.context.run_context as compactor_module
+from aide.agent.memory.manager import MemoryManager
+from aide.agent.message_bus import InboundMessage, MessageBus
+from aide.agent.permission import PermissionSnapshot, RuntimePermissionControl
+from aide.agent.run_errors import CommittableAgentRunError
+from aide.agent.runner import AgentRunner, AgentRunnerResult
+from aide.agent.session.session import Session, SessionStoragePartition
+from aide.agent.tools.base import BaseTool
+from aide.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
+from aide.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
+from aide.agent.tools.mcp import MCPTool, MCPToolSpec
+from aide.agent.tools.permission import PermissionContext
+from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway, ToolResult
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
+from aide.provider.errors import ModelCallError
+from aide.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,
@@ -38,9 +38,9 @@ from omni.provider.models import (
     ModelStreamEvent,
     ModelUsage,
 )
-from omni.schedule.model import DREAM_JOB_ID, JobSchedule, ScheduleJob
-from omni.schedule.service import ScheduleJobExecutionError, ScheduleService
-from omni.skills.catalog import SkillLoader
+from aide.schedule.model import DREAM_JOB_ID, JobSchedule, ScheduleJob
+from aide.schedule.service import ScheduleJobExecutionError, ScheduleService
+from aide.skills.catalog import SkillLoader
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import TaskFramingRouterAdapter, collect_foreground_outbound
 from tests.fixtures.agent_loop import DrivenExecutor as AgentRunExecutor
@@ -1241,7 +1241,7 @@ async def test_schedule_oversized_result_uses_canonical_schedule_artifact_sessio
         message for message in schedule_session.messages if message["role"] == "tool"
     )
     artifact = tool_message["artifact"]
-    assert artifact["path"].startswith(f".omni/artifacts/schedule_{JOB_ID}/")
+    assert artifact["path"].startswith(f".aide/artifacts/schedule_{JOB_ID}/")
     assert (state.workspace_path / artifact["path"]).exists()
 
 

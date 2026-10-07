@@ -24,18 +24,18 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, Final, Literal, cast
 
-from omni.agent.permission import PermissionSnapshot
-from omni.agent.tools.context import ToolRunContext
-from omni.agent.tools.core.exec import ExecTool
-from omni.agent.tools.core.exec_host import (
+from aide.agent.permission import PermissionSnapshot
+from aide.agent.tools.context import ToolRunContext
+from aide.agent.tools.core.exec import ExecTool
+from aide.agent.tools.core.exec_host import (
     PowerShellExecHost,
     ResolvedExecShell,
     resolve_exec_shell,
 )
-from omni.agent.tools.core.exec_policy import ExecAssessment
-from omni.agent.tools.permission import PermissionContext
-from omni.agent.tools.tool_gateway import ModelToolCall, ToolGateway
-from omni.utils.platform import WINDOWS_REQUIRED_ERROR, is_windows_host
+from aide.agent.tools.core.exec_policy import ExecAssessment
+from aide.agent.tools.permission import PermissionContext
+from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
+from aide.utils.platform import WINDOWS_REQUIRED_ERROR, is_windows_host
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 COMMAND_TIMEOUT_SECONDS: Final[int] = 1_800
@@ -326,7 +326,7 @@ class _ReportRecorder:
 
 
 _REPORT_CONTEXT: contextvars.ContextVar[_ReportRecorder | None] = contextvars.ContextVar(
-    "omni_release_report", default=None
+    "aide_release_report", default=None
 )
 
 
@@ -363,7 +363,7 @@ def _source_identity() -> dict[str, object]:
         identity["working_tree"] = _working_tree_identity()
     except (OSError, subprocess.SubprocessError) as error:
         identity["working_tree"] = {"error": _exception_payload(error)}
-    manifest = ROOT / "omni" / "web_assets" / "manifest.json"
+    manifest = ROOT / "aide" / "web_assets" / "manifest.json"
     if manifest.is_file():
         identity["web_asset_manifest"] = {
             "path": str(manifest),
@@ -387,7 +387,7 @@ def _working_tree_identity() -> dict[str, object]:
         for relative in result.stdout.decode("utf-8").split("\0"):
             if relative and (
                 selector == "--cached"
-                or relative.split("/", 1)[0] in {"omni", "scripts", "tests", "web", ".github"}
+                or relative.split("/", 1)[0] in {"aide", "scripts", "tests", "web", ".github"}
             ):
                 paths.add(relative)
     records: list[dict[str, object]] = []
@@ -540,13 +540,13 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/e2e-runner.mjs launches omni web and asserts the isolated service URL",
+            "web/scripts/e2e-runner.mjs launches aide web and asserts the isolated service URL",
             "the production browser path does not itself start two CLI processes",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
             "scripts/installed_web_validation.py::_run_installed_cli_competition cold-starts two installed metadata console entries with Textual headless I/O and asserts one PID/instance/port",
-            "the installed omni web executable refuses a real unrelated fixed-port listener without killing it or disclosing credentials",
+            "the installed aide web executable refuses a real unrelated fixed-port listener without killing it or disclosing credentials",
         ),
     ),
     AcceptanceScenario(
@@ -910,7 +910,7 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
-            "web/scripts/installed_cli_probe.py asserts installed omni console entry, no node/npm, same service discovery, and JSONL assistant persistence",
+            "web/scripts/installed_cli_probe.py asserts installed aide console entry, no node/npm, same service discovery, and JSONL assistant persistence",
             "direct and rebuilt reports both record stop=passed and port/discovery cleanup",
         ),
     ),
@@ -1331,8 +1331,8 @@ def build_coverage_evidence(nodes: Sequence[str]) -> CoverageEvidence:
 
 def _find_windows_shell(selector: str) -> str | None:
     overrides = {
-        "powershell": "OMNI_POWERSHELL_PATH",
-        "pwsh": "OMNI_PWSH_PATH",
+        "powershell": "AIDE_POWERSHELL_PATH",
+        "pwsh": "AIDE_PWSH_PATH",
     }
     candidates: list[Path] = []
     override = os.environ.get(overrides[selector])
@@ -1386,7 +1386,7 @@ async def _exercise_powershell_host(selector: str) -> dict[str, object]:
         raise ReleaseBlockedError("powershell did not resolve to Windows PowerShell 5.1")
     if selector == "pwsh" and shell.version < (7,):
         raise ReleaseBlockedError("pwsh did not resolve to PowerShell 7 or newer")
-    with tempfile.TemporaryDirectory(prefix=f"omni-{selector}-") as temporary:
+    with tempfile.TemporaryDirectory(prefix=f"aide-{selector}-") as temporary:
         workspace = Path(temporary).resolve()
         host = PowerShellExecHost(shell)
         spec = host.process_spec(workspace)
@@ -1588,7 +1588,7 @@ def _run_pytest_with_report(
 
 def _windows_path_capability_evidence() -> dict[str, object]:
     """Prove the Windows reparse behavior gate and record fixture limitations."""
-    with tempfile.TemporaryDirectory(prefix="omni-links-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="aide-links-") as temporary:
         root = Path(temporary)
         target = root / "target"
         target.mkdir()
@@ -1815,7 +1815,7 @@ def _run_quality(host_results: Sequence[Mapping[str, object]] | None = None) -> 
         list(host_results) if host_results is not None else run_host_integration(_selectors("both"))
     )
     path_evidence = _windows_path_capability_evidence()
-    with tempfile.TemporaryDirectory(prefix="omni-release-quality-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="aide-release-quality-") as temporary:
         report_dir = Path(temporary)
         evidence_by_label: dict[str, PytestEvidence] = {}
         validated_skips: list[dict[str, str]] | None = None
@@ -1844,9 +1844,9 @@ def _run_quality(host_results: Sequence[Mapping[str, object]] | None = None) -> 
                 path_evidence=path_evidence,
                 passed_nodes=full.passed_nodes,
             )
-            _run_command([sys.executable, "-m", "ruff", "check", "omni", "tests", "scripts"])
+            _run_command([sys.executable, "-m", "ruff", "check", "aide", "tests", "scripts"])
             _run_command(["git", "diff", "--check"])
-            _run_command([sys.executable, "-m", "mypy", "omni", "tests", "scripts"])
+            _run_command([sys.executable, "-m", "mypy", "aide", "tests", "scripts"])
             build_dir = report_dir / "build"
             build_dir.mkdir()
             _run_command(
@@ -1912,22 +1912,22 @@ from importlib.resources import files
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import omni
+import aide
 import tomlkit
 
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigError, ConfigLoader
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigError, ConfigLoader
 
 
-module_path = Path(omni.__file__).resolve()
+module_path = Path(aide.__file__).resolve()
 environment_prefix = Path(sys.prefix).resolve()
-source_root = Path(os.environ["OMNI_SOURCE_ROOT"]).resolve()
+source_root = Path(os.environ["AIDE_SOURCE_ROOT"]).resolve()
 assert module_path.is_relative_to(environment_prefix)
 assert not module_path.is_relative_to(source_root)
 assert shutil.which("node") is None
 assert shutil.which("npm") is None
 
-asset_root = files("omni.web_assets")
+asset_root = files("aide.web_assets")
 manifest = json.loads((asset_root / "manifest.json").read_text(encoding="utf-8"))
 assert manifest["schema_version"] == 1
 assert manifest["entry"] == "index.html"
@@ -1936,7 +1936,7 @@ for record in manifest["files"]:
     assert len(asset) == record["bytes"]
     assert hashlib.sha256(asset).hexdigest() == record["sha256"]
 
-with TemporaryDirectory(prefix="omni-wheel-config-") as temporary:
+with TemporaryDirectory(prefix="aide-wheel-config-") as temporary:
     home = Path(temporary) / "agent-home"
     loader = ConfigLoader(AgentHome(home))
     assert loader.ensure_default() is True
@@ -2016,12 +2016,12 @@ def _artifact_environment() -> dict[str, str]:
         for part in environment.get("PATH", "").split(os.pathsep)
         if "node" not in part.casefold() and "npm" not in part.casefold()
     )
-    environment["OMNI_SOURCE_ROOT"] = str(ROOT)
+    environment["AIDE_SOURCE_ROOT"] = str(ROOT)
     return environment
 
 
 def _source_web_asset_bytes() -> dict[str, bytes]:
-    asset_root = ROOT / "omni" / "web_assets"
+    asset_root = ROOT / "aide" / "web_assets"
     validator_module = cast(
         Any,
         import_module("scripts.validate_web_assets" if __package__ else "validate_web_assets"),
@@ -2036,7 +2036,7 @@ def _source_web_asset_bytes() -> dict[str, bytes]:
 
 
 def _assert_wheel_web_assets(wheel: Path, expected: Mapping[str, bytes]) -> None:
-    prefix = "omni/web_assets/"
+    prefix = "aide/web_assets/"
     with zipfile.ZipFile(wheel) as archive:
         names = {name.replace("\\", "/") for name in archive.namelist()}
         if any("/web/" in name or "node_modules/" in name for name in names):
@@ -2054,7 +2054,7 @@ def _assert_wheel_web_assets(wheel: Path, expected: Mapping[str, bytes]) -> None
 
 
 def _assert_sdist_web_assets(sdist: Path, expected: Mapping[str, bytes]) -> None:
-    marker = "/omni/web_assets/"
+    marker = "/aide/web_assets/"
     with tarfile.open(sdist, "r:gz") as archive:
         members = {member.name.replace("\\", "/"): member for member in archive.getmembers()}
         if any("/web/" in name or "node_modules/" in name for name in members):
@@ -2097,7 +2097,7 @@ def _smoke_installed_wheel(wheel: Path, root: Path) -> dict[str, object]:
     _run_command([sys.executable, "-m", "venv", str(venv_dir)])
     scripts_dir = venv_dir / "Scripts"
     python = scripts_dir / "python.exe"
-    entry_point = scripts_dir / "omni.exe"
+    entry_point = scripts_dir / "aide.exe"
     if not python.is_file():
         raise RuntimeError("wheel smoke virtual environment has no Python executable")
     environment = _artifact_environment()
@@ -2116,15 +2116,15 @@ def _smoke_installed_wheel(wheel: Path, root: Path) -> dict[str, object]:
     smoke_cwd = root / "smoke-cwd"
     smoke_cwd.mkdir()
     if not entry_point.is_file():
-        raise RuntimeError("installed wheel did not create the omni console entry point")
+        raise RuntimeError("installed wheel did not create the aide console entry point")
     entry_result = _run_command(
         [str(entry_point), "--help"],
         cwd=smoke_cwd,
         env=environment,
         timeout=60,
     )
-    if "Omni Personal Agent runtime" not in entry_result.stdout:
-        raise RuntimeError("installed omni entry point did not start normally")
+    if "Aide Personal Agent runtime" not in entry_result.stdout:
+        raise RuntimeError("installed aide entry point did not start normally")
     result = subprocess.run(
         [str(python), "-c", _ARTIFACT_SMOKE_PROGRAM],
         cwd=smoke_cwd,
@@ -2163,7 +2163,7 @@ def _smoke_installed_wheel(wheel: Path, root: Path) -> dict[str, object]:
 
 def _run_distribution_validation() -> dict[str, object]:
     expected_assets = _source_web_asset_bytes()
-    with tempfile.TemporaryDirectory(prefix="omni-release-distribution-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="aide-release-distribution-") as temporary:
         root = Path(temporary)
         distribution_dir = root / "distribution"
         distribution_dir.mkdir()
@@ -2179,8 +2179,8 @@ def _run_distribution_validation() -> dict[str, object]:
             ],
             env=_artifact_environment(),
         )
-        wheels = tuple(distribution_dir.glob("omni-*.whl"))
-        sdists = tuple(distribution_dir.glob("omni-*.tar.gz"))
+        wheels = tuple(distribution_dir.glob("aide-*.whl"))
+        sdists = tuple(distribution_dir.glob("aide-*.tar.gz"))
         if len(wheels) != 1 or len(sdists) != 1:
             raise RuntimeError(
                 f"expected one direct wheel and sdist, found {len(wheels)} wheels and "
@@ -2205,7 +2205,7 @@ def _run_distribution_validation() -> dict[str, object]:
             cwd=extracted_root,
             env=_artifact_environment(),
         )
-        rebuilt_wheels = tuple(rebuilt_dir.glob("omni-*.whl"))
+        rebuilt_wheels = tuple(rebuilt_dir.glob("aide-*.whl"))
         if len(rebuilt_wheels) != 1:
             raise RuntimeError(f"expected one sdist-rebuilt wheel, found {len(rebuilt_wheels)}")
         _assert_wheel_web_assets(rebuilt_wheels[0], expected_assets)

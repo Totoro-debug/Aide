@@ -13,16 +13,16 @@ import pytest
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, TextContent
 
-import omni.agent.tools.mcp as mcp_adapter
-from omni.agent.tools.mcp import MCPServerConnection, MCPTool, MCPToolSpec
-from omni.agent.tools.mcp_runtime import (
+import aide.agent.tools.mcp as mcp_adapter
+from aide.agent.tools.mcp import MCPServerConnection, MCPTool, MCPToolSpec
+from aide.agent.tools.mcp_runtime import (
     MCPRuntimeManager,
     MCPToolSnapshot,
     MCPWorkspaceRuntimeManager,
     allocate_mcp_tool_name,
 )
-from omni.agent.tools.tool_gateway import ModelToolCall, ToolGateway
-from omni.config.config import MCPServerConfiguration
+from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
+from aide.config.config import MCPServerConfiguration
 from tests.fixtures.mcp_wire import (
     ObservedLifetimes,
     http_wire_server,

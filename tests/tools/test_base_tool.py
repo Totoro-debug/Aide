@@ -8,9 +8,9 @@ from uuid import UUID
 
 import pytest
 
-from omni.agent.tools.base import BaseTool, ToolError, ToolParam
-from omni.agent.tools.context import ToolRunContext
-from omni.agent.tools.permission import ToolAuthorizationSession, ToolInvocationFacts
+from aide.agent.tools.base import BaseTool, ToolError, ToolParam
+from aide.agent.tools.context import ToolRunContext
+from aide.agent.tools.permission import ToolAuthorizationSession, ToolInvocationFacts
 
 
 class _RepresentativeTool(BaseTool):
@@ -542,16 +542,16 @@ def test_base_tool_result_handler_writes_a_bounded_workspace_artifact(
     )
 
     assert output.artifact is not None
-    assert output.artifact.path == ".omni/artifacts/session-1/call-1.txt"
-    marker = "\n\n...[truncated; full result stored at .omni/artifacts/session-1/call-1.txt]"
+    assert output.artifact.path == ".aide/artifacts/session-1/call-1.txt"
+    marker = "\n\n...[truncated; full result stored at .aide/artifacts/session-1/call-1.txt]"
     assert output.content == content[: limit - len(marker)] + marker
     assert len(output.content) == limit
     assert output.artifact.to_dict() == {
-        "path": ".omni/artifacts/session-1/call-1.txt",
+        "path": ".aide/artifacts/session-1/call-1.txt",
         "total_chars": len(content),
         "preview_chars": limit - len(marker),
     }
-    assert (workspace_path / ".omni" / "artifacts" / "session-1" / "call-1.txt").read_text(
+    assert (workspace_path / ".aide" / "artifacts" / "session-1" / "call-1.txt").read_text(
         encoding="utf-8"
     ) == content
 
@@ -562,7 +562,7 @@ def test_base_tool_result_handler_keeps_exact_limit_inline_and_overwrites_target
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
     workspace = workspace_path
-    target = workspace_path / ".omni" / "artifacts" / "session-1" / "call-1.txt"
+    target = workspace_path / ".aide" / "artifacts" / "session-1" / "call-1.txt"
     target.parent.mkdir(parents=True)
     target.write_text("old", encoding="utf-8")
 
@@ -614,7 +614,7 @@ def test_base_tool_result_handler_retains_success_when_artifact_write_fails(
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
     workspace = workspace_path
-    failed_target = workspace_path / ".omni" / "artifacts" / "session-1" / "failed.txt"
+    failed_target = workspace_path / ".aide" / "artifacts" / "session-1" / "failed.txt"
     failed_target.mkdir(parents=True)
 
     output = _RepresentativeTool().handle_result(
@@ -645,7 +645,7 @@ async def test_context_execution_implementation_is_a_concrete_tool(tmp_path: Pat
             del arguments, authorization, kwargs
             return str(context.workspace)
 
-    from omni.agent.tools.tool_gateway import ModelToolCall, ToolGateway
+    from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
 
     assert not inspect.isabstract(ContextTool)
     tool = ContextTool()

@@ -9,7 +9,7 @@ const expect = playwrightExpect.configure({ timeout: 30000 });
 const control = await setup();
 let browser;
 try {
-  browser = await chromium.launch({ channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge" });
+  browser = await chromium.launch({ channel: process.env.AIDE_E2E_BROWSER_CHANNEL ?? "msedge" });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -40,7 +40,7 @@ try {
   async function selectSession(title) {
     await sessions.getByRole("button", { name: new RegExp(title) }).click();
     await expect.poll(() => page.evaluate(() => (
-      JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null")?.session_id
+      JSON.parse(window.localStorage.getItem("aide.browser-recovery") ?? "null")?.session_id
     ))).toBe(sessionIds[title]);
     await expect(input).toBeEnabled();
   }
@@ -60,7 +60,7 @@ try {
   async function assertRecovery(text) {
     await expect(input).toHaveValue(text);
     await expect.poll(() => page.evaluate(() => (
-      JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null")?.input_text
+      JSON.parse(window.localStorage.getItem("aide.browser-recovery") ?? "null")?.input_text
     ))).toBe(text);
   }
 

@@ -12,17 +12,17 @@ from typing import Any, cast
 import pytest
 from typer.testing import CliRunner
 
-import omni.terminal.cli as cli
-from omni.agent.loop import ModelContextOverflowError
-from omni.agent.workspace_state import WorkspaceStateError
-from omni.config.agent_home import AgentHome
-from omni.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
-from omni.management.service import (
+import aide.terminal.cli as cli
+from aide.agent.loop import ModelContextOverflowError
+from aide.agent.workspace_state import WorkspaceStateError
+from aide.config.agent_home import AgentHome
+from aide.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
+from aide.management.service import (
     FatalManagementError,
 )
-from omni.service.client import ServiceClient, ServiceStartupError
-from omni.service.errors import ServiceError
-from omni.skills.catalog import SkillMetadata
+from aide.service.client import ServiceClient, ServiceStartupError
+from aide.service.errors import ServiceError
+from aide.skills.catalog import SkillMetadata
 from tests.configuration.test_config import (
     EXPECTED_DEFAULT_CONFIG,
     EXPECTED_REDACTED_CONFIG,
@@ -52,8 +52,8 @@ def stop_installed_test_service(agent_home: Path) -> None:
 
 
 def test_legacy_runtime_module_is_not_discoverable() -> None:
-    legacy_module = ".".join(("omni", "agent", "runtime"))
-    assert not (Path(__file__).resolve().parents[1] / "omni" / "agent" / "runtime.py").exists()
+    legacy_module = ".".join(("aide", "agent", "runtime"))
+    assert not (Path(__file__).resolve().parents[1] / "aide" / "agent" / "runtime.py").exists()
     assert importlib.util.find_spec(legacy_module) is None
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module(legacy_module)
@@ -224,7 +224,7 @@ async def test_cli_pending_service_config_does_not_attach_workspace(
                 "diagnostics": [],
                 "error": {
                     "code": "config_missing",
-                    "message": "A default User Configuration was created; edit it before starting Omni.\n"
+                    "message": "A default User Configuration was created; edit it before starting Aide.\n"
                     f"Path: {tmp_path / 'home' / 'config.toml'}",
                 },
             },
@@ -295,7 +295,7 @@ def test_cli_reports_unexpected_startup_failure_without_raw_exception_output(
         result = CliRunner().invoke(cli.app, [])
 
         assert result.exit_code == 1
-        assert result.output.count("persistence_error: Omni runtime could not be started.") == 1
+        assert result.output.count("persistence_error: Aide runtime could not be started.") == 1
         assert secret not in result.output
         assert "Traceback" not in result.output
 
@@ -404,12 +404,12 @@ def test_cli_reports_runtime_context_startup_failures_without_starting_conversat
     assert conversation_calls == []
 
 
-def run_installed_omni(
+def run_installed_aide(
     agent_home: Path,
     *arguments: str,
     workspace: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    executable = shutil.which("omni")
+    executable = shutil.which("aide")
     assert executable is not None
     environment = os.environ.copy()
     environment["HOME"] = str(agent_home.parent)
@@ -420,7 +420,7 @@ def run_installed_omni(
             listener.bind(("127.0.0.1", 0))
             _INSTALLED_SERVICE_PORTS[home_key] = listener.getsockname()[1]
     port = _INSTALLED_SERVICE_PORTS[home_key]
-    environment["OMNI_SERVICE_PORT"] = str(port)
+    environment["AIDE_SERVICE_PORT"] = str(port)
     source_root = str(Path(__file__).parent.parent)
     existing_pythonpath = environment.get("PYTHONPATH")
     environment["PYTHONPATH"] = (
@@ -452,8 +452,8 @@ def legacy_runtime_log_snapshot(agent_home: Path) -> dict[str, bytes]:
     }
 
 
-def test_installed_omni_console_entry_starts() -> None:
-    executable = shutil.which("omni")
+def test_installed_aide_console_entry_starts() -> None:
+    executable = shutil.which("aide")
 
     assert executable is not None
     result = subprocess.run(
@@ -464,14 +464,14 @@ def test_installed_omni_console_entry_starts() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert "Omni Personal Agent" in result.stdout
+    assert "Aide Personal Agent" in result.stdout
 
 
-def test_installed_omni_generates_missing_configuration_and_stops(
+def test_installed_aide_generates_missing_configuration_and_stops(
     agent_home: Path,
     workspace: Path,
 ) -> None:
-    result = run_installed_omni(agent_home, workspace=workspace)
+    result = run_installed_aide(agent_home, workspace=workspace)
 
     assert result.returncode == 2
     assert (agent_home / "config.toml").read_text(encoding="utf-8") == EXPECTED_DEFAULT_CONFIG
@@ -480,11 +480,11 @@ def test_installed_omni_generates_missing_configuration_and_stops(
     assert "edit" in result.stdout.lower()
     assert result.stderr == ""
     assert "configuration gate passed" not in result.stdout
-    assert not (workspace / ".omni").exists()
+    assert not (workspace / ".aide").exists()
     assert not (agent_home / "logs").exists()
 
 
-def test_installed_omni_does_not_modify_legacy_runtime_log_data(
+def test_installed_aide_does_not_modify_legacy_runtime_log_data(
     agent_home: Path,
     workspace: Path,
 ) -> None:
@@ -496,8 +496,8 @@ def test_installed_omni_does_not_modify_legacy_runtime_log_data(
     (logs / "run.log.lock").write_bytes(b"legacy lock\n")
     before = legacy_runtime_log_snapshot(agent_home)
 
-    result = run_installed_omni(agent_home, workspace=workspace)
-    config_result = run_installed_omni(agent_home, "config", workspace=workspace)
+    result = run_installed_aide(agent_home, workspace=workspace)
+    config_result = run_installed_aide(agent_home, "config", workspace=workspace)
 
     assert result.returncode == 2
     assert config_result.returncode == 0
@@ -508,7 +508,7 @@ def test_installed_config_command_generates_and_displays_missing_configuration(
     agent_home: Path,
     workspace: Path,
 ) -> None:
-    result = run_installed_omni(agent_home, "config", workspace=workspace)
+    result = run_installed_aide(agent_home, "config", workspace=workspace)
 
     assert result.returncode == 0, result.stderr
     assert f"Path: {agent_home / 'config.toml'}" in result.stdout
@@ -517,7 +517,7 @@ def test_installed_config_command_generates_and_displays_missing_configuration(
     assert EXPECTED_DEFAULT_CONFIG in result.stdout
     assert "configuration gate passed" not in result.stdout
     assert not (agent_home / "logs").exists()
-    assert not (workspace / ".omni").exists()
+    assert not (workspace / ".aide").exists()
 
 
 def test_installed_config_command_redacts_valid_configuration(
@@ -527,14 +527,14 @@ def test_installed_config_command_redacts_valid_configuration(
     agent_home.mkdir(parents=True)
     (agent_home / "config.toml").write_text(REDACTION_CONFIG, encoding="utf-8")
 
-    result = run_installed_omni(agent_home, "config", workspace=workspace)
+    result = run_installed_aide(agent_home, "config", workspace=workspace)
 
     assert result.returncode == 0, result.stderr
     assert EXPECTED_REDACTED_CONFIG in result.stdout
     assert f"Path: {agent_home / 'config.toml'}" in result.stdout
     assert_plaintext_absent(result.stdout + result.stderr, "plaintext-primary-key")
     assert not (agent_home / "logs").exists()
-    assert not (workspace / ".omni").exists()
+    assert not (workspace / ".aide").exists()
 
 
 def test_installed_config_command_reports_mcp_diagnostics_without_secrets(
@@ -560,7 +560,7 @@ headers = { Authorization = "Bearer installed-header-secret" }
         encoding="utf-8",
     )
 
-    result = run_installed_omni(agent_home, "config", workspace=workspace)
+    result = run_installed_aide(agent_home, "config", workspace=workspace)
 
     visible = result.stdout + result.stderr
     assert result.returncode == 0, result.stderr
@@ -569,7 +569,7 @@ headers = { Authorization = "Bearer installed-header-secret" }
     assert "installed-header-secret" not in visible
     assert "***REDACTED***" in visible
     assert not (agent_home / "logs").exists()
-    assert not (workspace / ".omni").exists()
+    assert not (workspace / ".aide").exists()
 
 
 def test_installed_config_command_keeps_fallback_diagnostic_before_later_fatal_error(
@@ -584,7 +584,7 @@ def test_installed_config_command_keeps_fallback_diagnostic_before_later_fatal_e
     config_path = agent_home / "config.toml"
     config_path.write_text(content, encoding="utf-8")
 
-    result = run_installed_omni(agent_home, "config", workspace=workspace)
+    result = run_installed_aide(agent_home, "config", workspace=workspace)
 
     error = "config_invalid: Configuration field 'models.routes.default.model' is required."
     diagnostic = (
@@ -603,7 +603,7 @@ def test_installed_config_command_shows_safe_malformed_configuration(
     agent_home.mkdir(parents=True)
     (agent_home / "config.toml").write_text(MALFORMED_CONFIG, encoding="utf-8")
 
-    result = run_installed_omni(agent_home, "config", workspace=workspace)
+    result = run_installed_aide(agent_home, "config", workspace=workspace)
 
     assert result.returncode == 2
     assert result.stdout.count("config_parse_error") == 1
@@ -616,7 +616,7 @@ def test_installed_config_command_shows_safe_malformed_configuration(
         "second-plaintext-key",
     )
     assert not (agent_home / "logs").exists()
-    assert not (workspace / ".omni").exists()
+    assert not (workspace / ".aide").exists()
 
 
 def test_installed_config_command_hides_invalid_utf8_and_traceback(
@@ -627,7 +627,7 @@ def test_installed_config_command_hides_invalid_utf8_and_traceback(
     config_path = agent_home / "config.toml"
     config_path.write_bytes(b'api_key = "sk-invalid-utf8-secret"\ninvalid = "\xff"\n')
 
-    result = run_installed_omni(agent_home, "config", workspace=workspace)
+    result = run_installed_aide(agent_home, "config", workspace=workspace)
 
     visible = result.stdout + result.stderr
     assert result.returncode == 1
@@ -648,34 +648,34 @@ def test_installed_config_command_ignores_undefined_content_fields(
     )
     (agent_home / "config.toml").write_text(content, encoding="utf-8")
 
-    result = run_installed_omni(agent_home, "config", workspace=workspace)
+    result = run_installed_aide(agent_home, "config", workspace=workspace)
 
     assert result.returncode == 0
     assert "config_invalid" not in result.stdout
     assert "runtime.misspelled_setting" not in result.stdout
     assert "misspelled_setting = true" in result.stdout
     assert_plaintext_absent(result.stdout + result.stderr, "plaintext-primary-key")
-    assert not (workspace / ".omni").exists()
+    assert not (workspace / ".aide").exists()
 
 
-def test_installed_omni_rejects_valid_configuration_without_a_tty(
+def test_installed_aide_rejects_valid_configuration_without_a_tty(
     agent_home: Path,
     workspace: Path,
 ) -> None:
     agent_home.mkdir(parents=True)
     (agent_home / "config.toml").write_text(VALID_CONFIG, encoding="utf-8")
 
-    result = run_installed_omni(agent_home, workspace=workspace)
+    result = run_installed_aide(agent_home, workspace=workspace)
 
     assert result.returncode == 2, result.stderr
     assert "interactive_terminal_required" in result.stdout
     assert "configuration gate passed" not in result.stdout
     assert_plaintext_absent(result.stdout + result.stderr, "sk-ant-secret")
     assert not (agent_home / "logs").exists()
-    assert not (workspace / ".omni").exists()
+    assert not (workspace / ".aide").exists()
 
 
-def test_installed_omni_uses_service_configuration_eligibility(
+def test_installed_aide_uses_service_configuration_eligibility(
     agent_home: Path,
     workspace: Path,
 ) -> None:
@@ -683,7 +683,7 @@ def test_installed_omni_uses_service_configuration_eligibility(
     config_path = agent_home / "config.toml"
 
     config_path.write_text(MALFORMED_CONFIG, encoding="utf-8")
-    parse_result = run_installed_omni(agent_home, workspace=workspace)
+    parse_result = run_installed_aide(agent_home, workspace=workspace)
     stop_installed_test_service(agent_home)
 
     schema_content = VALID_CONFIG.replace(
@@ -691,11 +691,11 @@ def test_installed_omni_uses_service_configuration_eligibility(
         "max_tool_result_chars = 60000\nmisspelled_setting = true",
     )
     config_path.write_text(schema_content, encoding="utf-8")
-    schema_result = run_installed_omni(agent_home, workspace=workspace)
+    schema_result = run_installed_aide(agent_home, workspace=workspace)
     stop_installed_test_service(agent_home)
 
     config_path.write_text(EXPECTED_DEFAULT_CONFIG, encoding="utf-8")
-    default_result = run_installed_omni(agent_home, workspace=workspace)
+    default_result = run_installed_aide(agent_home, workspace=workspace)
 
     assert (parse_result.returncode, schema_result.returncode, default_result.returncode) == (
         2,
@@ -707,7 +707,7 @@ def test_installed_omni_uses_service_configuration_eligibility(
     assert "configuration gate passed" not in parse_result.stdout
     assert "interactive_terminal_required" in schema_result.stdout
     assert "config_invalid" in default_result.stdout
-    assert not (workspace / ".omni").exists()
+    assert not (workspace / ".aide").exists()
     combined_output = "".join(
         result.stdout + result.stderr for result in (parse_result, schema_result, default_result)
     )
@@ -721,16 +721,16 @@ def test_installed_omni_uses_service_configuration_eligibility(
     assert not (agent_home / "logs").exists()
 
 
-def test_installed_omni_rejects_non_tty_before_unsafe_workspace_state(
+def test_installed_aide_rejects_non_tty_before_unsafe_workspace_state(
     agent_home: Path,
     workspace: Path,
 ) -> None:
     agent_home.mkdir(parents=True)
     (agent_home / "config.toml").write_text(VALID_CONFIG, encoding="utf-8")
-    state_path = workspace / ".omni"
+    state_path = workspace / ".aide"
     state_path.write_text("private collision content", encoding="utf-8")
 
-    result = run_installed_omni(agent_home, workspace=workspace)
+    result = run_installed_aide(agent_home, workspace=workspace)
 
     assert result.returncode == 2
     assert result.stdout.count("interactive_terminal_required") == 1
@@ -743,18 +743,18 @@ def test_installed_omni_rejects_non_tty_before_unsafe_workspace_state(
     assert not (agent_home / "logs").exists()
 
 
-def test_installed_omni_rejects_non_tty_before_corrupt_schedule_state(
+def test_installed_aide_rejects_non_tty_before_corrupt_schedule_state(
     agent_home: Path,
     workspace: Path,
 ) -> None:
     agent_home.mkdir(parents=True)
     (agent_home / "config.toml").write_text(VALID_CONFIG, encoding="utf-8")
-    state_path = workspace / ".omni"
+    state_path = workspace / ".aide"
     state_path.mkdir()
     schedule_path = state_path / "schedule.json"
     schedule_path.write_text("{corrupt", encoding="utf-8")
 
-    result = run_installed_omni(agent_home, workspace=workspace)
+    result = run_installed_aide(agent_home, workspace=workspace)
 
     assert result.returncode == 2
     assert result.stdout.count("interactive_terminal_required") == 1
@@ -767,13 +767,13 @@ def test_installed_omni_rejects_non_tty_before_corrupt_schedule_state(
     assert not (state_path / "logs").exists()
 
 
-def test_installed_omni_rejects_non_tty_before_user_home_workspace_validation(
+def test_installed_aide_rejects_non_tty_before_user_home_workspace_validation(
     agent_home: Path,
 ) -> None:
     agent_home.mkdir(parents=True)
     (agent_home / "config.toml").write_text(VALID_CONFIG, encoding="utf-8")
 
-    result = run_installed_omni(agent_home, workspace=agent_home.parent)
+    result = run_installed_aide(agent_home, workspace=agent_home.parent)
 
     assert result.returncode == 2
     assert result.stdout.count("interactive_terminal_required") == 1

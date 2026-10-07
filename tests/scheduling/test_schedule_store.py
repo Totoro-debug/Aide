@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from omni.agent.workspace_state import WorkspaceState
-from omni.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
-from omni.schedule.store import (
+from aide.agent.workspace_state import WorkspaceState
+from aide.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
+from aide.schedule.store import (
     ScheduleStaleRemovalError,
     ScheduleStateError,
     ScheduleStoreFaultedError,
@@ -22,7 +22,7 @@ SYSTEM_ID = "dream"
 
 def _state(path: Path) -> WorkspaceState:
     state = WorkspaceState(path)
-    state.initialize(agent_home_root=Path.home() / ".omni")
+    state.initialize(agent_home_root=Path.home() / ".aide")
     return state
 
 
@@ -248,7 +248,7 @@ def test_strict_load_rejects_duplicate_keys_and_duplicate_job_ids(workspace: Pat
     assert raised.value.path == state.schedule_path
     assert raised.value.error.code == "schedule_state_error"
     assert raised.value.error.message == (
-        "Schedule state could not be loaded. Repair or move the file, then start Omni again."
+        "Schedule state could not be loaded. Repair or move the file, then start Aide again."
     )
     assert raised.value.error.retryable is False
     assert raised.value.error.retry_after_seconds is None

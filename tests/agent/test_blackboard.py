@@ -7,14 +7,14 @@ from typing import Any
 
 import pytest
 
-from omni.agent.blackboard import (
+from aide.agent.blackboard import (
     Blackboard,
     FramingResult,
 )
-from omni.agent.runner import AgentRunnerRoute
-from omni.errors import ErrorInfo
-from omni.provider.errors import ModelCallError
-from omni.provider.models import (
+from aide.agent.runner import AgentRunnerRoute
+from aide.errors import ErrorInfo
+from aide.provider.errors import ModelCallError
+from aide.provider.models import (
     AssistantModelMessage,
     ModelContinuation,
     ModelMessages,
@@ -22,7 +22,7 @@ from omni.provider.models import (
     ModelStreamEvent,
     ModelUsage,
 )
-from omni.templates import render_template
+from aide.templates import render_template
 
 
 class _FakeRouter:

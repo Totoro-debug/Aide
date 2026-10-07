@@ -10,7 +10,7 @@ import { chromium, expect } from "@playwright/test";
 import { setInterfaceLanguage, setInterfaceTheme } from "./settings-e2e.mjs";
 
 if (process.platform !== "win32") {
-  console.error("Omni requires Windows.");
+  console.error("Aide requires Windows.");
   process.exit(1);
 }
 
@@ -29,10 +29,10 @@ function servicePort(homeRoot) {
 }
 
 function startupCli(homeRoot, command) {
-  const argv = JSON.stringify(["omni", ...command]);
+  const argv = JSON.stringify(["aide", ...command]);
   const source = [
     "import sys, webbrowser",
-    "from omni.terminal.process_entry import run",
+    "from aide.terminal.process_entry import run",
     "webbrowser.open_new_tab = lambda _url: False",
     `sys.argv = ${argv}`,
     "run()",
@@ -43,7 +43,7 @@ function startupCli(homeRoot, command) {
       ...process.env,
       USERPROFILE: homeRoot,
       HOME: homeRoot,
-      OMNI_SERVICE_PORT: String(servicePort(homeRoot)),
+      AIDE_SERVICE_PORT: String(servicePort(homeRoot)),
     },
     encoding: "utf8",
     timeout: 30000,
@@ -131,12 +131,12 @@ async function fetchJson(page, path, method = "GET", body = undefined) {
   return page.evaluate(async ({ path: requestPath, method: requestMethod, body: requestBody }) => {
     const headers = {};
     const control = window.__startupControlCredential;
-    if (typeof control === "string") headers["X-Omni-Control"] = control;
+    if (typeof control === "string") headers["X-Aide-Control"] = control;
     if (requestMethod !== "GET") {
       const session = await window.fetch("/api/v1/web/session", { credentials: "include" });
       const sessionBody = await session.json();
       headers["Content-Type"] = "application/json";
-      headers["X-Omni-CSRF"] = sessionBody.csrf_token;
+      headers["X-Aide-CSRF"] = sessionBody.csrf_token;
     }
     const response = await window.fetch(`/api/v1${requestPath}`, {
       method: requestMethod,
@@ -168,7 +168,7 @@ async function setupDraftAcceptance(context, initialPage, details, state, root) 
   const before = await sessionFiles();
   await expect.poll(() => page.evaluate(() => window.__startupSocket?.readyState)).toBe(1);
   await input().fill(text);
-  const saved = await page.evaluate(() => JSON.parse(window.localStorage.getItem("omni.browser-recovery")));
+  const saved = await page.evaluate(() => JSON.parse(window.localStorage.getItem("aide.browser-recovery")));
   assert.deepEqual(saved.target, { kind: "new-chat" });
   assert.equal(saved.session_id, null);
   assert.equal(saved.model_configuration, null);
@@ -293,18 +293,20 @@ async function fillRepairForm(page, state, providerBaseUrl) {
   const provider = page.locator("#settings-models-providers-openai-local");
   await expect(provider).toBeVisible();
   await keyboardFill(page, page.locator("#settings-models-providers-openai-local-base_url"), providerBaseUrl);
-  const modelList = page.locator("#settings-models-providers-openai-local-models");
-  if (await modelList.locator("textarea").count() === 0) {
-    await keyboardActivate(modelList.getByRole("button", { name: "Add item", exact: true }));
+  const modelCards = provider.locator('div[id^="settings-model-openai-local-"]');
+  if (await modelCards.count() === 0) {
+    await keyboardActivate(provider.getByRole("button", { name: "Add model", exact: true }));
   }
-  await keyboardFill(page, modelList.locator("textarea").first(), "small-model");
-  const routeDefault = page.locator("#settings-models-routes-default");
-  if (state === "invalid" && await routeDefault.count() === 0) {
-    await keyboardActivate(page.getByRole("button", { name: "Add route", exact: true }));
-  }
-  for (const input of await page.locator('input[id^="settings-models-routes-"][id$="-model"]').all()) {
-    await keyboardFill(page, input, "small-model");
-  }
+  const model = modelCards.first();
+  if (!await model.locator("details").evaluate(element => element.open)) await keyboardActivate(model.locator("summary"));
+  await keyboardFill(page, model.getByLabel("Model", { exact: true }), "small-model");
+  await keyboardFill(page, model.getByLabel("Context window", { exact: true }), "200000");
+  await keyboardFill(page, model.getByLabel("Maximum output", { exact: true }), "8192");
+  await keyboardFill(page, model.getByLabel("Temperature", { exact: true }), "0.2");
+  await keyboardFill(page, model.getByLabel("Timeout (seconds)", { exact: true }), "120");
+  await keyboardReach(model.getByLabel("Reasoning effort", { exact: true }));
+  await model.getByLabel("Reasoning effort", { exact: true }).press("Home");
+  await model.getByLabel("Reasoning effort", { exact: true }).press("ArrowDown");
   const action = page.locator("#settings-models-providers-openai-local-api_key-action");
   await keyboardReach(action);
   await action.press("Home");
@@ -312,6 +314,18 @@ async function fillRepairForm(page, state, providerBaseUrl) {
   await keyboardFill(page, page.locator("#settings-models-providers-openai-local-api_key-value"),
     `startup-secret-${state}-303`,
   );
+  const routeDefault = page.locator("#settings-models-routes-default");
+  if (state === "invalid" && await routeDefault.count() === 0) {
+    await keyboardActivate(page.getByRole("button", { name: "Add route", exact: true }));
+  }
+  for (const select of await page.locator('select[id^="settings-models-routes-"][id$="-provider_id"]').all()) {
+    await keyboardReach(select);
+    await select.press("End");
+  }
+  for (const select of await page.locator('select[id^="settings-models-routes-"][id$="-model"]').all()) {
+    await keyboardReach(select);
+    await select.press("End");
+  }
   await keyboardActivate(sections.getByRole("button", { name: "Runtime", exact: true }));
   await keyboardFill(page, page.getByLabel("Maximum iterations", { exact: true }), "64");
 }
@@ -353,9 +367,6 @@ async function conversationAfterRepair(page, details, beforeSocket) {
   await keyboardActivate(page.getByRole("main").getByRole("link", { name: "Status", exact: true }));
   await expect(page.locator("#status-heading")).toBeVisible();
   await expect(page).toHaveURL(/\/status$/);
-  await keyboardActivate(page.locator("#app-sidebar").getByRole("link", { name: "Projects", exact: true }));
-  await page.getByRole("main").getByRole("heading", { name: "Projects", exact: true }).waitFor();
-  await page.getByRole("button", { name: "Refresh projects", exact: true }).click();
   const projectResponse = await fetchJson(page, "/projects");
   const project = projectResponse.body.projects.find((item) => item.project_id === details.project_id);
   assert.ok(project);
@@ -363,13 +374,16 @@ async function conversationAfterRepair(page, details, beforeSocket) {
   assert.equal(project.schedule_state, "awaiting_resume");
   assert.equal(project.saved_jobs.length, 1);
   assert.equal(project.schedule_status?.admitted ?? false, false);
-  await expect(page.getByText("Schedule paused for review", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Resume schedule", exact: true })).toBeEnabled();
-
-  const item = page.locator(`#project-${details.project_id}`);
-  await keyboardActivate(item.getByRole("link", { name: "Open sessions", exact: true }));
+  const item = page.locator('#app-sidebar ul[aria-label="Projects"] > li').filter({
+    has: page.getByRole("button", { name: "persistent-project", exact: true }),
+  });
+  await expect(item.getByText("Schedule paused for review", { exact: true })).toBeVisible();
+  await keyboardActivate(item.locator("details").first().locator("summary"));
+  await expect(item.getByRole("button", { name: "Resume schedule", exact: true })).toBeEnabled();
+  await keyboardActivate(item.locator("details").first().locator("summary"));
+  await keyboardActivate(item.getByRole("button", { name: "persistent-project", exact: true }));
   await page.getByRole("heading", { name: "persistent-project", exact: true }).waitFor();
-  await keyboardActivate(page.getByRole("button", { name: "New session", exact: true }));
+  await keyboardActivate(item.getByRole("button", { name: "New session in persistent-project", exact: true }));
   await keyboardFill(page, page.getByLabel("Message input", { exact: true }),
     `startup repair conversation ${details.state}`,
   );
@@ -414,7 +428,7 @@ async function cleanupState(context, harness, root, failure) {
 }
 
 async function runState(browser, state) {
-  const root = await mkdtemp(join(tmpdir(), `omni-startup-${state}-`));
+  const root = await mkdtemp(join(tmpdir(), `aide-startup-${state}-`));
   let harness;
   let context;
   let failure;
@@ -426,12 +440,12 @@ async function runState(browser, state) {
     assert.ok(details.cold_launch_url.startsWith(`${details.url}/#ticket=`), "Cold production Web startup was bypassed");
     console.log(`${state}: ${details.url} pid=${details.pid} port=${details.port}`);
 
-    const bareRoot = await mkdtemp(join(tmpdir(), `omni-bare-${state}-`));
+    const bareRoot = await mkdtemp(join(tmpdir(), `aide-bare-${state}-`));
     try {
       const source = join(details.home_root, "config.toml");
       if (state !== "missing") {
-        await mkdir(join(bareRoot, ".omni"));
-        await writeFile(join(bareRoot, ".omni", "config.toml"), await readFile(source));
+        await mkdir(join(bareRoot, ".aide"));
+        await writeFile(join(bareRoot, ".aide", "config.toml"), await readFile(source));
       }
       const bare = startupCli(bareRoot, []);
       assert.equal(bare.status, 2, `Bare CLI unexpectedly started for ${state}: ${bare.stdout}`);
@@ -446,10 +460,10 @@ async function runState(browser, state) {
     }
 
     const web = startupCli(details.user_home_root, ["web"]);
-    assert.equal(web.status, 0, `omni web failed for ${state}: ${web.stderr}`);
+    assert.equal(web.status, 0, `aide web failed for ${state}: ${web.stderr}`);
     const webOutput = `${web.stdout ?? ""}\n${web.stderr ?? ""}`;
     const launchUrl = webOutput.match(/http:\/\/127\.0\.0\.1:\d+\/#ticket=[\w-]+/)?.[0];
-    assert.ok(launchUrl?.startsWith(`${details.url}/#ticket=`), "omni web did not reuse the isolated service");
+    assert.ok(launchUrl?.startsWith(`${details.url}/#ticket=`), "aide web did not reuse the isolated service");
     const sharedBare = startupCli(details.user_home_root, []);
     assert.equal(sharedBare.status, 2, "Existing Web service swallowed bare CLI startup errors");
     const sharedBareOutput = `${sharedBare.stdout ?? ""}\n${sharedBare.stderr ?? ""}`;
@@ -492,7 +506,7 @@ async function runState(browser, state) {
     const documentResponse = await page.goto(launchUrl);
     assert.equal(documentResponse.status(), 200);
     assert.match(documentResponse.headers()["content-security-policy"] ?? "", /default-src 'self'/);
-    await expect(page.getByRole("heading", { name: "Omni", exact: true }).last()).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Aide", exact: true }).last()).toBeVisible();
     await expect(page.getByRole("button", { name: /Send|发送/, exact: true })).toBeDisabled();
     page = await setupDraftAcceptance(context, page, details, state, root);
     if (state === "missing") {
@@ -504,7 +518,7 @@ async function runState(browser, state) {
       await expect(page.getByRole("textbox", { name: /Message input|消息输入/, exact: true })).toHaveValue("");
       assert.equal(new URL(page.url()).pathname, "/");
       assert.notEqual((await fetchJson(page, "/service")).body.service_instance_id, oldService);
-      assert.equal(await page.evaluate(() => window.localStorage.getItem("omni.browser-recovery")), null);
+      assert.equal(await page.evaluate(() => window.localStorage.getItem("aide.browser-recovery")), null);
     }
     await expect(page.getByRole("button", { name: /Send|发送/, exact: true })).toBeDisabled();
     await page.getByRole("link", { name: /Configure models|配置模型/, exact: true }).click();
@@ -557,7 +571,7 @@ async function runState(browser, state) {
     assert.equal(repaired.application.status, "restart-required");
     assert.equal(repaired.application.active_revision, null);
     await assertAdmissionClosed(page, details.project_id);
-    await expect(page.getByText("Saved; restart Omni to use these settings.", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Saved; restart Aide to use these settings.", { exact: true }).first()).toBeVisible();
     assert.equal(await page.evaluate(() => window.__startupSocketBefore === window.__startupSocket), true);
     const oldPid = details.pid;
     await context.close();
@@ -582,7 +596,7 @@ async function runState(browser, state) {
     });
     const restartedPage = await context.newPage();
     await restartedPage.goto(details.cold_launch_url);
-    await expect(restartedPage.getByRole("heading", { name: "Omni", exact: true }).last()).toBeVisible();
+    await expect(restartedPage.getByRole("heading", { name: "Aide", exact: true }).last()).toBeVisible();
     await expect(restartedPage.getByRole("textbox", { name: /Message input|消息输入/, exact: true })).toBeEnabled();
     await restartedPage.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
     await keyboardActivate(restartedPage.getByRole("navigation", { name: "Settings sections", exact: true })
@@ -655,7 +669,7 @@ const urls = [];
 try {
   await mkdir(output, { recursive: true });
   browser = await chromium.launch({
-    channel: process.env.OMNI_E2E_BROWSER_CHANNEL ?? "msedge",
+    channel: process.env.AIDE_E2E_BROWSER_CHANNEL ?? "msedge",
   });
   for (const state of states) urls.push(await runState(browser, state));
   console.log(

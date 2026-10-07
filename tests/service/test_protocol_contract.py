@@ -9,16 +9,16 @@ from typing import Any, cast
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
 
-from omni.agent.memory.dream import DreamResult
-from omni.errors import ErrorInfo
-from omni.management.commands import ManagementCommandResult
-from omni.management.service import RuntimeStatus
-from omni.service.client import _management_result
-from omni.service.runtime import _encode_management_result
+from aide.agent.memory.dream import DreamResult
+from aide.errors import ErrorInfo
+from aide.management.commands import ManagementCommandResult
+from aide.management.service import RuntimeStatus
+from aide.service.client import _management_result
+from aide.service.runtime import _encode_management_result
 
 
 def _schema() -> dict[str, Any]:
-    schema_path = resources.files("omni.service.protocol").joinpath("v1.schema.json")
+    schema_path = resources.files("aide.service.protocol").joinpath("v1.schema.json")
     return cast(dict[str, Any], json.loads(schema_path.read_text(encoding="utf-8")))
 
 

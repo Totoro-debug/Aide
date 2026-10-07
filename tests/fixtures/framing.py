@@ -9,10 +9,10 @@ from collections.abc import AsyncIterator, Sequence
 from copy import deepcopy
 from typing import Any, cast
 
-from omni.agent.runner import AgentRunnerRoute, AgentRunnerRouter
-from omni.config.config import UserConfiguration
-from omni.provider.model_router import ModelAttemptGuard, ModelRouteStatus
-from omni.provider.models import (
+from aide.agent.runner import AgentRunnerRoute, AgentRunnerRouter
+from aide.config.config import UserConfiguration
+from aide.provider.model_router import ModelAttemptGuard, ModelRouteStatus
+from aide.provider.models import (
     ModelContinuation,
     ModelMessages,
     ModelResponse,

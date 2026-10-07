@@ -8,27 +8,27 @@ from typing import Any
 import pytest
 from mcp.types import CallToolResult
 
-from omni.agent.context.run_context import (
+from aide.agent.context.run_context import (
     AgentRunContextController,
     AgentRunContextRequestPreparer,
     AgentRunContextSnapshot,
     agent_run_attempt_guard,
 )
-from omni.agent.memory.manager import MemoryManager
-from omni.agent.runner import AgentRunner, AgentRunnerResult
-from omni.agent.session.session import Session
-from omni.agent.tools.mcp import MCPTool, MCPToolSpec
-from omni.agent.tools.tool_gateway import ToolGateway
-from omni.agent.workspace_state import WorkspaceState
-from omni.provider.model_router import ModelRouteStatus, RunModelRouter
-from omni.provider.models import (
+from aide.agent.memory.manager import MemoryManager
+from aide.agent.runner import AgentRunner, AgentRunnerResult
+from aide.agent.session.session import Session
+from aide.agent.tools.mcp import MCPTool, MCPToolSpec
+from aide.agent.tools.tool_gateway import ToolGateway
+from aide.agent.workspace_state import WorkspaceState
+from aide.provider.model_router import ModelRouteStatus, RunModelRouter
+from aide.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelResponse,
     ModelRoute,
     ModelUsage,
 )
-from omni.schedule.service import ScheduleService
+from aide.schedule.service import ScheduleService
 from tests.fixtures import FakeClock, ScriptedFakeProvider, ScriptedFakeRouter, StreamScript
 from tests.fixtures.session import seed_session_state
 

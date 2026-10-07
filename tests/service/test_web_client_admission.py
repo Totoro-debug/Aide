@@ -12,11 +12,11 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
-from omni.config.config import ConfigLoader
-from omni.service.discovery import create_credential
-from omni.service.errors import ServiceError
-from omni.service.runtime import AgentService, ClientState
-from omni.service.transport import AgentServiceTransport
+from aide.config.config import ConfigLoader
+from aide.service.discovery import create_credential
+from aide.service.errors import ServiceError
+from aide.service.runtime import AgentService, ClientState
+from aide.service.transport import AgentServiceTransport
 from tests.fixtures import FakeClock
 from tests.service.test_service_concurrency import _CollectingSink
 from tests.service.test_service_transport import _prepare_agent_home
@@ -174,20 +174,20 @@ async def test_duplicate_browser_and_ticket_preserve_original_control(
             cookies = list(browser.cookie_jar)
             response = await browser.post(
                 server.make_url("/api/v1/clients"),
-                headers={"Origin": origin, "X-Omni-CSRF": csrf},
+                headers={"Origin": origin, "X-Aide-CSRF": csrf},
                 json={"request_id": "register", "kind": "web"},
             )
             assert response.status == 200
             registered = await response.json()
             socket = await browser.ws_connect(
                 server.make_url("/api/v1/events"), headers={"Origin": origin},
-                protocols=("omni-v1", registered["web_control_credential"]),
+                protocols=("aide-v1", registered["web_control_credential"]),
             )
             try:
                 for _ in range(2):
                     response = await browser.post(
                         server.make_url("/api/v1/clients"),
-                        headers={"Origin": origin, "X-Omni-CSRF": csrf},
+                        headers={"Origin": origin, "X-Aide-CSRF": csrf},
                         json={"request_id": "duplicate-tab", "kind": "web"},
                     )
                     assert response.status == 409
@@ -208,7 +208,7 @@ async def test_duplicate_browser_and_ticket_preserve_original_control(
                 assert list(browser.cookie_jar) == cookies
                 response = await browser.get(
                     server.make_url("/api/v1/config"),
-                    headers={"Origin": origin, "X-Omni-Control": registered["web_control_credential"]},
+                    headers={"Origin": origin, "X-Aide-Control": registered["web_control_credential"]},
                 )
                 assert response.status == 200
                 assert not socket.closed

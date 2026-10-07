@@ -14,24 +14,24 @@ from uuid import UUID
 
 import pytest
 
-import omni.agent.context.builder as context
-from omni.agent.context.builder import ContextBuilder
-from omni.agent.loop import ConfirmationRequestView
-from omni.agent.memory.dream import Dream
-from omni.agent.memory.manager import MemoryManager
-from omni.agent.message_bus import MessageBus
-from omni.agent.permission import RuntimePermissionControl
-from omni.agent.runner import AgentRunner, AgentRunnerResult
-from omni.agent.session.session import Session, SessionStoragePartition
-from omni.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
-from omni.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
-from omni.agent.tools.tool_gateway import ModelToolCall, ToolGateway
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.agent_home import AgentHome
-from omni.config.config import ConfigLoader
-from omni.management.commands import ManagementCommandDispatcher
-from omni.provider.model_router import ModelRouter
-from omni.provider.models import (
+import aide.agent.context.builder as context
+from aide.agent.context.builder import ContextBuilder
+from aide.agent.loop import ConfirmationRequestView
+from aide.agent.memory.dream import Dream
+from aide.agent.memory.manager import MemoryManager
+from aide.agent.message_bus import MessageBus
+from aide.agent.permission import RuntimePermissionControl
+from aide.agent.runner import AgentRunner, AgentRunnerResult
+from aide.agent.session.session import Session, SessionStoragePartition
+from aide.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
+from aide.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
+from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
+from aide.config.config import ConfigLoader
+from aide.management.commands import ManagementCommandDispatcher
+from aide.provider.model_router import ModelRouter
+from aide.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,
@@ -40,11 +40,11 @@ from omni.provider.models import (
     ModelUsage,
     ReasoningEffort,
 )
-from omni.schedule.history import read_schedule_history
-from omni.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
-from omni.schedule.service import ScheduleClock, ScheduleService
-from omni.schedule.store import WorkspaceScheduleStore
-from omni.templates import render_template
+from aide.schedule.history import read_schedule_history
+from aide.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
+from aide.schedule.service import ScheduleClock, ScheduleService
+from aide.schedule.store import WorkspaceScheduleStore
+from aide.templates import render_template
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import (
     FakeClock,
@@ -1337,7 +1337,7 @@ async def test_schedule_dispatcher_wakes_for_due_at_job_and_keeps_schedule_sessi
         )
         assert await _schedule_state(workspace).public_snapshot() == ()
         schedule_session_paths = tuple(
-            (workspace / ".omni" / "schedule-sessions").glob("schedule_*.jsonl")
+            (workspace / ".aide" / "schedule-sessions").glob("schedule_*.jsonl")
         )
         assert len(schedule_session_paths) == 1
         schedule_session_id = schedule_session_paths[0].stem
@@ -1352,7 +1352,7 @@ async def test_schedule_dispatcher_wakes_for_due_at_job_and_keeps_schedule_sessi
         ]
         assert schedule_session.messages[-1]["content"] == "Background result."
         assert (
-            workspace / ".omni" / "schedule-sessions" / f"{schedule_session_id}.jsonl"
+            workspace / ".aide" / "schedule-sessions" / f"{schedule_session_id}.jsonl"
         ).exists()
 
         resume = await dispatcher.dispatch("/resume")
@@ -1514,10 +1514,10 @@ async def test_foreground_and_schedule_artifacts_remain_separate(
     assert set(foreground_artifact) == {"path", "total_chars", "preview_chars"}
     assert set(schedule_artifact) == {"path", "total_chars", "preview_chars"}
     assert foreground_artifact["path"] == (
-        f".omni/artifacts/{foreground_session_id}/foreground_artifact.txt"
+        f".aide/artifacts/{foreground_session_id}/foreground_artifact.txt"
     )
     assert schedule_artifact["path"] == (
-        f".omni/artifacts/schedule_{JOB_UUID}/schedule_artifact.txt"
+        f".aide/artifacts/schedule_{JOB_UUID}/schedule_artifact.txt"
     )
     assert (workspace / foreground_artifact["path"]).exists()
     assert (workspace / schedule_artifact["path"]).exists()

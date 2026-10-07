@@ -9,25 +9,25 @@ from typing import Any, Literal, cast
 
 import pytest
 
-from omni.agent.context.budget import (
+from aide.agent.context.budget import (
     estimate_request_tokens,
     estimate_run_slice_tokens,
     request_fits_model_context,
 )
-from omni.agent.context.run_context import (
+from aide.agent.context.run_context import (
     AgentRunContextController,
     AgentRunContextRequestPreparer,
     AgentRunContextSnapshot,
     agent_run_attempt_guard,
     latest_main_agent_usage_anchor,
 )
-from omni.agent.memory.manager import MemoryManager
-from omni.agent.run_errors import CommittableAgentRunError
-from omni.agent.runner import AgentRunner
-from omni.agent.session.session import Session
-from omni.agent.tools.tool_gateway import ModelToolCall, ToolResult
-from omni.agent.workspace_state import WorkspaceState
-from omni.config.config import (
+from aide.agent.memory.manager import MemoryManager
+from aide.agent.run_errors import CommittableAgentRunError
+from aide.agent.runner import AgentRunner
+from aide.agent.session.session import Session
+from aide.agent.tools.tool_gateway import ModelToolCall, ToolResult
+from aide.agent.workspace_state import WorkspaceState
+from aide.config.config import (
     MemoryConfiguration,
     ModelsConfiguration,
     ProviderConfiguration,
@@ -35,10 +35,10 @@ from omni.config.config import (
     RuntimeConfiguration,
     UserConfiguration,
 )
-from omni.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
-from omni.provider.errors import ModelCallError
-from omni.provider.model_router import ModelRouter, ModelRouteStatus, RunModelRouter
-from omni.provider.models import (
+from aide.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
+from aide.provider.errors import ModelCallError
+from aide.provider.model_router import ModelRouter, ModelRouteStatus, RunModelRouter
+from aide.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
     ModelContinuation,
@@ -110,7 +110,7 @@ def _router_configuration(
 
 def _state(workspace: Path) -> WorkspaceState:
     state = WorkspaceState(workspace)
-    state.initialize(agent_home_root=Path.home() / ".omni")
+    state.initialize(agent_home_root=Path.home() / ".aide")
     return state
 
 

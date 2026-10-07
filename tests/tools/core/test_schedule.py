@@ -8,13 +8,13 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from omni.agent.tools.core.schedule import ScheduleTool
-from omni.agent.tools.permission import PermissionContext
-from omni.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRequest, ModelToolCall
-from omni.agent.workspace_state import WorkspaceState
-from omni.schedule.model import JobSchedule, ScheduleJob
-from omni.schedule.service import ScheduleService, ScheduleStaleRemovalError
-from omni.schedule.store import WorkspaceScheduleStore
+from aide.agent.tools.core.schedule import ScheduleTool
+from aide.agent.tools.permission import PermissionContext
+from aide.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRequest, ModelToolCall
+from aide.agent.workspace_state import WorkspaceState
+from aide.schedule.model import JobSchedule, ScheduleJob
+from aide.schedule.service import ScheduleService, ScheduleStaleRemovalError
+from aide.schedule.store import WorkspaceScheduleStore
 from tests.fixtures import SingleToolGateway, write_schedule_state
 from tests.fixtures.gateway import contextual_tool
 

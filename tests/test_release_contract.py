@@ -287,7 +287,7 @@ def test_distribution_directly_declares_host_timezone_discovery() -> None:
 def test_distribution_metadata_builds_one_windows_runtime_wheel() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
 
-    assert project["scripts"]["omni"] == "omni.terminal.process_entry:run"
+    assert project["scripts"]["aide"] == "aide.terminal.process_entry:run"
     assert "Operating System :: OS Independent" not in project["classifiers"]
     assert "Operating System :: Microsoft :: Windows" in project["classifiers"]
     setup_path = ROOT / "setup.cfg"
@@ -326,8 +326,8 @@ def test_clean_distributions_build_and_import_cleanly(
     )
     assert build_result.returncode == 0, build_result.stderr
 
-    sdists = tuple(artifact_dir.glob("omni-*.tar.gz"))
-    wheels = tuple(artifact_dir.glob("omni-*.whl"))
+    sdists = tuple(artifact_dir.glob("aide-*.tar.gz"))
+    wheels = tuple(artifact_dir.glob("aide-*.whl"))
     assert len(sdists) == 1
     assert len(wheels) == 1
 
@@ -336,8 +336,8 @@ def test_clean_distributions_build_and_import_cleanly(
     with zipfile.ZipFile(wheels[0]) as archive:
         wheel_members = {member.replace("\\", "/") for member in archive.namelist()}
 
-    assert any(member.endswith("/omni/__init__.py") for member in sdist_members)
-    assert "omni/__init__.py" in wheel_members
+    assert any(member.endswith("/aide/__init__.py") for member in sdist_members)
+    assert "aide/__init__.py" in wheel_members
 
     install_root = tmp_path / "clean-install"
     install_result = subprocess.run(
@@ -364,7 +364,7 @@ def test_clean_distributions_build_and_import_cleanly(
         [
             sys.executable,
             "-c",
-            ("import omni\nimport omni.terminal.cli\n"),
+            ("import aide\nimport aide.terminal.cli\n"),
         ],
         cwd=clean_import_dir,
         env={**os.environ, "PYTHONPATH": str(install_root)},
@@ -378,7 +378,7 @@ def test_clean_distributions_build_and_import_cleanly(
 def test_application_modules_do_not_depend_on_standard_library_logging() -> None:
     violations: list[str] = []
 
-    for path in sorted((ROOT / "omni").rglob("*.py")):
+    for path in sorted((ROOT / "aide").rglob("*.py")):
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(path))
         for node in ast.walk(tree):
@@ -486,7 +486,7 @@ def test_mcp_transport_evidence_uses_local_fixtures() -> None:
 def test_tracked_markdown_local_links_resolve() -> None:
     tracked = _tracked_markdown_paths()
     deleted_output = subprocess.check_output(
-        ("git", "diff", "--name-only", "--diff-filter=D", "-z", "--", "*.md"),
+        ("git", "ls-files", "--deleted", "-z", "--", "*.md"),
         cwd=ROOT,
     ).decode("utf-8")
     deleted = set(deleted_output.split("\0"))
@@ -512,7 +512,7 @@ def test_tracked_markdown_local_links_resolve() -> None:
 
 def test_current_architecture_matches_source_ast_contracts() -> None:
     loaded_skill = _source_class(
-        _source_ast(ROOT / "omni" / "skills" / "catalog.py"),
+        _source_ast(ROOT / "aide" / "skills" / "catalog.py"),
         "LoadedSkill",
     )
     assert {
@@ -522,7 +522,7 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
     } == {"metadata", "document", "always"}
 
     skill_loader = _source_class(
-        _source_ast(ROOT / "omni" / "skills" / "catalog.py"),
+        _source_ast(ROOT / "aide" / "skills" / "catalog.py"),
         "SkillLoader",
     )
     assert _public_method_names(skill_loader) == {
@@ -535,7 +535,7 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
     }
 
     message_bus = _source_class(
-        _source_ast(ROOT / "omni" / "agent" / "message_bus.py"),
+        _source_ast(ROOT / "aide" / "agent" / "message_bus.py"),
         "MessageBus",
     )
     assert {
@@ -565,7 +565,7 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
     }
 
     memory_manager = _source_class(
-        _source_ast(ROOT / "omni" / "agent" / "memory" / "manager.py"),
+        _source_ast(ROOT / "aide" / "agent" / "memory" / "manager.py"),
         "MemoryManager",
     )
     assert _public_method_names(memory_manager) == {
@@ -578,7 +578,7 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
     }
 
     dream = _source_class(
-        _source_ast(ROOT / "omni" / "agent" / "memory" / "dream.py"),
+        _source_ast(ROOT / "aide" / "agent" / "memory" / "dream.py"),
         "Dream",
     )
     assert _parameter_names(_source_function(dream, "__init__")) == (
@@ -597,7 +597,7 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
         "is_running",
     }
 
-    schedule_tree = _source_ast(ROOT / "omni" / "schedule" / "service.py")
+    schedule_tree = _source_ast(ROOT / "aide" / "schedule" / "service.py")
     schedule_clock = _source_class(schedule_tree, "ScheduleClock")
     assert _public_method_names(schedule_clock) == {"now", "monotonic", "sleep"}
     schedule_service = _source_class(schedule_tree, "ScheduleService")
@@ -616,7 +616,7 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
 
 
 def test_cli_source_uses_service_client_and_runtime_resource_shutdown_order() -> None:
-    cli_tree = _source_ast(ROOT / "omni" / "terminal" / "cli.py")
+    cli_tree = _source_ast(ROOT / "aide" / "terminal" / "cli.py")
     conversation = _source_function(cli_tree, "_run_service_cli_conversation")
     assert _attribute_call_lines(conversation, "ServiceClient", "connect_or_start")
     assert _attribute_call_lines(conversation, "client", "close")
@@ -624,7 +624,7 @@ def test_cli_source_uses_service_client_and_runtime_resource_shutdown_order() ->
     main = _source_function(cli_tree, "main")
     assert _named_call_lines(main, {"_run_service_cli_conversation"})
 
-    runtime_tree = _source_ast(ROOT / "omni" / "service" / "resources.py")
+    runtime_tree = _source_ast(ROOT / "aide" / "service" / "resources.py")
     runtime_shutdown = _source_function(runtime_tree, "close_workspace")
     resource_shutdown = (
         min(_attribute_reference_lines(runtime_shutdown, "resources.schedule_service", "pause_and_drain")),
@@ -638,7 +638,7 @@ def test_cli_source_uses_service_client_and_runtime_resource_shutdown_order() ->
 
 def test_composition_and_store_signatures_match_current_contracts() -> None:
     management = _source_class(
-        _source_ast(ROOT / "omni" / "management" / "service.py"),
+        _source_ast(ROOT / "aide" / "management" / "service.py"),
         "ManagementViewService",
     )
     management_init = _direct_method(management, "__init__")
@@ -671,7 +671,7 @@ def test_composition_and_store_signatures_match_current_contracts() -> None:
     )
 
     terminal = _source_class(
-        _source_ast(ROOT / "omni" / "terminal" / "conversation.py"),
+        _source_ast(ROOT / "aide" / "terminal" / "conversation.py"),
         "TerminalConversationApp",
     )
     terminal_init = _direct_method(terminal, "__init__")
@@ -695,7 +695,7 @@ def test_composition_and_store_signatures_match_current_contracts() -> None:
     assert isinstance(command_tokens_default, ast.Constant) and command_tokens_default.value is None
 
     schedule_store = _source_class(
-        _source_ast(ROOT / "omni" / "schedule" / "store.py"),
+        _source_ast(ROOT / "aide" / "schedule" / "store.py"),
         "WorkspaceScheduleStore",
     )
     assert _parameter_names(_direct_method(schedule_store, "_publish")) == (
@@ -706,15 +706,15 @@ def test_composition_and_store_signatures_match_current_contracts() -> None:
 
 def test_session_exposes_the_terminal_agent_run_commit() -> None:
     session = _source_class(
-        _source_ast(ROOT / "omni" / "agent" / "session" / "session.py"),
+        _source_ast(ROOT / "aide" / "agent" / "session" / "session.py"),
         "Session",
     )
     assert _direct_method(session, "commit_agent_run")
 
 
 def test_runtime_status_uses_the_canonical_usage_anchor_and_configured_chat_route() -> None:
-    loop_tree = _source_ast(ROOT / "omni" / "agent" / "loop.py")
-    compactor_tree = _source_ast(ROOT / "omni" / "agent" / "context" / "run_context.py")
+    loop_tree = _source_ast(ROOT / "aide" / "agent" / "loop.py")
+    compactor_tree = _source_ast(ROOT / "aide" / "agent" / "context" / "run_context.py")
 
     anchor_definitions = [
         node
@@ -734,7 +734,7 @@ def test_runtime_status_uses_the_canonical_usage_anchor_and_configured_chat_rout
     ]
     assert len(controller_anchor_calls) == 1
 
-    execution_tree = _source_ast(ROOT / "omni" / "service" / "execution.py")
+    execution_tree = _source_ast(ROOT / "aide" / "service" / "execution.py")
     execution = _source_class(execution_tree, "SessionExecution")
     assert _direct_method(execution, "runtime_status_input")
     runtime_status = _source_function(loop_tree, "session_runtime_status_input")
@@ -760,7 +760,7 @@ def test_runtime_status_uses_the_canonical_usage_anchor_and_configured_chat_rout
 
 
 def test_agent_run_context_exports_current_request_and_terminal_contracts() -> None:
-    compactor_tree = _source_ast(ROOT / "omni" / "agent" / "context" / "run_context.py")
+    compactor_tree = _source_ast(ROOT / "aide" / "agent" / "context" / "run_context.py")
     class_names = {node.name for node in compactor_tree.body if isinstance(node, ast.ClassDef)}
     expected_contracts = {"AgentRunContextRequestPreparer", "AgentRunTerminalCommitValues"}
 

@@ -702,6 +702,28 @@
         "result": {"$ref": "#/$defs/management_result"}
       }
     },
+    "project_memory_request": {
+      "type": "object", "additionalProperties": false,
+      "required": ["request_id"],
+      "properties": {"request_id": {"$ref": "#/$defs/request_id"}}
+    },
+    "service_restart_request": {
+      "type": "object", "additionalProperties": false,
+      "required": ["request_id", "saved_revision"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "saved_revision": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "service_restart_response": {
+      "type": "object", "additionalProperties": false,
+      "required": ["request_id", "accepted", "operation_id"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/request_id"},
+        "accepted": {"type": "boolean"},
+        "operation_id": {"$ref": "#/$defs/identifier"}
+      }
+    },
     "memory_view_response": {
       "type": "object",
       "additionalProperties": false,

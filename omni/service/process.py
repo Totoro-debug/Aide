@@ -30,7 +30,7 @@ from omni.service.discovery import (
 )
 from omni.service.errors import ServiceError
 from omni.service.runtime import AgentService
-from omni.service.transport import create_app
+from omni.service.transport import AgentServiceTransport
 from omni.utils.platform import WINDOWS_REQUIRED_ERROR, is_windows_host
 
 
@@ -50,7 +50,8 @@ async def serve_service(
         agent_home,
         reconnect_timeout=reconnect_timeout,
     )
-    runner = web.AppRunner(create_app(service), access_log=None)
+    transport = AgentServiceTransport(service)
+    runner = web.AppRunner(transport.create_app(), access_log=None)
     discovery: ServiceDiscovery | None = None
     credential_created = False
     try:
@@ -92,7 +93,20 @@ async def serve_service(
                 pid=os.getpid(),
             )
             write_discovery(agent_home, discovery)
-        await service.wait_closed()
+        while True:
+            await service.wait_closed()
+            if not service.restart_requested:
+                break
+            replacement = service.replacement_after_restart()
+            service = replacement
+            await service.start()
+            await transport.replace_service(service)
+            discovery = ServiceDiscovery(
+                service_instance_id=service.service_instance_id,
+                protocol_version=service.protocol_version,
+                host=host, port=bound_port, pid=os.getpid(),
+            )
+            write_discovery(agent_home, discovery)
         assert discovery is not None
         return discovery
     except BaseException:

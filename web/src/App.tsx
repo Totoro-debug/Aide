@@ -18,13 +18,9 @@ import {
   FolderOpen,
   Gauge,
   Info,
-  Languages,
   Menu,
   MessageSquare,
   MoreHorizontal,
-  Moon,
-  Monitor,
-  Pencil,
   Play,
   Plus,
   RefreshCw,
@@ -33,7 +29,6 @@ import {
   Settings2,
   ShieldX,
   Square,
-  Sun,
   Trash2,
   TriangleAlert,
   X,
@@ -91,6 +86,7 @@ import {
   ServiceCommandError,
   triggerRuntimeDream,
   patchConfig,
+  restartService,
   repairConfig,
   updateRuntimeEffort,
   updateRuntimePermission,
@@ -143,6 +139,8 @@ import type {
 import styles from "./App.module.css";
 import ComposerControls from "./ComposerControls";
 import NavigationSidebar from "./NavigationSidebar";
+import WorkspaceMemoryDialog from "./WorkspaceMemoryDialog";
+import type { WorkspaceMemoryTarget } from "./WorkspaceMemoryDialog";
 import type { NavigationSession, NavigationSessionAction, NavigationProjectAction } from "./NavigationSidebar";
 import {
   browserRecoveryRoute,
@@ -254,6 +252,10 @@ export default function App() {
   const [sessionNavigationVersion, setSessionNavigationVersion] = useState(0);
   const [activeNavigationSession, setActiveNavigationSession] = useState<NavigationSession | null>(null);
   const [activeNavigationClaim, setActiveNavigationClaim] = useState<SessionClaim | null>(null);
+  const [memoryTarget, setMemoryTarget] = useState<WorkspaceMemoryTarget | null>(null);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const expectedRestartRef = useRef(false);
+  const setRestartExpectation = useCallback((expected: boolean) => { expectedRestartRef.current = expected; }, []);
   const [navigationDraftSessions, setNavigationDraftSessions] = useState<NavigationSession[]>([]);
   const [pendingSessionAction, setPendingSessionAction] = useState<PendingSessionAction | null>(null);
   const releasedEmptyDraftSessionsRef = useRef(new Set<string>());
@@ -302,8 +304,8 @@ export default function App() {
       setBrowserRecoveryNotice(null);
       browserRecoveryNoticeTimerRef.current = null;
     }, 6000);
-    navigate("/", { replace: true, state: null });
-  }, [consumeRegisteredClient, navigate]);
+    navigateRef.current("/", { replace: true, state: null });
+  }, [consumeRegisteredClient]);
   const subscribeServiceEvents = useCallback((listener: ServiceEventListener) => {
     eventListenersRef.current.add(listener);
     return () => eventListenersRef.current.delete(listener);
@@ -549,9 +551,27 @@ export default function App() {
       onServiceInstanceChange: (currentInstanceId, previousInstanceId, initial) => {
         const serviceChanged = previousInstanceId !== null
           && previousInstanceId !== currentInstanceId;
+        if (serviceChanged) setMemoryTarget(null);
         serviceInstanceIdRef.current = currentInstanceId;
-        const savedRecovery = readBrowserRecoverySnapshot();
-        if (serviceChanged || (savedRecovery !== null
+        let savedRecovery = readBrowserRecoverySnapshot();
+        const expectedRestart = serviceChanged && expectedRestartRef.current;
+        if (serviceChanged) expectedRestartRef.current = false;
+        if (expectedRestart && savedRecovery !== null) {
+          savedRecovery = { ...savedRecovery, service_instance_id: currentInstanceId };
+          writeBrowserRecoverySnapshot(savedRecovery);
+          const route = new URL(browserRecoveryRoute(savedRecovery), window.location.origin);
+          if (window.location.pathname === "/settings") {
+            const state = window.history.state?.usr as SettingsNavigationState | null;
+            navigateRef.current("/settings", { replace: true, state: {
+              ...state,
+              returnTo: { ...state?.returnTo, pathname: route.pathname, search: route.search,
+                hash: "", scrollTop: state?.returnTo?.scrollTop ?? 0 },
+            } satisfies SettingsNavigationState });
+          } else {
+            navigateRef.current(`${route.pathname}${route.search}`, { replace: true, state: null });
+          }
+        }
+        if ((serviceChanged && !expectedRestart) || (savedRecovery !== null
           && savedRecovery.service_instance_id !== currentInstanceId)) {
           clearBrowserRecoverySnapshot();
           setBrowserRecovery(null);
@@ -603,9 +623,6 @@ export default function App() {
   const settingsReturnLocation = (location.state as SettingsNavigationState | null)?.returnTo;
   const conversationLocation = location.pathname === "/settings"
     && settingsReturnLocation !== undefined
-    && (settingsReturnLocation.pathname === "/"
-      || settingsReturnLocation.pathname === "/chat"
-      || /^\/projects\/[^/]+$/.test(settingsReturnLocation.pathname))
       ? settingsReturnLocation
       : location;
   const conversationParams = new URLSearchParams(conversationLocation.search);
@@ -644,7 +661,15 @@ export default function App() {
       hash: "",
       scrollTop: 0,
     };
-    navigate(`${target.pathname}${target.search}${target.hash}`, { replace: true });
+    const recovery = readBrowserRecoverySnapshot();
+    const recoveredRoute = recovery !== null && recovery.service_instance_id === serviceInstanceIdRef.current
+      ? new URL(browserRecoveryRoute(recovery), window.location.origin) : null;
+    const targetSession = new URLSearchParams(target.search).get("session");
+    const route = recoveredRoute !== null && recoveredRoute.pathname === target.pathname
+      && targetSession !== null && targetSession !== recovery?.session_id
+        ? `${recoveredRoute.pathname}${recoveredRoute.search}`
+        : `${target.pathname}${target.search}${target.hash}`;
+    navigate(route, { replace: true });
     window.requestAnimationFrame(() => {
       if (mainContentRef.current !== null) {
         mainContentRef.current.scrollTop = target.scrollTop;
@@ -705,6 +730,16 @@ export default function App() {
           onNewProjectSession={requestProjectSession}
           onSessionAction={requestSessionAction}
           onClose={() => setSidebarOpen(false)}
+          onOpenMemory={(projectId, trigger) => {
+            if (projectId !== null) {
+              const project = projects.find((item) => item.project_id === projectId);
+              if (project !== undefined) setMemoryTarget({ projectId, title: project.path, trigger });
+            } else if (activeNavigationClaim !== null) {
+              setMemoryTarget({ projectId: null, claim: activeNavigationClaim,
+                title: activeNavigationSession?.directory ?? t("nav.chatHistory"), trigger });
+            }
+            setMemoryOpen(true);
+          }}
         />
         <div className={styles.sidebarFooter}>
           <NavLink
@@ -718,89 +753,28 @@ export default function App() {
         </div>
       </aside>
 
+      {memoryTarget !== null ? (
+        <WorkspaceMemoryDialog
+          key={memoryTarget.projectId ?? `${memoryTarget.claim.workspace_id}:${memoryTarget.claim.session_id}:${memoryTarget.claim.claim_version}`}
+          target={memoryTarget}
+          open={memoryOpen}
+          online={connectionState === "online"}
+          onClose={() => setMemoryOpen(false)}
+        />
+      ) : null}
+
       <div className={styles.mainColumn}>
-        <header className={styles.topbar}>
-          <div className={styles.topbarLeading}>
-            <button
-              className={styles.sidebarToggle}
-              id="app-sidebar-toggle"
-              type="button"
-              aria-label={sidebarOpen ? t("controls.closeNavigation") : t("controls.openNavigation")}
-              aria-controls="app-sidebar"
-              aria-expanded={sidebarOpen}
-              onClick={() => setSidebarOpen((open) => !open)}
-            >
-              {sidebarOpen ? <X size={18} aria-hidden="true" /> : <Menu size={18} aria-hidden="true" />}
-            </button>
-            <div className={styles.breadcrumb}>
-              <span className={styles.breadcrumbMuted}>{t("app.name")}</span>
-              <span className={styles.breadcrumbDivider} aria-hidden="true">
-                /
-              </span>
-              <span>
-                {location.pathname === "/settings"
-                  ? t("nav.settings")
-                  : isChatRoute
-                  ? t("nav.newChat")
-                  : location.pathname.startsWith("/projects/")
-                  ? location.pathname.includes("/schedule")
-                    ? t("nav.schedule")
-                    : t("nav.sessions")
-                  : t(location.pathname === "/projects" ? "nav.projects" : "nav.status")}
-              </span>
-            </div>
-          </div>
-          <div className={styles.toolbar}>
-            <div className={styles.toolbarGroup} aria-label={t("controls.language")}>
-              <Languages size={15} aria-hidden="true" />
-              <button
-                className={language === "zh-CN" ? styles.segmentActive : styles.segmentButton}
-                type="button"
-                aria-pressed={language === "zh-CN"}
-                onClick={() => void i18n.changeLanguage("zh-CN")}
-              >
-                中文
-              </button>
-              <button
-                className={language === "en" ? styles.segmentActive : styles.segmentButton}
-                type="button"
-                aria-pressed={language === "en"}
-                onClick={() => void i18n.changeLanguage("en")}
-              >
-                EN
-              </button>
-            </div>
-            <div className={styles.toolbarGroup} aria-label={t("controls.theme")}>
-              <button
-                className={theme === "system" ? styles.iconButtonActive : styles.iconButton}
-                type="button"
-                aria-label={t("controls.system")}
-                aria-pressed={theme === "system"}
-                onClick={() => setTheme("system")}
-              >
-                <Monitor size={16} aria-hidden="true" />
-              </button>
-              <button
-                className={theme === "light" ? styles.iconButtonActive : styles.iconButton}
-                type="button"
-                aria-label={t("controls.light")}
-                aria-pressed={theme === "light"}
-                onClick={() => setTheme("light")}
-              >
-                <Sun size={16} aria-hidden="true" />
-              </button>
-              <button
-                className={theme === "dark" ? styles.iconButtonActive : styles.iconButton}
-                type="button"
-                aria-label={t("controls.dark")}
-                aria-pressed={theme === "dark"}
-                onClick={() => setTheme("dark")}
-              >
-                <Moon size={16} aria-hidden="true" />
-              </button>
-            </div>
-          </div>
-        </header>
+        <button
+          className={`${styles.sidebarToggle} ${styles.floatingNavigationToggle}`}
+          id="app-sidebar-toggle"
+          type="button"
+          aria-label={sidebarOpen ? t("controls.closeNavigation") : t("controls.openNavigation")}
+          aria-controls="app-sidebar"
+          aria-expanded={sidebarOpen}
+          onClick={() => setSidebarOpen((open) => !open)}
+        >
+          {sidebarOpen ? <X size={18} aria-hidden="true" /> : <Menu size={18} aria-hidden="true" />}
+        </button>
 
         <main
           id="main-content"
@@ -820,6 +794,7 @@ export default function App() {
                 path="/"
                 element={
                   <ChatSessionsView
+                        key={serviceStatus?.service_instance_id}
                         configurationNeedsSetup={configurationNeedsSetup}
                         authState={authState}
                         connectionState={connectionState}
@@ -852,6 +827,7 @@ export default function App() {
                 path="/chat"
                 element={
                   <ChatSessionsView
+                        key={serviceStatus?.service_instance_id}
                         configurationNeedsSetup={configurationNeedsSetup}
                         authState={authState}
                         connectionState={connectionState}
@@ -919,6 +895,7 @@ export default function App() {
                 path="/projects/:projectId"
                 element={
                   <ProjectSessionsView
+                    key={serviceStatus?.service_instance_id}
                     authState={authState}
                     connectionState={connectionState}
                     projects={projects}
@@ -977,6 +954,7 @@ export default function App() {
                 onBack={returnFromSettings}
                 onLanguageChange={(next) => void i18n.changeLanguage(next)}
                 onThemeChange={setTheme}
+                onRestartExpectation={setRestartExpectation}
                 serviceStatus={serviceStatus}
                 theme={theme}
                 runtimeClaim={activeNavigationClaim}
@@ -1019,6 +997,15 @@ export default function App() {
       />
     </div>
   );
+}
+
+function restoreSessionActionFocus(trigger: HTMLElement | null): boolean {
+  if (!trigger?.isConnected || (trigger instanceof HTMLButtonElement && trigger.disabled)) return false;
+  const navigationCollapsed = trigger.closest("#app-sidebar")?.getAttribute("data-open") === "false"
+    && window.matchMedia("(max-width: 1023px)").matches;
+  const target = navigationCollapsed ? document.getElementById("app-sidebar-toggle") : trigger;
+  target?.focus();
+  return target !== null;
 }
 
 interface ConfirmationDialogProps {
@@ -1615,6 +1602,7 @@ interface SettingsViewProps {
   onBack: () => void;
   onLanguageChange: (language: "en" | "zh-CN") => void;
   onThemeChange: (theme: Theme) => void;
+  onRestartExpectation: (expected: boolean) => void;
   serviceStatus: ServiceStatus | null;
   runtimeClaim: SessionClaim | null;
   theme: Theme;
@@ -1627,6 +1615,7 @@ function SettingsView({
   onBack,
   onLanguageChange,
   onThemeChange,
+  onRestartExpectation,
   serviceStatus,
   runtimeClaim,
   theme,
@@ -1687,6 +1676,12 @@ function SettingsView({
   const [notice, setNotice] = useState<string | null>(null);
   const [saveFailed, setSaveFailed] = useState(false);
   const [conflictedPaths, setConflictedPaths] = useState<string[]>([]);
+  const [restartOpen, setRestartOpen] = useState(false);
+  const [restartBusy, setRestartBusy] = useState(false);
+  const [restartError, setRestartError] = useState<string | null>(null);
+  const restartingInstanceRef = useRef<string | null>(null);
+  const restartRequestRef = useRef<string | null>(null);
+  const restartTriggerRef = useRef<HTMLButtonElement | null>(null);
   const dirtyRef = useRef(false);
   const draftRef = useRef<SettingsForm | null>(null);
   const draftRevisionRef = useRef<string | null>(null);
@@ -2190,7 +2185,52 @@ function SettingsView({
   };
 
   const errorEntries = Object.entries(fieldErrors);
-  const controlDisabled = draft === null || loading || connectionState !== "online";
+  const controlDisabled = draft === null || loading || connectionState !== "online" || restartBusy;
+  useEffect(() => {
+    if (!restartBusy) return;
+    const timer = window.setTimeout(() => {
+      restartingInstanceRef.current = null;
+      onRestartExpectation(false);
+      setRestartBusy(false);
+      setRestartError(t("settings.restartFailed"));
+    }, 60000);
+    return () => window.clearTimeout(timer);
+  }, [restartBusy, onRestartExpectation, t]);
+  useEffect(() => {
+    if (restartingInstanceRef.current !== null && serviceStatus !== null
+      && restartingInstanceRef.current !== serviceStatus.service_instance_id) {
+      restartingInstanceRef.current = null;
+      restartRequestRef.current = null;
+      setRestartBusy(false);
+      setRestartError(null);
+      setNotice(t("settings.restarted"));
+    }
+  }, [serviceStatus, t]);
+
+  async function restartOmni() {
+    if (restartingInstanceRef.current !== null || dirtyRef.current || mutationInFlight.current
+      || response === null || serviceStatus === null || connectionState !== "online") return;
+    setRestartBusy(true);
+    setRestartError(null);
+    restartingInstanceRef.current = serviceStatus.service_instance_id;
+    onRestartExpectation(true);
+    restartRequestRef.current ??= createRequestId();
+    try {
+      await restartService(response.application.saved_revision, restartRequestRef.current);
+      setRestartOpen(false);
+    } catch (error) {
+      if (restartingInstanceRef.current === null) return;
+      if (!(error instanceof ApiError)) {
+        setRestartOpen(false);
+        return;
+      }
+      restartingInstanceRef.current = null;
+      restartRequestRef.current = null;
+      onRestartExpectation(false);
+      setRestartBusy(false);
+      setRestartError(error instanceof ApiError ? error.message : t("settings.restartFailed"));
+    }
+  }
   const captureSettingsBlur = (event?: React.FocusEvent<HTMLFormElement>) => {
     if (event !== undefined && !(event.target instanceof HTMLInputElement
       || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement)) return;
@@ -2471,6 +2511,30 @@ function SettingsView({
         </div>
       ) : null}
 
+      <Dialog.Root open={restartOpen} onOpenChange={(open) => { if (!restartBusy) setRestartOpen(open); }}>
+        <Dialog.Portal>
+          <Dialog.Overlay className={styles.dialogOverlay} />
+          <Dialog.Content className={styles.dialogContent} onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            restartTriggerRef.current?.focus();
+          }}>
+            <div className={styles.dialogHeader}>
+              <div>
+                <Dialog.Title className={styles.dialogTitle}>{t("settings.restartOmni")}</Dialog.Title>
+                <Dialog.Description className={styles.dialogDescription}>{t("settings.restartConfirm")}</Dialog.Description>
+              </div>
+            </div>
+            {restartError !== null ? <p role="alert">{restartError}</p> : null}
+            <div className={styles.actionRow}>
+              <Dialog.Close asChild>
+                <button className={styles.secondaryButton} type="button" disabled={restartBusy}>{t("controls.cancel")}</button>
+              </Dialog.Close>
+              <button className={styles.primaryButton} type="button" disabled={restartBusy || dirty || saving || connectionState !== "online"}
+                onClick={() => void restartOmni()}>{t(restartBusy ? "settings.restarting" : "settings.restartOmni")}</button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
       {draft !== null ? (
         <form
           className={styles.settingsForm}
@@ -2536,6 +2600,24 @@ function SettingsView({
                 </div>
               ) : null}
 
+              {activeSection === "general" ? (
+                <div className={styles.managementTool}>
+                  <div className={styles.managementToolHeader}>
+                    <div>
+                      <h3>{t("settings.restartOmni")}</h3>
+                      <p className={styles.managementHint}>{t("settings.restartDescription")}</p>
+                    </div>
+                    <button className={styles.secondaryButton} type="button" ref={restartTriggerRef}
+                      disabled={controlDisabled || dirty || saving || saveFailed
+                        || response?.configuration.repair_required === true}
+                      onClick={() => { setRestartError(null); setRestartOpen(true); }}>
+                      <RefreshCw size={15} className={restartBusy ? styles.spin : undefined} aria-hidden="true" />
+                      {t(restartBusy ? "settings.restarting" : "settings.restartOmni")}
+                    </button>
+                  </div>
+                  {restartError !== null ? <p className={styles.composerError} role="alert">{restartError}</p> : null}
+                </div>
+              ) : null}
               {activeSection === "runtime" ? <div className={styles.settingsSection}>
             <div className={styles.settingsSectionHeader}>
               <div>
@@ -3123,6 +3205,58 @@ function StatusMetric({
         {state === "ready" || state === "online" ? <Check size={15} aria-hidden="true" /> : null}
         {value}
       </div>
+    </div>
+  );
+}
+
+function ConversationRuntimeStatus({ claim, connectionState, refreshVersion, activeRuns, onOpen }: {
+  claim: SessionClaim;
+  connectionState: ConnectionState;
+  refreshVersion: number;
+  activeRuns: LiveRun[];
+  onOpen: (trigger: HTMLElement) => void;
+}) {
+  const { i18n, t } = useTranslation();
+  const [status, setStatus] = useState<RuntimeStatus | null>(null);
+  const [failed, setFailed] = useState(false);
+  const activeCount = activeRuns.filter(isLiveRunActive).length;
+  useEffect(() => {
+    if (connectionState !== "online") return;
+    let active = true;
+    let pending = false;
+    const refresh = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const result = await getRuntimeStatus(
+          claim.workspace_id, claim.session_id, claim.claim_version, claim.reconnect_credential,
+        );
+        if (active) {
+          setStatus(result.status);
+          setFailed(false);
+        }
+      } catch {
+        if (active) setFailed(true);
+      } finally {
+        pending = false;
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [claim.workspace_id, claim.session_id, claim.claim_version, claim.reconnect_credential,
+    connectionState, refreshVersion, activeCount]);
+  return (
+    <div className={styles.runtimeStatusSummary} aria-label={t("controls.runtimeStatus")}>
+      <button type="button" disabled={connectionState !== "online"}
+        onClick={(event) => onOpen(event.currentTarget)}>
+        <Gauge size={13} aria-hidden="true" />{t("controls.runtimeStatus")}
+      </button>
+      <span>{activeCount > 0 ? t("management.activeWorkCount", { count: activeCount }) : t("management.idle")}</span>
+      {failed ? <span role="status">{t("management.actionError")}</span> : status !== null ? (
+        <span>{t("management.context")} {status.projected_next_request_tokens.toLocaleString(i18n.language)}
+          {" / "}{status.context_window.toLocaleString(i18n.language)}</span>
+      ) : null}
     </div>
   );
 }
@@ -5896,6 +6030,25 @@ function ChatSessionsView({
       if (requestNumber !== activationSequenceRef.current) return;
       if (sessionId !== null && error instanceof ApiError && error.body?.code === "not_found"
         && error.body.field_errors.session_id !== undefined) {
+        const recovery = readBrowserRecoverySnapshot();
+        if (recovery?.session_id === sessionId && recovery.draft && recovery.target.kind === "chat"
+          && recovery.service_instance_id === serviceInstanceId) {
+          try {
+            const entry = await openConversation({ directory: recovery.target.directory, create_new: true });
+            if (requestNumber !== activationSequenceRef.current) return;
+            const restored = { ...recovery, session_id: entry.session_id };
+            writeBrowserRecoverySnapshot(restored);
+            onBrowserRecoveryChange(restored);
+            setWorkspaceEntry(entry);
+            setInitialSessionId(entry.session_id);
+            setEntryLoadState("ready");
+          } catch (failure) {
+            if (requestNumber !== activationSequenceRef.current) return;
+            setEntryLoadState("error");
+            setEntryError(sessionErrorKey(failure));
+          }
+          return;
+        }
         onBrowserRecoveryUnavailable();
         return;
       }
@@ -5913,7 +6066,7 @@ function ChatSessionsView({
             ? "chat.workspaceUnavailable"
             : sessionErrorKey(error));
     }
-  }, [authState, configurationNeedsSetup, onBrowserRecoveryUnavailable]);
+  }, [authState, configurationNeedsSetup, onBrowserRecoveryChange, onBrowserRecoveryUnavailable, serviceInstanceId]);
 
   useEffect(() => {
     if (authState !== "ready" || configurationNeedsSetup !== false) return;
@@ -7238,13 +7391,15 @@ function ProjectSessionsContent({
     void openSession(initialSessionId, false);
   }, [authState, busySessionId, connectionState, initialConversation, initialSessionId, initialSessionRequestKey, loadState, onRestoreConsumed, openSession, refreshSessions, registeredClient, sessionNextCursor, sessionScopeId, sessions]);
 
-  const createDraft = useCallback(async () => {
+  const createDraft = useCallback(async (preserveSettings = false) => {
     if (busySessionId !== null) return;
     sessionSelectionVersionRef.current += 1;
     setBusySessionId("new");
     setOccupiedSessionId(null);
     setActionError(null);
-    if (!isChat) navigate(`/projects/${encodeURIComponent(sessionScopeId)}`, { replace: true });
+    if (!isChat && !(preserveSettings && window.location.pathname === "/settings")) {
+      navigate(`/projects/${encodeURIComponent(sessionScopeId)}`, { replace: true });
+    }
     try {
       await openSession(null, true, true);
     } catch (error) {
@@ -7282,7 +7437,7 @@ function ProjectSessionsContent({
     setRecreateBrowserDraft(false);
     if (recovery === null) return;
     void (async () => {
-      await createDraft();
+      await createDraft(true);
       const currentClaim = claimRef.current;
       const newSessionId = selectedSessionRef.current;
       if (currentClaim === null || newSessionId === null) return;
@@ -7349,6 +7504,15 @@ function ProjectSessionsContent({
     }
   }, [adoptSnapshot, readRunSnapshot, sendServiceCommand]);
   saveSessionModelConfigurationRef.current = saveSessionModelConfiguration;
+
+  useEffect(() => {
+    const recovery = recoveredDraftRef.current;
+    if (connectionState !== "online" || claim === null || snapshot === null
+      || recovery?.session_id !== claim.session_id || recovery.model_configuration === null
+      || snapshot.messages.length !== 0 || snapshot.model_configuration !== null) return;
+    recoveredDraftRef.current = null;
+    void saveSessionModelConfiguration(recovery.model_configuration);
+  }, [claim, connectionState, saveSessionModelConfiguration, snapshot]);
 
   async function saveClientPermission(value: string, confirmed = false) {
     if (!PERMISSION_LEVELS.includes(value as ToolPermissionLevel)
@@ -7521,15 +7685,6 @@ function ProjectSessionsContent({
     setRestoreMode(mode);
     setRestoreError(null);
     setRestoreOpen(true);
-  }
-
-  function openManagementPanel(panel: "runtime" | "memory", event: React.MouseEvent<HTMLButtonElement>) {
-    const menu = event.currentTarget.closest("details");
-    const trigger = menu?.querySelector("summary");
-    if (trigger instanceof HTMLElement) managementTriggerRef.current = trigger;
-    menu?.removeAttribute("open");
-    setManagementPanel(panel);
-    setManagementOpen(true);
   }
 
   async function closeRestore() {
@@ -7863,69 +8018,16 @@ function ProjectSessionsContent({
   const authUnavailable = authState !== "ready";
   return (
     <section className={styles.sessionsPage} aria-labelledby="sessions-heading">
-      <div className={styles.pageHeading}>
-        <div>
-          {!isChat ? (
-            <Link className={styles.backLink} to="/">
-              <ArrowLeft size={15} aria-hidden="true" />
-              {t("controls.backToChat")}
-            </Link>
-          ) : null}
-          <p className={styles.eyebrow}>{t(isChat ? "nav.chatHistory" : "nav.sessions")}</p>
-          <h1 id="sessions-heading" tabIndex={-1}>
-            {project?.name || t(isChat ? "app.name" : "sessions.title")}
-          </h1>
-          {project !== undefined
-            ? <p className={styles.pageDescription}>{project.path}</p>
-            : isChat && workspaceDirectory !== undefined
-              ? <p className={styles.pageDescription}>{workspaceDirectory}</p>
-              : null}
-        </div>
-        <div className={styles.pageActions}>
-          {pendingDeletion?.attempted ? (
-            <button
-              className={styles.dangerButton}
-              ref={deleteRetryTriggerRef}
-              type="button"
-              disabled={deleteBusy || connectionState !== "online"}
-              onClick={() => {
-                deleteFocusOriginRef.current = "retry";
-                setDeleteOpen(true);
-              }}
-            >
-              <Trash2 size={15} aria-hidden="true" />
-              {t("controls.retry")}
-            </button>
-          ) : null}
-          <button
-            className={styles.iconButton}
-            type="button"
-            aria-label={t("controls.refreshSessions")}
-            title={t("controls.refreshSessions")}
-            disabled={authUnavailable || loadState === "loading"}
-            onClick={() => void refreshSessions()}
-          >
-            <RefreshCw size={16} className={loadState === "loading" ? styles.spin : undefined} aria-hidden="true" />
-          </button>
-          {!isChat ? (
-            <>
-              <Link className={styles.secondaryButton} to={`/projects/${projectId}/schedule`}>
-                <CalendarClock size={15} aria-hidden="true" />
-                {t("controls.openSchedule")}
-              </Link>
-              <button
-                className={styles.primaryButton}
-                type="button"
-                disabled={authUnavailable || (!isChat && project?.available !== true) || busySessionId !== null}
-                onClick={() => void createDraft()}
-              >
-                <Plus size={16} aria-hidden="true" />
-                {t("controls.newSession")}
-              </button>
-            </>
-          ) : null}
-        </div>
-      </div>
+      <h1 id="sessions-heading" className={styles.srOnly} tabIndex={-1}>
+        {project?.name || t(isChat ? "app.name" : "sessions.title")}
+      </h1>
+      {pendingDeletion?.attempted ? (
+        <button className={styles.dangerButton} ref={deleteRetryTriggerRef} type="button"
+          disabled={deleteBusy || connectionState !== "online"}
+          onClick={() => { deleteFocusOriginRef.current = "retry"; setDeleteOpen(true); }}>
+          <Trash2 size={15} aria-hidden="true" />{t("controls.retry")}
+        </button>
+      ) : null}
 
       {connectionState !== "online" ? (
         <div className={styles.connectionNotice} role="status" aria-live="polite">
@@ -7938,6 +8040,11 @@ function ProjectSessionsContent({
           <CircleAlert size={17} aria-hidden="true" />
           <span>{t(actionError)}</span>
         </div>
+      ) : null}
+      {pendingRestoreFailure !== null && pendingRestoreFailure.session_id === claim?.session_id && restoreNotice === null ? (
+        <button className={styles.secondaryButton} type="button" onClick={() => setRestoreNotice(pendingRestoreFailure)}>
+          <Info size={15} aria-hidden="true" />{t("controls.reviewRestoreFailure")}
+        </button>
       ) : null}
       {restoreNotice !== null ? (
         <div className={styles.restoreResultNotice} role="status" aria-live="polite">
@@ -8020,99 +8127,9 @@ function ProjectSessionsContent({
           >
             {claim !== null && snapshot !== null ? (
               <>
-                <div className={styles.sessionContentHeader}>
-                  <div>
-                    <p className={styles.eyebrow}>{t("sessions.conversation")}</p>
-                    <h2>{draft ? t("sessions.draftTitle") : selectedSummary?.title ?? t("sessions.title")}</h2>
-                  </div>
-                  <div className={styles.sessionHeaderActions}>
-                    <details className={styles.sessionActionMenu}>
-                      <summary
-                        className={styles.sessionActionTrigger}
-                        aria-label={t("controls.sessionMoreActions", {
-                          session: draft ? t("sessions.draftTitle") : selectedSummary?.title ?? t("sessions.title"),
-                        })}
-                        title={t("controls.sessionMoreActions", {
-                          session: draft ? t("sessions.draftTitle") : selectedSummary?.title ?? t("sessions.title"),
-                        })}
-                      >
-                        <MoreHorizontal size={15} aria-hidden="true" />
-                      </summary>
-                      <div className={styles.sessionActionItems} role="group" aria-label={t("controls.sessionMoreActions", {
-                        session: draft ? t("sessions.draftTitle") : selectedSummary?.title ?? t("sessions.title"),
-                      })}>
-                        <button className={styles.sessionActionMenuItem} type="button" disabled={connectionState !== "online" || busySessionId !== null}
-                          onClick={(event) => openManagementPanel("memory", event)}>
-                          <Brain size={14} aria-hidden="true" />
-                          {t("controls.workspaceMemoryAndDream")}
-                        </button>
-                        <button className={styles.sessionActionMenuItem} type="button"
-                          onClick={(event) => {
-                            event.currentTarget.closest("details")?.removeAttribute("open");
-                            navigate(scheduleRouteHref(projectId, workspaceDirectory ?? null, claim.session_id));
-                          }}>
-                          <CalendarClock size={14} aria-hidden="true" />
-                          {t("controls.scheduleTasks")}
-                        </button>
-                        <button className={styles.sessionActionMenuItem} type="button" disabled={connectionState !== "online" || busySessionId !== null}
-                          onClick={(event) => openManagementPanel("runtime", event)}>
-                          <Gauge size={14} aria-hidden="true" />
-                          {t("controls.runtimeStatus")}
-                        </button>
-                      </div>
-                    </details>
-                    {!draft && selectedSummary !== undefined ? (
-                      <>
-                        <button
-                          className={styles.iconButton}
-                          type="button"
-                          aria-label={t("controls.renameSession")}
-                          title={t("controls.renameSession")}
-                          disabled={busySessionId !== null || connectionState !== "online"}
-                          onClick={(event) => {
-                            renameTriggerRef.current = event.currentTarget;
-                            beginRename();
-                          }}
-                        >
-                          <Pencil size={15} aria-hidden="true" />
-                        </button>
-                        <button
-                          className={`${styles.iconButton} ${styles.dangerIconButton}`}
-                          type="button"
-                          aria-label={t("controls.deleteSession")}
-                          title={t("controls.deleteSession")}
-                          disabled={busySessionId !== null || connectionState !== "online" || pendingDeletion?.attempted === true}
-                          onClick={(event) => beginDelete(event.currentTarget)}
-                        >
-                          <Trash2 size={15} aria-hidden="true" />
-                        </button>
-                        {(snapshot.restore_anchors ?? []).length > 0 ? (
-                          <button
-                            className={styles.iconButton}
-                            type="button"
-                            aria-label={t("controls.restoreSession")}
-                            title={t("controls.restoreSession")}
-                            disabled={busySessionId !== null || activeRun !== null || connectionState !== "online"}
-                            onClick={(event) => beginRestore(undefined, "files", event.currentTarget)}
-                          >
-                            <RotateCcw size={15} aria-hidden="true" />
-                          </button>
-                        ) : null}
-                        {pendingRestoreFailure?.session_id === claim.session_id ? (
-                          <button
-                            className={styles.iconButton}
-                            type="button"
-                            aria-label={t("controls.reviewRestoreFailure")}
-                            title={t("controls.reviewRestoreFailure")}
-                            onClick={() => setRestoreNotice(pendingRestoreFailure)}
-                          >
-                            <Info size={15} aria-hidden="true" />
-                          </button>
-                        ) : null}
-                      </>
-                    ) : null}
-                  </div>
-                </div>
+                <h2 className={styles.srOnly}>
+                  {draft ? t("sessions.draftTitle") : selectedSummary?.title ?? t("sessions.title")}
+                </h2>
                 <div
                   className={styles.conversationStage}
                   data-empty={snapshot.messages.length === 0 && selectedLiveRuns.length === 0}
@@ -8300,6 +8317,20 @@ function ProjectSessionsContent({
                           : t("conversation.enterHint")}
                     </p>
                   </div>
+                    {!draft || selectedLiveRuns.some((run) => run.runId !== null) ? (
+                      <ConversationRuntimeStatus
+                        key={`${claim.workspace_id}:${claim.session_id}:${claim.claim_version}`}
+                        claim={claim}
+                        connectionState={connectionState}
+                        refreshVersion={refreshVersion}
+                        activeRuns={selectedLiveRuns}
+                        onOpen={(trigger) => {
+                          managementTriggerRef.current = trigger;
+                          setManagementPanel("runtime");
+                          setManagementOpen(true);
+                        }}
+                      />
+                    ) : null}
                   </form>
                 </div>
               </>
@@ -8410,8 +8441,7 @@ function ProjectSessionsContent({
               const trigger = deleteFocusOriginRef.current === "retry"
                 ? deleteRetryTriggerRef.current
                 : deleteTriggerRef.current;
-              if (trigger?.isConnected && (!(trigger instanceof HTMLButtonElement) || !trigger.disabled)) trigger.focus();
-              else document.getElementById("sessions-heading")?.focus();
+              if (!restoreSessionActionFocus(trigger)) document.getElementById("sessions-heading")?.focus();
             }}
           >
             <Dialog.Title className={styles.dialogTitle}>{t("sessions.deleteTitle")}</Dialog.Title>
@@ -8606,7 +8636,7 @@ function ProjectSessionsContent({
             className={styles.dialogContent}
             onCloseAutoFocus={(event) => {
               event.preventDefault();
-              renameTriggerRef.current?.focus();
+              if (!restoreSessionActionFocus(renameTriggerRef.current)) document.getElementById("sessions-heading")?.focus();
             }}
           >
             <Dialog.Title className={styles.dialogTitle}>{t("sessions.renameTitle")}</Dialog.Title>

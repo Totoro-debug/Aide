@@ -1,3 +1,4 @@
+import { setInterfaceLanguage } from "./settings-e2e.mjs";
 import assert from "node:assert/strict";
 import { URL } from "node:url";
 import { chromium, expect } from "@playwright/test";
@@ -76,7 +77,7 @@ try {
     await foreign.close();
   }
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await setInterfaceLanguage(page, language);
     await expect(page.getByRole("button", { name: /Release session|释放会话/ })).toHaveCount(0);
     await page.reload();
     await expect(page.getByLabel(language === "en" ? "Message input" : "消息输入")).toBeEnabled();

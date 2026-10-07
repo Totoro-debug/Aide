@@ -1,3 +1,4 @@
+import { latestRestoreMenu, openLatestRestore, openWorkspaceAction, newProjectConversation, openActiveSessionActions } from "./project-ui.mjs";
 import { registerProjectFromSidebar, selectProjectDirectory, projectItemByPath, openProjectMenu, projectMenuAction, showProjectNavigation } from "./project-ui.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -8,7 +9,7 @@ import { URL, URLSearchParams } from "node:url";
 import { chromium, expect } from "@playwright/test";
 
 import setup from "./e2e-setup.mjs";
-import settingsAcceptance, { openServiceStatus, settingsConfirmationAcceptance, settingsModelMcpAcceptance } from "./settings-e2e.mjs";
+import settingsAcceptance, { setInterfaceLanguage, setInterfaceTheme, openServiceStatus, settingsConfirmationAcceptance, settingsModelMcpAcceptance } from "./settings-e2e.mjs";
 
 if (process.platform !== "win32") {
   console.error("Omni requires Windows.");
@@ -30,6 +31,7 @@ const output = resolve("test-results");
 let control;
 let browser;
 let acceptanceError;
+let diagnosticPage;
 
 async function verifyConversationMessages(page, viewport) {
   const messages = await page.getByRole("log").evaluate((log) => {
@@ -100,23 +102,15 @@ try {
   });
   const primaryContext = await browser.newContext();
   let page = await primaryContext.newPage();
+  diagnosticPage = page;
   async function openWorkspacePanel(name) {
-    const menu = page.locator("details").filter({
-      has: page.getByRole("button", { name, exact: true, includeHidden: true }),
-    });
-    const trigger = menu.locator("summary");
-    await trigger.focus();
-    await trigger.press("Enter");
-    await menu.getByRole("button", { name, exact: true }).click();
-    return trigger;
+    return openWorkspaceAction(page, name);
   }
   async function openRuntimeSettings(language = "en") {
     const settings = page.locator("#app-sidebar").getByRole("link", {
       name: language === "en" ? "Settings" : "设置", exact: true,
     });
-    if (!await settings.isVisible()) {
-      await page.getByRole("button", { name: language === "en" ? "Open navigation" : "打开导航", exact: true }).click();
-    }
+    await showProjectNavigation(page);
     await settings.click();
     await page.getByRole("navigation", { name: language === "en" ? "Settings sections" : "设置分类", exact: true })
       .getByRole("button", { name: language === "en" ? "Runtime" : "运行时", exact: true }).click();
@@ -233,11 +227,11 @@ try {
   await openServiceStatus(page);
 
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await setInterfaceLanguage(page, language);
     assert.equal(await page.locator("html").getAttribute("lang"), language);
     await page.getByRole("heading", { name: language === "en" ? "Service status" : "服务状态" }).waitFor();
     for (const theme of ["light", "dark"]) {
-      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      await setInterfaceTheme(page, theme);
       assert.equal(await page.locator("html").getAttribute("data-theme"), theme);
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
@@ -251,9 +245,7 @@ try {
           });
           await expect(openNavigation).toHaveAttribute("aria-expanded", "false");
           await openNavigation.click();
-          const closeNavigation = page.getByRole("banner").getByRole("button", {
-            name: language === "en" ? "Close navigation" : "关闭导航",
-          });
+          const closeNavigation = page.locator("#app-sidebar-toggle");
           await expect(closeNavigation).toHaveAttribute("aria-expanded", "true");
           await expect(settingsNavigationLink).toBeVisible();
           await page.keyboard.press("Escape");
@@ -313,15 +305,15 @@ try {
   await page.getByRole("heading", { name: "服务状态" }).waitFor();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
   await page.getByRole("status").filter({ hasText: /^在线$/ }).first().waitFor();
-  await page.getByRole("button", { name: /跟随系统|System/ }).click();
+  await setInterfaceTheme(page, "system");
   assert.equal(await page.locator("html").getAttribute("data-theme"), "system");
   await page.reload();
   await page.getByRole("heading", { name: "服务状态" }).waitFor();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "system");
-  await page.getByRole("button", { name: /深色|Dark/ }).click();
+  await setInterfaceTheme(page, "dark");
 
   await page.setViewportSize(viewports[0]);
-  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
   const chatWorkspaceEntry = page.waitForResponse((response) => (
     response.request().method() === "POST"
     && response.url().endsWith("/api/v1/conversations/open")
@@ -383,7 +375,7 @@ try {
     response.request().method() === "GET"
     && response.url().endsWith("/schedule/jobs")
   ));
-  await projectMenuAction(firstProjectItem, "Open schedule");
+  await projectMenuAction(firstProjectItem, "Schedule tasks");
   const scheduleResponse = await scheduleResponsePromise;
   assert.equal(scheduleResponse.status(), 200, "Schedule page did not load its real job response");
   const schedulePayload = await scheduleResponse.json();
@@ -486,12 +478,12 @@ try {
   await expect(refreshHistoryButton).toBeFocused();
 
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await setInterfaceLanguage(page, language);
     await page.getByRole("heading", { name: historyJobTitle, exact: true }).first().waitFor();
     const listTitle = language === "en" ? "Recorded executions" : "已记录的执行";
     await page.getByRole("heading", { name: listTitle, exact: true }).waitFor();
     for (const theme of ["light", "dark"]) {
-      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      await setInterfaceTheme(page, theme);
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
         assert.ok(
@@ -503,7 +495,7 @@ try {
     }
   }
   await page.setViewportSize(viewports[0]);
-  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
   await page.getByRole("link", { name: "Back to Schedule Jobs", exact: true }).first().click();
   await page.getByRole("heading", { name: "Schedule Jobs", exact: true }).waitFor();
 
@@ -570,7 +562,7 @@ try {
       await expect(page.getByRole("button", { name: "Refresh Schedule history", exact: true })).toBeEnabled({ timeout: 10000 });
       await page.getByRole("heading", { name: historyJobTitle, exact: true }).first().waitFor();
     }
-    await projectMenuAction(firstProjectItem, "Open schedule");
+    await projectMenuAction(firstProjectItem, "Schedule tasks");
     await page.getByRole("heading", { name: "Schedule Jobs", exact: true }).waitFor();
     await expect(page.getByRole("button", { name: "Refresh schedule", exact: true })).toBeEnabled();
     await historyJobItem.getByRole("link", { name: "History", exact: true }).waitFor();
@@ -778,7 +770,7 @@ try {
   await page.clock.resume();
 
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await setInterfaceLanguage(page, language);
     const labels = language === "en" ? {
       heading: "Schedule Jobs", create: "Create Job", message: "Message", at: "Run at",
       summary: "Review the highlighted fields.", inspect: "Inspect", delete: "Delete",
@@ -787,7 +779,7 @@ try {
       summary: "请检查标记出的字段。", inspect: "查看详情", delete: "删除",
     };
     for (const theme of ["light", "dark"]) {
-      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      await setInterfaceTheme(page, theme);
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
         const createTrigger = page.getByRole("button", { name: labels.create, exact: true });
@@ -817,9 +809,10 @@ try {
     }
   }
   await page.setViewportSize(viewports[0]);
-  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
 
   let notifyOldScheduleLoad;
+  await expect(page.getByRole("button", { name: "Refresh schedule", exact: true })).toBeEnabled();
   let releaseOldScheduleLoad;
   const oldScheduleLoadArrived = new Promise((done) => { notifyOldScheduleLoad = done; });
   const oldScheduleLoadGate = new Promise((done) => { releaseOldScheduleLoad = done; });
@@ -842,7 +835,7 @@ try {
   await expect(page.getByText("STALE Schedule page response", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Schedule Jobs", exact: true })).toHaveCount(0);
   await page.unroute("**/schedule/jobs", delayOldScheduleLoad);
-  await projectMenuAction(firstProjectItem, "Open schedule");
+  await projectMenuAction(firstProjectItem, "Schedule tasks");
   await page.getByRole("heading", { name: browserAtTitle, exact: true }).waitFor();
 
   let notifyDisconnectedLoad;
@@ -923,7 +916,7 @@ try {
 
   await sessionList.getByRole("button", { name: /Web restore history/ }).click();
   await page.getByText("Restore branch should disappear from history", { exact: true }).waitFor();
-  const restoreTrigger = page.getByRole("button", { name: "Restore", exact: true });
+  const restoreTrigger = latestRestoreMenu(page).locator("summary");
   let releaseInspection;
   let inspectionReceived;
   const inspectionReleased = new Promise((done) => { releaseInspection = done; });
@@ -935,7 +928,7 @@ try {
     await route.fulfill({ response });
   };
   await page.route("**/management/restore/inspect", delayInspection);
-  await restoreTrigger.click();
+  await openLatestRestore(page);
   await page.getByRole("button", { name: "Inspect restore" }).click();
   await inspectionFetched;
   await page.getByRole("button", { name: /Web available history/, includeHidden: true }).evaluate((element) => element.click());
@@ -947,7 +940,7 @@ try {
   await sessionList.getByRole("button", { name: /Web restore history/ }).click();
   await page.getByText("Restore branch should disappear from history", { exact: true }).waitFor();
   for (const closeWithEscape of [true, false]) {
-    await restoreTrigger.click();
+    await openLatestRestore(page);
     await page.getByRole("button", { name: "Inspect restore" }).click();
     await page.getByText("Restore preview", { exact: true }).waitFor();
     const cancelled = page.waitForResponse((response) => response.url().endsWith("/management/restore/cancel"));
@@ -997,8 +990,7 @@ try {
 
   await sessionList.getByRole("button", { name: /Web manual restore history/ }).click();
   await page.getByText("Manual Restore branch should disappear from history", { exact: true }).waitFor();
-  const manualRestoreTrigger = page.getByRole("button", { name: "Restore", exact: true });
-  await manualRestoreTrigger.click();
+  await openLatestRestore(page);
   await page.getByRole("button", { name: "Inspect restore" }).click();
   await page.getByText("Restore preview", { exact: true }).waitFor();
   await writeFile(resolve(control.details.manual_restore_target), "changed by another Session\n", "utf8");
@@ -1033,7 +1025,7 @@ try {
 
   await sessionList.getByRole("button", { name: /Web failed restore history/ }).click();
   await page.getByText("Failed Restore branch", { exact: true }).waitFor();
-  await page.getByRole("button", { name: "Restore", exact: true }).click();
+  await openLatestRestore(page);
   await page.getByRole("button", { name: "Inspect restore" }).click();
   await page.getByText("Restore preview", { exact: true }).waitFor();
   await unlink(control.details.failure_restore_target);
@@ -1054,7 +1046,9 @@ try {
   await failedRestoreNotice.waitFor({ state: "hidden" });
   await page.clock.resume();
   await page.getByRole("button", { name: "Review restore failure" }).click();
+  const acknowledgedFailure = page.waitForResponse(response => response.url().endsWith("/management/restore/acknowledge"));
   await failedRestoreNotice.getByRole("button", { name: "Acknowledge" }).click();
+  assert.equal((await acknowledgedFailure).status(), 200);
   await page.getByRole("button", { name: "Review restore failure" }).waitFor({ state: "hidden" });
   const durableRestore = JSON.parse(await readFile(resolve(firstProject, ".omni", "restore", control.details.failure_restore_session_id, "pending.json"), "utf8"));
   assert.equal(durableRestore.failure_notification_acknowledged, true);
@@ -1064,7 +1058,7 @@ try {
     && new URL(response.url()).pathname.endsWith("/conversations/open")
     && response.request().postDataJSON()?.create_new === true
   ));
-  await page.getByRole("button", { name: "New session", exact: true }).click();
+  await newProjectConversation(page);
   const draftResponse = await draftResponsePromise;
   const draftId = (await draftResponse.json()).session_id;
   assert.equal(typeof draftId, "string");
@@ -1115,7 +1109,7 @@ try {
     && new URL(response.url()).pathname.endsWith("/conversations/open")
     && response.request().postDataJSON()?.create_new === true
   ));
-  await page.getByRole("button", { name: "New session", exact: true }).click();
+  await newProjectConversation(page);
   const newSession = await (await newSessionResponsePromise).json();
   const conversationSessionId = newSession.session_id;
   const conversationWorkspaceId = newSession.workspace_id;
@@ -1144,12 +1138,16 @@ try {
       const form = log.parentElement.querySelector("form").getBoundingClientRect();
       return { center: stage.top + stage.height / 2, groupCenter: (brand.top + form.bottom) / 2 };
     });
-    assert.ok(Math.abs(emptyLayout.center - emptyLayout.groupCenter) <= 1,
-      `Empty conversation was not vertically centered at ${viewport.width}px`);
+    assert.ok(emptyLayout.groupCenter > emptyLayout.center,
+      `Empty conversation should sit below the middle at ${viewport.width}px`);
     await page.screenshot({ path: resolve(output, `empty-session-${viewport.width}.png`) });
   }
   await page.setViewportSize(viewports[0]);
-  const managementTrigger = await openWorkspacePanel("Runtime status and controls");
+  await expect(page.getByRole("button", { name: "Runtime status and controls", exact: true })).toHaveCount(0);
+  await page.getByLabel("Message input").fill("runtime status acceptance");
+  await page.getByLabel("Message input").press("Enter");
+  await page.getByRole("log").getByText("Fixture response.", { exact: true }).waitFor();
+  let managementTrigger = await openWorkspacePanel("Runtime status and controls");
   const runtimeManagementDialog = page.getByRole("dialog", { name: "Runtime status", exact: true });
   const memoryManagementDialog = page.getByRole("dialog", { name: "Workspace Memory and Dream", exact: true });
   let managementDialog = runtimeManagementDialog;
@@ -1169,7 +1167,7 @@ try {
   await managementDialog.getByRole("status").getByText("Reasoning effort updated.", { exact: true }).waitFor();
   await managementDialog.press("Escape");
   await expect(managementTrigger).toBeFocused();
-  await openWorkspacePanel("Workspace Memory and Dream");
+  managementTrigger = await openWorkspacePanel("Workspace Memory and Dream");
   managementDialog = memoryManagementDialog;
   await managementDialog.getByRole("button", { name: "View Memory", exact: true }).click();
   const memoryRegion = managementDialog.getByRole("region", { name: "Long-term Memory", exact: true }).last();
@@ -1196,7 +1194,7 @@ try {
   await dreamArrival;
   await managementDialog.press("Escape");
   await expect(managementTrigger).toBeFocused();
-  await openWorkspacePanel("Workspace Memory and Dream");
+  managementTrigger = await openWorkspacePanel("Workspace Memory and Dream");
   await expect(managementDialog.getByRole("button", { name: "Running Dream...", exact: true })).toBeDisabled();
   releaseDream();
   await managementDialog.getByRole("region", { name: "Dream", exact: true })
@@ -1273,17 +1271,17 @@ try {
     });
   };
   await page.route("**/memory/read", delayFirstMemoryResponse);
-  await openWorkspacePanel("Workspace Memory and Dream");
+  managementTrigger = await openWorkspacePanel("Workspace Memory and Dream");
   await managementDialog.getByRole("button", { name: "View Memory", exact: true }).click();
   await oldMemoryArrival;
   await managementDialog.press("Escape");
   await expect(managementTrigger).toBeFocused();
-  await openWorkspacePanel("Workspace Memory and Dream");
+  managementTrigger = await openWorkspacePanel("Workspace Memory and Dream");
   releaseOldMemory();
   await page.unroute("**/memory/read", delayFirstMemoryResponse);
   await expect(managementDialog.getByText("STALE_MEMORY_RESPONSE", { exact: true })).toHaveCount(0);
   await managementDialog.press("Escape");
-  await openWorkspacePanel("Runtime status and controls");
+  managementTrigger = await openWorkspacePanel("Runtime status and controls");
   managementDialog = runtimeManagementDialog;
   await expect(permissionControl).toHaveValue("read-only");
 
@@ -1324,13 +1322,13 @@ try {
     await route.fulfill({ response });
   };
   await page.route("**/management/permission", delayManagementSave);
-  await openWorkspacePanel("Runtime status and controls");
+  managementTrigger = await openWorkspacePanel("Runtime status and controls");
   await expect(permissionControl).toHaveValue("read-only");
   await permissionControl.selectOption("full-access");
   await permissionControl.locator("xpath=..").getByRole("button", { name: "Save", exact: true }).click();
   await oldSaveArrival;
   await managementDialog.press("Escape");
-  await openWorkspacePanel("Runtime status and controls");
+  managementTrigger = await openWorkspacePanel("Runtime status and controls");
   await expect(permissionControl).toHaveValue("full-access");
   await permissionControl.selectOption("workspace-write");
   releaseOldSave();
@@ -1354,9 +1352,9 @@ try {
     await writeFile(resolve(skillRoot, directory, "SKILL.md"), document, "utf8");
   }
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await setInterfaceLanguage(page, language);
     for (const theme of ["light", "dark"]) {
-      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      await setInterfaceTheme(page, theme);
       for (const viewport of [...viewports, { width: 375, height: 812 }, { width: 812, height: 375 }]) {
         await page.setViewportSize(viewport);
         const trigger = await openWorkspacePanel(language === "en" ? "Runtime status and controls" : "运行状态与控制");
@@ -1375,7 +1373,7 @@ try {
         await page.screenshot({ path: resolve(output, `runtime-${language}-${theme}-${viewport.width}x${viewport.height}.png`) });
         await dialog.press("Escape");
         await expect(trigger).toBeFocused();
-        await openWorkspacePanel(language === "en" ? "Workspace Memory and Dream" : "工作区记忆和 Dream");
+        const memoryTrigger = await openWorkspacePanel(language === "en" ? "Workspace Memory and Dream" : "工作区记忆和 Dream");
         const memoryDialog = page.getByRole("dialog", { name: language === "en" ? "Workspace Memory and Dream" : "工作区记忆和 Dream", exact: true });
         for (const [label, result] of language === "en" ? [
           ["View Memory", "Long-term Memory loaded."],
@@ -1398,7 +1396,7 @@ try {
         });
         await page.screenshot({ path: resolve(output, `memory-${language}-${theme}-${viewport.width}x${viewport.height}.png`) });
         await memoryDialog.press("Escape");
-        await expect(trigger).toBeFocused();
+        await expect(memoryTrigger).toBeFocused();
         await openRuntimeSettings(language);
         const reload = page.getByRole("button", { name: language === "en" ? "Reload Skills" : "重新加载 Skills", exact: true });
         await reload.focus();
@@ -1414,7 +1412,7 @@ try {
   await writeFile(memoryPath, originalMemory, "utf8");
   await rm(resolve(skillRoot, "web-review"), { recursive: true });
   await rm(resolve(skillRoot, "invalid"), { recursive: true });
-  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
   await page.setViewportSize(viewports.at(-1));
   await control.command("settings-arm");
   await page.getByLabel("Message input").fill("recovery streaming markdown");
@@ -1454,10 +1452,14 @@ try {
     window.__omniTestMessages = [...messages, ...window.__omniTestMessages];
   }, beforeStreamRefresh);
   await page.setViewportSize(viewports[0]);
+  const runningConversationTitle = await sessionList.locator('button[data-active="true"] span').textContent();
   await sessionList.getByRole("button", { name: /Web available history/ }).click();
   await expect(page.getByRole("log").getByText("tool states", { exact: true })).toHaveCount(1);
-  const backgroundDraft = page.getByRole("button", { name: /New Session draft/ });
-  await backgroundDraft.getByText("Running", { exact: true }).waitFor();
+  const backgroundDraft = sessionList.getByRole("button").filter({
+    has: page.getByText(runningConversationTitle, { exact: true }),
+  });
+  await expect(backgroundDraft).toBeVisible();
+  await expect(backgroundDraft).toContainText("Loaded here");
   let releaseLateClaim;
   const lateClaimGate = new Promise((resolveGate) => { releaseLateClaim = resolveGate; });
   let lateClaimArrived;
@@ -1558,9 +1560,9 @@ try {
   ).length), 1, "An unknown input was automatically resent after reconnect");
 
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await setInterfaceLanguage(page, language);
     for (const theme of ["light", "dark"]) {
-      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      await setInterfaceTheme(page, theme);
       for (const viewport of conversationViewports) {
         await page.setViewportSize(viewport);
         if (viewport.width < 1024) {
@@ -1697,9 +1699,9 @@ try {
   await activeRuntimeDialog.getByText(/1 active|1 个运行中/, { exact: true }).waitFor();
   await activeRuntimeDialog.press("Escape");
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await setInterfaceLanguage(page, language);
     for (const theme of ["light", "dark"]) {
-      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      await setInterfaceTheme(page, theme);
       for (const viewport of conversationViewports) {
         await page.setViewportSize(viewport);
         await verifyConversationMessages(page, viewport);
@@ -1715,7 +1717,6 @@ try {
               return { top: rect.top, bottom: rect.bottom, height: rect.height };
             };
             return {
-              topbar: bounds(document.querySelector("header")),
               main: bounds(document.querySelector("main")),
               panel: bounds(element.closest("section[aria-label='Conversation'], section[aria-label='对话']")),
               stage: bounds(element.closest("[data-empty]")),
@@ -1732,7 +1733,7 @@ try {
     }
   }
   await page.setViewportSize(viewports[0]);
-  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
   const cancelRunButton = page.getByRole("button", { name: "Cancel run" });
   const canceledRunId = await cancelRunButton.evaluate((element) => element.closest("article[data-run-id]")?.getAttribute("data-run-id"));
   assert.ok(canceledRunId, "Cancel control had no owning Run");
@@ -1769,8 +1770,8 @@ try {
   await expect(canceledHistoryActivity).toContainText("fixture.txt");
   assert.equal(await page.getByRole("log").getByText("tool states", { exact: true }).count(), 1,
     "Reload duplicated the persisted Tool Run prompt");
-  await page.getByRole("button", { name: /Light|浅色/ }).click();
-  await page.getByRole("button", { name: "New session", exact: true }).click();
+  await setInterfaceTheme(page, "light");
+  await newProjectConversation(page);
   await page.getByRole("region", { name: "Conversation", exact: true })
     .getByRole("heading", { name: "New Session draft", exact: true }).waitFor();
   const recoveryText = "Unsent empty conversation draft";
@@ -1817,6 +1818,7 @@ try {
   await page.close();
   await delay(31_000);
   page = await primaryContext.newPage();
+  diagnosticPage = page;
   projectItems = page.locator('#app-sidebar ul[aria-label="Projects"] > li');
   firstProjectItem = projectItemByPath(page, firstProject);
   historyJobItem = page.getByRole("listitem").filter({ hasText: historyJobTitle });
@@ -1904,7 +1906,7 @@ try {
   await page.getByRole("button", { name: /Web available history/ }).click();
   await page.getByRole("log").getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
   await page.getByLabel("Message input").waitFor();
-  await page.getByRole("main").getByRole("button", { name: "New session", exact: true }).waitFor();
+  await expect(page.getByLabel("Message input")).toBeEnabled();
 
   const duplicatePage = await page.context().newPage();
   try {
@@ -1943,6 +1945,9 @@ try {
   for (let attempt = 0; attempt < 120; attempt += 1) {
     await availableHistory.click();
     try {
+      await expect.poll(() => page.evaluate(() =>
+        JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null")?.session_id,
+      ), { timeout: 1000 }).toBe(control.details.available_session_id);
       await page.locator("textarea").waitFor({ timeout: 1000 });
       historyOpened = true;
       break;
@@ -1956,9 +1961,9 @@ try {
   const confirmationCombinations = [];
   const confirmationRuns = [];
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await setInterfaceLanguage(page, language);
     for (const theme of ["light", "dark"]) {
-      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      await setInterfaceTheme(page, theme);
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
         confirmationCombinations.push({ language, theme, viewport });
@@ -2128,10 +2133,10 @@ try {
   )).length, 0, "Declined confirmations exposed Tool output");
 
   await page.setViewportSize(viewports[0]);
-  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
   for (const prompt of ["process cycles", "process cancel gap"]) {
     await control.command("process-arm");
-    await page.getByRole("button", { name: "New session", exact: true }).click();
+    await newProjectConversation(page);
     await page.getByRole("heading", { name: "New Session draft", exact: true }).waitFor();
     await page.getByLabel("Message input").fill(prompt);
     await page.getByRole("button", { name: "Send", exact: true }).click();
@@ -2207,67 +2212,30 @@ try {
   await expect(failedActivity.locator("summary")).toContainText("Failed");
   await failedActivity.locator("summary").click();
   await expect(failedActivity).toContainText(failedReason);
-  await page.getByRole("button", { name: "New session", exact: true }).click();
+  await newProjectConversation(page);
   const handoff = await control.command(`cli-claim ${control.details.available_session_id}`);
   assert.ok(handoff.snapshot.messages.some(message => message.content === "Available history loaded after a successful Claim"));
   await control.command("cli-release");
   await sessionList.getByRole("button", { name: /Web available history/ }).click();
   await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
 
-  const sessionSearch = page.locator("#app-sidebar").getByRole("listitem").filter({
-    has: page.getByRole("button", { name: "project-one", exact: true }),
-  }).getByLabel("Search by title");
-  await sessionSearch.fill("Web available");
-  await sessionList.getByRole("button", { name: /Web available history/ }).waitFor();
-  await sessionSearch.fill("no matching session");
-  await page.getByText("No Sessions match this title.", { exact: true }).waitFor();
-  for (const failOldRequest of [false, true]) {
-    let releaseOldRequest;
-    let oldRequestReceived;
-    const released = new Promise((resolveRelease) => { releaseOldRequest = resolveRelease; });
-    const received = new Promise((resolveReceived) => { oldRequestReceived = resolveReceived; });
-    const oldTitle = failOldRequest ? "stale failure" : "Web available";
-    const interceptSearch = async (route) => {
-      if (new URL(route.request().url()).searchParams.get("title") !== oldTitle) {
-        await route.continue();
-        return;
-      }
-      const response = await route.fetch();
-      oldRequestReceived();
-      await released;
-      if (failOldRequest) await route.fulfill({ status: 503, json: {} });
-      else await route.fulfill({ response });
-    };
-    await page.route("**/api/v1/projects/*/sessions?*", interceptSearch);
-    await sessionSearch.fill(oldTitle);
-    await received;
-    const currentSearchResponse = page.waitForResponse((response) => new URL(response.url()).searchParams.get("title") === "no matching session");
-    await sessionSearch.fill("no matching session");
-    await currentSearchResponse;
-    const oldSearchResponse = page.waitForResponse((response) => new URL(response.url()).searchParams.get("title") === oldTitle);
-    releaseOldRequest();
-    await oldSearchResponse;
-    await page.evaluate(() => new Promise((resolveFrame) => window.requestAnimationFrame(() => window.requestAnimationFrame(resolveFrame))));
-    await page.getByText("No Sessions match this title.", { exact: true }).waitFor();
-    assert.equal(await page.getByRole("alert").count(), 0, "An obsolete search failure replaced the current results");
-    await page.unroute("**/api/v1/projects/*/sessions?*", interceptSearch);
-  }
-  await sessionSearch.fill("");
-  const renameTarget = sessionList.getByRole("button", { name: /Web available history/ });
-  await renameTarget.click();
+  await expect(page.getByLabel("Search by title")).toHaveCount(0);
+  await sessionList.getByRole("button", { name: /Web available history/ }).click();
   await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
-  await sessionSearch.fill("Web available");
-  await sessionList.getByRole("button", { name: /Web available history/ }).waitFor();
+  const renameFocus = await openActiveSessionActions(page);
+  const renameReturnFocus = page.viewportSize().width < 1024 ? page.locator("#app-sidebar-toggle") : renameFocus;
   const renameButton = page.getByRole("button", { name: "Rename session" });
   const renameDialog = page.getByRole("dialog");
   for (const closeWithEscape of [true, false]) {
+    await openActiveSessionActions(page);
     await renameButton.click();
     await renameDialog.getByLabel("Session title", { exact: true }).waitFor();
     if (closeWithEscape) await page.keyboard.press("Escape");
     else await renameDialog.getByRole("button", { name: "Cancel" }).click();
     await renameDialog.waitFor({ state: "hidden" });
-    await expect(renameButton).toBeFocused();
+    await expect(renameReturnFocus).toBeFocused();
   }
+  await openActiveSessionActions(page);
   await renameButton.click();
   await renameDialog.getByLabel("Session title", { exact: true }).fill("Renamed available history");
   const interceptRenameConflict = async (route) => {
@@ -2299,13 +2267,14 @@ try {
   await renameDialog.getByRole("button", { name: "Save" }).click();
   assert.equal((await renameResponse).status(), 200);
   await page.getByRole("heading", { name: "Renamed available history", exact: true }).waitFor();
-  await page.getByText("No Sessions match this title.", { exact: true }).waitFor();
-  assert.equal(await renameButton.evaluate((element) => element === document.activeElement), true,
-    "Saving a title outside the filter lost the selected Session or its trigger focus");
+  await expect(page.getByLabel("Search by title")).toHaveCount(0);
+  await expect(renameReturnFocus).toBeFocused();
+  await openActiveSessionActions(page);
   await renameButton.click();
   await renameDialog.getByLabel("Session title", { exact: true }).waitFor();
   assert.equal(await renameDialog.getByLabel("Session title", { exact: true }).inputValue(), "Renamed available history");
   await page.keyboard.press("Escape");
+  await openActiveSessionActions(page);
   const deleteButton = page.getByRole("button", { name: "Delete session" });
   await deleteButton.click();
   const deleteDialog = page.getByRole("dialog");
@@ -2313,7 +2282,7 @@ try {
   await deleteDialog.getByText("The conversation JSONL, Session logs, tool Artifacts, and Restore backups will be removed.", { exact: false }).waitFor();
   await page.keyboard.press("Escape");
   await deleteDialog.waitFor({ state: "hidden" });
-  assert.equal(await deleteButton.evaluate((element) => element === document.activeElement), true,
+  assert.equal(await page.locator("#app-sidebar summary:focus").count(), 1,
     "Delete dialog did not return focus to its trigger");
   let releaseRestoredClaim;
   let restoredClaimReceived;
@@ -2336,27 +2305,22 @@ try {
   await page.route(restoredClaimUrl, interceptAvailableSessionOpen);
   await page.reload();
   await restoredClaimStarted;
-  const restoredSearchResponse = page.waitForResponse((response) => new URL(response.url()).searchParams.get("title") === "no matching session");
-  await sessionSearch.fill("no matching session");
-  await restoredSearchResponse;
-  await page.getByText("No Sessions match this title.", { exact: true }).waitFor();
   releaseRestoredClaim();
   await page.getByRole("heading", { name: "Renamed available history", exact: true }).waitFor();
   await page.evaluate(() => new Promise((resolveFrame) => window.requestAnimationFrame(() => window.requestAnimationFrame(resolveFrame))));
-  await page.getByText("No Sessions match this title.", { exact: true }).waitFor();
+  await expect(page.getByLabel("Search by title")).toHaveCount(0);
   await page.unroute(restoredClaimUrl, interceptAvailableSessionOpen);
 
-  await sessionSearch.fill("");
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await setInterfaceLanguage(page, language);
     for (const theme of ["light", "dark"]) {
-      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      await setInterfaceTheme(page, theme);
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
         const creation = page.waitForResponse((response) => response.request().method() === "POST"
           && new URL(response.url()).pathname.endsWith("/conversations/open")
           && response.request().postDataJSON()?.create_new === true);
-        await page.getByRole("main").getByRole("button", { name: language === "en" ? "New session" : "新建会话", exact: true }).click();
+        await newProjectConversation(page);
         const { session_id: deleteId } = await (await creation).json();
         await page.getByRole("region", { name: language === "en" ? "Conversation" : "对话" })
           .getByRole("heading", { name: language === "en" ? "New Session draft" : "新会话草稿", exact: true }).waitFor();
@@ -2370,7 +2334,9 @@ try {
         const deleteLabel = language === "en" ? "Delete session" : "删除会话";
         const deleteDialog = page.getByRole("dialog", { name: language === "en"
           ? "Delete this Session permanently?" : "永久删除此会话？" });
-        const deleteTrigger = page.getByRole("button", { name: deleteLabel, exact: true });
+        const deleteFocus = await openActiveSessionActions(page);
+        const deleteReturnFocus = viewport.width < 1024 ? page.locator("#app-sidebar-toggle") : deleteFocus;
+        const deleteTrigger = page.locator("#app-sidebar").getByRole("button", { name: deleteLabel, exact: true });
         await deleteTrigger.waitFor();
         const extendedCase = language === "en" && theme === "light"
           && [1440, 768].includes(viewport.width);
@@ -2417,11 +2383,13 @@ try {
           }
           return route.continue();
         });
+        await openActiveSessionActions(page);
         await deleteTrigger.click();
         assert.equal(requestIds.length, 0, "Opening confirmation issued DELETE");
         await page.keyboard.press("Escape");
         await deleteDialog.waitFor({ state: "hidden" });
-        assert.equal(await deleteTrigger.evaluate((element) => element === document.activeElement), true);
+        await expect(deleteReturnFocus).toBeFocused();
+        await openActiveSessionActions(page);
         await deleteTrigger.click();
         if (extendedCase) {
           await page.setViewportSize({ width: 375, height: 812 });
@@ -2445,8 +2413,9 @@ try {
         assert.equal(await readFile(protectedFile, "utf8"), "user data survives");
         await deleteDialog.getByRole("button", { name: language === "en" ? "Cancel" : "取消", exact: true }).click();
         await deleteDialog.waitFor({ state: "hidden" });
-        assert.equal(await deleteTrigger.evaluate((element) => element === document.activeElement), true);
-        await expect(page.getByRole("main").getByRole("button", { name: language === "en" ? "New session" : "新建会话", exact: true })).toBeEnabled();
+        await expect(deleteReturnFocus).toBeFocused();
+        await expect(page.getByLabel(language === "en" ? "Message input" : "消息输入")).toBeEnabled();
+        await openActiveSessionActions(page);
         await deleteTrigger.click();
         await link(protectedFile, unsafeArtifact);
         await deleteDialog.getByRole("button", { name: deleteLabel, exact: true }).click();
@@ -2463,7 +2432,7 @@ try {
             && new URL(response.url()).pathname.endsWith("/conversations/open")
             && response.request().postDataJSON()?.create_new === true
           ));
-          await page.getByRole("button", { name: "New session", exact: true }).click();
+          await newProjectConversation(page);
           otherSessionId = (await (await otherSessionCreation).json()).session_id;
           await page.getByRole("heading", { name: "New Session draft", exact: true }).waitFor();
           otherPrompt = "retry once another session stays selected";
@@ -2569,7 +2538,7 @@ try {
     }
   }
   await page.setViewportSize(viewports[0]);
-  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
 
   await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
   await registerProject(secondProject, "project-two");
@@ -2577,12 +2546,12 @@ try {
   await projectItemByPath(page, secondProject).getByTitle("Schedule active", { exact: true }).waitFor();
 
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await setInterfaceLanguage(page, language);
     await page.getByText(language === "en" ? "Project registered." : "项目已登记。", { exact: true }).waitFor();
   }
   await page.clock.resume();
-  await page.getByRole("button", { name: "EN", exact: true }).click();
-  await projectMenuAction(firstProjectItem, "Open schedule");
+  await setInterfaceLanguage(page, "en");
+  await projectMenuAction(firstProjectItem, "Schedule tasks");
   await page.getByRole("heading", { name: "E2E saved project job", exact: true }).waitFor();
   await assertHistoryScopeChange("project");
   let notifySwitchingScheduleLoad;
@@ -2609,10 +2578,10 @@ try {
   await expect(page.getByRole("heading", { name: "Schedule Jobs", exact: true })).toHaveCount(0);
   await page.unroute("**/schedule/jobs", delaySwitchingScheduleLoad);
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
-    await page.locator("header").getByText(language === "en" ? "Sessions" : "会话", { exact: true }).waitFor();
+    await setInterfaceLanguage(page, language);
+    await expect(page.locator("#sessions-heading")).toBeVisible();
     for (const theme of ["light", "dark"]) {
-      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      await setInterfaceTheme(page, theme);
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
         if (viewport.width < 1024) {
@@ -2651,22 +2620,24 @@ try {
   await page.getByRole("button", { name: /Renamed available history/ }).click();
   await page.getByText("Available history loaded after a successful Claim", { exact: true }).waitFor();
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await setInterfaceLanguage(page, language);
     for (const theme of ["light", "dark"]) {
-      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      await setInterfaceTheme(page, theme);
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
         const layout = await page.evaluate(() => {
           return {
             width: document.documentElement.scrollWidth,
-            conversationSidebars: document.querySelectorAll("main aside").length,
+            conversationSidebars: document.querySelectorAll(
+              "section[aria-label='Conversation'] aside, section[aria-label='对话'] aside",
+            ).length,
           };
         });
         assert.ok(layout.width <= viewport.width, `Session horizontal overflow at ${viewport.width}x${viewport.height}`);
         assert.equal(layout.conversationSidebars, 0, "A second Session sidebar remained in the conversation panel");
         await page.screenshot({ path: resolve(output, `sessions-${language}-${theme}-${viewport.width}.png`) });
-        const restore = page.getByRole("button", { name: "Restore", exact: true });
-        await restore.click();
+        const restore = latestRestoreMenu(page).locator("summary");
+        await openLatestRestore(page);
         await page.getByRole("button", { name: /Inspect restore|检查 Restore/ }).click();
         await page.getByText(language === "en" ? "Restore preview" : "Restore 预览", { exact: true }).waitFor();
         const restoreBounds = await page.getByRole("dialog").evaluate((element) => {
@@ -2686,7 +2657,7 @@ try {
   await page.locator("#app-sidebar").getByRole("button", { name: "project-two", exact: true }).click();
   await page.getByRole("heading", { name: "project-two", exact: true }).waitFor();
   assert.equal(await page.getByText("Available history loaded after a successful Claim", { exact: true }).count(), 0);
-  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
   await page.setViewportSize({ width: 768, height: 1024 });
 
   await registerProject(projectAlias, "project-one");
@@ -2737,10 +2708,10 @@ try {
   await page.getByText("Schedule paused for review").waitFor();
   await projectItemByPath(page, secondProject).getByTitle("Unavailable", { exact: true }).waitFor();
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await setInterfaceLanguage(page, language);
     const resumeLabel = language === "en" ? "Resume schedule" : "恢复调度";
     for (const theme of ["light", "dark"]) {
-      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      await setInterfaceTheme(page, theme);
       for (const viewport of viewports) {
         await page.setViewportSize(viewport);
         const resumeButton = await openProjectMenu(firstProjectItem);
@@ -2793,7 +2764,7 @@ try {
       }
     }
   }
-  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
   await showProjectNavigation(page);
   await page.getByRole("button", { name: "Refresh projects" }).click();
   await page.getByText("Schedule paused for review").waitFor();
@@ -2806,7 +2777,7 @@ try {
     response.request().method() === "GET"
     && response.url().endsWith("/schedule/jobs")
   ));
-  await projectMenuAction(projectItemByPath(page, firstProject), "Open schedule");
+  await projectMenuAction(projectItemByPath(page, firstProject), "Schedule tasks");
   const resumedScheduleResponse = await resumedScheduleResponsePromise;
   assert.equal(resumedScheduleResponse.status(), 200, "Resumed Schedule page did not load its real response");
   const resumedSchedulePayload = await resumedScheduleResponse.json();
@@ -2904,6 +2875,15 @@ try {
     console.log("Playwright production E2E: 4 locale/theme combinations x 3 general viewports and 4 conversation viewports; long history scroll, live/history message bounds, empty layout, text contrast, both-theme cancel/approve; Schedule CRUD, accepted-create lost-ack retry, locked fields, delayed detail focus, simulated status polling, stale page/Project/disconnected responses, keyboard validation and 9999/10000ms feedback; Restore overwrite, cancel, stale responses, refresh, failure acknowledgement; delete, ticket, focus, reconnect passed");
 } catch (error) {
   acceptanceError = error;
+  if (diagnosticPage?.isClosed() === false) {
+    await diagnosticPage.screenshot({ path: resolve(output, "acceptance-failure.png") });
+    await writeFile(resolve(output, "acceptance-failure.json"), JSON.stringify(await diagnosticPage.evaluate(() => ({
+      route: window.location.pathname + window.location.search,
+      socket: window.__omniTestSocket?.readyState,
+      main: document.querySelector("main")?.innerText,
+      events: window.__omniTestMessages?.slice(-30).map(event => ({ type: event.type, code: event.code })),
+    })), null, 2));
+  }
   console.error("E2E failed:", error);
   throw error;
 } finally {

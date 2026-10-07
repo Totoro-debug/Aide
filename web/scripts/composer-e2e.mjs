@@ -1,3 +1,4 @@
+import { setInterfaceLanguage, setInterfaceTheme } from "./settings-e2e.mjs";
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -29,11 +30,8 @@ export default async function composerAcceptance(page) {
   for (const language of ["en", "zh-CN"]) {
     for (const theme of ["light", "dark"]) {
       await page.setViewportSize({ width: 1440, height: 900 });
-      await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
-      await page.getByRole("button", {
-        name: language === "en" ? (theme === "light" ? "Light" : "Dark") : (theme === "light" ? "浅色" : "深色"),
-        exact: true,
-      }).click();
+      await setInterfaceLanguage(page, language);
+      await setInterfaceTheme(page, theme);
       for (const width of [1440, 768, 375]) {
         await page.setViewportSize({ width, height: 900 });
         const input = page.getByLabel(language === "en" ? "Message input" : "消息输入", { exact: true });
@@ -91,8 +89,8 @@ export default async function composerAcceptance(page) {
   }
 
   await page.setViewportSize(originalViewport);
-  await page.getByRole("button", { name: "EN", exact: true }).click();
-  await page.getByRole("button", { name: "Light", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
+  await setInterfaceTheme(page, "light");
   const modelSelect = page.getByLabel("Session model", { exact: true });
   const originalModel = await modelSelect.inputValue();
   const modelValues = await modelSelect.locator("option").evaluateAll(options => options.filter(option => !option.disabled).map(option => option.value));

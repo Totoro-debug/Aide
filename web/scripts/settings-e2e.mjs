@@ -1,3 +1,4 @@
+import { newProjectConversation, openWorkspaceAction, showProjectNavigation } from "./project-ui.mjs";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -33,10 +34,12 @@ async function settingsSection(target, section) {
   }).getByRole("button", { name: sectionName, exact: true }).click();
 }
 
-async function setInterfacePreference(target, field, value, toolbarName) {
-  if (new globalThis.URL(target.url()).pathname !== "/settings") {
-    await target.getByRole("button", { name: toolbarName, exact: true }).click();
-    return;
+async function setInterfacePreference(target, field, value) {
+  const opened = new globalThis.URL(target.url()).pathname !== "/settings";
+  if (opened) {
+    const settings = target.locator("#app-sidebar").getByRole("link", { name: /^(Settings|设置)$/ });
+    await showProjectNavigation(target);
+    await settings.click();
   }
   const navigation = target.getByRole("navigation", { name: /^(Settings sections|设置分类)$/ });
   const section = await navigation.getByRole("button").evaluateAll((buttons) => (
@@ -44,16 +47,21 @@ async function setInterfacePreference(target, field, value, toolbarName) {
   ));
   await settingsSection(target, "General & appearance");
   await target.locator(field).selectOption(value);
-  await target.getByRole("navigation", { name: /^(Settings sections|设置分类)$/ })
+  if (opened) {
+    await target.getByRole("button", { name: /^(Back to app|返回应用)$/ }).click();
+    await expect(target).not.toHaveURL(url => url.pathname === "/settings");
+    await expect(target.getByRole("heading", { name: /^(Settings|设置)$/, exact: true })).toBeHidden();
+  }
+  else await target.getByRole("navigation", { name: /^(Settings sections|设置分类)$/ })
     .getByRole("button").nth(section).click();
 }
 
 export async function setInterfaceLanguage(target, language) {
-  await setInterfacePreference(target, "#settings-language", language, language === "en" ? "EN" : "中文");
+  await setInterfacePreference(target, "#settings-language", language);
 }
 
 export async function setInterfaceTheme(target, theme) {
-  await setInterfacePreference(target, "#settings-theme", theme, theme === "light" ? /Light|浅色/ : /Dark|深色/);
+  await setInterfacePreference(target, "#settings-theme", theme);
 }
 
 export async function openServiceStatus(target) {
@@ -61,7 +69,7 @@ export async function openServiceStatus(target) {
     const settingsLink = target.locator("#app-sidebar").getByRole("link", {
       name: /^(Settings|设置)$/,
     });
-    if (!await settingsLink.isVisible()) await target.locator("#app-sidebar-toggle").click();
+    await showProjectNavigation(target);
     await settingsLink.click();
   }
   await settingsSection(target, "Runtime");
@@ -95,12 +103,12 @@ export async function settingsConfirmationAcceptance({ page, control }) {
     new globalThis.URL(response.url()).pathname.endsWith("/conversations/open")
     && response.request().method() === "POST"
   ));
-  await page.getByRole("button", { name: "New session", exact: true }).click();
+  await newProjectConversation(page);
   const response = await openedResponse;
   assert.equal(response.status(), 200, "Settings draft creation and Claim failed");
   const opened = await response.json();
   assert.equal(opened.claim.session_id, opened.session_id);
-  await expect(page.getByRole("button", { name: "New session", exact: true })).toBeEnabled();
+  await expect(page.getByLabel("Message input", { exact: true })).toBeEnabled();
   await control.command("settings-arm");
   await page.locator("textarea").fill("settings generation barrier confirmation");
   await page.locator("textarea").press("Enter");
@@ -339,19 +347,17 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
     await expect(target.getByRole("heading", { name: "project-one", exact: true })).toBeVisible();
   };
   const createDraft = async (target) => {
-    const button = target.getByRole("button", { name: "New session", exact: true });
     for (let attempt = 0; attempt < 30; attempt += 1) {
-      await expect(button).toBeEnabled({ timeout: 30000 });
       const result = target.waitForResponse((response) => (
         new globalThis.URL(response.url()).pathname.endsWith("/conversations/open")
         && response.request().method() === "POST"
       ));
-      await button.click();
+      await newProjectConversation(target);
       const response = await result;
       const body = await response.json();
       if (response.ok()) {
         assert.equal(body.claim.session_id, body.session_id);
-        await expect(button).toBeEnabled({ timeout: 30000 });
+        await expect(target.getByLabel("Message input", { exact: true })).toBeEnabled({ timeout: 30000 });
         await expect(target.locator("textarea")).toBeVisible({ timeout: 30000 });
         return;
       }
@@ -732,15 +738,12 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
     && observation.tools.includes("tool_search")
   )), "The active generation did not reach the large-model Tool Search request");
 
-  const runtimeResponse = page.waitForResponse((response) => (
-    response.url().endsWith("/runtime/status") && response.request().method() === "POST"
-  ));
-  const runtimeMenu = page.locator("details").filter({
-    has: page.getByRole("button", { name: "Runtime status and controls", exact: true, includeHidden: true }),
-  });
-  await runtimeMenu.locator("summary").click();
-  await runtimeMenu.getByRole("button", { name: "Runtime status and controls", exact: true }).click();
-  const runtime = await runtimeResponse;
+  const [runtime] = await Promise.all([
+    page.waitForResponse((response) => (
+      response.url().endsWith("/runtime/status") && response.request().method() === "POST"
+    )),
+    openWorkspaceAction(page, "Runtime status and controls"),
+  ]);
   assert.equal(runtime.status(), 200);
   const budget = (await runtime.json()).status;
   assert.equal(budget.chat_model, "primary/large-model");

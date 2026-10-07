@@ -1,3 +1,5 @@
+import { openWorkspaceAction } from "./project-ui.mjs";
+import { setInterfaceLanguage } from "./settings-e2e.mjs";
 import { registerProjectFromSidebar, selectProjectDirectory } from "./project-ui.mjs";
 import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
@@ -94,11 +96,7 @@ try {
     return { status: response.status(), body: await response.json() };
   }
   async function openSessionMore(action) {
-    const trigger = page.locator('summary[aria-label^="More options for "]');
-    const label = await trigger.getAttribute("aria-label");
-    assert.ok(label);
-    await trigger.click();
-    await page.getByRole("group", { name: label, exact: true }).getByRole("button", { name: action, exact: true }).click();
+    await openWorkspaceAction(page, action);
   }
   async function changeDirectory(directory) {
     await page.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
@@ -135,7 +133,7 @@ try {
     await expect(page.getByRole("listitem").filter({ hasText: title })).toHaveCount(0);
   }
   await page.goto(`${control.details.url}/#ticket=${control.details.ticket}`);
-  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
   await expect(page.getByRole("heading", { name: "Omni", exact: true }).last()).toBeVisible();
   try {
     await expect(page.getByRole("textbox", { name: "Message input", exact: true })).toBeEnabled();
@@ -328,7 +326,7 @@ try {
   const restarted = await control.restart();
   await page.goto("about:blank");
   await page.goto(`${restarted.url}/#ticket=${restarted.ticket}`);
-  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
   await expect(page.getByRole("heading", { name: "Omni", exact: true }).last()).toBeVisible();
   const restartedSessions = (await api("/chat/sessions")).body.sessions;
   assert.ok(restartedSessions.some(session => session.id === first.id));

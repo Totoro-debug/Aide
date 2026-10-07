@@ -17,7 +17,9 @@
     "pretest:e2e:projects": "npm run build",
     "test:e2e:projects": "node scripts/project-e2e.mjs",
     "pretest:e2e:startup": "npm run build",
-    "test:e2e:startup": "node scripts/config-startup-e2e.mjs"
+    "test:e2e:startup": "node scripts/config-startup-e2e.mjs",
+    "pretest:e2e:layout": "npm run build",
+    "test:e2e:layout": "node scripts/workspace-layout-e2e.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "1.1.14",

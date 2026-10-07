@@ -52,6 +52,7 @@ import type {
   DreamRunResponse,
   SkillReloadResponse,
   RuntimeStatusResponse,
+  ServiceRestartResponse,
 } from "./protocol";
 
 const API_PREFIX = "/api/v1";
@@ -595,6 +596,25 @@ export function getRuntimeMemory(
   return postWorkspaceSessionOperation(
     workspaceId, sessionId, claimVersion, claimCredential, "memory/read",
   );
+}
+
+export function getProjectMemory(projectId: string): Promise<MemoryViewResponse> {
+  return request(`/projects/${encodeURIComponent(projectId)}/memory/read`, {
+    method: "POST", mutation: true, body: { request_id: createRequestId() },
+  });
+}
+
+export function triggerProjectDream(projectId: string): Promise<DreamRunResponse> {
+  return request(`/projects/${encodeURIComponent(projectId)}/memory/dream`, {
+    method: "POST", mutation: true, body: { request_id: createRequestId() },
+  });
+}
+
+export function restartService(savedRevision: string, requestId: string): Promise<ServiceRestartResponse> {
+  return request("/service/restart", {
+    method: "POST", mutation: true,
+    body: { request_id: requestId, saved_revision: savedRevision },
+  });
 }
 
 export function triggerRuntimeDream(

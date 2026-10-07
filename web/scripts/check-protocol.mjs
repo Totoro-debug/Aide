@@ -185,6 +185,7 @@ for (const [name, definitionName] of [
   ["DreamResult", "dream_result"],
   ["SkillMetadata", "skill_metadata"],
   ["MemoryViewResponse", "memory_view_response"],
+  ["ServiceRestartResponse", "service_restart_response"],
   ["DreamRunResponse", "dream_run_response"],
   ["SkillReloadResponse", "skill_reload_response"],
   ["RuntimeStatusResponse", "runtime_status_response"],

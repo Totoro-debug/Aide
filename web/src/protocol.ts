@@ -280,6 +280,12 @@ export interface MemoryViewResponse {
   content: string;
 }
 
+export interface ServiceRestartResponse {
+  request_id: string;
+  accepted: boolean;
+  operation_id: string;
+}
+
 export interface DreamRunResponse {
   request_id: string;
   workspace_id: string;

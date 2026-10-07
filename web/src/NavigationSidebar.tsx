@@ -1,8 +1,8 @@
-import { useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import * as Dialog from "@radix-ui/react-dialog";
-import { ChevronDown, ChevronRight, FolderOpen, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
+import { Brain, CalendarClock, ChevronDown, ChevronRight, FolderOpen, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCw, Trash2, X } from "lucide-react";
 
 import { getChatSessions, getProjectSessions } from "./api";
 import type {
@@ -59,6 +59,7 @@ interface NavigationSidebarProps {
   onNewProjectSession: (projectId: string) => void;
   onSessionAction: (action: NavigationSessionAction) => void;
   onClose: () => void;
+  onOpenMemory: (projectId: string | null, trigger: HTMLElement) => void;
 }
 
 export default function NavigationSidebar({
@@ -79,6 +80,7 @@ export default function NavigationSidebar({
   onNewProjectSession,
   onSessionAction,
   onClose,
+  onOpenMemory,
 }: NavigationSidebarProps) {
   const { t } = useTranslation();
   const location = useLocation();
@@ -249,6 +251,7 @@ export default function NavigationSidebar({
                 onOpenSession={(sessionId) => openProjectSession(project.project_id, sessionId)}
                 onSessionAction={onSessionAction}
                 onProjectAction={onProjectAction}
+                onOpenMemory={(trigger) => onOpenMemory(project.project_id, trigger)}
                 onOpenSchedule={() => {
                   navigate(`/projects/${encodeURIComponent(project.project_id)}/schedule`);
                   onClose();
@@ -264,7 +267,37 @@ export default function NavigationSidebar({
       </section>
 
       <section className={`${styles.sidebarSection} ${styles.conversationNavigationSection}`}>
-        <h2 className={styles.sidebarSectionTitle}>{t("nav.chatHistory")}</h2>
+        <div className={styles.sidebarSectionHeader}>
+          <h2 className={styles.sidebarSectionTitle}>{t("nav.chatHistory")}</h2>
+          {activeSession?.projectId === null && activeSession.sessionId !== null ? (
+            <details className={styles.sessionActionMenu}>
+              <summary className={styles.sessionActionTrigger} aria-label={t("controls.workspaceActions")}>
+                <MoreHorizontal size={15} aria-hidden="true" />
+              </summary>
+              <div className={styles.sessionActionItems} role="group" aria-label={t("controls.workspaceActions")}>
+                <button className={styles.sessionActionMenuItem} type="button" disabled={!authReady}
+                  onClick={(event) => {
+                    const details = event.currentTarget.closest("details");
+                    const trigger = details?.querySelector("summary");
+                    details?.removeAttribute("open");
+                    if (trigger instanceof HTMLElement) onOpenMemory(null, trigger);
+                  }}>
+                  <Brain size={14} aria-hidden="true" />{t("controls.workspaceMemoryAndDream")}
+                </button>
+                <button className={styles.sessionActionMenuItem} type="button" disabled={!authReady}
+                  onClick={(event) => {
+                    event.currentTarget.closest("details")?.removeAttribute("open");
+                    const query = new URLSearchParams({ directory: activeSession.directory ?? "" });
+                    if (activeSession.sessionId !== null) query.set("session", activeSession.sessionId);
+                    navigate(`/chat/schedule?${query}`);
+                    onClose();
+                  }}>
+                  <CalendarClock size={14} aria-hidden="true" />{t("controls.scheduleTasks")}
+                </button>
+              </div>
+            </details>
+          ) : null}
+        </div>
         {chatHistoryLoadState === "loading" && chatHistory === null ? (
           <p className={styles.sidebarStatus} role="status">{t("chat.historyLoading")}</p>
         ) : null}
@@ -390,6 +423,7 @@ function ProjectNavigationItem({
   onViewDirectory,
   onProjectAction,
   onOpenSchedule,
+  onOpenMemory,
 }: {
   project: RegisteredProject;
   authReady: boolean;
@@ -405,15 +439,14 @@ function ProjectNavigationItem({
   onViewDirectory: (title: string, directory: string, trigger: HTMLElement) => void;
   onProjectAction: (action: NavigationProjectAction) => void;
   onOpenSchedule: () => void;
+  onOpenMemory: (trigger: HTMLElement) => void;
 }) {
   const { t } = useTranslation();
-  const [sessionSearch, setSessionSearch] = useState("");
-  const deferredSessionSearch = useDeferredValue(sessionSearch);
   const [sessions, setSessions] = useState<ProjectSessionsResponse | null>(null);
   const [loadState, setLoadState] = useState<ProjectsLoadState>("idle");
   const [loadError, setLoadError] = useState(false);
   const requestRef = useRef(0);
-  const loadedSessionsRef = useRef({ title: "", count: 0 });
+  const loadedSessionsRef = useRef({ count: 0 });
   const sessionListId = `project-sessions-${encodeURIComponent(project.project_id)}`;
 
   const refreshSessions = useCallback(async (cursor: string | null = null, append = false) => {
@@ -421,19 +454,16 @@ function ProjectNavigationItem({
     const requestNumber = ++requestRef.current;
     setLoadState("loading");
     setLoadError(false);
-    const title = deferredSessionSearch.trim();
     try {
       let response = await getProjectSessions(project.project_id, {
-        title: title || undefined,
         cursor: cursor ?? undefined,
         limit: SESSION_PAGE_SIZE,
       });
       while (!append && response.next_cursor !== null
-        && loadedSessionsRef.current.title === title
         && response.sessions.length < loadedSessionsRef.current.count) {
         if (requestNumber !== requestRef.current) return;
         const page = await getProjectSessions(project.project_id, {
-          title: title || undefined, cursor: response.next_cursor, limit: SESSION_PAGE_SIZE,
+          cursor: response.next_cursor, limit: SESSION_PAGE_SIZE,
         });
         response = { ...page, sessions: [...response.sessions, ...page.sessions] };
       }
@@ -441,7 +471,7 @@ function ProjectNavigationItem({
       setSessions((current) => {
         const combined = append && current !== null ? [...current.sessions, ...response.sessions] : response.sessions;
         const sessions = Array.from(new Map(combined.map((session) => [session.id, session])).values());
-        loadedSessionsRef.current = { title, count: sessions.length };
+        loadedSessionsRef.current = { count: sessions.length };
         return { ...response, sessions };
       });
       setLoadState("ready");
@@ -450,7 +480,7 @@ function ProjectNavigationItem({
       setLoadState("error");
       setLoadError(true);
     }
-  }, [deferredSessionSearch, project.available, project.project_id]);
+  }, [project.available, project.project_id]);
 
   useEffect(() => {
     if (expanded && project.available) void refreshSessions();
@@ -509,6 +539,7 @@ function ProjectNavigationItem({
           project={project}
           authReady={authReady}
           onOpenSchedule={onOpenSchedule}
+          onOpenMemory={onOpenMemory}
           onAction={onProjectAction}
           onViewDirectory={(trigger) => onViewDirectory(projectName, project.path, trigger)}
         />
@@ -522,21 +553,9 @@ function ProjectNavigationItem({
       ) : null}
       {expanded ? (
         <div className={styles.projectSessionTree} id={sessionListId}>
-          {project.available ? (
-            <label className={styles.sidebarSearch}>
-              <Search size={13} aria-hidden="true" />
-              <span className={styles.srOnly}>{t("sessions.searchLabel")}</span>
-              <input
-                type="search"
-                aria-label={t("sessions.searchLabel")}
-                placeholder={t("sessions.searchPlaceholder")}
-                value={sessionSearch}
-                onChange={(event) => setSessionSearch(event.target.value)}
-              />
-            </label>
-          ) : (
+          {!project.available ? (
             <p className={styles.sidebarStatus} role="status">{t("sessions.projectUnavailable")}</p>
-          )}
+          ) : null}
           {loadState === "loading" && sessions === null ? (
             <p className={styles.sidebarStatus} role="status">{t("sessions.loading")}</p>
           ) : null}
@@ -550,7 +569,7 @@ function ProjectNavigationItem({
           ) : null}
           {loadState === "ready" && (sessions?.sessions.length ?? 0) === 0 && draftSessions.length === 0 ? (
             <p className={styles.sidebarStatus}>
-              {sessionSearch.trim() ? t("sessions.noSearchResults") : t("sessions.empty")}
+              {t("sessions.empty")}
             </p>
           ) : null}
           {sessions !== null || draftSessions.length > 0 ? (
@@ -622,10 +641,11 @@ function ProjectNavigationItem({
   );
 }
 
-function ProjectActionMenu({ project, authReady, onOpenSchedule, onAction, onViewDirectory }: {
+function ProjectActionMenu({ project, authReady, onOpenSchedule, onOpenMemory, onAction, onViewDirectory }: {
   project: RegisteredProject;
   authReady: boolean;
   onOpenSchedule: () => void;
+  onOpenMemory: (trigger: HTMLElement) => void;
   onAction: (action: NavigationProjectAction) => void;
   onViewDirectory: (trigger: HTMLElement) => void;
 }) {
@@ -651,8 +671,13 @@ function ProjectActionMenu({ project, authReady, onOpenSchedule, onAction, onVie
         </button>
         <button className={styles.sessionActionMenuItem} type="button"
           disabled={!authReady || !project.available || removalPending || removalFailed}
+          onClick={(event) => act(event, onOpenMemory)}>
+          <Brain size={14} aria-hidden="true" />{t("controls.workspaceMemoryAndDream")}
+        </button>
+        <button className={styles.sessionActionMenuItem} type="button"
+          disabled={!authReady || !project.available || removalPending || removalFailed}
           onClick={(event) => act(event, onOpenSchedule)}>
-          {t("controls.openSchedule")}
+          <CalendarClock size={14} aria-hidden="true" />{t("controls.scheduleTasks")}
         </button>
         {project.schedule_state === "awaiting_resume" ? (
           <button className={styles.sessionActionMenuItem} type="button"

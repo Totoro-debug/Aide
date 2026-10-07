@@ -2485,6 +2485,8 @@ class AgentService:
         self._stop_operation_id: str | None = None
         self._stop_request_results: dict[str, ServiceStopDTO] = {}
         self._stop_failed = False
+        self.restart_requested = False
+        self._restart_request_results: dict[str, tuple[str, ServiceStopDTO]] = {}
         self._closed = asyncio.Event()
         self._start_lock = asyncio.Lock()
         self._lock = asyncio.Lock()
@@ -2555,6 +2557,48 @@ class AgentService:
         }
         self._stop_request_results[request_id] = result
         return result.copy()
+
+    async def request_service_restart(
+        self, client_id: str, request_id: str, saved_revision: str
+    ) -> ServiceStopDTO:
+        """Validate the saved configuration before ending this Runtime Lifetime."""
+        self._require_client(client_id)
+        if not request_id or not saved_revision:
+            raise service_error(
+                "validation_error", "request_id and saved_revision are required.", status=422
+            )
+        async with self._config_lock:
+            previous = self._restart_request_results.get(request_id)
+            if previous is not None:
+                if previous[0] != saved_revision:
+                    raise service_error("request_reused", "request_id was already used.")
+                return previous[1].copy()
+            if self.state in {"draining", "stopped"} or self._stop_task is not None:
+                raise service_error("admission_closed", "The local service is stopping.")
+            view = self.config_view()
+            application = cast(dict[str, object], view["application"])
+            configuration = cast(dict[str, object], view["configuration"])
+            if configuration["repair_required"]:
+                raise service_error("config_invalid", "Repair configuration before restarting.")
+            if application["saved_revision"] != saved_revision:
+                raise service_error(
+                    "config_conflict", "Saved configuration changed; refresh before restarting."
+                )
+            self.restart_requested = True
+            result = self.request_service_stop(request_id)
+            self._restart_request_results[request_id] = (saved_revision, result)
+            return result.copy()
+
+    def replacement_after_restart(self) -> AgentService:
+        """Create the next Runtime Lifetime with the restart receipt retained."""
+        if not self.restart_requested or self.state != "stopped" or self._stop_failed:
+            raise service_error("admission_closed", "The previous Runtime has not stopped.")
+        replacement = AgentService(
+            self.agent_home, reconnect_timeout=self.reconnect_timeout,
+            monotonic_now=self._monotonic, sleep=self._sleep,
+        )
+        replacement._restart_request_results = self._restart_request_results.copy()
+        return replacement
 
     async def _activate_workspace(self, workspace: WorkspaceRecord) -> None:
         async with workspace._lock:
@@ -3411,6 +3455,8 @@ class AgentService:
             workspace.set_client_connection(client_id, connected=False)
         if client.disconnect_task is not None:
             client.disconnect_task.cancel()
+        if self.state in {"draining", "stopped"}:
+            return
         expiry_deadline = self._monotonic() + self.reconnect_timeout
         client.reconnect_deadline = expiry_deadline
         client.disconnect_task = asyncio.create_task(
@@ -5185,6 +5231,43 @@ class AgentService:
                     field_errors=field_errors if isinstance(field_errors, dict) else None,
                 )
         return result
+
+    async def project_memory_operation(
+        self, client_id: str, project_id: str, request_id: str, action: str
+    ) -> dict[str, object]:
+        """Operate on Project-owned Memory without creating a Conversation Session."""
+        client = self._require_client(client_id)
+        if action not in {"read", "dream"} or not request_id:
+            raise service_error("validation_error", "Memory operation is invalid.", status=422)
+        fingerprint = f"project-memory:{project_id}:{action}"
+        async with client.management_lock:
+            async with self._project_lifecycle_lock:
+                _, workspace = await self._project_workspace_owned(client_id, project_id)
+                workspace._require_admitted()
+            previous = client.management_results.get(request_id)
+            if previous is not None:
+                if previous[0] != fingerprint:
+                    raise service_error("request_reused", "request_id was already used.")
+                return deepcopy(previous[1])
+            if action == "read":
+                try:
+                    content = await workspace.memory_manager.read_long_term()
+                except (OSError, UnicodeError, ValueError) as error:
+                    raise service_error(
+                        "persistence_error", "Long-term Memory could not be read.", status=500
+                    ) from error
+                result: dict[str, object] = {
+                    "request_id": request_id, "workspace_id": workspace.workspace_id,
+                    "content": content,
+                }
+            else:
+                dream_result = await workspace.dream.run()
+                result = {
+                    "request_id": request_id, "workspace_id": workspace.workspace_id,
+                    "result": _safe_wire_value(dream_result),
+                }
+            client.management_results[request_id] = (fingerprint, result)
+            return deepcopy(result)
 
     async def get_memory_view(
         self,

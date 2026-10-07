@@ -1894,8 +1894,10 @@ h1 {
 }
 
 .conversationStage[data-empty="true"] {
+  box-sizing: border-box;
   justify-content: center;
   gap: 20px;
+  padding-top: min(20dvh, 180px);
 }
 
 .conversationStage[data-empty="true"] .conversationViewport {
@@ -3787,7 +3789,7 @@ h1 {
   display: flex;
   width: 100%;
   max-width: none;
-  height: calc(100dvh - 64px);
+  height: 100dvh;
   min-height: 0;
   flex-direction: column;
   margin: 0;
@@ -3929,7 +3931,7 @@ h1 {
   }
 
   .conversationMainContent {
-    height: calc(100dvh - 56px);
+    height: 100dvh;
     min-height: 0;
     padding: 12px;
   }
@@ -4171,6 +4173,9 @@ h1 {
 }
 
 .chatWorkspaceContent {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
 }
@@ -4178,5 +4183,50 @@ h1 {
 @media (max-width: 680px) {
   .chatWorkspaceLayout {
     gap: 0;
+  }
+}
+
+.floatingNavigationToggle {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 40;
+}
+
+.appShellSettings .floatingNavigationToggle {
+  display: none;
+}
+
+.runtimeStatusSummary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-height: 24px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.runtimeStatusSummary button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 4px;
+  padding: 3px 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.runtimeStatusSummary button:hover {
+  background: var(--surface-hover);
+}
+
+@media (max-height: 500px) {
+  .conversationStage[data-empty="true"] {
+    padding-top: 0;
+    overflow-y: auto;
   }
 }

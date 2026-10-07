@@ -1,3 +1,4 @@
+import { setInterfaceLanguage, setInterfaceTheme } from "./settings-e2e.mjs";
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -14,7 +15,7 @@ const errors = [];
 page.on("pageerror", error => errors.push(error.message));
 try {
   await page.goto(`${control.details.url}/#ticket=${encodeURIComponent(control.details.ticket)}`);
-  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
   await page.locator("#app-sidebar").getByRole("link", { name: "New conversation", exact: true }).click();
   await expect(page.getByLabel("Message input")).toBeEnabled();
   const origin = new URL(page.url()).origin;
@@ -68,9 +69,9 @@ try {
   await expect(trigger).toBeFocused();
 
   for (const language of ["en", "zh-CN"]) {
-    await page.getByRole("button", { name: language === "en" ? "EN" : "中文", exact: true }).click();
+    await setInterfaceLanguage(page, language);
     for (const theme of ["light", "dark"]) {
-      await page.getByRole("button", { name: theme === "light" ? /Light|浅色/ : /Dark|深色/ }).click();
+      await setInterfaceTheme(page, theme);
       for (const width of [1440, 375]) {
         await page.setViewportSize({ width, height: 900 });
         const localizedItem = page.locator('#app-sidebar ul[aria-label="Projects"], #app-sidebar ul[aria-label="项目"]')
@@ -89,11 +90,11 @@ try {
     }
   }
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.getByRole("button", { name: "EN", exact: true }).click();
+  await setInterfaceLanguage(page, "en");
   await projectMenuAction(item, "Resume schedule");
   await page.getByRole("dialog").getByRole("button", { name: "Resume schedule", exact: true }).click();
   await expect(item.getByTitle("Schedule active", { exact: true })).toBeVisible();
-  await projectMenuAction(item, "Open schedule");
+  await projectMenuAction(item, "Schedule tasks");
   await expect(page.getByRole("heading", { name: "Schedule Jobs", exact: true })).toBeVisible();
   await item.getByRole("button", { name: "project-one", exact: true }).click();
   await expect(page.getByRole("heading", { name: "project-one", exact: true })).toBeVisible();
@@ -108,8 +109,8 @@ try {
   const restored = await registerProjectFromSidebar(page, control.details.first_project);
   assert.equal(restored.schedule_state, "awaiting_resume");
   await expect(page.getByText("Schedule paused for review", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "中文", exact: true }).click();
-  await page.getByRole("button", { name: "浅色", exact: true }).click();
+  await setInterfaceLanguage(page, "zh-CN");
+  await setInterfaceTheme(page, "light");
   await page.screenshot({ path: resolve("test-results/project-sidebar.png"), fullPage: true });
   assert.deepEqual(errors, []);
   console.log("Project sidebar acceptance: passed (selection, cancel, retry, Unicode, deduplication, resume, removal, 8 appearance/viewport combinations).");

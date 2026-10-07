@@ -1,4 +1,4 @@
-import { registerProjectFromSidebar } from "./project-ui.mjs";
+import { newProjectConversation, registerProjectFromSidebar } from "./project-ui.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdir } from "node:fs/promises";
@@ -121,7 +121,7 @@ export default async function browserRecoveryAcceptance({ page: initialPage, con
       if (scope === "project") {
         await page.goto(`${origin}/projects/${encodeURIComponent(projectId)}?session=${control.details.available_session_id}`);
         await expect(input()).toBeEnabled();
-        if (draft) await page.getByRole("button", { name: "New session", exact: true }).click();
+        if (draft) await newProjectConversation(page);
       } else if (draft) {
         await page.locator("#app-sidebar").getByRole("link", { name: "New conversation", exact: true }).click();
       } else {
@@ -209,8 +209,7 @@ export default async function browserRecoveryAcceptance({ page: initialPage, con
       throw error;
     }
     assert.equal(await page.getByRole("log").count(), 0, "Occupied recovery retained old conversation body");
-    await page.getByRole("region", { name: "Conversation", exact: true })
-      .getByRole("button", { name: "New session", exact: true }).click();
+    await newProjectConversation(page);
     await expect(input()).toBeEnabled();
   } finally {
     await control.command("cli-release");

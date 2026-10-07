@@ -55,3 +55,69 @@ export async function projectMenuAction(item, label) {
   await item.locator("details").first().getByRole("button", { name: label, exact: true }).click();
   return trigger;
 }
+
+export async function openWorkspaceAction(page, label) {
+  if (/Runtime status|运行状态/.test(String(label))) {
+    const trigger = page.getByRole("button", { name: label, exact: true });
+    await trigger.click();
+    return trigger;
+  }
+  await showProjectNavigation(page);
+  const match = new globalThis.URL(page.url()).pathname.match(/^\/projects\/([^/]+)/);
+  const scope = match === null ? page.locator("#app-sidebar").locator("section").last()
+    : page.locator(`button[aria-controls="project-sessions-${match[1]}"]`).locator("..");
+  const menu = scope.locator("details").filter({
+    has: page.getByRole("button", { name: label, exact: true, includeHidden: true }),
+  });
+  const trigger = menu.locator("summary");
+  if (await menu.getAttribute("open") === null) await trigger.click();
+  await menu.getByRole("button", { name: label, exact: true }).click();
+  return trigger;
+}
+
+export async function newProjectConversation(page) {
+  await showProjectNavigation(page);
+  const match = new globalThis.URL(page.url()).pathname.match(/^\/projects\/([^/]+)/);
+  assert.ok(match, "Expected a selected Project");
+  const opened = page.waitForResponse(response => response.url().endsWith("/conversations/open")
+    && response.request().method() === "POST"
+    && response.request().postDataJSON()?.project_id === match[1]
+    && response.request().postDataJSON()?.create_new === true);
+  await page.locator(`button[aria-controls="project-sessions-${match[1]}"]`)
+    .locator("..").getByRole("button").nth(2).click();
+  const response = await opened;
+  if (response.ok()) {
+    const { session_id } = await response.json();
+    await expect.poll(() => page.evaluate(() => (
+      JSON.parse(window.localStorage.getItem("omni.browser-recovery") ?? "null")?.session_id
+    ))).toBe(session_id);
+  }
+}
+
+export async function openActiveSessionActions(page) {
+  await showProjectNavigation(page);
+  const active = page.locator('#app-sidebar button[data-active="true"]').last();
+  const menu = active.locator("..").locator("details");
+  const trigger = menu.locator("summary");
+  if (await menu.getAttribute("open") === null) await trigger.click();
+  return trigger;
+}
+
+export function latestRestoreMenu(page) {
+  return page.getByRole("log").locator("details").filter({
+    has: page.getByRole("button", {
+      name: /^(Restore conversation and files to before this message|恢复对话和文件到此消息之前)$/,
+      includeHidden: true,
+    }),
+  }).last();
+}
+
+export async function openLatestRestore(page) {
+  const menu = latestRestoreMenu(page);
+  const trigger = menu.locator("summary");
+  await trigger.click();
+  await menu.getByRole("button", {
+    name: /^(Restore conversation and files to before this message|恢复对话和文件到此消息之前)$/,
+  }).click();
+  return trigger;
+}

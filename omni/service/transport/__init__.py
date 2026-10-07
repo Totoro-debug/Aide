@@ -79,6 +79,7 @@ class AgentServiceTransport:
         self._web_sessions: dict[str, _WebSession] = {}
         self._web_auth_lock = asyncio.Lock()
         self._directory_picker = DirectoryPicker()
+        self._event_sockets: set[web.WebSocketResponse] = set()
 
     def _prune_web_tickets(self) -> None:
         now = time.monotonic()
@@ -241,6 +242,11 @@ class AgentServiceTransport:
             self._management,
         )
         app.router.add_post(f"{_API_PREFIX}/service/stop", self._stop_service)
+        app.router.add_post(f"{_API_PREFIX}/service/restart", self._restart_service)
+        app.router.add_post(
+            f"{_API_PREFIX}/projects/{{project_id}}/memory/{{action:read|dream}}",
+            self._project_memory,
+        )
         app.router.add_get(f"{_API_PREFIX}/events", self._events)
         app.router.add_get("/assets/{asset_path:.*}", self._static_asset)
         app.router.add_get("/{static_path:.*}", self._static_route)
@@ -1265,19 +1271,59 @@ class AgentServiceTransport:
         request_id = _require_request_id(body)
         return web.json_response(self.service.request_service_stop(request_id))
 
+    async def _restart_service(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        body = await _json_object(request)
+        if set(body) != {"request_id", "saved_revision"}:
+            raise service_error("validation_error", "Restart fields are invalid.", status=422)
+        request_id = _require_request_id(body)
+        revision = body.get("saved_revision")
+        if not isinstance(revision, str) or not revision:
+            raise service_error("validation_error", "Saved revision is required.", status=422)
+        result = await self.service.request_service_restart(
+            _context_client_id(context), request_id, revision
+        )
+        return web.json_response(result, status=202)
+
+    async def _project_memory(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        body = await _json_object(request)
+        if set(body) != {"request_id"}:
+            raise service_error("validation_error", "Memory fields are invalid.", status=422)
+        result = await self.service.project_memory_operation(
+            _context_client_id(context), request.match_info["project_id"],
+            _require_request_id(body), request.match_info["action"],
+        )
+        return web.json_response(result)
+
+    async def replace_service(self, service: AgentService) -> None:
+        """Keep browser authentication while rotating the hosted Runtime Lifetime."""
+        await asyncio.gather(*(
+            socket.close(code=1012, message=b"Omni restarted")
+            for socket in tuple(self._event_sockets)
+        ))
+        async with self._web_auth_lock:
+            self._web_tickets.clear()
+            for session in self._web_sessions.values():
+                session.client_id = None
+                session.reconnect_credential = None
+            self.service = service
+
     async def _events(self, request: web.Request) -> web.StreamResponse:
         context = self._authenticate(request, websocket=True, client_required=True)
         client_id = _context_client_id(context)
-        if self.service.client(client_id).connected:
+        service = self.service
+        if service.client(client_id).connected:
             raise service_error("client_already_connected", "This Client already has a connection.")
         socket = web.WebSocketResponse(heartbeat=20.0, autoping=True, protocols=("omni-v1",))
         await socket.prepare(request)
+        self._event_sockets.add(socket)
         sink = _WebSocketSink(socket)
         try:
-            await self.service.connect_client(
+            await service.connect_client(
                 client_id,
                 sink,
-                wait_for_subscribe=self.service.client(client_id).kind == "web",
+                wait_for_subscribe=service.client(client_id).kind == "web",
             )
             async for message in socket:
                 if message.type is WSMsgType.TEXT:
@@ -1286,7 +1332,7 @@ class AgentServiceTransport:
                         value = message.json()
                         if not isinstance(value, dict):
                             raise ValueError("command")
-                        result = await self.service.handle_command(client_id, value)
+                        result = await service.handle_command(client_id, value)
                     except ServiceError as error:
                         result = error.to_dict(_request_id_from_value(value))
                     except (TypeError, ValueError):
@@ -1300,7 +1346,8 @@ class AgentServiceTransport:
                 elif message.type is WSMsgType.ERROR:
                     break
         finally:
-            await self.service.disconnect_client(client_id, sink=sink)
+            self._event_sockets.discard(socket)
+            await service.disconnect_client(client_id, sink=sink)
             await socket.close()
         return socket
 

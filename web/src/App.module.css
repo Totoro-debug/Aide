@@ -4207,21 +4207,19 @@ h1 {
   font-size: 11px;
 }
 
-.runtimeStatusSummary button {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  border: 0;
-  border-radius: 4px;
-  padding: 3px 4px;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font: inherit;
+.runtimeStatusSummary > span {
+  white-space: nowrap;
 }
 
-.runtimeStatusSummary button:hover {
-  background: var(--surface-hover);
+.runtimeStatusSummary > span:nth-child(-n + 2)::after {
+  content: "·";
+  margin-inline-start: 8px;
+}
+
+.runtimeStatusSummary > span:nth-child(3)::after,
+.runtimeStatusSummary > span:nth-child(4)::after {
+  content: "/";
+  margin-inline-start: 8px;
 }
 
 @media (max-height: 500px) {

@@ -487,6 +487,26 @@ async def test_status_projects_the_current_runtime_reasoning_effort(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cached", [None, 0, 8])
+async def test_status_exposes_last_request_usage_separately_from_cumulative_usage(
+    agent_home: Path, cached: int | None,
+) -> None:
+    home = AgentHome(agent_home)
+    home.initialize()
+    projection = RuntimeStatusInput(
+        context_window=200000,
+        cumulative_usage=(("input_tokens", 150),),
+        last_request_usage={"input_tokens": 10, "cached_input_tokens": cached},
+    )
+    service = management_service(
+        home, current_agent_loop=lambda: _StatusProjectionLoop(projection),
+    )
+    status = await service.status()
+    assert status.to_dict()["last_request_usage"] == projection.last_request_usage
+    assert status.cumulative_usage == {"input_tokens": 150}
+
+
+@pytest.mark.asyncio
 async def test_status_reports_configured_and_current_foreground_permission_only(
     agent_home: Path,
 ) -> None:

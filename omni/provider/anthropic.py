@@ -188,6 +188,7 @@ class AnthropicProvider:
         text_parts: list[str] = []
         input_tokens = 0
         output_tokens = 0
+        cached_input_tokens: int | None = None
         stop_reason: str | None = None
         tool_uses: dict[int, _StreamingToolUse] = {}
         content_blocks: dict[int, dict[str, object]] = {}
@@ -195,7 +196,7 @@ class AnthropicProvider:
             event_type = _string_field(event, "type")
             if event_type == "message_start":
                 usage = _field(_field(event, "message"), "usage")
-                input_tokens = _integer_field(usage, "input_tokens")
+                input_tokens, cached_input_tokens = _input_usage(usage)
             elif event_type == "content_block_delta":
                 delta = _field(event, "delta")
                 delta_type = _string_field(delta, "type")
@@ -289,6 +290,7 @@ class AnthropicProvider:
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=input_tokens + output_tokens,
+                cached_input_tokens=cached_input_tokens,
             ),
             finish_reason=_finish_reason(stop_reason),
             continuation=continuation,
@@ -490,7 +492,7 @@ def _response_from_message(message: object, *, provider_id: str) -> ModelRespons
                     )
                 )
     usage = _field(message, "usage")
-    input_tokens = _integer_field(usage, "input_tokens")
+    input_tokens, cached_input_tokens = _input_usage(usage)
     output_tokens = _integer_field(usage, "output_tokens")
     return ModelResponse(
         message=AssistantModelMessage(content="".join(text_parts), tool_calls=tuple(tool_calls)),
@@ -498,6 +500,7 @@ def _response_from_message(message: object, *, provider_id: str) -> ModelRespons
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=input_tokens + output_tokens,
+            cached_input_tokens=cached_input_tokens,
         ),
         finish_reason=_finish_reason(_string_field(message, "stop_reason")),
         continuation=(
@@ -506,6 +509,17 @@ def _response_from_message(message: object, *, provider_id: str) -> ModelRespons
             else ModelContinuation(provider_id=provider_id, payload=tuple(continuation_blocks))
         ),
     )
+
+
+def _input_usage(usage: object) -> tuple[int, int | None]:
+    cached = _field(usage, "cache_read_input_tokens")
+    cached_input_tokens = cached if type(cached) is int and cached >= 0 else None
+    input_tokens = (
+        _integer_field(usage, "input_tokens")
+        + _integer_field(usage, "cache_creation_input_tokens")
+        + (cached_input_tokens or 0)
+    )
+    return input_tokens, cached_input_tokens
 
 
 def _stream_continuation(

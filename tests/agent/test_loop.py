@@ -768,6 +768,47 @@ def test_agent_loop_preflight_uses_the_deferred_baseline_without_unused_tool_sch
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cached", [None, 0, 8])
+async def test_last_request_usage_survives_failure_and_session_reload(
+    tmp_path: Path, cached: int | None,
+) -> None:
+    response = ModelResponse(
+        message=AssistantModelMessage(content="Second answer"),
+        usage=ModelUsage(input_tokens=10, output_tokens=2, total_tokens=12,
+                         cached_input_tokens=cached),
+        finish_reason="stop",
+    )
+    loop, session, bus = _runtime(
+        tmp_path,
+        _Router((_response("First answer", input_tokens=5), response,
+                 ModelCallError(ErrorInfo("model_failed", "Failed request")))),
+        task_framing_outcomes=None,
+    )
+    assert loop.execution.runtime_status_input().last_request_usage is None
+    await loop.start()
+    try:
+        for prompt in ("First question", "Second question", "Failing question"):
+            await bus.put_inbound(InboundMessage(prompt))
+            await _terminals(bus, 1)
+        projection = loop.execution.runtime_status_input()
+        assert projection.last_request_usage == {
+            "input_tokens": 10, "cached_input_tokens": cached,
+        }
+        assert dict(projection.cumulative_usage)["input_tokens"] == 15
+        restored = Session.load(WorkspaceState(tmp_path / "workspace"), session.session_id)
+        reloaded = loop_module.session_runtime_status_input(
+            restored, configuration=loop._configuration,
+            context_builder=loop._context_builder, tool_schemas=loop.tool_schemas,
+            generation_started_at=None,
+        )
+        assert reloaded.last_request_usage == projection.last_request_usage
+        assert reloaded.cumulative_usage == projection.cumulative_usage
+        assert restored.messages == session.messages
+    finally:
+        await loop.close()
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_injects_persisted_action_summary_into_foreground_and_status_context(
     tmp_path: Path,
 ) -> None:

@@ -137,6 +137,7 @@ class RuntimeStatusInput:
     latest_usage_context: ContextUsageSnapshot | None = None
     latest_reported_usage: tuple[tuple[str, int], ...] = ()
     generation_started_at: float | None = None
+    last_request_usage: dict[str, int | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +164,7 @@ class RuntimeStatus:
     current_permission_level: ToolPermissionLevel = "workspace-write"
     active_model_configuration: SessionModelConfiguration | None = None
     model_configuration_available: bool = True
+    last_request_usage: dict[str, int | None] | None = None
 
     def __post_init__(self) -> None:
         require_nonnegative_int(self.uptime_seconds, field="uptime_seconds")
@@ -189,6 +191,18 @@ class RuntimeStatus:
         require_nonnegative_int(self.last_compacted, field="last_compacted")
         validate_permission_level(self.configured_permission_level)
         validate_permission_level(self.current_permission_level)
+        if self.last_request_usage is not None:
+            if set(self.last_request_usage) != {"input_tokens", "cached_input_tokens"}:
+                raise ValueError("last_request_usage fields are invalid")
+            input_tokens = self.last_request_usage["input_tokens"]
+            if input_tokens is None:
+                raise ValueError("last_request_usage.input_tokens must be an integer")
+            require_nonnegative_int(input_tokens, field="last_request_usage.input_tokens")
+            cached = self.last_request_usage["cached_input_tokens"]
+            if cached is not None:
+                require_nonnegative_int(cached, field="last_request_usage.cached_input_tokens")
+                if cached > input_tokens:
+                    raise ValueError("cached_input_tokens must not exceed input_tokens")
 
     def to_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -216,6 +230,8 @@ class RuntimeStatus:
             result["active_model_configuration"] = self.active_model_configuration.to_dict()
         if not self.model_configuration_available:
             result["model_configuration_available"] = False
+        if self.last_request_usage is not None:
+            result["last_request_usage"] = dict(self.last_request_usage)
         return result
 
 
@@ -465,6 +481,7 @@ class ManagementViewService:
                 session_message_count=projection.session_message_count,
                 last_compacted=projection.last_compacted,
                 cumulative_usage=dict(projection.cumulative_usage),
+                last_request_usage=projection.last_request_usage,
                 configured_permission_level=self._permission_control.configured(),
                 current_permission_level=self._permission_control.current(),
                 schedule=schedule_status,

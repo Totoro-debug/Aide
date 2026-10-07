@@ -1605,6 +1605,19 @@ def session_runtime_status_input(
     if any(isinstance(value, bool) or not isinstance(value, int) for _, value in usage):
         raise ValueError("Active Session token usage is malformed")
     usage_anchor = latest_main_agent_usage_anchor(messages)
+    last_request_usage = next(
+        (
+            {
+                "input_tokens": message["token_usage"]["input_tokens"],
+                "cached_input_tokens": message.get("cached_input_tokens"),
+            }
+            for message in reversed(messages)
+            if message.get("role") == "assistant"
+            and message.get("status") == "completed"
+            and message["token_usage"]["model_calls"] == 1
+        ),
+        None,
+    )
     latest_usage_context: ContextUsageSnapshot | None = None
     latest_reported_usage: tuple[tuple[str, int], ...] = ()
     if usage_anchor is not None:
@@ -1638,7 +1651,11 @@ def session_runtime_status_input(
         latest_usage_context=latest_usage_context,
         latest_reported_usage=latest_reported_usage,
     )
-    return replace(status_input, model_configuration_available=model_configuration_available)
+    return replace(
+        status_input,
+        model_configuration_available=model_configuration_available,
+        last_request_usage=last_request_usage,
+    )
 
 
 __all__ = [

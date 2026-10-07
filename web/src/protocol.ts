@@ -267,6 +267,10 @@ export interface RuntimeStatus {
   session_message_count: number;
   last_compacted: number;
   cumulative_usage: Record<string, number>;
+  last_request_usage?: {
+    input_tokens: number;
+    cached_input_tokens: number | null;
+  } | null;
   configured_permission_level: ToolPermissionLevel;
   current_permission_level: ToolPermissionLevel;
   schedule?: {

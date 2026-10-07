@@ -63,6 +63,13 @@ def test_model_usage_rejects_values_outside_the_counter_contract(
         )
 
 
+@pytest.mark.parametrize("cached", [-1, True, 121])
+def test_model_usage_rejects_invalid_cache_counts(cached: int) -> None:
+    with pytest.raises(ValueError, match="cached_input_tokens"):
+        ModelUsage(input_tokens=120, output_tokens=24, total_tokens=144,
+                   cached_input_tokens=cached)
+
+
 def test_normalized_response_exposes_provider_neutral_fields() -> None:
     tool_call = ModelToolCall(
         id="call_123",

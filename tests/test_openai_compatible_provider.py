@@ -135,6 +135,46 @@ def completion_request(route: str) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.parametrize(
+    ("cache_fields", "expected"),
+    [
+        ({"prompt_tokens_details": SimpleNamespace(cached_tokens=5)}, 5),
+        ({"prompt_cache_hit_tokens": 6}, 6),
+        ({"prompt_tokens_details": SimpleNamespace(cached_tokens=0)}, 0),
+        ({}, None),
+    ],
+)
+async def test_provider_preserves_reported_cache_hits(
+    streaming: bool, cache_fields: dict[str, object], expected: int | None,
+) -> None:
+    usage = SimpleNamespace(prompt_tokens=7, completion_tokens=2, **cache_fields)
+    result = SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(content="Hello", tool_calls=None),
+            delta=SimpleNamespace(content="Hello", tool_calls=None),
+            finish_reason="stop",
+        )],
+        usage=usage,
+    )
+    client = FakeOpenAIClient(FakeOpenAIStream(result) if streaming else result)
+    provider = OpenAICompatibleProvider(
+        configuration(), client_factory=FakeOpenAIClientFactory(client),
+    )
+    if streaming:
+        events = [event async for event in provider.stream(**request())]
+        terminal = events[-1]
+        assert isinstance(terminal, ModelCompleted)
+        response = terminal.response
+    else:
+        response = await provider.complete(**request())
+    assert response.usage.cached_input_tokens == expected
+    assert response.usage.to_dict() == {
+        "input_tokens": 7, "output_tokens": 2, "total_tokens": 9,
+    }
+
+
+@pytest.mark.asyncio
 async def test_stream_translates_text_and_usage_through_official_sdk_boundary() -> None:
     stream = FakeOpenAIStream(
         SimpleNamespace(

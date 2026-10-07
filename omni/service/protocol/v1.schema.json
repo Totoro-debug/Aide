@@ -645,6 +645,19 @@
         "session_message_count": {"type": "integer", "minimum": 0},
         "last_compacted": {"type": "integer", "minimum": 0},
         "cumulative_usage": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "last_request_usage": {
+          "anyOf": [
+            {"type": "null"},
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["input_tokens", "cached_input_tokens"],
+              "properties": {
+                "input_tokens": {"type": "integer", "minimum": 0},
+                "cached_input_tokens": {"type": ["integer", "null"], "minimum": 0}
+              }
+            }
+          ]
+        },
         "configured_permission_level": {"$ref": "#/$defs/tool_permission_level"},
         "current_permission_level": {"$ref": "#/$defs/tool_permission_level"},
         "schedule": {

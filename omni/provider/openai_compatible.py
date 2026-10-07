@@ -197,6 +197,7 @@ class OpenAICompatibleProvider:
         finish_reason: FinishReason = "stop"
         input_tokens = 0
         output_tokens = 0
+        cached_input_tokens: int | None = None
         tool_call_parts: dict[int, _ToolCallParts] = {}
 
         async for chunk in chunks:
@@ -226,6 +227,7 @@ class OpenAICompatibleProvider:
             if usage is not None:
                 input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
                 output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+                cached_input_tokens = _cached_input_tokens(usage)
 
         content = "".join(content_parts)
         tool_calls = tuple(
@@ -242,6 +244,7 @@ class OpenAICompatibleProvider:
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     total_tokens=input_tokens + output_tokens,
+                    cached_input_tokens=cached_input_tokens,
                 ),
                 finish_reason=finish_reason,
                 continuation=_continuation_from_reasoning(
@@ -325,6 +328,7 @@ class OpenAICompatibleProvider:
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=input_tokens + output_tokens,
+                cached_input_tokens=_cached_input_tokens(usage),
             ),
             finish_reason=_finish_reason(str(choice.finish_reason or "stop")),
             continuation=_continuation_from_reasoning(
@@ -335,6 +339,14 @@ class OpenAICompatibleProvider:
 
     async def close(self) -> None:
         await self._client.close()
+
+
+def _cached_input_tokens(usage: object) -> int | None:
+    details = getattr(usage, "prompt_tokens_details", None)
+    value = getattr(details, "cached_tokens", None)
+    if value is None:
+        value = getattr(usage, "prompt_cache_hit_tokens", None)
+    return value if type(value) is int and value >= 0 else None
 
 
 def _request_arguments(

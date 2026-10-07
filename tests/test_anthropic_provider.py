@@ -119,6 +119,40 @@ def request(*, stream: bool = True) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.parametrize("cached", [None, 0, 5])
+async def test_provider_counts_cache_reads_and_writes_in_input_usage(
+    streaming: bool, cached: int | None,
+) -> None:
+    cache_fields = {} if cached is None else {"cache_read_input_tokens": cached}
+    usage = SimpleNamespace(input_tokens=7, cache_creation_input_tokens=3, **cache_fields)
+    result = FakeAnthropicStream(
+        SimpleNamespace(type="message_start", message=SimpleNamespace(usage=usage)),
+        SimpleNamespace(type="content_block_start", index=0,
+                        content_block=SimpleNamespace(type="text", text="Hello")),
+        SimpleNamespace(type="message_delta", delta=SimpleNamespace(stop_reason="end_turn"),
+                        usage=SimpleNamespace(output_tokens=2)),
+        SimpleNamespace(type="message_stop"),
+    ) if streaming else SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="Hello")],
+        usage=SimpleNamespace(output_tokens=2, **vars(usage)), stop_reason="end_turn",
+    )
+    provider = AnthropicProvider(
+        configuration(), client_factory=FakeAnthropicClientFactory(FakeAnthropicClient(result)),
+    )
+    if streaming:
+        events = [event async for event in provider.stream(**request())]
+        terminal = events[-1]
+        assert isinstance(terminal, ModelCompleted)
+        response = terminal.response
+    else:
+        response = await provider.complete(**request())
+    assert response.usage.cached_input_tokens == cached
+    assert response.usage.input_tokens == 10 + (cached or 0)
+    assert response.usage.total_tokens == 12 + (cached or 0)
+
+
+@pytest.mark.asyncio
 async def test_stream_translates_text_and_usage_through_official_sdk_boundary() -> None:
     stream = FakeAnthropicStream(
         SimpleNamespace(

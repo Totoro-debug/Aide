@@ -3253,12 +3253,11 @@ function StatusMetric({
   );
 }
 
-function ConversationRuntimeStatus({ claim, connectionState, refreshVersion, activeRuns, onOpen }: {
+function ConversationRuntimeStatus({ claim, connectionState, refreshVersion, activeRuns }: {
   claim: SessionClaim;
   connectionState: ConnectionState;
   refreshVersion: number;
   activeRuns: LiveRun[];
-  onOpen: (trigger: HTMLElement) => void;
 }) {
   const { i18n, t } = useTranslation();
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
@@ -3290,17 +3289,15 @@ function ConversationRuntimeStatus({ claim, connectionState, refreshVersion, act
     return () => { active = false; window.clearInterval(timer); };
   }, [claim.workspace_id, claim.session_id, claim.claim_version, claim.reconnect_credential,
     connectionState, refreshVersion, activeCount]);
+  const formatTokens = (value: number | null | undefined) => value == null ? "—" : value.toLocaleString(i18n.language);
   return (
-    <div className={styles.runtimeStatusSummary} aria-label={t("controls.runtimeStatus")}>
-      <button type="button" disabled={connectionState !== "online"}
-        onClick={(event) => onOpen(event.currentTarget)}>
-        <Gauge size={13} aria-hidden="true" />{t("controls.runtimeStatus")}
-      </button>
-      <span>{activeCount > 0 ? t("management.activeWorkCount", { count: activeCount }) : t("management.idle")}</span>
-      {failed ? <span role="status">{t("management.actionError")}</span> : status !== null ? (
-        <span>{t("management.context")} {status.projected_next_request_tokens.toLocaleString(i18n.language)}
-          {" / "}{status.context_window.toLocaleString(i18n.language)}</span>
-      ) : null}
+    <div className={styles.runtimeStatusSummary} aria-label={t("management.tokenUsage")}>
+      <span>{t("management.contextUsed")} {formatTokens(status?.projected_next_request_tokens)}</span>
+      <span>{t("management.contextWindow")} {formatTokens(status?.context_window)}</span>
+      <span>{t("management.historicalInput")} {formatTokens(status?.cumulative_usage.input_tokens)}</span>
+      <span>{t("management.inputTokens")} {formatTokens(status?.last_request_usage?.input_tokens)}</span>
+      <span>{t("management.cachedInput", { tokens: formatTokens(status?.last_request_usage?.cached_input_tokens) })}</span>
+      {failed ? <span role="status">{t("management.actionError")}</span> : null}
     </div>
   );
 }
@@ -8368,20 +8365,13 @@ function ProjectSessionsContent({
                           : t("conversation.enterHint")}
                     </p>
                   </div>
-                    {!draft || selectedLiveRuns.some((run) => run.runId !== null) ? (
-                      <ConversationRuntimeStatus
-                        key={`${claim.workspace_id}:${claim.session_id}:${claim.claim_version}`}
-                        claim={claim}
-                        connectionState={connectionState}
-                        refreshVersion={refreshVersion}
-                        activeRuns={selectedLiveRuns}
-                        onOpen={(trigger) => {
-                          managementTriggerRef.current = trigger;
-                          setManagementPanel("runtime");
-                          setManagementOpen(true);
-                        }}
-                      />
-                    ) : null}
+                    <ConversationRuntimeStatus
+                      key={`${claim.workspace_id}:${claim.session_id}:${claim.claim_version}`}
+                      claim={claim}
+                      connectionState={connectionState}
+                      refreshVersion={refreshVersion}
+                      activeRuns={selectedLiveRuns}
+                    />
                   </form>
                 </div>
               </>

@@ -651,7 +651,7 @@ def _append_run_message(
 
 
 def _assistant_run_message(response: ModelResponse) -> dict[str, Any]:
-    return {
+    message: dict[str, Any] = {
         "role": "assistant",
         "content": response.message.content,
         "tool_calls": [call.to_dict() for call in response.message.tool_calls],
@@ -659,6 +659,9 @@ def _assistant_run_message(response: ModelResponse) -> dict[str, Any]:
         "error": None,
         "token_usage": {"model_calls": 1, **response.usage.to_dict()},
     }
+    if response.usage.cached_input_tokens is not None:
+        message["cached_input_tokens"] = response.usage.cached_input_tokens
+    return message
 
 
 def _build_assistant_repair_message(

@@ -40,6 +40,21 @@ try {
   assert.equal(await page.getByRole("heading", { name: "New Session draft", exact: true }).evaluate(
     heading => heading.getBoundingClientRect().height), 1);
   await expect(page.getByLabel("Search by title", { exact: true })).toHaveCount(0);
+  const usageSummary = page.getByLabel("Context and Token usage", { exact: true });
+  await expect(usageSummary).toContainText("Historical input 0");
+  await expect(usageSummary).toContainText("Input —");
+  await expect(usageSummary).toContainText("Cache hit — Tokens");
+  let cachedFixture = 12000;
+  await page.route("**/runtime/status", async route => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.status.projected_next_request_tokens = 14559;
+    body.status.context_window = 1000000;
+    body.status.cumulative_usage.input_tokens = 80000;
+    body.status.last_request_usage = { input_tokens: 14000, cached_input_tokens: cachedFixture };
+    await route.fulfill({ response, json: body });
+  });
+  await expect(usageSummary).toContainText("Cache hit 12,000 Tokens");
   for (const language of ["en", "zh-CN"]) {
     await setInterfaceLanguage(page, language);
     for (const theme of ["light", "dark"]) {
@@ -48,6 +63,13 @@ try {
         { width: 768, height: 900 }, { width: 375, height: 800 }, { width: 1280, height: 440 }]) {
         await page.setViewportSize(viewport);
         await expect.poll(() => page.locator("textarea").evaluate(input => input.getBoundingClientRect().width)).toBeGreaterThan(0);
+        const tokenUsage = page.getByLabel(language === "en" ? "Context and Token usage" : "上下文与 Token 用量", { exact: true });
+        await expect(tokenUsage).toBeVisible();
+        await expect(tokenUsage.locator(":scope > span")).toHaveCount(5);
+        await expect(tokenUsage.getByRole("button")).toHaveCount(0);
+        for (const value of ["14,559", "1,000,000", "80,000", "14,000", "12,000"]) {
+          await expect(tokenUsage).toContainText(value);
+        }
         const layout = await page.locator("textarea").evaluate(input => {
           const box = input.parentElement.getBoundingClientRect();
           const main = document.getElementById("main-content").getBoundingClientRect();
@@ -60,6 +82,11 @@ try {
         assert.ok(layout.width <= viewport.width + 1, `Horizontal overflow: ${JSON.stringify(layout)}`);
         assert.ok(layout.top >= 0 && layout.bottom <= viewport.height + 1,
           `Input or send button is clipped: ${JSON.stringify(layout)}`);
+        const usageBounds = await tokenUsage.boundingBox();
+        assert.ok(usageBounds.y >= layout.input.bottom && usageBounds.x >= 0
+          && usageBounds.x + usageBounds.width <= viewport.width + 1
+          && usageBounds.y + usageBounds.height <= viewport.height + 1,
+        `Token usage is clipped or above the input: ${JSON.stringify(usageBounds)}`);
         if (viewport.width >= 1024 && viewport.height >= 500) {
           assert.ok(layout.center >= 0.55 && layout.center <= 0.65,
             `Input is not below the middle: ${JSON.stringify(layout)}`);
@@ -71,6 +98,11 @@ try {
   await page.setViewportSize({ width: 1440, height: 900 });
   await setInterfaceLanguage(page, "en");
   await setInterfaceTheme(page, "light");
+  cachedFixture = 0;
+  await expect(usageSummary).toContainText("Cache hit 0 Tokens");
+  cachedFixture = null;
+  await expect(usageSummary).toContainText("Cache hit — Tokens");
+  await page.unroute("**/runtime/status");
   const project = await registerProjectFromSidebar(page, control.details.first_project);
   const item = projectItemByPath(page, control.details.first_project);
   await page.goto(new globalThis.URL(`/projects/${project.project_id}`, page.url()).href);
@@ -115,23 +147,21 @@ try {
   await page.getByLabel("Message input").fill("workspace layout acceptance message");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   const runtime = page.getByRole("button", { name: "Runtime status and controls", exact: true });
-  await expect(runtime).toBeVisible();
-  const positions = await runtime.evaluate(button => ({
-    status: button.getBoundingClientRect().top,
+  await expect(runtime).toHaveCount(0);
+  const tokenUsage = page.getByLabel("Context and Token usage", { exact: true });
+  await expect(tokenUsage).toBeVisible();
+  const positions = await tokenUsage.evaluate(element => ({
+    status: element.getBoundingClientRect().top,
     box: document.querySelector("textarea").parentElement.getBoundingClientRect().bottom,
   }));
-  assert.ok(positions.status >= positions.box, "Runtime status is above the input");
-  await runtime.click();
-  const runtimeDialog = page.getByRole("dialog", { name: "Runtime status", exact: true });
-  await expect(runtimeDialog.getByText("Next request context", { exact: true })).toBeVisible();
-  await runtimeDialog.press("Escape");
-  await expect(runtime).toBeFocused();
+  assert.ok(positions.status >= positions.box, "Token usage is above the input");
   await expect(page.getByRole("log").getByText("Fixture response.", { exact: true })).toBeVisible();
   await control.command("settings-arm");
   await page.getByLabel("Message input").fill("recovery streaming markdown runtime activity acceptance");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await control.command("settings-wait");
-  await expect(runtime.locator("..").getByText("1 active", { exact: true })).toBeVisible();
+  await expect(tokenUsage).toBeVisible();
+  await expect(runtime).toHaveCount(0);
   await control.command("settings-release");
   await expect(page.getByRole("button", { name: "Cancel run", exact: true })).toHaveCount(0);
   await page.getByLabel("Message input").fill("unsent survives restart");
@@ -190,8 +220,8 @@ try {
   await page.getByLabel("Message input").fill("recovery streaming markdown first accepted run");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await control.command("settings-wait");
-  await expect(runtime).toBeVisible();
-  await expect(runtime.locator("..").getByText("1 active", { exact: true })).toBeVisible();
+  await expect(tokenUsage).toBeVisible();
+  await expect(runtime).toHaveCount(0);
   await control.command("settings-release");
   await expect(page.getByRole("button", { name: "Cancel run", exact: true })).toHaveCount(0);
   assert.deepEqual(errors, []);

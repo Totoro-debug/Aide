@@ -1166,6 +1166,8 @@ def _validate_message(message: dict[str, Any]) -> None:
     require_aware_datetime(timestamp, field="message timestamp")
     if role != "assistant" and "context_usage" in message:
         raise ValueError("context_usage is only valid on assistant messages")
+    if role != "assistant" and "cached_input_tokens" in message:
+        raise ValueError("cached_input_tokens is only valid on assistant messages")
     _restore_anchor_fields(message)
     if role == "user":
         if not message["content"].strip():
@@ -1209,6 +1211,10 @@ def _validate_assistant_message(message: dict[str, Any]) -> None:
             raise ValueError("assistant error must contain a message")
     token_usage = message["token_usage"]
     _validate_token_usage(token_usage, field="assistant.token_usage")
+    if "cached_input_tokens" in message:
+        require_nonnegative_int(message["cached_input_tokens"], field="cached_input_tokens")
+        if message["cached_input_tokens"] > token_usage["input_tokens"]:
+            raise ValueError("cached_input_tokens must not exceed input_tokens")
     if "context_usage" in message:
         ContextUsageSnapshot.from_dict(message["context_usage"])
         if token_usage["model_calls"] != 1:

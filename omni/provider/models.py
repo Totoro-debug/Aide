@@ -45,16 +45,22 @@ class ModelUsage:
     input_tokens: int
     output_tokens: int
     total_tokens: int
+    cached_input_tokens: int | None = None
 
     def __post_init__(self) -> None:
         require_nonnegative_int(self.input_tokens, field="input_tokens")
         require_nonnegative_int(self.output_tokens, field="output_tokens")
         require_nonnegative_int(self.total_tokens, field="total_tokens")
+        if self.cached_input_tokens is not None:
+            require_nonnegative_int(self.cached_input_tokens, field="cached_input_tokens")
+            if self.cached_input_tokens > self.input_tokens:
+                raise ValueError("cached_input_tokens must not exceed input_tokens")
         if self.total_tokens != self.input_tokens + self.output_tokens:
             msg = "total_tokens must equal input_tokens + output_tokens"
             raise ValueError(msg)
 
     def to_dict(self) -> dict[str, int]:
+        """Serialize shared counters; cache hits remain per-request metadata."""
         return {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,

@@ -4,48 +4,41 @@ status: accepted
 
 # Host CLI and Web through One Local Service
 
-One on-demand local service owns shared capabilities, Workspace state associations, and exclusive Session Claims. CLI and Web are clients of that service; static Web assets, versioned JSON management endpoints, and the WebSocket event channel share `127.0.0.1:8765`. Launchers verify service identity before attaching, and an unrelated process occupying the port is an error. Sharing files between independent runtimes was rejected because atomic writes do not coordinate in-memory state, Schedule dispatch, or confirmation decisions. An always-on daemon was rejected because work should stop when no CLI or Web client remains.
+One on-demand Agent Service owns user operations, shared capabilities, execution scheduling, and exclusive Session Claims. Independent runtimes sharing files were rejected because atomic writes cannot coordinate live state, scheduling, or confirmations. An always-on daemon was rejected because work should stop after the final client leaves.
 
-## Runtime ownership and conversation flow
+## Responsibility and data flow
 
-`AgentService` owns client identity, Projects, admission, the event broker, startup configuration, one confirmation coordinator, and the shared Skills, Built-in Tool catalog, Router and Providers. Workspace records associate Stores, Memory, Dream, Schedule state and stdio MCP; the service owns their lifecycle. HTTP MCP is shared globally. [ADR-0030](0030-service-owned-shared-resources-and-session-execution.md) defines shared ownership and Session scheduling.
+CLI and Web submit named operations and consume authoritative state/events. They own unsent drafts, forms, focus, and presentation; business validation, input classification, operation ordering, and persistence belong to the service. Client adapters handle transport, while a reusable launcher handles discovery and bootstrap. Tool execution remains behind [ADR-0020](0020-expose-configured-mcp-tools-through-tool-gateway.md), without direct user Tool endpoints.
 
-CLI input crosses `ServiceClient` and the authenticated transport into the claimed Session's FIFO. A processor runs accepted inputs serially and retires when empty. Distinct Sessions execute concurrently. Output is forwarded only during a Run with explicit Workspace, Session and Run identity. CLI and Web receive scoped broker events; they never compete for an Outbound queue. Every new foreground draft records an explicit `chat` or `project` creation scope. Project operations use `project`; ordinary Web conversations use `chat`; CLI creation uses `project` in a currently registered Project directory and `chat` elsewhere. Lists filter this stored scope without deriving it from later registration changes. Records without scope are excluded from scoped lists and are never rewritten during reads. Restore retains the original scope. Empty drafts disappear when abandoned; loaded conversation history remains resident until service exit, explicit deletion or target Restore replacement.
+Accepted input enters the claimed Session's FIFO. An on-demand processor runs each input through its terminal persistence boundary before starting the next, then retires when empty. Distinct Sessions run concurrently, without a global Run limit or Workspace-wide execution lock. Queue recall and starting work share a coordination boundary: recall returns only unstarted inputs in FIFO order, and retries cannot recall newer input.
 
-Foreground and user Schedule work create independent run-local execution collaborators, Agent Runners and Gateway views. User Jobs retain their dedicated Schedule Sessions and exclude the Schedule Tool. Dream retains its one-shot Memory model request and restricted edits. Execution contracts follow [ADR-0014](0014-use-message-bus-agent-loop-and-agent-runner.md), [ADR-0021](0021-defer-tool-schema-exposure-per-agent-run.md), and [ADR-0024](0024-use-one-shot-dream-model-request.md).
+Each Run owns context preparation, permission and Skill snapshots, Tool exposure, cancellation, output identity, and file mutation recording. Model and Tool output returns through broker events scoped by Workspace, Session, and Run; clients do not compete for an output queue. Shared Tool implementations receive execution context explicitly.
 
-Each client owns its current foreground Tool Permission Level, shared across that client's Session and Workspace switches and retained during reconnect grace. A new client starts from the active configuration. User Schedule occurrences instead capture the configured startup level and resolved Exec Shell at admission. These snapshots are runtime-only; neither a Schedule Job nor Session persistence stores a permission selection. Authorization follows [ADR-0026](0026-tool-permission-levels-and-foreground-snapshots.md).
+## Resource ownership
 
-## Project admission, reconnection, and shutdown
+| Lifetime | Resources |
+| --- | --- |
+| Service | Skills, Built-in Tool catalog, Model Router/Providers, Exec Host, HTTP MCP, event broker, confirmation coordinator, startup configuration |
+| Workspace association | Stores, Memory, Dream, Schedule state and coordination, stdio MCP |
+| Session | Authoritative history/metadata, FIFO, Claim coordination, optional active processor |
+| Agent Run | Captured projections, Gateway view, authorization, cancellation, transient execution state |
 
-One service admits at most one Web Client, alongside any number of CLI Clients.
-Web admission reserves that place from ticket exchange through initial connection,
-reconnect grace and completed expiry cleanup. An initial connection that never
-arrives expires after the same 30-second window. Additional browser pages receive
-`web_client_exists` (HTTP 409), preserving the original page's browser credentials
-and connection. Refresh and valid reconnect reuse the original Client. Web does
-not expose manual Session release: switching releases idle Claims automatically,
-and switched Sessions with accepted work retain their Claims until completion.
-Closing the Web page releases its Claims after reconnect expiry and cleanup.
+Opening another Session creates no Provider or MCP connection. HTTP MCP initializes globally; stdio MCP initializes once per active Workspace. Loaded Session histories stay resident until deletion, target Restore replacement, or service exit; releasing a Claim does not discard history. This reduces duplicated resources and idle tasks without bounding total memory or active work.
 
-Each registered Project is a durable reference to an existing Workspace directory. Registration does not copy data or automatically enroll CLI Workspaces. Available registered Projects run Schedule Jobs while the service has online clients. An unregistered CLI Workspace admits new Schedule work only while a connected client uses it; its last disconnection pauses admission immediately, and expiry cancels and drains its abandoned work while preserving resident Session history, saved Jobs and user files.
+One global Skill reload publishes a validated snapshot for later Runs across Sessions. Active Runs retain their captured snapshot, and failed reload retains the previous one. Ordinary configuration saves, repairs, and external edits take effect on the next service startup. Runtime permission selection affects a client's later Runs. Global chat Reasoning Effort updates memory before best-effort configuration persistence; cooperating configuration writers serialize reread and atomic publication under the Agent Home lock.
 
-A client may switch away while an accepted run continues. Its 30-second reconnect grace retains Session Claims, accepted input, live output, and pending confirmation; replay or a current snapshot restores presentation. Expiry cancels abandoned work and releases claims. After the final online client disconnects, the service stops new Schedule admission immediately, allows the same 30-second reconnect period, then drains work and exits. `omni service stop` begins draining immediately.
+An explicit Session model/effort combination is captured when its Run starts, before the first wait, and drives foreground requests and budgeting. Later selection changes affect later Runs; auxiliary routes keep their purposes. Restore preserves the current selection. An unavailable selection leaves history readable but prevents new work until replaced.
 
-Project removal closes admission durably, cancels its foreground and Schedule work, aborts pending confirmations, drains terminal outcomes, releases claims, and notifies clients before deleting the registration. A failed drain retains a retryable removal record. The Workspace directory and state remain on disk. Re-registering a directory with saved user Jobs requires explicit Schedule resume; overdue work never resumes merely because the path reappears.
+## Claims and lifecycle
 
-Session switching changes selection and Claims independently of execution. Restore reloads only the target Session and rotates its Claim after the durable transaction; the Workspace idle barriers and recovery contract follow [ADR-0028](0028-session-restore-architecture.md). Configuration read, save, and repair preserve startup resources and accepted work. Saved revisions require a subsequent service startup, including first-use repair. The service publishes one global chat Reasoning Effort override to current and subsequently activated Workspaces without rebuilding Providers; persistence remains best effort.
+The service admits one Web client and multiple CLI clients. Session Claims, UI selection, resident history, and execution have independent lifetimes. Switching away can leave accepted work running. Reconnect grace retains Claims, accepted inputs, output, and confirmation identity; expiry cancels abandoned work and releases Claims. User-visible timing and launch/stop commands are in [README](../../README.md).
 
-Shutdown closes confirmation admission and drains typed confirmation aborts while Schedule stores remain writable. Workspace cleanup drains Schedule terminal outcomes while its Store remains writable, flushes every Session, then closes Dream and its stdio association. Service shutdown closes global HTTP MCP and Providers after all Workspace cleanup. Cleanup continues after individual failures. Accepted Tool effects, Memory writes, artifacts, and persisted Jobs are not rolled back by cancellation or shutdown.
+Registered Projects can schedule while the service has online clients. An unregistered Workspace admits Schedule work only while an online client uses it. Project removal closes admission, cancels and drains its work, resolves confirmations, and removes registration while retaining user files and saved state. Re-registering saved user Jobs requires explicit Schedule resume.
 
-## One confirmation decision across clients
+Shutdown stops admission, drains confirmation aborts and terminal outcomes while Stores remain writable, flushes Sessions, then closes shared MCP and Providers. Cleanup continues after individual failures. Failed terminal persistence prevents a drain from being reported as successful; cancellation never rolls back completed effects.
 
-The service binds one stable `ServiceConfirmationPresenter` to its coordinator. Runtime-only immutable `ConfirmationEnvelope` values carry the exact normalized request, foreground or background origin, and an owner identifying the generation and run or Job occurrence. Internal envelopes are not durable records; the presenter emits a JSON projection with an opaque wire token and source identifiers to authorized clients.
+## Confirmation coordination
 
-There is one active confirmation slot across the service. Foreground and background queues are individually FIFO; foreground is selected first when the slot becomes free, without preempting the active item. Authorized clients can display the same request, but only the first valid decision is accepted. Duplicate, late, and unknown decisions cannot authorize another call. Connected requests have no user-response timeout; disconnect expiry and runtime cancellation abort their owners instead of implying user decline.
+One active confirmation slot serves the service. Foreground and background queues are FIFO; foreground has priority when the slot becomes free without preempting an active request. Runtime envelopes bind normalized invocation and owner identity, and authorized clients receive an opaque token. Only the first valid decision is accepted; duplicates and late decisions cannot authorize another call.
 
-The presenter restricts requests to the Workspace audience, including Web clients able to inspect a registered Project. Reconnection snapshots retain the original pending request and token. Resolution or lifecycle dismissal removes it from every recipient. CLI and Web keep Decline as the safe default and identify background Job context.
-
-Owner and generation cancellation propagate typed `ConfirmationAborted` through Gateway, Runner, and Run execution to Schedule Service, which owns terminal Job persistence. Unavailable presentation fails closed with `ConfirmationUnavailable`. A failed terminal Store write fails the drain rather than being treated as successful cleanup. Job deletion persists absence first, then cancels and drains its exact active occurrence and confirmation owner; a failed delete does not cancel the Job. Dream and other System Schedule work remain outside this confirmation path.
-
-Requirements: [Local Web interface and shared multi-session service (#281)](https://github.com/Totoro-debug/OmniAgent/issues/281).
+Presentation is restricted to the Workspace audience. Reconnect retains the same request and token. Connected requests have no user-response timeout; cancellation or disconnect expiry aborts their owners. Unavailable presentation fails closed. Schedule owns its terminal outcome persistence, while Dream and other System Jobs remain outside this confirmation path. Permission policy is defined in [ADR-0026](0026-tool-permission-levels-and-foreground-snapshots.md).

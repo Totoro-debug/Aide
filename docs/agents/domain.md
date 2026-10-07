@@ -1,14 +1,12 @@
 # Domain Documentation
 
-Omni has one bounded context. Before exploring a feature, read the relevant definitions in [CONTEXT.md](../../CONTEXT.md) and current decisions in [docs/adr/](../adr/).
+Omni has one bounded context. Use these sources:
 
-- [GitHub Issues](https://github.com/Totoro-debug/OmniAgent/issues) are the authoritative product requirements and discussion history. Follow [issue-tracker.md](issue-tracker.md) to retrieve the relevant issue and its accepted decisions.
-- [CONTEXT.md](../../CONTEXT.md) defines domain vocabulary, without API inventories or implementation plans.
-- `docs/adr/` records current architectural decisions and their consequences. Consolidate still-valid decisions when replacing an older design; use Git and GitHub for historical versions.
-- [README.md](../../README.md) is the installation, configuration, and usage guide.
+- [CONTEXT.md](../../CONTEXT.md): domain vocabulary.
+- [README.md](../../README.md): installation, configuration, and current user behavior.
+- [GitHub Issues](https://github.com/Totoro-debug/OmniAgent/issues): product requirements, accepted discussions, and delivery history; retrieve them using [issue-tracker.md](issue-tracker.md).
+- [ADR](../adr/): architectural trade-offs that still constrain changes.
 
-Current architecture starts with [shared service ownership](../adr/0029-host-cli-and-web-through-one-local-service.md), [Agent Home and Workspace storage](../adr/0001-file-first-local-persistence.md), and [run-local Tool authorization](../adr/0026-tool-permission-levels-and-foreground-snapshots.md). CLI and Web are service clients; each Workspace has shared Memory and Schedule resources and independently claimed Sessions. Read the focused ADR for the feature being changed rather than reconstructing current ownership from historical issue descriptions.
+Read only the decisions relevant to the change: [service ownership](../adr/0029-host-cli-and-web-through-one-local-service.md), [local storage](../adr/0001-file-first-local-persistence.md), [Tool invocation and exposure](../adr/0020-expose-configured-mcp-tools-through-tool-gateway.md), [context budgeting](../adr/0023-manage-agent-run-context-by-projected-token-budget.md), [authorization](../adr/0026-tool-permission-levels-and-foreground-snapshots.md), or [Restore transactions](../adr/0028-session-restore-architecture.md). Trace uncertain behavior through current code and the relevant issue rather than treating an old design as authority.
 
-Use glossary terms consistently in issues, proposals, code, and tests. Trace uncertain behavior through the implementation and relevant issue before resolving a conflict. Surface unresolved design choices to the user instead of silently selecting an obsolete document as authority.
-
-Keep local documents focused on current information. Do not retain duplicate PRDs, completed implementation plans, migration ledgers, or historical release counts as active contracts. Tests should verify behavior, architecture, persistence, and documentation links rather than require old prose or deleted documents.
+Keep one home for each fact. An implemented feature does not need its own ADR when README or CONTEXT already explains it. Retain an ADR only for a consequential trade-off whose rationale would otherwise be unclear. Remove replaced designs, completed plans, duplicate requirements, API inventories, and migration ledgers; Git and GitHub retain history. Tests should check behavior and valid document links rather than freeze prose or require deleted documents.

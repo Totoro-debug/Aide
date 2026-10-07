@@ -4,15 +4,13 @@ status: accepted
 
 # Use File-First Local Persistence
 
-Omni stores configuration, Project registrations, and Workspace-owned state as inspectable local files instead of using a database or mixed storage model. The shared local service is the runtime authority for concurrent CLI and Web clients; atomic file replacement alone does not coordinate independent runtimes. Service ownership follows [ADR-0029](0029-host-cli-and-web-through-one-local-service.md).
+Omni stores inspectable local files instead of a database. One shared service coordinates concurrent clients; atomic replacement alone cannot coordinate independent in-memory runtimes. Runtime ownership is defined in [ADR-0029](0029-host-cli-and-web-through-one-local-service.md).
 
-## Agent Home and Workspace boundaries
+## Ownership
 
-Agent Home is fixed at `~/.omni/` for the current operating-system account, without profiles or configurable data roots. It owns global `config.toml`, user-authored `skills/`, the durable `projects.json` catalog, the `conversation-workspaces.json` directory index, and service discovery and locking state. Both catalogs contain normalized directory references, not copies of Workspace data or service-lifetime Workspace IDs. Legacy Agent Home Runtime Log files remain untouched.
+Agent Home (`~/.omni/`) owns configuration, user-authored Skills, Project registrations, conversation-directory indexes, and service discovery and locks. Directory catalogs hold references, never copies of Workspace data.
 
-Each Workspace owns its non-global persistent state under `<workspace>/.omni/`. CLI startup selects the current directory; Web selects a registered Project or the Default Conversation Workspace, initially `~/.omni/chat`. The saved default-directory preference applies to the next non-Project conversation immediately; old Sessions remain in their original directories. Directory identity is normalized and resolved for shared runtime ownership. Omni does not infer a Git root, search ancestors, or fall back to Agent Home or temporary storage when Workspace State cannot be initialized safely.
-
-The dedicated Web entry may create a missing default directory. Workspace State inside Agent Home is permitted only for the direct `chat` directory; symlinks, Windows junctions and redirected state paths cannot widen this exception to other Agent Home management directories. File Tool authorization and protected Restore paths retain their existing rules. History discovery reads Session headers without activating Workspace resources or returning conversation bodies. New Session metadata records immutable `creation_scope` (`chat` or `project`), while legacy Sessions are classified by their normalized directory's current Project registration. Empty drafts stay in memory; Restore preserves creation scope.
+Each Workspace owns its state under `<workspace>/.omni/`:
 
 ```text
 .omni/
@@ -30,12 +28,12 @@ The dedicated Web entry may create a missing default directory. Workspace State 
   schedule.json
 ```
 
-Startup creates the root, internal Git ignore rule, `memory/`, `sessions/`, and a missing Long-term Memory template. Dream System Job registration creates or reconciles `schedule.json`; other paths are created on demand. Known records validate their own formats, while unknown entries remain untouched.
+CLI uses the startup directory; Web uses a Project or the configured default conversation directory. Directory identity is canonicalized. Omni does not infer a Git root or redirect failed Workspace initialization to another store. Inside Agent Home, only the direct `chat` directory may hold Workspace State; links and redirected state paths cannot widen that exception.
 
-## Publication and access
+## Publication and consistency
 
-Each store defines its publication guarantees: Conversation Sessions and other declared stores use atomic replacement where specified; Tool Artifacts use direct writes. Each active in-memory `Session` is authoritative for its own Agent Runs. Foreground Sessions use exclusive client claims; Schedule Sessions belong to their dedicated Job Loops. Conversation Summary and Session snapshots have no cross-file transaction and may diverge after a crash. Session persistence is defined by [ADR-0009](0009-active-session-snapshot-persistence.md), and diagnostics by [ADR-0008](0008-use-workspace-session-log.md).
+An active Session is authoritative for its messages and metadata. A terminal Agent Run publishes one validated in-memory increment before scheduling an ordered atomic JSONL snapshot. Empty drafts stay in memory. Ordinary Session saves use bounded retries and may fail without changing the Run outcome; strict Restore writes instead block further conversation until recovery succeeds.
 
-Each persisted Schedule Job has a strict canonical object shape with a required `title`. The decoder accepts a document containing only the exact pre-title shape and derives titles using Session title normalization. The in-memory Jobs become canonical immediately; the next successful Store mutation rewrites the file. Mixed versions, partial hybrids, and unknown fields are rejected; a failed write leaves the previous document authoritative.
+Stores validate their own formats. Atomic publication is a per-store guarantee: Session state, Conversation Summary, Memory, and Schedule have no common transaction. Cancellation cannot undo accepted Tool effects or earlier Memory writes. Tool Artifacts are direct writes; Session Logs are best-effort diagnostics, with no durability or redaction guarantee.
 
-Fixed File Tools can access Workspace State through normal path resolution and [ADR-0026](0026-tool-permission-levels-and-foreground-snapshots.md) authorization. Direct writes to the protected `.omni/restore/` subtree are rejected under [ADR-0028](0028-session-restore-architecture.md). The Skill Loader's internal reads follow [ADR-0016](0016-use-agent-home-skill-catalog-and-progressive-loading.md); Agent Home as a whole grants no exemption from external-path Tool Confirmation.
+Built-in File Tools may access Workspace State under [ADR-0026](0026-tool-permission-levels-and-foreground-snapshots.md). Direct writes to `.omni/restore/` are rejected so Tools cannot corrupt their own backup journal. Restore ownership and recovery are defined in [ADR-0028](0028-session-restore-architecture.md).

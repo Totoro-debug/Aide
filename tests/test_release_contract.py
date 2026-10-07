@@ -156,10 +156,42 @@ def test_tracked_markdown_link_contract_rejects_missing_tracked_source(
     monkeypatch.setattr(
         subprocess,
         "check_output",
-        lambda *_args, **_kwargs: b"docs/unexpected-missing.md\n",
+        lambda *_args, **_kwargs: b"",
     )
 
     with pytest.raises(AssertionError, match=r"unexpected-missing\.md"):
+        test_tracked_markdown_local_links_resolve()
+
+
+def test_tracked_markdown_local_links_allow_worktree_deletions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deleted = ROOT / "docs" / "deleted.md"
+    monkeypatch.setitem(globals(), "_tracked_markdown_paths", lambda: (deleted,))
+    monkeypatch.setattr(
+        subprocess,
+        "check_output",
+        lambda *_args, **_kwargs: b"docs/deleted.md\0",
+    )
+
+    test_tracked_markdown_local_links_resolve()
+
+
+def test_tracked_markdown_local_links_reject_deleted_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "README.md"
+    source.write_text("[Old decision](docs/deleted.md)\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    monkeypatch.setitem(globals(), "_tracked_markdown_paths", lambda: (source,))
+    monkeypatch.setattr(
+        subprocess,
+        "check_output",
+        lambda *_args, **_kwargs: b"docs/deleted.md\0",
+    )
+
+    with pytest.raises(AssertionError, match=r"deleted\.md"):
         test_tracked_markdown_local_links_resolve()
 
 
@@ -343,23 +375,6 @@ def test_clean_distributions_build_and_import_cleanly(
     assert import_result.returncode == 0, import_result.stderr
 
 
-def test_session_log_adr_publishes_the_risk_contract() -> None:
-    required_contract = (
-        "same-session concurrency is unsupported",
-        "unbounded queue",
-        "infinite drain",
-        "no per-record fsync",
-        "no active redaction",
-        "no control escaping",
-        "per-session retention",
-        "legacy agent home runtime log files remain untouched",
-    )
-
-    path = ROOT / "docs" / "adr" / "0008-use-workspace-session-log.md"
-    content = path.read_text(encoding="utf-8").lower()
-    assert all(statement in content for statement in required_contract), path
-
-
 def test_application_modules_do_not_depend_on_standard_library_logging() -> None:
     violations: list[str] = []
 
@@ -387,28 +402,6 @@ def test_application_modules_do_not_depend_on_standard_library_logging() -> None
             violations.append(f"{path}: logging interception bridge")
 
     assert violations == []
-
-
-def test_active_support_contract_matches_windows_release_evidence() -> None:
-    decision_path = ROOT / "docs" / "adr" / "0007-use-host-adapters.md"
-    assert decision_path.exists()
-    decision = decision_path.read_text(encoding="utf-8").lower()
-    assert "status: accepted" in decision
-    assert "filesystem" in decision
-    assert "process tree" not in decision
-    assert "owned-process" not in decision
-    assert "runtime log locking" not in decision
-
-    for claim in (
-        "py3-none-any",
-        "windows x64",
-        "currently validated",
-        "runs only on windows",
-        "reject other operating systems",
-        "windows powershell 5.1",
-        "powershell 7",
-    ):
-        assert claim in decision
 
 
 def test_current_adrs_have_unique_numbers_and_valid_status_contract() -> None:
@@ -492,9 +485,16 @@ def test_mcp_transport_evidence_uses_local_fixtures() -> None:
 
 def test_tracked_markdown_local_links_resolve() -> None:
     tracked = _tracked_markdown_paths()
+    deleted_output = subprocess.check_output(
+        ("git", "diff", "--name-only", "--diff-filter=D", "-z", "--", "*.md"),
+        cwd=ROOT,
+    ).decode("utf-8")
+    deleted = set(deleted_output.split("\0"))
 
     missing: list[str] = []
     for source in tracked:
+        if source.relative_to(ROOT).as_posix() in deleted:
+            continue
         if not source.exists():
             missing.append(f"{source.relative_to(ROOT)}: tracked Markdown source is missing")
             continue

@@ -154,6 +154,58 @@ def test_session_scoped_lookup_cannot_read_another_sessions_record(tmp_path: Pat
         first_store.get("../../" + other.agent_id)
 
 
+def test_restore_discards_only_matching_subagents_and_their_artifacts(tmp_path: Path) -> None:
+    state, session_id = _workspace(tmp_path)
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    discarded = _register(store, "Discarded task")
+    kept = store.register(
+        title="Kept task",
+        task="This task belongs to an earlier input.",
+        parent_run_id=_RUN_ID,
+        source=SubAgentSource(
+            kind=SubAgentSourceKind.FOREGROUND,
+            restore_run_token="223e4567-e89b-42d3-a456-426614174001",
+        ),
+        creator_snapshot=_snapshot(),
+    )
+
+    paths = {
+        discarded.agent_id: f".aide/artifacts/{session_id}/{discarded.agent_id}_tool_call.txt",
+        kept.agent_id: f".aide/artifacts/{session_id}/{kept.agent_id}_tool_call.txt",
+    }
+    for record in (discarded, kept):
+        running = replace(
+            record,
+            status=SubAgentStatus.RUNNING,
+            started_at=_NOW,
+            revision=record.revision + 1,
+        )
+        store.save(running)
+        store.save(
+            replace(
+                running,
+                status=SubAgentStatus.COMPLETED,
+                finished_at=_NOW,
+                artifact_paths=(paths[record.agent_id],),
+                result=f"done: {record.title}",
+                revision=running.revision + 1,
+            )
+        )
+        artifact = state.workspace_path.joinpath(*paths[record.agent_id].split("/"))
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(record.title, encoding="utf-8")
+
+    store.discard_restore_run_tokens((_RESTORE_TOKEN,))
+
+    assert store.get(discarded.agent_id) is None
+    assert not state.workspace_path.joinpath(*paths[discarded.agent_id].split("/")).exists()
+    assert store.get(kept.agent_id) is not None
+    assert (
+        state.workspace_path.joinpath(*paths[kept.agent_id].split("/")).read_text(encoding="utf-8")
+        == "Kept task"
+    )
+
+
 def test_list_pages_follow_registration_order_and_cursors_are_session_scoped(
     tmp_path: Path,
 ) -> None:

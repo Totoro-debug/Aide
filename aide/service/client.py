@@ -29,6 +29,7 @@ from aide.agent.confirmation import (
     ConfirmationPresentationCoordinator,
     ConfirmationPresenter,
     ForegroundConfirmationOwner,
+    SubAgentConfirmationOwner,
 )
 from aide.agent.loop import ForegroundConversationProjection, TerminalAgentRunExecutorControl
 from aide.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
@@ -1604,6 +1605,13 @@ def _confirmation_owner(
     if not isinstance(value, dict):
         raise ValueError("confirmation owner is missing")
     generation_id = UUID(_require_string(value, "generation_id"))
+    if value.get("kind") == "subagent":
+        return SubAgentConfirmationOwner(
+            generation_id,
+            _require_string(value, "workspace_id"),
+            _require_string(value, "session_id"),
+            _require_string(value, "agent_id"),
+        )
     if origin == "foreground":
         run_id = (
             UUID(_require_string(value, "run_id"))

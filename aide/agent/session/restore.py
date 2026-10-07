@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from aide.agent.session._restore_persistence import (
@@ -30,6 +30,9 @@ from aide.agent.session.backup_store import (
 from aide.agent.session.session import Session, SessionRestoreResult
 from aide.agent.workspace_state import WorkspaceState
 from aide.utils.host_filesystem import HOST_FILESYSTEM
+
+if TYPE_CHECKING:
+    from aide.agent.subagents.ports import SubAgentRecordRepository
 
 _SCHEMA_VERSION = 1
 
@@ -207,6 +210,7 @@ class RestoreManager:
         session_id: str | None = None,
         *,
         now: Callable[[], datetime] | None = None,
+        subagent_repository: SubAgentRecordRepository | None = None,
     ) -> None:
         if not isinstance(workspace_state, WorkspaceState):
             raise TypeError("workspace_state must be a WorkspaceState")
@@ -215,6 +219,7 @@ class RestoreManager:
         self._workspace_state = workspace_state
         self._session_id = session_id
         self._now = now
+        self._subagent_repository = subagent_repository
 
     def has_pending_transaction(self) -> bool:
         """Distinguish unfinished recovery from a retained completed Restore result."""
@@ -491,6 +496,14 @@ class RestoreManager:
             store.discard_run_tokens(pending.discarded_run_tokens)
             pending.phase = _RestorePhase.JOURNAL_PRUNED
             _write_pending(self._workspace_state, pending)
+
+        # Also clean records when replaying older transactions past journal pruning.
+        repository = self._subagent_repository
+        if repository is None or repository.session_id != pending.session_id:
+            from aide.agent.subagents.store import SubAgentRecordStore
+
+            repository = SubAgentRecordStore(self._workspace_state, pending.session_id)
+        repository.discard_restore_run_tokens(pending.discarded_run_tokens)
 
         if pending.mode is RestoreMode.FILES and pending.phase in {
             _RestorePhase.JOURNAL_PRUNED,

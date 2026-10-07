@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,8 +20,10 @@ from aide.agent.subagents.models import (
     SubAgentPage,
     SubAgentRecord,
     SubAgentSource,
+    SubAgentSourceKind,
     SubAgentStatus,
 )
+from aide.agent.tools.base import ArtifactReference
 from aide.agent.workspace_state import WorkspaceState
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from aide.utils.json import strict_json_loads
@@ -217,6 +219,57 @@ class SubAgentRecordStore:
         """Mark persisted queued and running tasks interrupted without restarting them."""
         with self._lock:
             self._recover_interrupted()
+
+    def discard_restore_run_tokens(self, restore_run_tokens: Sequence[str | UUID]) -> None:
+        """Remove records and Tool Artifacts created by discarded foreground inputs."""
+        if isinstance(restore_run_tokens, (str, bytes)) or not isinstance(
+            restore_run_tokens, Sequence
+        ):
+            raise SubAgentRequestError("Restore Run tokens must be a sequence")
+        selected_tokens: set[str] = set()
+        for token in restore_run_tokens:
+            token_value = str(token) if isinstance(token, UUID) else token
+            try:
+                require_uuid4_string(token_value, field="restore_run_token")
+            except ValueError as error:
+                raise SubAgentRequestError("Restore Run token is invalid") from error
+            selected_tokens.add(token_value)
+        if not selected_tokens:
+            return
+
+        with self._lock:
+            records = tuple(
+                record
+                for record in self._read_records()
+                if record.source.kind is SubAgentSourceKind.FOREGROUND
+                and record.source.restore_run_token in selected_tokens
+            )
+            directory = self._existing_session_directory()
+            for record in records:
+                self._remove_record_artifacts(record)
+                if directory is None:
+                    continue
+                path = self._record_path(directory, record.agent_id)
+                if HOST_FILESYSTEM.entry_exists(path):
+                    HOST_FILESYSTEM.require_owned_regular_file(path, within=directory)
+                    HOST_FILESYSTEM.remove_owned_entry(path, root=directory, tree=False)
+
+    def _remove_record_artifacts(self, record: SubAgentRecord) -> None:
+        workspace_root = self._workspace_state.workspace_path
+        for relative_path in record.artifact_paths:
+            try:
+                ArtifactReference(path=relative_path, total_chars=0, preview_chars=0)
+                if relative_path.split("/")[2] != self._session_id:
+                    raise ValueError("Tool Artifact belongs to another Session")
+                path = workspace_root.joinpath(*relative_path.split("/"))
+                if not HOST_FILESYSTEM.entry_exists(path):
+                    continue
+                HOST_FILESYSTEM.require_owned_regular_file(path, within=workspace_root)
+                HOST_FILESYSTEM.remove_owned_entry(path, root=workspace_root, tree=False)
+            except (OSError, PermissionError, TypeError, ValueError) as error:
+                raise SubAgentStoreError(
+                    "SubAgent Tool Artifact could not be removed safely"
+                ) from error
 
     def _recover_interrupted(self) -> None:
         records = self._read_records()

@@ -4,7 +4,7 @@ import json
 import os
 import shutil
 from collections.abc import Callable
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -22,6 +22,13 @@ from aide.agent.session.restore import (
     StaleRestorePlan,
 )
 from aide.agent.session.session import Session
+from aide.agent.subagents.models import (
+    SubAgentCreatorSnapshot,
+    SubAgentSource,
+    SubAgentSourceKind,
+    SubAgentStatus,
+)
+from aide.agent.subagents.store import SubAgentRecordStore
 from aide.agent.workspace_state import WorkspaceState
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 
@@ -132,6 +139,94 @@ async def test_conversation_only_clears_discarded_journal_and_restores_session(
 
     recovered = await RestoreManager(state, session.session_id, now=lambda: NOW).recover_pending()
     assert recovered == result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "interruption_phase", ["pending_intent", "journal_pruned", "files_replayed"]
+)
+async def test_restore_replay_removes_only_discarded_subagents_before_complete(
+    workspace: Path,
+    after_restore_phase: Callable[[str, Callable[[], None]], None],
+    interruption_phase: str,
+) -> None:
+    state = WorkspaceState(workspace)
+    session = Session.create(state, new_uuid=lambda: FIRST_TOKEN, now=lambda: NOW)
+    _commit_user(session, "kept input", FIRST_TOKEN)
+    _commit_user(session, "discarded input", SECOND_TOKEN)
+    third_token = UUID("32345678-1234-4234-8234-123456789abc")
+    _commit_user(session, "another discarded input", third_token)
+    await session.wait_for_pending_persist()
+    subagents = SubAgentRecordStore(state, session.session_id, now=lambda: NOW)
+    snapshot = SubAgentCreatorSnapshot(
+        provider_id="test-provider",
+        model="chat",
+        reasoning_effort="mid",
+        permission_level="workspace-write",
+        shell="pwsh",
+        tool_schemas=({"name": "read_file", "input_schema": {"type": "object"}},),
+        system_prompt="You are Aide.",
+    )
+
+    def register(title: str, token: UUID) -> tuple[str, Path]:
+        record = subagents.register(
+            title=title,
+            task=f"Task for {title}.",
+            parent_run_id=str(token),
+            source=SubAgentSource(
+                kind=SubAgentSourceKind.FOREGROUND,
+                restore_run_token=str(token),
+            ),
+            creator_snapshot=snapshot,
+        )
+        running = replace(
+            record,
+            status=SubAgentStatus.RUNNING,
+            started_at=NOW,
+            revision=record.revision + 1,
+        )
+        subagents.save(running)
+        artifact_path = f".aide/artifacts/{session.session_id}/{record.agent_id}_tool_call.txt"
+        completed = replace(
+            running,
+            status=SubAgentStatus.COMPLETED,
+            finished_at=NOW,
+            artifact_paths=(artifact_path,),
+            result=f"done: {title}",
+            revision=running.revision + 1,
+        )
+        subagents.save(completed)
+        artifact = workspace.joinpath(*artifact_path.split("/"))
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(title, encoding="utf-8")
+        return record.agent_id, artifact
+
+    kept_id, kept_artifact = register("Kept task", FIRST_TOKEN)
+    discarded_id, discarded_artifact = register("Discarded task", SECOND_TOKEN)
+    later_id, later_artifact = register("Later discarded task", third_token)
+    plan = RestoreManager(state, session.session_id, now=lambda: NOW).inspect(session, 2)
+    interrupted = False
+
+    def interrupt() -> None:
+        nonlocal interrupted
+        interrupted = True
+        raise OSError("simulated process interruption after restore intent")
+
+    after_restore_phase(interruption_phase, interrupt)
+    manager = RestoreManager(state, session.session_id, now=lambda: NOW)
+    with pytest.raises(RestoreRecoveryRequired):
+        await manager.execute(plan, RestoreMode.CONVERSATION_ONLY)
+    assert interrupted
+
+    recovered = await RestoreManager(state, session.session_id, now=lambda: NOW).recover_pending()
+
+    assert recovered is not None
+    assert SubAgentRecordStore(state, session.session_id, now=lambda: NOW).get(kept_id)
+    assert kept_artifact.exists()
+    assert SubAgentRecordStore(state, session.session_id, now=lambda: NOW).get(discarded_id) is None
+    assert not discarded_artifact.exists()
+    assert SubAgentRecordStore(state, session.session_id, now=lambda: NOW).get(later_id) is None
+    assert not later_artifact.exists()
 
 
 @pytest.mark.asyncio

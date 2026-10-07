@@ -397,10 +397,10 @@ async def test_project_removal_closes_admission_clears_claims_and_blocks_reentry
     allow_close = asyncio.Event()
     original_close = workspace.close
 
-    async def gated_close() -> None:
+    async def gated_close(*, interrupted: bool = True) -> None:
         close_started.set()
         await allow_close.wait()
-        await original_close()
+        await original_close(interrupted=interrupted)
 
     monkeypatch.setattr(workspace, "close", gated_close)
     try:

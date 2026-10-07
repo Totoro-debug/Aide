@@ -46,7 +46,34 @@ class BackgroundConfirmationOwner:
             raise ValueError("background confirmation job_id must be non-empty")
 
 
-type ConfirmationOwner = ForegroundConfirmationOwner | BackgroundConfirmationOwner
+@dataclass(frozen=True, slots=True)
+class SubAgentConfirmationOwner:
+    """Identity of one child Run, independent of its creator's Claim lifetime."""
+
+    generation_id: UUID
+    workspace_id: str
+    session_id: str
+    agent_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.generation_id, UUID):
+            raise TypeError("SubAgent confirmation generation_id must be a UUID")
+        if any(
+            not isinstance(value, str) or not value
+            for value in (self.workspace_id, self.session_id, self.agent_id)
+        ):
+            raise ValueError("SubAgent confirmation source identifiers must be non-empty")
+        try:
+            parsed_agent_id = UUID(self.agent_id)
+        except ValueError as error:
+            raise ValueError("SubAgent confirmation agent_id must be a UUID4") from error
+        if str(parsed_agent_id) != self.agent_id or parsed_agent_id.version != 4:
+            raise ValueError("SubAgent confirmation agent_id must be a canonical UUID4")
+
+
+type ConfirmationOwner = (
+    ForegroundConfirmationOwner | BackgroundConfirmationOwner | SubAgentConfirmationOwner
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,15 +95,17 @@ class ConfirmationEnvelope:
         if not isinstance(request, RuntimeConfirmationRequest):
             raise TypeError("confirmation envelope requires a normalized request")
         if self.origin == "foreground":
-            if not isinstance(self.owner, ForegroundConfirmationOwner):
+            if not isinstance(self.owner, (ForegroundConfirmationOwner, SubAgentConfirmationOwner)):
                 raise TypeError("foreground confirmations require a foreground owner")
             if self.job_id is not None or self.title is not None:
                 raise ValueError("foreground confirmations cannot carry background source data")
         elif self.origin == "background":
-            if not isinstance(self.owner, BackgroundConfirmationOwner):
+            if not isinstance(self.owner, (BackgroundConfirmationOwner, SubAgentConfirmationOwner)):
                 raise TypeError("background confirmations require a background owner")
-            if self.job_id != self.owner.job_id:
+            if isinstance(self.owner, BackgroundConfirmationOwner) and self.job_id != self.owner.job_id:
                 raise ValueError("background confirmation job_id must match its owner")
+            if not isinstance(self.job_id, str) or not self.job_id:
+                raise ValueError("background confirmations require a Job ID")
             if not isinstance(self.title, str) or not self.title.strip():
                 raise ValueError("background confirmations require a non-empty title")
         else:
@@ -234,7 +263,10 @@ class ToolConfirmationCoordinator:
         )
 
     async def cancel_owner(self, owner: ConfirmationOwner) -> None:
-        if not isinstance(owner, (ForegroundConfirmationOwner, BackgroundConfirmationOwner)):
+        if not isinstance(
+            owner,
+            (ForegroundConfirmationOwner, BackgroundConfirmationOwner, SubAgentConfirmationOwner),
+        ):
             raise TypeError("confirmation owner is invalid")
         await self._cancel_matching(lambda item: item.envelope.owner == owner)
 

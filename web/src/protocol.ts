@@ -26,11 +26,14 @@ export interface ConfirmationRequest {
 }
 
 export interface ConfirmationEventOwner {
-  kind: ConfirmationOrigin;
+  kind: "foreground" | "background" | "subagent";
   generation_id: string;
   run_id?: string;
   job_id?: string;
   occurrence_id?: string;
+  workspace_id?: string;
+  session_id?: string;
+  agent_id?: string;
 }
 
 export interface ConfirmationRequestedPayload {

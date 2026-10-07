@@ -15,6 +15,7 @@ from aide.agent.confirmation import (
     ConfirmationEnvelope,
     ConfirmationUnavailable,
     ForegroundConfirmationOwner,
+    SubAgentConfirmationOwner,
     ToolConfirmationCoordinator,
 )
 from aide.agent.tools.tool_gateway import ConfirmationRequest
@@ -56,6 +57,22 @@ def _background(call_id: str, *, generation_id: UUID = GENERATION_ONE) -> Confir
         ),
         job_id="job-1",
         title="Nightly backup",
+    )
+
+
+def _subagent(call_id: str, *, origin: str) -> ConfirmationEnvelope:
+    owner = SubAgentConfirmationOwner(
+        generation_id=uuid4(),
+        workspace_id="workspace-1",
+        session_id="20261008-090000-000000_00000000-0000-4000-8000-000000000001",
+        agent_id=str(uuid4()),
+    )
+    return ConfirmationEnvelope(
+        request=_request(call_id),
+        origin=origin,  # type: ignore[arg-type]
+        owner=owner,
+        job_id="job-1" if origin == "background" else None,
+        title="Nightly backup" if origin == "background" else None,
     )
 
 
@@ -211,6 +228,37 @@ async def test_active_foreground_does_not_preempt_background_and_foreground_is_p
 
     assert await foreground == "approved"
     assert await background == "declined"
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_subagent_owner_keeps_confirmation_priority_from_its_origin() -> None:
+    presenter = RecordingPresenter()
+    coordinator = ToolConfirmationCoordinator()
+    coordinator.bind_presenter(presenter)
+
+    active = asyncio.create_task(coordinator.request(_subagent("active-background", origin="background")))
+    await presenter.wait_for_count(1)
+    queued_background = asyncio.create_task(
+        coordinator.request(_subagent("queued-background", origin="background"))
+    )
+    queued_foreground = asyncio.create_task(
+        coordinator.request(_subagent("queued-foreground", origin="foreground"))
+    )
+    await asyncio.sleep(0)
+
+    presenter.decide(0, "approved")
+    await presenter.wait_for_count(2)
+    assert presenter.presented[1][0].request.tool_call_id == "queued-foreground"
+    assert isinstance(presenter.presented[1][0].owner, SubAgentConfirmationOwner)
+    presenter.decide(1, "approved")
+    await presenter.wait_for_count(3)
+    assert presenter.presented[2][0].request.tool_call_id == "queued-background"
+    presenter.decide(2, "declined")
+
+    assert await active == "approved"
+    assert await queued_foreground == "approved"
+    assert await queued_background == "declined"
     await coordinator.close()
 
 

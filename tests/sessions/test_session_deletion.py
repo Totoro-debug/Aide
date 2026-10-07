@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import json
 import subprocess
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,13 @@ from aide.agent.session.deletion import (
     session_deletion_pending,
 )
 from aide.agent.session.session import Session
+from aide.agent.subagents.models import (
+    SubAgentCreatorSnapshot,
+    SubAgentSource,
+    SubAgentSourceKind,
+    SubAgentStatus,
+)
+from aide.agent.subagents.store import SubAgentRecordStore
 from aide.agent.workspace_state import WorkspaceState
 
 
@@ -72,6 +80,60 @@ async def test_deletion_marker_fences_load_and_recovery_removes_owned_data(
     assert not restore_root.exists()
     assert not (state.logs_directory / f"{session_id}.log").exists()
     assert not session_deletion_pending(state, session_id)
+
+
+@pytest.mark.asyncio
+async def test_session_deletion_removes_subagent_records_and_artifacts(
+    tmp_path: Path,
+) -> None:
+    state, session_id = await _persist_session(tmp_path)
+    store = SubAgentRecordStore(state, session_id)
+    record = store.register(
+        title="Task to delete",
+        task="Belongs to the deleted Session.",
+        parent_run_id="123e4567-e89b-42d3-a456-426614174000",
+        source=SubAgentSource(
+            kind=SubAgentSourceKind.FOREGROUND,
+            restore_run_token="123e4567-e89b-42d3-a456-426614174001",
+        ),
+        creator_snapshot=SubAgentCreatorSnapshot(
+            provider_id="test-provider",
+            model="chat",
+            reasoning_effort="mid",
+            permission_level="workspace-write",
+            shell="pwsh",
+            tool_schemas=({"name": "read_file", "input_schema": {"type": "object"}},),
+            system_prompt="You are Aide.",
+        ),
+    )
+    artifact = state.path / "artifacts" / session_id / f"{record.agent_id}_tool_call.txt"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("full result", encoding="utf-8")
+    running = replace(
+        record,
+        status=SubAgentStatus.RUNNING,
+        started_at=datetime(2026, 4, 1, tzinfo=UTC),
+        revision=record.revision + 1,
+    )
+    store.save(running)
+    store.save(
+        replace(
+            running,
+            status=SubAgentStatus.COMPLETED,
+            finished_at=datetime(2026, 4, 1, tzinfo=UTC),
+            artifact_paths=(f".aide/artifacts/{session_id}/{artifact.name}",),
+            result="done",
+            revision=running.revision + 1,
+        )
+    )
+    subagent_root = state.subagents_directory / session_id
+    assert subagent_root.exists()
+
+    begin_session_deletion(state, session_id)
+    delete_session_data(state, session_id)
+
+    assert not subagent_root.exists()
+    assert not artifact.exists()
 
 
 def _directory_alias(alias: Path, target: Path) -> None:

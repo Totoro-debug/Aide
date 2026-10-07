@@ -211,6 +211,13 @@ def _deletion_targets(
             _validate_owned_tree(artifact_root, within=artifacts)
             trees.append((artifact_root, artifacts))
 
+    subagents = workspace_state.existing_subagents_directory()
+    if subagents is not None:
+        subagent_root = subagents / session_id
+        if HOST_FILESYSTEM.entry_exists(subagent_root):
+            _validate_owned_tree(subagent_root, within=subagents)
+            trees.append((subagent_root, subagents))
+
     restore = _existing_owned_directory(workspace_state.path / "restore", state_root)
     if restore is not None:
         restore_root = restore / session_id

@@ -1678,7 +1678,11 @@
       ],
       "properties": {
         "kind": {
-          "$ref": "#/$defs/confirmation_origin"
+          "enum": [
+            "foreground",
+            "background",
+            "subagent"
+          ]
         },
         "generation_id": {
           "type": "string"
@@ -1690,6 +1694,15 @@
           "type": "string"
         },
         "occurrence_id": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "agent_id": {
           "type": "string"
         }
       }

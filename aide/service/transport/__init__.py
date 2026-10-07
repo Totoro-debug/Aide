@@ -198,6 +198,18 @@ class AgentServiceTransport:
             self._delete_session,
         )
         app.router.add_get(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/sessions/{{session_id}}/subagents",
+            self._list_subagents,
+        )
+        app.router.add_get(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/sessions/{{session_id}}/subagents/{{agent_id}}",
+            self._get_subagent,
+        )
+        app.router.add_delete(
+            f"{_API_PREFIX}/workspaces/{{workspace_id}}/sessions/{{session_id}}/subagents/{{agent_id}}",
+            self._cancel_subagent,
+        )
+        app.router.add_get(
             f"{_API_PREFIX}/workspaces/{{workspace_id}}/schedule/jobs",
             self._list_schedule_jobs,
         )
@@ -1028,6 +1040,41 @@ class AgentServiceTransport:
         )
         del confirm
         return web.json_response({"request_id": request_id, **result})
+
+    async def _list_subagents(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, client_required=True)
+        return web.json_response(
+            self.service.list_subagents(
+                _context_client_id(context),
+                request.match_info["workspace_id"],
+                request.match_info["session_id"],
+                status=request.query.get("status"),
+                cursor=request.query.get("cursor"),
+                limit=_optional_page_limit(request),
+            )
+        )
+
+    async def _get_subagent(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, client_required=True)
+        return web.json_response(
+            self.service.get_subagent(
+                _context_client_id(context),
+                request.match_info["workspace_id"],
+                request.match_info["session_id"],
+                request.match_info["agent_id"],
+            )
+        )
+
+    async def _cancel_subagent(self, request: web.Request) -> web.Response:
+        context = self._authenticate(request, mutation=True, client_required=True)
+        return web.json_response(
+            await self.service.cancel_subagent(
+                _context_client_id(context),
+                request.match_info["workspace_id"],
+                request.match_info["session_id"],
+                request.match_info["agent_id"],
+            )
+        )
 
     async def _list_schedule_jobs(self, request: web.Request) -> web.Response:
         context = self._authenticate(request, client_required=True)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Protocol
+from uuid import UUID
 
 from aide.agent.subagents.models import (
     SubAgentCreatorSnapshot,
@@ -46,6 +47,8 @@ class SubAgentRecordRepository(Protocol):
     ) -> SubAgentPage: ...
 
     def recover(self) -> None: ...
+
+    def discard_restore_run_tokens(self, restore_run_tokens: Sequence[str | UUID]) -> None: ...
 
 
 class SubAgentExecutor(Protocol):
@@ -95,6 +98,32 @@ class SubAgentSessionCoordinator(Protocol):
     ) -> tuple[SubAgentWaitResult, ...]: ...
 
     def cancel(self, agent_id: str) -> bool: ...
+
+    def close_admission(self) -> None: ...
+
+    def open_admission(self) -> None: ...
+
+    def block_source(self, job_id: str) -> None: ...
+
+    def unblock_source(self, job_id: str) -> None: ...
+
+    def has_active(self) -> bool: ...
+
+    async def cancel_and_wait(
+        self,
+        agent_id: str,
+        *,
+        interrupted: bool = False,
+    ) -> SubAgentRecord | None: ...
+
+    async def cancel_source_and_wait(
+        self,
+        *,
+        job_id: str,
+        interrupted: bool = False,
+    ) -> tuple[SubAgentRecord, ...]: ...
+
+    async def shutdown(self, *, interrupted: bool = True) -> None: ...
 
 
 class SubAgentEventPublisher(Protocol):

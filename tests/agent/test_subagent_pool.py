@@ -446,3 +446,192 @@ async def test_checkpoint_write_failure_wakes_waiters_without_fabricating_a_resu
     cancelled = await pool.wait([record.agent_id], timeout_ms=0)
     assert cancelled[0].status is SubAgentStatus.CANCELLED
     assert cancelled == await pool.wait([record.agent_id])
+
+
+@pytest.mark.asyncio
+async def test_admission_can_be_fenced_and_reopened_around_restore(tmp_path: Path) -> None:
+    from aide.agent.subagents.coordinator import SubAgentPool
+    from aide.agent.subagents.store import SubAgentRequestError
+
+    state, session_id = _workspace(tmp_path)
+    repository = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    executor = _ControlledExecutor()
+    pool = SubAgentPool(repository, executor)
+    source = SubAgentSource(
+        kind=SubAgentSourceKind.FOREGROUND,
+        restore_run_token=_RESTORE_TOKEN,
+    )
+
+    pool.close_admission()
+    with pytest.raises(SubAgentRequestError, match="not accepting"):
+        pool.submit(
+            title="Rejected during restore",
+            task="Do not pass the restore fence.",
+            parent_run_id=_RUN_ID,
+            source=source,
+            creator_snapshot=_snapshot(),
+        )
+
+    pool.open_admission()
+    record = pool.submit(
+        title="Accepted after restore cancellation",
+        task="The admission fence was released.",
+        parent_run_id=_RUN_ID,
+        source=source,
+        creator_snapshot=_snapshot(),
+    )
+    executor.release[record.agent_id] = asyncio.Event()
+    executor.cancel_requested[record.agent_id] = asyncio.Event()
+    executor.release[record.agent_id].set()
+
+    assert (await asyncio.wait_for(pool.wait([record.agent_id]), timeout=2))[0].status is (
+        SubAgentStatus.COMPLETED
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancel_and_wait_returns_after_runner_cleanup(tmp_path: Path) -> None:
+    from aide.agent.subagents.coordinator import SubAgentPool
+
+    state, session_id = _workspace(tmp_path)
+    repository = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    executor = _ControlledExecutor()
+    pool = SubAgentPool(repository, executor)
+    record = pool.submit(
+        title="Controlled cancellation",
+        task="Remain active until cancellation cleanup is released.",
+        parent_run_id=_RUN_ID,
+        source=SubAgentSource(
+            kind=SubAgentSourceKind.FOREGROUND,
+            restore_run_token=_RESTORE_TOKEN,
+        ),
+        creator_snapshot=_snapshot(),
+    )
+    executor.release[record.agent_id] = asyncio.Event()
+    executor.cancel_requested[record.agent_id] = asyncio.Event()
+    assert await asyncio.wait_for(executor.started.get(), timeout=2) == record.agent_id
+
+    cancellation = asyncio.create_task(pool.cancel_and_wait(record.agent_id))
+    await asyncio.wait_for(executor.cancel_requested[record.agent_id].wait(), timeout=2)
+    assert not cancellation.done()
+
+    executor.release[record.agent_id].set()
+    cancelled = await asyncio.wait_for(cancellation, timeout=2)
+
+    assert cancelled is not None
+    assert cancelled.status is SubAgentStatus.CANCELLED
+    assert cancelled == _record(repository, record.agent_id)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drains_running_and_queued_tasks_as_interrupted(tmp_path: Path) -> None:
+    from aide.agent.subagents.coordinator import SubAgentPool
+    from aide.agent.subagents.store import SubAgentRequestError
+
+    state, session_id = _workspace(tmp_path)
+    repository = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    executor = _ControlledExecutor()
+    pool = SubAgentPool(repository, executor)
+    source = SubAgentSource(
+        kind=SubAgentSourceKind.FOREGROUND,
+        restore_run_token=_RESTORE_TOKEN,
+    )
+    records = []
+    for index in range(9):
+        record = pool.submit(
+            title=f"Shutdown {index}",
+            task=f"Do shutdown task {index}.",
+            parent_run_id=_RUN_ID,
+            source=source,
+            creator_snapshot=_snapshot(),
+        )
+        records.append(record)
+        executor.release[record.agent_id] = asyncio.Event()
+        executor.cancel_requested[record.agent_id] = asyncio.Event()
+    for _ in range(8):
+        await asyncio.wait_for(executor.started.get(), timeout=2)
+
+    shutdown = asyncio.create_task(pool.shutdown())
+    for record in records[:8]:
+        await asyncio.wait_for(executor.cancel_requested[record.agent_id].wait(), timeout=2)
+    assert not shutdown.done()
+    assert executor.started.empty()
+
+    for record in records[:8]:
+        executor.release[record.agent_id].set()
+    await asyncio.wait_for(shutdown, timeout=2)
+
+    assert executor.started_ids == [record.agent_id for record in records[:8]]
+    assert all(
+        _record(repository, record.agent_id).status is SubAgentStatus.INTERRUPTED
+        for record in records
+    )
+    with pytest.raises(SubAgentRequestError, match="not accepting"):
+        pool.submit(
+            title="After shutdown",
+            task="Must be rejected.",
+            parent_run_id=_RUN_ID,
+            source=source,
+            creator_snapshot=_snapshot(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_job_cancellation_covers_occurrences_without_cancelling_other_sources(
+    tmp_path: Path,
+) -> None:
+    from aide.agent.subagents.coordinator import SubAgentPool
+
+    state, session_id = _workspace(tmp_path)
+    repository = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    executor = _ControlledExecutor()
+    pool = SubAgentPool(repository, executor)
+    job_id = "123e4567-e89b-42d3-a456-426614174002"
+
+    def schedule_source(occurrence: str) -> SubAgentSource:
+        return SubAgentSource(
+            kind=SubAgentSourceKind.SCHEDULE,
+            job_id=job_id,
+            occurrence_id=occurrence,
+        )
+
+    sources = (
+        schedule_source("one"),
+        schedule_source("two"),
+        SubAgentSource(
+            kind=SubAgentSourceKind.FOREGROUND,
+            restore_run_token=_RESTORE_TOKEN,
+        ),
+    )
+    records = []
+    for index, source in enumerate(sources):
+        record = pool.submit(
+            title=f"Job task {index}",
+            task=f"Do job task {index}.",
+            parent_run_id=_RUN_ID,
+            source=source,
+            creator_snapshot=_snapshot(),
+        )
+        records.append(record)
+        executor.release[record.agent_id] = asyncio.Event()
+        executor.cancel_requested[record.agent_id] = asyncio.Event()
+    for record in records:
+        assert await asyncio.wait_for(executor.started.get(), timeout=2) == record.agent_id
+
+    removal = asyncio.create_task(pool.cancel_source_and_wait(job_id=job_id))
+    for record in records[:2]:
+        await asyncio.wait_for(executor.cancel_requested[record.agent_id].wait(), timeout=2)
+    assert not executor.cancel_requested[records[2].agent_id].is_set()
+    for record in records[:2]:
+        executor.release[record.agent_id].set()
+    await asyncio.wait_for(removal, timeout=2)
+
+    assert all(
+        _record(repository, record.agent_id).status is SubAgentStatus.CANCELLED
+        for record in records[:2]
+    )
+    assert _record(repository, records[2].agent_id).status is SubAgentStatus.RUNNING
+    executor.release[records[2].agent_id].set()
+    assert (await asyncio.wait_for(pool.wait([records[2].agent_id]), timeout=2))[0].status is (
+        SubAgentStatus.COMPLETED
+    )

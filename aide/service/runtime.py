@@ -26,6 +26,7 @@ from aide.agent.confirmation import (
     ConfirmationOwner,
     ConfirmationPresenter,
     ForegroundConfirmationOwner,
+    SubAgentConfirmationOwner,
     ToolConfirmationCoordinator,
 )
 from aide.agent.context.builder import ContextBuilder
@@ -54,6 +55,13 @@ from aide.agent.session.restore import (
     StaleRestorePlan,
 )
 from aide.agent.session.session import Session, SessionStoragePartition
+from aide.agent.subagents.models import SubAgentRecord, SubAgentStatus
+from aide.agent.subagents.ports import SubAgentRecordRepository, SubAgentSessionCoordinator
+from aide.agent.subagents.store import (
+    SubAgentRecordStore,
+    SubAgentRequestError,
+    SubAgentStoreError,
+)
 from aide.agent.tools.core.exec_host import ExecHost, create_exec_host, resolve_exec_shell
 from aide.agent.tools.mcp_keywords import MCPKeywordPreparer
 from aide.agent.tools.mcp_runtime import MCPRuntimeManager, MCPWorkspaceRuntimeManager
@@ -587,6 +595,14 @@ class ServiceConfirmationPresenter(ConfirmationPresenter):
                 "generation_id": str(envelope.owner.generation_id),
                 "run_id": str(envelope.owner.run_id),
             }
+        elif isinstance(envelope.owner, SubAgentConfirmationOwner):
+            payload["owner"] = {
+                "kind": "subagent",
+                "generation_id": str(envelope.owner.generation_id),
+                "workspace_id": envelope.owner.workspace_id,
+                "session_id": envelope.owner.session_id,
+                "agent_id": envelope.owner.agent_id,
+            }
         else:
             payload["owner"] = {
                 "kind": "background",
@@ -757,6 +773,11 @@ class WorkspaceRecord:
         self._restore_schedule_paused = False
         self._restore_blocked = False
         self._restore_commit_task: asyncio.Task[Any] | None = None
+        self._subagent_repositories: dict[str, SubAgentRecordRepository] = {}
+        self._subagent_coordinators: dict[str, SubAgentSessionCoordinator] = {}
+        self._subagent_admission_closed = False
+        self._subagent_blocked_job_ids: set[str] = set()
+        self._subagent_shutdown_failed = False
         self._schedule_permission = RuntimePermissionControl(configuration.runtime.permission_level)
         self._exec_host: ExecHost | None = None
         self._started = False
@@ -787,6 +808,82 @@ class WorkspaceRecord:
     @property
     def loops(self) -> Mapping[str, _LoopState]:
         return self._loops
+
+    def subagent_repository(self, session_id: str) -> SubAgentRecordRepository:
+        """Return the Workspace-owned record repository for one Session."""
+        repository = self._subagent_repositories.get(session_id)
+        if repository is None:
+            repository = SubAgentRecordStore(self.workspace_state, session_id)
+            self._subagent_repositories[session_id] = repository
+        return repository
+
+    def register_subagent_coordinator(
+        self,
+        coordinator: SubAgentSessionCoordinator,
+        repository: SubAgentRecordRepository | None = None,
+    ) -> None:
+        """Attach one Session pool without tying it to a Claim or Agent Run."""
+        session_id = getattr(coordinator, "session_id", None)
+        if not isinstance(session_id, str):
+            raise TypeError("SubAgent coordinator must be Session-scoped")
+        if self._subagent_admission_closed or self.service.state in {"draining", "stopped"}:
+            raise SubAgentRequestError("Workspace is not accepting new SubAgent coordinators")
+        if self._restore_blocked or self._restore_session_id == session_id:
+            raise SubAgentRequestError("Session Restore is blocking SubAgent registration")
+        Session._require_id(session_id)
+        if not session_id.startswith("schedule_"):
+            self._ensure_session_available(session_id)
+        selected_repository = repository or self.subagent_repository(session_id)
+        if selected_repository.session_id != session_id:
+            raise ValueError("SubAgent repository belongs to a different Session")
+        existing = self._subagent_coordinators.get(session_id)
+        if existing is not None and existing is not coordinator:
+            raise RuntimeError("A SubAgent coordinator is already registered for this Session")
+        for job_id in self._subagent_blocked_job_ids:
+            coordinator.block_source(job_id)
+        self._subagent_repositories[session_id] = selected_repository
+        self._subagent_coordinators[session_id] = coordinator
+
+    def _subagent_coordinator(self, session_id: str) -> SubAgentSessionCoordinator | None:
+        return self._subagent_coordinators.get(session_id)
+
+    def close_subagent_admission(self) -> None:
+        """Fence every Session before any asynchronous Workspace cleanup starts."""
+        self._subagent_admission_closed = True
+        for coordinator in tuple(self._subagent_coordinators.values()):
+            coordinator.close_admission()
+
+    def block_subagent_source(self, job_id: str) -> None:
+        """Fence a removing Job in both existing and subsequently registered pools."""
+        self._subagent_blocked_job_ids.add(job_id)
+        for coordinator in tuple(self._subagent_coordinators.values()):
+            coordinator.block_source(job_id)
+
+    def unblock_subagent_source(self, job_id: str) -> None:
+        """Release the Job fence after its removal fails before deletion."""
+        self._subagent_blocked_job_ids.discard(job_id)
+        for coordinator in tuple(self._subagent_coordinators.values()):
+            coordinator.unblock_source(job_id)
+
+    def _require_persisted_subagent_session(self, session_id: str) -> None:
+        try:
+            Session._require_id(session_id)
+            if not session_id.startswith("schedule_"):
+                self._ensure_session_available(session_id)
+            Session.load(self.workspace_state, session_id)
+        except FileNotFoundError as error:
+            raise service_error("not_found", "Conversation Session was not found.", status=404) from error
+        except ValueError as error:
+            raise service_error(
+                "validation_error", "Conversation Session ID is invalid.", status=422
+            ) from error
+        except OSError as error:
+            raise service_error(
+                "persistence_error",
+                "Conversation Session could not be read safely.",
+                status=500,
+                retryable=True,
+            ) from error
 
     async def activate_schedule(self) -> None:
         await self.start()
@@ -1116,6 +1213,16 @@ class WorkspaceRecord:
     def confirmation_source(
         self, owner: ConfirmationOwner
     ) -> tuple[str | None, str | None, str | None]:
+        if isinstance(owner, SubAgentConfirmationOwner):
+            if owner.workspace_id != self.workspace_id:
+                return None, None, None
+            try:
+                record = self.subagent_repository(owner.session_id).get(owner.agent_id)
+            except (OSError, RuntimeError, ValueError):
+                return None, None, None
+            if record is not None and record.session_id == owner.session_id:
+                return self.workspace_id, owner.session_id, None
+            return None, None, None
         for session_id, claim in self._claims.items():
             if claim.loop.generation_id == owner.generation_id:
                 run_id = (
@@ -1492,8 +1599,21 @@ class WorkspaceRecord:
                         retryable=True,
                     ) from error
 
+            coordinator = self._subagent_coordinator(session_id)
+            if coordinator is not None:
+                coordinator.close_admission()
+                if coordinator.has_active():
+                    if not self._subagent_admission_closed:
+                        coordinator.open_admission()
+                    raise service_error(
+                        "session_busy",
+                        "Conversation Session still has active SubAgent work.",
+                        retryable=True,
+                    )
+            deletion_started = False
             try:
                 begin_session_deletion(self.workspace_state, session_id)
+                deletion_started = True
                 if loop_state is not None:
                     await loop_state.loop.wait_for_restore_idle()
                     if (
@@ -1510,8 +1630,20 @@ class WorkspaceRecord:
                     await self._close_loop(session_id)
                 delete_session_data(self.workspace_state, session_id)
             except ServiceError:
+                if (
+                    coordinator is not None
+                    and not deletion_started
+                    and not self._subagent_admission_closed
+                ):
+                    coordinator.open_admission()
                 raise
             except (OSError, RuntimeError, ValueError) as error:
+                if (
+                    coordinator is not None
+                    and not deletion_started
+                    and not self._subagent_admission_closed
+                ):
+                    coordinator.open_admission()
                 raise service_error(
                     "persistence_error",
                     "Conversation Session data could not be deleted safely; retry the operation.",
@@ -1522,6 +1654,8 @@ class WorkspaceRecord:
             self._claims.pop(session_id, None)
             self._deletion_claims.pop(session_id, None)
             self._draft_clients.pop(session_id, None)
+            self._subagent_coordinators.pop(session_id, None)
+            self._subagent_repositories.pop(session_id, None)
             self.service.client_claim_released(client_id, self.workspace_id, session_id)
             response = {
                 "workspace_id": self.workspace_id,
@@ -1546,6 +1680,7 @@ class WorkspaceRecord:
         if self._restore_owner != client_id:
             return
         loop = self._restore_loop
+        session_id = self._restore_session_id
         self._restore_owner = None
         self._restore_session_id = None
         self._restore_loop = None
@@ -1554,6 +1689,14 @@ class WorkspaceRecord:
                 self._restore_plans.pop(key, None)
         if loop is not None:
             await loop._release_replacement_barrier(resume_inbound=True)
+        if (
+            session_id is not None
+            and not self._restore_blocked
+            and not self._subagent_admission_closed
+        ):
+            coordinator = self._subagent_coordinator(session_id)
+            if coordinator is not None:
+                coordinator.open_admission()
         if self._restore_schedule_paused:
             self._restore_schedule_paused = False
             if (
@@ -1667,6 +1810,21 @@ class WorkspaceRecord:
                             "Finish the active run and clear queued input before restoring.",
                         )
                     )
+                coordinator = self._subagent_coordinator(loop.session.session_id)
+                if coordinator is not None:
+                    coordinator.close_admission()
+                    try:
+                        if coordinator.has_active():
+                            raise ManagementError(
+                                ErrorInfo(
+                                    "model_invalid_request",
+                                    "Cancel active SubAgent work before restoring this Session.",
+                                )
+                            )
+                    except BaseException:
+                        if not self._subagent_admission_closed:
+                            coordinator.open_admission()
+                        raise
                 self._restore_owner = client_id
                 self._restore_session_id = loop.session.session_id
                 self._restore_loop = loop
@@ -1702,7 +1860,10 @@ class WorkspaceRecord:
                     await self.schedule_service.pause_and_wait_idle()
                 current_loop()
                 manager = RestoreManager(
-                    self.workspace_state, loop.session.session_id, now=local_now
+                    self.workspace_state,
+                    loop.session.session_id,
+                    now=local_now,
+                    subagent_repository=self.subagent_repository(loop.session.session_id),
                 )
                 plan = manager.inspect(loop.session, anchor_id)
                 manager.revalidate(plan)
@@ -1731,7 +1892,12 @@ class WorkspaceRecord:
             restore_task = asyncio.current_task()
             self._restore_commit_task = restore_task
             try:
-                manager = RestoreManager(self.workspace_state, stored.session_id, now=local_now)
+                manager = RestoreManager(
+                    self.workspace_state,
+                    stored.session_id,
+                    now=local_now,
+                    subagent_repository=self.subagent_repository(stored.session_id),
+                )
                 manager.revalidate(stored)
                 result = await manager.execute(stored, mode)
                 executed = True
@@ -2357,7 +2523,8 @@ class WorkspaceRecord:
             if candidate is state:
                 self._schedule_loops.pop(job_id, None)
 
-    async def close(self) -> None:
+    async def close(self, *, interrupted: bool = True) -> None:
+        self.close_subagent_admission()
         # Claim release may hold this lock while awaiting a title naturally.
         for state in tuple(self._loops.values()):
             state.loop.cancel_title_work()
@@ -2370,6 +2537,7 @@ class WorkspaceRecord:
                 restore_task = self._restore_commit_task
                 if restore_task is not None and restore_task is not asyncio.current_task():
                     await asyncio.shield(asyncio.gather(restore_task, return_exceptions=True))
+                await self._shutdown_subagents(interrupted=interrupted)
                 if self._restore_blocked:
                     raise service_error(
                         "restore_pending",
@@ -2384,6 +2552,19 @@ class WorkspaceRecord:
                 raise
             else:
                 self._close_failed = False
+
+    async def _shutdown_subagents(self, *, interrupted: bool) -> None:
+        errors: list[Exception] = []
+        for coordinator in tuple(self._subagent_coordinators.values()):
+            try:
+                await coordinator.shutdown(interrupted=interrupted)
+            except Exception as error:
+                errors.append(error)
+        self._subagent_shutdown_failed = bool(errors)
+        if errors:
+            raise SubAgentStoreError("Workspace SubAgent tasks could not be drained safely") from (
+                ExceptionGroup("SubAgent shutdown failed", errors)
+            )
 
     async def _close_all_loops(self) -> None:
         """Flush every Session, collecting failures without skipping later entries."""
@@ -2481,6 +2662,11 @@ class AgentService:
             return existing.copy()
         if self._stop_operation_id is None:
             self._stop_operation_id = str(uuid4())
+        if self._stop_task is not None and self._stop_task.done():
+            try:
+                self._stop_task.result()
+            except BaseException:
+                self._stop_task = None
         if self._stop_task is None:
             self._stop_task = asyncio.create_task(self._stop_owned())
             self._stop_task.add_done_callback(_consume_task_result)
@@ -2561,6 +2747,7 @@ class AgentService:
                     allow_agent_home_chat=workspace.allow_agent_home_chat,
                 )
                 recover_session_deletions(state)
+                SubAgentRecordStore.recover_workspace(state)
                 restore_manager = RestoreManager(state)
                 workspace._restore_result = await restore_manager.recover_pending()
                 workspace.workspace_state = state
@@ -3518,6 +3705,7 @@ class AgentService:
                 job = pending[0]
             if job is None:
                 raise service_error("not_found", "Schedule Job was not found.", status=404)
+            workspace.block_subagent_source(job_id)
             was_active = (
                 pending[1]
                 if pending is not None
@@ -3527,29 +3715,46 @@ class AgentService:
             try:
                 removed = await workspace.schedule_service.remove_user_job(job_id, expected=job)
             except ScheduleStaleRemovalError as error:
+                workspace.unblock_subagent_source(job_id)
                 raise service_error(
                     "schedule_changed",
                     "Schedule Job changed before removal; reload and try again.",
                     retryable=True,
                 ) from error
             except ScheduleStoreFaultedError as error:
+                workspace.unblock_subagent_source(job_id)
                 raise service_error(
                     "schedule_unavailable",
                     "Schedule state is unavailable; retry after it is repaired.",
                     retryable=True,
                 ) from error
             except (ScheduleStateError, OSError, RuntimeError) as error:
+                workspace.unblock_subagent_source(job_id)
                 raise service_error(
                     "schedule_update_failed",
                     "Schedule Job could not be deleted.",
                     retryable=True,
                 ) from error
             if not removed:
+                workspace.unblock_subagent_source(job_id)
                 raise service_error(
                     "schedule_changed",
                     "Schedule Job changed before removal; reload and try again.",
                     retryable=True,
                 )
+            try:
+                await asyncio.gather(
+                    *(
+                        coordinator.cancel_source_and_wait(job_id=job_id)
+                        for coordinator in tuple(workspace._subagent_coordinators.values())
+                    )
+                )
+            except Exception as error:
+                raise service_error(
+                    "schedule_update_failed",
+                    "Schedule Job was removed, but its SubAgent work could not be drained.",
+                    retryable=True,
+                ) from error
             result: dict[str, object] = {
                 "request_id": request_id,
                 "workspace_id": workspace_id,
@@ -4233,7 +4438,7 @@ class AgentService:
             if workspace is not None:
                 workspace_id = operation.workspace_id
                 assert workspace_id is not None
-                await workspace.close()
+                await workspace.close(interrupted=False)
                 claims = workspace.clear_claims_for_removal()
                 key = os.path.normcase(str(operation.path.resolve(strict=False)))
                 self._workspace_keys.pop(key, None)
@@ -4436,6 +4641,168 @@ class AgentService:
                 "reconnect_credential": claim.credential,
             },
             "snapshot": snapshot,
+        }
+
+    def list_subagents(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        *,
+        status: str | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, object]:
+        client = self._require_client(client_id)
+        workspace = self.workspace(workspace_id)
+        client.attached_workspaces.add(workspace_id)
+        workspace._require_persisted_subagent_session(session_id)
+        repository = workspace.subagent_repository(session_id)
+        coordinator = workspace._subagent_coordinator(session_id)
+        try:
+            page = (
+                coordinator.list(status=status, cursor=cursor, limit=limit)
+                if coordinator is not None
+                else repository.list(status=status, cursor=cursor, limit=limit)
+            )
+            items: list[dict[str, object]] = []
+            for item in page.items:
+                record = repository.get(item.agent_id)
+                result_preview = None if record is None else record.result
+                if result_preview is not None and len(result_preview) > 240:
+                    result_preview = result_preview[:237] + "..."
+                items.append(
+                    {
+                        "agent_id": item.agent_id,
+                        "title": item.title,
+                        "status": item.status.value,
+                        "created_at": item.created_at.isoformat(),
+                        "finished_at": (
+                            None if item.finished_at is None else item.finished_at.isoformat()
+                        ),
+                        "result_preview": result_preview,
+                        "error": (
+                            None
+                            if record is None or record.error is None
+                            else record.error.to_dict()
+                        ),
+                        "usage": {} if record is None else dict(record.usage or {}),
+                    }
+                )
+            return {
+                "workspace_id": workspace_id,
+                "session_id": session_id,
+                "items": items,
+                "next_cursor": page.next_cursor,
+            }
+        except SubAgentRequestError as error:
+            raise service_error("validation_error", str(error), status=422) from error
+        except SubAgentStoreError as error:
+            raise service_error(
+                "persistence_error",
+                "SubAgent records could not be read safely.",
+                status=500,
+                retryable=True,
+            ) from error
+
+    def get_subagent(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        agent_id: str,
+    ) -> dict[str, object]:
+        client = self._require_client(client_id)
+        workspace = self.workspace(workspace_id)
+        client.attached_workspaces.add(workspace_id)
+        workspace._require_persisted_subagent_session(session_id)
+        repository = workspace.subagent_repository(session_id)
+        coordinator = workspace._subagent_coordinator(session_id)
+        try:
+            record = (
+                coordinator.get(agent_id)
+                if coordinator is not None
+                else repository.get(agent_id)
+            )
+        except SubAgentRequestError as error:
+            raise service_error("validation_error", str(error), status=422) from error
+        except SubAgentStoreError as error:
+            raise service_error(
+                "persistence_error",
+                "SubAgent records could not be read safely.",
+                status=500,
+                retryable=True,
+            ) from error
+        if record is None or record.session_id != session_id:
+            raise service_error("not_found", "SubAgent was not found.", status=404)
+        return self._subagent_detail(workspace_id, session_id, record)
+
+    async def cancel_subagent(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        agent_id: str,
+    ) -> dict[str, object]:
+        client = self._require_client(client_id)
+        workspace = self.workspace(workspace_id)
+        client.attached_workspaces.add(workspace_id)
+        workspace._require_persisted_subagent_session(session_id)
+        repository = workspace.subagent_repository(session_id)
+        coordinator = workspace._subagent_coordinator(session_id)
+        try:
+            record = repository.get(agent_id)
+            if record is None or record.session_id != session_id:
+                raise service_error("not_found", "SubAgent was not found.", status=404)
+            if record.status in {SubAgentStatus.QUEUED, SubAgentStatus.RUNNING}:
+                if coordinator is None:
+                    raise service_error(
+                        "subagent_unavailable",
+                        "Active SubAgent execution is unavailable for cancellation.",
+                        status=503,
+                        retryable=True,
+                    )
+                record = await coordinator.cancel_and_wait(agent_id)
+                if record is None:
+                    raise service_error("not_found", "SubAgent was not found.", status=404)
+            return {
+                "workspace_id": workspace_id,
+                "session_id": session_id,
+                "cancelled": record.status is SubAgentStatus.CANCELLED,
+                "agent": self._subagent_detail(workspace_id, session_id, record),
+            }
+        except SubAgentRequestError as error:
+            raise service_error("validation_error", str(error), status=422) from error
+        except SubAgentStoreError as error:
+            raise service_error(
+                "persistence_error",
+                "SubAgent cancellation could not be persisted safely.",
+                status=500,
+                retryable=True,
+            ) from error
+
+    @staticmethod
+    def _subagent_detail(
+        workspace_id: str,
+        session_id: str,
+        record: SubAgentRecord,
+    ) -> dict[str, object]:
+        return {
+            "workspace_id": workspace_id,
+            "session_id": session_id,
+            "agent_id": record.agent_id,
+            "title": record.title,
+            "task": record.task,
+            "source": record.source.kind.value,
+            "status": record.status.value,
+            "created_at": record.created_at.isoformat(),
+            "started_at": None if record.started_at is None else record.started_at.isoformat(),
+            "finished_at": None if record.finished_at is None else record.finished_at.isoformat(),
+            "revision": record.revision,
+            "conversation": list(record.conversation),
+            "result": record.result,
+            "error": None if record.error is None else record.error.to_dict(),
+            "usage": dict(record.usage or {}),
         }
 
     async def list_sessions(self, client_id: str, workspace_id: str) -> list[dict[str, object]]:
@@ -5666,16 +6033,32 @@ class AgentService:
 
     async def stop(self) -> None:
         if self._stop_task is not None:
-            await self._stop_task
-            return
-        self._stop_task = asyncio.create_task(self._stop_owned())
-        await self._stop_task
+            task = self._stop_task
+            if not task.done():
+                await task
+                return
+            try:
+                task.result()
+            except BaseException:
+                self._stop_task = None
+            else:
+                return
+        task = asyncio.create_task(self._stop_owned())
+        self._stop_task = task
+        try:
+            await task
+        except BaseException:
+            if self._stop_task is task:
+                self._stop_task = None
+            raise
 
     async def _stop_owned(self) -> None:
         if self.state == "stopped":
             return
         self.state = "draining"
         errors: list[Exception] = []
+        for workspace in tuple(self._workspaces.values()):
+            workspace.close_subagent_admission()
         if self._global_reconnect_task is not None:
             self._global_reconnect_task.cancel()
         await self._reconcile_schedule_admission()
@@ -5694,15 +6077,23 @@ class AgentService:
                 await workspace.pause_schedule_admission()
             except Exception as error:
                 errors.append(error)
-        try:
-            await self.confirmation.close()
-        except Exception as error:
-            errors.append(error)
         for workspace in tuple(self._workspaces.values()):
             try:
                 await workspace.close()
             except Exception as error:
                 errors.append(error)
+        if any(workspace._subagent_shutdown_failed for workspace in self._workspaces.values()):
+            self._stop_failed = True
+            raise service_error(
+                "service_stop_failed",
+                "The local service could not persist SubAgent shutdown state; retry after storage is repaired.",
+                status=500,
+                retryable=True,
+            ) from ExceptionGroup("Local service SubAgent cleanup failed", errors)
+        try:
+            await self.confirmation.close()
+        except Exception as error:
+            errors.append(error)
         try:
             await self._workspace_resources.close()
         except Exception as error:

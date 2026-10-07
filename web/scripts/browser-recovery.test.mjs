@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   readBrowserRecoverySnapshot,
+  reconcileBrowserRecovery,
+  writeBrowserRecoverySnapshot,
+  clearBrowserRecoverySnapshot,
 } from "../src/browserRecovery.ts";
 
 function recovery(effort, draft = true) {
@@ -49,3 +52,103 @@ for (const effort of ["medium", "unknown", "MID", null, 1]) {
     assert.equal(state.writes, 0);
   });
 }
+
+function connection(overrides = {}) {
+  return {
+    currentInstanceId: "service-1",
+    previousInstanceId: "service-1",
+    initial: false,
+    expectedRestart: false,
+    location: { pathname: "/chat", search: "?session=session-1" },
+    ...overrides,
+  };
+}
+
+test("reconnect retains the draft and current route", () => {
+  const saved = recovery("high");
+  const decision = reconcileBrowserRecovery(saved, connection());
+  assert.deepEqual(decision, {
+    snapshot: saved, storage: "keep", serviceChanged: false, navigation: null,
+  });
+});
+
+test("initial connection restores an unselected conversation", () => {
+  const decision = reconcileBrowserRecovery(recovery("high"), connection({
+    previousInstanceId: null, initial: true, location: { pathname: "/", search: "" },
+  }));
+  assert.deepEqual(decision.navigation, {
+    kind: "conversation", route: "/chat?session=session-1&directory=D%3A%5Cworkspace",
+  });
+});
+
+test("initial connection respects an explicit session selection", () => {
+  const decision = reconcileBrowserRecovery(recovery("high"), connection({
+    previousInstanceId: null, initial: true,
+    location: { pathname: "/chat", search: "?session=explicit-session" },
+  }));
+  assert.equal(decision.navigation, null);
+});
+
+test("expected restart migrates identity while preserving unsent work", () => {
+  const saved = recovery("high");
+  const decision = reconcileBrowserRecovery(saved, connection({
+    currentInstanceId: "service-2", expectedRestart: true,
+  }));
+  assert.equal(decision.storage, "write");
+  assert.equal(decision.serviceChanged, true);
+  assert.deepEqual(decision.snapshot, { ...saved, service_instance_id: "service-2" });
+  assert.equal(saved.service_instance_id, "service-1");
+  assert.equal(decision.navigation.kind, "conversation");
+});
+
+test("expected restart on settings updates the return destination", () => {
+  const decision = reconcileBrowserRecovery(recovery("high"), connection({
+    currentInstanceId: "service-2", expectedRestart: true,
+    location: { pathname: "/settings", search: "" },
+  }));
+  assert.deepEqual(decision.navigation, {
+    kind: "settings-return", route: "/chat?session=session-1&directory=D%3A%5Cworkspace",
+  });
+});
+
+test("unexpected service replacement clears the stale conversation", () => {
+  const decision = reconcileBrowserRecovery(recovery("high"), connection({
+    currentInstanceId: "service-2",
+  }));
+  assert.equal(decision.snapshot, null);
+  assert.equal(decision.storage, "clear");
+  assert.deepEqual(decision.navigation, { kind: "conversation", route: "/" });
+});
+
+test("stale recovery on initial settings connection keeps the settings page", () => {
+  const decision = reconcileBrowserRecovery(recovery("high"), connection({
+    currentInstanceId: "service-2", previousInstanceId: null, initial: true,
+    location: { pathname: "/settings", search: "" },
+  }));
+  assert.equal(decision.snapshot, null);
+  assert.equal(decision.storage, "clear");
+  assert.equal(decision.navigation, null);
+});
+
+test("initial project selection respects the requested project", () => {
+  const saved = { ...recovery("high"), target: { kind: "project", project_id: "project-1" } };
+  const decision = reconcileBrowserRecovery(saved, connection({
+    previousInstanceId: null, initial: true,
+    location: { pathname: "/projects/project-2", search: "" },
+  }));
+  assert.equal(decision.navigation, null);
+});
+
+test("unavailable browser storage leaves recovery optional", t => {
+  storage(t, null);
+  const unavailable = () => { throw new Error("Storage unavailable"); };
+  Object.assign(globalThis.window.localStorage, {
+    getItem: unavailable, setItem: unavailable, removeItem: unavailable,
+  });
+  assert.equal(readBrowserRecoverySnapshot(), null);
+  assert.doesNotThrow(() => writeBrowserRecoverySnapshot(recovery("high")));
+  assert.doesNotThrow(() => clearBrowserRecoverySnapshot());
+  const decision = reconcileBrowserRecovery(null, connection());
+  assert.equal(decision.snapshot, null);
+  assert.equal(decision.navigation, null);
+});

@@ -33,6 +33,54 @@ export interface NewChatBrowserRecoverySnapshot {
 
 export type BrowserRecoverySnapshot = SessionBrowserRecoverySnapshot | NewChatBrowserRecoverySnapshot;
 
+export interface BrowserRecoveryConnection {
+  currentInstanceId: string;
+  previousInstanceId: string | null;
+  initial: boolean;
+  expectedRestart: boolean;
+  location: { pathname: string; search: string };
+}
+
+export interface BrowserRecoveryDecision {
+  snapshot: BrowserRecoverySnapshot | null;
+  storage: "keep" | "write" | "clear";
+  serviceChanged: boolean;
+  navigation: { kind: "conversation" | "settings-return"; route: string } | null;
+}
+
+export function reconcileBrowserRecovery(
+  snapshot: BrowserRecoverySnapshot | null,
+  connection: BrowserRecoveryConnection,
+): BrowserRecoveryDecision {
+  const { currentInstanceId, previousInstanceId, initial, location } = connection;
+  const serviceChanged = previousInstanceId !== null && previousInstanceId !== currentInstanceId;
+  const expectedRestart = serviceChanged && connection.expectedRestart;
+  let recovery = snapshot;
+  let storage: BrowserRecoveryDecision["storage"] = "keep";
+  let navigation: BrowserRecoveryDecision["navigation"] = null;
+
+  if (expectedRestart && recovery !== null) {
+    recovery = { ...recovery, service_instance_id: currentInstanceId };
+    storage = "write";
+    navigation = {
+      kind: location.pathname === "/settings" ? "settings-return" : "conversation",
+      route: browserRecoveryRoute(recovery),
+    };
+  }
+  if ((serviceChanged && !expectedRestart)
+    || (recovery !== null && recovery.service_instance_id !== currentInstanceId)) {
+    recovery = null;
+    storage = "clear";
+    if ((initial || serviceChanged) && isConversationPath(location.pathname)) {
+      navigation = { kind: "conversation", route: "/" };
+    }
+  } else if (recovery !== null && initial
+    && shouldRestoreBrowserRecovery(location.pathname, location.search, recovery)) {
+    navigation = { kind: "conversation", route: browserRecoveryRoute(recovery) };
+  }
+  return { snapshot: recovery, storage, serviceChanged, navigation };
+}
+
 export function readBrowserRecoverySnapshot(): BrowserRecoverySnapshot | null {
   try {
     const raw = window.localStorage.getItem(BROWSER_RECOVERY_KEY);
@@ -116,4 +164,30 @@ function isSessionModelConfiguration(value: unknown): value is SessionModelConfi
 
 function hasOnlyKeys(value: Record<string, unknown>, keys: string[]): boolean {
   return Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key));
+}
+
+function isConversationPath(pathname: string): boolean {
+  return pathname === "/" || pathname === "/chat" || /^\/projects\/[^/]+$/.test(pathname);
+}
+
+function shouldRestoreBrowserRecovery(
+  pathname: string,
+  search: string,
+  snapshot: BrowserRecoverySnapshot,
+): boolean {
+  if (!isConversationPath(pathname)) return false;
+  const params = new URLSearchParams(search);
+  if (params.has("session")) return false;
+  if (pathname.startsWith("/projects/")) {
+    let projectId: string;
+    try {
+      projectId = decodeURIComponent(pathname.slice("/projects/".length));
+    } catch {
+      return false;
+    }
+    return snapshot.target.kind === "project" && snapshot.target.project_id === projectId;
+  }
+  const requestedDirectory = params.get("directory");
+  return requestedDirectory === null
+    || (snapshot.target.kind === "chat" && snapshot.target.directory === requestedDirectory);
 }

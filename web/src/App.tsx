@@ -146,6 +146,7 @@ import {
   browserRecoveryRoute,
   clearBrowserRecoverySnapshot,
   readBrowserRecoverySnapshot,
+  reconcileBrowserRecovery,
   writeBrowserRecoverySnapshot,
 } from "./browserRecovery";
 import type { BrowserRecoverySnapshot, SessionBrowserRecoverySnapshot } from "./browserRecovery";
@@ -549,46 +550,32 @@ export default function App() {
       onServiceStatus: setServiceStatus,
       onRegisteredClient: setRegisteredClient,
       onServiceInstanceChange: (currentInstanceId, previousInstanceId, initial) => {
-        const serviceChanged = previousInstanceId !== null
-          && previousInstanceId !== currentInstanceId;
-        if (serviceChanged) setMemoryTarget(null);
-        serviceInstanceIdRef.current = currentInstanceId;
-        let savedRecovery = readBrowserRecoverySnapshot();
-        const expectedRestart = serviceChanged && expectedRestartRef.current;
-        if (serviceChanged) expectedRestartRef.current = false;
-        if (expectedRestart && savedRecovery !== null) {
-          savedRecovery = { ...savedRecovery, service_instance_id: currentInstanceId };
-          writeBrowserRecoverySnapshot(savedRecovery);
-          const route = new URL(browserRecoveryRoute(savedRecovery), window.location.origin);
-          if (window.location.pathname === "/settings") {
-            const state = window.history.state?.usr as SettingsNavigationState | null;
-            navigateRef.current("/settings", { replace: true, state: {
-              ...state,
-              returnTo: { ...state?.returnTo, pathname: route.pathname, search: route.search,
-                hash: "", scrollTop: state?.returnTo?.scrollTop ?? 0 },
-            } satisfies SettingsNavigationState });
-          } else {
-            navigateRef.current(`${route.pathname}${route.search}`, { replace: true, state: null });
-          }
+        const decision = reconcileBrowserRecovery(readBrowserRecoverySnapshot(), {
+          currentInstanceId, previousInstanceId, initial,
+          expectedRestart: expectedRestartRef.current,
+          location: window.location,
+        });
+        if (decision.serviceChanged) {
+          setMemoryTarget(null);
+          expectedRestartRef.current = false;
         }
-        if ((serviceChanged && !expectedRestart) || (savedRecovery !== null
-          && savedRecovery.service_instance_id !== currentInstanceId)) {
+        serviceInstanceIdRef.current = currentInstanceId;
+        if (decision.storage === "write" && decision.snapshot !== null) {
+          writeBrowserRecoverySnapshot(decision.snapshot);
+        } else if (decision.storage === "clear") {
           clearBrowserRecoverySnapshot();
-          setBrowserRecovery(null);
-          if ((initial || serviceChanged) && isConversationPath(window.location.pathname)) {
-            navigateRef.current("/", { replace: true, state: null });
-          }
-        } else if (savedRecovery !== null) {
-          setBrowserRecovery(savedRecovery);
-          if (initial && shouldRestoreBrowserRecovery(
-            window.location.pathname,
-            window.location.search,
-            savedRecovery,
-          )) {
-            navigateRef.current(browserRecoveryRoute(savedRecovery), { replace: true, state: null });
-          }
-        } else {
-          setBrowserRecovery(null);
+        }
+        setBrowserRecovery(decision.snapshot);
+        if (decision.navigation?.kind === "settings-return") {
+          const route = new URL(decision.navigation.route, window.location.origin);
+          const state = window.history.state?.usr as SettingsNavigationState | null;
+          navigateRef.current("/settings", { replace: true, state: {
+            ...state,
+            returnTo: { ...state?.returnTo, pathname: route.pathname, search: route.search,
+              hash: "", scrollTop: state?.returnTo?.scrollTop ?? 0 },
+          } satisfies SettingsNavigationState });
+        } else if (decision.navigation !== null) {
+          navigateRef.current(decision.navigation.route, { replace: true, state: null });
         }
       },
       onConnectionOpen: () => setSessionEventVersion((version) => version + 1),
@@ -8838,32 +8825,6 @@ function readAndClearTicket(): string | null {
     window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.search}`);
   }
   return ticket;
-}
-
-function isConversationPath(pathname: string): boolean {
-  return pathname === "/" || pathname === "/chat" || /^\/projects\/[^/]+$/.test(pathname);
-}
-
-function shouldRestoreBrowserRecovery(
-  pathname: string,
-  search: string,
-  snapshot: BrowserRecoverySnapshot,
-): boolean {
-  if (!isConversationPath(pathname)) return false;
-  const params = new URLSearchParams(search);
-  if (params.has("session")) return false;
-  if (pathname.startsWith("/projects/")) {
-    let projectId: string;
-    try {
-      projectId = decodeURIComponent(pathname.slice("/projects/".length));
-    } catch {
-      return false;
-    }
-    return snapshot.target.kind === "project" && snapshot.target.project_id === projectId;
-  }
-  const requestedDirectory = params.get("directory");
-  return requestedDirectory === null
-    || (snapshot.target.kind === "chat" && snapshot.target.directory === requestedDirectory);
 }
 
 function readThemePreference(): Theme {

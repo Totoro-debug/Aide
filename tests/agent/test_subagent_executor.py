@@ -352,9 +352,10 @@ async def test_subagent_gateway_limits_catalog_and_search_to_creator_snapshot(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("call_id", ["same-call-id", "../../unsafe-call-id"])
 async def test_two_subagents_with_same_tool_call_id_keep_distinct_artifacts(
-    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
     call_id: str,
 ) -> None:
+    tmp_path = tmp_path_factory.mktemp("art")
     state, session_id = _workspace(tmp_path)
     store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
     tool = _LongResultTool()

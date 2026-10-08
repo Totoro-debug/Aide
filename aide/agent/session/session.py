@@ -888,7 +888,6 @@ class Session:
         except ValueError as error:
             raise ValueError(f"{field} must be a valid Schedule Session ID") from error
 
-
 def _coerce_partition(value: SessionStoragePartition | str) -> SessionStoragePartition:
     if isinstance(value, SessionStoragePartition):
         return value

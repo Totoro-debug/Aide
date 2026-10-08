@@ -454,14 +454,7 @@ class AgentRunExecutor:
             reasoning_effort=reasoning_effort,
             permission_level=permission_snapshot.level,
             shell=self._exec_host.resolved_shell.selector,
-            tool_schemas=tuple(
-                {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "input_schema": deepcopy(tool.parameters),
-                }
-                for tool in run_gateway.catalog
-            ),
+            tool_names=tuple(tool.name for tool in run_gateway.catalog),
             system_prompt=system_prompt,
         )
         base_context = self._tool_gateway.tool_context

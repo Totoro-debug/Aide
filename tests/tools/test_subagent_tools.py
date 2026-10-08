@@ -91,7 +91,7 @@ def _harness(
             reasoning_effort="mid",
             permission_level="workspace-write",
             shell="pwsh",
-            tool_schemas=({"name": "read_file"},),
+            tool_names=("read_file",),
             system_prompt="You are Aide.",
         ),
     )
@@ -208,7 +208,7 @@ async def test_wait_tool_returns_compact_results_and_rejects_invalid_or_foreign_
             reasoning_effort="mid",
             permission_level="workspace-write",
             shell="pwsh",
-            tool_schemas=({"name": "read_file"},),
+            tool_names=("read_file",),
             system_prompt="You are Aide.",
         ),
     )

@@ -68,7 +68,7 @@ def _snapshot() -> SubAgentCreatorSnapshot:
         reasoning_effort="mid",
         permission_level="workspace-write",
         shell="pwsh",
-        tool_schemas=({"name": "read_file", "input_schema": {"type": "object"}},),
+        tool_names=("read_file",),
         system_prompt="You are Aide.",
     )
 

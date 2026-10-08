@@ -425,7 +425,7 @@ class SubAgentRunnerExecutor:
         return run_router, build_agent_run_gateway(
             self._tool_gateway,
             excluded_names=_DISALLOWED_TOOL_NAMES,
-            allowed_names=tuple(schema["name"] for schema in creator.tool_schemas),
+            allowed_names=creator.tool_names,
             mcp_keywords=self._mcp_keywords,
             permission_snapshot=permission_snapshot,
             tool_context=tool_context,

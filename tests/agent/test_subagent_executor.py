@@ -118,7 +118,7 @@ def _creator_snapshot(*names: str) -> SubAgentCreatorSnapshot:
         reasoning_effort="high",
         permission_level="workspace-write",
         shell="pwsh",
-        tool_schemas=tuple({"name": name} for name in names),
+        tool_names=names,
         system_prompt="child-only-system-prompt",
     )
 
@@ -304,17 +304,31 @@ async def test_subagent_gateway_limits_catalog_and_search_to_creator_snapshot(
     tmp_path: Path,
 ) -> None:
     tools = (_MarkerTool(), _ForbiddenTool())
+    state, session_id = _workspace(tmp_path)
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
     gateway = ToolGateway._for_memory(
         tools,
-        tool_context=_tool_context(tmp_path),
+        tool_context=_tool_context(state.workspace_path),
     )
     parent = build_agent_run_gateway(gateway)
     parent_exposure = parent.exposed_names
-    child = build_agent_run_gateway(
-        gateway,
-        allowed_names=("marker_tool", "tool_search", "spawn_agent"),
-        excluded_names=("spawn_agent", "wait_agent", "schedule"),
+    record = _register_running(
+        store,
+        title="Frozen catalog",
+        snapshot=replace(
+            _creator_snapshot(), tool_names=tuple(tool.name for tool in parent.catalog)
+        ),
     )
+    expanded_gateway = ToolGateway._for_memory(
+        (*tools, _LongResultTool()),
+        permission_context=PermissionContext(workspace_root=state.workspace_path),
+        tool_context=gateway.tool_context,
+    )
+    executor = _executor(state, store, ScriptedFakeProvider(), expanded_gateway)
+    _, child = executor._create_run_resources(record)
+    assert {tool.name for tool in child.catalog} == {"marker_tool", "tool_search"}
+    added = await child.call(ModelToolCall(id="later-tool", name="long_result", arguments="{}"))
+    assert added.status == "error"
 
     assert {schema["function"]["name"] for schema in child.schemas} == {"tool_search"}
     search = await child.call(

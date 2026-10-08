@@ -164,7 +164,7 @@ async def test_restore_replay_removes_only_discarded_subagents_before_complete(
         reasoning_effort="mid",
         permission_level="workspace-write",
         shell="pwsh",
-        tool_schemas=({"name": "read_file", "input_schema": {"type": "object"}},),
+        tool_names=("read_file",),
         system_prompt="You are Aide.",
     )
 

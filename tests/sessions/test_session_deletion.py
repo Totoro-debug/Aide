@@ -102,7 +102,7 @@ async def test_session_deletion_removes_subagent_records_and_artifacts(
             reasoning_effort="mid",
             permission_level="workspace-write",
             shell="pwsh",
-            tool_schemas=({"name": "read_file", "input_schema": {"type": "object"}},),
+            tool_names=("read_file",),
             system_prompt="You are Aide.",
         ),
     )

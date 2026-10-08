@@ -19,7 +19,7 @@ from aide.utils.validation import (
     token_usage_validation_issue,
 )
 
-SUBAGENT_RECORD_SCHEMA_VERSION = 1
+SUBAGENT_RECORD_SCHEMA_VERSION = 2
 _USAGE_FIELDS = frozenset({"model_calls", "input_tokens", "output_tokens", "total_tokens"})
 
 
@@ -98,7 +98,7 @@ class SubAgentCreatorSnapshot:
     reasoning_effort: ReasoningEffort
     permission_level: str
     shell: str | None
-    tool_schemas: tuple[dict[str, Any], ...]
+    tool_names: tuple[str, ...]
     system_prompt: str
 
     def __post_init__(self) -> None:
@@ -111,15 +111,12 @@ class SubAgentCreatorSnapshot:
             _require_nonempty_string(self.shell, field="creator_snapshot.shell")
         if not isinstance(self.system_prompt, str):
             raise ValueError("creator_snapshot.system_prompt must be a string")
-        if any(not isinstance(schema, dict) for schema in self.tool_schemas):
-            raise ValueError("creator_snapshot.tool_schemas must contain objects")
-        _ensure_json_value(list(self.tool_schemas), field="creator_snapshot.tool_schemas")
-        names = tuple(schema.get("name") for schema in self.tool_schemas)
-        if any(not isinstance(name, str) or not name.strip() for name in names):
-            raise ValueError("creator_snapshot.tool_schemas must have nonempty names")
-        if len(set(names)) != len(names):
-            raise ValueError("creator_snapshot.tool_schemas must not contain duplicate names")
-        object.__setattr__(self, "tool_schemas", copy.deepcopy(self.tool_schemas))
+        if not isinstance(self.tool_names, tuple) or any(
+            not isinstance(name, str) or not name.strip() for name in self.tool_names
+        ):
+            raise ValueError("creator_snapshot.tool_names must contain nonempty strings")
+        if len(set(self.tool_names)) != len(self.tool_names):
+            raise ValueError("creator_snapshot.tool_names must not contain duplicate names")
 
     def to_dict(self) -> dict[str, object]:
         self.__post_init__()
@@ -129,7 +126,7 @@ class SubAgentCreatorSnapshot:
             "reasoning_effort": self.reasoning_effort,
             "permission_level": self.permission_level,
             "shell": self.shell,
-            "tool_schemas": copy.deepcopy(list(self.tool_schemas)),
+            "tool_names": list(self.tool_names),
             "system_prompt": self.system_prompt,
         }
 
@@ -302,6 +299,9 @@ class SubAgentRecord:
         }
         if set(value) != fields:
             raise ValueError("SubAgent record fields do not match the current format")
+        schema_version = _integer(value["schema_version"], field="schema_version")
+        if schema_version != SUBAGENT_RECORD_SCHEMA_VERSION:
+            raise ValueError("SubAgent record schema version is unsupported")
         source = _source_from_dict(value["source"])
         creator_snapshot = _snapshot_from_dict(value["creator_snapshot"])
         created_at = _datetime_from_value(value["created_at"], field="created_at")
@@ -355,7 +355,7 @@ class SubAgentRecord:
             result=result,
             error=error,
             usage=usage,
-            schema_version=_integer(value["schema_version"], field="schema_version"),
+            schema_version=schema_version,
         )
 
 
@@ -516,15 +516,13 @@ def _snapshot_from_dict(value: object) -> SubAgentCreatorSnapshot:
         "reasoning_effort",
         "permission_level",
         "shell",
-        "tool_schemas",
+        "tool_names",
         "system_prompt",
     }:
         raise ValueError("SubAgent creator snapshot fields do not match the current format")
-    tool_schemas = value["tool_schemas"]
-    if not isinstance(tool_schemas, list) or any(
-        not isinstance(item, dict) for item in tool_schemas
-    ):
-        raise ValueError("SubAgent creator snapshot tool_schemas must be a list of objects")
+    tool_names = value["tool_names"]
+    if not isinstance(tool_names, list) or any(not isinstance(item, str) for item in tool_names):
+        raise ValueError("SubAgent creator snapshot tool_names must be a list of strings")
     return SubAgentCreatorSnapshot(
         provider_id=_string(value["provider_id"], field="creator_snapshot.provider_id"),
         model=_string(value["model"], field="creator_snapshot.model"),
@@ -536,7 +534,7 @@ def _snapshot_from_dict(value: object) -> SubAgentCreatorSnapshot:
             value["permission_level"], field="creator_snapshot.permission_level"
         ),
         shell=_optional_string(value["shell"], field="creator_snapshot.shell"),
-        tool_schemas=tuple(cast(dict[str, Any], item) for item in tool_schemas),
+        tool_names=tuple(tool_names),
         system_prompt=_string(value["system_prompt"], field="creator_snapshot.system_prompt"),
     )
 

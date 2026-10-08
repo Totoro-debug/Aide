@@ -5,6 +5,7 @@ import os
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -49,10 +50,7 @@ def _snapshot() -> SubAgentCreatorSnapshot:
         reasoning_effort="mid",
         permission_level="workspace-write",
         shell="pwsh",
-        tool_schemas=(
-            {"name": "read_file", "input_schema": {"type": "object"}},
-            {"name": "list_dir", "input_schema": {"type": "object"}},
-        ),
+        tool_names=("read_file", "list_dir"),
         system_prompt="You are Aide.",
     )
 
@@ -114,6 +112,19 @@ def test_record_round_trips_through_a_new_session_scoped_store(tmp_path: Path) -
 
     assert loaded == completed
     assert loaded.creator_snapshot.provider_id == "test-provider"
+    assert loaded.creator_snapshot.tool_names == ("read_file", "list_dir")
+    path = state.subagents_directory / session_id / f"{completed.agent_id}.json"
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["schema_version"] == 2
+    assert saved["creator_snapshot"] == {
+        "provider_id": "test-provider",
+        "model": "chat",
+        "reasoning_effort": "mid",
+        "permission_level": "workspace-write",
+        "shell": "pwsh",
+        "tool_names": ["read_file", "list_dir"],
+        "system_prompt": "You are Aide.",
+    }
     assert repository.session_id == session_id
 
 
@@ -539,17 +550,41 @@ def test_list_uses_twenty_item_default_and_rejects_out_of_range_limits(
             store.list(limit=invalid_limit)
 
 
-def test_unknown_schema_version_is_reported_as_a_persistence_error(tmp_path: Path) -> None:
+@pytest.mark.parametrize("schema_version", [1, 9])
+def test_unknown_schema_version_is_reported_without_writing_records(
+    tmp_path: Path, schema_version: int
+) -> None:
     state, session_id = _workspace(tmp_path)
     store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
     record = _register(store, "Future schema")
     path = state.subagents_directory / session_id / f"{record.agent_id}.json"
     value = json.loads(path.read_text(encoding="utf-8"))
-    value["schema_version"] = 9
+    value["schema_version"] = schema_version
+    if schema_version == 1:
+        value["creator_snapshot"]["tool_schemas"] = [
+            {"name": name, "input_schema": {"type": "object"}}
+            for name in value["creator_snapshot"].pop("tool_names")
+        ]
     path.write_text(json.dumps(value), encoding="utf-8")
+    original = path.read_bytes()
+    writes: list[Path] = []
+
+    def observe_write(target: Path, content: str) -> None:
+        writes.append(target)
+        HOST_FILESYSTEM.atomic_replace_text(target, content)
 
     with pytest.raises(SubAgentStoreError, match="schema version is unsupported"):
         store.get(record.agent_id)
+    with pytest.raises(SubAgentStoreError, match="schema version is unsupported"):
+        SubAgentRecordStore(state, session_id, now=lambda: _NOW, replace_text=observe_write)
+    assert writes == []
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("names", [("",), (" ",), (3,), ("read_file", "read_file")])
+def test_creator_snapshot_rejects_invalid_tool_names(names: tuple[object, ...]) -> None:
+    with pytest.raises(ValueError, match="tool_names"):
+        replace(_snapshot(), tool_names=cast(tuple[str, ...], names))
 
 
 def test_schedule_source_round_trips_job_and_occurrence_ownership(tmp_path: Path) -> None:
@@ -607,7 +642,7 @@ def test_failed_registration_after_publication_does_not_leave_a_queued_record(
     assert SubAgentRecordStore(state, session_id, now=lambda: _NOW).list().items == ()
 
 
-def test_registration_detaches_the_creators_mutable_tool_capabilities(tmp_path: Path) -> None:
+def test_registration_freezes_the_creators_tool_names(tmp_path: Path) -> None:
     state, session_id = _workspace(tmp_path)
     store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
     snapshot = _snapshot()
@@ -619,10 +654,10 @@ def test_registration_detaches_the_creators_mutable_tool_capabilities(tmp_path: 
         creator_snapshot=snapshot,
     )
 
-    snapshot.tool_schemas[0]["name"] = "changed_tool"
-    snapshot.tool_schemas[0]["input_schema"]["type"] = "array"
+    snapshot = replace(snapshot, tool_names=(*snapshot.tool_names, "changed_tool"))
 
-    assert queued.creator_snapshot.tool_schemas[0]["name"] == "read_file"
+    assert queued.creator_snapshot.tool_names == ("read_file", "list_dir")
+    assert snapshot.tool_names == ("read_file", "list_dir", "changed_tool")
     assert store.get(queued.agent_id) == queued
     running = replace(
         queued, status=SubAgentStatus.RUNNING, started_at=_NOW, revision=queued.revision + 1

@@ -873,11 +873,22 @@ class WorkspaceRecord:
         for coordinator in tuple(self._subagent_coordinators.values()):
             coordinator.unblock_source(job_id)
 
-    def _require_persisted_subagent_session(self, session_id: str) -> None:
+    def _require_subagent_session(self, session_id: str) -> None:
         try:
             Session._require_id(session_id)
             if not session_id.startswith("schedule_"):
                 self._ensure_session_available(session_id)
+            state = self._loops.get(session_id)
+            if state is not None:
+                session = state.loop.session
+                if (
+                    session.session_id != session_id
+                    or session.workspace_state is not self.workspace_state
+                ):
+                    raise service_error(
+                        "not_found", "Conversation Session was not found.", status=404
+                    )
+                return
             Session.load(self.workspace_state, session_id)
         except FileNotFoundError as error:
             raise service_error("not_found", "Conversation Session was not found.", status=404) from error
@@ -4717,7 +4728,7 @@ class AgentService:
         client = self._require_client(client_id)
         workspace = self.workspace(workspace_id)
         client.attached_workspaces.add(workspace_id)
-        workspace._require_persisted_subagent_session(session_id)
+        workspace._require_subagent_session(session_id)
         repository = workspace.subagent_repository(session_id)
         coordinator = workspace._subagent_coordinator(session_id)
         try:
@@ -4776,7 +4787,7 @@ class AgentService:
         client = self._require_client(client_id)
         workspace = self.workspace(workspace_id)
         client.attached_workspaces.add(workspace_id)
-        workspace._require_persisted_subagent_session(session_id)
+        workspace._require_subagent_session(session_id)
         repository = workspace.subagent_repository(session_id)
         coordinator = workspace._subagent_coordinator(session_id)
         try:
@@ -4808,7 +4819,7 @@ class AgentService:
         client = self._require_client(client_id)
         workspace = self.workspace(workspace_id)
         client.attached_workspaces.add(workspace_id)
-        workspace._require_persisted_subagent_session(session_id)
+        workspace._require_subagent_session(session_id)
         repository = workspace.subagent_repository(session_id)
         coordinator = workspace._subagent_coordinator(session_id)
         try:

@@ -15,6 +15,7 @@ import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
 from aide.agent.confirmation import ConfirmationEnvelope, SubAgentConfirmationOwner
+from aide.agent.session.deletion import begin_session_deletion
 from aide.agent.session.session import Session
 from aide.agent.subagents.coordinator import SubAgentPool
 from aide.agent.subagents.models import (
@@ -460,6 +461,112 @@ class _DelegatingProvider:
         return None
 
 
+class _FirstDraftProvider(_DelegatingProvider):
+    def __init__(self, *, wait_for_child: bool = False) -> None:
+        super().__init__()
+        self.spawn_count = 0
+        self.started: asyncio.Queue[None] = asyncio.Queue()
+        self.parent_ready = asyncio.Event()
+        self.allow_parent = asyncio.Event()
+        self.cleanup_started = asyncio.Event()
+        self.allow_cleanup = asyncio.Event()
+        self.wait_for_child = wait_for_child
+        self.wait_emitted = asyncio.Event()
+
+    def stream(
+        self,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        model: str,
+        max_output: int,
+        temperature: float,
+        reasoning_effort: object,
+        timeout: int,
+        continuation: object = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        del model, max_output, temperature, reasoning_effort, timeout, continuation
+        user_text = "\n".join(str(message.get("content", "")) for message in messages)
+        tool_names = {tool["function"]["name"] for tool in tools}
+        if "first draft delegation request" in user_text:
+            if "spawn_agent" not in tool_names:
+                return self._events(
+                    "",
+                    tool_call=ModelToolCall(
+                        "first-search-spawn",
+                        "tool_search",
+                        '{"query":"spawn agent wait agent"}',
+                    ),
+                )
+            if self.spawn_count < 9:
+                index = self.spawn_count
+                self.spawn_count += 1
+                return self._events(
+                    "",
+                    tool_call=ModelToolCall(
+                        f"first-spawn-{index}",
+                        "spawn_agent",
+                        json.dumps(
+                            {
+                                "title": f"First draft child {index}",
+                                "task": "Hold the delegated child.",
+                            }
+                        ),
+                    ),
+                )
+            if self.wait_requested:
+                self.wait_result_contents = [
+                    str(message.get("content", ""))
+                    for message in messages
+                    if message.get("role") == "tool" and message.get("tool_call_id") == "first-wait"
+                ]
+                return self._events("First main Run completed after waiting.")
+
+            async def finish_parent() -> AsyncIterator[ModelStreamEvent]:
+                self.parent_ready.set()
+                await self.allow_parent.wait()
+                if self.wait_for_child:
+                    self.wait_requested = True
+                    self.wait_emitted.set()
+                    yield ModelCompleted(
+                        self._response(
+                            "",
+                            tool_call=ModelToolCall(
+                                "first-wait",
+                                "wait_agent",
+                                json.dumps({"agent_ids": [self.agent_id]}),
+                            ),
+                        )
+                    )
+                else:
+                    yield ModelCompleted(self._response("First main Run completed."))
+
+            return finish_parent()
+
+        if not any(message.get("tool_call_id") == "first-child-search" for message in messages):
+            return self._events(
+                "Persisted first child output.",
+                tool_call=ModelToolCall(
+                    "first-child-search",
+                    "tool_search",
+                    '{"query":"list agents"}',
+                ),
+            )
+
+        async def hold_child() -> AsyncIterator[ModelStreamEvent]:
+            yield TextDelta("Persisted first child output.")
+            self.started.put_nowait(None)
+            try:
+                await self.release_child.wait()
+            except asyncio.CancelledError:
+                self.cleanup_started.set()
+                await self.allow_cleanup.wait()
+                raise
+            yield ModelCompleted(self._response("First child finished."))
+
+        return hold_child()
+
+
 @pytest_asyncio.fixture
 async def management_case(
     tmp_path: Path,
@@ -528,6 +635,266 @@ async def test_subagent_queries_survive_claim_release_and_remain_session_scoped(
                 "923e4567-e89b-42d3-a456-426614174000",
             )
         assert error.value.code == "not_found"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["chat", "project"])
+async def test_first_draft_run_allows_subagent_queries_and_cancellation_before_persist(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    scope: Literal["chat", "project"],
+) -> None:
+    service, workspace, client_id, _session_id, other_session_id = management_case
+    if scope == "project":
+        await service.register_project(client_id, workspace.workspace_path)
+    provider = _FirstDraftProvider()
+    service.model_router._provider_factory = lambda _configuration: provider
+    service.model_router._providers.clear()
+    session_id = await workspace.create_draft(
+        client_id,
+        reuse_startup_session=False,
+        creation_scope=scope,
+    )
+    claim_payload = cast(
+        dict[str, Any],
+        (await service.claim(client_id, workspace.workspace_id, session_id))["claim"],
+    )
+    claim = workspace.require_claim(client_id, session_id, claim_payload["claim_version"])
+    session = claim.loop.session
+    path = workspace.workspace_state.sessions_directory / f"{session_id}.jsonl"
+    sink = cast(_CollectingSink, service.client(client_id).sink)
+    try:
+        await workspace.input(
+            client_id,
+            session_id,
+            claim.version,
+            "First input: first draft delegation request.",
+            _RUN_ID,
+        )
+        await asyncio.wait_for(provider.parent_ready.wait(), timeout=20)
+        for _ in range(8):
+            await asyncio.wait_for(provider.started.get(), timeout=20)
+        assert not path.exists()
+        original_metadata = dict(session.metadata)
+        original_messages = list(session.messages)
+        page = service.list_subagents(client_id, workspace.workspace_id, session_id)
+        items = cast(list[dict[str, Any]], page["items"])
+        assert len(items) == 9
+        running = next(item for item in items if item["title"] == "First draft child 0")
+        queued = next(item for item in items if item["title"] == "First draft child 8")
+        detail = service.get_subagent(
+            client_id, workspace.workspace_id, session_id, running["agent_id"]
+        )
+        assert detail["status"] == "running"
+        assert "Persisted first child output." in json.dumps(detail["conversation"])
+        assert queued["status"] == "queued"
+        assert not path.exists()
+        assert session.metadata == original_metadata
+        assert session.messages == original_messages
+        queued_result = await service.cancel_subagent(
+            client_id,
+            workspace.workspace_id,
+            session_id,
+            queued["agent_id"],
+        )
+        assert queued_result["cancelled"] is True
+        cancellation = asyncio.create_task(
+            service.cancel_subagent(
+                client_id,
+                workspace.workspace_id,
+                session_id,
+                running["agent_id"],
+            )
+        )
+        await asyncio.wait_for(provider.cleanup_started.wait(), timeout=3)
+        assert not cancellation.done()
+        assert claim.loop.has_active_run
+        provider.allow_cleanup.set()
+        assert (await cancellation)["cancelled"] is True
+        assert not path.exists()
+        assert provider.started.empty(), "The queued child must never start"
+        untouched = service.list_subagents(client_id, workspace.workspace_id, session_id)
+        assert (
+            sum(
+                item["status"] == "running"
+                for item in cast(list[dict[str, Any]], untouched["items"])
+            )
+            == 7
+        )
+        for target_session in (session_id, other_session_id):
+            with pytest.raises(ServiceError) as missing:
+                service.get_subagent(
+                    client_id,
+                    workspace.workspace_id,
+                    target_session,
+                    str(uuid4()) if target_session == session_id else running["agent_id"],
+                )
+            assert missing.value.status == 404
+        provider.allow_parent.set()
+        await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=5)
+        await claim.loop.wait_for_restore_idle()
+        output_task = workspace.loops[session_id].output_task
+        if output_task is not None:
+            await asyncio.wait_for(output_task, timeout=5)
+        await workspace.release(client_id, session_id)
+        assert (
+            service.get_subagent(
+                client_id, workspace.workspace_id, session_id, running["agent_id"]
+            )["status"]
+            == "cancelled"
+        )
+        assert (
+            await service.cancel_subagent(
+                client_id, workspace.workspace_id, session_id, running["agent_id"]
+            )
+        )["cancelled"] is True
+        survivor = next(item for item in items if item["title"] == "First draft child 1")
+        assert (
+            await service.cancel_subagent(
+                client_id, workspace.workspace_id, session_id, survivor["agent_id"]
+            )
+        )["cancelled"] is True
+    finally:
+        provider.allow_cleanup.set()
+        provider.allow_parent.set()
+        provider.release_child.set()
+
+
+@pytest.mark.asyncio
+async def test_user_cancellation_releases_wait_agent_in_the_first_draft_run(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    service, workspace, client_id, _session_id, _other_session_id = management_case
+    provider = _FirstDraftProvider(wait_for_child=True)
+    service.model_router._provider_factory = lambda _configuration: provider
+    service.model_router._providers.clear()
+    session_id = await workspace.create_draft(
+        client_id, reuse_startup_session=False, creation_scope="chat"
+    )
+    claim_payload = cast(
+        dict[str, Any],
+        (await service.claim(client_id, workspace.workspace_id, session_id))["claim"],
+    )
+    sink = cast(_CollectingSink, service.client(client_id).sink)
+    cancellation: asyncio.Task[dict[str, object]] | None = None
+    try:
+        await workspace.input(
+            client_id,
+            session_id,
+            claim_payload["claim_version"],
+            "first draft delegation request",
+            _RUN_ID,
+        )
+        await asyncio.wait_for(provider.parent_ready.wait(), timeout=20)
+        for _ in range(8):
+            await asyncio.wait_for(provider.started.get(), timeout=20)
+        items = cast(
+            list[dict[str, Any]],
+            service.list_subagents(client_id, workspace.workspace_id, session_id)["items"],
+        )
+        provider.agent_id = next(
+            item["agent_id"] for item in items if item["title"] == "First draft child 0"
+        )
+        provider.allow_parent.set()
+        await asyncio.wait_for(provider.wait_emitted.wait(), timeout=5)
+        await asyncio.sleep(0)
+        path = workspace.workspace_state.sessions_directory / f"{session_id}.jsonl"
+        assert not path.exists()
+        cancellation = asyncio.create_task(
+            service.cancel_subagent(
+                client_id, workspace.workspace_id, session_id, cast(str, provider.agent_id)
+            )
+        )
+        await asyncio.wait_for(provider.cleanup_started.wait(), timeout=3)
+        assert not cancellation.done()
+        assert not any(
+            event["type"] == "run.completed" and event["run_id"] == _RUN_ID for event in sink.events
+        )
+        provider.allow_cleanup.set()
+        assert (await cancellation)["cancelled"] is True
+        await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=5)
+        assert provider.wait_result_contents
+        assert "cancelled" in provider.wait_result_contents[0]
+        assert cast(str, provider.agent_id) in provider.wait_result_contents[0]
+    finally:
+        provider.allow_cleanup.set()
+        provider.allow_parent.set()
+        provider.release_child.set()
+        if cancellation is not None:
+            await asyncio.gather(cancellation, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_subagent_management_requires_session_authority_and_preserves_deletion_guard(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    service, workspace, client_id, _session_id, _other_session_id = management_case
+    orphan = Session.create(workspace.workspace_state)
+    repository = SubAgentRecordStore(workspace.workspace_state, orphan.session_id)
+    pool = SubAgentPool(repository, _HoldingExecutor())
+    workspace.register_subagent_coordinator(pool, repository)
+    record = _register(repository, "An orphan record cannot establish Session authority")
+    draft = await workspace.create_draft(
+        client_id, reuse_startup_session=False, creation_scope="chat"
+    )
+    begin_session_deletion(workspace.workspace_state, draft)
+    for target, code, status in (
+        (orphan.session_id, "not_found", 404),
+        (Session.create(workspace.workspace_state).session_id, "not_found", 404),
+        ("invalid/session", "validation_error", 422),
+        (draft, "session_deleting", 409),
+    ):
+        for action in ("list", "get", "cancel"):
+            with pytest.raises(ServiceError) as failure:
+                if action == "list":
+                    service.list_subagents(client_id, workspace.workspace_id, target)
+                elif action == "get":
+                    service.get_subagent(client_id, workspace.workspace_id, target, record.agent_id)
+                else:
+                    await service.cancel_subagent(
+                        client_id, workspace.workspace_id, target, record.agent_id
+                    )
+            assert (failure.value.code, failure.value.status) == (code, status)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partition", ["foreground", "schedule"])
+async def test_historical_subagent_session_read_failure_still_reports_persistence_error(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    partition: str,
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    directory = workspace.workspace_state.sessions_directory
+    if partition == "schedule":
+        session = Session.create_schedule(workspace.workspace_state, str(uuid4()))
+        session.commit_agent_run(
+            [{"role": "user", "content": "Schedule history"}],
+            pending_last_compacted=0,
+            pending_action_summary=None,
+        )
+        await session.wait_for_pending_persist()
+        session_id = session.session_id
+        directory = workspace.workspace_state.schedule_sessions_directory
+    history_path = directory / f"{session_id}.jsonl"
+    read_file = HOST_FILESYSTEM.require_owned_regular_file
+
+    def fail_history_read(path: Path, *, within: Path) -> Path:
+        if path == history_path:
+            raise OSError("History cannot be read")
+        return read_file(path, within=within)
+
+    monkeypatch.setattr(HOST_FILESYSTEM, "require_owned_regular_file", fail_history_read)
+    for action in ("list", "get", "cancel"):
+        with pytest.raises(ServiceError) as failure:
+            if action == "list":
+                service.list_subagents(client_id, workspace.workspace_id, session_id)
+            elif action == "get":
+                service.get_subagent(client_id, workspace.workspace_id, session_id, str(uuid4()))
+            else:
+                await service.cancel_subagent(
+                    client_id, workspace.workspace_id, session_id, str(uuid4())
+                )
+        assert (failure.value.code, failure.value.status) == ("persistence_error", 500)
 
 
 @pytest.mark.asyncio

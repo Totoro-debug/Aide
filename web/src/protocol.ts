@@ -82,13 +82,6 @@ export interface SubAgentCancelResponse {
   agent: SubAgentDetail;
 }
 
-export interface SubAgentEventPayload {
-  agent_id: string;
-  revision: number;
-  occurred_at: string;
-  data: Record<string, unknown>;
-}
-
 export type ConfirmationOrigin = "foreground" | "background";
 
 export interface ConfirmationRequest {

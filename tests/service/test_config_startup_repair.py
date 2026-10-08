@@ -156,14 +156,14 @@ async def test_malformed_configuration_is_repaired_after_exact_private_backup(
             http,
             str(server.make_url("/api/v1/config")),
             headers,
-            "restart-required",
+            "next-run-required",
         )
 
     assert repair_response.status == 200
     assert repaired["backup_id"].startswith("sha256:")
     assert active["configuration"]["state"] == "active"
     assert active["application"]["active_revision"] is None
-    assert not service.configuration_ready
+    assert service.configuration_ready
     assert service.service_instance_id == instance_id
     assert config_path.read_bytes() != REPAIRABLE_CONFIG
     backups = tuple(service.agent_home.path.glob("config.toml.backup.*"))

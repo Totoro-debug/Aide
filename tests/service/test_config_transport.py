@@ -14,6 +14,7 @@ from aiohttp.test_utils import BaseTestServer, TestServer
 
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigLoader, ProviderConfiguration
+from aide.service.configuration import ConfigurationSnapshot
 from aide.service.discovery import create_credential
 from aide.service.runtime import AgentService
 from aide.service.transport import create_app
@@ -135,15 +136,26 @@ async def test_available_models_exposes_active_capacity_and_default_without_secr
         },
     }
     assert "minimal-secret" not in str(initial)
-    assert active == initial
-    assert cast(dict[str, object], saved["application"])["restart_required"] is True
+    assert active["models"] == [
+        {"provider_id": "primary", "model": "small-model", "context_window": 16384}
+    ]
+    assert active["default_combination"] == initial["default_combination"]
+    assert cast(dict[str, object], saved["application"])["restart_required"] is False
     assert service.configuration is not None
-    assert service.configuration.resolve_route("chat").route.context_window == 8192
+    assert service.configuration.resolve_route("chat").route.context_window == 16384
 
 
 @pytest.mark.asyncio
-async def test_available_models_excludes_unusable_providers(config_http: ConfigHttp) -> None:
+async def test_available_models_excludes_unusable_providers(
+    config_http: ConfigHttp, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service, _server, _client_id, _control = config_http
+
+    def capture() -> ConfigurationSnapshot:
+        assert service.configuration is not None
+        return ConfigurationSnapshot("projection-fixture", service.configuration)
+
+    monkeypatch.setattr(service._configuration_editor, "capture", capture)
     configuration = service.configuration
     assert configuration is not None
     provider = configuration.models.providers["primary"]
@@ -224,7 +236,7 @@ async def test_config_patch_rejects_invalid_values_without_writing(
 
 
 @pytest.mark.asyncio
-async def test_config_patch_reports_restart_required_and_stale_conflict(
+async def test_config_patch_reports_next_run_application_and_stale_conflict(
     config_http: ConfigHttp,
 ) -> None:
     service, server, client_id, control = config_http
@@ -262,12 +274,12 @@ async def test_config_patch_reports_restart_required_and_stale_conflict(
 
     assert response.status == 200
     assert saved["fields"]["runtime"]["max_iterations"] == 80
-    assert saved["application"]["status"] == "restart-required"
-    assert saved["application"]["restart_required"] is True
-    assert active["application"]["status"] == "restart-required"
+    assert saved["application"]["status"] == "next-run-required"
+    assert saved["application"]["restart_required"] is False
+    assert active["application"]["status"] == "next-run-required"
     assert active["application"]["active_revision"] == revision
     assert service.configuration is not None
-    assert service.configuration.runtime.max_iterations == 50
+    assert service.configuration.runtime.max_iterations == 80
     assert active["fields"]["runtime"]["max_iterations"] == 80
     assert conflict_response.status == 409
     assert conflict["code"] == "config_revision_conflict"
@@ -723,9 +735,9 @@ async def test_pending_service_reports_saved_config_restart_requirement(tmp_path
                 })
                 body = await response.json()
         assert response.status == 200
-        assert body["startup"]["available"] is False
-        assert body["startup"]["error"]["code"] == "config_restart_required"
-        assert body["application"]["status"] == "restart-required"
+        assert body["startup"]["available"] is True
+        assert body["startup"]["error"] is None
+        assert body["application"]["status"] == "next-run-required"
         assert "minimal-secret" not in str(body)
     finally:
         await service.stop()
@@ -769,7 +781,7 @@ async def live_service(tmp_path: Path) -> AsyncIterator[tuple[AgentService, Path
 
 
 @pytest.mark.asyncio
-async def test_config_save_preserves_workspace_and_later_activation_uses_startup_settings(
+async def test_config_save_preserves_workspace_and_later_activation_uses_new_settings(
     live_service: tuple[AgentService, Path],
 ) -> None:
     service, workspace_path = live_service
@@ -787,15 +799,15 @@ async def test_config_save_preserves_workspace_and_later_activation_uses_startup
     second_path.mkdir()
     later = await service.attach_workspace(client.client_id, second_path)
     assert saved["application"] == {
-        "status": "restart-required",
+        "status": "next-run-required",
         "saved_revision": saved["revision"],
         "active_revision": revision,
-        "restart_required": True,
+        "restart_required": False,
     }
     assert workspace.resources is old_runtime
     for owner in (workspace, later):
-        assert owner.configuration.runtime.max_iterations == 50
-        assert owner.configuration.memory.batch_size == 10
+        assert owner.configuration.runtime.max_iterations == 81
+        assert owner.configuration.memory.batch_size == 11
     await service.stop()
     restarted = AgentService(service.agent_home, reconnect_timeout=3600)
     try:

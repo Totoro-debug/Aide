@@ -36,6 +36,39 @@ type ProviderFactory = Callable[[ProviderConfiguration], ProviderImplementation]
 type Jitter = Callable[[float], float]
 
 
+class _ProviderPool:
+    """Share SDK clients across configuration versions while each Router owns a lease."""
+
+    def __init__(self) -> None:
+        self._entries: dict[tuple[str, str, str, str], tuple[ModelProvider, int]] = {}
+
+    @staticmethod
+    def key(configuration: ProviderConfiguration) -> tuple[str, str, str, str]:
+        return (
+            configuration.provider_id, configuration.protocol,
+            configuration.base_url, configuration.api_key,
+        )
+
+    def acquire(
+        self, configuration: ProviderConfiguration, factory: ProviderFactory,
+    ) -> ModelProvider:
+        key = self.key(configuration)
+        provider, users = self._entries.get(key, (None, 0))
+        if provider is None:
+            provider = factory(configuration)
+        self._entries[key] = (provider, users + 1)
+        return provider
+
+    def release(self, configuration: ProviderConfiguration) -> ModelProvider | None:
+        key = self.key(configuration)
+        provider, users = self._entries[key]
+        if users > 1:
+            self._entries[key] = (provider, users - 1)
+            return None
+        del self._entries[key]
+        return provider
+
+
 @dataclass(frozen=True, slots=True)
 class ModelRouteStatus:
     """Secret-free snapshot of the route selected for one logical purpose."""
@@ -211,12 +244,28 @@ class ModelRouter:
         self._clock = clock
         self._jitter = jitter
         self._providers: dict[str, ProviderImplementation] = {}
+        self._provider_pool = _ProviderPool()
+        self._provider_configurations: dict[str, ProviderConfiguration] = {}
         self._route_statuses: dict[ModelRoute, ModelRouteStatus] = {}
         self._current_call_statuses: ContextVar[dict[ModelRoute, ModelRouteStatus] | None] = (
             ContextVar("aide_model_router_call_statuses", default=None)
         )
         self._reasoning_effort_override: ReasoningEffort | None = None
         self._close_task: asyncio.Task[None] | None = None
+
+    def fork(self, configuration: UserConfiguration) -> "ModelRouter":
+        """Freeze new routes while retaining unchanged, already-created Provider clients."""
+        router = ModelRouter(
+            configuration=configuration, provider_factory=self._provider_factory,
+            clock=self._clock, jitter=self._jitter,
+        )
+        router._provider_pool = self._provider_pool
+        router._reasoning_effort_override = self._reasoning_effort_override
+        for provider_id, previous in self._provider_configurations.items():
+            selected = configuration.models.providers.get(provider_id)
+            if selected is not None and self._provider_pool.key(selected) == self._provider_pool.key(previous):
+                router._provider(selected)
+        return router
 
     def for_run(
         self,
@@ -444,8 +493,12 @@ class ModelRouter:
         await asyncio.shield(task)
 
     async def _close_providers(self) -> None:
-        providers = tuple(self._providers.values())
+        providers = tuple(
+            provider for configuration in self._provider_configurations.values()
+            if (provider := self._provider_pool.release(configuration)) is not None
+        )
         self._providers.clear()
+        self._provider_configurations.clear()
         unique = _unique_providers(providers)
         results = await asyncio.gather(
             *(provider.close() for provider in unique),
@@ -511,8 +564,9 @@ class ModelRouter:
             raise RuntimeError("Model Router is closed")
         provider = self._providers.get(configuration.provider_id)
         if provider is None:
-            provider = self._provider_factory(configuration)
+            provider = self._provider_pool.acquire(configuration, self._provider_factory)
             self._providers[configuration.provider_id] = provider
+            self._provider_configurations[configuration.provider_id] = configuration
         return provider
 
     def _begin_call(

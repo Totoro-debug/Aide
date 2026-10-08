@@ -50,6 +50,13 @@ class RuntimePermissionControl:
     def __init__(self, configured_level: ToolPermissionLevel) -> None:
         self._configured_level = validate_permission_level(configured_level)
         self._current_level = self._configured_level
+        self._selected = False
+
+    def reconfigure(self, level: ToolPermissionLevel) -> None:
+        """Update defaults while preserving an explicit Client selection."""
+        self._configured_level = validate_permission_level(level)
+        if not self._selected:
+            self._current_level = self._configured_level
 
     def configured(self) -> ToolPermissionLevel:
         return self._configured_level
@@ -59,6 +66,7 @@ class RuntimePermissionControl:
 
     def select(self, level: ToolPermissionLevel) -> None:
         self._current_level = validate_permission_level(level)
+        self._selected = True
 
     def snapshot(self, exec_shell: PermissionExecShell) -> PermissionSnapshot:
         return PermissionSnapshot(level=self._current_level, exec_shell=exec_shell)

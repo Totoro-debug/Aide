@@ -43,6 +43,15 @@ class ConfigurationSave:
     changed: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ConfigurationSnapshot:
+    """One complete validated configuration eligible for a subsequent Run."""
+
+    revision: str
+    configuration: UserConfiguration
+    generation: int = 0
+
+
 def _configuration_request_fingerprint(
     client_id: str | None,
     action: str,
@@ -124,10 +133,40 @@ class ConfigurationEditor:
         self._requires_secret_reentry = configuration is None
         self._projection_error: dict[str, str] | None = None
         self._startup_diagnostics: tuple[str, ...] = ()
+        self._snapshot_revision: str | None = None
+        self._snapshot_generation = 0
+        self._active_generation = 0
 
     @property
     def ready(self) -> bool:
-        return self._active_revision is not None
+        return self._active_revision is not None or self._saved_configuration is not None
+
+    def capture(self) -> ConfigurationSnapshot:
+        """Check external edits before capturing a complete candidate for execution."""
+        self.view()
+        if self._saved_configuration is None or self._saved_revision is None:
+            raise service_error(
+                "config_invalid", "Repair User Configuration before starting new work.", status=422
+            )
+        if self._snapshot_revision != self._saved_revision:
+            self._snapshot_revision = self._saved_revision
+            self._snapshot_generation += 1
+        return ConfigurationSnapshot(
+            self._saved_revision, self._saved_configuration, self._snapshot_generation,
+        )
+
+    def activate(self, snapshot: ConfigurationSnapshot) -> bool:
+        """Publish the version whose execution resources were prepared successfully."""
+        if snapshot.generation < self._active_generation:
+            return False
+        changed = self._active_revision != snapshot.revision
+        self._active_revision = snapshot.revision
+        self._active_generation = snapshot.generation
+        self._status = (
+            "pending-repair" if self._repair_required else
+            "active" if self._saved_revision == snapshot.revision else "next-run-required"
+        )
+        return changed
 
     def start(self) -> UserConfiguration | None:
         """Capture the startup revision once and return its eligible configuration."""
@@ -154,7 +193,7 @@ class ConfigurationEditor:
         return None
 
     def view(self) -> dict[str, object]:
-        """Read saved settings without changing this service's startup configuration."""
+        """Read saved settings and report whether later Runs need a new snapshot."""
         snapshot = self._loader.web_snapshot()
         self._saved_revision = snapshot.revision
         self._saved_configuration = snapshot.configuration if snapshot.state == "active" else None
@@ -170,7 +209,7 @@ class ConfigurationEditor:
             if snapshot.repair_required
             else "active"
             if snapshot.revision == self._active_revision
-            else "restart-required"
+            else "next-run-required"
         )
         return self._response()
 
@@ -196,12 +235,12 @@ class ConfigurationEditor:
     def startup_view(self) -> dict[str, object]:
         """Prepare the CLI configuration template and report Service startup eligibility."""
         result = self.view()
-        available = self._active_revision is not None
+        available = self.ready and not self._repair_required
         error = None if available else self._projection_error
         if not available and error is None:
             error = {
-                "code": "config_restart_required",
-                "message": "User Configuration was saved; restart the Agent Service before starting a conversation.",
+                "code": "config_invalid",
+                "message": "Repair User Configuration before starting a conversation.",
             }
         if not available and self._state == "missing":
             self.text_view()
@@ -337,20 +376,17 @@ class ConfigurationEditor:
                 "status": self._status,
                 "saved_revision": saved_revision,
                 "active_revision": self._active_revision,
-                "restart_required": (
-                    not self._repair_required and saved_revision != self._active_revision
-                ),
+                "restart_required": False,
             },
         }
 
     def status_text(self) -> str:
-        """Render the same save/restart state for Command-line management."""
+        """Render the version available to subsequent Runs for Command-line management."""
         application = cast(dict[str, object], self.view()["application"])
-        restart = "yes" if application["restart_required"] else "no"
         return (
             f"Saved version: {application['saved_revision']}\n"
-            f"Startup version: {application['active_revision'] or '-'}\n"
-            f"Restart required: {restart}\n"
+            f"Active version: {application['active_revision'] or '-'}\n"
+            "Configuration changes apply to the next Agent Run.\n"
         )
 
     async def save(self, edit: ConfigurationEdit) -> ConfigurationSave:
@@ -454,7 +490,7 @@ class ConfigurationEditor:
             self._requires_secret_reentry = False
             self._projection_error = None
             self._status = (
-                "active" if result.revision == self._active_revision else "restart-required"
+                "active" if result.revision == self._active_revision else "next-run-required"
             )
             response = self._response()
             if action == "repair":

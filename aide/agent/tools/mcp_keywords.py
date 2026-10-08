@@ -61,6 +61,12 @@ class MCPKeywordPreparer:
         self._config_loader = config_loader
         self._cache: dict[_KeywordCacheKey, tuple[str, ...]] = {}
 
+    def for_router(self, router: KeywordModelRouter) -> MCPKeywordPreparer:
+        """Reuse discovery metadata while later preparation uses its captured route."""
+        preparer = MCPKeywordPreparer(router, self._config_loader)
+        preparer._cache = self._cache
+        return preparer
+
     async def prepare(
         self,
         tools: Sequence[MCPTool],

@@ -138,7 +138,7 @@ async def _status(case: ManagementCase, **kwargs: Any) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
-async def test_cli_config_reports_saved_and_startup_versions_and_restart_requirement(
+async def test_cli_config_reports_saved_and_active_versions_and_next_run_application(
     management_case: ManagementCase,
 ) -> None:
     case = management_case
@@ -149,8 +149,8 @@ async def test_cli_config_reports_saved_and_startup_versions_and_restart_require
     result = await _request(case, "dispatch", command="/config")
     output = cast(str, result["output"])
     assert f"Saved version: {saved['revision']}" in output
-    assert f"Startup version: {revision}" in output
-    assert "Restart required: yes" in output
+    assert f"Active version: {revision}" in output
+    assert "Configuration changes apply to the next Agent Run." in output
     assert "minimal-secret" not in output
 
 

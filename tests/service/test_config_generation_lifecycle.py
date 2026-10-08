@@ -8,6 +8,7 @@ from typing import cast
 import pytest
 
 from aide.config.agent_home import AgentHome
+from aide.service.errors import ServiceError
 from aide.service.runtime import AgentService
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.service.test_service_concurrency import _CollectingSink
@@ -15,7 +16,7 @@ from tests.service.test_service_concurrency import _CollectingSink
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "external", [MINIMAL_VALID_CONFIG + "\n[runtime]\nmax_iterations = 83\n", "[broken"]
+    "external", [MINIMAL_VALID_CONFIG.replace("compact_ratio = 0.9", "compact_ratio = 0.9\nmax_iterations = 83"), "[broken"]
 )
 async def test_external_changes_preserve_resources_and_admission(
     tmp_path: Path, external: str
@@ -42,8 +43,13 @@ async def test_external_changes_preserve_resources_and_admission(
         assert service.configuration_ready and first.schedule_admitted
         later_path = tmp_path / "later"
         later_path.mkdir()
+        if cast(dict[str, object], view["configuration"])["repair_required"]:
+            with pytest.raises(ServiceError, match="Repair User Configuration"):
+                await service.attach_workspace(client.client_id, later_path)
+            assert not (later_path / ".aide").exists()
+            return
         later = await service.attach_workspace(client.client_id, later_path)
-        assert later.configuration is startup
+        assert later.configuration.runtime.max_iterations == 83
         session = await later.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, later.workspace_id, session)
         before = later.session_snapshot(session)

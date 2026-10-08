@@ -18,14 +18,14 @@ Each Run owns context preparation, permission and Skill snapshots, Tool exposure
 
 | Lifetime | Resources |
 | --- | --- |
-| Service | Skills, Built-in Tool catalog, Model Router/Providers, Exec Host, HTTP MCP, event broker, confirmation coordinator, startup configuration |
+| Service | Skills, Built-in Tool catalog, Model Router/Providers, Exec Host, HTTP MCP, event broker, confirmation coordinator, configuration snapshots and resource leases |
 | Workspace association | Stores, Memory, Dream, Schedule state and coordination, stdio MCP |
 | Session | Authoritative history/metadata, FIFO, Claim coordination, optional active processor |
 | Agent Run | Captured projections, Gateway view, authorization, cancellation, transient execution state |
 
 Opening another Session creates no Provider or MCP connection. HTTP MCP initializes globally; stdio MCP initializes once per active Workspace. Loaded Session histories stay resident until deletion, target Restore replacement, or service exit; releasing a Claim does not discard history. This reduces duplicated resources and idle tasks without bounding total memory or active work.
 
-One global Skill reload publishes a validated snapshot for later Runs across Sessions. Active Runs retain their captured snapshot, and failed reload retains the previous one. Ordinary configuration saves, repairs, and external edits take effect on the next service startup. Runtime permission selection affects a client's later Runs. Global chat Reasoning Effort updates memory before best-effort configuration persistence; cooperating configuration writers serialize reread and atomic publication under the Agent Home lock.
+One global Skill reload publishes a validated snapshot for later Runs across Sessions. Active Runs retain their captured snapshot, and failed reload retains the previous one. Valid configuration saves, repairs, and external edits become eligible for each Session's next Run; queued input captures configuration when execution starts. Resource preparation shares unchanged Provider clients and MCP connections while retaining changed versions for existing Runs, title work, and already-registered SubAgents. Rebuilding Session histories or draining accepted work would couple a settings edit to unrelated execution, so configuration resources have an independent lifetime. Retired resources close after their Workspace and execution leases are released. Invalid configuration cannot replace a working resource snapshot and blocks new execution until repaired. Runtime permission selection affects a client's later Runs and overrides the configured default. Global chat Reasoning Effort updates memory before best-effort configuration persistence; cooperating configuration writers serialize reread and atomic publication under the Agent Home lock.
 
 An explicit Session model/effort combination is captured when its Run starts, before the first wait, and drives foreground requests and budgeting. Later selection changes affect later Runs; auxiliary routes keep their purposes. Restore preserves the current selection. An unavailable selection leaves history readable but prevents new work until replaced.
 

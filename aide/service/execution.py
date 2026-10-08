@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from uuid import UUID, uuid4
 
@@ -34,6 +34,9 @@ class SessionExecution:
         status_input: Callable[[], RuntimeStatusInput],
         *,
         run_state: SessionRunState | None = None,
+        prepare_executor: Callable[
+            [SessionRunState], Awaitable[tuple[AgentRunExecutor, Callable[[], None]]]
+        ] | None = None,
     ) -> None:
         self.session = session
         self._run_state = SessionRunState(uuid4()) if run_state is None else run_state
@@ -41,6 +44,8 @@ class SessionExecution:
         self._create_executor: Callable[[], AgentRunExecutor] = lambda: create_executor(self._run_state)
         self._reload_skills = reload_skills
         self._status_input = status_input
+        self._prepare_executor = prepare_executor
+        self._preparing_task: asyncio.Task[object] | None = None
         self._active: AgentRunExecutor | None = None
         self._pending_flushes: set[asyncio.Task[None]] = set()
         self._flush_errors: list[Exception] = []
@@ -53,7 +58,7 @@ class SessionExecution:
 
     @property
     def has_active_run(self) -> bool:
-        return self._active is not None
+        return self._active is not None or self._preparing_task is not None
 
     @property
     def active_model_configuration(self) -> SessionModelConfiguration | None:
@@ -63,18 +68,36 @@ class SessionExecution:
         return not (self._closed or self._replacement_barrier_held)
 
     async def run_foreground(self, inbound: InboundMessage) -> None:
-        if not self.foreground_input_admitted() or self._active is not None:
+        if not self.foreground_input_admitted() or self.has_active_run:
             raise RuntimeError("Session is unavailable for execution")
-        executor = self._create_executor()
+        executor, release = await self._executor_for_run()
         self._active = executor
         try:
             await executor.start()
             await executor.run_foreground(inbound)
         finally:
             self._active = None
-            flush = asyncio.create_task(executor.wait_for_restore_idle())
+            flush = asyncio.create_task(self._finish_executor(executor, release))
             self._pending_flushes.add(flush)
             flush.add_done_callback(self._flush_done)
+
+    async def _executor_for_run(self) -> tuple[AgentRunExecutor, Callable[[], None] | None]:
+        if self._prepare_executor is None:
+            return self._create_executor(), None
+        self._preparing_task = asyncio.current_task()
+        try:
+            return await self._prepare_executor(self._run_state)
+        finally:
+            self._preparing_task = None
+
+    async def _finish_executor(
+        self, executor: AgentRunExecutor, release: Callable[[], None] | None,
+    ) -> None:
+        try:
+            await executor.wait_for_restore_idle()
+        finally:
+            if release is not None:
+                release()
 
     def _flush_done(self, task: asyncio.Task[None]) -> None:
         self._pending_flushes.discard(task)
@@ -86,18 +109,22 @@ class SessionExecution:
     async def run_schedule_job(
         self, job: ScheduleJob, occurrence: ScheduleOccurrence | None = None
     ) -> None:
-        if self._closed or self._active is not None:
+        if self._closed or self.has_active_run:
             raise RuntimeError("Schedule Session is unavailable for execution")
-        executor = self._create_executor()
+        executor, release = await self._executor_for_run()
         self._active = executor
         try:
             await executor.start()
             await executor.run_schedule_job(job, occurrence)
         finally:
             self._active = None
-            await self.session.wait_for_pending_persist()
+            await self._finish_executor(executor, release)
 
     async def cancel_active_run(self) -> None:
+        preparation = self._preparing_task
+        if preparation is not None and preparation is not asyncio.current_task():
+            preparation.cancel()
+            await asyncio.gather(preparation, return_exceptions=True)
         active = self._active
         if active is not None:
             await active.cancel_active_run()
@@ -131,6 +158,10 @@ class SessionExecution:
 
     async def abort(self) -> None:
         self._closed = True
+        preparation = self._preparing_task
+        if preparation is not None and preparation is not asyncio.current_task():
+            preparation.cancel()
+            await asyncio.gather(preparation, return_exceptions=True)
         if self._active is not None:
             await self._active.abort()
         await self._run_state.finish_title_work()

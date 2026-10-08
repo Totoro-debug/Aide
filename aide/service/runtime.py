@@ -72,7 +72,6 @@ from aide.agent.tools.core.exec_host import ExecHost, create_exec_host, resolve_
 from aide.agent.tools.mcp_keywords import MCPKeywordPreparer
 from aide.agent.tools.mcp_runtime import MCPRuntimeManager, MCPWorkspaceRuntimeManager
 from aide.agent.tools.tool_gateway import (
-    BUILT_IN_TOOL_NAMES,
     BuiltInToolCatalog,
     ConfirmationRequest,
     ConfirmationRequester,
@@ -106,7 +105,12 @@ from aide.schedule.store import (
     ScheduleStoreFaultedError,
     WorkspaceScheduleStore,
 )
-from aide.service.configuration import ConfigurationEdit, ConfigurationEditor
+from aide.service.configuration import ConfigurationEdit, ConfigurationEditor, ConfigurationSnapshot
+from aide.service.configuration_resources import (
+    ConfigurationResourceManager,
+    SharedConfigurationResources,
+    WorkspaceConfigurationResources,
+)
 from aide.service.contracts import (
     ConversationClaimDTO,
     ConversationOpenDTO,
@@ -2304,27 +2308,6 @@ class WorkspaceRecord:
         bus: MessageBus | None = None,
     ) -> tuple[SessionExecution, MessageBus]:
         selected_bus = MessageBus() if bus is None else bus
-        loop_kwargs: dict[str, Any] = {
-            "workspace_path": self.workspace_path,
-            "workspace_state": self.workspace_state,
-            "agent_home": self.service.agent_home,
-            "configuration": configuration,
-            "bus": selected_bus,
-            "schedule_service": schedule_service,
-            "model_router": runtime.router,
-            "memory_manager": runtime.memory_manager,
-            "now": local_now,
-            "new_uuid": uuid4,
-            "monotonic_now": monotonic,
-            "mcp_tools": runtime.mcp_snapshot,
-            "mcp_keywords": runtime.mcp_keywords,
-            "exec_host": exec_host,
-            "permission_control": permission_control,
-            "configured_schedule_level": configuration.runtime.permission_level,
-            "skill_loader": self.service.skill_loader,
-            "built_in_catalog": self.service.built_in_tool_catalog,
-            "subagent_model_router": runtime.router,
-        }
         authority = session
         if authority is None:
             authority = (
@@ -2335,12 +2318,46 @@ class WorkspaceRecord:
 
         run_state = SessionRunState(uuid4())
 
-        def create_executor(session_state: SessionRunState) -> AgentRunExecutor:
+        def create_executor(
+            session_state: SessionRunState,
+            configured: WorkspaceConfigurationResources | None = None,
+            captured_skills: SkillLoader | None = None,
+        ) -> AgentRunExecutor:
             state = self._loops.get(authority.session_id)
             owner = None if state is None else state.owner_client_id
-            loop_kwargs["permission_control"] = (
+            control = (
                 self._schedule_permission if owner is None else self.service.client_permission(owner)
             )
+            current_configuration = (
+                self.configuration if configured is None else configured.shared.snapshot.configuration
+            )
+            router = (
+                ModelRouter(configuration=current_configuration, provider_factory=create_provider)
+                if configured is None else configured.shared.router
+            )
+            loop_kwargs: dict[str, Any] = {
+                "workspace_path": self.workspace_path,
+                "workspace_state": self.workspace_state,
+                "agent_home": self.service.agent_home,
+                "configuration": current_configuration,
+                "bus": selected_bus,
+                "schedule_service": schedule_service,
+                "model_router": router,
+                "memory_manager": runtime.memory_manager,
+                "now": local_now,
+                "new_uuid": uuid4,
+                "monotonic_now": monotonic,
+                "mcp_tools": runtime.mcp_snapshot if configured is None else configured.mcp_report.snapshot,
+                "mcp_keywords": runtime.mcp_keywords if configured is None else configured.keywords,
+                "exec_host": exec_host if configured is None else configured.shared.exec_host,
+                "permission_control": control,
+                "configured_schedule_level": current_configuration.runtime.permission_level,
+                "skill_loader": self.service.skill_loader if captured_skills is None else captured_skills,
+                "built_in_catalog": (
+                    self.service.built_in_tool_catalog if configured is None else configured.shared.built_in_catalog
+                ),
+                "subagent_model_router": router,
+            }
             executor = AgentRunExecutor(
                 session=authority, session_id=None, session_run_state=session_state, **loop_kwargs
             )
@@ -2362,7 +2379,42 @@ class WorkspaceRecord:
                 )
                 self.register_subagent_coordinator(coordinator, repository)
             executor.bind_subagent_coordinator(coordinator)
+            if configured is not None and isinstance(coordinator, SubAgentPool):
+                child = executor.create_subagent_runner_executor(
+                    self.subagent_repository(authority.session_id),
+                    workspace_id=self.workspace_id,
+                    confirmation_for=self._subagent_confirmation_for,
+                )
+                coordinator.bind_executor(
+                    child, lambda: self.service._configuration_resources.retain(configured),
+                )
             return executor
+
+        async def prepare_executor(
+            session_state: SessionRunState,
+        ) -> tuple[AgentRunExecutor, Callable[[], None]]:
+            snapshot = self.service._capture_configuration()
+            self.service._initialize_shared_resources(snapshot.configuration)
+            model = authority.model_configuration
+            state = self._loops.get(authority.session_id)
+            owner = None if state is None else state.owner_client_id
+            control = self._schedule_permission if owner is None else self.service.client_permission(owner)
+            host = self.service._exec_host_for(snapshot.configuration)
+            permission = control.snapshot(host.resolved_shell)
+            skills = self.service.skill_loader.with_always_load(
+                snapshot.configuration.runtime.enable_skill_always_load,
+            )
+            configured, activated = await self.service._prepare_execution_resources(self, snapshot)
+            release = self.service._configuration_resources.retain(configured)
+            try:
+                executor = create_executor(session_state, configured, skills)
+                executor.capture_run_inputs(permission, model)
+                if activated:
+                    await self.service._emit_configuration_event()
+            except BaseException:
+                release()
+                raise
+            return executor, release
 
         prepared = create_executor(run_state)
         prepared.preflight()
@@ -2382,7 +2434,7 @@ class WorkspaceRecord:
 
         handle = SessionExecution(
             authority, selected_bus, create_executor, self.service.reload_skills, status_input,
-            run_state=run_state,
+            run_state=run_state, prepare_executor=prepare_executor,
         )
         return handle, selected_bus
 
@@ -2706,6 +2758,12 @@ class AgentService:
         self._project_lifecycle_lock = asyncio.Lock()
         self._project_removals: dict[str, _ProjectRemoval] = {}
         self._configuration_editor = ConfigurationEditor(ConfigLoader(agent_home), configuration)
+        self._configuration_resources = ConfigurationResourceManager(
+            agent_home, lambda candidate: create_provider(candidate),
+        )
+        self._exec_hosts: dict[str, ExecHost] = {}
+        self._skill_always_load: bool | None = None
+        self._memory_schedules: dict[str, str] = {}
         self._chat_effort_override: ReasoningEffort | None = None
         self.projects = ProjectCatalog(agent_home)
         self.conversation_workspaces = ConversationWorkspaceCatalog(agent_home)
@@ -2806,7 +2864,10 @@ class AgentService:
                 raise RuntimeError("Workspace service runtime is closed")
             if workspace._started:
                 return
-            workspace._exec_host = self.exec_host
+            snapshot = self._capture_configuration()
+            shared = await self._prepare_shared_configuration(snapshot)
+            workspace.configuration = snapshot.configuration
+            workspace._exec_host = shared.exec_host
 
             async def execute_user_job(job: ScheduleJob) -> None:
                 # Admission was checked at reservation; accepted occurrences must drain.
@@ -2832,6 +2893,7 @@ class AgentService:
                     raise BaseExceptionGroup("Schedule SubAgent cleanup failed", failures)
 
             registered_resources = False
+            release_shared = self._configuration_resources.retain_shared(shared)
             try:
                 state = WorkspaceState(workspace.workspace_path)
                 state.initialize(
@@ -2844,29 +2906,39 @@ class AgentService:
                 workspace._restore_result = await restore_manager.recover_pending()
                 workspace.workspace_state = state
 
-                manager = MCPWorkspaceRuntimeManager(
-                    workspace.workspace_path,
-                    shared_runtime=self.mcp_manager,
-                    built_in_names=BUILT_IN_TOOL_NAMES,
+                configured = await self._configuration_resources.workspace(
+                    workspace.workspace_id, workspace.workspace_path, shared,
                 )
+                manager = configured.mcp_manager
                 workspace._mcp_manager = manager
-                workspace._mcp_startup_report = await manager.start(workspace.configuration.mcp)
+                workspace._mcp_startup_report = configured.mcp_report
                 workspace._mcp_snapshot = workspace._mcp_startup_report.snapshot
-                workspace._router = self.model_router
-                workspace._mcp_keyword_preparer = MCPKeywordPreparer(
-                    model_router=workspace._router,
-                    config_loader=ConfigLoader(self.agent_home),
-                )
-                workspace._mcp_keywords = await workspace._mcp_keyword_preparer.prepare(
-                    workspace._mcp_snapshot,
-                    workspace.configuration.mcp,
-                )
+                workspace._router = shared.router
+                workspace._mcp_keyword_preparer = configured.keyword_preparer
+                workspace._mcp_keywords = configured.keywords
                 memory_manager = MemoryManager(state)
+
+                async def prepare_dream() -> Any:
+                    current = self._capture_configuration()
+                    prepared, activated = await self._prepare_execution_resources(workspace, current)
+                    release = self._configuration_resources.retain(prepared)
+                    try:
+                        if activated:
+                            await self._emit_configuration_event()
+                        return (
+                            prepared.shared.router, prepared.shared.router.route_status("memory"),
+                            current.configuration.memory.batch_size, release,
+                        )
+                    except BaseException:
+                        release()
+                        raise
+
                 dream = Dream(
                     memory_manager=memory_manager,
                     model_router=workspace._router,
                     batch_size=workspace.configuration.memory.batch_size,
                     memory_route_status=workspace._router.route_status("memory"),
+                    prepare_execution=prepare_dream,
                 )
                 workspace._memory_manager = memory_manager
                 workspace._dream = dream
@@ -2909,7 +2981,10 @@ class AgentService:
                         get_localzone_name(),
                     )
                 )
+                self._memory_schedules[workspace.workspace_id] = workspace.configuration.memory.schedule
                 workspace._started = True
+                if self._configuration_editor.activate(snapshot):
+                    await self._emit_configuration_event()
             except BaseException as error:
                 cleanup_targets: list[Awaitable[None]] = []
                 if registered_resources:
@@ -2919,6 +2994,7 @@ class AgentService:
                         if resource is not None:
                             cleanup_targets.append(resource.close())
                 cleanup_results = await asyncio.gather(*cleanup_targets, return_exceptions=True)
+                await self._configuration_resources.close_workspace(workspace.workspace_id)
                 cleanup_errors = [
                     result for result in cleanup_results if isinstance(result, BaseException)
                 ]
@@ -2938,6 +3014,8 @@ class AgentService:
                         "Workspace startup cleanup failed", cleanup_errors
                     )
                 raise
+            finally:
+                release_shared()
 
     async def _close_workspace_resources(self, workspace: WorkspaceRecord) -> None:
         """Close this Workspace's resources without closing the service globals."""
@@ -2949,6 +3027,8 @@ class AgentService:
             )
         else:
             await workspace._close_all_loops()
+        await self._configuration_resources.close_workspace(workspace.workspace_id)
+        self._memory_schedules.pop(workspace.workspace_id, None)
 
     async def start(self) -> None:
         async with self._start_lock:
@@ -2960,9 +3040,7 @@ class AgentService:
         self.agent_home.initialize()
         self.configuration = self._configuration_editor.start()
         if self.configuration is not None:
-            self._initialize_shared_resources(self.configuration)
-            assert self._mcp_manager is not None
-            await self._mcp_manager.start(self.configuration.mcp)
+            await self._prepare_shared_configuration(self._capture_configuration())
         self.confirmation.bind_presenter(self._presenter)
         for record in self.projects.list():
             if record.schedule_state == "removing" and record.removal_error is None:
@@ -3016,7 +3094,7 @@ class AgentService:
         return self._built_in_tool_catalog
 
     def _initialize_shared_resources(self, configuration: UserConfiguration) -> None:
-        """Publish the service-owned Skill and Model resources once per lifetime."""
+        """Prepare local projections before asynchronously opening shared resources."""
         if self._skill_loader is None:
             skill_loader = SkillLoader(
                 root=self.agent_home.skills_directory,
@@ -3025,24 +3103,80 @@ class AgentService:
             )
             skill_loader.load()
             self._skill_loader = skill_loader
-        if self._model_router is None:
-            self._model_router = ModelRouter(
-                configuration=configuration,
-                provider_factory=create_provider,
+        elif self._skill_always_load != configuration.runtime.enable_skill_always_load:
+            self._skill_loader = self._skill_loader.with_always_load(
+                configuration.runtime.enable_skill_always_load,
             )
-        if self._exec_host is None:
-            self._exec_host = create_exec_host(resolve_exec_shell(configuration.runtime.exec_shell))
-        if self._built_in_tool_catalog is None:
-            self._built_in_tool_catalog = BuiltInToolCatalog(
-                skill_root=self.skill_loader.root,
-                exec_host=self._exec_host,
-            )
-        if self._mcp_manager is None:
-            self._mcp_manager = MCPRuntimeManager(
-                None,
-                transport="streamable-http",
-                built_in_names=BUILT_IN_TOOL_NAMES,
-            )
+        self._skill_always_load = configuration.runtime.enable_skill_always_load
+
+    def _exec_host_for(self, configuration: UserConfiguration) -> ExecHost:
+        selector = configuration.runtime.exec_shell
+        if selector not in self._exec_hosts:
+            self._exec_hosts[selector] = create_exec_host(resolve_exec_shell(selector))
+        return self._exec_hosts[selector]
+
+    def _capture_configuration(self) -> ConfigurationSnapshot:
+        """Publish valid external edits without changing collaborators owned by live Runs."""
+        snapshot = self._configuration_editor.capture()
+        self.configuration = snapshot.configuration
+        for client in self._clients.values():
+            client.permission_control.reconfigure(snapshot.configuration.runtime.permission_level)
+        for workspace in self._workspaces.values():
+            workspace.configuration = snapshot.configuration
+            workspace._schedule_permission.reconfigure(snapshot.configuration.runtime.permission_level)
+        return snapshot
+
+    async def _prepare_shared_configuration(
+        self, snapshot: ConfigurationSnapshot,
+    ) -> SharedConfigurationResources:
+        self._initialize_shared_resources(snapshot.configuration)
+        shared = await self._configuration_resources.shared(
+            snapshot, self.skill_loader, self._exec_host_for(snapshot.configuration),
+        )
+        if self.configuration == snapshot.configuration:
+            self._model_router = shared.router
+            self._mcp_manager = shared.mcp_manager
+            self._exec_host = shared.exec_host
+            self._built_in_tool_catalog = shared.built_in_catalog
+            if self._chat_effort_override is not None:
+                shared.router.set_reasoning_effort(self._chat_effort_override)
+        return shared
+
+    async def _prepare_execution_resources(
+        self, workspace: WorkspaceRecord, snapshot: ConfigurationSnapshot,
+    ) -> tuple[WorkspaceConfigurationResources, bool]:
+        await self._synchronize_memory_schedules()
+        shared = await self._prepare_shared_configuration(snapshot)
+        configured = await self._configuration_resources.workspace(
+            workspace.workspace_id, workspace.workspace_path, shared,
+        )
+        resources = workspace.resources
+        resources.router = shared.router
+        resources.mcp_manager = configured.mcp_manager
+        resources.mcp_startup_report = configured.mcp_report
+        resources.mcp_snapshot = configured.mcp_report.snapshot
+        resources.mcp_keywords = configured.keywords
+        resources.mcp_keyword_preparer = configured.keyword_preparer
+        workspace._router = shared.router
+        workspace._exec_host = shared.exec_host
+        workspace._mcp_manager = configured.mcp_manager
+        workspace._mcp_startup_report = configured.mcp_report
+        workspace._mcp_snapshot = configured.mcp_report.snapshot
+        workspace._mcp_keywords = configured.keywords
+        workspace._mcp_keyword_preparer = configured.keyword_preparer
+        activated = self._configuration_editor.activate(snapshot)
+        return configured, activated
+
+    async def _synchronize_memory_schedules(self) -> None:
+        for workspace in tuple(self._workspaces.values()):
+            if workspace._closed or not workspace._started:
+                continue
+            schedule = workspace.configuration.memory.schedule
+            if self._memory_schedules.get(workspace.workspace_id) != schedule:
+                await workspace.schedule_service.register_dream_job(
+                    schedule=JobSchedule.from_cron_input(schedule, get_localzone_name()),
+                )
+                self._memory_schedules[workspace.workspace_id] = schedule
 
     def reload_skills(self) -> tuple[SkillMetadata, ...]:
         """Validate every loaded Session before publishing one global Skill snapshot."""
@@ -3075,7 +3209,13 @@ class AgentService:
 
     def available_models_view(self) -> dict[str, object]:
         """Return active provider models with capacities and the effective chat route."""
-        configuration = self.configuration
+        configuration: UserConfiguration | None
+        try:
+            configuration = self._capture_configuration().configuration
+        except ServiceError as error:
+            if error.code != "config_invalid":
+                raise
+            configuration = self.configuration
         if configuration is None:
             return {"models": [], "default_combination": None}
 
@@ -3141,7 +3281,7 @@ class AgentService:
         editor_id: str | None = None,
         edit_sequence: int | None = None,
     ) -> dict[str, object]:
-        """Persist one safe configuration patch for the next service startup."""
+        """Persist one safe configuration patch for subsequent Agent Runs."""
         return await self._persist_configuration_edit(
             "patch",
             request_id, expected_revision, fields, secrets,
@@ -3163,7 +3303,7 @@ class AgentService:
         editor_id: str | None = None,
         edit_sequence: int | None = None,
     ) -> dict[str, object]:
-        """Persist a first-use or malformed-file repair for the next service startup."""
+        """Persist a first-use or malformed-file repair for subsequent Agent Runs."""
         return await self._persist_configuration_edit(
             "repair",
             request_id, expected_revision, fields, secrets,
@@ -3200,6 +3340,9 @@ class AgentService:
             editor_id=editor_id, edit_sequence=edit_sequence,
         ))
         if saved.changed:
+            self._capture_configuration()
+            self._initialize_shared_resources(cast(UserConfiguration, self.configuration))
+            await self._synchronize_memory_schedules()
             await self._emit_configuration_event()
         return saved.view
 
@@ -3449,6 +3592,7 @@ class AgentService:
     async def _get_or_create_workspace(
         self, path: Path, *, allow_agent_home_chat: bool = False
     ) -> WorkspaceRecord:
+        self._capture_configuration()
         key = os.path.normcase(str(path.resolve(strict=True)))
         async with self._lock:
             workspace_id = self._workspace_keys.get(key)
@@ -5822,6 +5966,7 @@ class AgentService:
                 )
             return {"kind": "management", "management_result": response}
 
+        self._capture_configuration()
         run_id = str(uuid4())
         await workspace.input(
             client_id,
@@ -6170,16 +6315,10 @@ class AgentService:
             await self._workspace_resources.close()
         except Exception as error:
             errors.append(error)
-        if self._mcp_manager is not None:
-            try:
-                await self._mcp_manager.close()
-            except Exception as error:
-                errors.append(error)
-        if self._model_router is not None:
-            try:
-                await self._model_router.close()
-            except Exception as error:
-                errors.append(error)
+        try:
+            await self._configuration_resources.close()
+        except Exception as error:
+            errors.append(error)
         self._stop_failed = bool(errors)
         self.state = "stopped"
         self._closed.set()

@@ -28,11 +28,10 @@ python -m pip install .
 
 ### 2. 配置模型
 
-生成默认配置，然后停止服务，以便下次启动加载你填写的模型设置：
+生成默认配置，再填写模型设置：
 
 ```powershell
 aide config
-aide service stop
 ```
 
 首次配置时可能提示模型尚未配置，继续填写即可。打开 `~/.aide/config.toml`，首次使用可将内容替换为以下最小配置；已有配置可按需修改。`~` 表示用户主目录，Windows 下通常为 `C:\Users\<用户名>`。
@@ -58,7 +57,7 @@ model = "your-model-id"
 
 `protocol` 支持 `openai-compatible` 和 `anthropic`；只配置 `default` 路由即可用于对话、记忆和定时任务。更多选项见[配置模板](aide/templates/default-config.md)。
 
-Web 模型设置以小卡片编辑参数，点击 Provider 下的加号添加模型；chat、memory、schedule 从已配置的 Provider 和模型中选择。保存设置后，重启服务生效。切换会话模型时采用所选模型自身的输出上限等参数，会话显式推理强度覆盖模型默认值。
+Web 模型设置以小卡片编辑参数，点击 Provider 下的加号添加模型；chat、memory、schedule 从已配置的 Provider 和模型中选择。保存设置后，所有会话从下一轮 AgentRun 开始生效，无需重启服务。切换会话模型时采用所选模型自身的输出上限等参数，会话显式推理强度覆盖模型默认值。
 
 旧模型列表与路由参数配置仍可读取。编辑模型设置时，参数一致的配置可以合并；同一模型存在不同路由参数时，卡片列出候选值，需要明确选择或补齐参数后再迁移保存。额外模型缺少参数时需要补齐，已引用的模型需先更换路由才能删除。
 
@@ -95,7 +94,7 @@ aide service stop
 
 **Skill 与 MCP**：将 Skill 放在 `~/.aide/skills/<技能名>/SKILL.md`，文件使用包含 `name`、`description` 的 YAML frontmatter；输入 `/<技能名> 任务描述` 调用。修改后用 `/reload_skill` 重新加载。MCP 可在 Web 设置中配置，示例见[配置模板](aide/templates/default-config.md)。
 
-**Tool 微压缩**：默认关闭，可在 Web「设置 → 运行时」中启用，或在配置文件的 `[runtime]` 中设置 `enable_tool_micro_compression = true`，保存后需重启 Aide。启用时，模型上下文中符合条件的 Tool 结果超过 10 条后，较早的长结果可能被省略，最新完整调用周期仍保留。这样可减少上下文占用，但模型可能遗漏细节或需要再次调用工具；原始结果和会话记录仍会保留。Web 启用前会弹窗说明影响，确认后才保存。
+**Tool 微压缩**：默认关闭，可在 Web「设置 → 运行时」中启用，或在配置文件的 `[runtime]` 中设置 `enable_tool_micro_compression = true`，保存后从下一轮 AgentRun 开始生效。启用时，模型上下文中符合条件的 Tool 结果超过 10 条后，较早的长结果可能被省略，最新完整调用周期仍保留。这样可减少上下文占用，但模型可能遗漏细节或需要再次调用工具；原始结果和会话记录仍会保留。Web 启用前会弹窗说明影响，确认后才保存。
 
 CLI 中，`Enter` 提交、`Ctrl+J` 换行、`Ctrl+C` 取消当前回复，输入 `exit` 或 `quit` 退出。以下管理命令需单独输入：
 
@@ -115,7 +114,7 @@ CLI 中，`Enter` 提交、`Ctrl+J` 换行、`Ctrl+C` 取消当前回复，输�
 
 1. **数据位置**：全局配置与 Skill 位于 `~/.aide/`；会话、记忆和定时任务位于各工作区的 `.aide/`。模型请求会发送给你配置的服务商，API Key 直接保存在配置文件中，当前不支持环境变量引用。
 2. **工具权限**：默认 `workspace-write`，允许直接读写工作区内文件，访问外部文件和调用 MCP 需逐次确认。可选择 `read-only` 或 `full-access`；`full-access` 不提供操作系统沙箱，可能造成大范围破坏或检查无法确定的命令仍需确认。详细规则见[权限说明](docs/adr/0026-tool-permission-levels-and-foreground-snapshots.md)。
-3. **配置生效**：修改模型、MCP 等配置后需重启 Aide，可在 Web「常规与外观」中操作；重启会停止当前运行和连接的 CLI。权限选择与推理强度调整即时生效，用于后续运行。
+3. **配置生效**：通过 Web 保存或直接修改配置文件后，所有普通、Project 和用户 Schedule 会话从下一轮 AgentRun 开始使用新配置，无需重启；正在执行的轮次和已登记的子任务保留原配置。首次填写或修复合法配置后可直接开始对话。无效配置不会替换可用资源，需修复后才能开始新工作。权限选择与推理强度调整保留现有运行时控制边界。
 4. **定时任务运行条件**：服务有在线客户端时，已登记的可用项目继续调度；未登记的 CLI 工作区仅在有在线使用者时接收新任务执行。最后一个客户端断线后暂停新执行，约 30 秒后清理并退出；定时任务定义仍保留。
 5. **会话回退范围**：回退会删除所选输入及其后的对话。文件恢复仅覆盖当前会话通过内置 `write_file`、`edit_file` 修改且有可用备份的文件，不撤销命令执行、MCP 操作或记忆等状态；恢复失败的文件会单独报告。详细边界见[恢复说明](docs/adr/0028-session-restore-architecture.md)。
 

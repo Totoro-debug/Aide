@@ -131,12 +131,16 @@ async def test_cli_real_mcp_flow_persists_result_reuses_session_snapshot_and_clo
                     cast(str, service.config_view()["revision"]),
                     {"runtime": {"max_iterations": 83}},
                 )
-                assert cast(dict[str, object], service.config_view()["application"])["status"] == "restart-required"
+                assert cast(dict[str, object], service.config_view()["application"])["status"] == "next-run-required"
                 assert workspace.resources is original
                 assert [tool.to_schema() for tool in old_tools] == schemas
                 assert len(observed.processes) == 1
             await client.submit_user_input("second echo")
             assert "done" in await _client_output(client)
+            assert len(observed.processes) == 1
+            assert cast(dict[str, object], service.config_view()["application"])["status"] == "active"
+            if save_before_next_run:
+                assert workspace.configuration.runtime.max_iterations == 83
             claim = workspace.require_claim(
                 client.client_id, client.session_id, client.claim_version
             )

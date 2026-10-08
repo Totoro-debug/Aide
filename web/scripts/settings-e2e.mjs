@@ -7,7 +7,7 @@ import { expect } from "@playwright/test";
 
 async function waitForSavedSettings(target) {
   try {
-    await expect(target.locator('[role="status"][data-state="active"], [role="status"][data-state="restart-required"]')).toBeVisible({ timeout: 30000 });
+    await expect(target.locator('[role="status"][data-state="active"], [role="status"][data-state="next-run-required"]')).toBeVisible({ timeout: 30000 });
   } catch (error) {
     const statuses = await target.getByRole("status").allTextContents();
     const alerts = await target.getByRole("alert").allTextContents();
@@ -142,7 +142,7 @@ export async function settingsConfirmationAcceptance({ page, control }) {
   await field.press("Tab");
   const saved = await savedResponse;
   assert.equal(saved.status(), 200);
-  assert.equal((await saved.json()).application.status, "restart-required");
+  assert.equal((await saved.json()).application.status, "next-run-required");
   await control.command("settings-release");
   const dialog = page.getByRole("dialog", { name: "Tool Confirmation", exact: true });
   await expect(dialog).toBeVisible();
@@ -336,7 +336,7 @@ export async function settingsMicroCompressionAcceptance({ page, configPath }) {
       await dialog.getByRole("button", { name: language === "en" ? "Confirm enable" : "确认启用", exact: true }).press("Enter");
       const saved = await enabledResponse;
       assert.equal(saved.status(), 200);
-      assert.equal((await saved.json()).application.status, "restart-required");
+      assert.equal((await saved.json()).application.status, "next-run-required");
       await expect(dialog).toBeHidden();
       await expect(toggle).toBeChecked();
       assert.match(await readFile(configPath, "utf8"), /enable_tool_micro_compression\s*=\s*true/);
@@ -384,15 +384,6 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   captureConfigResponses(page);
 
   const field = (target, id) => target.locator(`[id="${id}"]`);
-  const openRestartedPage = async (target, launchUrl) => {
-    const exchanged = target.waitForResponse(response => (
-      response.url().endsWith("/api/v1/web/ticket") && response.request().method() === "POST"
-    ));
-    // A new ticket on the same root URL needs a new document to authenticate.
-    await target.goto("about:blank");
-    await target.goto(launchUrl);
-    assert.equal((await exchanged).status(), 200);
-  };
   const openSettings = async (target) => {
     await target.bringToFront();
     await setInterfaceLanguage(target, "en");
@@ -450,7 +441,7 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const saveState = await target.locator('[role="status"][data-state]').evaluateAll((items) => (
           items.map((item) => item.getAttribute("data-state"))
-            .find((value) => ["saving", "unsaved", "error", "active", "restart-required", "pending-repair"].includes(value)) ?? null
+            .find((value) => ["saving", "unsaved", "error", "active", "next-run-required", "pending-repair"].includes(value)) ?? null
         ));
         if (saveState === "saving") {
           await expect(target.locator('[role="status"][data-state="saving"]')).toHaveCount(0, { timeout: 30000 });
@@ -477,7 +468,7 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const state = await statuses.evaluateAll((items) => items
         .map((item) => item.getAttribute("data-state"))
-        .find((value) => ["saving", "unsaved", "error", "active", "restart-required", "pending-repair"].includes(value)));
+        .find((value) => ["saving", "unsaved", "error", "active", "next-run-required", "pending-repair"].includes(value)));
       if (state === "saving") {
         await expect(target.locator('[role="status"][data-state="saving"]')).toHaveCount(0, { timeout: 30000 });
         continue;
@@ -791,20 +782,19 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   assert.equal(capacityResponse.status(), 200, "Model capacity must save automatically on blur");
   const capacitySaved = await capacityResponse.json();
   assert.equal(capacitySaved.fields.models.providers.primary.models["large-model"].context_window, 65536);
-  assert.equal(capacitySaved.application.status, "restart-required");
+  assert.equal(capacitySaved.application.status, "next-run-required");
   await waitForSavedSettings(page);
-  const beforeCapacityRestart = await availableModels(page);
-  assert.deepEqual(beforeCapacityRestart.body.models, [
+  const savedCapacityModels = await availableModels(page);
+  assert.deepEqual(savedCapacityModels.body.models, [
     { provider_id: "primary", model: "small-model", context_window: 8192 },
-  ], "Saved capacity must not replace the active model projection before restart");
+    { provider_id: "primary", model: "large-model", context_window: 65536 },
+    { provider_id: "primary", model: "expanded-model-302", context_window: 8192 },
+  ], "Saved capacities must be available for the next Run without restarting");
   await defaultModel(page).selectOption("large-model");
   await chatModel(page).selectOption("large-model");
   const conflictResolved = await save(page);
   await waitForSavedSettings(page);
 
-  const v1Startup = await control.restart();
-  await openRestartedPage(page, `${v1Startup.url}/#ticket=${encodeURIComponent(v1Startup.ticket)}`);
-  await openSettings(page);
   assert.equal(await largeModelContextWindow(page).inputValue(), "65536");
   const restartedModels = await availableModels(page);
   assert.equal(restartedModels.status, 200);
@@ -853,18 +843,15 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   await field(page, "settings-mcp-fixture-tool_keywords").getByRole("textbox", { name: "Tool name", exact: true }).fill("fixture_echo_v2");
   console.log("Settings model/provider/route/MCP E2E: saving new model and v2 MCP while v1 is active");
   const pending = await save(page);
-  assert.equal(pending.application.status, "restart-required");
+  assert.equal(pending.application.status, "next-run-required");
   assert.equal(pending.application.active_revision, conflictResolved.revision);
-  assert.notEqual(pending.application.restart_required, false);
+  assert.equal(pending.application.restart_required, false);
   await control.command("model-mcp-release");
   await waitForSavedSettings(page);
   assert.equal((await readJsonLines(providerObservationPath)).some((observation) => (
     observation.tools.some((name) => name.endsWith("fixture_echo_v2"))
-  )), false, "Saved MCP settings activated before restart");
-  const v2Startup = await control.restart();
-  await openRestartedPage(page, `${v2Startup.url}/#ticket=${encodeURIComponent(v2Startup.ticket)}`);
-  await openSettings(page);
-  console.log("Settings model/provider/route/MCP E2E: explicit restart activated v2 settings");
+  )), false, "The running AgentRun switched to the saved MCP settings");
+  console.log("Settings model/provider/route/MCP E2E: next Run will activate v2 settings in the same Service");
 
   await openProject(page);
   await createDraft(page);
@@ -971,7 +958,7 @@ export default async function settingsAcceptance({ page, control, output, viewpo
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const state = await statuses.evaluateAll((items) => items
         .map((item) => item.getAttribute("data-state"))
-        .find((value) => ["saving", "unsaved", "error", "active", "restart-required", "pending-repair"].includes(value)));
+        .find((value) => ["saving", "unsaved", "error", "active", "next-run-required", "pending-repair"].includes(value)));
       if (state === "saving") {
         await expect(target.locator('[role="status"][data-state="saving"]')).toHaveCount(0, { timeout: 30000 });
         continue;
@@ -1068,9 +1055,9 @@ export default async function settingsAcceptance({ page, control, output, viewpo
   await memorySettings(page);
   await page.getByLabel("Memory batch size", { exact: true }).fill("13");
   const pending = await save(page);
-  assert.equal(pending.application.status, "restart-required");
-  assert.equal(pending.application.active_revision, saved.application.active_revision);
-  await expect(page.getByText("Saved; restart Aide to use these settings.", { exact: true }).first()).toBeVisible();
+  assert.equal(pending.application.status, "next-run-required");
+  assert.equal(pending.application.active_revision, saved.revision);
+  await expect(page.getByText("Saved; these settings apply to the next Agent Run in every conversation.", { exact: true }).first()).toBeVisible();
   await openServiceStatus(page);
   await expect(page.getByRole("heading", { name: "Service status", exact: true })).toBeVisible();
   await settings(page);
@@ -1088,7 +1075,7 @@ export default async function settingsAcceptance({ page, control, output, viewpo
     await runtimeSettings(page);
     await page.getByLabel("Maximum iterations", { exact: true }).fill("63");
     const failedSave = await save(page);
-    assert.equal(failedSave.application.status, "restart-required");
+    assert.equal(failedSave.application.status, "next-run-required");
     assert.equal(failedSave.application.active_revision, pending.application.active_revision);
     await expect(page.getByRole("button", { name: "Retry application", exact: true })).toHaveCount(0);
   } finally {
@@ -1244,5 +1231,5 @@ export default async function settingsAcceptance({ page, control, output, viewpo
   await page.setViewportSize(viewports[0]);
   await setInterfaceLanguage(page, "en");
   await settingsMicroCompressionAcceptance({ page, configPath });
-  console.log("Settings production CSP E2E: global without Claim, invalid bytes, cross-client stale CAS and explicit reload, dirty late poll, real active Run save/restart with same PID/WS, save remains independent of resource preparation, versions, keyboard and 4 locale/theme x 4 viewports passed");
+  console.log("Settings production CSP E2E: global without Claim, invalid bytes, cross-client stale CAS and explicit reload, dirty late poll, real active Run save with same PID/WS, save remains independent of resource preparation, versions, keyboard and 4 locale/theme x 4 viewports passed");
 }

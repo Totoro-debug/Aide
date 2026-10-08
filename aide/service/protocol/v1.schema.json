@@ -516,7 +516,7 @@
         }
       }
     },
-    "config_application_status": {"enum": ["active", "restart-required", "pending-repair"]},
+    "config_application_status": {"enum": ["active", "next-run-required", "pending-repair"]},
     "config_projection_state": {"enum": ["active", "missing", "invalid", "malformed"]},
     "config_projection": {
       "type": "object", "additionalProperties": false,

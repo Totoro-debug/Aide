@@ -277,7 +277,7 @@ export type ConfigSecretChange =
 
 export type ConfigSecrets = Record<string, ConfigSecretChange>;
 
-export type ConfigApplicationStatus = "active" | "restart-required" | "pending-repair";
+export type ConfigApplicationStatus = "active" | "next-run-required" | "pending-repair";
 
 export type ConfigProjectionState = "active" | "missing" | "invalid" | "malformed";
 

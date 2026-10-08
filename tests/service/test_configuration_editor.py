@@ -38,7 +38,7 @@ async def test_save_and_retry_retain_receipt_and_startup_revision(
     assert retry.view == saved.view
     application = cast(dict[str, object], editor.view()["application"])
     assert application["active_revision"] == revision
-    assert application["restart_required"] is True
+    assert application["restart_required"] is False
 
 
 @pytest.mark.asyncio

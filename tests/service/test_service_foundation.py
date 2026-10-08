@@ -1411,11 +1411,11 @@ async def test_client_disconnect_expiry_aborts_owned_confirmation(tmp_path: Path
     sink = Sink()
     try:
         owner = await service.register_client("cli")
+        await service.connect_client(owner.client_id, sink)
         other = await service.register_client("web")
+        await service.connect_client(other.client_id, sink)
         workspace = await service.attach_workspace(owner.client_id, workspace_path)
         await service.attach_workspace(other.client_id, workspace_path)
-        await service.connect_client(owner.client_id, sink)
-        await service.connect_client(other.client_id, sink)
         session_id = await workspace.create_draft(owner.client_id, creation_scope="chat")
         await service.claim(owner.client_id, workspace.workspace_id, session_id)
         envelope = ConfirmationEnvelope(

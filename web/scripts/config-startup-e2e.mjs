@@ -359,8 +359,6 @@ async function conversationAfterRepair(page, details, beforeSocket) {
     closed: window.__startupSocketCloseCount,
     ready: window.__startupSocket.readyState,
   })), { created: 1, closed: 0, ready: 1 });
-  const firstActiveService = await fetchJson(page, "/service");
-  assert.equal(firstActiveService.body.active_workspace_count, 2, "The available Project and default Chat workspace were not activated before Session open");
 
   await keyboardActivate(page.getByRole("navigation", { name: "Settings sections", exact: true })
     .getByRole("button", { name: "Runtime", exact: true }));
@@ -408,7 +406,7 @@ async function conversationAfterRepair(page, details, beforeSocket) {
     );
   }, prompt), { timeout: 30000 }).toBe(true);
   const afterService = await fetchJson(page, "/service");
-  assert.equal(afterService.body.active_workspace_count, 3);
+  assert.equal(afterService.body.active_workspace_count, 2);
 }
 
 async function cleanupState(context, harness, root, failure) {
@@ -568,42 +566,15 @@ async function runState(browser, state) {
     }
     const repaired = await saveRepair(page, 200);
     if (state === "malformed") assert.match(repaired.backup_id, /^sha256:/);
-    assert.equal(repaired.application.status, "restart-required");
+    assert.equal(repaired.application.status, "next-run-required");
     assert.equal(repaired.application.active_revision, null);
-    await assertAdmissionClosed(page, details.project_id);
-    await expect(page.getByText("Saved; restart Aide to use these settings.", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Saved; these settings apply to the next Agent Run in every conversation.", { exact: true }).first()).toBeVisible();
     assert.equal(await page.evaluate(() => window.__startupSocketBefore === window.__startupSocket), true);
-    const oldPid = details.pid;
-    await context.close();
-    details = await harness.restart();
-    assert.notEqual(details.pid, oldPid);
-    context = await browser.newContext({ locale: "en", reducedMotion: "reduce" });
-    await context.addInitScript(() => {
-      window.__startupMessages = [];
-      window.__startupSocketCount = 0;
-      window.__startupSocketCloseCount = 0;
-      const OriginalWebSocket = window.WebSocket;
-      window.WebSocket = class extends OriginalWebSocket {
-        constructor(...args) {
-          super(...args);
-          window.__startupControlCredential = Array.isArray(args[1]) ? args[1][1] : null;
-          window.__startupSocket = this;
-          window.__startupSocketCount += 1;
-          this.addEventListener("close", () => { window.__startupSocketCloseCount += 1; });
-          this.addEventListener("message", (event) => { window.__startupMessages.push(JSON.parse(event.data)); });
-        }
-      };
-    });
-    const restartedPage = await context.newPage();
-    await restartedPage.goto(details.cold_launch_url);
-    await expect(restartedPage.getByRole("heading", { name: "Aide", exact: true }).last()).toBeVisible();
-    await expect(restartedPage.getByRole("textbox", { name: /Message input|消息输入/, exact: true })).toBeEnabled();
-    await restartedPage.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
-    await keyboardActivate(restartedPage.getByRole("navigation", { name: "Settings sections", exact: true })
+    await conversationAfterRepair(page, details, true);
+    await page.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
+    await keyboardActivate(page.getByRole("navigation", { name: "Settings sections", exact: true })
       .getByRole("button", { name: "Runtime", exact: true }));
-    await expect(restartedPage.getByLabel("Maximum iterations", { exact: true })).toBeEnabled();
-    page = restartedPage;
-    await page.evaluate(() => { window.__startupSocketBefore = window.__startupSocket; });
+    await expect(page.getByLabel("Maximum iterations", { exact: true })).toBeEnabled();
     const active = await waitForActiveConfig(page);
     assert.equal(active.configuration.state, "active");
     assert.equal(JSON.stringify(active).includes(details.malformed_secret), false);
@@ -627,7 +598,6 @@ async function runState(browser, state) {
       assert.equal(backupResponse.status(), 404, "Private backup was exposed by static serving");
     }
     await screenshotStates(page, state, "active");
-    await conversationAfterRepair(page, details, true);
     const observed = [
       ...(await Promise.all(configBodies)),
       await page.evaluate(() => JSON.stringify({
@@ -674,7 +644,7 @@ try {
   for (const state of states) urls.push(await runState(browser, state));
   console.log(
     `Config startup production E2E: missing, semantic-invalid, malformed TOML, backup failure/exact bytes, `
-    + `bare CLI errors, active workspace admission, awaiting_resume Schedule state, repair preserves PID/WebSocket and explicit restart activates settings, `
+    + `bare CLI errors, active workspace admission, awaiting_resume Schedule state, repair activates settings and preserves PID/WebSocket, `
     + `keyboard fixture conversation, cold production Web startup, CSP, and en/zh-CN light/dark 390/768/1024/1440 screenshots passed; URLs=${urls.join(",")}`,
   );
 } finally {

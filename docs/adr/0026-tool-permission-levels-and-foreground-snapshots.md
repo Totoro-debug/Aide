@@ -14,7 +14,7 @@ Aide authorizes detached invocation facts against immutable Run snapshots, keepi
 
 ## Capture and authorization
 
-Each client owns its foreground permission selection across Session switches and reconnect grace. A foreground Run captures the selection and resolved Exec Shell before its first asynchronous preparation. User Schedule occurrences capture startup configuration at admission instead of inheriting a client's temporary selection. Snapshots and approvals are runtime-only.
+Each client owns its foreground permission selection across Session switches and reconnect grace. A foreground Run captures the selection and resolved Exec Shell before its first asynchronous preparation. Configuration updates change the default for clients without an explicit selection. User Schedule Runs capture the latest configured permission and Shell when execution begins, independently of a client's temporary selection; occurrence admission facts and confirmation identity remain with the scheduler. Snapshots and approvals are runtime-only.
 
 The Gateway prepares normalized arguments, validates capabilities and business rules, then opens one authorization session. Invalid arguments and hard failures remain errors at every level. Approval applies to one normalized invocation and is never cached. Decline or unavailable presentation prevents execution; confirmation ownership and lifecycle follow [ADR-0029](0029-host-cli-and-web-through-one-local-service.md).
 

@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -123,6 +123,67 @@ def _skipped_tool_count(connection: MCPConnectionAdapter) -> int:
     return 0
 
 
+@dataclass(slots=True)
+class _SharedConnection:
+    configuration: MCPServerConfiguration
+    connection: MCPConnectionAdapter
+    users: int = 0
+    connecting: asyncio.Task[tuple[MCPTool, ...]] | None = None
+
+
+class _ConnectionPool:
+    """Retain a connection until all configuration snapshots stop using it."""
+
+    def __init__(self, factory: MCPConnectionFactory, workspace: Path | None) -> None:
+        self._factory = factory
+        self._workspace = workspace
+        self._entries: list[_SharedConnection] = []
+
+    def acquire(self, configuration: MCPServerConfiguration) -> _ConnectionLease:
+        identity = replace(configuration, tool_keywords={})
+        entry = next((item for item in self._entries if item.configuration == identity), None)
+        if entry is None:
+            entry = _SharedConnection(identity, self._factory(configuration, self._workspace))
+            self._entries.append(entry)
+        entry.users += 1
+        return _ConnectionLease(self, entry)
+
+    async def release(self, entry: _SharedConnection) -> None:
+        entry.users -= 1
+        if entry.users:
+            return
+        self._entries.remove(entry)
+        if entry.connecting is not None and not entry.connecting.done():
+            entry.connecting.cancel()
+            await asyncio.gather(entry.connecting, return_exceptions=True)
+        await entry.connection.close()
+
+
+class _ConnectionLease:
+    def __init__(self, pool: _ConnectionPool, entry: _SharedConnection) -> None:
+        self._pool = pool
+        self._entry = entry
+        self._closed = False
+
+    @property
+    def unavailable(self) -> bool:
+        return self._closed or self._entry.connection.unavailable
+
+    @property
+    def skipped_tool_count(self) -> int:
+        return _skipped_tool_count(self._entry.connection)
+
+    async def connect(self) -> tuple[MCPTool, ...]:
+        if self._entry.connecting is None:
+            self._entry.connecting = asyncio.create_task(self._entry.connection.connect())
+        return await asyncio.shield(self._entry.connecting)
+
+    async def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            await self._pool.release(self._entry)
+
+
 class MCPRuntimeManager:
     """Own MCP connections for one runtime scope and prepare tool snapshots.
 
@@ -146,6 +207,7 @@ class MCPRuntimeManager:
         if (transport == "stdio") != (workspace is not None):
             raise ValueError("Stdio requires a Workspace; HTTP requires no Workspace")
         self._connection_factory = connection_factory or _default_connection_factory
+        self._connection_pool = _ConnectionPool(self._connection_factory, workspace)
         self._transport = transport
         names = list(built_in_names)
         if any(not isinstance(name, str) or not name for name in names):
@@ -163,6 +225,15 @@ class MCPRuntimeManager:
         self._startup_report: MCPStartupReport | None = None
         self._started = False
 
+    def fork(self) -> MCPRuntimeManager:
+        """Create a new scope snapshot sharing unchanged Server connections."""
+        manager = MCPRuntimeManager(
+            self._workspace, connection_factory=self._connection_factory,
+            built_in_names=self._built_in_names, transport=self._transport,
+        )
+        manager._connection_pool = self._connection_pool
+        return manager
+
     async def start(
         self,
         configuration: Mapping[str, MCPServerConfiguration],
@@ -179,10 +250,7 @@ class MCPRuntimeManager:
             if not server_configuration.enabled:
                 continue
             try:
-                connections[mcp_name] = self._connection_factory(
-                    server_configuration,
-                    self._workspace,
-                )
+                connections[mcp_name] = self._connection_pool.acquire(server_configuration)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -368,6 +436,18 @@ class MCPWorkspaceRuntimeManager:
         self._snapshot: MCPToolSnapshot = ()
         self._startup_report: MCPStartupReport | None = None
         self._started = False
+
+    def fork(self, shared_runtime: MCPRuntimeManager) -> MCPWorkspaceRuntimeManager:
+        """Keep Stdio connection ownership while changing the shared HTTP snapshot."""
+        workspace = self._stdio_runtime._workspace
+        assert workspace is not None
+        manager = MCPWorkspaceRuntimeManager(
+            workspace,
+            shared_runtime=shared_runtime,
+            built_in_names=self._stdio_runtime._built_in_names,
+        )
+        manager._stdio_runtime = self._stdio_runtime.fork()
+        return manager
 
     async def start(
         self,

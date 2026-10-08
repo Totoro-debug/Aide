@@ -327,6 +327,15 @@ class AgentRunExecutor:
         self._preflight_error: Exception | None = None
         self._session_abandoned = False
         self._run_model_configuration: SessionModelConfiguration | None = None
+        self._captured_foreground: tuple[
+            PermissionSnapshot, SessionModelConfiguration | None,
+        ] | None = None
+
+    def capture_run_inputs(
+        self, permission: PermissionSnapshot, model: SessionModelConfiguration | None,
+    ) -> None:
+        """Retain inputs captured before asynchronous resource preparation."""
+        self._captured_foreground = (permission, model)
 
     @property
     def session(self) -> Session:
@@ -387,6 +396,17 @@ class AgentRunExecutor:
         model_router = self._subagent_model_router
         if model_router is None:
             raise RuntimeError("SubAgent execution requires the shared Service Model Router")
+        coordinator = self._subagent_coordinator
+        workspace_state = self._workspace_state
+
+        def child_context(record: SubAgentRecord) -> SubAgentToolContext:
+            if coordinator is None:
+                raise RuntimeError("SubAgent coordinator is unavailable for this Agent Run")
+            return SubAgentToolContext(
+                coordinator=coordinator, parent_run_id=record.parent_run_id,
+                source=record.source, creator_snapshot=record.creator_snapshot,
+            )
+
         return SubAgentRunnerExecutor(
             workspace_id=workspace_id,
             workspace_state=self._workspace_state,
@@ -401,9 +421,9 @@ class AgentRunExecutor:
             ),
             mcp_keywords=self._mcp_keywords,
             confirmation_for=confirmation_for,
-            tool_context_for=self._subagent_tool_context_for,
+            tool_context_for=(self._subagent_tool_context_for if coordinator is None else child_context),
             file_mutation_recorder_for=lambda record: FileBackupStore(
-                self._workspace_state,
+                workspace_state,
                 record.session_id,
             ),
             now=self._now,
@@ -807,7 +827,10 @@ class AgentRunExecutor:
         occurrence: ScheduleOccurrence | None = None,
     ) -> None:
         current_user = {"role": "user", "content": job.message}
-        permission_snapshot = None if occurrence is None else occurrence.permission_snapshot
+        permission_snapshot = (
+            self._captured_foreground[0] if self._captured_foreground is not None else
+            None if occurrence is None else occurrence.permission_snapshot
+        )
         permission_context = (
             PermissionContext.from_snapshot(
                 permission_snapshot,
@@ -1149,8 +1172,11 @@ class AgentRunExecutor:
             return
         restore_before = active_session.capture_restore_before()
         restore_run_token = self._new_uuid()
-        permission_snapshot = self._permission_control.snapshot(self._exec_host.resolved_shell)
-        session_model_configuration = active_session.model_configuration
+        if self._captured_foreground is None:
+            permission_snapshot = self._permission_control.snapshot(self._exec_host.resolved_shell)
+            session_model_configuration = active_session.model_configuration
+        else:
+            permission_snapshot, session_model_configuration = self._captured_foreground
         self._run_model_configuration = session_model_configuration
         skill_state = self._skill_loader.skills
         manual_invocation = self._skill_loader.resolve_manual(inbound.content)

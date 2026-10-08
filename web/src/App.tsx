@@ -439,7 +439,7 @@ export default function App() {
       try {
         const response = await getConfig();
         if (active && requestSequence === sequence) {
-          setConfigurationNeedsSetup(response.application.active_revision === null);
+          setConfigurationNeedsSetup(response.configuration.repair_required);
         }
       } catch {
         // SettingsView owns the detailed configuration error state.
@@ -448,7 +448,7 @@ export default function App() {
     const unsubscribe = subscribeServiceEvents((event) => {
       if (event.type === "config.application") {
         ++sequence;
-        setConfigurationNeedsSetup(event.payload.active_revision === null);
+        setConfigurationNeedsSetup(event.payload.status === "pending-repair");
       } else if (event.type === "snapshot.required") {
         void refreshConfiguration();
       }
@@ -2163,7 +2163,7 @@ function SettingsView({
       const hasRemainingChanges = dirtySectionsRef.current.size > 0;
       dirtyRef.current = hasRemainingChanges;
       setDirty(hasRemainingChanges);
-      setNotice(next.application.restart_required ? t("settings.restartRequired") : t("settings.saved"));
+      setNotice(next.application.status === "next-run-required" ? t("settings.nextRunRequired") : t("settings.saved"));
     } catch (error) {
       if (mutationSequence.current !== sequence) return;
       if (error instanceof ApiError && error.body !== null) {
@@ -2434,8 +2434,8 @@ function SettingsView({
       ? t("settings.saving")
       : dirty
         ? t("settings.unsaved")
-        : response?.application.status === "restart-required"
-          ? t("settings.restartRequired")
+        : response?.application.status === "next-run-required"
+          ? t("settings.nextRunRequired")
           : response?.application.status === "pending-repair"
             ? t("settings.pendingRepair")
             : t("settings.active");

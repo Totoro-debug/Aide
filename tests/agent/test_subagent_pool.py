@@ -175,6 +175,74 @@ async def test_each_session_starts_at_most_eight_and_admits_queued_tasks_fifo(
 
 
 @pytest.mark.asyncio
+async def test_executor_updates_preserve_queued_children_and_release_each_generation(
+    tmp_path: Path,
+) -> None:
+    from aide.agent.subagents.coordinator import SubAgentPool
+
+    state, session_id = _workspace(tmp_path)
+    repository = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    old = _ControlledExecutor()
+    new = _ControlledExecutor()
+    pool = SubAgentPool(repository, old)
+    held = {"old": 0, "new": 0}
+
+    def retain(generation: str) -> Callable[[], None]:
+        held[generation] += 1
+
+        def release() -> None:
+            held[generation] -= 1
+
+        return release
+
+    source = SubAgentSource(
+        kind=SubAgentSourceKind.FOREGROUND, restore_run_token=_RESTORE_TOKEN,
+    )
+
+    def submit(executor: _ControlledExecutor, title: str) -> SubAgentRecord:
+        record = pool.submit(
+            title=title, task=title, parent_run_id=_RUN_ID,
+            source=source, creator_snapshot=_snapshot(),
+        )
+        executor.release[record.agent_id] = asyncio.Event()
+        executor.cancel_requested[record.agent_id] = asyncio.Event()
+        return record
+
+    pool.bind_executor(old, lambda: retain("old"))
+    originals = [submit(old, f"old {index}") for index in range(10)]
+    try:
+        for _ in range(8):
+            await asyncio.wait_for(old.started.get(), timeout=2)
+        pool.bind_executor(new, lambda: retain("new"))
+        latest = submit(new, "new")
+        assert held == {"old": 10, "new": 1}
+
+        assert pool.cancel(originals[9].agent_id)
+        assert held == {"old": 9, "new": 1}
+        assert pool.cancel(originals[0].agent_id)
+        assert old.cancel_requested[originals[0].agent_id].is_set()
+        old.release[originals[0].agent_id].set()
+        assert await asyncio.wait_for(old.started.get(), timeout=2) == originals[8].agent_id
+        assert held == {"old": 8, "new": 1}
+        assert new.started.empty()
+
+        old.release[originals[1].agent_id].set()
+        assert await asyncio.wait_for(new.started.get(), timeout=2) == latest.agent_id
+        assert held == {"old": 7, "new": 1}
+        for executor in (old, new):
+            for gate in executor.release.values():
+                gate.set()
+        await asyncio.gather(*(pool.wait([record.agent_id]) for record in [*originals, latest]))
+        assert held == {"old": 0, "new": 0}
+        assert originals[9].agent_id not in old.started_ids
+    finally:
+        for executor in (old, new):
+            for gate in executor.release.values():
+                gate.set()
+        await pool.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_session_pools_have_independent_capacity(tmp_path: Path) -> None:
     from aide.agent.subagents.coordinator import SubAgentPool
 

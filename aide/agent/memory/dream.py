@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, Protocol
@@ -122,6 +122,9 @@ class Dream:
         model_router: DreamModelRouter,
         batch_size: int,
         memory_route_status: ModelRouteStatus,
+        prepare_execution: Callable[
+            [], Awaitable[tuple[DreamModelRouter, ModelRouteStatus, int, Callable[[], None]]]
+        ] | None = None,
     ) -> None:
         require_nonnegative_int(batch_size, field="batch_size")
         if batch_size < 1:
@@ -132,6 +135,7 @@ class Dream:
         self._model_router = model_router
         self._batch_size = batch_size
         self._memory_route_status = memory_route_status
+        self._prepare_execution = prepare_execution
         self._failure_diagnostic: Exception | None = None
         self._memory_updated = False
         self._tool_gateway = ToolGateway._for_memory(
@@ -169,11 +173,19 @@ class Dream:
             self._failure_diagnostic = None
             task = asyncio.current_task()
             self._task = task
+            release: Callable[[], None] | None = None
             try:
+                if self._prepare_execution is not None:
+                    router, status, batch_size, release = await self._prepare_execution()
+                    self._model_router = router
+                    self._memory_route_status = status
+                    self._batch_size = batch_size
                 result = await self._run_once()
                 self._log_failure(result)
                 return result
             finally:
+                if release is not None:
+                    release()
                 self._running = False
                 if self._task is task:
                     self._task = None

@@ -3318,7 +3318,7 @@ h1 {
   color: var(--danger-text);
 }
 
-.settingsStatus[data-state="restart-required"],
+.settingsStatus[data-state="next-run-required"],
 .settingsStatus[data-state="pending-repair"] {
   border-color: var(--warning-border);
   color: var(--warning-text);

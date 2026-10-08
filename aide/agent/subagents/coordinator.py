@@ -61,6 +61,9 @@ class SubAgentPool:
                 raise TypeError("SubAgent event publisher must provide publish")
         self._repository = repository
         self._executor = executor
+        self._task_executors: dict[str, SubAgentExecutor] = {}
+        self._task_releases: dict[str, Callable[[], None]] = {}
+        self._retain_executor: Callable[[], Callable[[], None]] | None = None
         self._now = now or (lambda: datetime.now(UTC))
         self._workspace_id = workspace_id
         self._event_publisher = event_publisher
@@ -81,6 +84,20 @@ class SubAgentPool:
     @property
     def session_id(self) -> str:
         return self._repository.session_id
+
+    def bind_executor(
+        self,
+        executor: SubAgentExecutor,
+        retain: Callable[[], Callable[[], None]],
+    ) -> None:
+        """Use the creating Run's resources for new tasks, including queued tasks."""
+        self._executor = executor
+        self._retain_executor = retain
+
+    def _release_executor(self, agent_id: str) -> None:
+        self._task_executors.pop(agent_id, None)
+        if (release := self._task_releases.pop(agent_id, None)) is not None:
+            release()
 
     def submit(
         self,
@@ -107,6 +124,9 @@ class SubAgentPool:
             source=source,
             creator_snapshot=creator_snapshot,
         )
+        self._task_executors[record.agent_id] = self._executor
+        if self._retain_executor is not None:
+            self._task_releases[record.agent_id] = self._retain_executor()
         self._publish_status(record)
         self._queued.append(record.agent_id)
         self._start_queued(loop)
@@ -205,6 +225,7 @@ class SubAgentPool:
                     self._queued.remove(agent_id)
                 except ValueError:
                     pass
+                self._release_executor(agent_id)
                 self._signal_waiters()
                 raise
             self._publish_status(terminal)
@@ -216,14 +237,15 @@ class SubAgentPool:
                 self._queued.remove(agent_id)
             except ValueError:
                 pass
+            self._release_executor(agent_id)
             self._signal_waiters()
             return True
         if agent_id in self._cancel_requested:
             if interrupted:
                 self._interrupted_requested.add(agent_id)
-                self._executor.request_cancel(agent_id, interrupted=True)
+                self._task_executors.get(agent_id, self._executor).request_cancel(agent_id, interrupted=True)
             return True
-        if not self._executor.request_cancel(agent_id, interrupted=interrupted):
+        if not self._task_executors.get(agent_id, self._executor).request_cancel(agent_id, interrupted=interrupted):
             return False
         self._cancel_requested.add(agent_id)
         if interrupted:
@@ -402,7 +424,9 @@ class SubAgentPool:
             )
             self._publish_status(running)
             try:
-                result = await self._executor.execute(running, emit=self._publish_event)
+                result = await self._task_executors.get(agent_id, self._executor).execute(
+                    running, emit=self._publish_event,
+                )
                 if not isinstance(result, SubAgentExecutionResult):
                     raise TypeError("SubAgent executor returned an invalid result")
             except asyncio.CancelledError:
@@ -419,6 +443,7 @@ class SubAgentPool:
         except Exception:
             logger.exception("SubAgent Pool could not start task {}", agent_id)
         finally:
+            self._release_executor(agent_id)
             if self._event_publisher is not None:
                 try:
                     terminal = self._repository.get(agent_id)

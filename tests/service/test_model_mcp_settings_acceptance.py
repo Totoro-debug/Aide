@@ -253,14 +253,14 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
                 saved = await response.json()
                 observed.append(json.dumps(saved))
                 assert response.status == 200, saved
-                assert saved["application"]["status"] == "restart-required"
+                assert saved["application"]["status"] == "next-run-required"
                 assert workspace.resources is old and old is not None and not workspace._closed
                 gates["foreground-old"].set()
                 assert "foreground-old finished" in await _client_output(cli)
                 assert workspace.resources is old and not workspace._closed
                 assert (
                     cast(dict[str, Any], service.config_view()["application"])["status"]
-                    == "restart-required"
+                    == "next-run-required"
                 )
                 assert not any(version == "new" for version, _, _ in header_calls)
                 gates["scheduled-old"].set()
@@ -271,7 +271,7 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
                         observed.append(json.dumps(event))
                         if (
                             event.get("type") == "config.application"
-                            and event["payload"]["status"] == "restart-required"
+                            and event["payload"]["status"] == "next-run-required"
                         ):
                             break
                 assert not ws.closed
@@ -322,8 +322,8 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
         for user, model in (
             ("foreground-old", "small-model"),
             ("scheduled-old", "small-model"),
-            ("foreground-new", "small-model"),
-            ("scheduled-new", "small-model"),
+            ("foreground-new", "large-model"),
+            ("scheduled-new", "large-model"),
         ):
             calls = [item for item in model_calls if item["user"] == user and item["tools"]]
             assert calls and all(item["model"] == model and item["key_matches"] for item in calls)
@@ -335,9 +335,10 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
                     and item["effort"] == "high"
                     for item in calls
                 )
-        assert sum(item["method"] == "tools/call" for item in wires["old"].requests) == 4
+        assert sum(item["method"] == "tools/call" for item in wires["old"].requests) == 2
         assert sum(item["method"] == "initialize" for item in wires["old"].requests) == 1
-        assert wires["new"].requests == []
+        assert sum(item["method"] == "tools/call" for item in wires["new"].requests) == 2
+        assert sum(item["method"] == "initialize" for item in wires["new"].requests) == 1
         assert all(matches for _, _, matches in header_calls)
         assert cancelled == []
         assert workspace.workspace_state is state

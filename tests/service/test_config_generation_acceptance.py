@@ -321,13 +321,13 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
                 )
                 saved = await response.json()
                 assert response.status == 200, saved
-                assert saved["application"]["status"] == "restart-required"
+                assert saved["application"]["status"] == "next-run-required"
                 assert saved["application"]["active_revision"] == revision
                 assert not old_provider.closed
                 await cli.submit_user_input("new work continues")
                 old_provider.release_a.set()
                 await asyncio.wait_for(confirmation.presented.wait(), 5)
-                assert _application(service)["status"] == "restart-required"
+                assert _application(service)["status"] == "next-run-required"
                 assert not old_provider.closed
                 assert confirmation.respond is not None
                 assert confirmation.respond(confirmation.token, "approved")
@@ -335,10 +335,10 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
                 assert (project / "generation.txt").read_text(
                     encoding="utf-8"
                 ) == "old Run survived"
-                assert _application(service)["status"] == "restart-required"
+                assert _application(service)["status"] == "active"
                 assert not old_provider.closed
                 old_provider.release_schedule.set()
-                assert _application(service)["status"] == "restart-required"
+                assert _application(service)["status"] == "active"
                 assert not web_socket.closed
                 await web_socket.ping(b"still-connected")
                 assert service.client(browser.client_id).connected
@@ -348,22 +348,22 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
         assert not old_provider.closed
         assert workspace.resources is old_runtime
         assert workspace.workspace_state is old_state
-        assert workspace.configuration.runtime.max_iterations == 50
-        assert workspace.configuration.memory.batch_size == 10
+        assert workspace.configuration.runtime.max_iterations == 81
+        assert workspace.configuration.memory.batch_size == 11
         assert (cli.session_id, cli.claim_version, cli.claim_credential) == claim
         assert cli._socket is socket and socket is not None and not socket.closed
         assert os.getpid() == pid and service.service_instance_id == identity
         assert service.client_permission(cli.client_id).current() == "read-only"
-        assert service.client_permission(cli.client_id).configured() == "workspace-write"
+        assert service.client_permission(cli.client_id).configured() == "full-access"
         assert (
             workspace.loops[
                 cli.session_id
             ].loop._create_executor()._tool_gateway._permission_context.configured_schedule_level
-            == "workspace-write"
+            == "full-access"
         )
         assert (
             workspace._schedule_loops[job.job_id].loop._create_executor()._permission_control.configured()
-            == "workspace-write"
+            == "full-access"
         )
         await workspace.schedule_service.pause_and_wait_idle()
         workspace.schedule_service.resume()
@@ -393,7 +393,7 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
 
 
 @pytest.mark.asyncio
-async def test_save_preserves_dream_and_subsequent_dream_uses_startup_settings(
+async def test_save_preserves_dream_and_subsequent_dream_uses_new_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = _configured_home(tmp_path / "home")
@@ -432,15 +432,15 @@ async def test_save_preserves_dream_and_subsequent_dream_uses_startup_settings(
             cast(str, service.config_view()["revision"]),
             {"memory": {"batch_size": 17}},
         )
-        assert _application(service)["status"] == "restart-required"
-        assert _application(service)["restart_required"] is True
+        assert _application(service)["status"] == "next-run-required"
+        assert _application(service)["restart_required"] is False
         assert not old_provider.closed and not dream_task.done()
         assert workspace.resources is old_runtime and not workspace._closed
         old_provider.release_background.set()
         result = await asyncio.wait_for(dream_task, 5)
         dream_result = cast(dict[str, object], result["dream_result"])
         assert dream_result["processed_count"] == 1 and dream_result["cursor"] == 1
-        assert _application(service)["status"] == "restart-required"
+        assert _application(service)["status"] == "next-run-required"
         assert not old_provider.background_cancelled.is_set() and not old_provider.closed
         assert workspace.resources is not None and workspace.resources is old_runtime
         await workspace.resources.memory_manager.append_summary(
@@ -449,7 +449,7 @@ async def test_save_preserves_dream_and_subsequent_dream_uses_startup_settings(
         next_result = await cli.management("dream", {})
         assert cast(dict[str, object], next_result["dream_result"])["processed_count"] == 1
         assert len(providers) == 1 and providers[0].dream_started.is_set()
-        assert workspace.configuration.memory.batch_size == 10
+        assert workspace.configuration.memory.batch_size == 17
     finally:
         for provider in providers:
             provider.release_background.set()
@@ -512,13 +512,13 @@ async def test_save_preserves_auto_title_after_foreground_run_has_finished(
             cast(str, service.config_view()["revision"]),
             {"runtime": {"max_iterations": 85}},
         )
-        assert _application(service)["status"] == "restart-required"
-        assert _application(service)["restart_required"] is True
+        assert _application(service)["status"] == "next-run-required"
+        assert _application(service)["restart_required"] is False
         assert workspace.resources is old_runtime and not old_provider.closed
         assert not title_idle.done() and not workspace._closed
         old_provider.release_background.set()
         await asyncio.wait_for(asyncio.shield(title_idle), 5)
-        assert _application(service)["status"] == "restart-required"
+        assert _application(service)["status"] == "next-run-required"
         assert not old_provider.background_cancelled.is_set() and not old_provider.closed
         current = workspace.loops[cli.session_id].loop.session
         assert current.metadata["title"] == "Completed background title"
@@ -526,7 +526,7 @@ async def test_save_preserves_auto_title_after_foreground_run_has_finished(
         await workspace.release(cli.client_id, cli.session_id)
         persisted = Session.load(cast(WorkspaceState, workspace.workspace_state), cli.session_id)
         assert persisted.metadata["title"] == "Completed background title"
-        assert workspace.configuration.runtime.max_iterations == 50
+        assert workspace.configuration.runtime.max_iterations == 85
     finally:
         for provider in providers:
             provider.release_background.set()
@@ -614,18 +614,18 @@ async def test_save_preserves_real_restore_transaction(
             cast(str, service.config_view()["revision"]),
             {"runtime": {"max_iterations": 86}},
         )
-        assert _application(service)["status"] == "restart-required"
-        assert _application(service)["restart_required"] is True
+        assert _application(service)["status"] == "next-run-required"
+        assert _application(service)["restart_required"] is False
         assert workspace.resources is old_runtime and not workspace._closed
         assert not restore_task.done() and target.read_bytes() == b"current branch"
         release.set()
         result = await asyncio.wait_for(restore_task, 5)
         assert result.get("restore_result") is not None
-        assert _application(service)["status"] == "restart-required"
+        assert _application(service)["status"] == "next-run-required"
         assert not cancelled.is_set()
         assert target.read_bytes() == b"before restore"
         assert not RestoreManager(state, session.session_id).has_pending_transaction()
-        assert workspace.configuration.runtime.max_iterations == 50
+        assert workspace.configuration.runtime.max_iterations == 86
         assert workspace.loops[session.session_id].loop is claim.loop
         assert claim.loop.session.session_id == session.session_id
     finally:

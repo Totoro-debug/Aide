@@ -532,6 +532,7 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
         "get",
         "resolve_manual",
         "load",
+        "with_always_load",
     }
 
     message_bus = _source_class(
@@ -587,6 +588,7 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
         "model_router",
         "batch_size",
         "memory_route_status",
+        "prepare_execution",
     )
     assert _public_method_names(dream) == {
         "run",

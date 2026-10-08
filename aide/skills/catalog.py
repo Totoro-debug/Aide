@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import yaml  # type: ignore[import-untyped]
@@ -84,6 +84,24 @@ class SkillLoader:
     def metadata(self) -> tuple[SkillMetadata, ...]:
         """Return metadata for the currently published Skills in discovery order."""
         return tuple(skill.metadata for skill in self._skills)
+
+    def with_always_load(self, enabled: bool) -> SkillLoader:
+        """Project published instructions with a new setting without re-reading files."""
+        loader = SkillLoader(
+            root=self._root, reserved_names=self._reserved_names, enable_always_load=enabled,
+        )
+        loader._skills = tuple(
+            replace(skill, always=enabled and self._authored_always(skill))
+            for skill in self._skills
+        )
+        return loader
+
+    @staticmethod
+    def _authored_always(skill: LoadedSkill) -> bool:
+        _, always, _ = _parse_document(
+            skill.document, skill.metadata.path, interpret_always=True,
+        )
+        return always is True
 
     def get(self, name: str) -> LoadedSkill | None:
         """Return one published Skill by its exact authored name."""

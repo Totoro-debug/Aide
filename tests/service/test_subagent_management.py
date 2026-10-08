@@ -33,7 +33,7 @@ from aide.agent.subagents.store import (
     SubAgentRequestError,
     SubAgentStoreError,
 )
-from aide.agent.tools.tool_gateway import ConfirmationRequest, ModelToolCall
+from aide.agent.tools.tool_gateway import ConfirmationRequest, ModelToolCall, ToolGateway
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.config import ConfigLoader
 from aide.provider.models import (
@@ -110,6 +110,54 @@ def _require_record(repository: SubAgentRecordRepository, agent_id: str) -> SubA
     record = repository.get(agent_id)
     assert record is not None
     return record
+
+
+def _schedule_child(pool: SubAgentPool, job_id: str) -> SubAgentRecord:
+    return pool.submit(
+        title="Schedule child",
+        task="Wait for cleanup.",
+        parent_run_id=_RUN_ID,
+        source=SubAgentSource(
+            kind=SubAgentSourceKind.SCHEDULE,
+            job_id=job_id,
+            occurrence_id=str(uuid4()),
+        ),
+        creator_snapshot=_snapshot(),
+    )
+
+
+async def _remove_schedule_job(
+    service: AgentService,
+    workspace: WorkspaceRecord,
+    client_id: str,
+    job_id: str,
+    entry: str,
+    request_id: str,
+) -> bool:
+    if entry == "tool":
+        gateway = ToolGateway(
+            workspace=workspace.workspace_path, schedule_service=workspace.schedule_service
+        )
+        result = await gateway.call(
+            ModelToolCall(
+                id=request_id,
+                name="schedule",
+                arguments=json.dumps({"action": "remove", "job_id": job_id}),
+            )
+        )
+        return result.status == "success"
+    try:
+        response = await service.delete_schedule_job(
+            client_id,
+            workspace.workspace_id,
+            job_id,
+            request_id,
+            {},
+        )
+    except ServiceError as error:
+        assert error.code in {"schedule_update_failed", "schedule_changed", "not_found"}
+        return False
+    return response["deleted"] is True
 
 
 class _HoldingExecutor:
@@ -1009,11 +1057,82 @@ async def test_schedule_job_deletion_drains_all_occurrences_before_returning(
 
 
 @pytest.mark.asyncio
-async def test_job_removal_fences_a_coordinator_registered_during_removal(
+@pytest.mark.parametrize("entry", ["tool", "user"])
+async def test_job_removal_drains_running_and_queued_children_through_both_entries(
     management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
-    monkeypatch: pytest.MonkeyPatch,
+    entry: str,
 ) -> None:
     service, workspace, client_id, session_id, _other_session_id = management_case
+    repository = SubAgentRecordStore(workspace.workspace_state, session_id)
+    executor = _HoldingExecutor()
+    pool = SubAgentPool(repository, executor)
+    workspace.register_subagent_coordinator(pool, repository)
+    job = ScheduleJob(
+        job_id=str(uuid4()),
+        message="Remove all occurrences",
+        schedule=JobSchedule.every(3600),
+        created_at_ms=1,
+        updated_at_ms=1,
+    )
+    await workspace.schedule_service.add_user_job(job)
+    records = tuple(
+        pool.submit(
+            title=f"Child {index}",
+            task="Wait for cancellation.",
+            parent_run_id=_RUN_ID,
+            source=SubAgentSource(
+                kind=SubAgentSourceKind.SCHEDULE,
+                job_id=job.job_id,
+                occurrence_id=str(uuid4()),
+            ),
+            creator_snapshot=_snapshot(),
+        )
+        for index in range(9)
+    )
+    started = {await executor.started.get() for _ in range(8)}
+    gateway = ToolGateway(
+        workspace=workspace.workspace_path, schedule_service=workspace.schedule_service
+    )
+    removal = asyncio.create_task(
+        gateway.call(
+            ModelToolCall(
+                id="remove-children",
+                name="schedule",
+                arguments=json.dumps({"action": "remove", "job_id": job.job_id}),
+            )
+        )
+        if entry == "tool"
+        else service.delete_schedule_job(
+            client_id, workspace.workspace_id, job.job_id, "remove-children", {}
+        )
+    )
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(executor.cancel_requested[agent_id].wait() for agent_id in started)),
+            timeout=2,
+        )
+        assert not removal.done()
+        assert await workspace.schedule_service.public_snapshot() == ()
+        assert _require_record(repository, records[-1].agent_id).status is SubAgentStatus.CANCELLED
+    finally:
+        pool.close_admission()
+        for release in executor.release.values():
+            release.set()
+        await removal
+    assert {_require_record(repository, record.agent_id).status for record in records} == {
+        SubAgentStatus.CANCELLED
+    }
+    assert records[-1].agent_id not in executor.release
+    assert executor.started.empty()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["tool", "user"])
+async def test_job_removal_fences_a_coordinator_registered_during_removal(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    entry: str,
+) -> None:
+    service, workspace, client_id, session_id, other_session_id = management_case
     job_id = str(uuid4())
     job = ScheduleJob(
         job_id=job_id,
@@ -1023,39 +1142,377 @@ async def test_job_removal_fences_a_coordinator_registered_during_removal(
         updated_at_ms=int(_NOW.timestamp() * 1000),
     )
     await workspace.schedule_service.add_user_job(job)
-    removal_started = asyncio.Event()
-    allow_removal = asyncio.Event()
-    remove = workspace.schedule_service.remove_user_job
-
-    async def gated_remove(job_id: str, *, expected: ScheduleJob | None = None) -> bool:
-        removal_started.set()
-        await allow_removal.wait()
-        return await remove(job_id, expected=expected)
-
-    monkeypatch.setattr(workspace.schedule_service, "remove_user_job", gated_remove)
-    removal = asyncio.create_task(
-        service.delete_schedule_job(client_id, workspace.workspace_id, job_id, "remove-late", {})
-    )
-    await asyncio.wait_for(removal_started.wait(), timeout=2)
     repository = SubAgentRecordStore(workspace.workspace_state, session_id)
-    pool = SubAgentPool(repository, _HoldingExecutor())
+    executor = _HoldingExecutor()
+    pool = SubAgentPool(repository, executor)
+    workspace.register_subagent_coordinator(pool, repository)
+    record = _schedule_child(pool, job_id)
+    assert await executor.started.get() == record.agent_id
+    removal = asyncio.create_task(
+        _remove_schedule_job(service, workspace, client_id, job_id, entry, "remove-late")
+    )
+    await asyncio.wait_for(executor.cancel_requested[record.agent_id].wait(), timeout=2)
+    late_repository = SubAgentRecordStore(workspace.workspace_state, other_session_id)
+    late_pool = SubAgentPool(late_repository, _HoldingExecutor())
+    workspace.register_subagent_coordinator(late_pool, late_repository)
     try:
-        workspace.register_subagent_coordinator(pool, repository)
-        with pytest.raises(SubAgentRequestError, match="Schedule Job"):
-            pool.submit(
-                title="Rejected late child",
-                task="Must not start during Job removal.",
-                parent_run_id=_RUN_ID,
-                source=SubAgentSource(
-                    kind=SubAgentSourceKind.SCHEDULE,
-                    job_id=job_id,
-                    occurrence_id=str(uuid4()),
-                ),
-                creator_snapshot=_snapshot(),
-            )
+        for target in (pool, late_pool):
+            with pytest.raises(SubAgentRequestError, match="Schedule Job"):
+                _schedule_child(target, job_id)
     finally:
-        allow_removal.set()
+        executor.release[record.agent_id].set()
+        assert await removal
+    for target in (pool, late_pool):
+        with pytest.raises(SubAgentRequestError, match="Schedule Job"):
+            _schedule_child(target, job_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["tool", "user"])
+@pytest.mark.parametrize("retry_entry", ["tool", "user"])
+async def test_job_removal_waits_for_all_pools_and_retries_checkpoint_failure(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    entry: str,
+    retry_entry: str,
+) -> None:
+    service, workspace, client_id, session_id, other_session_id = management_case
+    fail_cancelled = True
+
+    def replace_text(path: Path, content: str) -> None:
+        if fail_cancelled and json.loads(content)["status"] == "cancelled":
+            raise OSError("cancelled checkpoint unavailable")
+        HOST_FILESYSTEM.atomic_replace_text(path, content)
+
+    job = ScheduleJob(
+        job_id=str(uuid4()),
+        message="Retry cleanup",
+        schedule=JobSchedule.every(3600),
+        created_at_ms=1,
+        updated_at_ms=1,
+    )
+    await workspace.schedule_service.add_user_job(job)
+    executor = _HoldingExecutor()
+    entries = []
+    for target_session in (session_id, other_session_id):
+        repository = SubAgentRecordStore(
+            workspace.workspace_state,
+            target_session,
+            replace_text=(
+                replace_text
+                if target_session == session_id
+                else HOST_FILESYSTEM.atomic_replace_text
+            ),
+        )
+        pool = SubAgentPool(repository, executor)
+        workspace.register_subagent_coordinator(pool, repository)
+        record = _schedule_child(pool, job.job_id)
+        assert await executor.started.get() == record.agent_id
+        entries.append((repository, pool, record))
+    removal = asyncio.create_task(
+        _remove_schedule_job(service, workspace, client_id, job.job_id, entry, "failed-remove")
+    )
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                *(executor.cancel_requested[record.agent_id].wait() for _, _, record in entries)
+            ),
+            timeout=2,
+        )
+        first, second = entries
+        executor.release[first[2].agent_id].set()
+        with pytest.raises(SubAgentStoreError):
+            await asyncio.wait_for(first[1].wait([first[2].agent_id]), timeout=2)
+        assert not removal.done(), "An error in one pool must not skip the other pool's cleanup"
+        executor.release[second[2].agent_id].set()
+        assert not await removal
+        assert await workspace.schedule_service.public_snapshot() == ()
+        assert await workspace.schedule_service.job_for_removal(job.job_id) == job
+        assert first[1].has_active()
+        for _, pool, _ in entries:
+            with pytest.raises(SubAgentRequestError, match="Schedule Job"):
+                _schedule_child(pool, job.job_id)
+    finally:
+        fail_cancelled = False
+        for release in executor.release.values():
+            release.set()
+    assert await _remove_schedule_job(
+        service,
+        workspace,
+        client_id,
+        job.job_id,
+        retry_entry,
+        "retry-remove",
+    )
+    for repository, pool, record in entries:
+        assert _require_record(repository, record.agent_id).status is SubAgentStatus.CANCELLED
+        assert len(repository.list().items) == 1
+        assert not pool.has_active()
+    assert await workspace.schedule_service.job_for_removal(job.job_id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["tool", "user"])
+async def test_job_removal_queued_checkpoint_failure_never_starts_the_cancelled_child(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    entry: str,
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    failed_id: str | None = None
+    fail_cancelled = True
+
+    def replace_text(path: Path, content: str) -> None:
+        value = json.loads(content)
+        if fail_cancelled and value["agent_id"] == failed_id and value["status"] == "cancelled":
+            raise OSError("Queued cancellation checkpoint failed")
+        HOST_FILESYSTEM.atomic_replace_text(path, content)
+
+    repository = SubAgentRecordStore(
+        workspace.workspace_state, session_id, replace_text=replace_text
+    )
+    executor = _HoldingExecutor()
+    pool = SubAgentPool(repository, executor)
+    workspace.register_subagent_coordinator(pool, repository)
+    job = ScheduleJob(
+        job_id=str(uuid4()),
+        message="Keep cancelled queue stopped",
+        schedule=JobSchedule.every(3600),
+        created_at_ms=1,
+        updated_at_ms=1,
+    )
+    await workspace.schedule_service.add_user_job(job)
+    records = [_schedule_child(pool, job.job_id) for _ in range(9)]
+    failed_id = records[-1].agent_id
+    started = {await executor.started.get() for _ in range(8)}
+    removal = asyncio.create_task(
+        _remove_schedule_job(
+            service, workspace, client_id, job.job_id, entry, "failed-queued-remove"
+        )
+    )
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(executor.cancel_requested[agent_id].wait() for agent_id in started)),
+            timeout=2,
+        )
+        for release in executor.release.values():
+            release.set()
+        assert not await removal
+        assert executor.started.empty(), (
+            "A failed cancellation checkpoint must not let the queued child start"
+        )
+        assert _require_record(repository, failed_id).status is SubAgentStatus.QUEUED
+        assert pool.has_active()
+    finally:
+        fail_cancelled = False
+    assert await _remove_schedule_job(
+        service,
+        workspace,
+        client_id,
+        job.job_id,
+        "user" if entry == "tool" else "tool",
+        "retry-queued-remove",
+    )
+    assert all(
+        _require_record(repository, record.agent_id).status is SubAgentStatus.CANCELLED
+        for record in records
+    )
+    assert not pool.has_active()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["tool", "user"])
+async def test_job_removal_checkpoint_failure_still_waits_for_siblings_in_the_same_pool(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    entry: str,
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    failed_id: str | None = None
+    fail_cancelled = True
+
+    def replace_text(path: Path, content: str) -> None:
+        value = json.loads(content)
+        if fail_cancelled and value["agent_id"] == failed_id and value["status"] == "cancelled":
+            raise OSError("One sibling's terminal checkpoint failed")
+        HOST_FILESYSTEM.atomic_replace_text(path, content)
+
+    repository = SubAgentRecordStore(
+        workspace.workspace_state, session_id, replace_text=replace_text
+    )
+    executor = _HoldingExecutor()
+    pool = SubAgentPool(repository, executor)
+    workspace.register_subagent_coordinator(pool, repository)
+    job = ScheduleJob(
+        job_id=str(uuid4()),
+        message="Drain siblings",
+        schedule=JobSchedule.every(3600),
+        created_at_ms=1,
+        updated_at_ms=1,
+    )
+    await workspace.schedule_service.add_user_job(job)
+    first = _schedule_child(pool, job.job_id)
+    failed_id = first.agent_id
+    second = _schedule_child(pool, job.job_id)
+    assert {await executor.started.get(), await executor.started.get()} == {
+        first.agent_id,
+        second.agent_id,
+    }
+    removal = asyncio.create_task(
+        _remove_schedule_job(service, workspace, client_id, job.job_id, entry, "remove-siblings")
+    )
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                executor.cancel_requested[first.agent_id].wait(),
+                executor.cancel_requested[second.agent_id].wait(),
+            ),
+            timeout=2,
+        )
+        executor.release[first.agent_id].set()
+        with pytest.raises(SubAgentStoreError):
+            await asyncio.wait_for(pool.wait([first.agent_id]), timeout=2)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(removal), timeout=0.1)
+        executor.release[second.agent_id].set()
+        assert not await removal
+    finally:
+        fail_cancelled = False
+        for release in executor.release.values():
+            release.set()
         await removal
+        await _remove_schedule_job(
+            service, workspace, client_id, job.job_id, entry, "retry-siblings"
+        )
+    assert not pool.has_active()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["tool", "user"])
+@pytest.mark.parametrize("cancel_caller", [False, True])
+async def test_concurrent_job_removal_keeps_the_source_fenced(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    entry: str,
+    cancel_caller: bool,
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    job = ScheduleJob(
+        job_id=str(uuid4()),
+        message="Concurrent removal",
+        schedule=JobSchedule.every(3600),
+        created_at_ms=1,
+        updated_at_ms=1,
+    )
+    await workspace.schedule_service.add_user_job(job)
+    repository = SubAgentRecordStore(workspace.workspace_state, session_id)
+    executor = _HoldingExecutor()
+    pool = SubAgentPool(repository, executor)
+    workspace.register_subagent_coordinator(pool, repository)
+    record = _schedule_child(pool, job.job_id)
+    other_job_id = str(uuid4())
+    unaffected = _schedule_child(pool, other_job_id)
+    outside_path = workspace.workspace_path.parent / "outside-job-removal"
+    outside_path.mkdir()
+    outside_session_id = await _persist_session(
+        outside_path,
+        home=service.agent_home,
+        title="Outside",
+        created_at=_NOW,
+        content="Unrelated Workspace",
+    )
+    outside_workspace = await service.attach_workspace(client_id, outside_path)
+    outside_repository = SubAgentRecordStore(outside_workspace.workspace_state, outside_session_id)
+    outside_pool = SubAgentPool(outside_repository, executor)
+    outside_workspace.register_subagent_coordinator(outside_pool, outside_repository)
+    outside = _schedule_child(outside_pool, job.job_id)
+    assert {await executor.started.get() for _ in range(3)} == {
+        record.agent_id,
+        unaffected.agent_id,
+        outside.agent_id,
+    }
+    removal = asyncio.create_task(
+        _remove_schedule_job(service, workspace, client_id, job.job_id, entry, "concurrent-first")
+    )
+    await asyncio.wait_for(executor.cancel_requested[record.agent_id].wait(), timeout=2)
+    if cancel_caller:
+        removal.cancel()
+    followup = asyncio.create_task(
+        _remove_schedule_job(
+            service,
+            workspace,
+            client_id,
+            job.job_id,
+            "user" if entry == "tool" else "tool",
+            "concurrent-second",
+        )
+    )
+    await asyncio.sleep(0)
+    try:
+        assert not followup.done()
+        with pytest.raises(SubAgentRequestError, match="Schedule Job"):
+            _schedule_child(pool, job.job_id)
+        executor.release[record.agent_id].set()
+        if cancel_caller:
+            with pytest.raises(asyncio.CancelledError):
+                await removal
+            assert await followup
+        else:
+            assert await removal
+            assert not await followup
+        with pytest.raises(SubAgentRequestError, match="Schedule Job"):
+            _schedule_child(pool, job.job_id)
+        assert not executor.cancel_requested[unaffected.agent_id].is_set()
+        assert _require_record(repository, unaffected.agent_id).status is SubAgentStatus.RUNNING
+        assert not executor.cancel_requested[outside.agent_id].is_set()
+        assert (
+            _require_record(outside_repository, outside.agent_id).status is SubAgentStatus.RUNNING
+        )
+    finally:
+        for release in executor.release.values():
+            release.set()
+        await asyncio.gather(removal, followup, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["tool", "user"])
+@pytest.mark.parametrize("failure", ["before_replace", "after_replace", "unreadable"])
+async def test_job_removal_store_failure_reopens_only_a_proven_unremoved_source(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    entry: str,
+    failure: str,
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    job = ScheduleJob(
+        job_id=str(uuid4()),
+        message="Store failure",
+        schedule=JobSchedule.every(3600),
+        created_at_ms=1,
+        updated_at_ms=1,
+    )
+    await workspace.schedule_service.add_user_job(job)
+    repository = SubAgentRecordStore(workspace.workspace_state, session_id)
+    executor = _HoldingExecutor()
+    pool = SubAgentPool(repository, executor)
+    workspace.register_subagent_coordinator(pool, repository)
+    first = _schedule_child(pool, job.job_id)
+    assert await executor.started.get() == first.agent_id
+
+    def fail_replace(path: Path, content: str) -> None:
+        if failure != "before_replace":
+            HOST_FILESYSTEM.atomic_replace_text(
+                path, "invalid schedule" if failure == "unreadable" else content
+            )
+        raise OSError("Schedule atomic replacement failed")
+
+    monkeypatch.setattr(workspace.schedule_service._store, "_replace_text", fail_replace)
+    assert not await _remove_schedule_job(
+        service, workspace, client_id, job.job_id, entry, "failed-store"
+    )
+    assert not executor.cancel_requested[first.agent_id].is_set()
+    if failure == "before_replace":
+        recovered = _schedule_child(pool, job.job_id)
+        assert await executor.started.get() == recovered.agent_id
+    else:
+        with pytest.raises(SubAgentRequestError, match="Schedule Job"):
+            _schedule_child(pool, job.job_id)
 
 
 @pytest.mark.asyncio

@@ -238,6 +238,21 @@ class ScheduleService:
             ConfirmationOwnerCanceller | None,
             runtime_options.pop("cancel_confirmation_owner", None),
         )
+        block_subagent_source = cast(
+            Callable[[str], None] | None, runtime_options.pop("block_subagent_source", None)
+        )
+        unblock_subagent_source = cast(
+            Callable[[str], None] | None, runtime_options.pop("unblock_subagent_source", None)
+        )
+        cancel_subagents_for_job = cast(
+            Callable[[str], Awaitable[None]] | None,
+            runtime_options.pop("cancel_subagents_for_job", None),
+        )
+        subagent_hooks = (block_subagent_source, unblock_subagent_source, cancel_subagents_for_job)
+        if any(hook is not None for hook in subagent_hooks) and not all(
+            callable(hook) for hook in subagent_hooks
+        ):
+            raise TypeError("Schedule SubAgent lifecycle operations must be bound together")
         if runtime_options:
             unexpected = next(iter(runtime_options))
             raise TypeError(f"Unexpected Schedule Service runtime option: {unexpected}")
@@ -252,6 +267,9 @@ class ScheduleService:
         self._admission_guard: Callable[[], bool] = lambda: True
         self._permission_snapshot_factory = permission_snapshot_factory
         self._cancel_confirmation_owner = cancel_confirmation_owner
+        self._block_subagent_source = block_subagent_source
+        self._unblock_subagent_source = unblock_subagent_source
+        self._cancel_subagents_for_job = cancel_subagents_for_job
         self._execute_dream = execute_dream
         self._timezone_name = timezone_name
         self._loop_task: asyncio.Task[None] | None = None
@@ -263,8 +281,10 @@ class ScheduleService:
         self._active_job_ids: set[str] = set()
         self._active_runs: dict[str, _ActiveScheduleRun] = {}
         self._pending_user_removals: dict[
-            str, tuple[_ActiveScheduleRun, BackgroundConfirmationOwner | None]
+            str, tuple[ScheduleJob, _ActiveScheduleRun | None, BackgroundConfirmationOwner | None]
         ] = {}
+        self._user_removal_locks: dict[str, asyncio.Lock] = {}
+        self._removed_user_job_ids: set[str] = set()
         self._cancelled_confirmation_generations: set[UUID] = set()
         self._consumed_at_jobs: set[str] = set()
         self._retry_at_jobs_after_resume: set[str] = set()
@@ -555,38 +575,97 @@ class ScheduleService:
             raise RuntimeError("Schedule Service is no longer active")
         return await self._store.public_snapshot()
 
+    async def job_for_removal(self, job_id: str) -> ScheduleJob | None:
+        """Include removed Jobs whose execution cleanup still needs to be retried."""
+        if self._aborted:
+            raise RuntimeError("Schedule Service is no longer active")
+        pending = self._pending_user_removals.get(job_id)
+        if pending is not None:
+            return pending[0]
+        jobs = await self._store.public_snapshot()
+        return next((job for job in jobs if job.job_id == job_id), None)
+
     async def remove_user_job(
         self,
         job_id: str,
         *,
         expected: ScheduleJob | None = None,
     ) -> bool:
-        """Remove one user-owned Job with the Store's optimistic expectation."""
+        """Fence, remove, and drain a user Job across all of its occurrences."""
         if self._aborted:
             raise RuntimeError("Schedule Service is no longer active")
-        removed = await self._store.remove_user_job(job_id, expected=expected)
-        self._notify_dispatcher()
-        pending = self._pending_user_removals.get(job_id)
-        active = pending[0] if pending is not None else self._active_runs.get(job_id)
-        if not removed and job_id not in self._pending_user_removals:
-            return False
-        if active is None:
+        lock = self._user_removal_locks.setdefault(job_id, asyncio.Lock())
+        async with lock:
+            pending = self._pending_user_removals.get(job_id)
+            if pending is None:
+                new_fence = job_id not in self._removed_user_job_ids
+                if not new_fence and await self.job_for_removal(job_id) is None:
+                    return False
+                if self._block_subagent_source is not None:
+                    self._block_subagent_source(job_id)
+                try:
+                    job = await self.job_for_removal(job_id)
+                    removed = await self._store.remove_user_job(job_id, expected=expected)
+                except BaseException:
+                    # A failed atomic replace can have committed on disk. Only reopen
+                    # admission when the Store or a fresh read proves non-removal.
+                    not_committed = self._store.health == "available"
+                    if not not_committed:
+                        try:
+                            recovered = WorkspaceScheduleStore(self._store.workspace_state)
+                            not_committed = any(
+                                job.job_id == job_id for job in await recovered.public_snapshot()
+                            )
+                        except Exception:
+                            pass
+                    if new_fence and not_committed and self._unblock_subagent_source is not None:
+                        self._unblock_subagent_source(job_id)
+                    raise
+                if not removed:
+                    if new_fence and self._unblock_subagent_source is not None:
+                        self._unblock_subagent_source(job_id)
+                    return False
+                assert job is not None
+                active = self._active_runs.get(job_id)
+                owner = None if active is None else active.owner
+                pending = (job, active, owner)
+                self._pending_user_removals[job_id] = pending
+                self._removed_user_job_ids.add(job_id)
+                self._notify_dispatcher()
+            elif expected is not None and (
+                expected.source != "user"
+                or (expected.job_id, expected.title, expected.message, expected.schedule)
+                != (pending[0].job_id, pending[0].title, pending[0].message, pending[0].schedule)
+            ):
+                raise ScheduleStaleRemovalError("Schedule Job changed before removal")
+            cleanup = asyncio.create_task(
+                self._drain_removed_user_job(job_id, pending[1], pending[2])
+            )
+            await await_task_preserving_cancellation(cleanup)
+            self._pending_user_removals.pop(job_id, None)
             return True
-        owner = pending[1] if pending is not None else active.owner
-        self._pending_user_removals[job_id] = (active, owner)
-        if not active.task.done():
+
+    async def _drain_removed_user_job(
+        self,
+        job_id: str,
+        active: _ActiveScheduleRun | None,
+        owner: BackgroundConfirmationOwner | None,
+    ) -> None:
+        if active is not None and not active.task.done():
             active.task.cancel()
-        cancellation_error: BaseException | None = None
+        cleanup: list[Awaitable[object]] = []
         if owner is not None and self._cancel_confirmation_owner is not None:
-            try:
-                await self._cancel_confirmation_owner(owner)
-            except BaseException as error:
-                cancellation_error = error
-        await self._drain_confirmation_runs((active,), require_terminal=False)
-        if cancellation_error is not None:
-            raise cancellation_error
-        self._pending_user_removals.pop(job_id, None)
-        return True
+            cleanup.append(self._cancel_confirmation_owner(owner))
+        if active is not None:
+            cleanup.append(self._drain_confirmation_runs((active,), require_terminal=False))
+        if self._cancel_subagents_for_job is not None:
+            cleanup.append(self._cancel_subagents_for_job(job_id))
+        results = await asyncio.gather(*cleanup, return_exceptions=True)
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise BaseExceptionGroup("Schedule Job cleanup failed", failures)
 
     def bind_occurrence_owner(
         self,

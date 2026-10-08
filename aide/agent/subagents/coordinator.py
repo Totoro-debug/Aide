@@ -188,16 +188,25 @@ class SubAgentPool:
                     else "The SubAgent was cancelled."
                 ),
             )
-            terminal = self._repository.save(
-                replace(
-                    record,
-                    status=status,
-                    finished_at=self._aware_now(),
-                    error=terminal_error,
-                    revision=self._next_revision(record),
-                ),
-                expected_revision=record.revision,
-            )
+            try:
+                terminal = self._repository.save(
+                    replace(
+                        record,
+                        status=status,
+                        finished_at=self._aware_now(),
+                        error=terminal_error,
+                        revision=self._next_revision(record),
+                    ),
+                    expected_revision=record.revision,
+                )
+            except SubAgentStoreError:
+                self._storage_failures.add(agent_id)
+                try:
+                    self._queued.remove(agent_id)
+                except ValueError:
+                    pass
+                self._signal_waiters()
+                raise
             self._publish_status(terminal)
             self._event_revisions.pop(agent_id, None)
             self._storage_failures.discard(agent_id)
@@ -292,9 +301,15 @@ class SubAgentPool:
                 break
             cursor = page.next_cursor
         results = await asyncio.gather(
-            *(self.cancel_and_wait(agent_id, interrupted=interrupted) for agent_id in agent_ids)
+            *(self.cancel_and_wait(agent_id, interrupted=interrupted) for agent_id in agent_ids),
+            return_exceptions=True,
         )
-        return tuple(record for record in results if record is not None)
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise BaseExceptionGroup("SubAgent source cleanup failed", failures)
+        return tuple(record for record in results if isinstance(record, SubAgentRecord))
 
     async def shutdown(self, *, interrupted: bool = True) -> None:
         """Stop admission and drain every task before its Workspace closes resources."""

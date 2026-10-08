@@ -144,10 +144,7 @@ class ScheduleTool(BaseTool):
                     require_uuid4_string(job_id, field="job_id")
                 except ValueError:
                     return prepared
-                if (
-                    await self._current_public_job(job_id, schedule_service=schedule_service)
-                    is None
-                ):
+                if await self._job_for_removal(job_id, schedule_service=schedule_service) is None:
                     raise ToolError(_NOT_FOUND)
         return prepared
 
@@ -262,7 +259,7 @@ class ScheduleTool(BaseTool):
                 require_uuid4_string(job_id, field="job_id")
             except ValueError as error:
                 raise ToolError(_INVALID_ARGUMENTS) from error
-            public_job = await self._current_public_job(job_id, schedule_service=schedule_service)
+            public_job = await self._job_for_removal(job_id, schedule_service=schedule_service)
             if public_job is None:
                 raise ToolError(_NOT_FOUND)
             try:
@@ -339,17 +336,16 @@ class ScheduleTool(BaseTool):
             raise ToolError(_INVALID_ARGUMENTS)
         return milliseconds
 
-    async def _current_public_job(
+    async def _job_for_removal(
         self,
         job_id: str,
         *,
         schedule_service: ScheduleService,
     ) -> ScheduleJob | None:
         try:
-            jobs = await schedule_service.public_snapshot()
+            return await schedule_service.job_for_removal(job_id)
         except Exception as error:
             raise ToolError(_STATE_READ_FAILED) from error
-        return next((job for job in jobs if job.job_id == job_id), None)
 
     @staticmethod
     def _context_schedule_service(context: ToolRunContext) -> ScheduleService:

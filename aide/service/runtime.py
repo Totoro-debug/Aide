@@ -2691,7 +2691,7 @@ class AgentService:
         self._schedule_admission_lock = asyncio.Lock()
         self._schedule_mutation_lock = asyncio.Lock()
         self._schedule_mutation_results: dict[str, tuple[str, dict[str, object]]] = {}
-        self._schedule_removal_jobs: dict[tuple[str, str], tuple[ScheduleJob, bool]] = {}
+        self._schedule_removal_jobs: dict[tuple[str, str], bool] = {}
         self._project_lifecycle_lock = asyncio.Lock()
         self._project_removals: dict[str, _ProjectRemoval] = {}
         self._configuration_editor = ConfigurationEditor(ConfigLoader(agent_home), configuration)
@@ -2806,6 +2806,20 @@ class AgentService:
                 loop = await workspace._get_schedule_loop(occurrence.job.job_id, title=occurrence.job.title)
                 await loop.loop.run_schedule_job(occurrence.job, occurrence)
 
+            async def cancel_subagents_for_job(job_id: str) -> None:
+                results = await asyncio.gather(
+                    *(
+                        coordinator.cancel_source_and_wait(job_id=job_id)
+                        for coordinator in tuple(workspace._subagent_coordinators.values())
+                    ),
+                    return_exceptions=True,
+                )
+                failures = [result for result in results if isinstance(result, BaseException)]
+                if len(failures) == 1:
+                    raise failures[0]
+                if failures:
+                    raise BaseExceptionGroup("Schedule SubAgent cleanup failed", failures)
+
             registered_resources = False
             try:
                 state = WorkspaceState(workspace.workspace_path)
@@ -2852,6 +2866,9 @@ class AgentService:
                     execute_user_occurrence=execute_user_occurrence,
                     permission_snapshot_factory=workspace._capture_schedule_permission_snapshot,
                     cancel_confirmation_owner=self.confirmation.cancel_owner,
+                    block_subagent_source=workspace.block_subagent_source,
+                    unblock_subagent_source=workspace.unblock_subagent_source,
+                    cancel_subagents_for_job=cancel_subagents_for_job,
                     execute_dream=dream.run,
                     timezone_name=get_localzone_name(),
                 )
@@ -3764,64 +3781,41 @@ class AgentService:
                         status=409,
                     )
                 return previous[1]
-            jobs = await workspace.schedule_service.public_snapshot()
-            job = next((candidate for candidate in jobs if candidate.job_id == job_id), None)
+            job = await workspace.schedule_service.job_for_removal(job_id)
             removal_key = (workspace_id, job_id)
             pending = self._schedule_removal_jobs.get(removal_key)
-            if job is None and pending is not None:
-                job = pending[0]
             if job is None:
                 raise service_error("not_found", "Schedule Job was not found.", status=404)
-            workspace.block_subagent_source(job_id)
             was_active = (
-                pending[1]
-                if pending is not None
-                else workspace.schedule_service.is_job_active(job_id)
+                pending if pending is not None else workspace.schedule_service.is_job_active(job_id)
             )
-            self._schedule_removal_jobs[removal_key] = (job, was_active)
+            self._schedule_removal_jobs[removal_key] = was_active
             try:
                 removed = await workspace.schedule_service.remove_user_job(job_id, expected=job)
             except ScheduleStaleRemovalError as error:
-                workspace.unblock_subagent_source(job_id)
                 raise service_error(
                     "schedule_changed",
                     "Schedule Job changed before removal; reload and try again.",
                     retryable=True,
                 ) from error
             except ScheduleStoreFaultedError as error:
-                workspace.unblock_subagent_source(job_id)
                 raise service_error(
                     "schedule_unavailable",
                     "Schedule state is unavailable; retry after it is repaired.",
                     retryable=True,
                 ) from error
-            except (ScheduleStateError, OSError, RuntimeError) as error:
-                workspace.unblock_subagent_source(job_id)
+            except Exception as error:
                 raise service_error(
                     "schedule_update_failed",
                     "Schedule Job could not be deleted.",
                     retryable=True,
                 ) from error
             if not removed:
-                workspace.unblock_subagent_source(job_id)
                 raise service_error(
                     "schedule_changed",
                     "Schedule Job changed before removal; reload and try again.",
                     retryable=True,
                 )
-            try:
-                await asyncio.gather(
-                    *(
-                        coordinator.cancel_source_and_wait(job_id=job_id)
-                        for coordinator in tuple(workspace._subagent_coordinators.values())
-                    )
-                )
-            except Exception as error:
-                raise service_error(
-                    "schedule_update_failed",
-                    "Schedule Job was removed, but its SubAgent work could not be drained.",
-                    retryable=True,
-                ) from error
             result: dict[str, object] = {
                 "request_id": request_id,
                 "workspace_id": workspace_id,

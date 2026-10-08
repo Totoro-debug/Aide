@@ -435,8 +435,13 @@ def test_reopening_marks_only_active_records_interrupted_and_keeps_outputs(
     assert reopened.get(cancelled.agent_id) == cancelled
     assert reopened.get(interrupted.agent_id) == interrupted
 
-    reopened.recover()
+    reopened = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    assert reopened.get(queued_record.agent_id) == recovered_queued
     assert reopened.get(running.agent_id) == recovered_running
+    assert reopened.get(completed.agent_id) == completed
+    assert reopened.get(failed.agent_id) == failed
+    assert reopened.get(cancelled.agent_id) == cancelled
+    assert reopened.get(interrupted.agent_id) == interrupted
 
 
 def test_workspace_recovery_processes_active_records_in_every_session(tmp_path: Path) -> None:

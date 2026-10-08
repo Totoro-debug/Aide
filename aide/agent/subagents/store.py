@@ -217,11 +217,6 @@ class SubAgentRecordStore:
                 next_cursor=next_cursor,
             )
 
-    def recover(self) -> None:
-        """Mark persisted queued and running tasks interrupted without restarting them."""
-        with self._lock:
-            self._recover_interrupted()
-
     def discard_restore_run_tokens(self, restore_run_tokens: Sequence[str | UUID]) -> None:
         """Remove records and Tool Artifacts created by discarded foreground inputs."""
         if isinstance(restore_run_tokens, (str, bytes)) or not isinstance(

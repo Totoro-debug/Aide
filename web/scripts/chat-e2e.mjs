@@ -204,7 +204,7 @@ try {
   await control.command("queue-wait");
   for (const queuedText of ["  queued B  ", "queued C\nline two"]) {
     await messageInput.fill(queuedText);
-    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await messageInput.press("Enter");
   }
   const recallButton = page.getByRole("button", { name: "Take back 2 queued", exact: true });
   await expect(recallButton).toBeVisible();
@@ -283,7 +283,7 @@ try {
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await control.command("queue-wait");
   await messageInput.fill("queued switched draft");
-  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await messageInput.press("Enter");
   await page.evaluate(() => { window.delayRecallResponse = true; });
   await page.getByRole("button", { name: "Take back 1 queued", exact: true }).click();
   await expect.poll(() => page.evaluate(() => window.recallResponsePending === true)).toBe(true);
@@ -295,7 +295,7 @@ try {
   await historyNavigation.getByTitle(firstConversation.directory).click();
   await expect(messageInput).toHaveValue("queued switched draft");
   await messageInput.fill("queued after returning");
-  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await messageInput.press("Enter");
   await page.evaluate(() => {
     window.delayRecallResponse = true;
     window.recallResponsePending = false;
@@ -719,8 +719,7 @@ try {
   await page.getByRole("button", { name: "Send", exact: true }).click();
   const draftActivity = page.locator("article[data-run-id]").filter({ hasText: "recovery streaming markdown" })
     .getByRole("group", { name: "Run activity", exact: true });
-  await expect(draftActivity).not.toHaveAttribute("open");
-  await draftActivity.locator("summary").click();
+  await expect(draftActivity).toHaveAttribute("open", "");
   await expect(page.getByRole("log").getByText("Streamed answer", { exact: true })).toBeVisible();
   await projectSessions.getByRole("button", { name: /Saved project/ }).click();
   await expect(page.getByRole("log").getByText("Saved project body", { exact: true })).toBeVisible();

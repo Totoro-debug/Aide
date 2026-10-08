@@ -1087,9 +1087,11 @@ try {
   const toolRun = page.locator("article[data-run-id]").filter({ hasText: "tool states" }).last();
   await expect(toolRun.getByRole("status").first()).toHaveText("Running");
   const toolGroup = toolRun.getByRole("group", { name: "Run activity", exact: true });
-  await toolGroup.locator("summary").waitFor();
+  await toolGroup.locator(":scope > summary").waitFor();
+  await expect(toolGroup).toHaveAttribute("open", "");
+  await toolGroup.locator(":scope > summary").click();
   await expect(toolGroup).not.toHaveAttribute("open");
-  await toolGroup.locator("summary").click();
+  await toolGroup.locator(":scope > summary").click();
   for (const status of ["Completed", "Failed", "Rejected", "Running"]) {
     await toolGroup.getByRole("list").getByText(status, { exact: true }).waitFor();
   }
@@ -1099,7 +1101,7 @@ try {
   await page.evaluate((messages) => {
     window.__aideTestMessages = [...messages, ...window.__aideTestMessages];
   }, beforeToolRefresh);
-  await toolGroup.locator("summary").click();
+  await expect(toolGroup).toHaveAttribute("open", "");
   for (const status of ["Completed", "Failed", "Rejected", "Running"]) {
     await toolGroup.getByRole("list").getByText(status, { exact: true }).waitFor();
   }
@@ -1431,9 +1433,8 @@ try {
   await page.getByLabel("Message input").press("Enter");
   const streamingRun = page.locator("article[data-run-id]").filter({ hasText: multilinePrompt }).last();
   const streamingActivity = streamingRun.getByRole("group", { name: "Run activity", exact: true });
-  await streamingActivity.locator("summary").waitFor();
-  await expect(streamingActivity).not.toHaveAttribute("open");
-  await streamingActivity.locator("summary").click();
+  await streamingActivity.locator(":scope > summary").waitFor();
+  await expect(streamingActivity).toHaveAttribute("open", "");
   await streamingActivity.getByRole("heading", { name: "Streamed answer", exact: true }).waitFor();
   assert.equal(await page.getByText("The response arrived in multiple chunks.", { exact: true }).count(), 0,
     "The complete answer appeared before its first streamed frame was observed");
@@ -1444,8 +1445,7 @@ try {
   const recoveredStreamingActivity = page.locator("article[data-run-id]").filter({ hasText: multilinePrompt }).last()
     .getByRole("group", { name: "Run activity", exact: true });
   await recoveredStreamingActivity.waitFor();
-  await expect(recoveredStreamingActivity).not.toHaveAttribute("open");
-  await recoveredStreamingActivity.locator("summary").click();
+  await expect(recoveredStreamingActivity).toHaveAttribute("open", "");
   await expect(recoveredStreamingActivity.getByRole("heading", { name: "Streamed answer", exact: true })).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Cancel run", exact: true })).toBeEnabled();
   await page.evaluate((messages) => {
@@ -1706,10 +1706,15 @@ try {
         await page.setViewportSize(viewport);
         await verifyConversationMessages(page, viewport);
         const cancel = page.getByRole("button", { name: language === "en" ? "Cancel run" : "取消运行" });
-        await cancel.scrollIntoViewIfNeeded();
+        await expect(cancel).toHaveAttribute("type", "button");
+        await expect(page.getByRole("button", { name: language === "en" ? "Send" : "发送", exact: true })).toHaveCount(0);
         const box = await cancel.boundingBox();
         assert.ok(box && box.width > 0 && box.y >= 0 && box.y + box.height <= viewport.height + 1,
           `Cancel unreachable at ${viewport.width}x${viewport.height}`);
+        const composerBox = await page.locator("#conversation-input").locator("..").boundingBox();
+        assert.ok(composerBox && box.x >= composerBox.x && box.x + box.width <= composerBox.x + composerBox.width
+          && box.y >= composerBox.y && box.y + box.height <= composerBox.y + composerBox.height,
+        `Cancel is outside the composer at ${viewport.width}x${viewport.height}`);
         const composerLayout = await page.locator("section[aria-label='Conversation'] form, section[aria-label='对话'] form")
           .evaluate((element) => {
             const bounds = (target) => {
@@ -1735,7 +1740,8 @@ try {
   await page.setViewportSize(viewports[0]);
   await setInterfaceLanguage(page, "en");
   const cancelRunButton = page.getByRole("button", { name: "Cancel run" });
-  const canceledRunId = await cancelRunButton.evaluate((element) => element.closest("article[data-run-id]")?.getAttribute("data-run-id"));
+  const canceledRunId = await page.locator("article[data-run-id]").filter({ hasText: "tool states" }).last()
+    .getAttribute("data-run-id");
   assert.ok(canceledRunId, "Cancel control had no owning Run");
   const priorCancellationCount = await page.evaluate((runId) => window.__aideTestMessages.filter((event) => (
     event.type === "run.cancelled" && event.run_id === runId
@@ -1760,8 +1766,8 @@ try {
     .filter({ hasText: "Tool call interrupted because the turn was cancelled." }).last();
   await canceledHistoryActivity.waitFor();
   await expect(canceledHistoryActivity).not.toHaveAttribute("open");
-  await expect(canceledHistoryActivity.locator("summary")).toContainText("Canceled");
-  await canceledHistoryActivity.locator("summary").click();
+  await expect(canceledHistoryActivity.locator(":scope > summary")).toContainText("Canceled");
+  await canceledHistoryActivity.locator(":scope > summary").click();
   const canceledExec = canceledHistoryActivity.getByRole("list").locator("li").filter({ hasText: /^exec/ }).last();
   const canceledExecArguments = JSON.parse(await canceledExec.locator("pre").textContent() ?? "null");
   assert.equal(canceledExecArguments.command, "Get-Content -LiteralPath .\\fixture.txt -Wait");
@@ -1897,7 +1903,9 @@ try {
   await page.getByLabel("Message input").press("Enter");
   await page.getByRole("button", { name: "Cancel run", exact: true }).waitFor();
   const lightCancel = page.getByRole("button", { name: "Cancel run", exact: true });
-  const lightRunId = await lightCancel.evaluate((element) => element.closest("article[data-run-id]").dataset.runId);
+  const lightRunId = await page.locator("article[data-run-id]").filter({ hasText: "tool states" }).last()
+    .getAttribute("data-run-id");
+  assert.ok(lightRunId);
   await lightCancel.click();
   await waitForRecordedEvent((messages) => messages.some((event) => (
     event.type === "run.cancelled" && event.run_id === lightRunId
@@ -2061,7 +2069,7 @@ try {
           await finalReply.waitFor();
           await completedActivity.waitFor();
           await expect(completedActivity).not.toHaveAttribute("open");
-          await expect(completedActivity.locator("summary")).toContainText("Completed");
+          await expect(completedActivity.locator(":scope > summary")).toContainText("Completed");
           await expect(completedActivity).not.toContainText("Confirmation fixture completed.");
           await expect(finalReply).toBeVisible();
         }
@@ -2088,7 +2096,7 @@ try {
         assert.equal(await input.evaluate((element) => element === document.activeElement), true,
           "Confirmation did not restore focus to the triggering input");
         if (combinationIndex === 0) {
-          await completedActivity.locator("summary").click();
+          await completedActivity.locator(":scope > summary").click();
           await expect(completedActivity).toContainText("confirmation fixture content");
           await expect(completedActivity).toContainText("confirmation-outside.txt");
           await page.setViewportSize({ width: 480, height: 800 });
@@ -2146,22 +2154,26 @@ try {
     await control.command("process-wait");
     const activity = page.getByRole("log").getByRole("group", { name: "Run activity", exact: true });
     const verifyProcess = async () => {
-      await expect(activity.locator("summary")).toContainText("Running");
-      await expect(activity).not.toHaveAttribute("open");
-      await activity.locator("summary").focus();
-      await activity.locator("summary").press("Enter");
+      await expect(activity.locator(":scope > summary")).toContainText("Running");
       await expect(activity).toHaveAttribute("open", "");
-      const parts = activity.getByRole("list").locator(":scope > li");
+      const parts = activity.locator(":scope > ul > li");
       await expect(parts.nth(0)).toHaveText("Before first tool.");
       await expect(parts.nth(1)).toContainText("read_file");
       await expect(parts.nth(1)).toContainText("Completed");
+      const firstTool = parts.nth(1).locator("details");
+      await expect(firstTool).not.toHaveAttribute("open");
+      await expect(parts.nth(1).getByText("fixture content", { exact: true })).toBeHidden();
+      await firstTool.locator("summary").focus();
+      await firstTool.locator("summary").press("Enter");
+      await expect(firstTool).toHaveAttribute("open", "");
       await expect(parts.nth(1)).toContainText("fixture.txt");
-      await expect(parts.nth(1)).toContainText("fixture content");
+      await expect(parts.nth(1).getByText("fixture content", { exact: true })).toBeVisible();
       if (prompt === "process cycles") {
         await expect(parts.nth(2)).toHaveText("Between tools.");
         await expect(parts.nth(3)).toContainText("read_file");
         await expect(parts.nth(3)).toContainText("Completed");
-        await expect(parts.nth(3)).toContainText("fixture content");
+        await expect(parts.nth(3).locator("details")).not.toHaveAttribute("open");
+        await expect(parts.nth(3).getByText("fixture content", { exact: true })).toBeHidden();
       }
       await expect(activity.getByText("Result", { exact: true })).toHaveCount(prompt === "process cycles" ? 2 : 1);
     };
@@ -2171,19 +2183,19 @@ try {
     if (prompt === "process cycles") {
       await control.command("process-release");
       await page.getByRole("log").getByText("Process final reply.", { exact: true }).waitFor();
-      await expect(activity.locator("summary")).toContainText("Completed");
+      await expect(activity.locator(":scope > summary")).toContainText("Completed");
       await expect(activity).not.toHaveAttribute("open");
       await expect(activity).not.toContainText("Process final reply.");
-      await activity.locator("summary").click();
-      await expect(activity.getByRole("list").locator(":scope > li").nth(2)).toHaveText("Between tools.");
+      await activity.locator(":scope > summary").click();
+      await expect(activity.locator(":scope > ul > li").nth(2)).toHaveText("Between tools.");
     } else {
       await page.getByRole("button", { name: "Cancel run", exact: true }).click();
       await expect(page.getByRole("button", { name: "Cancel run", exact: true })).toBeHidden();
       await control.command("process-release");
       await page.reload();
-      await expect(activity.locator("summary")).toContainText("Canceled");
+      await expect(activity.locator(":scope > summary")).toContainText("Canceled");
       await expect(activity).not.toHaveAttribute("open");
-      await activity.locator("summary").click();
+      await activity.locator(":scope > summary").click();
       await expect(activity).toContainText("Aide 已取消本轮对话。");
     }
   }
@@ -2202,15 +2214,15 @@ try {
     .filter({ hasText: "Failed" }).last();
   await failedActivity.waitFor();
   await expect(failedActivity).not.toHaveAttribute("open");
-  await expect(failedActivity.locator("summary")).toContainText("Failed");
+  await expect(failedActivity.locator(":scope > summary")).toContainText("Failed");
   const failedReason = await page.evaluate(() => [...window.__aideTestMessages].reverse().find((event) => (
     event.type === "run.output" && event.payload?.message?.type === "system_control"
     && event.payload?.message?.metadata?.finish_reason === "failed"
   ))?.payload.message.content);
   assert.ok(typeof failedReason === "string" && failedReason.length > 0, "Failed Run had no public error reason");
   await page.reload();
-  await expect(failedActivity.locator("summary")).toContainText("Failed");
-  await failedActivity.locator("summary").click();
+  await expect(failedActivity.locator(":scope > summary")).toContainText("Failed");
+  await failedActivity.locator(":scope > summary").click();
   await expect(failedActivity).toContainText(failedReason);
   await newProjectConversation(page);
   const handoff = await control.command(`cli-claim ${control.details.available_session_id}`);

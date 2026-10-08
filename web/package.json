@@ -11,6 +11,8 @@
     "build": "npm run protocol-check && npm run typecheck && vite build && node scripts/copy-assets.mjs",
     "pretest:e2e": "npm run build",
     "test:e2e": "node scripts/e2e-runner.mjs",
+    "pretest:e2e:agent-run-ui": "npm run build",
+    "test:e2e:agent-run-ui": "node scripts/agent-run-ui-e2e.mjs",
     "test:e2e:client": "node scripts/client-e2e.mjs",
     "pretest:e2e:restore": "npm run build",
     "test:e2e:restore": "node scripts/restore-e2e.mjs",

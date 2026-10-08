@@ -2272,7 +2272,7 @@ h1 {
   transition: transform 0.15s ease;
 }
 
-.toolActivity[open] .toolActivityChevron {
+.toolActivity[open] > .toolActivityHeader > .toolActivityChevron {
   transform: rotate(180deg);
 }
 
@@ -2300,6 +2300,44 @@ h1 {
   min-width: 0;
   border-left: 2px solid var(--border-subtle);
   padding-left: 9px;
+}
+
+.runToolActivityItem {
+  min-width: 0;
+}
+
+.toolCallCard {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface-app);
+}
+
+.toolCallCard > .toolActivityItemHeader {
+  cursor: pointer;
+  list-style: none;
+  padding: 8px 10px;
+}
+
+.toolCallCard > .toolActivityItemHeader::-webkit-details-marker {
+  display: none;
+}
+
+.toolCallCard > .toolActivityItemHeader:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.toolCallCard[open] > .toolActivityItemHeader > .toolActivityChevron {
+  transform: rotate(180deg);
+}
+
+.toolCallBody {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  border-top: 1px solid var(--border-subtle);
+  padding: 9px 10px;
 }
 
 .runActivityText {
@@ -2568,6 +2606,7 @@ h1 {
   width: 34px;
   height: 34px;
   flex: 0 0 auto;
+  box-sizing: border-box;
   place-items: center;
   border: 0;
   border-radius: 50%;
@@ -2580,6 +2619,19 @@ h1 {
 .composerSend:disabled {
   cursor: default;
   opacity: 0.4;
+}
+
+.composerStop {
+  border: 1px solid var(--danger-border);
+  background: var(--danger-surface);
+  color: var(--danger-text);
+}
+
+.composerStop:hover:not(:disabled),
+.composerStop:focus-visible {
+  background: var(--danger-surface);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 .composerFooter {
@@ -2610,33 +2662,6 @@ h1 {
   overflow: auto;
   color: var(--text-muted);
   white-space: pre-wrap;
-}
-
-.cancelRunButton {
-  display: inline-flex;
-  width: fit-content;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid var(--danger-border);
-  border-radius: 5px;
-  background: transparent;
-  color: var(--danger-text);
-  cursor: pointer;
-  font: inherit;
-  font-size: 11px;
-  font-weight: 650;
-  padding: 6px 9px;
-}
-
-.cancelRunButton:hover,
-.cancelRunButton:focus-visible {
-  background: var(--danger-surface);
-  outline: none;
-}
-
-.cancelRunButton:disabled {
-  cursor: wait;
-  opacity: 0.65;
 }
 
 .srOnly {

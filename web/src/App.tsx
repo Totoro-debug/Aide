@@ -5928,13 +5928,17 @@ function conversationHistoryEntries(messages: Record<string, unknown>[]): Conver
 function RunActivityGroup({
   activity,
   t,
+  initiallyOpen = false,
 }: {
   activity: RunActivity;
   t: (key: string) => string;
+  initiallyOpen?: boolean;
 }) {
+  const [expanded, setExpanded] = useState(initiallyOpen);
   const toolCount = activity.parts.filter((part) => part.kind === "tool").length;
   return (
-    <details className={styles.toolActivity} role="group" aria-label={t("conversation.runActivity")}>
+    <details className={styles.toolActivity} role="group" aria-label={t("conversation.runActivity")}
+      open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
       <summary className={styles.toolActivityHeader}>
         <span className={styles.toolActivityTitle}>
           <Activity size={14} aria-hidden="true" />
@@ -5955,26 +5959,33 @@ function RunActivityGroup({
             <MarkdownContent content={part.content} />
           </li>
         ) : (
-          <li className={styles.toolActivityItem} key={part.tool.toolCallId}>
-            <div className={styles.toolActivityItemHeader}>
-              <span className={styles.toolName}>{part.tool.name || t("conversation.unknownTool")}</span>
-              <span className={`${styles.statusBadge} ${styles[`status${part.tool.status}`]}`}>
-                {statusIcon(part.tool.status, 12)}
-                {t(toolStatusKey(part.tool.status))}
-              </span>
-            </div>
-            {part.tool.arguments ? (
-              <div className={styles.runActivityDetail}>
-                <span>{t("conversation.toolArguments")}</span>
-                <pre>{part.tool.arguments}</pre>
-              </div>
-            ) : null}
-            {part.tool.result !== undefined && part.tool.result !== null ? (
-              <div className={styles.runActivityDetail}>
-                <span>{t("conversation.toolResult")}</span>
-                <MarkdownContent content={part.tool.result} />
-              </div>
-            ) : null}
+          <li className={styles.runToolActivityItem} key={part.tool.toolCallId}>
+            <details className={styles.toolCallCard}>
+              <summary className={styles.toolActivityItemHeader}>
+                <span className={styles.toolName}>{part.tool.name || t("conversation.unknownTool")}</span>
+                <span className={`${styles.statusBadge} ${styles[`status${part.tool.status}`]}`}>
+                  {statusIcon(part.tool.status, 12)}
+                  {t(toolStatusKey(part.tool.status))}
+                </span>
+                <ChevronDown className={styles.toolActivityChevron} size={14} aria-hidden="true" />
+              </summary>
+              {part.tool.arguments || part.tool.result !== undefined && part.tool.result !== null ? (
+                <div className={styles.toolCallBody}>
+                {part.tool.arguments ? (
+                  <div className={styles.runActivityDetail}>
+                    <span>{t("conversation.toolArguments")}</span>
+                    <pre>{part.tool.arguments}</pre>
+                  </div>
+                ) : null}
+                {part.tool.result !== undefined && part.tool.result !== null ? (
+                  <div className={styles.runActivityDetail}>
+                    <span>{t("conversation.toolResult")}</span>
+                    <MarkdownContent content={part.tool.result} />
+                  </div>
+                ) : null}
+                </div>
+              ) : null}
+            </details>
           </li>
         ))}
       </ul>
@@ -6018,11 +6029,9 @@ function ConversationHistoryView({
 function LiveRunView({
   run,
   t,
-  onCancel,
 }: {
   run: LiveRun;
   t: (key: string) => string;
-  onCancel: (run: LiveRun) => void;
 }) {
   const active = isLiveRunActive(run);
   const activityParts: RunActivityPart[] = [];
@@ -6056,24 +6065,13 @@ function LiveRunView({
             key={`${run.localId}-${active ? "active" : "terminal"}`}
             activity={{ status: activityStatus, parts: activityParts }}
             t={t}
+            initiallyOpen={active}
           />
         ) : null}
         {run.status === "completed" && run.assistantContent
           ? <MarkdownContent content={run.assistantContent} />
           : active && !run.assistantContent
             ? <p className={styles.pendingAnswer}>{t("conversation.assistantPending")}</p> : null}
-        {active && run.runId !== null && run.cancellable ? (
-          <button
-            className={styles.cancelRunButton}
-            type="button"
-            aria-label={t("controls.cancelRun")}
-            disabled={run.cancelRequested}
-            onClick={() => onCancel(run)}
-          >
-            <Square size={14} aria-hidden="true" />
-            {run.cancelRequested ? t("controls.cancelingRun") : t("controls.cancelRun")}
-          </button>
-        ) : null}
       </div>
     </article>
   );
@@ -8337,7 +8335,7 @@ function ProjectSessionsContent({
                           onRestoreAnchor={(anchorId, mode, trigger) => beginRestore(anchorId, mode, trigger)}
                         />
                         {selectedLiveRuns.map((run) => (
-                          <LiveRunView key={run.localId} run={run} t={t} onCancel={(candidate) => void cancelRun(candidate)} />
+                          <LiveRunView key={run.localId} run={run} t={t} />
                         ))}
                       </div>
                     )}
@@ -8445,13 +8443,19 @@ function ProjectSessionsContent({
                     </label>
                   </ComposerControls>
                     <button
-                      className={styles.composerSend}
-                      type="submit"
-                      aria-label={t("controls.send")}
-                      title={t("controls.send")}
-                      disabled={!inputText.trim() || connectionState !== "online"}
+                      className={activeRun === null ? styles.composerSend : `${styles.composerSend} ${styles.composerStop}`}
+                      type={activeRun === null ? "submit" : "button"}
+                      aria-label={activeRun === null ? t("controls.send") : activeRun.cancelRequested
+                        ? t("controls.cancelingRun") : t("controls.cancelRun")}
+                      title={activeRun === null ? t("controls.send") : activeRun.cancelRequested
+                        ? t("controls.cancelingRun") : t("controls.cancelRun")}
+                      disabled={connectionState !== "online" || (activeRun === null
+                        ? !inputText.trim()
+                        : activeRun.runId === null || !activeRun.cancellable || activeRun.cancelRequested)}
+                      onClick={activeRun === null ? undefined : () => void cancelRun(activeRun)}
                     >
-                      <ArrowUp size={20} aria-hidden="true" />
+                      {activeRun === null ? <ArrowUp size={20} aria-hidden="true" />
+                        : <Square size={14} fill="currentColor" aria-hidden="true" />}
                     </button>
                   </div>
                   </div>

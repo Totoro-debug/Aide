@@ -247,9 +247,6 @@ const resources = {
         save: "Save settings",
         saving: "Saving settings…",
         saved: "Settings saved.",
-        versions: "Configuration versions",
-        savedVersion: "Saved version",
-        activeVersion: "Active version",
         pendingVersion: "Pending version",
         waitingFor: "Waiting for",
         waitingReasons: {
@@ -899,9 +896,6 @@ const resources = {
         save: "保存设置",
         saving: "正在保存设置……",
         saved: "设置已保存。",
-        versions: "配置版本",
-        savedVersion: "已保存版本",
-        activeVersion: "活动版本",
         pendingVersion: "待应用版本",
         waitingFor: "等待收尾",
         waitingReasons: {

@@ -3493,42 +3493,6 @@ h1 {
   outline-offset: 1px;
 }
 
-.settingsVersionDetails {
-  border-top: 1px solid var(--border-subtle);
-  color: var(--text-muted);
-  font-size: 12px;
-  padding-top: 16px;
-}
-
-.settingsVersionDetails summary {
-  width: fit-content;
-  cursor: pointer;
-}
-
-.settingsVersionDetails summary:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
-}
-
-.settingsVersions {
-  display: grid;
-  gap: 8px;
-  margin: 14px 0 0;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.settingsVersions > div {
-  display: grid;
-  grid-template-columns: 120px minmax(0, 1fr);
-  gap: 12px;
-}
-
-.settingsVersions dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
 .settingsField > .fieldError {
   min-height: 18px;
 }

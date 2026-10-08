@@ -1724,6 +1724,12 @@ function SettingsView({
   const errorSummaryRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    if (notice !== "settings.restarted") return;
+    const timer = window.setTimeout(() => setNotice(null), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  useEffect(() => {
     if (submitError === null || !saveFailed || !focusErrorSummaryRef.current) return;
     focusErrorSummaryRef.current = false;
     const timer = window.setTimeout(() => errorSummaryRef.current?.focus(), 0);
@@ -2163,7 +2169,7 @@ function SettingsView({
       const hasRemainingChanges = dirtySectionsRef.current.size > 0;
       dirtyRef.current = hasRemainingChanges;
       setDirty(hasRemainingChanges);
-      setNotice(next.application.status === "next-run-required" ? t("settings.nextRunRequired") : t("settings.saved"));
+      setNotice(next.application.status === "next-run-required" ? "settings.nextRunRequired" : "settings.saved");
     } catch (error) {
       if (mutationSequence.current !== sequence) return;
       if (error instanceof ApiError && error.body !== null) {
@@ -2290,9 +2296,9 @@ function SettingsView({
       restartRequestRef.current = null;
       setRestartBusy(false);
       setRestartError(null);
-      setNotice(t("settings.restarted"));
+      setNotice("settings.restarted");
     }
-  }, [serviceStatus, t]);
+  }, [serviceStatus]);
 
   async function restartAide() {
     if (restartingInstanceRef.current !== null || dirtyRef.current || mutationInFlight.current
@@ -3155,19 +3161,10 @@ function SettingsView({
           {notice !== null ? (
             <div className={styles.notice} role="status" aria-live="polite">
               <CircleCheck size={16} aria-hidden="true" />
-              <span>{notice}</span>
+              <span>{t(notice)}</span>
             </div>
           ) : null}
         </form>
-      ) : null}
-      {response !== null ? (
-        <details className={styles.settingsVersionDetails}>
-          <summary>{t("settings.versions")}</summary>
-          <dl className={styles.settingsVersions}>
-            <div><dt>{t("settings.savedVersion")}</dt><dd>{response.application.saved_revision}</dd></div>
-            <div><dt>{t("settings.activeVersion")}</dt><dd>{response.application.active_revision ?? "-"}</dd></div>
-          </dl>
-        </details>
       ) : null}
         </div>
       </div>

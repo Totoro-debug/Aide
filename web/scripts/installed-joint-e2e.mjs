@@ -436,7 +436,7 @@ try {
   const iterations = page.getByLabel(/Maximum iterations|最大迭代次数/);
   await expect(iterations).toBeEnabled();
   await iterations.fill("65");
-  await page.locator('[id="settings-models-routes-default-model"]').fill("installed-new-model");
+  await page.locator('[id="settings-models-routes-chat-model"]').fill("installed-new-model");
   const saveResponsePromise = page.waitForResponse((response) => (
     response.request().method() === "PATCH" && response.url().endsWith("/api/v1/config")
   ));

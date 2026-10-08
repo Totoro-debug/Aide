@@ -447,7 +447,7 @@ async def test_effort_is_global_runtime_control_with_shared_cli_and_persistence_
     cli = case.workspace.management_dispatcher(case.second.client_id, case.other_claim.session_id)
     assert (await cli.dispatch("/effort")).effort_selection == "high"
     saved = ConfigLoader(case.service.agent_home).load_for_startup()
-    assert saved.models.routes["default"].reasoning_effort == "high"
+    assert saved.models.routes["chat"].reasoning_effort == "high"
 
     path = tmp_path / "new-runtime"
     path.mkdir()
@@ -484,7 +484,7 @@ async def test_concurrent_client_effort_updates_keep_last_runtime_and_persisted_
     config_path = case.service.agent_home.path / "config.toml"
     with config_path.open("a", encoding="utf-8") as source:
         source.write(
-            "\n# Preserve this configuration comment.\n[models.routes.chat]\n"
+            "\n# Preserve this configuration comment.\n[models.routes.title]\n"
             "provider_id = 'primary'\nmodel = 'small-model'\ncontext_window = 8192\n"
             "max_output = 1024\ntemperature = 0\ntimeout = 30\nreasoning_effort = 'mid'\n"
         )
@@ -505,7 +505,6 @@ async def test_concurrent_client_effort_updates_keep_last_runtime_and_persisted_
     assert set(published) == {"low", "xhigh"}
     final = published[-1]
     saved = ConfigLoader(case.service.agent_home).load_for_startup()
-    assert saved.models.routes["default"].reasoning_effort == final
     assert saved.models.routes["chat"].reasoning_effort == final
     assert "# Preserve this configuration comment." in config_path.read_text(encoding="utf-8")
     assert (await _status(case))["chat_reasoning_effort"] == final

@@ -15,7 +15,7 @@ CONTEXT_ESTIMATOR_VERSION = "utf8-bytes-div4-v1"
 type ProjectionSource = Literal["estimated", "reported_delta"]
 type RetentionPercentage = Literal[10, 50]
 
-_MODEL_ROUTES = frozenset({"default", "chat", "memory", "schedule"})
+_MODEL_ROUTES = frozenset({"chat", "title", "memory", "schedule", "subagent"})
 _PROJECTION_SOURCES = frozenset({"estimated", "reported_delta"})
 _RUN_MESSAGE_ROLES = frozenset({"user", "assistant", "tool"})
 _CONTEXT_USAGE_FIELDS = frozenset(

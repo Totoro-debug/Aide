@@ -1416,7 +1416,7 @@ async def _terminals(bus: MessageBus, count: int) -> list[OutboundMessage]:
     return terminals
 
 
-def test_agent_loop_status_uses_the_configured_static_default_route(tmp_path: Path) -> None:
+def test_agent_loop_status_uses_the_configured_static_chat_route(tmp_path: Path) -> None:
     router = _Router(())
     loop, session, _bus = _runtime(tmp_path, router)
 
@@ -1429,7 +1429,7 @@ def test_agent_loop_status_uses_the_configured_static_default_route(tmp_path: Pa
         status.model,
         status.context_window,
         status.max_output,
-    ) == ("chat", "default", "primary", "small-model", 8192, 1024)
+    ) == ("chat", "chat", "primary", "small-model", 8192, 1024)
     assert status.chat_model == "primary/small-model"
     assert router.calls == []
     assert session._pending_persist is None
@@ -1458,7 +1458,7 @@ async def test_status_treats_the_latest_assistant_as_the_usage_provenance_bounda
                 "total_tokens": 110,
             },
             "context_usage": _status_context_usage(
-                selected_route="default",
+                selected_route="chat",
                 provider_id="primary",
                 model="small-model",
                 context_window=8192,
@@ -1531,7 +1531,7 @@ async def test_status_treats_the_latest_assistant_as_the_usage_provenance_bounda
 
 
 @pytest.mark.asyncio
-async def test_status_after_dynamic_fallback_projects_the_next_configured_chat_attempt(
+async def test_title_fallback_does_not_change_the_next_configured_chat_attempt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1550,7 +1550,7 @@ models = ["default-model"]
 [runtime]
 compact_ratio = 0.9
 
-[models.routes.chat]
+[models.routes.title]
 provider_id = "chat-provider"
 model = "chat-model"
 context_window = 32000
@@ -1558,7 +1558,7 @@ max_output = 2048
 temperature = 0
 timeout = 30
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = "default-provider"
 model = "default-model"
 context_window = 16000
@@ -1576,11 +1576,14 @@ timeout = 30
                 events=(),
                 error=ModelCallError(ErrorInfo("provider_auth_error", "Use fallback.")),
             ),
-            StreamScript(events=(ModelCompleted(response=_response("Configured chat.")),)),
         )
     )
     default_provider = ScriptedFakeProvider(
-        streams=(StreamScript(events=(ModelCompleted(response=_response("Fallback.")),)),)
+        streams=(
+            StreamScript(events=(ModelCompleted(response=_response("Fallback.")),)),
+            StreamScript(events=(ModelCompleted(response=_response("First chat.")),)),
+            StreamScript(events=(ModelCompleted(response=_response("Next chat.")),)),
+        )
     )
     providers = {
         "chat-provider": chat_provider,
@@ -1597,18 +1600,23 @@ timeout = 30
 
     await loop.start()
     try:
+        async for _ in model_router.stream(
+            "title", messages=[{"role": "user", "content": "Generate title"}], tools=[],
+        ):
+            pass
+        assert model_router.route_status("title").selected_route == "chat"
         await bus.put_inbound(InboundMessage("Use fallback for this run."))
         await _terminals(bus, 1)
         assert len(chat_provider.stream_requests) == 1
-        assert len(default_provider.stream_requests) == 1
+        assert len(default_provider.stream_requests) == 2
         chat_attempt = chat_provider.stream_requests[0]
         fallback_attempt = default_provider.stream_requests[0]
         assert (chat_attempt.model, chat_attempt.max_output) == ("chat-model", 2048)
         assert (fallback_attempt.model, fallback_attempt.max_output) == ("default-model", 1024)
         assert persist_calls == [None]
-        fallback_context = session.messages[-1]["context_usage"]
-        assert fallback_context["selected_route"] == "default"
-        assert fallback_context["provider_id"] == "default-provider"
+        chat_context = session.messages[-1]["context_usage"]
+        assert chat_context["selected_route"] == "chat"
+        assert chat_context["provider_id"] == "default-provider"
 
         provider_counts = (
             len(chat_provider.stream_requests),
@@ -1629,9 +1637,9 @@ timeout = 30
             status_input.model,
             status_input.context_window,
             status_input.max_output,
-        ) == ("chat", "chat", "chat-provider", "chat-model", 32000, 2048)
-        assert status_input.chat_model == "chat-provider/chat-model"
-        assert status.projection_source == "estimated"
+        ) == ("chat", "chat", "default-provider", "default-model", 16000, 1024)
+        assert status_input.chat_model == "default-provider/default-model"
+        assert status.projection_source == "reported_delta"
         assert (
             len(chat_provider.stream_requests),
             len(default_provider.stream_requests),
@@ -1641,8 +1649,8 @@ timeout = 30
         await bus.put_inbound(InboundMessage("Start the next independent run."))
         await _terminals(bus, 1)
 
-        assert len(chat_provider.stream_requests) == 2
-        assert len(default_provider.stream_requests) == 1
+        assert len(chat_provider.stream_requests) == 1
+        assert len(default_provider.stream_requests) == 3
         next_context = session.messages[-1]["context_usage"]
         assert (
             next_context["requested_route"],
@@ -1659,8 +1667,8 @@ timeout = 30
             status_input.context_window,
             status_input.max_output,
         )
-        next_attempt = chat_provider.stream_requests[1]
-        assert (next_attempt.model, next_attempt.max_output) == ("chat-model", 2048)
+        next_attempt = default_provider.stream_requests[2]
+        assert (next_attempt.model, next_attempt.max_output) == ("default-model", 1024)
         assert persist_calls == [None, None]
     finally:
         await loop.close()
@@ -2759,6 +2767,7 @@ async def test_title_request_uses_context_builder_messages_without_loop_override
     )
     builder_inputs: list[str] = []
     captured_messages: list[dict[str, Any]] = []
+    captured_routes: list[str] = []
 
     def build_title_messages(content: str) -> list[dict[str, Any]]:
         builder_inputs.append(content)
@@ -2768,13 +2777,14 @@ async def test_title_request_uses_context_builder_messages_without_loop_override
         ]
 
     def stream(
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "title", "schedule"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
-        del route, tools, continuation
+        del tools, continuation
+        captured_routes.append(route)
         captured_messages.extend(deepcopy(messages))
 
         async def replay() -> AsyncIterator[ModelStreamEvent]:
@@ -2789,6 +2799,7 @@ async def test_title_request_uses_context_builder_messages_without_loop_override
     _ = [event async for event in events]
 
     assert builder_inputs == ["First title input."]
+    assert captured_routes == ["title"]
     assert captured_messages == [
         {"role": "system", "content": "Builder-owned title prompt"},
         {"role": "user", "content": "First title input."},

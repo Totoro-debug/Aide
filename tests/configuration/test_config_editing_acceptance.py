@@ -98,7 +98,7 @@ def test_crossprocess_effort_and_cas_preserve_latest_bytes(tmp_path: Path) -> No
     assert effort == "saved"
     assert patch in {"saved", "conflict"}
     configuration = loader.load()
-    assert configuration.models.routes["default"].reasoning_effort == "high"
+    assert configuration.models.routes["chat"].reasoning_effort == "high"
     assert configuration.memory.batch_size == (13 if patch == "saved" else 10)
     assert "value = 9 # untouched" in loader.path.read_text(encoding="utf-8")
 

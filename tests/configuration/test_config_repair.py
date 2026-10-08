@@ -64,7 +64,7 @@ def test_invalid_row_retains_siblings_secrets_and_unknown_fields(
         "retired",
     }
     assert set(cast(Mapping[str, object], snapshot.fields["models"]["routes"])) == {
-        "default",
+        "title",
         "chat",
         "memory",
         "schedule",

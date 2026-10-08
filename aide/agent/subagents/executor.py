@@ -225,7 +225,7 @@ class SubAgentRunnerExecutor:
             request_preparer = AgentRunContextRequestPreparer(
                 run_controller,
                 router=run_router,
-                requested_route="chat",
+                requested_route="subagent",
                 project_messages=lambda messages: [
                     {"role": "system", "content": record.creator_snapshot.system_prompt},
                     *deepcopy(list(messages)),
@@ -363,7 +363,7 @@ class SubAgentRunnerExecutor:
             runner_task = asyncio.create_task(
                 runner.run(
                     (),
-                    model="chat",
+                    model="subagent",
                     tool_gateway=run_gateway,
                     on_output=on_output,
                     confirmation=confirmation,
@@ -418,7 +418,7 @@ class SubAgentRunnerExecutor:
         run_router = RunModelRouter(
             self._model_router,
             guard=agent_run_attempt_guard,
-            session_model_configuration=SessionModelConfiguration(
+            subagent_model_configuration=SessionModelConfiguration(
                 creator.provider_id,
                 creator.model,
                 creator.reasoning_effort,

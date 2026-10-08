@@ -28,7 +28,7 @@ base_url = "https://provider.example/v1"
 api_key = "secret"
 models = ["model"]
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = "primary"
 model = "model"
 context_window = 100000
@@ -131,7 +131,7 @@ DEFAULTABLE_FIELDS = (
         "not-a-cron",
     ),
     (
-        "models.routes.default.reasoning_effort",
+        "models.routes.chat.reasoning_effort",
         'reasoning_effort = "mid"',
         'reasoning_effort = "high"',
         'reasoning_effort = "turbo"',
@@ -286,7 +286,7 @@ def test_config_view_exposes_effective_permission_and_exec_shell(tmp_path: Path)
         (
             'reasoning_effort = "mid"',
             'reasoning_effort = ["not-an-effort"]',
-            "models.routes.default.reasoning_effort",
+            "models.routes.chat.reasoning_effort",
             "mid",
             "'mid'",
         ),
@@ -314,7 +314,7 @@ def test_untyped_defaultable_values_use_sanitized_fallbacks(
 
 
 def _config_with_route_reasoning(route_name: str, reasoning_line: str | None) -> str:
-    if route_name == "default":
+    if route_name == "chat":
         replacement = "" if reasoning_line is None else reasoning_line
         return BASE_CONFIG.replace('reasoning_effort = "mid"', replacement)
     route = f"""
@@ -331,7 +331,7 @@ timeout = 30
     return BASE_CONFIG + route
 
 
-@pytest.mark.parametrize("route_name", ("default", "chat", "memory", "schedule"))
+@pytest.mark.parametrize("route_name", ("chat", "title", "memory", "schedule", "subagent"))
 @pytest.mark.parametrize(
     ("reasoning_line", "expected", "diagnostic_count"),
     (
@@ -400,7 +400,7 @@ def test_config_header_keeps_fallback_diagnostics_when_later_fields_are_fatal(
     assert view.error.code == "config_invalid"
     assert view.effective_values_text() == ""
     assert view.header_text() == (
-        "config_invalid: Configuration field 'models.routes.default.model' is required.\n"
+        "config_invalid: Configuration field 'models.routes.chat.model' is required.\n"
         "Configuration field 'runtime.permission_level' is invalid; "
         "using 'workspace-write'.\n"
         f"Path: {loader.path}\n"

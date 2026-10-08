@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -106,6 +107,19 @@ def _router_configuration(
             },
         ),
     )
+
+
+def _title_fallback_configuration(
+    *, title_context_window: int, chat_context_window: int,
+) -> UserConfiguration:
+    base = _router_configuration(
+        chat_context_window=title_context_window,
+        default_context_window=chat_context_window,
+    )
+    return replace(base, models=replace(base.models, routes={
+        "title": base.models.routes["chat"],
+        "chat": base.models.routes["default"],
+    }))
 
 
 def _state(workspace: Path) -> WorkspaceState:
@@ -454,7 +468,7 @@ def _chat_status(
         model=model,
         context_window=context_window,
         max_output=max_output,
-        used_default=False,
+        used_fallback=False,
     )
 
 
@@ -466,7 +480,7 @@ def _memory_status(*, context_window: int, max_output: int = 100) -> ModelRouteS
         model="memory-model",
         context_window=context_window,
         max_output=max_output,
-        used_default=False,
+        used_fallback=False,
     )
 
 
@@ -1276,9 +1290,9 @@ async def test_explicit_router_adapter_rechecks_smaller_fallback_before_provider
         "default-provider": default_provider,
     }
     router = ModelRouter(
-        configuration=_router_configuration(
-            chat_context_window=4_000,
-            default_context_window=100,
+        configuration=_title_fallback_configuration(
+            title_context_window=4_000,
+            chat_context_window=100,
         ),
         provider_factory=lambda provider: providers[provider.provider_id],
         clock=FakeClock(NOW),
@@ -1288,7 +1302,7 @@ async def test_explicit_router_adapter_rechecks_smaller_fallback_before_provider
 
     with pytest.raises(ModelCallError) as raised:
         await guarded.complete(
-            "chat",
+            "title",
             messages=[{"role": "user", "content": "x" * 1_000}],
             tools=(),
         )
@@ -1296,9 +1310,9 @@ async def test_explicit_router_adapter_rechecks_smaller_fallback_before_provider
     assert raised.value.error.code == "model_context_overflow"
     assert len(chat_provider.complete_requests) == 1
     assert default_provider.complete_requests == []
-    status = router.current_call_status("chat")
+    status = router.current_call_status("title")
     assert status is not None
-    assert status.selected_route == "default"
+    assert status.selected_route == "chat"
 
 
 @pytest.mark.asyncio
@@ -2428,7 +2442,7 @@ async def test_react_revision_changes_for_each_model_visible_input_source(
         model="model",
         context_window=1_000,
         max_output=200,
-        used_default=False,
+        used_fallback=False,
     )
     base: dict[str, Any] = {
         "project_messages": _project_messages,
@@ -2464,7 +2478,7 @@ async def test_react_revision_changes_for_each_model_visible_input_source(
             model="other-model",
             context_window=1_000,
             max_output=200,
-            used_default=True,
+            used_fallback=True,
         )
     elif change == "capacity":
         changed["route_status"] = ModelRouteStatus(
@@ -2474,7 +2488,7 @@ async def test_react_revision_changes_for_each_model_visible_input_source(
             model="model",
             context_window=900,
             max_output=200,
-            used_default=False,
+            used_fallback=False,
         )
     elif change == "estimator":
         changed["estimator_version"] = "another-estimator"
@@ -2495,16 +2509,17 @@ async def test_request_preparer_uses_configured_capacity_after_previous_fallback
 ) -> None:
     state = _state(workspace)
     session = Session.create(state)
-    configuration = _router_configuration(
+    configuration = _title_fallback_configuration(
+        title_context_window=500,
         chat_context_window=4_000,
-        default_context_window=500,
-        max_output=10,
     )
     chat_provider = ScriptedFakeProvider(
-        streams=(StreamScript(events=(ModelCompleted(response=_response("done")),)),),
-        completions=(ModelCallError(ErrorInfo("route_unavailable", "chat unavailable")),),
+        completions=(ModelCallError(ErrorInfo("provider_auth_error", "title unavailable")),),
     )
-    default_provider = ScriptedFakeProvider(completions=(_response("fallback"),))
+    default_provider = ScriptedFakeProvider(
+        streams=(StreamScript(events=(ModelCompleted(response=_response("done")),)),),
+        completions=(_response("fallback"),),
+    )
     providers = {
         "chat-provider": chat_provider,
         "default-provider": default_provider,
@@ -2520,13 +2535,13 @@ async def test_request_preparer_uses_configured_capacity_after_previous_fallback
         now=lambda: NOW,
     )
     await router.complete(
-        "chat",
+        "title",
         messages=[{"role": "user", "content": "warmup"}],
         tools=(),
     )
-    fallback_status = router.current_call_status("chat")
+    fallback_status = router.current_call_status("title")
     assert fallback_status is not None
-    assert fallback_status.selected_route == "default"
+    assert fallback_status.selected_route == "chat"
 
     preparer = AgentRunContextRequestPreparer(
         controller,
@@ -2548,8 +2563,8 @@ async def test_request_preparer_uses_configured_capacity_after_previous_fallback
     )
 
     assert result.finish_reason == "completed"
-    assert len(chat_provider.stream_requests) == 1
-    assert default_provider.stream_requests == []
+    assert chat_provider.stream_requests == []
+    assert len(default_provider.stream_requests) == 1
 
 
 @pytest.mark.asyncio

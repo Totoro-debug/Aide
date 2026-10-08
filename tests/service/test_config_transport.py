@@ -35,7 +35,7 @@ base_url = "https://anthropic.example"
 api_key = "transport-retired-secret-302"
 models = ["retired-model"]
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = "primary"
 model = "small-model"
 context_window = 8192
@@ -184,7 +184,7 @@ async def test_available_models_excludes_unusable_providers(
     current_configuration = service.configuration
     assert current_configuration is not None
     chat_route = replace(
-        current_configuration.models.routes["default"],
+        current_configuration.models.routes["chat"],
         context_window=16_384,
         reasoning_effort="high",
     )
@@ -882,7 +882,7 @@ async def test_config_patch_edits_models_routes_mcp_and_write_only_secrets(
                             "primary": {"base_url": "https://models.example/v2"},
                             "retired": {},
                         },
-                        "routes": {"default": {"model": "small-model"}},
+                        "routes": {"chat": {"model": "small-model"}},
                     },
                     "mcp": {"http": {"url": "https://mcp.example/replaced"}},
                 },

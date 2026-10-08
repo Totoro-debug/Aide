@@ -130,7 +130,7 @@ models = ["shared-model"]
 [models.providers.second-provider.model_context_windows]
 shared-model = 16000
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = "first-provider"
 model = "shared-model"
 context_window = 32000

@@ -45,7 +45,7 @@ _FAKE_MEMORY_ROUTE_STATUS = ModelRouteStatus(
     model="test-model",
     context_window=200_000,
     max_output=8_192,
-    used_default=False,
+    used_fallback=False,
 )
 
 
@@ -118,7 +118,7 @@ def _memory_configuration(
                     reasoning_effort="low",
                     timeout=60,
                 ),
-                "default": RouteConfiguration(
+                "chat": RouteConfiguration(
                     provider_id=default_provider.provider_id,
                     model="default-model",
                     context_window=default_context_window,

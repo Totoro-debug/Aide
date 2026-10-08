@@ -920,7 +920,7 @@ class AgentRunContextRequestPreparer:
         controller: AgentRunContextController,
         *,
         router: RunModelRouter,
-        requested_route: Literal["chat", "schedule"],
+        requested_route: Literal["chat", "schedule", "subagent"],
         project_messages: CompactionProjection,
         current_user: dict[str, Any] | None = None,
         compact_ratio: float = 0.9,
@@ -1145,7 +1145,7 @@ def latest_main_agent_usage_anchor(
             context = ContextUsageSnapshot.from_dict(context_value)
         except (TypeError, ValueError):
             return None
-        if context.requested_route not in {"chat", "schedule"}:
+        if context.requested_route not in {"chat", "schedule", "subagent"}:
             return None
         return context, deepcopy(usage_value)
     return None

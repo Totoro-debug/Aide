@@ -35,7 +35,7 @@ type ExecShell = Literal["auto", "powershell", "pwsh"]
 
 _PROVIDER_ID_PATTERN: Final = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _MCP_NAME_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-_ROUTE_NAMES: Final = frozenset({"default", "chat", "memory", "schedule"})
+_ROUTE_NAMES: Final = frozenset({"chat", "title", "memory", "schedule", "subagent"})
 _MCP_TRANSPORTS: Final = frozenset({"stdio", "streamable-http"})
 _MCP_DEFAULT_CONNECT_TIMEOUT: Final = 30
 _MCP_DEFAULT_CALL_TIMEOUT: Final = 60
@@ -193,7 +193,7 @@ class ResolvedModelRoute:
     selected_route: str
     provider: ProviderConfiguration
     route: RouteConfiguration
-    used_default: bool
+    used_fallback: bool
 
 
 def normalize_mcp_tool_keywords(value: object) -> tuple[str, ...]:
@@ -271,14 +271,14 @@ class UserConfiguration:
     web: WebConfiguration = field(default_factory=WebConfiguration)
 
     def resolve_route(self, requested_route: str) -> ResolvedModelRoute:
-        """Resolve a Model Route, falling back to a usable default when permitted."""
+        """Resolve a Model Route, using chat for unavailable auxiliary routes."""
         _require_supported_route(requested_route)
 
         candidate = _usable_route(self.models, requested_route)
         selected_route = requested_route
-        if candidate is None and requested_route != "default":
-            candidate = _usable_route(self.models, "default")
-            selected_route = "default"
+        if candidate is None and requested_route != "chat":
+            candidate = _usable_route(self.models, "chat")
+            selected_route = "chat"
         if candidate is None:
             raise _route_unavailable_error(self.models)
         provider, route = candidate
@@ -294,7 +294,7 @@ class UserConfiguration:
             selected_route=selected_route,
             provider=provider,
             route=route,
-            used_default=selected_route != requested_route,
+            used_fallback=selected_route != requested_route,
         )
 
     def resolve_session_model_route(
@@ -302,8 +302,10 @@ class UserConfiguration:
         provider_id: str,
         model: str,
         reasoning_effort: ReasoningEffort,
+        *,
+        requested_route: Literal["chat", "subagent"] = "chat",
     ) -> ResolvedModelRoute:
-        """Resolve one explicitly selected Available Model for a chat Agent Run."""
+        """Resolve one explicitly selected Available Model for an Agent Run."""
         provider = self.models.providers.get(provider_id)
         if provider is None or not provider.is_usable or model not in provider.models:
             raise ValueError("Session Model Configuration is unavailable")
@@ -314,32 +316,32 @@ class UserConfiguration:
                 reasoning_effort=reasoning_effort,
             )
             return ResolvedModelRoute(
-                requested_route="chat", selected_route="chat", provider=provider,
-                route=route, used_default=False,
+                requested_route=requested_route, selected_route=requested_route, provider=provider,
+                route=route, used_fallback=False,
             )
         capacity = self.effective_model_context_windows()[provider_id].get(model)
         if capacity is None:
             raise ValueError("Session Model Configuration has no known context window")
-        chat = self.resolve_route("chat")
-        if capacity <= chat.route.max_output:
+        selected = self.resolve_route(requested_route)
+        if capacity <= selected.route.max_output:
             raise ValueError("Session Model Configuration cannot satisfy the chat output budget")
         route = replace(
-            chat.route,
+            selected.route,
             provider_id=provider_id,
             model=model,
             context_window=capacity,
             reasoning_effort=reasoning_effort,
         )
         return ResolvedModelRoute(
-            requested_route="chat",
-            selected_route="chat",
+            requested_route=requested_route,
+            selected_route=requested_route,
             provider=provider,
             route=route,
-            used_default=False,
+            used_fallback=False,
         )
 
     def effective_model_context_windows(self) -> Mapping[str, Mapping[str, int]]:
-        """Return explicit capacities plus values recoverable from legacy default/chat routes."""
+        """Return explicit capacities plus values recoverable from legacy routes."""
         capacities = {
             provider_id: dict(provider.model_context_windows)
             for provider_id, provider in self.models.providers.items()
@@ -349,7 +351,9 @@ class UserConfiguration:
             for provider_id, provider in self.models.providers.items()
             for model in provider.model_context_windows
         }
-        for route_name in ("default", "chat"):
+        for route_name in ("title", "memory", "schedule", "subagent", "chat"):
+            if route_name not in self.models.routes:
+                continue
             try:
                 resolved = self.resolve_route(route_name)
             except ConfigError:
@@ -396,7 +400,18 @@ class DefaultValueDiagnostic:
         return f"Configuration field {self.field!r} is invalid; using {rendered_default}."
 
 
-type ConfigurationDiagnosticValue = ConfigurationDiagnostic | DefaultValueDiagnostic
+@dataclass(frozen=True, slots=True)
+class LegacyRouteDiagnostic:
+    """A legacy default route was mapped to chat during reading."""
+
+    @property
+    def message(self) -> str:
+        return "Legacy models.routes.default is superseded by models.routes.chat."
+
+
+type ConfigurationDiagnosticValue = (
+    ConfigurationDiagnostic | DefaultValueDiagnostic | LegacyRouteDiagnostic
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -531,21 +546,19 @@ def _require_supported_route(requested_route: str) -> None:
 
 
 def _route_unavailable_error(models: ModelsConfiguration) -> ConfigError:
-    message = "Default Model Route is unavailable."
-    if "default" not in models.routes:
-        message = (
-            "Default Model Route is missing. Add [models.routes.default] to User Configuration."
-        )
+    message = "Chat Model Route is unavailable."
+    if "chat" not in models.routes:
+        message = "Chat Model Route is missing. Add [models.routes.chat] to User Configuration."
     return ConfigError(ErrorInfo("route_unavailable", message))
 
 
-def _missing_default_route_error() -> ConfigError:
+def _missing_chat_route_error() -> ConfigError:
     return ConfigError(
         ErrorInfo(
             "route_unavailable",
-            "Default Model Route is missing. Add [models.routes.default] to User Configuration.",
+            "Chat Model Route is missing. Add [models.routes.chat] to User Configuration.",
         ),
-        field_errors={"models.routes.default": "must define a default Model Route"},
+        field_errors={"models.routes.chat": "must define a chat Model Route"},
     )
 
 
@@ -1074,8 +1087,16 @@ def _parse_route(
                         f"{prefix}.model", nonempty=True)
         parameters = provider.model_configurations.get(model)
         if parameters is None:
-            _invalid(f"{prefix}.model", "must reference an available model")
+            if route_name == "chat":
+                _invalid(f"{prefix}.model", "must reference an available model")
+            parameters = ModelConfiguration(200_000, 8192, 0.2, _DEFAULT_REASONING_EFFORT, 120)
         return _configured_model_route(provider_id, model, parameters)
+    if set(table) == {"provider_id", "model"}:
+        model = _string(table["model"], f"{prefix}.model", nonempty=True)
+        return _configured_model_route(
+            provider_id, model,
+            ModelConfiguration(200_000, 8192, 0.2, _DEFAULT_REASONING_EFFORT, 120),
+        )
     context_window = _integer(
         _required(table, "context_window", f"{prefix}.context_window"),
         f"{prefix}.context_window",
@@ -1136,6 +1157,12 @@ def _parse_models(
     table = _table(models_value, "models")
     provider_tables = _table(table.get("providers", {}), "models.providers")
     route_tables = _table(table.get("routes", {}), "models.routes")
+    if "default" in route_tables:
+        if diagnostics is not None:
+            diagnostics.append(LegacyRouteDiagnostic())
+        route_tables = dict(route_tables)
+        legacy_chat = route_tables.pop("default")
+        route_tables.setdefault("chat", legacy_chat)
     providers = {
         provider_id: _parse_provider(provider_id, provider)
         for provider_id, provider in provider_tables.items()
@@ -1587,7 +1614,7 @@ def _restore_model_repair_fields(
                 for parameter in _MODEL_PARAMETER_NAMES:
                     value = parameters.get(parameter) if isinstance(parameters, Mapping) else None
                     try:
-                        projected[parameter] = _validate_route_fields("default", {parameter: value})[parameter]
+                        projected[parameter] = _validate_route_fields("chat", {parameter: value})[parameter]
                     except ConfigError:
                         projected[parameter] = None
                 capacity = projected["context_window"]
@@ -2032,7 +2059,7 @@ def _apply_model_fields(
         routes = _mutable_toml_table(models, "routes", "models.routes")
         route_values = cast(Mapping[str, Mapping[str, object]], values["routes"])
         for route_name in tuple(routes):
-            if route_name in _ROUTE_NAMES and route_name not in route_values:
+            if (route_name in _ROUTE_NAMES or route_name == "default") and route_name not in route_values:
                 del routes[route_name]
         for route_name, route in route_values.items():
             table = _mutable_toml_table(routes, route_name, f"models.routes.{route_name}")
@@ -2054,6 +2081,18 @@ def _apply_model_fields(
                     if isinstance(submitted, Mapping) and parameter in submitted:
                         continue
                     stored_route.pop(parameter, None)
+
+
+def _normalize_legacy_route_document(document: MutableMapping[str, object]) -> None:
+    models = document.get("models")
+    if not isinstance(models, MutableMapping):
+        return
+    routes = models.get("routes")
+    if not isinstance(routes, MutableMapping) or "default" not in routes:
+        return
+    if "chat" not in routes:
+        routes["chat"] = routes["default"]
+    del routes["default"]
 
 
 def _apply_mcp_fields(document: MutableMapping[str, object], values: Mapping[str, object]) -> None:
@@ -2185,8 +2224,8 @@ def _require_complete_candidate(
     configuration: UserConfiguration,
     diagnostics: tuple[ConfigurationDiagnosticValue, ...] | list[ConfigurationDiagnosticValue],
 ) -> None:
-    if "default" not in configuration.models.routes:
-        raise _missing_default_route_error()
+    if "chat" not in configuration.models.routes:
+        raise _missing_chat_route_error()
     for provider_id, configured_provider in configuration.models.providers.items():
         if configured_provider.protocol not in {"anthropic", "openai-compatible"}:
             _invalid(
@@ -2199,15 +2238,19 @@ def _require_complete_candidate(
     for route_name, route in configuration.models.routes.items():
         provider = configuration.models.providers.get(route.provider_id)
         if provider is None:
+            if route_name != "chat":
+                continue
             _invalid(
                 f"models.routes.{route_name}.provider_id",
                 "must reference an existing Model Provider",
             )
+        if route_name != "chat":
+            continue
         if route.model not in provider.models:
             _invalid(f"models.routes.{route_name}.model", "must reference an available model")
         if _usable_route(configuration.models, route_name) is None:
             _invalid(f"models.routes.{route_name}", "must reference a usable Model Provider")
-    if diagnostics:
+    if any(not isinstance(item, LegacyRouteDiagnostic) for item in diagnostics):
         raise ConfigError(
             ErrorInfo("config_invalid", "The complete User Configuration contains invalid fields.")
         )
@@ -2265,7 +2308,7 @@ def _safe_web_configuration(document: Mapping[str, object]) -> tuple[UserConfigu
         except ConfigError:
             pass
         else:
-            if not direct_diagnostics:
+            if all(isinstance(item, LegacyRouteDiagnostic) for item in direct_diagnostics):
                 return direct, False
     default_document = _table(tomllib.loads(DEFAULT_CONFIG_TEMPLATE), "configuration")
     safe_document: dict[str, object] = {}
@@ -2397,12 +2440,16 @@ def _safe_web_configuration(document: Mapping[str, object]) -> tuple[UserConfigu
         if use_model_defaults
         else {}
     )
-    for route_name, raw_route in raw_routes.items():
+    projected_routes = dict(raw_routes)
+    legacy_chat = projected_routes.pop("default", None)
+    if "chat" not in projected_routes and legacy_chat is not None:
+        projected_routes["chat"] = legacy_chat
+    for route_name, raw_route in projected_routes.items():
         if not isinstance(route_name, str) or route_name not in _ROUTE_NAMES:
             continue
         if not isinstance(raw_route, Mapping):
             has_issues = True
-        default_route = dict(cast(Mapping[str, object], default_routes["default"]))
+        default_route = dict(cast(Mapping[str, object], default_routes["chat"]))
         route_provider_id = raw_route.get("provider_id") if isinstance(raw_route, Mapping) else None
         route_provider = parsed_providers.get(cast(str, route_provider_id))
         if route_provider is not None and route_provider.model_configurations is not None:
@@ -2885,6 +2932,7 @@ class ConfigLoader:
                     for field_name, value in section_values.items():
                         table[field_name] = value
 
+            _normalize_legacy_route_document(source_document)
             _apply_secret_changes(source_document, {} if secrets is None else secrets)
 
             candidate_content = tomlkit.dumps(source_document)
@@ -2993,6 +3041,7 @@ class ConfigLoader:
                     for field_name, value in section_values.items():
                         table[field_name] = value
 
+            _normalize_legacy_route_document(source_document)
             _apply_secret_changes(source_document, {} if secrets is None else secrets)
             candidate_content = tomlkit.dumps(source_document)
             try:
@@ -3089,8 +3138,8 @@ class ConfigLoader:
                     )
                 )
             configuration = self.load()
-            if "default" not in configuration.models.routes:
-                raise _missing_default_route_error()
+            if "chat" not in configuration.models.routes:
+                raise _missing_chat_route_error()
             return configuration
         except OSError as error:
             raise ConfigError(
@@ -3104,7 +3153,7 @@ class ConfigLoader:
         """Persist a Runtime-Lifetime Reasoning Effort in the latest configuration."""
         if effort not in REASONING_EFFORT_LEVELS:
             _invalid(
-                "models.routes.default.reasoning_effort",
+                "models.routes.chat.reasoning_effort",
                 "must be low, mid, high, xhigh, or max",
             )
 
@@ -3118,26 +3167,21 @@ class ConfigLoader:
             routes = models.get("routes", {})
             if not isinstance(routes, MutableMapping):
                 _invalid("models.routes", "must be a table")
-            if "default" not in routes:
-                raise _missing_default_route_error()
-            default = routes["default"]
-            if not isinstance(default, MutableMapping):
-                _invalid("models.routes.default", "must be a table")
+            _normalize_legacy_route_document(source_document)
             chat = routes.get("chat")
+            if not isinstance(chat, MutableMapping):
+                raise _missing_chat_route_error()
             providers = models.get("providers", {})
-            for route in (default, chat):
-                if not isinstance(route, MutableMapping):
-                    continue
-                provider = providers.get(route.get("provider_id")) \
-                    if isinstance(providers, Mapping) else None
-                configured_models = provider.get("models") if isinstance(provider, Mapping) else None
-                if isinstance(configured_models, MutableMapping):
-                    parameters = configured_models.get(route.get("model"))
-                    if not isinstance(parameters, MutableMapping):
-                        _invalid("models.routes.chat.model", "must reference an available model")
-                    parameters["reasoning_effort"] = effort
-                else:
-                    route["reasoning_effort"] = effort
+            provider = providers.get(chat.get("provider_id")) \
+                if isinstance(providers, Mapping) else None
+            configured_models = provider.get("models") if isinstance(provider, Mapping) else None
+            if isinstance(configured_models, MutableMapping):
+                parameters = configured_models.get(chat.get("model"))
+                if not isinstance(parameters, MutableMapping):
+                    _invalid("models.routes.chat.model", "must reference an available model")
+                parameters["reasoning_effort"] = effort
+            else:
+                chat["reasoning_effort"] = effort
 
             self._publish_editable_toml(source_document)
 

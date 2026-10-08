@@ -23,7 +23,7 @@ base_url = "https://anthropic.example"
 api_key = "retired-secret-canary-302"
 models = ["retired-model"]
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = "primary"
 model = "small-model"
 context_window = 8192
@@ -32,7 +32,7 @@ temperature = 0
 reasoning_effort = "mid"
 timeout = 30
 
-[models.routes.chat]
+[models.routes.title]
 provider_id = "primary"
 model = "large-model"
 context_window = 16384
@@ -239,9 +239,9 @@ def test_web_snapshot_projects_all_model_route_and_mcp_fields_without_secrets(
     assert set(model_fields) == {"small-model", "large-model"}
     assert model_fields["small-model"]["context_window"] == 8192
     assert model_fields["large-model"]["context_window"] == 16384
-    assert set(routes) == {"default", "chat", "memory", "schedule"}
+    assert set(routes) == {"title", "chat", "memory", "schedule"}
     chat_route = cast(Mapping[str, object], routes["chat"])
-    assert chat_route == {"provider_id": "primary", "model": "large-model"}
+    assert chat_route == {"provider_id": "primary", "model": "small-model"}
     assert model_fields["large-model"]["reasoning_effort"] == "high"
     assert mcp["http"] == {
         "enabled": True,
@@ -311,7 +311,7 @@ models = ["large-model"]
     assert result.configuration.models.providers["secondary"].model_context_windows == {
         "large-model": 65536,
     }
-    assert result.configuration.resolve_route("chat").route.context_window == 32768
+    assert result.configuration.resolve_route("title").route.context_window == 32768
     saved = loader.path.read_text(encoding="utf-8")
     assert "# Keep the comment with this provider/model capacity." in saved
     assert "secondary-secret-302" in saved
@@ -328,17 +328,17 @@ def test_larger_model_context_window_allows_output_above_legacy_route_capacity(
         {
             "models": {
                 "providers": {"primary": {"model_context_windows": {"small-model": 65536}}},
-                "routes": {"default": {"context_window": 8192, "max_output": 16384}},
+                "routes": {"chat": {"context_window": 8192, "max_output": 16384}},
             }
         },
     )
 
-    resolved = result.configuration.resolve_route("default").route
+    resolved = result.configuration.resolve_route("chat").route
     assert resolved.context_window == 65536
     assert resolved.max_output == 16384
-    restarted = loader.load_for_startup().resolve_route("default").route
+    restarted = loader.load_for_startup().resolve_route("chat").route
     assert restarted == resolved
-    projected = cast(Mapping[str, object], result.fields["models"]["routes"])["default"]
+    projected = cast(Mapping[str, object], result.fields["models"]["routes"])["chat"]
     assert cast(Mapping[str, object], projected) == {"provider_id": "primary", "model": "small-model"}
 
 
@@ -362,7 +362,7 @@ def test_model_context_window_not_greater_than_route_output_keeps_original_bytes
             },
         )
 
-    assert "models.routes.default.max_output" in error.value.field_errors
+    assert "models.routes.chat.max_output" in error.value.field_errors
     assert loader.path.read_bytes() == before
 
 
@@ -387,7 +387,7 @@ def test_model_route_mcp_patch_replaces_collections_and_secrets_atomically(tmp_p
                     },
                 },
                 "routes": {
-                    "default": {
+                    "title": {
                         "provider_id": "primary",
                         "model": "new-model",
                         "context_window": 16384,
@@ -455,7 +455,7 @@ def test_model_route_mcp_patch_replaces_collections_and_secrets_atomically(tmp_p
 
     configuration = loader.load()
     assert set(configuration.models.providers) == {"primary", "added"}
-    assert set(configuration.models.routes) == {"default", "chat", "memory", "schedule"}
+    assert set(configuration.models.routes) == {"title", "chat", "memory", "schedule"}
     assert configuration.models.routes["chat"].provider_id == "added"
     assert configuration.models.providers["primary"].api_key == "provider-secret-replaced-302"
     assert configuration.models.providers["added"].api_key == "provider-secret-added-302"
@@ -540,7 +540,7 @@ def test_dangling_route_candidate_keeps_original_bytes(tmp_path: Path) -> None:
                         },
                     },
                     "routes": {
-                        "default": {
+                        "chat": {
                             "provider_id": "missing",
                             "model": "small-model",
                             "context_window": 8192,
@@ -581,7 +581,7 @@ def test_nondefault_route_cannot_fallback_from_invalid_provider(tmp_path: Path, 
                 "models": {
                     "providers": {"primary": {}, "retired": {"protocol": value}},
                     "routes": {
-                        "default": {},
+                        "title": {},
                         "chat": {"provider_id": "retired", "model": "retired-model"},
                         "memory": {},
                         "schedule": {},
@@ -601,7 +601,7 @@ def test_clearing_key_of_referenced_nondefault_provider_is_invalid(tmp_path: Pat
             {
                 "models": {
                     "routes": {
-                        "default": {},
+                        "title": {},
                         "chat": {"provider_id": "retired", "model": "retired-model"},
                         "memory": {},
                         "schedule": {},
@@ -682,7 +682,7 @@ def test_complete_settings_value_matrix_preserves_invalid_bytes(
         values = (
             {"primary": {}, "retired": {}}
             if section == "providers"
-            else {"default": {}, "chat": {}, "memory": {}, "schedule": {}}
+            else {"title": {}, "chat": {}, "memory": {}, "schedule": {}}
         )
         values[name] = {field: value}
         patch = {"models": {section: values}}

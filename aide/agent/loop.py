@@ -459,10 +459,8 @@ class AgentRunExecutor:
         shared_router = self._subagent_model_router
         if shared_router is None:
             raise RuntimeError("SubAgent execution requires the shared Service Model Router")
-        route_status = context.router.call_route_status(context.route, continuation=None)
-        if session_model_configuration is not None:
-            reasoning_effort = session_model_configuration.reasoning_effort
-        elif context.route == "chat" or route_status.selected_route in {"default", "chat"}:
+        route_status = shared_router.call_route_status("subagent", continuation=None)
+        if route_status.selected_route == "chat":
             reasoning_effort = shared_router.reasoning_effort
         else:
             reasoning_effort = self._configuration.resolve_route(
@@ -1774,7 +1772,7 @@ class AgentRunExecutor:
     def _router_stream_title(self, content: str) -> Any:
         messages = self._context_builder.build_title_messages(normalize_title(content))
         return self._model_router.stream(
-            "chat",
+            "title",
             messages=messages,
             tools=(),
             continuation=None,
@@ -1954,7 +1952,7 @@ def _configured_model_route_status(
         model=resolved.route.model,
         context_window=resolved.route.context_window,
         max_output=resolved.route.max_output,
-        used_default=resolved.used_default,
+        used_fallback=resolved.used_fallback,
     )
 
 

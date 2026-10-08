@@ -79,7 +79,7 @@ class ModelRouteStatus:
     model: str
     context_window: int
     max_output: int
-    used_default: bool
+    used_fallback: bool
 
 
 type ModelAttemptGuard = Callable[
@@ -92,12 +92,13 @@ class ModelRouterDelegate(Protocol):
 
     def stream(
         self,
-        route: Literal["chat", "schedule"],
+        route: ModelRoute,
         *,
         messages: ModelMessages,
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None = None,
         session_model_configuration: SessionModelConfiguration | None = None,
+        subagent_model_configuration: SessionModelConfiguration | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> AsyncIterator[ModelStreamEvent]: ...
 
@@ -109,6 +110,7 @@ class ModelRouterDelegate(Protocol):
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None = None,
         session_model_configuration: SessionModelConfiguration | None = None,
+        subagent_model_configuration: SessionModelConfiguration | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> Coroutine[Any, Any, ModelResponse]: ...
 
@@ -120,6 +122,7 @@ class ModelRouterDelegate(Protocol):
         *,
         continuation: ModelContinuation | None,
         session_model_configuration: SessionModelConfiguration | None = None,
+        subagent_model_configuration: SessionModelConfiguration | None = None,
     ) -> ModelRouteStatus: ...
 
 
@@ -132,15 +135,17 @@ class RunModelRouter:
         *,
         guard: ModelAttemptGuard,
         session_model_configuration: SessionModelConfiguration | None = None,
+        subagent_model_configuration: SessionModelConfiguration | None = None,
     ) -> None:
         self._router = router
         self._guard = guard
         self._session_model_configuration = session_model_configuration
+        self._subagent_model_configuration = subagent_model_configuration
         self._call_statuses: dict[ModelRoute, ModelRouteStatus] = {}
 
     def stream(
         self,
-        route: Literal["chat", "schedule"],
+        route: ModelRoute,
         *,
         messages: ModelMessages,
         tools: Sequence[dict[str, Any]],
@@ -148,23 +153,10 @@ class RunModelRouter:
         guard: ModelAttemptGuard | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         call_guard = self._guard if guard is None else guard
-        if self._session_model_configuration is None:
-            events = self._router.stream(
-                route,
-                messages=messages,
-                tools=tools,
-                continuation=continuation,
-                guard=call_guard,
-            )
-        else:
-            events = self._router.stream(
-                route,
-                messages=messages,
-                tools=tools,
-                continuation=continuation,
-                session_model_configuration=self._session_model_configuration,
-                guard=call_guard,
-            )
+        events = self._router.stream(
+            route, messages=messages, tools=tools, continuation=continuation,
+            guard=call_guard, **self._selection_kwargs(),
+        )
 
         async def observe() -> AsyncIterator[ModelStreamEvent]:
             try:
@@ -186,21 +178,9 @@ class RunModelRouter:
     ) -> ModelResponse:
         try:
             call_guard = self._guard if guard is None else guard
-            if self._session_model_configuration is None:
-                return await self._router.complete(
-                    route,
-                    messages=messages,
-                    tools=tools,
-                    continuation=continuation,
-                    guard=call_guard,
-                )
             return await self._router.complete(
-                route,
-                messages=messages,
-                tools=tools,
-                continuation=continuation,
-                session_model_configuration=self._session_model_configuration,
-                guard=call_guard,
+                route, messages=messages, tools=tools, continuation=continuation,
+                guard=call_guard, **self._selection_kwargs(),
             )
         finally:
             self._remember_call_status(route)
@@ -214,13 +194,16 @@ class RunModelRouter:
         *,
         continuation: ModelContinuation | None,
     ) -> ModelRouteStatus:
-        if self._session_model_configuration is None:
-            return self._router.call_route_status(route, continuation=continuation)
         return self._router.call_route_status(
-            route,
-            continuation=continuation,
-            session_model_configuration=self._session_model_configuration,
+            route, continuation=continuation, **self._selection_kwargs(),
         )
+
+    def _selection_kwargs(self) -> dict[str, Any]:
+        if self._session_model_configuration is not None:
+            return {"session_model_configuration": self._session_model_configuration}
+        if self._subagent_model_configuration is not None:
+            return {"subagent_model_configuration": self._subagent_model_configuration}
+        return {}
 
     def _remember_call_status(self, route: ModelRoute) -> None:
         status = self._router.current_call_status(route)
@@ -272,12 +255,14 @@ class ModelRouter:
         *,
         guard: ModelAttemptGuard,
         session_model_configuration: SessionModelConfiguration | None = None,
+        subagent_model_configuration: SessionModelConfiguration | None = None,
     ) -> RunModelRouter:
         """Bind a per-attempt guard and final route status to an Agent Run."""
         return RunModelRouter(
             self,
             guard=guard,
             session_model_configuration=session_model_configuration,
+            subagent_model_configuration=subagent_model_configuration,
         )
 
     def route_status(self, requested_route: ModelRoute) -> ModelRouteStatus:
@@ -302,6 +287,7 @@ class ModelRouter:
         *,
         continuation: ModelContinuation | None,
         session_model_configuration: SessionModelConfiguration | None = None,
+        subagent_model_configuration: SessionModelConfiguration | None = None,
     ) -> ModelRouteStatus:
         """Preview the initial route for one logical call without publishing state."""
         return _route_status(
@@ -310,6 +296,7 @@ class ModelRouter:
                 requested_route,
                 continuation,
                 session_model_configuration=session_model_configuration,
+                subagent_model_configuration=subagent_model_configuration,
             ),
         )
 
@@ -336,12 +323,14 @@ class ModelRouter:
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None = None,
         session_model_configuration: SessionModelConfiguration | None = None,
+        subagent_model_configuration: SessionModelConfiguration | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         resolved, reasoning_effort = self._begin_call(
             route,
             continuation=continuation,
             session_model_configuration=session_model_configuration,
+            subagent_model_configuration=subagent_model_configuration,
         )
         return self._stream_direct(
             resolved,
@@ -349,7 +338,9 @@ class ModelRouter:
             tools=tools,
             continuation=continuation,
             reasoning_effort=reasoning_effort,
-            publish_route_status=route != "chat" or session_model_configuration is None,
+            publish_route_status=(
+                session_model_configuration is None and subagent_model_configuration is None
+            ),
             guard=guard,
         )
 
@@ -410,12 +401,14 @@ class ModelRouter:
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None = None,
         session_model_configuration: SessionModelConfiguration | None = None,
+        subagent_model_configuration: SessionModelConfiguration | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> Coroutine[Any, Any, ModelResponse]:
         resolved, reasoning_effort = self._begin_call(
             route,
             continuation=continuation,
             session_model_configuration=session_model_configuration,
+            subagent_model_configuration=subagent_model_configuration,
         )
         return self._complete_direct(
             resolved,
@@ -423,7 +416,9 @@ class ModelRouter:
             tools=tools,
             continuation=continuation,
             reasoning_effort=reasoning_effort,
-            publish_route_status=route != "chat" or session_model_configuration is None,
+            publish_route_status=(
+                session_model_configuration is None and subagent_model_configuration is None
+            ),
             guard=guard,
         )
 
@@ -519,10 +514,16 @@ class ModelRouter:
         reasoning_effort: ReasoningEffort | None,
         publish_route_status: bool,
     ) -> ResolvedModelRoute:
-        if attempt == _MAX_ATTEMPTS:
-            raise failure
         code = failure.error.code
         if failure.error.retryable and code in _RETRYABLE_CODES:
+            if current.selected_route != "chat" and attempt == _MAX_ATTEMPTS - 1:
+                return self._fallback_to_chat(
+                    current, failure, attempt=attempt,
+                    reasoning_effort=reasoning_effort,
+                    publish_route_status=publish_route_status,
+                )
+            if attempt == _MAX_ATTEMPTS:
+                raise failure
             backoff = min(30.0, 0.5 * 2.0 ** (attempt - 1))
             if self._jitter is not None:
                 backoff += min(backoff, max(0.0, self._jitter(backoff)))
@@ -537,9 +538,24 @@ class ModelRouter:
         allows_fallback = code in _FALLBACK_CODES or (
             code == "provider_unavailable" and not failure.error.retryable
         )
-        if current.selected_route == "default" or not allows_fallback:
+        if current.selected_route == "chat" or not allows_fallback or attempt == _MAX_ATTEMPTS:
             raise failure
-        fallback = self._configuration.resolve_route("default")
+        return self._fallback_to_chat(
+            current, failure, attempt=attempt,
+            reasoning_effort=reasoning_effort,
+            publish_route_status=publish_route_status,
+        )
+
+    def _fallback_to_chat(
+        self,
+        current: ResolvedModelRoute,
+        failure: ModelCallError,
+        *,
+        attempt: int,
+        reasoning_effort: ReasoningEffort | None,
+        publish_route_status: bool,
+    ) -> ResolvedModelRoute:
+        fallback = self._configuration.resolve_route("chat")
         requested_route = cast(ModelRoute, current.requested_route)
         fallback_route = fallback.route
         if reasoning_effort is not None:
@@ -549,7 +565,7 @@ class ModelRouter:
         fallback = replace(
             fallback,
             requested_route=requested_route,
-            used_default=True,
+            used_fallback=True,
             route=fallback_route,
         )
         status = _route_status(requested_route, fallback)
@@ -575,6 +591,7 @@ class ModelRouter:
         *,
         continuation: ModelContinuation | None,
         session_model_configuration: SessionModelConfiguration | None,
+        subagent_model_configuration: SessionModelConfiguration | None,
     ) -> tuple[ResolvedModelRoute, ReasoningEffort | None]:
         session_chat_selection = session_model_configuration if requested_route == "chat" else None
         reasoning_effort = (
@@ -586,19 +603,22 @@ class ModelRouter:
             requested_route,
             continuation,
             session_model_configuration=session_chat_selection,
+            subagent_model_configuration=subagent_model_configuration,
         )
-        if reasoning_effort is not None and resolved.selected_route in {"default", "chat"}:
+        if subagent_model_configuration is not None:
+            reasoning_effort = None
+        if reasoning_effort is not None and resolved.selected_route == "chat":
             resolved = replace(
                 resolved,
                 route=replace(resolved.route, reasoning_effort=reasoning_effort),
             )
         status = _route_status(requested_route, resolved)
-        if session_chat_selection is None:
+        if session_chat_selection is None and subagent_model_configuration is None:
             self._route_statuses[requested_route] = status
         self._remember_current_call_status(requested_route, status)
-        if resolved.used_default:
+        if resolved.used_fallback:
             logger.warning(
-                "Default Model Route selected code=route_unavailable requested_route={} "
+                "Chat Model Route selected code=route_unavailable requested_route={} "
                 "provider={} selected_route={} model={}",
                 resolved.requested_route,
                 resolved.provider.provider_id,
@@ -613,19 +633,19 @@ class ModelRouter:
         continuation: ModelContinuation | None,
         *,
         session_model_configuration: SessionModelConfiguration | None,
+        subagent_model_configuration: SessionModelConfiguration | None,
     ) -> ResolvedModelRoute:
         if continuation is not None:
             previous = self.current_call_status(requested_route)
             if previous is not None and previous.provider_id == continuation.provider_id:
-                if (
-                    session_model_configuration is not None
-                    and requested_route == "chat"
-                    and previous.selected_route == "chat"
-                ):
+                selected = (
+                    session_model_configuration if requested_route == "chat"
+                    else subagent_model_configuration if requested_route == "subagent" else None
+                )
+                if selected is not None and previous.selected_route == requested_route:
                     resolved = self._configuration.resolve_session_model_route(
-                        session_model_configuration.provider_id,
-                        session_model_configuration.model,
-                        session_model_configuration.reasoning_effort,
+                        selected.provider_id, selected.model, selected.reasoning_effort,
+                        requested_route=cast(Literal["chat", "subagent"], requested_route),
                     )
                 else:
                     resolved = self._configuration.resolve_route(previous.selected_route)
@@ -637,7 +657,7 @@ class ModelRouter:
                     return replace(
                         resolved,
                         requested_route=requested_route,
-                        used_default=previous.selected_route != requested_route,
+                        used_fallback=previous.selected_route != requested_route,
                     )
         if session_model_configuration is not None and requested_route == "chat":
             return self._configuration.resolve_session_model_route(
@@ -645,6 +665,21 @@ class ModelRouter:
                 session_model_configuration.model,
                 session_model_configuration.reasoning_effort,
             )
+        if subagent_model_configuration is not None and requested_route == "subagent":
+            resolved = self._configuration.resolve_session_model_route(
+                subagent_model_configuration.provider_id,
+                subagent_model_configuration.model,
+                subagent_model_configuration.reasoning_effort,
+                requested_route="subagent",
+            )
+            configured = self._configuration.resolve_route("subagent")
+            if (
+                configured.used_fallback
+                and configured.provider.provider_id == resolved.provider.provider_id
+                and configured.route.model == resolved.route.model
+            ):
+                return replace(resolved, selected_route="chat", used_fallback=True)
+            return resolved
         return self._configuration.resolve_route(requested_route)
 
     def _remember_current_call_status(
@@ -712,7 +747,7 @@ def _log_fallback(
         failed.route.model,
     )
     logger.warning(
-        "Default Model Route selected code={} requested_route={} provider={} "
+        "Chat Model Route selected code={} requested_route={} provider={} "
         "selected_route={} model={}",
         failure.error.code,
         fallback.requested_route,
@@ -733,5 +768,5 @@ def _route_status(
         model=resolved.route.model,
         context_window=resolved.route.context_window,
         max_output=resolved.route.max_output,
-        used_default=resolved.used_default,
+        used_fallback=resolved.used_fallback,
     )

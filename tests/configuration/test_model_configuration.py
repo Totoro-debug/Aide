@@ -35,10 +35,10 @@ max_output = 512
 temperature = 0.7
 reasoning_effort = "mid"
 timeout = 17
-[models.routes.default]
+[models.routes.chat]
 provider_id = "primary"
 model = "large"
-[models.routes.chat]
+[models.routes.title]
 provider_id = "primary"
 model = "large"
 [models.routes.memory]
@@ -232,7 +232,7 @@ def test_legacy_conflicts_require_resolution_and_migrate_atomically(tmp_path: Pa
     with pytest.raises(ConfigError):
         loader.patch_editable_fields(loader.revision(), {"models": models})
     assert loader.path.read_bytes() == before
-    selected = next(candidate for candidate in candidates if candidate["route"] == "default")
+    selected = next(candidate for candidate in candidates if candidate["route"] == "chat")
     selected.pop("route")
     models["providers"]["primary"]["models"]["small-model"] = selected
     models["providers"]["retired"]["models"]["retired-model"] = {

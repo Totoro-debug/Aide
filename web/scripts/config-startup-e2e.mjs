@@ -314,8 +314,8 @@ async function fillRepairForm(page, state, providerBaseUrl) {
   await keyboardFill(page, page.locator("#settings-models-providers-openai-local-api_key-value"),
     `startup-secret-${state}-303`,
   );
-  const routeDefault = page.locator("#settings-models-routes-default");
-  if (state === "invalid" && await routeDefault.count() === 0) {
+  const chatRoute = page.locator("#settings-models-routes-chat");
+  if (state === "invalid" && await chatRoute.count() === 0) {
     await keyboardActivate(page.getByRole("button", { name: "Add route", exact: true }));
   }
   for (const select of await page.locator('select[id^="settings-models-routes-"][id$="-provider_id"]').all()) {

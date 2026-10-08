@@ -50,12 +50,12 @@ temperature = 0.2
 reasoning_effort = "mid"
 timeout = 120
 
-# Remove any purpose-specific route to fall back to default.
-[models.routes.default]
+# Remove any optional purpose-specific route to fall back to chat.
+[models.routes.chat]
 provider_id = "openai-local"
 model = "replace-with-a-model-id"
 
-[models.routes.chat]
+[models.routes.title]
 provider_id = "openai-local"
 model = "replace-with-a-model-id"
 
@@ -64,5 +64,9 @@ provider_id = "openai-local"
 model = "replace-with-a-model-id"
 
 [models.routes.schedule]
+provider_id = "openai-local"
+model = "replace-with-a-model-id"
+
+[models.routes.subagent]
 provider_id = "openai-local"
 model = "replace-with-a-model-id"

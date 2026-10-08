@@ -586,7 +586,7 @@ def test_installed_config_command_keeps_fallback_diagnostic_before_later_fatal_e
 
     result = run_installed_aide(agent_home, "config", workspace=workspace)
 
-    error = "config_invalid: Configuration field 'models.routes.default.model' is required."
+    error = "config_invalid: Configuration field 'models.routes.chat.model' is required."
     diagnostic = (
         "Configuration field 'runtime.permission_level' is invalid; using 'workspace-write'."
     )

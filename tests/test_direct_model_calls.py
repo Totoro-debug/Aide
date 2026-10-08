@@ -69,7 +69,7 @@ def _configuration() -> UserConfiguration:
         ),
         models=ModelsConfiguration(
             providers={provider.provider_id: provider},
-            routes={"default": route},
+            routes={"chat": route},
         ),
     )
 
@@ -152,7 +152,7 @@ async def test_router_direct_call_resolves_route_and_passes_only_provider_fields
     )
     messages = [{"role": "system", "content": "System"}, {"role": "user", "content": "Hi"}]
 
-    response = await router.complete("default", messages=messages, tools=(READ_FILE_SCHEMA,))
+    response = await router.complete("chat", messages=messages, tools=(READ_FILE_SCHEMA,))
 
     assert response.message.content == "done"
     assert provider.calls == [
@@ -204,7 +204,7 @@ async def test_router_direct_call_keeps_retry_budget_and_reuses_message_dictiona
         {"role": "user", "content": "Hi"},
     ]
 
-    await router.complete("default", messages=messages, tools=())
+    await router.complete("chat", messages=messages, tools=())
 
     assert clock.sleeps == [0.5]
     assert [call["messages"] for call in provider.calls] == [messages, messages]
@@ -224,7 +224,7 @@ async def test_router_direct_stream_returns_provider_usage() -> None:
     events = [
         event
         async for event in router.stream(
-            "default",
+            "chat",
             messages=[{"role": "system", "content": "System"}],
             tools=(),
         )
@@ -261,13 +261,13 @@ def _fallback_configuration() -> UserConfiguration:
         memory=base.memory,
         models=ModelsConfiguration(
             providers={**base.models.providers, provider.provider_id: provider},
-            routes={**base.models.routes, "chat": route},
+            routes={**base.models.routes, "title": route},
         ),
     )
 
 
 @pytest.mark.asyncio
-async def test_router_direct_call_falls_back_to_default_route() -> None:
+async def test_router_direct_call_falls_back_to_chat_route() -> None:
     default_provider = _DirectProvider()
     requested_provider = _DirectProvider(
         completions=[
@@ -289,13 +289,13 @@ async def test_router_direct_call_falls_back_to_default_route() -> None:
     )
 
     response = await router.complete(
-        "chat",
+        "title",
         messages=[{"role": "system", "content": "System"}],
         tools=(),
     )
 
     assert response.message.content == "done"
-    assert router.route_status("chat").selected_route == "default"
+    assert router.route_status("title").selected_route == "chat"
     assert default_provider.calls[0]["model"] == "resolved-model"
 
 

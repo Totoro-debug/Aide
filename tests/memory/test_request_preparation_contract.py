@@ -112,7 +112,7 @@ async def _run_once(
                 model="test-model",
                 context_window=65_536,
                 max_output=1_024,
-                used_default=False,
+                used_fallback=False,
             )
             for route in routes
         },

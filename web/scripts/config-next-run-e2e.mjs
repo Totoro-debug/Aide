@@ -77,7 +77,7 @@ try {
   const configured = await control.command(`config-patch ${JSON.stringify({
     runtime: { permission_level: "full-access" },
     models: { providers, routes: {
-      default: { provider_id: "primary", model: "large-model" },
+      title: { provider_id: "primary", model: "large-model" },
       chat: { provider_id: "primary", model: "large-model" },
     } },
     mcp: { fixture },
@@ -110,7 +110,7 @@ try {
     return body;
   };
   await section("Models");
-  await saveField(page.locator("#settings-models-routes-default-model"), "small-model", true);
+  await saveField(page.locator("#settings-models-routes-title-model"), "small-model", true);
   await saveField(page.locator("#settings-models-routes-chat-model"), "small-model", true);
   await section("MCP");
   await saveField(page.locator("#settings-mcp-fixture-args").getByRole("textbox").last(), control.details.mcp_v2_path);

@@ -1928,7 +1928,7 @@ function SettingsView({
   const addRoute = useCallback(() => {
     const current = draftRef.current;
     if (current === null) return;
-    const name = (["default", "chat", "memory", "schedule"] as const).find(
+    const name = (["chat", "title", "memory", "schedule", "subagent"] as const).find(
       (candidate) => current.models.routes[candidate] === undefined,
     );
     if (name === undefined) return;
@@ -1949,6 +1949,7 @@ function SettingsView({
   }, [updateDraft]);
 
   const removeRoute = useCallback((id: string) => {
+    if (id === "chat") return;
     updateDraft((current) => {
       const routes = { ...current.models.routes };
       delete routes[id];
@@ -2351,7 +2352,7 @@ function SettingsView({
     if (/^(?:add|添加)(?:\s|$)/i.test(label)) return;
     window.setTimeout(() => void saveDraft(false, false, activeSection === "general" ? null : activeSection), 0);
   };
-  const canAddRoute = draft !== null && (["default", "chat", "memory", "schedule"] as const).some(
+  const canAddRoute = draft !== null && (["chat", "title", "memory", "schedule", "subagent"] as const).some(
     (name) => draft.models.routes[name] === undefined,
   );
   const labelFor = (path: string): string => {
@@ -3026,13 +3027,13 @@ function SettingsView({
                   return (
                   <div className={styles.settingsCollectionItem} key={route.name} id={fieldId(`models.routes.${route.name}`)} tabIndex={-1}>
                     <div className={styles.settingsCollectionItemHeader}>
-                      <h4>{route.name === "default" ? t("settings.defaultFallback") : route.name}</h4>
+                      <h4>{route.name === "chat" ? t("settings.chatFallback") : route.name}</h4>
                       <button
                         className={styles.iconButton}
                         type="button"
                         aria-label={t("settings.removeRoute")}
                         title={t("settings.removeRoute")}
-                        disabled={controlDisabled || route.name === "default"}
+                        disabled={controlDisabled || route.name === "chat"}
                         onClick={() => removeRoute(route.name)}
                       ><Trash2 size={15} aria-hidden="true" /></button>
                     </div>

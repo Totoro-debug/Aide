@@ -25,7 +25,7 @@ base_url = \"https://old.example/v1\"
 api_key = \"malformed-secret-303\"
 models = [\"old-model\"]
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = \"old\"
 model = \"old-model\"
 context_window = 8192

@@ -72,7 +72,7 @@ models = ["retired-model"]
 compact_ratio = 0.9
 permission_level = "full-access"
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = "primary"
 model = "small-model"
 context_window = 8192
@@ -81,7 +81,7 @@ temperature = 0
 reasoning_effort = "mid"
 timeout = 30
 
-[models.routes.chat]
+[models.routes.title]
 provider_id = "primary"
 model = "small-model"
 context_window = 8192

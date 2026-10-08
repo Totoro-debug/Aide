@@ -31,17 +31,12 @@ from tests.scheduling.test_schedule_agent_loop import (
 
 def _configuration() -> str:
     return (
-        VALID_CONFIG
+        VALID_CONFIG.replace(
+            "context_window = 200000\nmax_output = 8192",
+            "context_window = 4096\nmax_output = 512",
+            1,
+        )
         + """
-
-[models.routes.chat]
-provider_id = "anthropic-default"
-model = "claude-model"
-context_window = 4096
-max_output = 512
-temperature = 0.2
-reasoning_effort = "mid"
-timeout = 120
 
 [models.routes.schedule]
 provider_id = "anthropic-default"

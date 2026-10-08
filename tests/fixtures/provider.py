@@ -245,7 +245,7 @@ class ScriptedFakeRouter:
                 model="test-model",
                 context_window=16_384,
                 max_output=1_024,
-                used_default=False,
+                used_fallback=False,
             ),
         )
 

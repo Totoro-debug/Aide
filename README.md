@@ -48,18 +48,20 @@ temperature = 0.2
 reasoning_effort = "mid"
 timeout = 120
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = "my-provider"
 model = "your-model-id"
 ```
 
 选择支持工具调用的模型，替换服务地址、API Key 和两处模型 ID。模型的上下文窗口、最大输出、温度、默认推理强度和请求超时集中配置在 Provider 下的模型中；路由仅引用 Provider 和模型。按模型实际限制设置 `context_window` 与 `max_output`，单位为 token，后者必须小于前者。
 
-`protocol` 支持 `openai-compatible` 和 `anthropic`；只配置 `default` 路由即可用于对话、记忆和定时任务。更多选项见[配置模板](aide/templates/default-config.md)。
+`protocol` 支持 `openai-compatible` 和 `anthropic`；只配置 `chat` 路由即可用于对话、标题、记忆、定时任务和 SubAgent。更多选项见[配置模板](aide/templates/default-config.md)。
 
-Web 模型设置以小卡片编辑参数，点击 Provider 下的加号添加模型；chat、memory、schedule 从已配置的 Provider 和模型中选择。保存设置后，所有会话从下一轮 AgentRun 开始生效，无需重启服务。切换会话模型时采用所选模型自身的输出上限等参数，会话显式推理强度覆盖模型默认值。
+Web 模型设置以小卡片编辑参数，点击 Provider 下的加号添加模型；chat、title、memory、schedule、subagent 从已配置的 Provider 和模型中选择。保存设置后，所有会话从下一轮 AgentRun 开始生效，无需重启服务。切换会话模型时采用所选模型自身的输出上限等参数，会话显式推理强度覆盖模型默认值。
 
 旧模型列表与路由参数配置仍可读取。编辑模型设置时，参数一致的配置可以合并；同一模型存在不同路由参数时，卡片列出候选值，需要明确选择或补齐参数后再迁移保存。额外模型缺少参数时需要补齐，已引用的模型需先更换路由才能删除。
+
+旧的 `models.routes.default` 读取时会映射到 `chat`；若两者同时存在，以 `chat` 为准。下次保存配置时会移除旧路由表。
 
 ### 3. 开始对话
 

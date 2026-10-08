@@ -711,7 +711,7 @@ models = ["small-model", "installed-new-model"]
 [runtime]
 permission_level = "workspace-write"
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = "fixture"
 model = "small-model"
 context_window = 8192

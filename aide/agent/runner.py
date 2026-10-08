@@ -33,7 +33,7 @@ from aide.provider.models import (
 )
 from aide.utils.validation import empty_token_usage, token_usage_validation_issue
 
-type AgentRunnerRoute = Literal["chat", "schedule"]
+type AgentRunnerRoute = Literal["chat", "schedule", "subagent"]
 type AgentRunnerSegment = Literal["reasoning", "response"]
 type AgentRunnerFinishReason = Literal["completed", "failed", "cancelled", "max_iterations"]
 type AgentRunnerOutput = (
@@ -320,7 +320,7 @@ class AgentRunner:
                     ) from error
                 model_call_started = True
                 usage["model_calls"] += 1
-                if model == "chat":
+                if model in {"chat", "subagent"}:
                     router = active_router
                     events = router.stream(
                         model,
@@ -525,13 +525,13 @@ class AgentRunner:
             ):
                 raise
             _log_agent_failure(failure)
-            failed_content = "".join(partial_content) if model == "chat" else ""
+            failed_content = "".join(partial_content) if model in {"chat", "subagent"} else ""
             _repair_failed_messages(
                 runtime_messages,
                 increment,
                 partial_content,
                 pending_tool_calls,
-                stream=model == "chat",
+                stream=model in {"chat", "subagent"},
                 failure=failure,
                 model_calls=int(model_call_started),
             )
@@ -567,14 +567,14 @@ class AgentRunner:
             if is_cancel_requested():
                 cancelled_content = "".join(partial_content)
                 return finish_cancelled(final_content=cancelled_content)
-            failed_content = "".join(partial_content) if model == "chat" else ""
+            failed_content = "".join(partial_content) if model in {"chat", "subagent"} else ""
             generic_failure = _model_failure()
             _repair_failed_messages(
                 runtime_messages,
                 increment,
                 partial_content,
                 pending_tool_calls,
-                stream=model == "chat",
+                stream=model in {"chat", "subagent"},
                 failure=generic_failure,
                 model_calls=int(model_call_started),
             )

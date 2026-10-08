@@ -225,7 +225,7 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
                                     "reasoning_effort": "high",
                                     "timeout": 40,
                                 }
-                                for name in ("default", "chat", "memory", "schedule")
+                                for name in ("chat", "title", "memory", "schedule")
                             }
                         },
                         "mcp": {

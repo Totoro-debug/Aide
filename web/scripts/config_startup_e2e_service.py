@@ -70,8 +70,8 @@ base_url = "{provider_base_url}"
 api_key = ""
 models = ["small-model"]
 
-# The default route is intentionally absent for the semantic-repair case.
-[models.routes.chat]
+# The required chat route is intentionally absent for the semantic-repair case.
+[models.routes.title]
 provider_id = "openai-local"
 model = "old-model"
 context_window = 8192
@@ -88,7 +88,7 @@ base_url = "https://old.example/v1"
 api_key = "{MALFORMED_SECRET}"
 models = ["old-model"]
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = "old"
 model = "old-model"
 context_window = 8192

@@ -64,7 +64,7 @@ try {
   };
   const initial = await control.command("config-read");
   assert.equal(initial.fields.models.providers.primary.models["small-model"].reasoning_effort, null);
-  await card("primary", "small-model").getByRole("button", { name: /^Use default parameters/ }).click();
+  await card("primary", "small-model").getByRole("button", { name: /^Use chat parameters/ }).click();
   await page.locator('[id="settings-models-providers-retired"]').getByRole("button", { name: "Remove provider", exact: true }).click();
   await fillModel(card("primary", "large-model"), { context: 65536, output: 16384, temperature: 0.1, effort: "high", timeout: 91 });
   await savedModel("primary", "large-model", 16384);
@@ -75,6 +75,17 @@ try {
   assert.equal(JSON.stringify(migrated).includes("e2e-provider-secret-302"), false);
   assert.match(await readFile(configPath, "utf8"), /e2e-provider-secret-302/);
   await expect(card("primary", "small-model").getByRole("button", { name: "Remove model", exact: true })).toBeDisabled();
+
+  const chatRoute = page.locator('[id="settings-models-routes-chat"]');
+  await expect(chatRoute.getByRole("button", { name: "Remove route", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Add route", exact: true }).click();
+  const subagentRoute = page.locator('[id="settings-models-routes-subagent"]');
+  await expect(subagentRoute).toBeVisible();
+  await page.locator('[id="settings-models-routes-subagent-model"]').selectOption("small-model");
+  await page.locator('[id="settings-models-routes-subagent-model"]').press("Tab");
+  await expect.poll(async () => (await control.command("config-read")).fields.models.routes.subagent?.model)
+    .toBe("small-model");
+  await expect(page.locator('[id="settings-models-routes-title"]')).toBeVisible();
 
   const unchanged = await readFile(configPath);
   await openCard(card("primary", "large-model"));
@@ -156,6 +167,9 @@ try {
   }
   await setInterfaceLanguage(page, "en");
   await page.setViewportSize({ width: 1440, height: 900 });
+  await subagentRoute.getByRole("button", { name: "Remove route", exact: true }).click();
+  await expect.poll(async () => (await control.command("config-read")).fields.models.routes.subagent)
+    .toBeUndefined();
   await expect(page.locator('[role="status"][data-state="saving"]')).toHaveCount(0);
   const restarted = await control.restart();
   await page.goto("about:blank");

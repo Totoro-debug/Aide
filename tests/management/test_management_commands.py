@@ -36,7 +36,7 @@ base_url = "https://api.anthropic.com"
 api_key = "command-secret"
 models = ["model-id"]
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = "primary"
 model = "model-id"
 context_window = 4096
@@ -79,7 +79,7 @@ base_url = "https://api.anthropic.com"
 api_key = "***REDACTED***"
 models = ["model-id"]
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = "primary"
 model = "model-id"
 context_window = 4096
@@ -417,7 +417,7 @@ api_key = "schema-command-secret"
 models = ["model-id"]
 unexpected = true
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = "primary"
 model = "model-id"
 context_window = 4096
@@ -433,7 +433,7 @@ api_key = "***REDACTED***"
 models = ["model-id"]
 unexpected = true
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = "primary"
 model = "model-id"
 context_window = 4096
@@ -507,7 +507,7 @@ async def test_config_command_keeps_fallback_diagnostic_before_later_fatal_error
 
     assert result.handled is True
     assert result.output is not None
-    error = "config_invalid: Configuration field 'models.routes.default.model' is required."
+    error = "config_invalid: Configuration field 'models.routes.chat.model' is required."
     diagnostic = (
         "Configuration field 'runtime.permission_level' is invalid; using 'workspace-write'."
     )

@@ -28,7 +28,7 @@ _FAKE_MEMORY_ROUTE_STATUS = ModelRouteStatus(
     model="test-model",
     context_window=200_000,
     max_output=8_192,
-    used_default=False,
+    used_fallback=False,
 )
 
 

@@ -580,12 +580,12 @@ async def test_compaction_summaries_are_persisted_in_child_context_state(
         tool_context=_tool_context(state.workspace_path),
     )
     config = configuration()
-    chat_route = replace(config.models.routes["default"], context_window=4000, max_output=500)
+    chat_route = replace(config.models.routes["chat"], context_window=4000, max_output=500)
     config = replace(
         config,
         models=replace(
             config.models,
-            routes={**config.models.routes, "chat": chat_route},
+            routes={**config.models.routes, "chat": chat_route, "memory": config.models.routes["chat"]},
         ),
     )
     executor = SubAgentRunnerExecutor(
@@ -891,7 +891,7 @@ async def test_snapshot_permission_shell_and_model_survive_parent_configuration_
     )
     router = ModelRouter(configuration=routed_configuration(), provider_factory=lambda _: provider)
     router.set_reasoning_effort("low")
-    assert router.route_status("chat").model != snapshot.model
+    assert router.route_status("title").model != snapshot.model
     host = _exec_host()
 
     executor = SubAgentRunnerExecutor(
@@ -1183,9 +1183,11 @@ async def test_compaction_keeps_earlier_model_output_in_the_persisted_conversati
         completions=(_response(f"summary-{index}").response for index in range(6)),
     )
     config = configuration()
-    chat_route = replace(config.models.routes["default"], context_window=4000, max_output=500)
+    chat_route = replace(config.models.routes["chat"], context_window=4000, max_output=500)
     config = replace(
-        config, models=replace(config.models, routes={**config.models.routes, "chat": chat_route})
+        config, models=replace(config.models, routes={
+            **config.models.routes, "chat": chat_route, "memory": config.models.routes["chat"],
+        })
     )
     executor = SubAgentRunnerExecutor(
         workspace_id="workspace-id",
@@ -1234,9 +1236,11 @@ async def test_failed_child_summary_save_keeps_its_consumed_memory_usage(tmp_pat
     )
     provider = ScriptedFakeProvider(completions=(_response("fact-summary").response,))
     config = configuration()
-    chat_route = replace(config.models.routes["default"], context_window=4000, max_output=500)
+    chat_route = replace(config.models.routes["chat"], context_window=4000, max_output=500)
     config = replace(
-        config, models=replace(config.models, routes={**config.models.routes, "chat": chat_route})
+        config, models=replace(config.models, routes={
+            **config.models.routes, "chat": chat_route, "memory": config.models.routes["chat"],
+        })
     )
     executor = SubAgentRunnerExecutor(
         workspace_id="workspace-id",
@@ -1315,9 +1319,11 @@ async def test_concurrent_compaction_keeps_summaries_and_raw_activity_in_each_ch
         for marker in markers
     ]
     config = configuration()
-    chat_route = replace(config.models.routes["default"], context_window=4000, max_output=500)
+    chat_route = replace(config.models.routes["chat"], context_window=4000, max_output=500)
     config = replace(
-        config, models=replace(config.models, routes={**config.models.routes, "chat": chat_route})
+        config, models=replace(config.models, routes={
+            **config.models.routes, "chat": chat_route, "memory": config.models.routes["chat"],
+        })
     )
     provider = ConcurrentProvider()
     executor = SubAgentRunnerExecutor(

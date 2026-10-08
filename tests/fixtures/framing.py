@@ -37,7 +37,7 @@ class TaskFramingRouterAdapter:
         self._last_statuses: dict[ModelRoute, ModelRouteStatus] = {}
 
     def bind_configuration(self, configuration: UserConfiguration) -> None:
-        for route in cast(tuple[ModelRoute, ...], ("chat", "schedule", "memory", "default")):
+        for route in cast(tuple[ModelRoute, ...], ("chat", "title", "schedule", "memory", "subagent")):
             resolved = configuration.resolve_route(route)
             self._configured_statuses[route] = ModelRouteStatus(
                 requested_route=route,
@@ -46,7 +46,7 @@ class TaskFramingRouterAdapter:
                 model=resolved.route.model,
                 context_window=resolved.route.context_window,
                 max_output=resolved.route.max_output,
-                used_default=resolved.used_default,
+                used_fallback=resolved.used_fallback,
             )
 
     def stream(

@@ -17,7 +17,7 @@ from aide.provider.session_configuration import (
 )
 from aide.utils.validation import require_nonnegative_int
 
-type ModelRoute = Literal["default", "chat", "memory", "schedule"]
+type ModelRoute = Literal["chat", "title", "memory", "schedule", "subagent"]
 type FinishReason = Literal["stop", "tool_calls", "length", "cancelled"]
 type ModelMessageDictionary = dict[str, Any]
 type ModelMessages = Sequence[ModelMessageDictionary]

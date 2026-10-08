@@ -517,7 +517,7 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   const retiredApiKeyAction = (target) => field(target, "settings-models-providers-retired-api_key-action");
   const remoteHeaderAction = (target) => field(target, "settings-mcp-remote-headers-Authorization-action");
   const remoteHeaderValue = (target) => field(target, "settings-mcp-remote-headers-Authorization-value");
-  const defaultModel = (target) => field(target, "settings-models-routes-default-model");
+  const titleModel = (target) => field(target, "settings-models-routes-title-model");
   const chatModel = (target) => field(target, "settings-models-routes-chat-model");
   const smallModelContextWindow = (target) => field(target, "settings-model-primary-small-model-context_window");
   const largeModelContextWindow = (target) => field(target, "settings-model-primary-large-model-context_window");
@@ -533,8 +533,8 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
 
   const initial = await openSettings(page);
   assert.ok(initial.fields.models.providers.primary.models["small-model"]);
-  assert.equal(initial.fields.models.routes.default.model, "small-model");
-  const defaultReasoningEffort = initial.fields.models.providers.primary.models["small-model"].migration_candidates.find(candidate => candidate.route === "default").reasoning_effort;
+  assert.equal(initial.fields.models.routes.chat.model, "small-model");
+  const defaultReasoningEffort = initial.fields.models.providers.primary.models["small-model"].migration_candidates.find(candidate => candidate.route === "chat").reasoning_effort;
   assert.equal(await smallModelContextWindow(page).inputValue(), "8192");
   assert.equal(initial.fields.models.providers.primary.models["large-model"].context_window, null);
   const activeModels = await availableModels(page);
@@ -549,7 +549,7 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   });
   assert.equal(initial.fields.mcp.fixture.transport, "stdio");
   assert.equal(initial.fields.mcp.remote.headers.Authorization.configured, true);
-  await field(page, "settings-model-primary-small-model").getByRole("button", { name: /^Use default parameters/ }).click();
+  await field(page, "settings-model-primary-small-model").getByRole("button", { name: /^Use chat parameters/ }).click();
   await completeModelCard(field(page, "settings-model-primary-large-model"), { context: 32768 });
   await completeModelCard(field(page, "settings-model-retired-retired-model"));
   await save(page);
@@ -724,7 +724,7 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
 
   await settingsSection(page, "Models");
   const beforeInvalid = await readFile(configPath);
-  assert.equal(await defaultModel(page).locator('option[value="missing-model-302"]').count(), 0);
+  assert.equal(await titleModel(page).locator('option[value="missing-model-302"]').count(), 0);
   const largeModelOutput = field(page, "settings-model-primary-large-model-max_output");
   if (!await field(page, "settings-model-primary-large-model").locator("details").evaluate(element => element.open)) await field(page, "settings-model-primary-large-model").locator("summary").click();
   await largeModelOutput.fill("0");
@@ -769,7 +769,7 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   await expect(page.getByText("These settings changed elsewhere. Your edits are still here.", { exact: true })).toBeVisible({ timeout: 15000 });
   assert.deepEqual(await readFile(configPath), beforeConflict, "Stale model save changed config bytes");
   await page.getByRole("button", { name: "Reload saved values", exact: true }).click();
-  await expect(defaultModel(page)).toHaveValue("small-model");
+  await expect(titleModel(page)).toHaveValue("small-model");
   await expect(chatModel(page)).toHaveValue("small-model");
   const capacitySave = page.waitForResponse((response) => (
     response.url().endsWith("/api/v1/config")
@@ -790,7 +790,7 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
     { provider_id: "primary", model: "large-model", context_window: 65536 },
     { provider_id: "primary", model: "expanded-model-302", context_window: 8192 },
   ], "Saved capacities must be available for the next Run without restarting");
-  await defaultModel(page).selectOption("large-model");
+  await titleModel(page).selectOption("large-model");
   await chatModel(page).selectOption("large-model");
   const conflictResolved = await save(page);
   await waitForSavedSettings(page);
@@ -835,7 +835,7 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   await page.keyboard.press("Escape");
 
   await openSettings(page);
-  await defaultModel(page).selectOption("small-model");
+  await titleModel(page).selectOption("small-model");
   await chatModel(page).selectOption("small-model");
   await settingsSection(page, "MCP");
   const args = field(page, "settings-mcp-fixture-args").getByRole("textbox");
@@ -1039,8 +1039,7 @@ export default async function settingsAcceptance({ page, control, output, viewpo
   await waitForSavedSettings(page);
   const competing = await control.command('config-patch {"memory":{"batch_size":12}}');
   await page.bringToFront();
-  await page.getByText("Configuration versions", { exact: true }).click();
-  await expect(page.getByRole("definition").filter({ hasText: competing.revision })).toHaveCount(1);
+  assert.equal((await control.command("config-read")).revision, competing.revision);
   await expect(page.getByLabel("Maximum iterations", { exact: true })).toHaveValue("61");
   await runtimeSettings(page);
   await page.getByLabel("Maximum iterations", { exact: true }).fill("62");
@@ -1109,7 +1108,7 @@ export default async function settingsAcceptance({ page, control, output, viewpo
   await (await deliveredPoll).finished();
   await page.evaluate(() => new Promise((done) => window.requestAnimationFrame(done)));
   await expect(page.getByLabel("Maximum iterations", { exact: true })).toHaveValue("64");
-  await expect(page.getByRole("definition").filter({ hasText: freshRevision })).toHaveCount(1);
+  assert.equal((await control.command("config-read")).revision, freshRevision);
   await page.unroute("**/api/v1/config", delayedPoll);
   await save(page);
 

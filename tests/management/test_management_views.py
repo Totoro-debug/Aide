@@ -35,7 +35,7 @@ base_url = ""
 api_key = ""
 models = []
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = "primary"
 model = "model-id"
 context_window = 4096
@@ -57,7 +57,7 @@ base_url = ""
 api_key = ""
 models = []
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = "primary"
 model = "model-id"
 context_window = 4096
@@ -239,7 +239,7 @@ async def test_reasoning_effort_configuration_failure_keeps_runtime_success_and_
             "high",
         ),
         (
-            CONFIG_WITH_PLAINTEXT_KEYS.partition("\n[models.routes.default]")[0] + "\n",
+            CONFIG_WITH_PLAINTEXT_KEYS.partition("\n[models.routes.chat]")[0] + "\n",
             False,
             "xhigh",
         ),
@@ -554,7 +554,7 @@ base_url = "https://api.anthropic.com"
 api_key = "secret"
 models = ["model-id"]
 
-[models.routes.default]
+[models.routes.chat]
 provider_id = "primary"
 model = "model-id"
 context_window = 4096

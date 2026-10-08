@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID
 
+from aide.utils.validation import require_uuid4_string
+
 if TYPE_CHECKING:
     from aide.agent.tools.tool_gateway import ConfirmationRequest
 
@@ -63,12 +65,7 @@ class SubAgentConfirmationOwner:
             for value in (self.workspace_id, self.session_id, self.agent_id)
         ):
             raise ValueError("SubAgent confirmation source identifiers must be non-empty")
-        try:
-            parsed_agent_id = UUID(self.agent_id)
-        except ValueError as error:
-            raise ValueError("SubAgent confirmation agent_id must be a UUID4") from error
-        if str(parsed_agent_id) != self.agent_id or parsed_agent_id.version != 4:
-            raise ValueError("SubAgent confirmation agent_id must be a canonical UUID4")
+        require_uuid4_string(self.agent_id, field="SubAgent confirmation agent_id")
 
 
 type ConfirmationOwner = (

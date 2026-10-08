@@ -12,6 +12,7 @@ from fractions import Fraction
 from json import dumps
 from typing import Any, Literal, TypeGuard, cast
 
+from aide.utils.json import json_validation_issue
 from aide.utils.validation import require_nonnegative_int
 
 type SchemaKind = Literal["string", "integer", "boolean", "object"]
@@ -607,23 +608,12 @@ def _require_finite_number(value: int | float, name: str) -> None:
 
 
 def _require_json_value(value: object, name: str) -> object:
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        if math.isfinite(value):
-            return value
-        raise ValueError(f"Schema {name} must be JSON-compatible")
-    if isinstance(value, list):
-        for index, item in enumerate(value):
-            _require_json_value(item, f"{name}[{index}]")
-        return value
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TypeError(f"Schema {name} must be JSON-compatible")
-            _require_json_value(item, f"{name}.{key}")
-        return value
-    raise TypeError(f"Schema {name} must be JSON-compatible")
+    issue = json_validation_issue(value, field=name)
+    if issue is not None:
+        path, kind = issue
+        error_type = ValueError if kind == "value" else TypeError
+        raise error_type(f"Schema {path} must be JSON-compatible")
+    return value
 
 
 __all__ = [

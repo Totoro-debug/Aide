@@ -1,7 +1,35 @@
 """Strict JSON parsing shared by persisted and model-generated documents."""
 
 import json
-from typing import NoReturn
+from math import isfinite
+from typing import Literal, NoReturn
+
+
+def json_validation_issue(
+    value: object,
+    *,
+    field: str,
+) -> tuple[str, Literal["type", "value"]] | None:
+    """Return the first path and category that violates standard JSON values."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return None
+    if isinstance(value, float):
+        return None if isfinite(value) else (field, "value")
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            issue = json_validation_issue(item, field=f"{field}[{index}]")
+            if issue is not None:
+                return issue
+        return None
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                return field, "type"
+            issue = json_validation_issue(item, field=f"{field}.{key}")
+            if issue is not None:
+                return issue
+        return None
+    return field, "type"
 
 
 def strict_json_loads(content: str) -> object:

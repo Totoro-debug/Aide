@@ -13,6 +13,8 @@ from aide.agent.session.session import Session
 from aide.agent.subagents.models import (
     SubAgentCreatorSnapshot,
     SubAgentError,
+    SubAgentEvent,
+    SubAgentEventKind,
     SubAgentRecord,
     SubAgentSource,
     SubAgentSourceKind,
@@ -94,7 +96,11 @@ def test_record_round_trips_through_a_new_session_scoped_store(tmp_path: Path) -
         status=SubAgentStatus.COMPLETED,
         finished_at=_NOW,
         conversation=({"role": "assistant", "content": "Found it."},),
-        context_state={"last_compacted": 0, "messages": [{"role": "system"}]},
+        context_state={
+            "last_compacted": 0,
+            "messages": [{"role": "system"}],
+            "values": [None, True, 2, 2.5, {"nested": ["string"]}],
+        },
         artifact_paths=("subagents/agent-1/tool-call.txt",),
         result="Found it.",
         usage={
@@ -670,7 +676,18 @@ def test_registration_freezes_the_creators_tool_names(tmp_path: Path) -> None:
     assert store.save(running) == running
 
 
-@pytest.mark.parametrize("payload", [{"nested": {1: "value"}}, {"nested": (1, 2)}])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"nested": {1: "value"}},
+        {"nested": (1, 2)},
+        {"nested": {1, 2}},
+        {"nested": object()},
+        {"nested": float("nan")},
+        {"nested": float("inf")},
+        {"nested": float("-inf")},
+    ],
+)
 def test_checkpoint_rejects_values_that_would_change_after_json_round_trip(
     tmp_path: Path, payload: dict[str, object]
 ) -> None:
@@ -678,11 +695,38 @@ def test_checkpoint_rejects_values_that_would_change_after_json_round_trip(
     store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
     queued = _register(store, "Exact JSON checkpoint")
 
-    with pytest.raises(ValueError, match="standard JSON values"):
+    with pytest.raises(ValueError, match="context_state must contain only standard JSON values"):
         replace(queued, context_state=payload)
-    with pytest.raises(ValueError, match="standard JSON values"):
+    with pytest.raises(ValueError, match="conversation must contain only standard JSON values"):
         replace(queued, conversation=(payload,))
+    with pytest.raises(ValueError, match="event data must contain only standard JSON values"):
+        SubAgentEvent(
+            kind=SubAgentEventKind.OUTPUT,
+            workspace_id="workspace-id",
+            session_id=session_id,
+            agent_id=queued.agent_id,
+            revision=1,
+            occurred_at=_NOW,
+            data=payload,
+        )
 
+    assert store.get(queued.agent_id) == queued
+
+
+def test_checkpoint_rejects_cyclic_and_overdeep_json_values(tmp_path: Path) -> None:
+    state, session_id = _workspace(tmp_path)
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    queued = _register(store, "Recursive checkpoint")
+    cyclic: list[object] = []
+    cyclic.append(cyclic)
+    deep: object = None
+    for _ in range(2000):
+        deep = [deep]
+    for value in (cyclic, deep):
+        with pytest.raises(
+            ValueError, match="context_state must contain only standard JSON values"
+        ):
+            replace(queued, context_state={"nested": value})
     assert store.get(queued.agent_id) == queued
 
 

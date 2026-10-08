@@ -1720,22 +1720,54 @@ def test_update_metadata_normalizes_title_shallow_merges_and_accumulates_usage(
     }
 
 
-@pytest.mark.parametrize("value", [object(), {"bad": object()}])
+@pytest.mark.parametrize(
+    ("value", "error_type", "suffix"),
+    [
+        (object(), TypeError, ""),
+        ({"bad": object()}, TypeError, ".bad"),
+        ({1: "invalid"}, TypeError, ""),
+        ((1, 2), TypeError, ""),
+        ({1, 2}, TypeError, ""),
+        (float("nan"), ValueError, ""),
+        (float("inf"), ValueError, ""),
+        (float("-inf"), ValueError, ""),
+    ],
+)
 def test_mutation_helpers_reject_non_json_values(
     agent_home: Path,
     workspace: Path,
     value: object,
+    error_type: type[Exception],
+    suffix: str,
 ) -> None:
     session = Session.create(_state(workspace, agent_home))
 
-    with pytest.raises((TypeError, ValueError), match="JSON"):
+    with pytest.raises(error_type) as message_error:
         session.commit_agent_run(
             [{"role": "user", "content": "Hello", "extension": value}],
             pending_last_compacted=0,
             pending_action_summary="",
         )
-    with pytest.raises((TypeError, ValueError), match="JSON"):
+    assert str(message_error.value) == (
+        f"message.extension{suffix} must contain only JSON-compatible values"
+    )
+    with pytest.raises(error_type) as metadata_error:
         session.update_metadata(future=value)
+    assert str(metadata_error.value) == (
+        f"metadata.future{suffix} must contain only JSON-compatible values"
+    )
+
+
+def test_session_rejects_cyclic_and_overdeep_json_values(agent_home: Path, workspace: Path) -> None:
+    session = Session.create(_state(workspace, agent_home))
+    cyclic: list[object] = []
+    cyclic.append(cyclic)
+    deep: object = None
+    for _ in range(2000):
+        deep = [deep]
+    for value in (cyclic, deep):
+        with pytest.raises(RecursionError):
+            session.update_metadata(future=value)
 
 
 def test_known_message_contracts_and_unsupported_legacy_fields_are_validated(

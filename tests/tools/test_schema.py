@@ -48,6 +48,42 @@ def test_schema_builders_reject_non_json_defaults_and_enum_values() -> None:
         Schema.integer(enum=[float("nan")])
 
 
+@pytest.mark.parametrize(
+    ("value", "error_type"),
+    [
+        ({1: "invalid"}, TypeError),
+        ((1, 2), TypeError),
+        ({1, 2}, TypeError),
+        (object(), TypeError),
+        (float("nan"), ValueError),
+        (float("inf"), ValueError),
+        (float("-inf"), ValueError),
+    ],
+)
+def test_nested_schema_json_errors_preserve_category_and_path(
+    value: object, error_type: type[Exception]
+) -> None:
+    with pytest.raises(error_type) as default_error:
+        Schema.object(default={"nested": [value]})
+    assert str(default_error.value) == "Schema default.nested[0] must be JSON-compatible"
+    with pytest.raises(error_type) as enum_error:
+        Schema.object(enum=[{"nested": [value]}])
+    assert str(enum_error.value) == "Schema enum[0].nested[0] must be JSON-compatible"
+
+
+def test_schema_rejects_cyclic_and_overdeep_json_values() -> None:
+    cyclic: list[object] = []
+    cyclic.append(cyclic)
+    deep: object = None
+    for _ in range(2000):
+        deep = [deep]
+    for value in (cyclic, deep):
+        with pytest.raises(RecursionError):
+            Schema.object(default=value)
+        with pytest.raises(RecursionError):
+            Schema.object(enum=[value])
+
+
 def test_schema_cast_is_recursive_safe_and_does_not_apply_defaults() -> None:
     schema = Schema.object(
         {

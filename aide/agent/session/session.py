@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-import math
 import re
 import time
 from collections.abc import Callable
@@ -22,6 +21,7 @@ from aide.agent.workspace_state import WorkspaceState
 from aide.provider.session_configuration import SessionModelConfiguration
 from aide.utils.async_tasks import await_task_preserving_cancellation
 from aide.utils.host_filesystem import HOST_FILESYSTEM
+from aide.utils.json import json_validation_issue
 from aide.utils.text import normalize_title as _normalize_title
 from aide.utils.time import format_rfc3339_milliseconds, local_now
 from aide.utils.validation import (
@@ -888,6 +888,7 @@ class Session:
         except ValueError as error:
             raise ValueError(f"{field} must be a valid Schedule Session ID") from error
 
+
 def _coerce_partition(value: SessionStoragePartition | str) -> SessionStoragePartition:
     if isinstance(value, SessionStoragePartition):
         return value
@@ -1134,23 +1135,11 @@ def _copy_json_object(value: dict[str, Any], *, field: str) -> dict[str, Any]:
 
 
 def _validate_json_value(value: Any, *, field: str) -> None:
-    if value is None or isinstance(value, (str, bool, int)):
-        return
-    if isinstance(value, float):
-        if math.isfinite(value):
-            return
-        raise ValueError(f"{field} must contain only JSON-compatible values")
-    if isinstance(value, list):
-        for index, item in enumerate(value):
-            _validate_json_value(item, field=f"{field}[{index}]")
-        return
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TypeError(f"{field} must contain only JSON-compatible values")
-            _validate_json_value(item, field=f"{field}.{key}")
-        return
-    raise TypeError(f"{field} must contain only JSON-compatible values")
+    issue = json_validation_issue(value, field=field)
+    if issue is not None:
+        path, kind = issue
+        error_type = ValueError if kind == "value" else TypeError
+        raise error_type(f"{path} must contain only JSON-compatible values")
 
 
 def _validate_message(message: dict[str, Any]) -> None:

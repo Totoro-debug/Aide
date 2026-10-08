@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -12,6 +11,7 @@ from typing import Any, cast
 
 from aide.agent.session.session import validate_session_id
 from aide.provider.session_configuration import ReasoningEffort, SessionModelConfiguration
+from aide.utils.json import json_validation_issue
 from aide.utils.validation import (
     empty_token_usage,
     require_aware_datetime,
@@ -598,23 +598,11 @@ def _datetime_from_value(value: object, *, field: str) -> datetime:
 
 def _ensure_json_value(value: object, *, field: str) -> None:
     try:
-        json.dumps(value, allow_nan=False)
-        _validate_json_containers(value)
+        issue = json_validation_issue(value, field=field)
     except (TypeError, ValueError, RecursionError) as error:
         raise ValueError(f"{field} must contain only standard JSON values") from error
-
-
-def _validate_json_containers(value: object) -> None:
-    if isinstance(value, dict):
-        if any(not isinstance(key, str) for key in value):
-            raise ValueError("JSON object keys must be strings")
-        for member in value.values():
-            _validate_json_containers(member)
-    elif isinstance(value, list):
-        for member in value:
-            _validate_json_containers(member)
-    elif value is not None and not isinstance(value, (str, int, float, bool)):
-        raise ValueError("JSON values must not contain non-JSON containers")
+    if issue is not None:
+        raise ValueError(f"{field} must contain only standard JSON values")
 
 
 def _require_nonempty_string(value: str, *, field: str) -> None:

@@ -1269,6 +1269,95 @@ async def test_failed_child_summary_save_keeps_its_consumed_memory_usage(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_concurrent_compaction_keeps_summaries_and_raw_activity_in_each_child(
+    tmp_path: Path,
+) -> None:
+    markers = ("first-child-marker", "second-child-marker")
+
+    class ConcurrentProvider(ScriptedFakeProvider):
+        def __init__(self) -> None:
+            super().__init__(completions=(_response("summary").response for _ in range(4)))
+            self.both_compacting = asyncio.Event()
+            self.child_streams: dict[str, int] = {}
+
+        async def complete(self, **kwargs: Any) -> ModelResponse:
+            response = await super().complete(**kwargs)
+            marker = markers[0] if markers[0] in json.dumps(kwargs["messages"]) else markers[1]
+            if len(self.complete_requests) == 1:
+                await self.both_compacting.wait()
+            else:
+                self.both_compacting.set()
+            return replace(response, message=replace(response.message, content=f"{marker}-summary"))
+
+        async def stream(self, **kwargs: Any) -> AsyncIterator[ModelStreamEvent]:
+            marker = kwargs["messages"][0]["content"]
+            count = self.child_streams.get(marker, 0)
+            self.child_streams[marker] = count + 1
+            yield (
+                _tool_call("marker_tool", f"{marker}-call", {})
+                if count == 0
+                else _response(f"{marker}-done")
+            )
+
+    state, session_id = _workspace(tmp_path)
+    await MemoryManager(state).append_summary("workspace-summary", _NOW)
+    summary_path = state.memory_directory / "summary.jsonl"
+    summary_before = summary_path.read_bytes()
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    records = [
+        _register_running(
+            store,
+            title=marker,
+            snapshot=replace(_creator_snapshot("marker_tool"), system_prompt=marker),
+            task=f"{marker} " * 1000,
+        )
+        for marker in markers
+    ]
+    config = configuration()
+    chat_route = replace(config.models.routes["default"], context_window=4000, max_output=500)
+    config = replace(
+        config, models=replace(config.models, routes={**config.models.routes, "chat": chat_route})
+    )
+    provider = ConcurrentProvider()
+    executor = SubAgentRunnerExecutor(
+        workspace_id="workspace-id",
+        workspace_state=state,
+        repository=store,
+        model_router=ModelRouter(configuration=config, provider_factory=lambda _: provider),
+        tool_gateway=ToolGateway._for_memory(
+            (_MarkerTool(),),
+            permission_context=PermissionContext(workspace_root=state.workspace_path),
+            tool_context=_tool_context(state.workspace_path),
+        ),
+        compact_ratio=0.5,
+        max_iterations=50,
+        max_tool_result_chars=5000,
+        now=lambda: _NOW,
+    )
+    results = await asyncio.wait_for(
+        asyncio.gather(*(executor.execute(record, emit=_ignore_event) for record in records)),
+        timeout=5,
+    )
+    assert provider.both_compacting.is_set()
+    assert len(provider.complete_requests) == 4
+    assert summary_path.read_bytes() == summary_before
+    for marker, record, result in zip(markers, records, results, strict=True):
+        assert result.status is SubAgentStatus.COMPLETED
+        persisted = store.get(record.agent_id)
+        assert persisted is not None
+        assert persisted.conversation[0]["content"] == record.task
+        assert any(
+            message.get("role") == "tool" and message.get("tool_call_id") == f"{marker}-call"
+            for message in persisted.conversation
+        )
+        assert persisted.context_state is not None
+        assert persisted.context_state["conversation_summaries"] == [
+            {"timestamp": _NOW.isoformat(), "content": f"{marker}-summary"}
+        ]
+        assert persisted.context_state["summary"] == f"{marker}-summary"
+
+
+@pytest.mark.asyncio
 async def test_eight_subagents_reuse_host_without_extra_version_probes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

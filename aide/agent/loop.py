@@ -1008,7 +1008,7 @@ class AgentRunExecutor:
         controller = AgentRunContextController.from_session(
             session,
             provider=run_router,
-            memory_manager=self._memory_manager,
+            append_summary=self._memory_manager.append_summary,
             now=self._now,
         )
         request_preparer = AgentRunContextRequestPreparer(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
@@ -50,7 +50,6 @@ __all__ = [
     "AgentRunContextRequestPreparer",
     "AgentRunContextSnapshot",
     "AgentRunTerminalCommitValues",
-    "ConversationSummaryAppender",
     "agent_run_attempt_guard",
     "latest_main_agent_usage_anchor",
 ]
@@ -67,12 +66,6 @@ class AgentRunContextModelRouter(Protocol):
         tools: Sequence[dict[str, Any]],
         guard: ModelAttemptGuard | None = None,
     ) -> ModelResponse: ...
-
-
-class ConversationSummaryAppender(Protocol):
-    """Persistence boundary for summaries produced during context compaction."""
-
-    async def append_summary(self, content: str, timestamp: datetime) -> object: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +131,7 @@ class AgentRunContextController:
         *,
         snapshot: AgentRunContextSnapshot,
         provider: AgentRunContextModelRouter,
-        memory_manager: ConversationSummaryAppender,
+        append_summary: Callable[[str, datetime], Awaitable[object]],
         now: Callable[[], datetime],
     ) -> None:
         self._snapshot = AgentRunContextSnapshot(
@@ -147,7 +140,7 @@ class AgentRunContextController:
             last_compacted=snapshot.last_compacted,
         )
         self._provider = provider
-        self._memory_manager = memory_manager
+        self._append_summary = append_summary
         self._now = now
         self._pending_last_compacted = snapshot.last_compacted
         self._pending_action_summary = _normalized_staged_action_summary(
@@ -172,14 +165,14 @@ class AgentRunContextController:
         session: Session,
         *,
         provider: AgentRunContextModelRouter,
-        memory_manager: ConversationSummaryAppender,
+        append_summary: Callable[[str, datetime], Awaitable[object]],
         now: Callable[[], datetime],
     ) -> AgentRunContextController:
         """Create a controller without retaining the writable Session object."""
         return cls(
             snapshot=AgentRunContextSnapshot.from_session(session),
             provider=provider,
-            memory_manager=memory_manager,
+            append_summary=append_summary,
             now=now,
         )
 
@@ -742,9 +735,9 @@ class AgentRunContextController:
             if response_error is not None:
                 self._raise_summary_failure(revision, response_error)
             try:
-                await self._memory_manager.append_summary(
-                    content=fact_response.message.content,
-                    timestamp=self._persisted_now(),
+                await self._append_summary(
+                    fact_response.message.content,
+                    self._persisted_now(),
                 )
             except (OSError, UnicodeError, ValueError) as persistence_cause:
                 persistence_error = ModelCallError(

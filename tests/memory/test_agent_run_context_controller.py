@@ -403,7 +403,7 @@ def _controller(
     return AgentRunContextController(
         snapshot=AgentRunContextSnapshot.from_session(session),
         provider=ScriptedFakeRouter(provider),
-        memory_manager=MemoryManager(state),
+        append_summary=MemoryManager(state).append_summary,
         now=lambda: NOW,
     )
 
@@ -584,7 +584,7 @@ async def test_controller_stages_run_start_compaction_from_detached_snapshot(
     manager = AgentRunContextController(
         snapshot=snapshot,
         provider=ScriptedFakeRouter(provider),
-        memory_manager=MemoryManager(state),
+        append_summary=MemoryManager(state).append_summary,
         now=lambda: NOW,
     )
 
@@ -681,7 +681,7 @@ async def test_controller_detaches_from_the_supplied_snapshot(workspace: Path) -
     controller = AgentRunContextController(
         snapshot=snapshot,
         provider=ScriptedFakeRouter(provider),
-        memory_manager=MemoryManager(state),
+        append_summary=MemoryManager(state).append_summary,
         now=lambda: NOW,
     )
 
@@ -2516,7 +2516,7 @@ async def test_request_preparer_uses_configured_capacity_after_previous_fallback
     controller = AgentRunContextController(
         snapshot=AgentRunContextSnapshot.from_session(session),
         provider=router,
-        memory_manager=MemoryManager(state),
+        append_summary=MemoryManager(state).append_summary,
         now=lambda: NOW,
     )
     await router.complete(

@@ -16,7 +16,6 @@ from aide.agent.context.run_context import (
     AgentRunContextRequestPreparer,
     AgentRunContextSnapshot,
     AgentRunTerminalCommitValues,
-    ConversationSummaryAppender,
     agent_run_attempt_guard,
 )
 from aide.agent.permission import PermissionSnapshot, ToolPermissionLevel
@@ -75,31 +74,6 @@ class _Cancellation:
                 and asyncio.current_task() is not self.runner_task
             ):
                 self.runner_task.cancel()
-
-
-class _SubAgentSummaryAppender(ConversationSummaryAppender):
-    def __init__(
-        self,
-        repository: SubAgentRecordRepository,
-        current_record: list[SubAgentRecord],
-    ) -> None:
-        self._repository = repository
-        self._current_record = current_record
-
-    async def append_summary(self, content: str, timestamp: datetime) -> None:
-        record = self._current_record[0]
-        context_state = deepcopy(record.context_state or {})
-        summaries = context_state.setdefault("conversation_summaries", [])
-        if not isinstance(summaries, list):
-            raise ValueError("SubAgent conversation summaries are malformed")
-        summaries.append({"timestamp": timestamp.isoformat(), "content": content})
-        self._current_record[0] = self._repository.save(
-            replace(
-                record,
-                context_state=context_state,
-                revision=record.revision + 1,
-            )
-        )
 
 
 class SubAgentRunnerExecutor:
@@ -213,7 +187,22 @@ class SubAgentRunnerExecutor:
                         revision=current.revision + 1,
                     )
                 )
-            summary_appender = _SubAgentSummaryAppender(self._repository, current_record)
+
+            async def append_summary(content: str, timestamp: datetime) -> None:
+                current = current_record[0]
+                next_context_state = deepcopy(current.context_state or {})
+                summaries = next_context_state.setdefault("conversation_summaries", [])
+                if not isinstance(summaries, list):
+                    raise ValueError("SubAgent conversation summaries are malformed")
+                summaries.append({"timestamp": timestamp.isoformat(), "content": content})
+                current_record[0] = self._repository.save(
+                    replace(
+                        current,
+                        context_state=next_context_state,
+                        revision=current.revision + 1,
+                    )
+                )
+
             context_state = deepcopy(record.context_state or {})
             last_compacted = cast(object, context_state.get("last_compacted", 0))
             if (
@@ -229,7 +218,7 @@ class SubAgentRunnerExecutor:
                     last_compacted=last_compacted,
                 ),
                 provider=run_router,
-                memory_manager=summary_appender,
+                append_summary=append_summary,
                 now=self._now,
             )
             controller = run_controller

@@ -121,7 +121,7 @@ async def _run_once(
     controller = AgentRunContextController(
         snapshot=AgentRunContextSnapshot.from_session(session),
         provider=router,
-        memory_manager=MemoryManager(state),
+        append_summary=MemoryManager(state).append_summary,
         now=lambda: NOW,
     )
     preparer = AgentRunContextRequestPreparer(

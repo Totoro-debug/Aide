@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
+from functools import cache
 from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID
@@ -26,8 +27,8 @@ from aide.agent.subagents.models import (
 from aide.agent.subagents.store import SubAgentRecordStore
 from aide.agent.tools.base import BaseTool
 from aide.agent.tools.context import ToolRunContext
-from aide.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
-from aide.agent.tools.core.exec_policy import ExecShellSelector, ResolvedExecShell
+from aide.agent.tools.core import exec_host as exec_host_module
+from aide.agent.tools.core.exec_host import ExecHost, create_exec_host, resolve_exec_shell
 from aide.agent.tools.deferred import build_agent_run_gateway
 from aide.agent.tools.permission import PermissionContext
 from aide.agent.tools.tool_gateway import (
@@ -99,6 +100,15 @@ def _workspace(tmp_path: Path) -> tuple[WorkspaceState, str]:
     state.initialize(agent_home_root=agent_home)
     session_id = Session.create(state, now=lambda: _NOW).session_id
     return state, session_id
+
+
+@cache
+def _exec_host() -> ExecHost:
+    return create_exec_host(resolve_exec_shell("pwsh"))
+
+
+def _tool_context(workspace: Path) -> ToolRunContext:
+    return ToolRunContext(workspace=workspace, exec_host=_exec_host())
 
 
 def _creator_snapshot(*names: str) -> SubAgentCreatorSnapshot:
@@ -217,7 +227,7 @@ async def test_subagent_runner_uses_frozen_context_and_persists_full_tool_artifa
     gateway = ToolGateway._for_memory(
         (tool,),
         permission_context=PermissionContext(workspace_root=state.workspace_path),
-        tool_context=ToolRunContext(workspace=state.workspace_path),
+        tool_context=_tool_context(state.workspace_path),
     )
     executor = SubAgentRunnerExecutor(
         workspace_id="workspace-id",
@@ -296,7 +306,7 @@ async def test_subagent_gateway_limits_catalog_and_search_to_creator_snapshot(
     tools = (_MarkerTool(), _ForbiddenTool())
     gateway = ToolGateway._for_memory(
         tools,
-        tool_context=ToolRunContext(workspace=tmp_path),
+        tool_context=_tool_context(tmp_path),
     )
     parent = build_agent_run_gateway(gateway)
     parent_exposure = parent.exposed_names
@@ -360,7 +370,7 @@ async def test_two_subagents_with_same_tool_call_id_keep_distinct_artifacts(
     gateway = ToolGateway._for_memory(
         (tool,),
         permission_context=PermissionContext(workspace_root=state.workspace_path),
-        tool_context=ToolRunContext(workspace=state.workspace_path),
+        tool_context=_tool_context(state.workspace_path),
     )
     executor = SubAgentRunnerExecutor(
         workspace_id="workspace-id",
@@ -402,7 +412,7 @@ async def test_service_interruption_returns_interrupted_without_terminal_record_
     gateway = ToolGateway._for_memory(
         (_MarkerTool(),),
         permission_context=PermissionContext(workspace_root=state.workspace_path),
-        tool_context=ToolRunContext(workspace=state.workspace_path),
+        tool_context=_tool_context(state.workspace_path),
     )
     executor = SubAgentRunnerExecutor(
         workspace_id="workspace-id",
@@ -467,7 +477,7 @@ async def test_compaction_summaries_are_persisted_in_child_context_state(
     gateway = ToolGateway._for_memory(
         (_MarkerTool(),),
         permission_context=PermissionContext(workspace_root=state.workspace_path),
-        tool_context=ToolRunContext(workspace=state.workspace_path),
+        tool_context=_tool_context(state.workspace_path),
     )
     config = configuration()
     chat_route = replace(config.models.routes["default"], context_window=4000, max_output=500)
@@ -592,7 +602,14 @@ async def test_cancel_interrupts_a_blocked_provider_and_preserves_partial_output
     store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
     record = _register_running(store, title="Blocked model", snapshot=_creator_snapshot())
     provider = _BlockingProvider()
-    executor = _executor(state, store, provider, ToolGateway(workspace=state.workspace_path))
+    executor = _executor(
+        state,
+        store,
+        provider,
+        ToolGateway(
+            workspace=state.workspace_path, tool_context=_tool_context(state.workspace_path)
+        ),
+    )
     execution = asyncio.create_task(executor.execute(record, emit=_ignore_event))
     await asyncio.wait_for(provider.started.wait(), timeout=5)
 
@@ -628,7 +645,7 @@ async def test_repeated_cancellation_drains_the_tool_before_execution_returns(
     tool = _BlockingTool()
     gateway = ToolGateway._for_memory(
         (tool,),
-        tool_context=ToolRunContext(workspace=state.workspace_path),
+        tool_context=_tool_context(state.workspace_path),
         permission_context=PermissionContext(workspace_root=state.workspace_path),
     )
     executor = _executor(state, store, provider, gateway)
@@ -677,7 +694,14 @@ async def test_model_error_keeps_partial_result_and_usage_without_restarting(
             ),
         )
     )
-    executor = _executor(state, store, provider, ToolGateway(workspace=state.workspace_path))
+    executor = _executor(
+        state,
+        store,
+        provider,
+        ToolGateway(
+            workspace=state.workspace_path, tool_context=_tool_context(state.workspace_path)
+        ),
+    )
 
     result = await executor.execute(record, emit=_ignore_event)
 
@@ -705,7 +729,7 @@ async def test_iteration_limit_is_failed_after_exactly_fifty_model_calls(tmp_pat
     )
     gateway = ToolGateway._for_memory(
         (_MarkerTool(),),
-        tool_context=ToolRunContext(workspace=state.workspace_path),
+        tool_context=_tool_context(state.workspace_path),
         permission_context=PermissionContext(workspace_root=state.workspace_path),
     )
 
@@ -768,11 +792,7 @@ async def test_snapshot_permission_shell_and_model_survive_parent_configuration_
     router = ModelRouter(configuration=routed_configuration(), provider_factory=lambda _: provider)
     router.set_reasoning_effort("low")
     assert router.route_status("chat").model != snapshot.model
-    observed_shells = []
-
-    def resolve_snapshot_shell(selector: ExecShellSelector) -> ResolvedExecShell:
-        observed_shells.append(selector)
-        return resolve_exec_shell("pwsh")
+    host = _exec_host()
 
     executor = SubAgentRunnerExecutor(
         workspace_id="workspace-id",
@@ -786,19 +806,25 @@ async def test_snapshot_permission_shell_and_model_survive_parent_configuration_
             ),
             tool_context=ToolRunContext(
                 workspace=state.workspace_path,
-                exec_host=create_exec_host(resolve_exec_shell("powershell")),
+                exec_host=host,
             ),
         ),
         compact_ratio=0.9,
         max_iterations=50,
         max_tool_result_chars=5000,
-        exec_shell_resolver=resolve_snapshot_shell,
         now=lambda: _NOW,
     )
+    router._configuration = replace(
+        router._configuration,
+        runtime=replace(router._configuration.runtime, exec_shell="powershell"),
+    )
+    _, child_gateway = executor._create_run_resources(record)
+    assert child_gateway.tool_context is not None
+    assert child_gateway.tool_context.exec_host is host
+    assert child_gateway._permission_context.exec_shell is host.resolved_shell
     result = await executor.execute(record, emit=_ignore_event)
 
     assert result.status is SubAgentStatus.COMPLETED
-    assert observed_shells == [snapshot.shell]
     assert not (state.workspace_path / "blocked.txt").exists()
     assert any(message.get("status") == "refused" for message in result.conversation)
     assert all(
@@ -830,7 +856,12 @@ async def test_checkpoint_failure_reports_storage_error_and_actual_consumed_usag
         events.append(event)
 
     result = await _executor(
-        state, store, provider, ToolGateway(workspace=state.workspace_path)
+        state,
+        store,
+        provider,
+        ToolGateway(
+            workspace=state.workspace_path, tool_context=_tool_context(state.workspace_path)
+        ),
     ).execute(record, emit=emit)
 
     assert result.status is SubAgentStatus.FAILED
@@ -905,7 +936,9 @@ async def test_file_restore_ownership_and_prompt_follow_the_creation_source(
         workspace_state=state,
         repository=store,
         model_router=_router(provider),
-        tool_gateway=ToolGateway(workspace=state.workspace_path),
+        tool_gateway=ToolGateway(
+            workspace=state.workspace_path, tool_context=_tool_context(state.workspace_path)
+        ),
         compact_ratio=0.9,
         max_iterations=50,
         max_tool_result_chars=5000,
@@ -992,7 +1025,9 @@ async def test_user_cancellation_cleans_a_pending_confirmation(tmp_path: Path) -
         workspace_state=state,
         repository=store,
         model_router=_router(provider),
-        tool_gateway=ToolGateway(workspace=state.workspace_path),
+        tool_gateway=ToolGateway(
+            workspace=state.workspace_path, tool_context=_tool_context(state.workspace_path)
+        ),
         compact_ratio=0.9,
         max_iterations=50,
         max_tool_result_chars=5000,
@@ -1057,7 +1092,11 @@ async def test_compaction_keeps_earlier_model_output_in_the_persisted_conversati
         workspace_state=state,
         repository=store,
         model_router=ModelRouter(configuration=config, provider_factory=lambda _: provider),
-        tool_gateway=ToolGateway(workspace=state.workspace_path, additional_tools=(_MarkerTool(),)),
+        tool_gateway=ToolGateway(
+            workspace=state.workspace_path,
+            tool_context=_tool_context(state.workspace_path),
+            additional_tools=(_MarkerTool(),),
+        ),
         compact_ratio=0.5,
         max_iterations=50,
         max_tool_result_chars=5000,
@@ -1104,7 +1143,9 @@ async def test_failed_child_summary_save_keeps_its_consumed_memory_usage(tmp_pat
         workspace_state=state,
         repository=store,
         model_router=ModelRouter(configuration=config, provider_factory=lambda _: provider),
-        tool_gateway=ToolGateway(workspace=state.workspace_path),
+        tool_gateway=ToolGateway(
+            workspace=state.workspace_path, tool_context=_tool_context(state.workspace_path)
+        ),
         compact_ratio=0.5,
         max_iterations=50,
         max_tool_result_chars=5000,
@@ -1126,3 +1167,66 @@ async def test_failed_child_summary_save_keeps_its_consumed_memory_usage(tmp_pat
     assert persisted is not None and persisted.conversation[0]["content"] == record.task
     assert not persisted.context_state
     assert not (state.memory_directory / "summary.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_eight_subagents_reuse_host_without_extra_version_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state, session_id = _workspace(tmp_path)
+    host = create_exec_host(resolve_exec_shell("pwsh"))
+    probes = 0
+    original_probe = exec_host_module._probe_powershell_version
+
+    def count_probe(executable: str, environment: dict[str, str]) -> tuple[int, ...] | None:
+        nonlocal probes
+        probes += 1
+        return original_probe(executable, environment)
+
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    provider = ScriptedFakeProvider(
+        streams=(StreamScript(events=(_response("done"),)) for _ in range(8))
+    )
+    parent_context = ToolRunContext(workspace=state.workspace_path, exec_host=host)
+    executor = _executor(
+        state,
+        store,
+        provider,
+        ToolGateway(workspace=state.workspace_path, tool_context=parent_context),
+    )
+    monkeypatch.setattr(exec_host_module, "_probe_powershell_version", count_probe)
+    for index in range(8):
+        record = _register_running(store, title=f"Child {index}", snapshot=_creator_snapshot())
+        result = await executor.execute(record, emit=_ignore_event)
+        assert result.status is SubAgentStatus.COMPLETED
+        _, child = executor._create_run_resources(record)
+        assert child.tool_context is not None and child.tool_context.exec_host is host
+        assert child._permission_context.exec_shell is host.resolved_shell
+    assert probes == 0
+    assert len(provider.stream_requests) == 8
+
+
+@pytest.mark.asyncio
+async def test_snapshot_shell_mismatch_fails_before_model_execution(tmp_path: Path) -> None:
+    state, session_id = _workspace(tmp_path)
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    record = _register_running(
+        store,
+        title="Mismatched shell",
+        snapshot=replace(_creator_snapshot(), shell="powershell"),
+    )
+    provider = ScriptedFakeProvider()
+    executor = _executor(
+        state,
+        store,
+        provider,
+        ToolGateway(
+            workspace=state.workspace_path, tool_context=_tool_context(state.workspace_path)
+        ),
+    )
+    with pytest.raises(ValueError, match="snapshot shell"):
+        executor._create_run_resources(record)
+    result = await executor.execute(record, emit=_ignore_event)
+    assert result.status is SubAgentStatus.FAILED
+    assert result.error is not None and result.error.code == "agent_failed"
+    assert not provider.stream_requests

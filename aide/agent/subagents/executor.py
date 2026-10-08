@@ -42,8 +42,6 @@ from aide.agent.subagents.ports import SubAgentRecordRepository
 from aide.agent.subagents.store import SubAgentStoreError
 from aide.agent.tools.base import BaseTool
 from aide.agent.tools.context import ToolRunContext
-from aide.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
-from aide.agent.tools.core.exec_policy import ExecShellSelector, ResolvedExecShell
 from aide.agent.tools.deferred import build_agent_run_gateway
 from aide.agent.tools.file_mutation import FileMutationRecorder
 from aide.agent.tools.tool_gateway import ConfirmationRequester, ToolGateway, ToolResult
@@ -59,7 +57,6 @@ _RUNNER_USAGE_FIELDS = ("model_calls", "input_tokens", "output_tokens", "total_t
 
 type SubAgentConfirmationFactory = Callable[[SubAgentRecord], ConfirmationRequester | None]
 type SubAgentFileMutationRecorderFactory = Callable[[SubAgentRecord], FileMutationRecorder | None]
-type ExecShellResolver = Callable[[ExecShellSelector], ResolvedExecShell]
 
 
 @dataclass(slots=True)
@@ -124,7 +121,6 @@ class SubAgentRunnerExecutor:
         confirmation_for: SubAgentConfirmationFactory | None = None,
         file_mutation_recorder_for: SubAgentFileMutationRecorderFactory | None = None,
         tool_context_for: Callable[[SubAgentRecord], SubAgentToolContext] | None = None,
-        exec_shell_resolver: ExecShellResolver = resolve_exec_shell,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(workspace_id, str) or not workspace_id:
@@ -135,6 +131,11 @@ class SubAgentRunnerExecutor:
             raise TypeError("SubAgent execution requires a shared ModelRouter")
         if not isinstance(tool_gateway, ToolGateway):
             raise TypeError("SubAgent execution requires a base ToolGateway")
+        base_context = tool_gateway.tool_context
+        if base_context is None or base_context.exec_host is None:
+            raise ValueError("SubAgent execution requires a prepared Exec Host context")
+        if base_context.workspace != workspace_state.workspace_path:
+            raise ValueError("SubAgent Tool Gateway belongs to a different Workspace")
         if isinstance(compact_ratio, bool) or not 0 < compact_ratio < 1:
             raise ValueError("SubAgent compact ratio must be between zero and one")
         if (
@@ -149,14 +150,14 @@ class SubAgentRunnerExecutor:
             or max_tool_result_chars < 1
         ):
             raise ValueError("SubAgent Tool result limit must be a positive integer")
-        if not callable(exec_shell_resolver):
-            raise TypeError("SubAgent Exec shell resolver must be callable")
 
         self._workspace_id = workspace_id
         self._workspace_state = workspace_state
         self._repository = repository
         self._model_router = model_router
         self._tool_gateway = tool_gateway
+        self._tool_context = base_context
+        self._exec_host = base_context.exec_host
         self._compact_ratio = compact_ratio
         self._max_iterations = max_iterations
         self._max_tool_result_chars = max_tool_result_chars
@@ -165,7 +166,6 @@ class SubAgentRunnerExecutor:
         self._confirmation_for = confirmation_for
         self._file_mutation_recorder_for = file_mutation_recorder_for
         self._tool_context_for = tool_context_for
-        self._exec_shell_resolver = exec_shell_resolver
         self._now = now or (lambda: datetime.now(UTC))
         self._cancellations: dict[str, _Cancellation] = {}
         self._started_agent_ids: set[str] = set()
@@ -407,21 +407,15 @@ class SubAgentRunnerExecutor:
                 creator.reasoning_effort,
             ),
         )
-        base_context = self._tool_gateway.tool_context
+        base_context = self._tool_context
         workspace = self._workspace_state.workspace_path
-        if base_context is not None and base_context.workspace != workspace:
-            raise ValueError("SubAgent Tool Gateway belongs to a different Workspace")
-        shell = self._exec_shell_resolver(cast(ExecShellSelector, creator.shell or "auto"))
-        base_exec_host = None if base_context is None else base_context.exec_host
-        exec_host = (
-            base_exec_host
-            if base_exec_host is not None and base_exec_host.resolved_shell == shell
-            else create_exec_host(shell)
-        )
+        shell = self._exec_host.resolved_shell
+        if (creator.shell or "auto") != shell.selector:
+            raise ValueError("SubAgent snapshot shell does not match the shared Exec Host")
         tool_context = ToolRunContext(
             workspace=workspace,
-            schedule_service=None if base_context is None else base_context.schedule_service,
-            exec_host=exec_host,
+            schedule_service=base_context.schedule_service,
+            exec_host=self._exec_host,
             subagent=(None if self._tool_context_for is None else self._tool_context_for(record)),
         )
         permission_snapshot = PermissionSnapshot(

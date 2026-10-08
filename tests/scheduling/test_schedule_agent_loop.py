@@ -1184,6 +1184,9 @@ async def test_concurrent_runs_keep_summaries_and_micro_compression_state_isolat
         workspace,
         provider,
         schedule_clock=clock,
+        config_text=VALID_CONFIG.replace(
+            "[runtime]\n", "[runtime]\nenable_tool_micro_compression = true\n", 1
+        ),
     )
     foreground_summary = "- Updated the foreground Session."
     schedule_summary = "- Updated the Schedule Session."

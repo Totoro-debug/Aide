@@ -10,10 +10,13 @@ import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 import mcp.client.stdio as stdio_client
 import pytest
+from anyio.abc import Process
 from loguru import logger
+from mcp.os.win32.utilities import FallbackProcess
 
 from aide.agent.tools.tool_gateway import BuiltInToolCatalog
 from aide.config.agent_home import AgentHome
@@ -54,7 +57,7 @@ def working_set_bytes() -> int:
     get_memory.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong]
     if not get_memory(kernel.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
         raise ctypes.WinError(ctypes.get_last_error())
-    return counters.working
+    return int(counters.working)
 
 
 async def main() -> None:
@@ -66,16 +69,16 @@ async def main() -> None:
         root = Path(directory)
         patch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
         lifetime = ObservedLifetimes(patch)
-        skill_loaders = []
-        built_in_catalogs = []
+        skill_loaders: list[SkillLoader] = []
+        built_in_catalogs: list[BuiltInToolCatalog] = []
         original_skill_init = SkillLoader.__init__
         original_catalog_init = BuiltInToolCatalog.__init__
 
-        def create_skill_loader(self, *args, **kwargs):
+        def create_skill_loader(self: SkillLoader, *args: Any, **kwargs: Any) -> None:
             original_skill_init(self, *args, **kwargs)
             skill_loaders.append(self)
 
-        def create_catalog(self, *args, **kwargs):
+        def create_catalog(self: BuiltInToolCatalog, *args: Any, **kwargs: Any) -> None:
             original_catalog_init(self, *args, **kwargs)
             built_in_catalogs.append(self)
 
@@ -84,7 +87,7 @@ async def main() -> None:
         stdio_working_directories = []
         observed_spawn = stdio_client._create_platform_compatible_process
 
-        async def record_spawn(**kwargs):
+        async def record_spawn(**kwargs: Any) -> Process | FallbackProcess:
             process = await observed_spawn(**kwargs)
             stdio_working_directories.append(
                 {"pid": process.pid, "cwd": os.path.normcase(str(Path(kwargs["cwd"]).resolve()))}
@@ -107,12 +110,12 @@ async def main() -> None:
         original_init = OpenAICompatibleProvider.__init__
         original_close = OpenAICompatibleProvider.close
 
-        def create(self, *args, **kwargs):
+        def create(self: OpenAICompatibleProvider, *args: Any, **kwargs: Any) -> None:
             nonlocal sdk_created
             original_init(self, *args, **kwargs)
             sdk_created += 1
 
-        async def close(self):
+        async def close(self: OpenAICompatibleProvider) -> None:
             nonlocal sdk_closed
             await original_close(self)
             sdk_closed += 1
@@ -141,10 +144,10 @@ args = {json.dumps(list(stdio.args))}
             service = AgentService(
                 home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600
             )
-            snapshots = []
+            snapshots: list[dict[str, object]] = []
             initial_tasks = set(asyncio.all_tasks())
 
-            def snapshot(label):
+            def snapshot(label: str) -> None:
                 tasks = [task for task in asyncio.all_tasks() - initial_tasks if not task.done()]
                 snapshots.append(
                     {
@@ -161,7 +164,11 @@ args = {json.dumps(list(stdio.args))}
                             p.returncode is None for p in lifetime.processes
                         ),
                         "tasks": dict(
-                            sorted(Counter(t.get_coro().__qualname__ for t in tasks).items())
+                            sorted(
+                                Counter(
+                                    getattr(t.get_coro(), "__qualname__", "<unknown>") for t in tasks
+                                ).items()
+                            )
                         ),
                         "working_set_bytes": working_set_bytes(),
                     }
@@ -186,12 +193,16 @@ args = {json.dumps(list(stdio.args))}
                         claim = await service.claim(
                             lane_client.client_id, workspace.workspace_id, session
                         )
-                        lanes.append((workspace, session, claim, lane_client))
-                for workspace, session, claim, lane_client in lanes:
+                        claim_data = claim["claim"]
+                        assert isinstance(claim_data, dict)
+                        claim_version = claim_data["claim_version"]
+                        assert isinstance(claim_version, int)
+                        lanes.append((workspace, session, claim_version, lane_client))
+                for workspace, session, claim_version, lane_client in lanes:
                     await workspace.input(
                         lane_client.client_id,
                         session,
-                        claim["claim"]["claim_version"],
+                        claim_version,
                         "warmup",
                         session,
                     )
@@ -206,22 +217,22 @@ args = {json.dumps(list(stdio.args))}
                 controlled.release_b.clear()
                 controlled.session_a_started.clear()
                 controlled.session_b_started.clear()
-                for index, (workspace, session, claim, lane_client) in enumerate(lanes[:2]):
+                for index, (workspace, session, claim_version, lane_client) in enumerate(lanes[:2]):
                     await workspace.input(
                         lane_client.client_id,
                         session,
-                        claim["claim"]["claim_version"],
+                        claim_version,
                         "session-a" if index == 0 else "session-b",
                         f"parallel-{index}",
                     )
                 await asyncio.wait_for(controlled.session_a_started.wait(), 10)
                 await asyncio.wait_for(controlled.session_b_started.wait(), 10)
                 snapshot("two-sessions-in-provider")
-                workspace, session, claim, lane_client = lanes[0]
+                workspace, session, claim_version, lane_client = lanes[0]
                 await workspace.input(
                     lane_client.client_id,
                     session,
-                    claim["claim"]["claim_version"],
+                    claim_version,
                     "queued",
                     "queued",
                 )

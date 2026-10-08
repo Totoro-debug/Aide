@@ -2296,7 +2296,11 @@ class _MessageBusRunProjection:
                     not isinstance(tool_call_id, str)
                     or not isinstance(status, str)
                     or status not in {"success", "error", "refused"}
-                    or set(outbound.metadata) != {"tool_call_id", "status"}
+                    or set(outbound.metadata) - {"tool_call_id", "status", "result"}
+                    or (
+                        "result" in outbound.metadata
+                        and not isinstance(outbound.metadata["result"], str)
+                    )
                 ):
                     await self._fail_sparse_protocol()
                     return

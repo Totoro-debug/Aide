@@ -17,8 +17,8 @@ from aiohttp.test_utils import TestServer
 from aide.agent.session.backup_store import FileBackupStore
 from aide.agent.session.restore import RestoreManager, RestoreMode
 from aide.agent.session.session import Session
-from aide.agent.subagents.ports import SubAgentSessionCoordinator
-from aide.agent.subagents.store import SubAgentRecordStore, SubAgentRequestError
+from aide.agent.subagents.coordinator import SubAgentPool
+from aide.agent.subagents.store import SubAgentRequestError
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.config import ConfigLoader
 from aide.service.discovery import create_credential
@@ -35,27 +35,6 @@ def restore_provider(monkeypatch: pytest.MonkeyPatch) -> _ConcurrentProvider:
     provider = _ConcurrentProvider(block_b=True)
     monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_args: provider)
     return provider
-
-
-class _BusySubAgentCoordinator:
-    def __init__(self, session_id: str) -> None:
-        self.session_id = session_id
-        self.accepting = True
-        self.active = True
-        self.shutdown_interrupted: bool | None = None
-
-    def close_admission(self) -> None:
-        self.accepting = False
-
-    def open_admission(self) -> None:
-        self.accepting = True
-
-    def has_active(self) -> bool:
-        return self.active
-
-    async def shutdown(self, *, interrupted: bool = True) -> None:
-        self.shutdown_interrupted = interrupted
-        self.active = False
 
 
 @pytest_asyncio.fixture
@@ -156,13 +135,12 @@ async def test_restore_plan_and_cancel_are_bound_to_inspected_session(
 @pytest.mark.asyncio
 async def test_restore_fences_subagent_admission_and_returns_busy_for_active_children(
     restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, workspace, owner, claim, _target = restore_case
-    repository = SubAgentRecordStore(workspace.workspace_state, claim.session_id)
-    coordinator = _BusySubAgentCoordinator(claim.session_id)
-    workspace.register_subagent_coordinator(
-        cast(SubAgentSessionCoordinator, coordinator), repository
-    )
+    coordinator = workspace._subagent_coordinator(claim.session_id)
+    assert isinstance(coordinator, SubAgentPool)
+    monkeypatch.setattr(coordinator, "has_active", lambda: True)
 
     result = await service.inspect_restore(
         owner,
@@ -175,7 +153,7 @@ async def test_restore_fences_subagent_admission_and_returns_busy_for_active_chi
     )
 
     assert str(result["output"]).startswith("model_invalid_request:")
-    assert coordinator.accepting is True
+    assert coordinator._accepting is True
     assert workspace._restore_owner is None
 
 
@@ -188,17 +166,16 @@ async def test_restore_blocks_coordinator_registration_until_inspection_is_cance
         service, workspace, owner, claim, "restore/inspect", "inspect-without-child", anchor_id=1
     )
     assert workspace._restore_session_id == claim.session_id
-    repository = SubAgentRecordStore(workspace.workspace_state, claim.session_id)
-    coordinator = _BusySubAgentCoordinator(claim.session_id)
-    coordinator.active = False
+    repository = workspace.subagent_repository(claim.session_id)
+    coordinator = workspace._subagent_coordinator(claim.session_id)
+    assert isinstance(coordinator, SubAgentPool)
+    assert coordinator._accepting is False
     with pytest.raises(SubAgentRequestError, match="Restore"):
-        workspace.register_subagent_coordinator(
-            cast(SubAgentSessionCoordinator, coordinator), repository
-        )
+        workspace.register_subagent_coordinator(coordinator, repository)
     await _restore_request(service, workspace, owner, claim, "restore/cancel", "cancel")
-    workspace.register_subagent_coordinator(
-        cast(SubAgentSessionCoordinator, coordinator), repository
-    )
+    workspace.register_subagent_coordinator(coordinator, repository)
+    assert workspace._subagent_coordinator(claim.session_id) is coordinator
+    assert coordinator._accepting is True
 
 
 @pytest.mark.asyncio
@@ -206,18 +183,14 @@ async def test_restore_cancel_cannot_reopen_subagents_after_workspace_admission_
     restore_case: tuple[AgentService, WorkspaceRecord, str, SessionClaim, Path],
 ) -> None:
     service, workspace, owner, claim, _target = restore_case
-    repository = SubAgentRecordStore(workspace.workspace_state, claim.session_id)
-    coordinator = _BusySubAgentCoordinator(claim.session_id)
-    coordinator.active = False
-    workspace.register_subagent_coordinator(
-        cast(SubAgentSessionCoordinator, coordinator), repository
-    )
+    coordinator = workspace._subagent_coordinator(claim.session_id)
+    assert isinstance(coordinator, SubAgentPool)
     await _restore_request(
         service, workspace, owner, claim, "restore/inspect", "inspect-before-stop", anchor_id=1
     )
     workspace.close_subagent_admission()
     await _restore_request(service, workspace, owner, claim, "restore/cancel", "cancel")
-    assert coordinator.accepting is False
+    assert coordinator._accepting is False
 
 
 @pytest.mark.asyncio

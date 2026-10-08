@@ -751,12 +751,20 @@ def test_runtime_status_uses_the_canonical_usage_anchor_and_configured_chat_rout
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "_configured_model_route_status"
-        and len(node.args) == 2
-        and isinstance(node.args[1], ast.Constant)
-        and node.args[1].value == "chat"
     ]
     assert len(status_anchor_calls) == 1
-    assert len(configured_route_calls) == 1
+    assert configured_route_calls
+    assert all(
+        len(call.args) == 2
+        and isinstance(call.args[1], ast.Constant)
+        and call.args[1].value == "chat"
+        for call in configured_route_calls
+    )
+    assert any(
+        keyword.arg == "session_model_configuration"
+        for call in configured_route_calls
+        for keyword in call.keywords
+    )
 
 
 def test_agent_run_context_exports_current_request_and_terminal_contracts() -> None:

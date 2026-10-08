@@ -1344,6 +1344,7 @@ async def _wait_for_confirmation(
         while (
             app.screen.id is None
             or not app.screen.id.startswith("confirmation-")
+            or not app.screen.is_mounted
             or not app.screen.query(".confirmation-details")
         ):
             await pilot.pause()
@@ -3289,7 +3290,17 @@ async def test_up_drain_keeps_an_inbound_consumed_during_the_atomic_drain() -> N
 
 
 @pytest.mark.asyncio
-async def test_sparse_protocol_errors_and_duplicate_terminal_do_not_poison_next_run() -> None:
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"tool_call_id": "call-malformed"},
+        {"tool_call_id": "call-malformed", "status": "success", "result": 1},
+        {"tool_call_id": "call-malformed", "status": "success", "unexpected": True},
+    ],
+)
+async def test_sparse_protocol_errors_and_duplicate_terminal_do_not_poison_next_run(
+    metadata: dict[str, object],
+) -> None:
     bus = MessageBus()
     control = _DirectControl()
 
@@ -3305,7 +3316,7 @@ async def test_sparse_protocol_errors_and_duplicate_terminal_do_not_poison_next_
             OutboundMessage(
                 type="tool_call",
                 content="read_file",
-                metadata={"tool_call_id": "call-malformed"},
+                metadata=metadata,
             )
         )
         async with asyncio.timeout(1):
@@ -4335,7 +4346,7 @@ async def test_activity_heading_starts_with_accumulated_time_and_freezes_on_succ
         projection = app._active_run_projection
         assert projection is not None
         async with asyncio.timeout(1):
-            while projection._started_at is None or not app.query(".agent-run-activity-heading"):
+            while projection._started_at is None or projection._activity_group is None:
                 await pilot.pause()
 
         clock[0] = 5.9
@@ -5022,6 +5033,7 @@ async def test_application_teardown_cancels_an_open_confirmation_without_a_decis
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("include_result", [False, True])
 @pytest.mark.parametrize(
     ("status", "expected"),
     [("success", "Completed: work"), ("error", "Failed: work"), ("refused", "Rejected: work")],
@@ -5029,11 +5041,15 @@ async def test_application_teardown_cancels_an_open_confirmation_without_a_decis
 async def test_tool_completion_updates_only_its_row_without_showing_results(
     status: str,
     expected: str,
+    include_result: bool,
 ) -> None:
+    completion_metadata: dict[str, object] = {"tool_call_id": "first", "status": status}
+    if include_result:
+        completion_metadata["result"] = "Private tool result."
     conversation = ToolMessageSequenceRunSource(
         (
             _tool_call("first", "work", "{}"),
-            OutboundMessage("tool_call", "work", {"tool_call_id": "first", "status": status}),
+            OutboundMessage("tool_call", "work", completion_metadata),
             OutboundMessage("tool_call", "work", {"tool_call_id": "first", "status": "success"}),
             _tool_call("second", "work", "{}"),
             OutboundMessage("tool_call", "work", {"tool_call_id": "second", "status": "success"}),
@@ -5050,6 +5066,8 @@ async def test_tool_completion_updates_only_its_row_without_showing_results(
         assert rows[0].startswith(expected)
         assert rows[1] == "Completed: work"
         assert all("Running:" not in row and "Arguments:" not in row for row in rows)
+        assert "Private tool result." not in _visible_screen_text(app)
+        assert "Final answer." in _visible_screen_text(app)
 
 
 @pytest.mark.asyncio

@@ -119,4 +119,12 @@ CLI 中，`Enter` 提交、`Ctrl+J` 换行、`Ctrl+C` 取消当前回复，输�
 4. **定时任务运行条件**：服务有在线客户端时，已登记的可用项目继续调度；未登记的 CLI 工作区仅在有在线使用者时接收新任务执行。最后一个客户端断线后暂停新执行，约 30 秒后清理并退出；定时任务定义仍保留。
 5. **会话回退范围**：回退会删除所选输入及其后的对话。文件恢复仅覆盖当前会话通过内置 `write_file`、`edit_file` 修改且有可用备份的文件，不撤销命令执行、MCP 操作或记忆等状态；恢复失败的文件会单独报告。详细边界见[恢复说明](docs/adr/0028-session-restore-architecture.md)。
 
+## 开发与发布验证
+
+在安装了开发依赖的 Windows 工作区运行以下命令，验证覆盖、PowerShell 宿主、Python 回归与安装包。文件符号链接用例需要宿主启用开发者模式或具备相应权限；报告记录每项检查及跳过原因。
+
+```powershell
+python scripts/release_validation.py --phase all --report "$env:TEMP\aide-windows-release.json"
+```
+
 问题与建议请提交到 [GitHub Issues](https://github.com/Totoro-debug/Aide/issues)。

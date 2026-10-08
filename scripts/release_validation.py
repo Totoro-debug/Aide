@@ -1223,8 +1223,7 @@ COVERAGE_RULES: Final[tuple[CoverageRule, ...]] = (
         5,
         _node_patterns(
             "tests/scheduling/test_schedule_store.py",
-            "test_exact_old_schema_derives_title_and_rewrites_on_next_successful_mutation",
-            "test_exact_old_dream_schema_uses_the_fixed_title",
+            "test_old_schema_is_rejected_without_writes",
             "test_public_removal_detects_title_only_changes",
         )
         + _node_patterns(
@@ -1954,8 +1953,6 @@ with TemporaryDirectory(prefix="aide-wheel-config-") as temporary:
         del missing["runtime"][key]
     for key in ("batch_size", "schedule"):
         del missing["memory"][key]
-    for route in missing["models"]["routes"].values():
-        del route["reasoning_effort"]
     loader.path.write_text(tomlkit.dumps(missing), encoding="utf-8")
     configuration = loader.load_for_startup()
     assert configuration.runtime.max_tool_result_chars == 4096
@@ -1966,7 +1963,7 @@ with TemporaryDirectory(prefix="aide-wheel-config-") as temporary:
     assert configuration.runtime.exec_shell == "auto"
     assert configuration.memory.batch_size == 10
     assert configuration.memory.schedule == "0 * * * *"
-    assert all(route.reasoning_effort == "medium" for route in configuration.models.routes.values())
+    assert all(route.reasoning_effort == "mid" for route in configuration.models.routes.values())
     assert loader.diagnostics == ()
 
     fallback = tomlkit.parse(source)
@@ -1978,7 +1975,12 @@ with TemporaryDirectory(prefix="aide-wheel-config-") as temporary:
     assert loader.diagnostics[0].field == "runtime.permission_level"
     assert "wheel-secret" not in loader.view().diagnostics_text()
 
+    missing_model_effort = tomlkit.parse(source)
+    for provider in missing_model_effort["models"]["providers"].values():
+        for parameters in provider["models"].values():
+            del parameters["reasoning_effort"]
     invalid_documents = (
+        tomlkit.dumps(missing_model_effort),
         "[broken\nvalue = true\n",
         source.replace("[runtime]\n", "runtime = true\n", 1),
         source + "\n[models.providers.invalid]\nmodels = \"not-an-array\"\n",

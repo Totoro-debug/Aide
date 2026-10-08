@@ -449,23 +449,42 @@ class ServiceClient:
         key = str(agent_home.path.resolve())
         lock = cls._startup_locks.setdefault(key, asyncio.Lock())
         async with lock:
-            try:
-                discovery = read_discovery(agent_home)
-            except (OSError, ValueError):
-                discovery = None
-            token = _read_token_safely(agent_home)
-            if discovery is not None and token is not None:
-                info = await cls._probe(discovery, token)
-                if info is not None:
-                    _validate_protocol(info, discovery)
-                    return await cls._connect(
-                        agent_home,
-                        workspace,
-                        discovery,
-                        token,
-                        reconnect_credential,
-                        attach_workspace,
+            stopping_instance_id: str | None = None
+            shutdown_deadline: float | None = None
+            while True:
+                try:
+                    discovery = read_discovery(agent_home)
+                except (OSError, ValueError):
+                    discovery = None
+                token = _read_token_safely(agent_home)
+                if discovery is not None and token is not None:
+                    info = await cls._probe(discovery, token)
+                    if info is not None and discovery.service_instance_id != stopping_instance_id:
+                        _validate_protocol(info, discovery)
+                        try:
+                            return await cls._connect(
+                                agent_home,
+                                workspace,
+                                discovery,
+                                token,
+                                reconnect_credential,
+                                attach_workspace,
+                            )
+                        except ServiceError as error:
+                            if error.code != "admission_closed":
+                                raise
+                        except ServiceStartupError as error:
+                            if error.code != "service_unavailable":
+                                raise
+                        stopping_instance_id = discovery.service_instance_id
+                        shutdown_deadline = asyncio.get_running_loop().time() + 15.0
+                if shutdown_deadline is None or not _port_is_open(DEFAULT_SERVICE_HOST, port):
+                    break
+                if asyncio.get_running_loop().time() >= shutdown_deadline:
+                    raise ServiceStartupError(
+                        "service_timeout", "The local service did not finish stopping."
                     )
+                await asyncio.sleep(0.05)
             process = _spawn_service(agent_home, port)
             discovery, token = await cls._wait_for_started_service(
                 agent_home,
@@ -501,14 +520,17 @@ class ServiceClient:
         _validate_protocol(info, discovery)
         url = f"http://{discovery.host}:{discovery.port}{'/api/v1/service/stop'}"
         timeout = aiohttp.ClientTimeout(total=3)
-        async with aiohttp.ClientSession(timeout=timeout) as http:
-            headers = _auth_headers(token, mutation=True)
-            async with http.post(
-                url,
-                headers=headers,
-                json={"request_id": str(uuid4())},
-            ) as response:
-                accepted = response.status == 200
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as http:
+                headers = _auth_headers(token, mutation=True)
+                async with http.post(
+                    url,
+                    headers=headers,
+                    json={"request_id": str(uuid4())},
+                ) as response:
+                    accepted = response.status == 200
+        except (aiohttp.ClientError, TimeoutError):
+            return await cls._probe(discovery, token) is None
         if not accepted:
             return False
         deadline = asyncio.get_running_loop().time() + 3.0

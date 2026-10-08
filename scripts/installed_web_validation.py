@@ -341,7 +341,7 @@ async def _run_installed_cli_competition(
             )
 
 
-async def _run_installed_last_client_grace(
+async def _run_installed_last_client_exit(
     root: Path,
     *,
     entry: str,
@@ -349,7 +349,7 @@ async def _run_installed_last_client_grace(
     config: str,
     environment: dict[str, str],
 ) -> dict[str, object]:
-    scenario_root = root / "last-client-grace"
+    scenario_root = root / "last-client-exit"
     home, workspace, scenario_environment = _prepare_cli_scenario(
         scenario_root, config, environment
     )
@@ -365,7 +365,7 @@ async def _run_installed_last_client_grace(
     companion_done = scenario_root / "companion-done.json"
     keep_environment = {
         **scenario_environment,
-        "AIDE_CLI_SCENARIO": "last-client-grace",
+        "AIDE_CLI_SCENARIO": "last-client-exit",
         "AIDE_CLI_READY": str(keep_ready),
         "AIDE_CLI_DONE": str(keep_done),
         "AIDE_CLI_RELEASE": str(keep_release),
@@ -402,35 +402,35 @@ async def _run_installed_last_client_grace(
         )
         if companion_process.returncode != 0:
             text = (companion_output + companion_error).decode("utf-8", errors="replace")
-            raise RuntimeError(f"installed grace companion failed: {text}")
+            raise RuntimeError(f"installed exit companion failed: {text}")
         companion_evidence = json.loads(companion_done.read_text(encoding="utf-8"))
         if not isinstance(companion_evidence, dict) or companion_evidence.get("status") != "passed":
             raise RuntimeError(
-                f"installed grace companion returned failed evidence: {companion_evidence}"
+                f"installed exit companion returned failed evidence: {companion_evidence}"
             )
         discovery_after_companion = read_discovery(home)
         if discovery_after_companion is None:
-            raise RuntimeError("last-client grace service stopped while another client was online")
+            raise RuntimeError("last-client exit service stopped while another client was online")
         service_before_release = await _service_json(home, "/api/v1/service")
         if service_before_release.get("state") != "ready":
             raise RuntimeError(
-                f"last-client grace service was not ready with keepalive client: {service_before_release}"
+                f"last-client exit service was not ready with keepalive client: {service_before_release}"
             )
         await asyncio.sleep(2.0)
         service_after_wait = await _service_json(home, "/api/v1/service")
         if service_after_wait.get("state") != "ready":
             raise RuntimeError(
-                f"last-client grace service stopped despite keepalive client: {service_after_wait}"
+                f"last-client exit service stopped despite keepalive client: {service_after_wait}"
             )
         keep_release.write_text("release\n", encoding="ascii")
         keep_output, keep_error = await asyncio.wait_for(keep_process.communicate(), timeout=150)
         if keep_process.returncode != 0:
             text = (keep_output + keep_error).decode("utf-8", errors="replace")
-            raise RuntimeError(f"installed last-client grace probe failed: {text}")
+            raise RuntimeError(f"installed last-client exit probe failed: {text}")
         keep_done_evidence = json.loads(keep_done.read_text(encoding="utf-8"))
         if not isinstance(keep_done_evidence, dict) or keep_done_evidence.get("status") != "passed":
             raise RuntimeError(
-                f"installed last-client grace returned failed evidence: {keep_done_evidence}"
+                f"installed last-client exit returned failed evidence: {keep_done_evidence}"
             )
         return {
             "status": "passed",
@@ -473,7 +473,7 @@ async def _run_installed_last_client_grace(
             cleanup_errors.append(error)
         if cleanup_errors:
             raise BaseExceptionGroup(
-                "installed last-client grace cleanup failed",
+                "installed last-client exit cleanup failed",
                 ([primary] if primary is not None else []) + cleanup_errors,
             )
 
@@ -735,7 +735,7 @@ timeout = 120
             config=config,
             environment=environment,
         )
-        last_client_grace = await _run_installed_last_client_grace(
+        last_client_exit = await _run_installed_last_client_exit(
             root,
             entry=entry,
             python=python,
@@ -902,7 +902,7 @@ timeout = 120
             "wheel_path": str(wheel),
             "wheel_sha256": sha256(wheel.read_bytes()).hexdigest(),
             "cli_competition": cli_competition,
-            "last_client_grace": last_client_grace,
+            "last_client_exit": last_client_exit,
             "joint": joint,
             "web": json.loads((root / "browser.json").read_text(encoding="utf-8")),
             "cross_client": {

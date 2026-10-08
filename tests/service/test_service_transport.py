@@ -36,11 +36,13 @@ from aide.service.client import (
     RemoteMessageBus,
     ServiceClient,
     ServiceStartupError,
+    _port_is_open,
 )
 from aide.service.conversation_workspaces import ConversationWorkspaceCatalog
 from aide.service.discovery import (
     ServiceDiscovery,
     create_credential,
+    credential_path,
     identity_proof,
     read_credential,
     read_discovery,
@@ -750,8 +752,6 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
 
         reconnect_credential = first.reconnect_credential
         first_session_id = first.session_id
-        await second.close()
-        second = None
         await first.close()
         first = None
         reconnected = await ServiceClient.connect_or_start(
@@ -1774,13 +1774,11 @@ asyncio.run(main())
         for process, (_stdout, stderr) in zip(processes, completed, strict=True):
             assert process.returncode == 0, stderr.decode(errors="replace")
         responses = [json.loads(stdout) for stdout, _stderr in completed]
-        discovery = read_discovery(home)
-        assert discovery is not None
-        assert {response["instance_id"] for response in responses} == {
-            discovery.service_instance_id
-        }
+        assert len({response["instance_id"] for response in responses}) == 1
         assert len({response["session_id"] for response in responses}) == 2
-        assert discovery.port == port
+        async with asyncio.timeout(5):
+            while read_discovery(home) is not None:
+                await asyncio.sleep(0.02)
     finally:
         for process in processes:
             if process.returncode is None:
@@ -1952,6 +1950,118 @@ async def test_service_without_first_client_exits_after_connection_window(tmp_pa
     await service.start()
     await asyncio.wait_for(service.wait_closed(), timeout=1)
     assert service.state == "stopped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["cli", "web"])
+async def test_last_real_client_disconnect_exits_service_process(
+    tmp_path: Path, kind: str,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    port = _free_port()
+    launcher = await ServiceClient.connect_or_start(
+        home, workspace, port=port, attach_workspace=False
+    )
+    instance_id = launcher.discovery.service_instance_id
+    try:
+        if kind == "cli":
+            await launcher.attach_workspace(workspace)
+            await launcher.close()
+        else:
+            async with aiohttp.ClientSession() as http:
+                headers = {
+                    "Authorization": f"Bearer {launcher.token}",
+                    "X-Aide-CSRF": launcher.token,
+                }
+                async with http.post(
+                    f"{launcher.base_url}/api/v1/clients",
+                    headers=headers,
+                    json={"request_id": str(uuid4()), "kind": "web"},
+                ) as response:
+                    assert response.status == 200
+                    web_client = await response.json()
+                socket = await http.ws_connect(
+                    f"{launcher.base_url}/api/v1/events",
+                    headers={
+                        "Authorization": f"Bearer {launcher.token}",
+                        "X-Aide-Client": web_client["client_id"],
+                        "Origin": launcher.base_url,
+                    },
+                    protocols=("aide-v1",),
+                )
+                await launcher.close()
+                await socket.close()
+        async with asyncio.timeout(5):
+            while (
+                read_discovery(home) is not None
+                or credential_path(home).exists()
+                or _port_is_open("127.0.0.1", port)
+            ):
+                await asyncio.sleep(0.02)
+        reopened = await ServiceClient.connect_or_start(
+            home, workspace, port=port, attach_workspace=False
+        )
+        try:
+            assert reopened.discovery.service_instance_id != instance_id
+        finally:
+            await reopened.close()
+    finally:
+        await launcher.close()
+        await ServiceClient.stop_existing(home, port=port)
+
+
+@pytest.mark.asyncio
+async def test_launcher_waits_for_draining_service_before_starting_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = AgentService(home)
+    server = TestServer(create_app(service), host="127.0.0.1")
+    await service.start()
+    await server.start_server()
+    assert server.port is not None
+    port = server.port
+    create_credential(home)
+    write_discovery(home, ServiceDiscovery(
+        service.service_instance_id, service.protocol_version, "127.0.0.1", port, 0,
+    ))
+    await service.stop()
+    registration_rejected = asyncio.Event()
+    original_register = service.register_client
+
+    async def register_stopping_client(*args: object, **kwargs: object) -> object:
+        try:
+            return await original_register(*args, **kwargs)
+        except ServiceError as error:
+            if error.code == "admission_closed":
+                registration_rejected.set()
+            raise
+
+    monkeypatch.setattr(service, "register_client", register_stopping_client)
+
+    async def close_old_listener() -> None:
+        await registration_rejected.wait()
+        await server.close()
+
+    closing = asyncio.create_task(close_old_listener())
+    replacement: ServiceClient | None = None
+    try:
+        replacement = await ServiceClient.connect_or_start(
+            home, workspace, port=port, attach_workspace=False
+        )
+        assert registration_rejected.is_set()
+        assert replacement.discovery.service_instance_id != service.service_instance_id
+    finally:
+        closing.cancel()
+        await asyncio.gather(closing, return_exceptions=True)
+        await server.close()
+        if replacement is not None:
+            await replacement.close()
+        await ServiceClient.stop_existing(home, port=port)
 
 
 @pytest.mark.asyncio

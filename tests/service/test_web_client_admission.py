@@ -84,6 +84,21 @@ async def test_unconnected_web_reservation_expires_without_deadline_extension(
 
 
 @pytest.mark.asyncio
+async def test_pending_web_launch_survives_last_connected_cli_departure(
+    admission_service: tuple[AgentService, FakeClock, asyncio.Event],
+) -> None:
+    service, _clock, _timer = admission_service
+    cli = await service.register_client("cli")
+    await service.connect_client(cli.client_id, _CollectingSink())
+    web = await service.register_client("web")
+    await service.disconnect_client(cli.client_id)
+    await asyncio.sleep(0)
+    assert service.state == "reconnecting"
+    await service.connect_client(web.client_id, _CollectingSink())
+    assert service.state == "ready"
+
+
+@pytest.mark.asyncio
 async def test_web_reconnect_preserves_claim_and_cli_exclusion(
     admission_service: tuple[AgentService, FakeClock, asyncio.Event], tmp_path: Path,
 ) -> None:

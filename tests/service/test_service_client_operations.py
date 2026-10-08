@@ -31,6 +31,13 @@ async def _wait_until(predicate: Callable[[], bool]) -> None:
             await asyncio.sleep(0.02)
 
 
+async def _keep_service_online(service: AgentService, stack: AsyncExitStack) -> None:
+    observer = await service.register_client("cli")
+    sink = _CollectingSink()
+    await service.connect_client(observer.client_id, sink)
+    stack.push_async_callback(service.disconnect_client, observer.client_id, sink=sink)
+
+
 @pytest_asyncio.fixture
 async def connected_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -195,7 +202,8 @@ async def test_textual_recovers_active_run_and_keeps_unsent_draft(
     connected_client: tuple[ServiceClient, AgentService, AsyncExitStack],
     monkeypatch: pytest.MonkeyPatch, complete_offline: bool,
 ) -> None:
-    client, service, _stack = connected_client
+    client, service, stack = connected_client
+    await _keep_service_online(service, stack)
     started, release = asyncio.Event(), asyncio.Event()
     original_stream = _ConcurrentProvider.stream
 
@@ -257,7 +265,8 @@ async def test_textual_recovers_active_run_and_keeps_unsent_draft(
 async def test_recovery_retries_when_socket_closes_immediately_after_subscribe_ack(
     connected_client: tuple[ServiceClient, AgentService, AsyncExitStack], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, _service, _stack = connected_client
+    client, service, stack = connected_client
+    await _keep_service_online(service, stack)
     original = _WebSocketSink.send_json
     subscriptions: list[Mapping[str, object]] = []
 
@@ -280,7 +289,8 @@ async def test_recovery_retries_when_socket_closes_immediately_after_subscribe_a
 async def test_unknown_input_result_is_not_resent_during_reconnection(
     connected_client: tuple[ServiceClient, AgentService, AsyncExitStack], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, service, _stack = connected_client
+    client, service, stack = connected_client
+    await _keep_service_online(service, stack)
     original = service.handle_command
     submissions: list[Mapping[str, object]] = []
 

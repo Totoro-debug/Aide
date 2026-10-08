@@ -18,8 +18,6 @@ from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
 
-import aiohttp
-
 import aide
 import aide.terminal.cli as cli
 from aide.agent.message_bus import InboundMessage
@@ -27,7 +25,7 @@ from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
 from aide.schedule.store import WorkspaceScheduleStore
 from aide.service.client import ServiceClient
-from aide.service.discovery import read_credential, read_discovery
+from aide.service.discovery import read_discovery
 from aide.service.errors import ServiceError
 from aide.terminal.conversation import TerminalConversationApp
 
@@ -193,33 +191,6 @@ async def _wait_for_cancelled_session(path: Path, prompt: str) -> None:
     raise AssertionError("cancelled CLI run did not persist its terminal result")
 
 
-async def _authenticated_json(
-    home: AgentHome,
-    url: str,
-    *,
-    client_id: str | None = None,
-) -> dict[str, object]:
-    headers = {"Authorization": f"Bearer {read_credential(home)}"}
-    if client_id is not None:
-        headers["X-Aide-Client"] = client_id
-    async with aiohttp.ClientSession() as http:
-        async with http.get(url, headers=headers) as response:
-            body = await response.json()
-            assert response.status == 200, body
-            assert isinstance(body, dict), body
-            return body
-
-
-async def _schedule_snapshot(client: ServiceClient) -> dict[str, object]:
-    result = await client._http_request(
-        "GET",
-        f"/api/v1/workspaces/{client.workspace_id}/schedule/jobs",
-    )
-    assert isinstance(result.get("jobs"), list), result
-    assert isinstance(result.get("status"), dict), result
-    return result
-
-
 async def _run_competition_scenario(
     *,
     client: ServiceClient,
@@ -278,7 +249,7 @@ async def _run_competition_scenario(
         raise
 
 
-async def _run_last_client_grace_scenario(
+async def _run_last_client_exit_scenario(
     *,
     client: ServiceClient,
     ready_path: Path,
@@ -289,14 +260,13 @@ async def _run_last_client_grace_scenario(
     home = AgentHome.production()
     discovery = read_discovery(home)
     assert discovery is not None
-    reconnect_credential = client.reconnect_credential
     original_client_id = client.client_id
     original_instance_id = discovery.service_instance_id
     original_pid = discovery.pid
     project = await client._http_request(
         "POST",
         "/api/v1/projects",
-        payload={"request_id": "installed-last-client-grace-project", "path": str(Path.cwd())},
+        payload={"request_id": "installed-last-client-exit-project", "path": str(Path.cwd())},
         mutation=True,
     )
     assert project.get("workspace_id") == client.workspace_id, project
@@ -317,92 +287,31 @@ async def _run_last_client_grace_scenario(
     )
     try:
         await _wait_for_file(release_path)
-        due_time = datetime.now(UTC) + timedelta(seconds=10)
-        job = await client._http_request(
-            "POST",
-            f"/api/v1/workspaces/{client.workspace_id}/schedule/jobs",
-            payload={
-                "request_id": "installed-last-client-grace-job",
-                "message": "installed last-client grace must not run this Job",
-                "title": "installed last-client grace Job",
-                "at_time": due_time.isoformat(),
-            },
-            mutation=True,
-        )
-        job_value = job.get("job")
-        assert isinstance(job_value, dict), job
-        job_id = job_value.get("job_id")
-        assert isinstance(job_id, str), job
-        disconnected_at = monotonic()
-        await client.close()
-        await asyncio.sleep(29.0)
-        elapsed = monotonic() - disconnected_at
-        during_grace = read_discovery(home)
-        assert during_grace is not None
-        assert during_grace.service_instance_id == original_instance_id
-        assert during_grace.pid == original_pid
-        with socket.create_connection((during_grace.host, during_grace.port), timeout=2):
-            pass
-        service_info = await _authenticated_json(
-            home,
-            f"http://{during_grace.host}:{during_grace.port}/api/v1/service",
-        )
-        assert service_info["state"] == "reconnecting", service_info
-        schedule_during_grace = await _authenticated_json(
-            home,
-            f"http://{during_grace.host}:{during_grace.port}/api/v1/workspaces/"
-            f"{client.workspace_id}/schedule/jobs",
-            client_id=original_client_id,
-        )
-        status_during_grace = schedule_during_grace.get("status")
-        assert isinstance(status_during_grace, dict), schedule_during_grace
-        assert status_during_grace["admitted"] is False, schedule_during_grace
-        jobs_during_grace = schedule_during_grace.get("jobs")
-        assert isinstance(jobs_during_grace, list), schedule_during_grace
-        observed_job = next(
-            item
-            for item in jobs_during_grace
-            if isinstance(item, dict) and item.get("job_id") == job_id
-        )
-        assert observed_job["state"]["last_status"] is None, observed_job
-        assert datetime.now(UTC) > due_time
-        assert not (
-            Path.cwd() / ".aide" / "schedule-sessions" / f"schedule_{job_id}.jsonl"
-        ).exists()
-
-        reconnected = await ServiceClient.connect_or_start(
-            home,
-            Path.cwd(),
-            reconnect_credential=reconnect_credential,
-        )
+        active_client = client
         process_witness: _ProcessExitWitness | None = None
         try:
-            reconnected_discovery = read_discovery(home)
-            assert reconnected_discovery is not None
-            assert reconnected_discovery.service_instance_id == original_instance_id
-            assert reconnected_discovery.pid == original_pid
-            assert reconnected.client_id == original_client_id
-            schedule_after_reconnect = await _schedule_snapshot(reconnected)
-            status_after_reconnect = schedule_after_reconnect["status"]
-            assert isinstance(status_after_reconnect, dict), schedule_after_reconnect
-            assert status_after_reconnect["admitted"] is True, schedule_after_reconnect
+            active_discovery = read_discovery(home)
+            assert active_discovery is not None
+            assert active_discovery.service_instance_id == original_instance_id
+            assert active_discovery.pid == original_pid
+            assert active_client.client_id == original_client_id
             expiry_prompt = "installed expiry barrier"
             expiry_session_path = (
-                Path.cwd() / ".aide" / "sessions" / f"{reconnected.session_id}.jsonl"
+                Path.cwd() / ".aide" / "sessions" / f"{active_client.session_id}.jsonl"
             )
-            await reconnected.bus.put_inbound(InboundMessage(expiry_prompt))
+            await active_client.bus.put_inbound(InboundMessage(expiry_prompt))
             await _wait_for_observation(
                 Path(os.environ["AIDE_PROVIDER_OBSERVATION_PATH"]), expiry_prompt
             )
-            expiry_job_prompt = f"installed expiry grace Job must not run {uuid4()}"
-            expiry_job_due = datetime.now(UTC) + timedelta(seconds=10)
-            expiry_job_response = await reconnected._http_request(
+            expiry_job_prompt = f"installed last-client exit Job must not run {uuid4()}"
+            expiry_job_due = datetime.now(UTC) + timedelta(seconds=5)
+            expiry_job_response = await active_client._http_request(
                 "POST",
-                f"/api/v1/workspaces/{reconnected.workspace_id}/schedule/jobs",
+                f"/api/v1/workspaces/{active_client.workspace_id}/schedule/jobs",
                 payload={
                     "request_id": str(uuid4()),
                     "message": expiry_job_prompt,
-                    "title": "installed expiry grace Job",
+                    "title": "installed last-client exit Job",
                     "at_time": expiry_job_due.isoformat(),
                 },
                 mutation=True,
@@ -414,10 +323,10 @@ async def _run_last_client_grace_scenario(
             process_witness = _ProcessExitWitness(original_pid)
             witness_captured_at = monotonic()
             expiry_due_margin = (expiry_job_due - datetime.now(UTC)).total_seconds()
-            assert expiry_due_margin > 0, "Expiry Job became due before the last departure"
+            assert expiry_due_margin > 0, "Exit Job became due before the last departure"
             expiry_disconnect = monotonic()
-            await reconnected.close()
-            deadline = asyncio.get_running_loop().time() + 60
+            await active_client.close()
+            deadline = asyncio.get_running_loop().time() + 20
             while asyncio.get_running_loop().time() < deadline:
                 if process_witness.exited() and read_discovery(home) is None:
                     try:
@@ -433,10 +342,12 @@ async def _run_last_client_grace_scenario(
                     "last client departure did not autonomously exit the original service process"
                 )
             shutdown_elapsed = monotonic() - expiry_disconnect
-            assert shutdown_elapsed >= 30.0, shutdown_elapsed
+            assert shutdown_elapsed < 20.0, shutdown_elapsed
             assert process_witness.exited()
             process_witness.close()
-            assert datetime.now(UTC) > expiry_job_due
+            remaining_until_due = (expiry_job_due - datetime.now(UTC)).total_seconds()
+            if remaining_until_due > 0:
+                await asyncio.sleep(remaining_until_due + 0.1)
             await _wait_for_cancelled_session(expiry_session_path, expiry_prompt)
             workspace_state = WorkspaceState(Path.cwd())
             persisted_jobs = await WorkspaceScheduleStore(workspace_state).snapshot()
@@ -463,27 +374,16 @@ async def _run_last_client_grace_scenario(
                 json.dumps(
                     {
                         "status": "passed",
-                        "marker": "INSTALLED_CLI_LAST_CLIENT_GRACE_OK",
+                        "marker": "INSTALLED_CLI_LAST_CLIENT_EXIT_OK",
                         "adapter": "installed console entry with Textual run_test; not a TTY",
                         "console_entry": entry_value,
                         "service_instance_id": original_instance_id,
                         "service_pid": original_pid,
                         "client_id": original_client_id,
-                        "same_client_reconnected": True,
-                        "reconnect_elapsed_seconds": elapsed,
-                        "grace_seconds_observed": 29,
-                        "state_during_grace": service_info["state"],
-                        "discovery_preserved_during_grace": True,
-                        "port_open_during_grace": True,
-                        "schedule_admitted_during_grace": False,
-                        "schedule_admitted_after_reconnect": True,
-                        "no_new_job_during_grace": True,
-                        "job_id": job_id,
                         "project_registered": True,
-                        "job_due_during_grace": due_time.isoformat(),
-                        "schedule_session_absent_during_grace": True,
                         "autonomous_shutdown": True,
                         "shutdown_elapsed_seconds": shutdown_elapsed,
+                        "shutdown_without_grace": True,
                         "discovery_removed": True,
                         "port_released": True,
                         "foreground_cancelled_persisted": True,
@@ -494,12 +394,11 @@ async def _run_last_client_grace_scenario(
                             witness_captured_at < expiry_disconnect
                         ),
                         "process_witness_closed": process_witness.closed,
-                        "reconnect_after_expiry_departure": False,
                         "expiry_job_id": expiry_job_id,
                         "expiry_job_prompt": expiry_job_prompt,
                         "expiry_job_due_at": expiry_job_due.isoformat(),
                         "expiry_job_due_margin_before_departure_seconds": expiry_due_margin,
-                        "expiry_job_due_before_shutdown": True,
+                        "expiry_job_due_before_inspection": True,
                         "expiry_job_schedule_session_absent": True,
                         "expiry_job_provider_request_absent": True,
                         "expiry_job_persisted_unexecuted": True,
@@ -510,7 +409,7 @@ async def _run_last_client_grace_scenario(
             )
         finally:
             try:
-                await reconnected.close()
+                await active_client.close()
             finally:
                 if process_witness is not None:
                     process_witness.close()
@@ -743,7 +642,7 @@ async def headless_terminal(self: Any, **_kwargs: object) -> None:
         assert self.query_one("#conversation-input")
         scenario = os.environ.get("AIDE_CLI_SCENARIO")
         current_discovery = read_discovery(AgentHome.production())
-        if scenario not in {"competition", "last-client-grace"}:
+        if scenario not in {"competition", "last-client-exit"}:
             assert current_discovery == before
         else:
             assert current_discovery is not None
@@ -758,8 +657,8 @@ async def headless_terminal(self: Any, **_kwargs: object) -> None:
                 prompt=os.environ["AIDE_CLI_PROMPT"],
                 entry_value=console_entry.value,
             )
-        elif scenario == "last-client-grace":
-            await _run_last_client_grace_scenario(
+        elif scenario == "last-client-exit":
+            await _run_last_client_exit_scenario(
                 client=client,
                 ready_path=Path(os.environ["AIDE_CLI_READY"]),
                 done_path=Path(os.environ["AIDE_CLI_DONE"]),
@@ -872,7 +771,7 @@ assert Path(aide.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
 assert shutil.which("node") is None and shutil.which("npm") is None
 scenario = os.environ.get("AIDE_CLI_SCENARIO")
 before = read_discovery(AgentHome.production())
-if scenario not in {"competition", "last-client-grace", "joint"}:
+if scenario not in {"competition", "last-client-exit", "joint"}:
     assert before is not None
     assert before.service_instance_id == sys.argv[1]
     assert before.pid == int(sys.argv[2])
@@ -888,7 +787,7 @@ with (
         entry.load()()
     except SystemExit as error:
         assert error.code in (None, 0), error.code
-if scenario not in {"competition", "last-client-grace"}:
+if scenario not in {"competition", "last-client-exit"}:
     assert before is not None
     assert read_discovery(AgentHome.production()) == before
     print(json.dumps({"marker": "INSTALLED_CLI_CONNECT_OK", **before.to_dict()}))

@@ -1439,15 +1439,47 @@ async def test_client_disconnect_expiry_aborts_owned_confirmation(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_last_client_grace_pauses_and_restarts_schedule(tmp_path: Path) -> None:
+async def test_last_client_disconnect_stops_without_grace(tmp_path: Path) -> None:
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=0.2)
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=30)
     await service.start()
     try:
-        client = await service.register_client("cli")
-        workspace = await service.attach_workspace(client.client_id, workspace_path)
+        cli = await service.register_client("cli")
+        web = await service.register_client("web")
+        workspace = await service.attach_workspace(cli.client_id, workspace_path)
+        await service.attach_workspace(web.client_id, workspace_path)
+
+        class Sink:
+            async def send_event(self, event: dict[str, object]) -> None:
+                del event
+
+        sink = Sink()
+        await service.connect_client(cli.client_id, sink)
+        await service.connect_client(web.client_id, sink)
+        assert workspace._schedule_admitted
+        await service.disconnect_client(cli.client_id, sink=sink)
+        assert service.state == "ready"
+        assert workspace._schedule_admitted
+        await service.connect_client(cli.client_id, sink)
+        await service.disconnect_client(web.client_id, sink=sink)
+        assert service.state == "ready"
+        await service.disconnect_client(cli.client_id, sink=sink)
+        await asyncio.wait_for(service.wait_closed(), timeout=2)
+        assert service.state == "stopped"
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["cli", "web"])
+async def test_sole_client_disconnect_stops_without_grace(tmp_path: Path, kind: str) -> None:
+    home = _configured_home(tmp_path / "agent-home")
+    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=30)
+    await service.start()
+    try:
+        client = await service.register_client(kind)
 
         class Sink:
             async def send_event(self, event: dict[str, object]) -> None:
@@ -1455,14 +1487,11 @@ async def test_last_client_grace_pauses_and_restarts_schedule(tmp_path: Path) ->
 
         sink = Sink()
         await service.connect_client(client.client_id, sink)
-        assert workspace._schedule_admitted
         await service.disconnect_client(client.client_id, sink=sink)
-        assert service.state == "reconnecting"
-        assert not workspace._schedule_admitted
-        await service.connect_client(client.client_id, sink)
-        assert service.state == "ready"
-        assert workspace._schedule_admitted
-        await service.disconnect_client(client.client_id, sink=sink)
+        await asyncio.sleep(0)
+        with pytest.raises(ServiceError) as rejected:
+            await service.connect_client(client.client_id, sink)
+        assert rejected.value.code == "admission_closed"
         await asyncio.wait_for(service.wait_closed(), timeout=2)
         assert service.state == "stopped"
     finally:

@@ -479,6 +479,7 @@ class ClientState:
     permission_control: RuntimePermissionControl
     web_control_credential: str | None = None
     connected: bool = False
+    ever_connected: bool = False
     sink: ServiceSink | None = None
     stream_id: str = field(default_factory=lambda: str(uuid4()))
     sequence: int = 0
@@ -3484,6 +3485,7 @@ class AgentService:
         if client.connected:
             raise service_error("client_already_connected", "This Client already has a connection.")
         client.connected = True
+        client.ever_connected = True
         client.sink = sink
         client.subscribed = False
         client.expired = False
@@ -3533,8 +3535,19 @@ class AgentService:
                 self.state = "reconnecting"
             await self._reconcile_schedule_admission()
             if self.state == "reconnecting":
+                pending_web_deadline = next(
+                    (
+                        candidate.reconnect_deadline
+                        for candidate in self._clients.values()
+                        if candidate.kind == "web"
+                        and not candidate.ever_connected
+                        and candidate.reconnect_deadline is not None
+                        and candidate.reconnect_deadline > self._monotonic()
+                    ),
+                    None,
+                )
                 self._global_reconnect_task = asyncio.create_task(
-                    self._stop_after_grace(expiry_deadline)
+                    self._stop_after_grace(pending_web_deadline or self._monotonic())
                 )
         else:
             await self._reconcile_schedule_admission()
@@ -6426,14 +6439,7 @@ class AgentService:
             return
         if not any(client.connected for client in self._clients.values()):
             self._global_reconnect_task = None
-            pending_expiry = tuple(
-                client.disconnect_task
-                for client in self._clients.values()
-                if client.disconnect_task is not None
-                and client.disconnect_task is not asyncio.current_task()
-            )
-            if pending_expiry:
-                await asyncio.gather(*pending_expiry, return_exceptions=True)
+            self.state = "draining"
             await self.stop()
 
     async def _wait_until(self, deadline: float) -> None:

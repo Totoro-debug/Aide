@@ -696,12 +696,12 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         "Client loss and explicit stop drain the service without starting new Jobs.",
         ("backend_service", "installed_cli_browser"),
         (
-            "tests/service/test_service_foundation.py::test_last_client_grace_pauses_and_restarts_schedule",
+            "tests/service/test_service_foundation.py::test_last_client_disconnect_stops_without_grace",
             "tests/service/test_service_foundation.py::test_service_stop_aborts_confirmation_and_invalidates_token",
             "tests/service/test_service_concurrency.py::test_client_expiry_keeps_claim_until_cancelled_run_cleanup_finishes",
         ),
         (
-            "the last-client grace pauses then restarts Schedule",
+            "the final Client disconnect starts immediate service shutdown",
             "explicit stop invalidates pending confirmation and exits",
         ),
         _PRODUCTION_BROWSER_COMMAND,
@@ -710,7 +710,7 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
-            "installed grace reconnects the same Client at 29 seconds, then disconnects the last active Client and verifies autonomous 30-second cancellation, discovery removal, and port release without explicit stop",
+            "installed final-Client exit verifies prompt autonomous shutdown, cancellation persistence, discovery removal, and port release without explicit stop",
             "the separate installed Web lifecycle verifies the explicit service stop entry",
         ),
     ),

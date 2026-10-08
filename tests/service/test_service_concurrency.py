@@ -2256,6 +2256,8 @@ async def test_snapshot_resync_includes_selected_and_switched_away_claims(
             (workspace.workspace_id, first_session),
             (workspace.workspace_id, second_session),
         }
+        observer = await service.register_client("cli")
+        await service.connect_client(observer.client_id, _CollectingSink())
         last_seq = client.sequence
         await service.disconnect_client(client.client_id, sink=initial_sink)
         provider.release_b.set()

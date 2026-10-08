@@ -350,8 +350,10 @@ async def test_subagent_gateway_limits_catalog_and_search_to_creator_snapshot(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("call_id", ["same-call-id", "../../unsafe-call-id"])
 async def test_two_subagents_with_same_tool_call_id_keep_distinct_artifacts(
     tmp_path: Path,
+    call_id: str,
 ) -> None:
     state, session_id = _workspace(tmp_path)
     store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
@@ -362,7 +364,7 @@ async def test_two_subagents_with_same_tool_call_id_keep_distinct_artifacts(
     tool_response = ModelResponse(
         message=AssistantModelMessage(
             content="",
-            tool_calls=(ModelToolCall(id="same-call-id", name="long_result", arguments="{}"),),
+            tool_calls=(ModelToolCall(id=call_id, name="long_result", arguments="{}"),),
         ),
         usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
         finish_reason="tool_calls",
@@ -409,6 +411,89 @@ async def test_two_subagents_with_same_tool_call_id_keep_distinct_artifacts(
         )
     assert first.agent_id in first_result.artifact_paths[0]
     assert second.agent_id in second_result.artifact_paths[0]
+    for result in (first_result, second_result):
+        assert any(
+            message.get("role") == "tool"
+            and message.get("name") == "long_result"
+            and message.get("tool_call_id") == call_id
+            for message in result.conversation
+        )
+
+
+@pytest.mark.asyncio
+async def test_artifact_write_failure_keeps_tool_result_and_original_call_id(
+    tmp_path: Path,
+) -> None:
+    state, session_id = _workspace(tmp_path)
+    (state.path / "artifacts").write_text("blocked", encoding="utf-8")
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    record = _register_running(
+        store, title="Artifact failure", snapshot=_creator_snapshot("long_result")
+    )
+    provider = ScriptedFakeProvider(
+        streams=(
+            StreamScript(events=(_tool_call("long_result", "original-call", {}),)),
+            StreamScript(events=(_response("done"),)),
+        )
+    )
+    gateway = ToolGateway._for_memory(
+        (_LongResultTool(),),
+        permission_context=PermissionContext(workspace_root=state.workspace_path),
+        tool_context=_tool_context(state.workspace_path),
+    )
+    executor = SubAgentRunnerExecutor(
+        workspace_id="workspace-id",
+        workspace_state=state,
+        repository=store,
+        model_router=_router(provider),
+        tool_gateway=gateway,
+        compact_ratio=0.9,
+        max_iterations=50,
+        max_tool_result_chars=80,
+        now=lambda: _NOW,
+    )
+    result = await executor.execute(record, emit=_ignore_event)
+    assert result.status is SubAgentStatus.COMPLETED
+    assert result.artifact_paths == ()
+    tool_message = next(message for message in result.conversation if message.get("role") == "tool")
+    assert tool_message["tool_call_id"] == "original-call"
+    assert tool_message["status"] == "success"
+    assert "artifact write failed; full result was not stored" in tool_message["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cursor", [0, 1, True, -1, 2, "0", None])
+async def test_execution_accepts_only_valid_compaction_cursors(
+    tmp_path: Path, cursor: object
+) -> None:
+    state, session_id = _workspace(tmp_path)
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    record = _register_running(store, title="Cursor", snapshot=_creator_snapshot())
+    record = store.save(
+        replace(
+            record,
+            conversation=({"role": "user", "content": record.task},),
+            context_state={"last_compacted": cursor},
+            revision=record.revision + 1,
+        )
+    )
+    provider = ScriptedFakeProvider(streams=(StreamScript(events=(_response("done"),)),))
+    result = await _executor(
+        state,
+        store,
+        provider,
+        ToolGateway(
+            workspace=state.workspace_path, tool_context=_tool_context(state.workspace_path)
+        ),
+    ).execute(record, emit=_ignore_event)
+    if type(cursor) is int and cursor in (0, 1):
+        assert result.status is SubAgentStatus.COMPLETED
+        assert result.context_state["last_compacted"] == cursor
+    else:
+        assert result.status is SubAgentStatus.FAILED
+        assert not provider.stream_requests
+        persisted = store.get(record.agent_id)
+        assert persisted == record
 
 
 @pytest.mark.asyncio

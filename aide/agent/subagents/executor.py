@@ -215,7 +215,13 @@ class SubAgentRunnerExecutor:
                 )
             summary_appender = _SubAgentSummaryAppender(self._repository, current_record)
             context_state = deepcopy(record.context_state or {})
-            last_compacted = _last_compacted(context_state, len(current_record[0].conversation))
+            last_compacted = cast(object, context_state.get("last_compacted", 0))
+            if (
+                isinstance(last_compacted, bool)
+                or not isinstance(last_compacted, int)
+                or not 0 <= last_compacted <= len(current_record[0].conversation)
+            ):
+                raise ValueError("SubAgent compaction cursor is invalid")
             run_controller = AgentRunContextController(
                 snapshot=AgentRunContextSnapshot(
                     messages=current_record[0].conversation,
@@ -326,7 +332,29 @@ class SubAgentRunnerExecutor:
                 runner_message_count = len(messages)
                 await publish(SubAgentEventKind.USAGE, {"usage": usage})
 
-            externalize_result = self._result_externalizer_for(record, artifact_paths)
+            def externalize_result(result: ToolResult) -> ToolResult:
+                if (
+                    result.status != "success"
+                    or len(result.content) <= self._max_tool_result_chars
+                    or result.artifact is not None
+                ):
+                    return result
+                safe_call_id = (
+                    result.tool_call_id
+                    if _ARTIFACT_TOOL_CALL_ID.fullmatch(result.tool_call_id)
+                    else str(uuid4())
+                )
+                content = BaseTool.handle_result(
+                    result.content,
+                    workspace=self._workspace_state.workspace_path,
+                    session_id=record.session_id,
+                    tool_call_id=f"{record.agent_id}_{safe_call_id}",
+                    limit=self._max_tool_result_chars,
+                )
+                if content.artifact is not None:
+                    artifact_paths.append(content.artifact.path)
+                return replace(result, content=content.content, artifact=content.artifact)
+
             recorder = (
                 self._file_mutation_recorder_for(record)
                 if self._file_mutation_recorder_for is not None
@@ -430,46 +458,6 @@ class SubAgentRunnerExecutor:
             permission_snapshot=permission_snapshot,
             tool_context=tool_context,
         )
-
-    def _result_externalizer_for(
-        self,
-        record: SubAgentRecord,
-        artifact_paths: list[str],
-    ) -> Callable[[ToolResult], ToolResult] | None:
-        if self._max_tool_result_chars <= 0:
-            return None
-
-        def externalize(result: ToolResult) -> ToolResult:
-            if (
-                result.status != "success"
-                or len(result.content) <= self._max_tool_result_chars
-                or result.artifact is not None
-            ):
-                return result
-            content = BaseTool.handle_result(
-                result.content,
-                workspace=self._workspace_state.workspace_path,
-                session_id=record.session_id,
-                tool_call_id=_artifact_id(record.agent_id, result.tool_call_id),
-                limit=self._max_tool_result_chars,
-            )
-            if content.artifact is not None:
-                artifact_paths.append(content.artifact.path)
-            return replace(result, content=content.content, artifact=content.artifact)
-
-        return externalize
-
-
-def _artifact_id(agent_id: str, tool_call_id: str) -> str:
-    safe_call_id = tool_call_id if _ARTIFACT_TOOL_CALL_ID.fullmatch(tool_call_id) else str(uuid4())
-    return f"{agent_id}_{safe_call_id}"
-
-
-def _last_compacted(context_state: Mapping[str, Any], message_count: int) -> int:
-    value = cast(object, context_state.get("last_compacted", 0))
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= message_count:
-        raise ValueError("SubAgent compaction cursor is invalid")
-    return value
 
 
 def _context_state(

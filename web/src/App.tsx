@@ -2447,7 +2447,7 @@ function SettingsView({
         {t("settings.backToApp")}
       </button>
       <nav className={styles.settingsNavigation} aria-label={t("settings.sections")}>
-        <span className={styles.settingsNavigationLabel}>{t("settings.sections")}</span>
+        <span className={styles.settingsNavigationLabel}>{t("settings.title")}</span>
         {([
           ["general", "settings.generalAppearance", Settings2],
           ["models", "settings.models", Brain],
@@ -2504,9 +2504,7 @@ function SettingsView({
       <div className={styles.settingsHeader}>
         <div className={styles.pageHeading}>
           <div>
-            <p className={styles.eyebrow}>{t("nav.settings")}</p>
             <h1 id="settings-title">{t("settings.title")}</h1>
-            <p className={styles.pageDescription}>{t("settings.description")}</p>
           </div>
           {dirty && !saving && !saveFailed ? (
             <button className={styles.secondaryButton} type="button" onClick={() => void saveDraft(false, true)} disabled={controlDisabled}>
@@ -2527,13 +2525,6 @@ function SettingsView({
           ) : null}
         </div>
       </div>
-
-      {response !== null ? (
-        <dl className={styles.settingsVersions} aria-label={t("settings.versions")}>
-          <div><dt>{t("settings.savedVersion")}</dt><dd>{response.application.saved_revision}</dd></div>
-          <div><dt>{t("settings.activeVersion")}</dt><dd>{response.application.active_revision ?? "-"}</dd></div>
-        </dl>
-      ) : null}
 
       {loadError !== null && response === null ? (
         <div className={styles.errorBanner} role="alert">
@@ -3168,6 +3159,15 @@ function SettingsView({
             </div>
           ) : null}
         </form>
+      ) : null}
+      {response !== null ? (
+        <details className={styles.settingsVersionDetails}>
+          <summary>{t("settings.versions")}</summary>
+          <dl className={styles.settingsVersions}>
+            <div><dt>{t("settings.savedVersion")}</dt><dd>{response.application.saved_revision}</dd></div>
+            <div><dt>{t("settings.activeVersion")}</dt><dd>{response.application.active_revision ?? "-"}</dd></div>
+          </dl>
+        </details>
       ) : null}
         </div>
       </div>

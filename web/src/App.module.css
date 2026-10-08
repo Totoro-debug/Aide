@@ -3115,31 +3115,46 @@ h1 {
   display: grid;
   height: 100dvh;
   min-height: 0;
-  grid-template-columns: 248px minmax(0, 1fr);
+  grid-template-columns: 264px minmax(0, 1fr);
   overflow: hidden;
+  background: var(--surface-app);
+  --settings-sidebar-bg: #eef3f8;
+  --settings-sidebar-selected: #dfe7ed;
+}
+
+:global(:root[data-theme="dark"]) .settingsPage {
+  --settings-sidebar-bg: #1b2227;
+  --settings-sidebar-selected: #303b42;
+}
+
+@media (prefers-color-scheme: dark) {
+  :global(:root[data-theme="system"]) .settingsPage {
+    --settings-sidebar-bg: #1b2227;
+    --settings-sidebar-selected: #303b42;
+  }
 }
 
 .settingsSidebar {
   display: flex;
   min-height: 0;
   flex-direction: column;
-  gap: 32px;
+  gap: 28px;
   overflow-y: auto;
   border-right: 1px solid var(--border-subtle);
-  background: var(--surface-sidebar);
-  padding: 24px 16px;
+  background: var(--settings-sidebar-bg);
+  padding: 20px 14px;
 }
 
 .settingsBack {
   display: inline-flex;
   min-height: 36px;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   align-self: flex-start;
   border: 0;
   border-radius: 6px;
   background: transparent;
-  padding: 8px 10px;
+  padding: 8px 6px;
   color: var(--text-primary);
   font: inherit;
   cursor: pointer;
@@ -3157,15 +3172,30 @@ h1 {
 
 .settingsContentInner {
   display: grid;
-  width: min(100%, 1072px);
-  gap: 24px;
+  width: min(100%, 864px);
+  gap: 16px;
   margin: 0 auto;
-  padding: 52px 56px 64px;
+  padding: 56px 44px 72px;
 }
 
 .settingsHeader {
   display: grid;
-  gap: 12px;
+  min-height: 28px;
+  align-items: center;
+}
+
+.settingsHeader .pageHeading {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+}
+
+.settingsHeader h1 {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
 }
 
 .settingsNavigation {
@@ -3175,23 +3205,22 @@ h1 {
 }
 
 .settingsNavigationLabel {
-  padding: 0 10px 8px;
+  padding: 0 10px 2px;
   color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .settingsNavigationItem {
   display: flex;
-  min-height: 40px;
+  min-height: 36px;
   align-items: center;
   gap: 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 7px;
   padding: 7px 10px;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--text-primary);
   font: inherit;
   text-align: left;
   cursor: pointer;
@@ -3208,9 +3237,15 @@ h1 {
 }
 
 .settingsNavigationItem[aria-current="page"] {
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  font-weight: 650;
+  background: var(--settings-sidebar-selected);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.settingsNavigationItem:focus-visible,
+.settingsBack:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 
 .settingsDetail {
@@ -3301,20 +3336,22 @@ h1 {
 }
 
 .settingsSection {
-  padding: 12px 0;
+  min-width: 0;
+  padding: 0;
 }
 
 .settingsSubsection {
   display: grid;
-  gap: 12px;
-  padding-top: 20px;
+  gap: 14px;
+  padding-top: 28px;
 }
 
 .settingsSubsection h3,
 .settingsSubsection h4 {
   margin: 0;
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: 15px;
+  font-weight: 600;
 }
 
 .settingsCollection {
@@ -3324,23 +3361,22 @@ h1 {
 
 .modelCards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
 }
 
 .modelCard {
   position: relative;
   min-width: 0;
   align-self: start;
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .modelCardSummary {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 42px 12px 12px;
+  padding: 16px 42px 16px 0;
   cursor: pointer;
   list-style: none;
 }
@@ -3353,7 +3389,7 @@ h1 {
 .modelCard details[open] > summary > svg { transform: rotate(180deg); }
 .modelCardSummary:focus-visible { outline: 2px solid var(--text-primary); outline-offset: -2px; }
 .modelCardRemove { position: absolute; top: 9px; right: 6px; }
-.modelCardFields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 0 12px 12px; }
+.modelCardFields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding: 0 0 16px; }
 .modelCardFields > label:first-of-type { grid-column: 1 / -1; }
 .modelMigration { grid-column: 1 / -1; display: grid; gap: 8px; font-size: 12px; }
 .modelMigration p { margin: 0; }
@@ -3363,9 +3399,9 @@ h1 {
 .settingsCollectionItem {
   display: grid;
   min-width: 0;
-  gap: 16px;
+  gap: 0;
   border: 1px solid var(--border-subtle);
-  border-radius: 5px;
+  border-radius: 8px;
   padding: 16px;
 }
 
@@ -3388,6 +3424,14 @@ h1 {
   align-items: baseline;
 }
 
+.settingsCollectionItem > .settingsCollectionItemHeader {
+  padding-bottom: 16px;
+}
+
+.settingsCollectionItem > .settingsCollectionHeader {
+  padding: 20px 0 12px;
+}
+
 .settingsSecretRow {
   display: grid;
   min-width: 0;
@@ -3406,6 +3450,18 @@ h1 {
   grid-template-columns: minmax(90px, 0.4fr) minmax(0, 1fr) auto;
   align-items: start;
   gap: 12px;
+}
+
+.settingsSecretItem .settingsField {
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 8px;
+  padding: 0;
+}
+
+.settingsSecretItem .settingsField > :not(.fieldLabel) {
+  grid-column: 1;
 }
 
 .settingsSecretName {
@@ -3437,10 +3493,27 @@ h1 {
   outline-offset: 1px;
 }
 
+.settingsVersionDetails {
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 12px;
+  padding-top: 16px;
+}
+
+.settingsVersionDetails summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.settingsVersionDetails summary:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
 .settingsVersions {
   display: grid;
   gap: 8px;
-  margin: 0;
+  margin: 14px 0 0;
   font-size: 12px;
   color: var(--text-muted);
 }
@@ -3462,36 +3535,112 @@ h1 {
 
 .settingsSectionHeader {
   display: flex;
-  align-items: flex-start;
+  min-width: 0;
+  align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  border-bottom: 1px solid var(--border-subtle);
-  padding-bottom: 14px;
-  color: var(--accent-strong);
+  margin-bottom: 18px;
 }
 
 .settingsSectionHeader .eyebrow {
-  margin-bottom: 4px;
+  display: none;
 }
 
 .settingsSectionHeader h2 {
   margin: 0;
   color: var(--text-primary);
-  font-size: 16px;
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.settingsSectionHeader > svg {
+  display: none;
 }
 
 .settingsFieldGrid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px 20px;
-  padding-top: 20px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-panel);
+  padding: 0 16px;
+}
+
+.settingsFieldGrid > * + * {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.settingsCollectionItem .settingsFieldGrid {
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
 }
 
 .settingsField {
   display: grid;
   min-width: 0;
-  align-content: start;
+  min-height: 64px;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 40%);
+  align-items: center;
+  gap: 4px 20px;
+  padding: 12px 0;
+}
+
+.settingsField > :not(.fieldLabel) {
+  grid-column: 2;
+}
+
+.settingsField > .fieldLabel,
+.settingsToggle strong {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.settingsField > .fieldError:empty {
+  display: none;
+}
+
+.settingsField > .settingsListRow,
+.settingsField > .settingsSecretRow,
+.settingsField > .settingsSecretState,
+.settingsField > .secondaryButton {
+  min-width: 0;
+  grid-column: 2;
+}
+
+.settingsField > .settingsSecretRow {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.settingsField > .secondaryButton {
+  justify-self: start;
+}
+
+.settingsFieldGrid .selectInput,
+.settingsFieldGrid .textInput {
+  min-height: 36px;
+  border-color: var(--border-subtle);
+  border-radius: 7px;
+}
+
+.settingsFieldGrid .textInput:focus,
+.settingsFieldGrid .selectInput:focus {
+  border-color: var(--accent-strong);
+}
+
+.modelCardFields .settingsField {
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr);
   gap: 7px;
+  padding: 0;
+}
+
+.modelCardFields .settingsField > :not(.fieldLabel) {
+  grid-column: 1;
 }
 
 .selectInput {
@@ -3515,33 +3664,80 @@ h1 {
 
 .settingsToggle {
   display: flex;
-  min-height: 38px;
+  min-height: 64px;
   align-items: center;
-  gap: 10px;
-  align-self: end;
-  border: 1px solid var(--border-subtle);
-  border-radius: 5px;
-  background: var(--surface-app);
+  justify-content: space-between;
+  gap: 20px;
+  flex-direction: row-reverse;
   color: var(--text-primary);
   cursor: pointer;
-  padding: 9px 11px;
+  padding: 12px 0;
 }
 
 .settingsToggle input {
-  width: 17px;
-  height: 17px;
-  accent-color: var(--accent-strong);
+  position: relative;
+  width: 36px;
+  height: 21px;
+  flex: 0 0 36px;
+  appearance: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 20px;
+  background: var(--surface-hover);
+  cursor: pointer;
+  margin: 0;
+}
+
+.settingsToggle input::before {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--surface-app);
+  box-shadow: 0 1px 2px #0002;
+  content: "";
+  transition: transform 150ms ease;
+}
+
+.settingsToggle input:checked {
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+}
+
+.settingsToggle input:checked::before {
+  transform: translateX(15px);
+}
+
+.settingsToggle input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.settingsToggle input:disabled {
+  cursor: not-allowed;
 }
 
 .settingsToggle span {
   display: grid;
+  min-width: 0;
   gap: 2px;
-  font-size: 12px;
 }
 
 .settingsToggle small {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.settingsPage .managementTool {
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.settingsPage .managementToolHeader h3 {
+  font-size: 15px;
+  font-weight: 600;
 }
 
 .settingsActions {
@@ -3568,7 +3764,7 @@ h1 {
   }
 
   .settingsPage {
-    grid-template-columns: 200px minmax(0, 1fr);
+    grid-template-columns: 220px minmax(0, 1fr);
   }
 
   .settingsContentInner {
@@ -3583,10 +3779,11 @@ h1 {
   }
 
   .settingsSidebar {
-    gap: 16px;
+    gap: 8px;
+    overflow: visible;
     border-right: 0;
     border-bottom: 1px solid var(--border-subtle);
-    padding: 16px;
+    padding: 10px 16px 12px;
   }
 
   .settingsContentInner {
@@ -3595,12 +3792,17 @@ h1 {
 
   .settingsNavigation {
     display: flex;
+    min-width: 0;
+    gap: 4px;
     flex-wrap: wrap;
   }
 
   .settingsNavigationLabel {
-    width: 100%;
-    padding-left: 0;
+    display: none;
+  }
+
+  .settingsNavigationItem {
+    flex: 0 0 auto;
   }
 
   .settingsServiceStatus {
@@ -3609,7 +3811,30 @@ h1 {
 }
 
 @media (max-width: 680px) {
+  .settingsHeader .pageHeading {
+    align-items: center;
+    flex-direction: row;
+  }
+
+  .settingsField,
   .settingsFieldGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settingsField {
+    gap: 9px;
+    padding: 14px 0;
+  }
+
+  .settingsField > :not(.fieldLabel),
+  .settingsField > .settingsListRow,
+  .settingsField > .settingsSecretRow,
+  .settingsField > .settingsSecretState,
+  .settingsField > .secondaryButton {
+    grid-column: 1;
+  }
+
+  .modelCardFields {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -3620,10 +3845,27 @@ h1 {
   .settingsCollectionItemHeader,
   .settingsCollectionHeader {
     align-items: flex-start;
+    flex-wrap: wrap;
   }
 
   .settingsSecretRow {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settingsSecretItem {
+    grid-template-columns: minmax(0, 1fr) auto;
+    border-top: 1px solid var(--border-subtle);
+    padding-top: 14px;
+  }
+
+  .settingsSecretItem > .settingsField:nth-child(2) {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .settingsSecretItem > .iconButton {
+    grid-column: 2;
+    grid-row: 1;
   }
 
   .settingsSection {

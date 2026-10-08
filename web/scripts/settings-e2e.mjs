@@ -1052,6 +1052,7 @@ export default async function settingsAcceptance({ page, control, output, viewpo
   await waitForSavedSettings(page);
   const competing = await control.command('config-patch {"memory":{"batch_size":12}}');
   await page.bringToFront();
+  await page.getByText("Configuration versions", { exact: true }).click();
   await expect(page.getByRole("definition").filter({ hasText: competing.revision })).toHaveCount(1);
   await expect(page.getByLabel("Maximum iterations", { exact: true })).toHaveValue("61");
   await runtimeSettings(page);

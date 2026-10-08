@@ -55,7 +55,13 @@ from aide.agent.session.restore import (
     StaleRestorePlan,
 )
 from aide.agent.session.session import Session, SessionStoragePartition
-from aide.agent.subagents.models import SubAgentRecord, SubAgentStatus
+from aide.agent.subagents.coordinator import SubAgentPool
+from aide.agent.subagents.models import (
+    SubAgentEvent,
+    SubAgentRecord,
+    SubAgentSourceKind,
+    SubAgentStatus,
+)
 from aide.agent.subagents.ports import SubAgentRecordRepository, SubAgentSessionCoordinator
 from aide.agent.subagents.store import (
     SubAgentRecordStore,
@@ -68,6 +74,8 @@ from aide.agent.tools.mcp_runtime import MCPRuntimeManager, MCPWorkspaceRuntimeM
 from aide.agent.tools.tool_gateway import (
     BUILT_IN_TOOL_NAMES,
     BuiltInToolCatalog,
+    ConfirmationRequest,
+    ConfirmationRequester,
 )
 from aide.agent.workspace_state import WorkspaceState, WorkspaceStateError
 from aide.config.agent_home import AgentHome
@@ -2304,6 +2312,7 @@ class WorkspaceRecord:
             "configured_schedule_level": configuration.runtime.permission_level,
             "skill_loader": self.service.skill_loader,
             "built_in_catalog": self.service.built_in_tool_catalog,
+            "subagent_model_router": runtime.router,
         }
         authority = session
         if authority is None:
@@ -2325,6 +2334,23 @@ class WorkspaceRecord:
                 session=authority, session_id=None, session_run_state=session_state, **loop_kwargs
             )
             executor.bind_confirmation_requester(self.service.confirmation.request)
+            coordinator = self._subagent_coordinator(authority.session_id)
+            if coordinator is None:
+                repository = self.subagent_repository(authority.session_id)
+                child_executor = executor.create_subagent_runner_executor(
+                    repository,
+                    workspace_id=self.workspace_id,
+                    confirmation_for=self._subagent_confirmation_for,
+                )
+                coordinator = SubAgentPool(
+                    repository,
+                    child_executor,
+                    now=local_now,
+                    workspace_id=self.workspace_id,
+                    event_publisher=self,
+                )
+                self.register_subagent_coordinator(coordinator, repository)
+            executor.bind_subagent_coordinator(coordinator)
             return executor
 
         prepared = create_executor(run_state)
@@ -2348,6 +2374,47 @@ class WorkspaceRecord:
             run_state=run_state,
         )
         return handle, selected_bus
+
+    async def publish(self, event: SubAgentEvent) -> None:
+        """Publish a SubAgent event to the active claimant without a Main Run ID."""
+        if event.workspace_id != self.workspace_id:
+            raise ValueError("SubAgent event belongs to a different Workspace")
+        claim = self._claims.get(event.session_id)
+        target_client_ids = () if claim is None else (claim.client_id,)
+        await self.service.emit(
+            event.kind.value,
+            workspace_id=self.workspace_id,
+            session_id=event.session_id,
+            run_id=None,
+            payload={
+                "agent_id": event.agent_id,
+                "revision": event.revision,
+                "data": deepcopy(event.data),
+            },
+            target_client_ids=target_client_ids,
+        )
+
+    def _subagent_confirmation_for(self, record: SubAgentRecord) -> ConfirmationRequester:
+        owner = SubAgentConfirmationOwner(
+            generation_id=uuid4(),
+            workspace_id=self.workspace_id,
+            session_id=record.session_id,
+            agent_id=record.agent_id,
+        )
+        background = record.source.kind is SubAgentSourceKind.SCHEDULE
+
+        async def request(request: ConfirmationRequest) -> ConfirmationDecision:
+            return await self.service.confirmation.request(
+                ConfirmationEnvelope(
+                    request=request,
+                    origin="background" if background else "foreground",
+                    owner=owner,
+                    job_id=record.source.job_id if background else None,
+                    title=record.title if background else None,
+                )
+            )
+
+        return request
 
     async def _get_schedule_loop(self, job_id: str, *, title: str | None = None) -> _LoopState:
         state = self._schedule_loops.get(job_id)

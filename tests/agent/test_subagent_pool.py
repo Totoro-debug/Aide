@@ -14,6 +14,7 @@ from aide.agent.subagents.models import (
     SubAgentCreatorSnapshot,
     SubAgentError,
     SubAgentEvent,
+    SubAgentEventKind,
     SubAgentExecutionResult,
     SubAgentRecord,
     SubAgentSource,
@@ -635,3 +636,155 @@ async def test_job_cancellation_covers_occurrences_without_cancelling_other_sour
     assert (await asyncio.wait_for(pool.wait([records[2].agent_id]), timeout=2))[0].status is (
         SubAgentStatus.COMPLETED
     )
+
+
+@pytest.mark.asyncio
+async def test_pool_publishes_execution_and_terminal_events_with_increasing_revisions(
+    tmp_path: Path,
+) -> None:
+    from aide.agent.subagents.coordinator import SubAgentPool
+
+    class EventPublisher:
+        def __init__(self) -> None:
+            self.events: list[SubAgentEvent] = []
+
+        async def publish(self, event: SubAgentEvent) -> None:
+            self.events.append(event)
+
+    class EventExecutor:
+        async def execute(
+            self,
+            record: SubAgentRecord,
+            *,
+            emit: Callable[[SubAgentEvent], Awaitable[None]],
+        ) -> SubAgentExecutionResult:
+            await emit(
+                SubAgentEvent(
+                    kind=SubAgentEventKind.OUTPUT,
+                    workspace_id="test-workspace",
+                    session_id=record.session_id,
+                    agent_id=record.agent_id,
+                    revision=record.revision + 1,
+                    occurred_at=_NOW,
+                    data={"type": "text_delta", "delta": "partial"},
+                )
+            )
+            return SubAgentExecutionResult(
+                status=SubAgentStatus.COMPLETED,
+                conversation=({"role": "assistant", "content": "finished"},),
+                context_state={},
+                artifact_paths=(),
+                result="finished",
+                error=None,
+                usage={"model_calls": 1, "input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            )
+
+        def request_cancel(self, agent_id: str, *, interrupted: bool = False) -> bool:
+            del agent_id, interrupted
+            return False
+
+    state, session_id = _workspace(tmp_path)
+    repository = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    publisher = EventPublisher()
+    pool = SubAgentPool(
+        repository,
+        EventExecutor(),
+        now=lambda: _NOW,
+        workspace_id="test-workspace",
+        event_publisher=publisher,
+    )
+    record = pool.submit(
+        title="Publish events",
+        task="Emit one output event.",
+        parent_run_id=_RUN_ID,
+        source=SubAgentSource(
+            kind=SubAgentSourceKind.FOREGROUND,
+            restore_run_token=_RESTORE_TOKEN,
+        ),
+        creator_snapshot=_snapshot(),
+    )
+
+    results = await asyncio.wait_for(pool.wait([record.agent_id], timeout_ms=1000), timeout=2)
+    await pool.shutdown()
+
+    assert results[0].status is SubAgentStatus.COMPLETED
+    assert [event.kind for event in publisher.events] == [
+        SubAgentEventKind.STATUS,
+        SubAgentEventKind.STATUS,
+        SubAgentEventKind.OUTPUT,
+        SubAgentEventKind.STATUS,
+    ]
+    assert [event.revision for event in publisher.events] == sorted(
+        {event.revision for event in publisher.events}
+    )
+    assert publisher.events[0].data["status"] == "queued"
+    assert publisher.events[1].data["status"] == "running"
+    assert publisher.events[-1].data["status"] == "completed"
+    terminal = repository.get(record.agent_id)
+    assert terminal is not None
+    assert terminal.revision == publisher.events[-1].revision
+
+
+@pytest.mark.asyncio
+async def test_blocked_event_delivery_preserves_cancellation_and_queued_statuses(
+    tmp_path: Path,
+) -> None:
+    from aide.agent.subagents.coordinator import SubAgentPool
+
+    class BlockedPublisher:
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.events: list[SubAgentEvent] = []
+
+        async def publish(self, event: SubAgentEvent) -> None:
+            self.entered.set()
+            await self.release.wait()
+            self.events.append(event)
+
+    state, session_id = _workspace(tmp_path)
+    repository = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    executor = _ControlledExecutor()
+    publisher = BlockedPublisher()
+    pool = SubAgentPool(
+        repository,
+        executor,
+        now=lambda: _NOW,
+        workspace_id="test-workspace",
+        event_publisher=publisher,
+    )
+    records = []
+    for index in range(9):
+        record = pool.submit(
+            title=f"Task {index}",
+            task="Hold until cancelled.",
+            parent_run_id=_RUN_ID,
+            source=SubAgentSource(
+                kind=SubAgentSourceKind.FOREGROUND,
+                restore_run_token=_RESTORE_TOKEN,
+            ),
+            creator_snapshot=_snapshot(),
+        )
+        records.append(record)
+        executor.release[record.agent_id] = asyncio.Event()
+        executor.cancel_requested[record.agent_id] = asyncio.Event()
+    try:
+        await asyncio.wait_for(publisher.entered.wait(), timeout=2)
+        for _ in range(8):
+            await asyncio.wait_for(executor.started.get(), timeout=2)
+        assert pool.cancel(records[0].agent_id)
+        assert pool.cancel(records[8].agent_id)
+        executor.release[records[0].agent_id].set()
+        cancelled = await asyncio.wait_for(pool.wait([records[0].agent_id]), timeout=2)
+        assert cancelled[0].status is SubAgentStatus.CANCELLED
+        assert records[8].agent_id not in executor.started_ids
+    finally:
+        publisher.release.set()
+        for gate in executor.release.values():
+            gate.set()
+        await pool.shutdown()
+    queued_events = [event for event in publisher.events if event.data.get("status") == "queued"]
+    assert len(queued_events) == 9
+    for record in (records[0], records[8]):
+        events = [event for event in publisher.events if event.agent_id == record.agent_id]
+        assert events[-1].data["status"] == "cancelled"

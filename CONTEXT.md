@@ -84,6 +84,22 @@ _Avoid_: Agent Service, Conversation Session, Runtime Lifetime, Provider retry l
 One complete Agent execution for one input against one Conversation Session, from input acceptance through its final outcome and persistence request.
 _Avoid_: Agent Turn, Runtime, Model call, Tool call
 
+**Main Agent**:
+The Agent executing a foreground user input or a user Schedule occurrence that can delegate independent tasks to SubAgents.
+_Avoid_: SubAgent, independent Personal Agent
+
+**SubAgent**:
+A single-use Agent associated with one Conversation Session that performs one independent delegated task and may outlive the Main Agent Run that created it. It cannot create further SubAgents.
+_Avoid_: Nested Agent, independent Personal Agent
+
+**SubAgent Conversation**:
+The recorded task and model-and-Tool exchanges belonging to one single-use SubAgent, associated with its owning Conversation Session.
+_Avoid_: Conversation Session, Main Agent history
+
+**SubAgent Pool**:
+The execution capacity and waiting queue owned by one Conversation Session for its SubAgents, independently of that Session's current Main Agent Run.
+_Avoid_: Agent Runner, global Run limit, foreground input queue
+
 **ReAct Cycle**:
 One assistant response that requests Tools together with every corresponding Tool result completed before the next model request; a terminal assistant response without Tool calls ends the Agent Run instead of starting another cycle.
 _Avoid_: Agent Run, Model call, individual Tool call, Provider retry

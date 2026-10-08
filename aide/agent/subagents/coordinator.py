@@ -14,6 +14,7 @@ from aide.agent.subagents.models import (
     SubAgentCreatorSnapshot,
     SubAgentError,
     SubAgentEvent,
+    SubAgentEventKind,
     SubAgentExecutionResult,
     SubAgentPage,
     SubAgentRecord,
@@ -22,15 +23,15 @@ from aide.agent.subagents.models import (
     SubAgentStatus,
     SubAgentWaitResult,
 )
-from aide.agent.subagents.ports import SubAgentExecutor, SubAgentRecordRepository
+from aide.agent.subagents.ports import (
+    SubAgentEventPublisher,
+    SubAgentExecutor,
+    SubAgentRecordRepository,
+)
 from aide.agent.subagents.store import SubAgentRequestError, SubAgentStoreError
 from aide.utils.validation import require_aware_datetime
 
 SUBAGENT_POOL_CAPACITY = 8
-
-
-async def _discard_event(event: SubAgentEvent) -> None:
-    del event
 
 
 class SubAgentPool:
@@ -42,6 +43,8 @@ class SubAgentPool:
         executor: SubAgentExecutor,
         *,
         now: Callable[[], datetime] | None = None,
+        workspace_id: str | None = None,
+        event_publisher: SubAgentEventPublisher | None = None,
     ) -> None:
         if not isinstance(getattr(repository, "session_id", None), str):
             raise TypeError("SubAgent Pool requires a Session-scoped record repository")
@@ -51,9 +54,19 @@ class SubAgentPool:
             getattr(executor, "request_cancel", None)
         ):
             raise TypeError("SubAgent Pool requires an executor")
+        if event_publisher is not None:
+            if not isinstance(workspace_id, str) or not workspace_id:
+                raise ValueError("SubAgent event publishing requires a Workspace ID")
+            if not callable(getattr(event_publisher, "publish", None)):
+                raise TypeError("SubAgent event publisher must provide publish")
         self._repository = repository
         self._executor = executor
         self._now = now or (lambda: datetime.now(UTC))
+        self._workspace_id = workspace_id
+        self._event_publisher = event_publisher
+        self._event_revisions: dict[str, int] = {}
+        self._events: deque[SubAgentEvent] = deque()
+        self._event_task: asyncio.Task[None] | None = None
         self._queued: deque[str] = deque()
         self._active: dict[str, asyncio.Task[None]] = {}
         self._cancel_requested: set[str] = set()
@@ -94,6 +107,7 @@ class SubAgentPool:
             source=source,
             creator_snapshot=creator_snapshot,
         )
+        self._publish_status(record)
         self._queued.append(record.agent_id)
         self._start_queued(loop)
         return record
@@ -174,15 +188,18 @@ class SubAgentPool:
                     else "The SubAgent was cancelled."
                 ),
             )
-            self._repository.save(
+            terminal = self._repository.save(
                 replace(
                     record,
                     status=status,
                     finished_at=self._aware_now(),
                     error=terminal_error,
-                    revision=record.revision + 1,
-                )
+                    revision=self._next_revision(record),
+                ),
+                expected_revision=record.revision,
             )
+            self._publish_status(terminal)
+            self._event_revisions.pop(agent_id, None)
             self._storage_failures.discard(agent_id)
             self._cancel_requested.discard(agent_id)
             self._interrupted_requested.discard(agent_id)
@@ -338,6 +355,8 @@ class SubAgentPool:
                     "SubAgent shutdown persistence failed", errors
                 )
             raise shutdown_error
+        if self._event_task is not None:
+            await asyncio.shield(self._event_task)
 
     def _bind_loop(self) -> asyncio.AbstractEventLoop:
         loop = asyncio.get_running_loop()
@@ -366,8 +385,9 @@ class SubAgentPool:
                     revision=record.revision + 1,
                 )
             )
+            self._publish_status(running)
             try:
-                result = await self._executor.execute(running, emit=_discard_event)
+                result = await self._executor.execute(running, emit=self._publish_event)
                 if not isinstance(result, SubAgentExecutionResult):
                     raise TypeError("SubAgent executor returned an invalid result")
             except asyncio.CancelledError:
@@ -384,12 +404,78 @@ class SubAgentPool:
         except Exception:
             logger.exception("SubAgent Pool could not start task {}", agent_id)
         finally:
+            if self._event_publisher is not None:
+                try:
+                    terminal = self._repository.get(agent_id)
+                except Exception:
+                    terminal = None
+                if terminal is not None and terminal.status not in {
+                    SubAgentStatus.QUEUED,
+                    SubAgentStatus.RUNNING,
+                }:
+                    self._publish_status(terminal)
+                    self._event_revisions.pop(agent_id, None)
             self._active.pop(agent_id, None)
             self._cancel_requested.discard(agent_id)
             self._interrupted_requested.discard(agent_id)
             self._signal_waiters()
             if self._loop is not None and not self._loop.is_closed():
                 self._start_queued(self._loop)
+
+    async def _publish_event(self, event: SubAgentEvent) -> None:
+        self._queue_event(event)
+
+    def _queue_event(self, event: SubAgentEvent) -> None:
+        if self._event_publisher is None:
+            return
+        previous_revision = self._event_revisions.get(event.agent_id, -1)
+        revision = max(event.revision, previous_revision + 1)
+        self._events.append(
+            event if revision == event.revision else replace(event, revision=revision)
+        )
+        self._event_revisions[event.agent_id] = revision
+        if self._event_task is None:
+            self._event_task = self._bind_loop().create_task(self._publish_events())
+
+    async def _publish_events(self) -> None:
+        publisher = self._event_publisher
+        if publisher is None:
+            return
+        try:
+            while self._events:
+                event = self._events.popleft()
+                try:
+                    await publisher.publish(event)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("SubAgent event could not be published for {}", event.agent_id)
+        finally:
+            self._event_task = None
+
+    def _publish_status(self, record: SubAgentRecord) -> None:
+        workspace_id = self._workspace_id
+        if self._event_publisher is None or workspace_id is None:
+            return
+        error = record.error
+        event = SubAgentEvent(
+            kind=SubAgentEventKind.STATUS,
+            workspace_id=workspace_id,
+            session_id=record.session_id,
+            agent_id=record.agent_id,
+            revision=record.revision,
+            occurred_at=self._aware_now(),
+            data={
+                "status": record.status.value,
+                "result": record.result,
+                "error": None if error is None else {"code": error.code, "message": error.message},
+                "usage": dict(record.usage or {}),
+            },
+        )
+        self._queue_event(event)
+
+    def _next_revision(self, record: SubAgentRecord) -> int:
+        return max(record.revision, self._event_revisions.get(record.agent_id, -1)) + 1
 
     def _save_result(self, agent_id: str, result: SubAgentExecutionResult) -> None:
         current = self._repository.get(agent_id)
@@ -423,8 +509,9 @@ class SubAgentPool:
                 result=result.result,
                 error=error,
                 usage=result.usage,
-                revision=current.revision + 1,
-            )
+                revision=self._next_revision(current),
+            ),
+            expected_revision=current.revision,
         )
 
     def _save_failure(self, agent_id: str) -> None:
@@ -458,8 +545,9 @@ class SubAgentPool:
                         else "The SubAgent could not complete the task."
                     ),
                 ),
-                revision=current.revision + 1,
-            )
+                revision=self._next_revision(current),
+            ),
+            expected_revision=current.revision,
         )
 
     def _save_interrupted(self, agent_id: str) -> None:
@@ -485,8 +573,9 @@ class SubAgentPool:
                         else "The SubAgent was cancelled."
                     ),
                 ),
-                revision=current.revision + 1,
-            )
+                revision=self._next_revision(current),
+            ),
+            expected_revision=current.revision,
         )
 
     def _completed_results(self, agent_ids: Sequence[str]) -> tuple[SubAgentWaitResult, ...]:

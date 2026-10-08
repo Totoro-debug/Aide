@@ -63,6 +63,9 @@ BUILT_IN_TOOL_NAMES: tuple[str, ...] = (
     "web_fetch",
     "schedule",
     "tool_search",
+    "spawn_agent",
+    "wait_agent",
+    "list_agents",
 )
 _MICRO_COMPRESSION_ELIGIBLE_BUILT_IN_NAMES = frozenset(
     {"exec", "glob", "grep", "list_dir", "read_file", "web_fetch", "web_search"}

@@ -145,7 +145,9 @@ class SubAgentRecordStore:
                 raise
             return record
 
-    def save(self, record: SubAgentRecord) -> SubAgentRecord:
+    def save(
+        self, record: SubAgentRecord, *, expected_revision: int | None = None
+    ) -> SubAgentRecord:
         """Atomically replace one record after validating its revision and state transition."""
         if not isinstance(record, SubAgentRecord):
             raise TypeError("record must be a SubAgentRecord")
@@ -162,7 +164,7 @@ class SubAgentRecordStore:
             existing = self._read_record(path, directory=directory)
             if record == existing:
                 return existing
-            self._validate_update(existing, record)
+            self._validate_update(existing, record, expected_revision=expected_revision)
             self._write_record(path, record, directory=directory)
             return record
 
@@ -437,7 +439,12 @@ class SubAgentRecordStore:
             raise SubAgentRequestError("cursor is invalid for this Session") from error
 
     @staticmethod
-    def _validate_update(existing: SubAgentRecord, candidate: SubAgentRecord) -> None:
+    def _validate_update(
+        existing: SubAgentRecord,
+        candidate: SubAgentRecord,
+        *,
+        expected_revision: int | None = None,
+    ) -> None:
         if (
             candidate.session_id != existing.session_id
             or candidate.agent_id != existing.agent_id
@@ -450,7 +457,10 @@ class SubAgentRecordStore:
             or candidate.task != existing.task
         ):
             raise SubAgentStoreError("SubAgent registration fields cannot be changed")
-        if candidate.revision != existing.revision + 1:
+        previous_revision = (
+            candidate.revision - 1 if expected_revision is None else expected_revision
+        )
+        if previous_revision != existing.revision or candidate.revision <= existing.revision:
             raise SubAgentStoreError("SubAgent record revision is stale")
         if existing.status is SubAgentStatus.QUEUED:
             allowed = {

@@ -58,15 +58,26 @@ from aide.agent.session.session import (
     SessionRestoreBefore,
     SessionStoragePartition,
 )
+from aide.agent.subagents.context import SubAgentToolContext
+from aide.agent.subagents.executor import SubAgentRunnerExecutor
+from aide.agent.subagents.models import (
+    SubAgentCreatorSnapshot,
+    SubAgentRecord,
+    SubAgentSource,
+    SubAgentSourceKind,
+)
+from aide.agent.subagents.ports import SubAgentRecordRepository, SubAgentSessionCoordinator
 from aide.agent.tools.base import BaseTool
 from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.core.exec_host import ExecHost
+from aide.agent.tools.core.subagents import build_subagent_tools
 from aide.agent.tools.deferred import build_agent_run_gateway
 from aide.agent.tools.permission import MCPToolIdentity, PermissionContext
 from aide.agent.tools.tool_gateway import (
     BuiltInToolCatalog,
     ConfirmationDecision,
     ConfirmationRequest,
+    ConfirmationRequester,
     ToolGateway,
     ToolResult,
 )
@@ -81,7 +92,12 @@ from aide.errors import (
 from aide.logging.session import session_log
 from aide.management.service import RuntimeStatusInput
 from aide.provider.errors import ModelCallError
-from aide.provider.model_router import ModelRouterDelegate, ModelRouteStatus, RunModelRouter
+from aide.provider.model_router import (
+    ModelRouter,
+    ModelRouterDelegate,
+    ModelRouteStatus,
+    RunModelRouter,
+)
 from aide.provider.models import (
     ModelCompleted,
     ModelRoute,
@@ -211,6 +227,7 @@ class AgentRunExecutor:
         session: Session | None = None,
         built_in_catalog: BuiltInToolCatalog | None = None,
         session_run_state: SessionRunState | None = None,
+        subagent_model_router: ModelRouter | None = None,
     ) -> None:
         if workspace_state.workspace_path != workspace_path:
             raise ValueError("Agent Loop Workspace State must belong to the Workspace")
@@ -230,7 +247,11 @@ class AgentRunExecutor:
             workspace=workspace_path,
             schedule_service=schedule_service,
             skill_root=skill_loader.root,
-            additional_tools=tuple(mcp_tools),
+            additional_tools=(
+                (*tuple(mcp_tools), *build_subagent_tools())
+                if subagent_model_router is not None
+                else tuple(mcp_tools)
+            ),
             exec_host=exec_host,
             tool_context=ToolRunContext(
                 workspace=workspace_path,
@@ -287,6 +308,8 @@ class AgentRunExecutor:
         self._baseline_tool_schemas = baseline_tool_schemas
         self._mcp_keywords = selected_mcp_keywords
         self._model_router = model_router
+        self._subagent_model_router = subagent_model_router
+        self._subagent_coordinator: SubAgentSessionCoordinator | None = None
         self._max_iterations = configuration.runtime.max_iterations
         self._bus = bus
         self._generation_started_at: float | None = None
@@ -329,6 +352,7 @@ class AgentRunExecutor:
         excluded_names: Sequence[str] = (),
         permission_snapshot: PermissionSnapshot | None = None,
         permission_context: PermissionContext | None = None,
+        tool_context: ToolRunContext | None = None,
     ) -> ToolGateway:
         return build_agent_run_gateway(
             self._tool_gateway,
@@ -336,6 +360,127 @@ class AgentRunExecutor:
             mcp_keywords=self._mcp_keywords,
             permission_snapshot=permission_snapshot,
             permission_context=permission_context,
+            tool_context=tool_context,
+        )
+
+    def bind_subagent_coordinator(
+        self,
+        coordinator: SubAgentSessionCoordinator,
+    ) -> None:
+        """Bind the Service-owned pool for this executor's Session."""
+        if self._subagent_model_router is None:
+            raise RuntimeError("SubAgent tools are not enabled for this Agent Loop")
+        if coordinator.session_id != self._session.session_id:
+            raise ValueError("SubAgent coordinator belongs to a different Session")
+        if self._subagent_coordinator is not None:
+            raise RuntimeError("Agent Loop SubAgent coordinator is already bound")
+        self._subagent_coordinator = coordinator
+
+    def create_subagent_runner_executor(
+        self,
+        repository: SubAgentRecordRepository,
+        *,
+        workspace_id: str,
+        confirmation_for: Callable[[SubAgentRecord], ConfirmationRequester | None],
+    ) -> SubAgentRunnerExecutor:
+        """Build the child executor from this Service Loop's shared runtime resources."""
+        model_router = self._subagent_model_router
+        if model_router is None:
+            raise RuntimeError("SubAgent execution requires the shared Service Model Router")
+        return SubAgentRunnerExecutor(
+            workspace_id=workspace_id,
+            workspace_state=self._workspace_state,
+            repository=repository,
+            model_router=model_router,
+            tool_gateway=self._tool_gateway,
+            compact_ratio=self._configuration.runtime.compact_ratio,
+            max_iterations=self._configuration.runtime.max_iterations,
+            max_tool_result_chars=self._configuration.runtime.max_tool_result_chars,
+            enable_tool_micro_compression=(
+                self._configuration.runtime.enable_tool_micro_compression
+            ),
+            mcp_keywords=self._mcp_keywords,
+            confirmation_for=confirmation_for,
+            tool_context_for=self._subagent_tool_context_for,
+            file_mutation_recorder_for=lambda record: FileBackupStore(
+                self._workspace_state,
+                record.session_id,
+            ),
+            now=self._now,
+        )
+
+    def _subagent_tool_context_for(self, record: SubAgentRecord) -> SubAgentToolContext:
+        coordinator = self._subagent_coordinator
+        if coordinator is None:
+            raise RuntimeError("SubAgent coordinator is unavailable for this Agent Run")
+        return SubAgentToolContext(
+            coordinator=coordinator,
+            parent_run_id=record.parent_run_id,
+            source=record.source,
+            creator_snapshot=record.creator_snapshot,
+        )
+
+    def _subagent_run_gateway(
+        self,
+        context: _AgentRunContext,
+        run_gateway: ToolGateway,
+        *,
+        source: SubAgentSource,
+        parent_run_id: str,
+        permission_snapshot: PermissionSnapshot,
+        permission_context: PermissionContext | None = None,
+        session_model_configuration: SessionModelConfiguration | None = None,
+        excluded_names: Sequence[str] = (),
+        system_prompt: str,
+    ) -> ToolGateway:
+        coordinator = self._subagent_coordinator
+        if coordinator is None:
+            raise RuntimeError("SubAgent coordinator is unavailable for this Agent Run")
+        shared_router = self._subagent_model_router
+        if shared_router is None:
+            raise RuntimeError("SubAgent execution requires the shared Service Model Router")
+        route_status = context.router.call_route_status(context.route, continuation=None)
+        if session_model_configuration is not None:
+            reasoning_effort = session_model_configuration.reasoning_effort
+        elif context.route == "chat" or route_status.selected_route in {"default", "chat"}:
+            reasoning_effort = shared_router.reasoning_effort
+        else:
+            reasoning_effort = self._configuration.resolve_route(
+                route_status.selected_route
+            ).route.reasoning_effort
+        snapshot = SubAgentCreatorSnapshot(
+            provider_id=route_status.provider_id,
+            model=route_status.model,
+            reasoning_effort=reasoning_effort,
+            permission_level=permission_snapshot.level,
+            shell=self._exec_host.resolved_shell.selector,
+            tool_schemas=tuple(
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": deepcopy(tool.parameters),
+                }
+                for tool in run_gateway.catalog
+            ),
+            system_prompt=system_prompt,
+        )
+        base_context = self._tool_gateway.tool_context
+        if base_context is None:
+            raise RuntimeError("SubAgent execution requires a Tool Run context")
+        tool_context = replace(
+            base_context,
+            subagent=SubAgentToolContext(
+                coordinator=coordinator,
+                parent_run_id=parent_run_id,
+                source=source,
+                creator_snapshot=snapshot,
+            ),
+        )
+        return self._new_run_gateway(
+            excluded_names=excluded_names,
+            permission_context=permission_context,
+            permission_snapshot=(None if permission_context is not None else permission_snapshot),
+            tool_context=tool_context,
         )
 
     async def wait_for_restore_idle(self) -> None:
@@ -683,8 +828,17 @@ class AgentRunExecutor:
                 workspace_root=self._workspace_state.workspace_path,
             )
         )
+        subagents_eligible = (
+            self._subagent_coordinator is not None
+            and occurrence is not None
+            and permission_snapshot is not None
+        )
         run_gateway = self._new_run_gateway(
-            excluded_names=("schedule",),
+            excluded_names=(
+                ("schedule",)
+                if subagents_eligible
+                else ("schedule", "spawn_agent", "wait_agent", "list_agents")
+            ),
             permission_context=permission_context,
         )
 
@@ -700,6 +854,23 @@ class AgentRunExecutor:
             route="schedule",
             project_messages=project_messages,
         )
+        if subagents_eligible:
+            assert occurrence is not None and permission_snapshot is not None
+            occurrence_id = str(occurrence.occurrence_id)
+            run_gateway = self._subagent_run_gateway(
+                run_context,
+                run_gateway,
+                source=SubAgentSource(
+                    kind=SubAgentSourceKind.SCHEDULE,
+                    job_id=job.job_id,
+                    occurrence_id=occurrence_id,
+                ),
+                parent_run_id=occurrence_id,
+                permission_snapshot=permission_snapshot,
+                permission_context=permission_context,
+                excluded_names=("schedule",),
+                system_prompt=self._context_builder.schedule_system_prompt(),
+            )
         schedule_confirmation: (
             Callable[[ConfirmationRequest], Awaitable[ConfirmationDecision]] | None
         ) = None
@@ -1129,7 +1300,31 @@ class AgentRunExecutor:
         else:
             staged_blackboard = None
             framing_usage = None
-        run_gateway = self._new_run_gateway(permission_snapshot=permission_snapshot)
+        subagents_eligible = (
+            self._subagent_coordinator is not None
+            and restore_run_token is not None
+        )
+        run_gateway = self._new_run_gateway(
+            excluded_names=(
+                () if subagents_eligible else ("spawn_agent", "wait_agent", "list_agents")
+            ),
+            permission_snapshot=permission_snapshot,
+        )
+        if subagents_eligible:
+            assert restore_run_token is not None
+            parent_run_id = str(restore_run_token)
+            run_gateway = self._subagent_run_gateway(
+                run_context,
+                run_gateway,
+                source=SubAgentSource(
+                    kind=SubAgentSourceKind.FOREGROUND,
+                    restore_run_token=parent_run_id,
+                ),
+                parent_run_id=parent_run_id,
+                permission_snapshot=permission_snapshot,
+                session_model_configuration=session_model_configuration,
+                system_prompt=self._context_builder.foreground_system_prompt(),
+            )
         try:
             initial_messages = await self._prepare_agent_run(
                 run_context,

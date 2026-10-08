@@ -28,6 +28,7 @@ from aide.agent.runner import (
     AgentRunnerToolCallFinished,
     AgentRunnerToolCallStarted,
 )
+from aide.agent.subagents.context import SubAgentToolContext
 from aide.agent.subagents.models import (
     SubAgentError,
     SubAgentEvent,
@@ -122,6 +123,7 @@ class SubAgentRunnerExecutor:
         mcp_keywords: Mapping[str, Sequence[str]] | None = None,
         confirmation_for: SubAgentConfirmationFactory | None = None,
         file_mutation_recorder_for: SubAgentFileMutationRecorderFactory | None = None,
+        tool_context_for: Callable[[SubAgentRecord], SubAgentToolContext] | None = None,
         exec_shell_resolver: ExecShellResolver = resolve_exec_shell,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -162,6 +164,7 @@ class SubAgentRunnerExecutor:
         self._mcp_keywords = {} if mcp_keywords is None else deepcopy(dict(mcp_keywords))
         self._confirmation_for = confirmation_for
         self._file_mutation_recorder_for = file_mutation_recorder_for
+        self._tool_context_for = tool_context_for
         self._exec_shell_resolver = exec_shell_resolver
         self._now = now or (lambda: datetime.now(UTC))
         self._cancellations: dict[str, _Cancellation] = {}
@@ -240,7 +243,7 @@ class SubAgentRunnerExecutor:
 
             async def publish(kind: SubAgentEventKind, data: dict[str, Any]) -> None:
                 nonlocal event_revision
-                event_revision += 1
+                event_revision = max(event_revision, current_record[0].revision) + 1
                 await emit(
                     SubAgentEvent(
                         kind=kind,
@@ -316,8 +319,9 @@ class SubAgentRunnerExecutor:
                         context_state=next_context_state,
                         artifact_paths=next_artifact_paths,
                         usage=usage,
-                        revision=current.revision + 1,
-                    )
+                        revision=max(current.revision + 1, event_revision),
+                    ),
+                    expected_revision=current.revision,
                 )
                 runner_message_count = len(messages)
                 await publish(SubAgentEventKind.USAGE, {"usage": usage})
@@ -418,6 +422,7 @@ class SubAgentRunnerExecutor:
             workspace=workspace,
             schedule_service=None if base_context is None else base_context.schedule_service,
             exec_host=exec_host,
+            subagent=(None if self._tool_context_for is None else self._tool_context_for(record)),
         )
         permission_snapshot = PermissionSnapshot(
             level=cast(ToolPermissionLevel, creator.permission_level),

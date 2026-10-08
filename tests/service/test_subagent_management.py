@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import aiohttp
@@ -33,9 +33,18 @@ from aide.agent.subagents.store import (
     SubAgentRequestError,
     SubAgentStoreError,
 )
-from aide.agent.tools.tool_gateway import ConfirmationRequest
+from aide.agent.tools.tool_gateway import ConfirmationRequest, ModelToolCall
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.config import ConfigLoader
+from aide.provider.models import (
+    AssistantModelMessage,
+    ModelCompleted,
+    ModelMessages,
+    ModelResponse,
+    ModelStreamEvent,
+    ModelUsage,
+    TextDelta,
+)
 from aide.schedule.model import JobSchedule, ScheduleJob
 from aide.service.discovery import create_credential, read_credential
 from aide.service.errors import ServiceError
@@ -156,6 +165,253 @@ class _DelayedExecutor(_HoldingExecutor):
         return True
 
 
+class _DelegatingProvider:
+    def __init__(self) -> None:
+        self.child_started = asyncio.Event()
+        self.release_child = asyncio.Event()
+        self.old_result_seen = asyncio.Event()
+        self.agent_id: str | None = None
+        self.parent_tool_names: list[set[str]] = []
+        self.child_tool_names: set[str] = set()
+        self.child_tool_results: list[dict[str, Any]] = []
+        self.write_path: str | None = None
+        self.allow_write = asyncio.Event()
+        self.write_seen = asyncio.Event()
+        self.spawn_requested = False
+        self.wait_requested = False
+        self.wait_result_contents: list[str] = []
+        self.direct_schedule_tool_names: list[set[str]] = []
+        self.requests: list[tuple[str, set[str]]] = []
+
+    @staticmethod
+    def _response(content: str, *, tool_call: ModelToolCall | None = None) -> ModelResponse:
+        calls = () if tool_call is None else (tool_call,)
+        return ModelResponse(
+            message=AssistantModelMessage(content=content, tool_calls=calls),
+            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+            finish_reason="tool_calls" if calls else "stop",
+        )
+
+    @classmethod
+    def _events(
+        cls, content: str, *, tool_call: ModelToolCall | None = None
+    ) -> AsyncIterator[ModelStreamEvent]:
+        async def emit() -> AsyncIterator[ModelStreamEvent]:
+            yield ModelCompleted(cls._response(content, tool_call=tool_call))
+
+        return emit()
+
+    def stream(
+        self,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        model: str,
+        max_output: int,
+        temperature: float,
+        reasoning_effort: object,
+        timeout: int,
+        continuation: object = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        del model, max_output, temperature, reasoning_effort, timeout, continuation
+        tool_names = {
+            name
+            for tool in tools
+            if isinstance(tool.get("function"), dict)
+            and isinstance((name := tool["function"].get("name")), str)
+        }
+        latest_user_index = max(
+            (index for index, message in enumerate(messages) if message.get("role") == "user"),
+            default=-1,
+        )
+        user_text = "\n".join(str(message.get("content", "")) for message in messages)
+        self.requests.append((user_text, tool_names))
+        current_tool_results = [
+            message
+            for message in messages[latest_user_index + 1 :]
+            if message.get("role") == "tool"
+        ]
+
+        if "Direct schedule integration request" in user_text:
+            self.direct_schedule_tool_names.append(tool_names)
+            return self._events("Direct schedule completed.")
+
+        if (
+            "initial delegation request" in user_text
+            and "follow-up result request" not in user_text
+        ):
+            self.parent_tool_names.append(tool_names)
+            if self.spawn_requested:
+                return self._events("Main run completed.")
+            if "spawn_agent" not in tool_names:
+                return self._events(
+                    "",
+                    tool_call=ModelToolCall(
+                        "search-spawn",
+                        "tool_search",
+                        '{"query":"spawn agent"}',
+                    ),
+                )
+            self.spawn_requested = True
+            return self._events(
+                "",
+                tool_call=ModelToolCall(
+                    "spawn-child",
+                    "spawn_agent",
+                    '{"title":"Delegated answer","task":"Make delegated integration answer."}',
+                ),
+            )
+
+        if "follow-up result request" in user_text:
+            self.parent_tool_names.append(tool_names)
+            if self.wait_requested:
+                self.wait_result_contents = [
+                    str(message.get("content", "")) for message in current_tool_results
+                ]
+                if any("SubAgent child answer" in content for content in self.wait_result_contents):
+                    self.old_result_seen.set()
+                return self._events("Old result retrieved.")
+            if "wait_agent" not in tool_names:
+                return self._events(
+                    "",
+                    tool_call=ModelToolCall(
+                        "search-wait",
+                        "tool_search",
+                        '{"query":"wait agent"}',
+                    ),
+                )
+            self.wait_requested = True
+            agent_id = self.agent_id or ""
+            return self._events(
+                "",
+                tool_call=ModelToolCall(
+                    "wait-child",
+                    "wait_agent",
+                    json.dumps({"agent_ids": [agent_id]}),
+                ),
+            )
+
+        if "spawn_agent" not in tool_names and "list_agents" not in tool_names:
+            return self._events(
+                "",
+                tool_call=ModelToolCall(
+                    "search-list",
+                    "tool_search",
+                    '{"query":"list agents"}',
+                ),
+            )
+        if "spawn_agent" not in tool_names:
+            self.child_tool_names = tool_names
+            self.child_tool_results = current_tool_results
+            for name, call_id in (
+                ("list_agents", "child-list"),
+                ("spawn_agent", "child-spawn-denied"),
+                ("wait_agent", "child-wait-denied"),
+                ("schedule", "child-schedule-denied"),
+            ):
+                if not any(
+                    result.get("tool_call_id") == call_id for result in current_tool_results
+                ):
+                    return self._events("", tool_call=ModelToolCall(call_id, name, "{}"))
+            if self.write_path is not None:
+                if "write_file" not in tool_names:
+                    return self._events(
+                        "",
+                        tool_call=ModelToolCall(
+                            "child-search-write", "tool_search", '{"query":"write file"}'
+                        ),
+                    )
+                if not any(
+                    result.get("tool_call_id") == "child-write" for result in current_tool_results
+                ):
+
+                    async def write_child() -> AsyncIterator[ModelStreamEvent]:
+                        self.child_started.set()
+                        await self.allow_write.wait()
+                        yield ModelCompleted(
+                            self._response(
+                                "",
+                                tool_call=ModelToolCall(
+                                    "child-write",
+                                    "write_file",
+                                    json.dumps({"path": self.write_path, "content": "child edit"}),
+                                ),
+                            )
+                        )
+
+                    return write_child()
+                self.write_seen.set()
+
+            async def complete_child() -> AsyncIterator[ModelStreamEvent]:
+                self.child_started.set()
+                await self.release_child.wait()
+                yield TextDelta("SubAgent ")
+                yield TextDelta("child ")
+                yield TextDelta("answer.")
+                yield ModelCompleted(self._response("SubAgent child answer."))
+
+            return complete_child()
+
+        return self._events("Unexpected model request.")
+
+    async def complete(
+        self,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        model: str,
+        max_output: int,
+        temperature: float,
+        reasoning_effort: object,
+        timeout: int,
+        continuation: object = None,
+    ) -> ModelResponse:
+        del model, max_output, temperature, reasoning_effort, timeout, continuation
+        tool_names = {
+            name
+            for tool in tools
+            if isinstance(tool.get("function"), dict)
+            and isinstance((name := tool["function"].get("name")), str)
+        }
+        user_text = "\n".join(str(message.get("content", "")) for message in messages)
+        if "Direct schedule integration request" in user_text:
+            self.direct_schedule_tool_names.append(tool_names)
+            return self._response("Direct schedule completed.")
+        if (
+            "initial delegation request" in user_text
+            and "follow-up result request" not in user_text
+            and "tool_search" in tool_names
+        ):
+            self.parent_tool_names.append(tool_names)
+            if self.spawn_requested:
+                return self._response("Scheduled Main Run completed.")
+            if "spawn_agent" not in tool_names:
+                return self._response(
+                    "",
+                    tool_call=ModelToolCall(
+                        "search-spawn",
+                        "tool_search",
+                        '{"query":"spawn agent"}',
+                    ),
+                )
+            self.spawn_requested = True
+            return self._response(
+                "",
+                tool_call=ModelToolCall(
+                    "spawn-child",
+                    "spawn_agent",
+                    '{"title":"Scheduled answer","task":"Make delegated integration answer."}',
+                ),
+            )
+        return self._response(
+            '{"action":"replace","task_goal":"answer the input",'
+            '"completion_boundary":"return one answer"}'
+        )
+
+    async def close(self) -> None:
+        return None
+
+
 @pytest_asyncio.fixture
 async def management_case(
     tmp_path: Path,
@@ -224,6 +480,291 @@ async def test_subagent_queries_survive_claim_release_and_remain_session_scoped(
                 "923e4567-e89b-42d3-a456-426614174000",
             )
         assert error.value.code == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_foreground_main_run_delegates_and_later_reads_the_completed_result(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    provider = _DelegatingProvider()
+    assert service._model_router is not None
+    assert workspace.resources.router is service._model_router
+    service._model_router._provider_factory = lambda _configuration: provider
+    service._model_router._providers.clear()
+    claim_payload = cast(
+        dict[str, object],
+        (await service.claim(client_id, workspace.workspace_id, session_id))["claim"],
+    )
+    claim_version = cast(int, claim_payload["claim_version"])
+    coordinator = workspace._subagent_coordinator(session_id)
+    assert coordinator is not None
+    sink = cast(_CollectingSink, service.client(client_id).sink)
+
+    try:
+        await workspace.input(
+            client_id,
+            session_id,
+            claim_version,
+            "Please make an initial delegation request.",
+            _RUN_ID,
+        )
+        await asyncio.wait_for(provider.child_started.wait(), timeout=5)
+        await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=5)
+
+        assert any("spawn_agent" in names for names in provider.parent_tool_names)
+        assert "tool_search" in provider.parent_tool_names[0]
+        assert "spawn_agent" not in provider.child_tool_names
+        assert "wait_agent" not in provider.child_tool_names
+        assert "schedule" not in provider.child_tool_names
+        assert "list_agents" in provider.child_tool_names
+        child_results = {item["tool_call_id"]: item for item in provider.child_tool_results}
+        assert child_results["child-list"]["status"] == "success"
+        assert len(json.loads(child_results["child-list"]["content"])["items"]) == 1
+        assert all(
+            child_results[call_id]["status"] == "error"
+            for call_id in ("child-spawn-denied", "child-wait-denied", "child-schedule-denied")
+        )
+        page = service.list_subagents(client_id, workspace.workspace_id, session_id)
+        items = cast(list[dict[str, object]], page["items"])
+        assert len(items) == 1
+        agent_id = cast(str, items[0]["agent_id"])
+        assert items[0]["status"] == "running"
+
+        provider.release_child.set()
+        results = await asyncio.wait_for(
+            coordinator.wait([agent_id], timeout_ms=3000),
+            timeout=4,
+        )
+        assert results[0].result == "SubAgent child answer."
+        terminal = workspace.subagent_repository(session_id).get(agent_id)
+        assert terminal is not None
+        child_events = [
+            event
+            for event in sink.events
+            if cast(str, event["type"]).startswith("subagent.")
+            and cast(dict[str, object], event["payload"])["agent_id"] == agent_id
+        ]
+        assert child_events
+        assert all(
+            cast(int, cast(dict[str, object], event["payload"])["revision"]) <= terminal.revision
+            for event in child_events
+        )
+
+        provider.agent_id = agent_id
+        follow_up_run_id = str(uuid4())
+        await workspace.input(
+            client_id,
+            session_id,
+            claim_version,
+            "Please make a follow-up result request.",
+            follow_up_run_id,
+        )
+        await asyncio.wait_for(sink.wait_for("run.completed", follow_up_run_id), timeout=5)
+        assert provider.old_result_seen.is_set(), provider.wait_result_contents
+    finally:
+        provider.release_child.set()
+
+
+@pytest.mark.asyncio
+async def test_schedule_occurrence_delegates_and_direct_schedule_hides_subagent_tools(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    service, workspace, _client_id, _session_id, _other_session_id = management_case
+    provider = _DelegatingProvider()
+    assert service._model_router is not None
+    service._model_router._provider_factory = lambda _configuration: provider
+    service._model_router._providers.clear()
+    job = ScheduleJob(
+        job_id=str(uuid4()),
+        message="Please make an initial delegation request.",
+        title="Scheduled delegation",
+        schedule=JobSchedule.every(3600),
+        created_at_ms=1,
+        updated_at_ms=1,
+    )
+    await workspace.schedule_service.add_user_job(job)
+    workspace.schedule_service._reserve(job, current_monotonic=asyncio.get_running_loop().time())
+
+    try:
+        try:
+            await asyncio.wait_for(provider.child_started.wait(), timeout=5)
+        except TimeoutError:
+            pytest.fail(
+                f"Schedule SubAgent did not start; requests={provider.requests!r}; "
+                f"jobs={await workspace.schedule_service.public_snapshot()!r}"
+            )
+        for _ in range(500):
+            if job.job_id not in workspace.schedule_service._active_runs:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("Schedule Job did not finish while its SubAgent remained active.")
+
+        schedule_loop = workspace._schedule_loops[job.job_id].loop
+        assert any(
+            message.get("content") == "Scheduled Main Run completed."
+            for message in schedule_loop.session.messages
+        )
+        repository = workspace.subagent_repository(job.session_id)
+        items = repository.list().items
+        assert len(items) == 1
+        record = repository.get(items[0].agent_id)
+        assert record is not None
+        assert record.status is SubAgentStatus.RUNNING
+        assert record.source.kind is SubAgentSourceKind.SCHEDULE
+        assert record.source.job_id == job.job_id
+        assert record.source.occurrence_id is not None
+        permission_snapshot = workspace._capture_schedule_permission_snapshot()
+        assert workspace._exec_host is not None
+        assert record.creator_snapshot.permission_level == permission_snapshot.level
+        assert record.creator_snapshot.shell == workspace._exec_host.resolved_shell.selector
+        assert all("schedule" not in names for names in provider.parent_tool_names)
+
+        provider.release_child.set()
+        coordinator = workspace._subagent_coordinator(job.session_id)
+        assert coordinator is not None
+        result = await asyncio.wait_for(
+            coordinator.wait([record.agent_id], timeout_ms=3000),
+            timeout=4,
+        )
+        assert result[0].result == "SubAgent child answer."
+
+        provider.spawn_requested = False
+        workspace.schedule_service._reserve(
+            job, current_monotonic=asyncio.get_running_loop().time()
+        )
+        await asyncio.wait_for(workspace.schedule_service._active_runs[job.job_id].task, timeout=5)
+        assert workspace._subagent_coordinator(job.session_id) is coordinator
+        records = [repository.get(item.agent_id) for item in repository.list().items]
+        assert len(records) == 2
+        assert len({record.source.occurrence_id for record in records if record is not None}) == 2
+        for scheduled_record in records:
+            assert scheduled_record is not None
+            await asyncio.wait_for(coordinator.wait([scheduled_record.agent_id]), timeout=4)
+            with pytest.raises(ServiceError) as cross_session:
+                service.get_subagent(
+                    _client_id, workspace.workspace_id, _session_id, scheduled_record.agent_id
+                )
+            assert cross_session.value.code == "not_found"
+
+        direct_job = ScheduleJob(
+            job_id=str(uuid4()),
+            message="Direct schedule integration request.",
+            title="Direct Schedule",
+            schedule=JobSchedule.at("2000-01-01T00:00:00.000+00:00"),
+            created_at_ms=1,
+            updated_at_ms=1,
+        )
+        direct_loop = await workspace._get_schedule_loop(
+            direct_job.job_id,
+            title=direct_job.title,
+        )
+        await direct_loop.loop.run_schedule_job(direct_job)
+        assert provider.direct_schedule_tool_names
+        assert not (
+            {"spawn_agent", "wait_agent", "list_agents"} & provider.direct_schedule_tool_names[0]
+        )
+    finally:
+        provider.release_child.set()
+
+
+@pytest.mark.asyncio
+async def test_real_child_confirmation_cancel_and_file_restore_after_claim_release(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    service, workspace, client_id, session_id, other_session_id = management_case
+    provider = _DelegatingProvider()
+    provider.write_path = "delegated.txt"
+    target = workspace.workspace_path / provider.write_path
+    target.write_text("before child", encoding="utf-8")
+    service.client_permission(client_id).select("read-only")
+    assert service._model_router is not None
+    service._model_router._provider_factory = lambda _configuration: provider
+    service._model_router._providers.clear()
+    mcp_manager = workspace._mcp_manager
+    await service.claim(client_id, workspace.workspace_id, session_id)
+    claim = workspace._claims[session_id]
+    repository = workspace.subagent_repository(session_id)
+    assert isinstance(repository, SubAgentRecordStore)
+    earlier = _complete(repository, _register(repository, "Keep earlier result"))
+    sink = cast(_CollectingSink, service.client(client_id).sink)
+    try:
+        await workspace.input(
+            client_id, session_id, claim.version, "initial delegation request", _RUN_ID
+        )
+        await asyncio.wait_for(provider.child_started.wait(), timeout=5)
+        await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=5)
+        child = next(item for item in repository.list().items if item.agent_id != earlier.agent_id)
+        record = _require_record(repository, child.agent_id)
+        assert record.creator_snapshot.permission_level == "read-only"
+        anchor = next(
+            anchor
+            for anchor in claim.loop.session.restore_candidates()
+            if str(anchor.run_token) == record.source.restore_run_token
+        )
+        await workspace.release(client_id, session_id)
+        # A later permission choice must not change the already registered child's rules.
+        service.client_permission(client_id).select("full-access")
+        provider.allow_write.set()
+
+        async def wait_for_confirmation() -> dict[str, object]:
+            while True:
+                for event in sink.events:
+                    if event["type"] == "confirmation.requested":
+                        return cast(dict[str, object], event["payload"])
+                await asyncio.sleep(0.01)
+
+        confirmation = await asyncio.wait_for(wait_for_confirmation(), timeout=5)
+        assert cast(dict[str, object], confirmation["owner"])["agent_id"] == child.agent_id
+        service.decide_confirmation(client_id, cast(str, confirmation["token"]), "approved")
+        await asyncio.wait_for(provider.write_seen.wait(), timeout=5)
+        assert target.read_text(encoding="utf-8") == "child edit"
+        assert workspace._mcp_manager is mcp_manager
+        assert len(service._model_router._providers) == 1
+        claim = await workspace.claim(client_id, session_id)
+        busy = await service.inspect_restore(
+            client_id,
+            workspace.workspace_id,
+            session_id,
+            claim.version,
+            claim.credential,
+            "restore-live-child",
+            anchor.anchor_id,
+        )
+        assert str(busy["output"]).startswith("model_invalid_request:")
+        cancelled = await service.cancel_subagent(
+            client_id, workspace.workspace_id, session_id, child.agent_id
+        )
+        assert cast(dict[str, object], cancelled["agent"])["status"] == "cancelled"
+        inspected = await service.inspect_restore(
+            client_id,
+            workspace.workspace_id,
+            session_id,
+            claim.version,
+            claim.credential,
+            "inspect-child-file",
+            anchor.anchor_id,
+        )
+        assert inspected.get("restore_plan") is not None
+        restored = await service.commit_restore(
+            client_id,
+            workspace.workspace_id,
+            session_id,
+            claim.version,
+            claim.credential,
+            "restore-child-file",
+            anchor.anchor_id,
+            "files",
+        )
+        assert restored.get("restore_result") is not None
+        assert target.read_text(encoding="utf-8") == "before child"
+        assert repository.get(child.agent_id) is None
+        assert repository.get(earlier.agent_id) == earlier
+        assert Session.load(workspace.workspace_state, other_session_id).messages
+    finally:
+        provider.allow_write.set()
+        provider.release_child.set()
 
 
 @pytest.mark.asyncio
@@ -668,12 +1209,14 @@ async def test_service_close_retries_failed_subagent_checkpoint_before_closing_r
     save = repository.save
     failures_remaining = 2
 
-    def fail_first_interrupted_save(updated: SubAgentRecord) -> SubAgentRecord:
+    def fail_first_interrupted_save(
+        updated: SubAgentRecord, *, expected_revision: int | None = None
+    ) -> SubAgentRecord:
         nonlocal failures_remaining
         if updated.status is SubAgentStatus.INTERRUPTED and failures_remaining:
             failures_remaining -= 1
             raise SubAgentStoreError("temporary storage failure")
-        return save(updated)
+        return save(updated, expected_revision=expected_revision)
 
     monkeypatch.setattr(repository, "save", fail_first_interrupted_save)
     close = asyncio.create_task(service.stop())

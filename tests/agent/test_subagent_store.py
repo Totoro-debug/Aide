@@ -310,6 +310,22 @@ def test_failed_update_keeps_the_previous_complete_record(
     assert store.get(running.agent_id) == running
 
 
+def test_checkpoint_can_cover_stream_revisions_without_accepting_stale_writes(
+    tmp_path: Path,
+) -> None:
+    state, session_id = _workspace(tmp_path)
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    queued = _register(store, "Stream checkpoint")
+    checkpoint = replace(queued, revision=queued.revision + 8)
+    with pytest.raises(SubAgentStoreError, match="stale"):
+        store.save(checkpoint)
+    assert store.save(checkpoint, expected_revision=queued.revision) == checkpoint
+    stale = replace(queued, revision=checkpoint.revision + 8)
+    with pytest.raises(SubAgentStoreError, match="stale"):
+        store.save(stale, expected_revision=queued.revision)
+    assert store.get(queued.agent_id) == checkpoint
+
+
 def test_reopening_marks_only_active_records_interrupted_and_keeps_outputs(
     tmp_path: Path,
 ) -> None:

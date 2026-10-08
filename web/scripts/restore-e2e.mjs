@@ -12,7 +12,38 @@ try {
   browser = await chromium.launch({ channel: process.env.AIDE_E2E_BROWSER_CHANNEL ?? "msedge" });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const errors = [];
+  let restoreTaskRemoved = false;
   page.on("pageerror", error => errors.push(error.message));
+  await page.route(/\/api\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/subagents(?:\?.*)?$/, async route => {
+    const url = new globalThis.URL(route.request().url());
+    const match = url.pathname.match(/\/workspaces\/([^/]+)\/sessions\/([^/]+)\/subagents$/);
+    assert.ok(match, `Unexpected SubAgent list path: ${url.pathname}`);
+    const [, workspaceId, sessionId] = match;
+    if (sessionId !== control.details.restore_session_id) {
+      await route.fulfill({ json: {
+        workspace_id: workspaceId,
+        session_id: sessionId,
+        items: [],
+        next_cursor: null,
+      } });
+      return;
+    }
+    await route.fulfill({ json: {
+      workspace_id: workspaceId,
+      session_id: sessionId,
+      items: restoreTaskRemoved ? [] : [{
+        agent_id: "00000000-0000-4000-8000-000000000335",
+        title: "Restore branch task",
+        status: "completed",
+        created_at: "2026-10-08T00:00:00+00:00",
+        finished_at: "2026-10-08T00:01:00+00:00",
+        result_preview: "Result from discarded restore branch",
+        error: null,
+        usage: { model_calls: 1, input_tokens: 12, output_tokens: 5, total_tokens: 17 },
+      }],
+      next_cursor: null,
+    } });
+  });
   await page.addInitScript(() => {
     window.restoreInputs = [];
     const send = window.WebSocket.prototype.send;
@@ -65,6 +96,15 @@ try {
   }
 
   await selectSession("Web restore history");
+  const subagentTrigger = page.getByRole("button", { name: "SubAgent tasks", exact: true });
+  await expect(subagentTrigger).toBeVisible();
+  await subagentTrigger.click();
+  const subagentPanel = page.getByRole("dialog", { name: "SubAgent tasks", exact: true });
+  await expect(subagentPanel.locator('[data-agent-id="00000000-0000-4000-8000-000000000335"]')).toBeVisible();
+  await expect(subagentPanel.getByText("SubAgents", { exact: true }).locator("..")).toContainText("total 17");
+  await page.keyboard.press("Escape");
+  await expect(subagentPanel).toBeHidden();
+
   await input.fill("Draft preserved on cancel and failure");
   for (const useEscape of [true, false]) {
     await inspect("conversation-only");
@@ -94,6 +134,12 @@ try {
   await expect(page.locator("#restore-anchor-select")).toHaveValue("2");
   const inputCount = await page.evaluate(() => window.restoreInputs.length);
   await execute();
+  restoreTaskRemoved = true;
+  await subagentTrigger.click();
+  await expect(subagentPanel.locator("li[data-agent-id]")).toHaveCount(0);
+  await expect(subagentPanel.getByText("SubAgents", { exact: true }).locator("..")).toContainText("calls 0 · input 0 · output 0 · total 0");
+  await page.keyboard.press("Escape");
+  await expect(subagentPanel).toBeHidden();
   await assertRecovery(multiline);
   await expect(page.getByRole("log").getByText(multiline, { exact: true })).toHaveCount(0);
   await expect(page.getByRole("log").getByText("Restore branch should disappear from history", { exact: true })).toBeVisible();
@@ -101,6 +147,10 @@ try {
   assert.equal(await page.evaluate(() => window.restoreInputs.length), inputCount, "Restore automatically submitted the anchor");
   await notice.getByRole("button", { name: "Close", exact: true }).click();
   await selectSession("Web available history");
+  await subagentTrigger.click();
+  await expect(subagentPanel.locator("li[data-agent-id]")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(subagentPanel).toBeHidden();
   await input.fill("Other Session draft");
   await selectSession("Web restore history");
   await assertRecovery(multiline);

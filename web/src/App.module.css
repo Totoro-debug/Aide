@@ -1893,6 +1893,16 @@ h1 {
   overflow: hidden;
 }
 
+.conversationToolbar {
+  display: flex;
+  width: min(60vw, 100%);
+  min-height: 48px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  margin-inline: auto;
+}
+
 .conversationStage[data-empty="true"] {
   box-sizing: border-box;
   justify-content: center;
@@ -3793,6 +3803,11 @@ h1 {
 
   .conversationViewport {
     max-height: min(52vh, 480px);
+  }
+
+  .conversationToolbar {
+    width: 100%;
+    padding-inline: 16px;
   }
 
   .composer {

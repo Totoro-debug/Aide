@@ -141,6 +141,7 @@ import type {
 } from "./protocol";
 import styles from "./App.module.css";
 import ComposerControls from "./ComposerControls";
+import SubAgentPanel from "./SubAgentPanel";
 import NavigationSidebar from "./NavigationSidebar";
 import WorkspaceMemoryDialog from "./WorkspaceMemoryDialog";
 import type { WorkspaceMemoryTarget } from "./WorkspaceMemoryDialog";
@@ -6558,6 +6559,7 @@ function ProjectSessionsContent({
   const [restoreBusy, setRestoreBusy] = useState(false);
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [restoreNotice, setRestoreNotice] = useState<RestoreResult | null>(null);
+  const [subAgentRefreshVersion, setSubAgentRefreshVersion] = useState(0);
   const [pendingRestoreFailure, setPendingRestoreFailure] = useState<RestoreResult | null>(null);
   const [managementOpen, setManagementOpen] = useState(false);
   const [managementPanel, setManagementPanel] = useState<"runtime" | "memory">("runtime");
@@ -7924,6 +7926,7 @@ function ProjectSessionsContent({
       setClaim(nextClaim);
       restorePlanClaimRef.current = null;
       setRestoreNotice(executed.result);
+      setSubAgentRefreshVersion((version) => version + 1);
       setPendingRestoreFailure(executed.result.file_results.some((item) => item.status === "failed")
         && !executed.result.failure_notification_acknowledged ? executed.result : null);
       rememberSession(nextClaim, executed.snapshot);
@@ -8290,6 +8293,20 @@ function ProjectSessionsContent({
                   className={styles.conversationStage}
                   data-empty={snapshot.messages.length === 0 && selectedLiveRuns.length === 0}
                 >
+                  <div className={styles.conversationToolbar}>
+                    <SubAgentPanel
+                      key={`${claim.workspace_id}:${claim.session_id}`}
+                      claim={claim}
+                      connectionState={connectionState}
+                      refreshVersion={subAgentRefreshVersion}
+                      subscribeServiceEvents={subscribeServiceEvents}
+                      renderConversation={(messages) => (
+                        <div className={styles.messageHistory}>
+                          <ConversationHistoryView messages={messages} t={t} />
+                        </div>
+                      )}
+                    />
+                  </div>
                   <div
                     className={styles.conversationViewport}
                     ref={conversationViewportRef}

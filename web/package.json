@@ -23,7 +23,9 @@
     "pretest:e2e:models": "npm run build",
     "test:e2e:models": "node scripts/model-configuration-e2e.mjs",
     "pretest:e2e:layout": "npm run build",
-    "test:e2e:layout": "node scripts/workspace-layout-e2e.mjs"
+    "test:e2e:layout": "node scripts/workspace-layout-e2e.mjs",
+    "pretest:e2e:subagents": "npm run build",
+    "test:e2e:subagents": "node scripts/subagent-e2e.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "1.1.14",

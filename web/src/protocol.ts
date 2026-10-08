@@ -13,6 +13,82 @@ export interface ServiceEvent {
   payload: Record<string, unknown>;
 }
 
+export type SubAgentStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+export type SubAgentEventKind =
+  | "subagent.status"
+  | "subagent.output"
+  | "subagent.activity"
+  | "subagent.usage";
+
+export interface SubAgentUsage {
+  model_calls?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+}
+
+export interface SubAgentError {
+  code: string;
+  message: string;
+}
+
+export interface SubAgentListItem {
+  agent_id: string;
+  title: string;
+  status: SubAgentStatus;
+  created_at: string;
+  finished_at: string | null;
+  result_preview: string | null;
+  error: SubAgentError | null;
+  usage: SubAgentUsage;
+}
+
+export interface SubAgentListResponse {
+  workspace_id: string;
+  session_id: string;
+  items: SubAgentListItem[];
+  next_cursor: string | null;
+}
+
+export interface SubAgentDetail {
+  workspace_id: string;
+  session_id: string;
+  agent_id: string;
+  title: string;
+  task: string;
+  source: "foreground" | "schedule";
+  status: SubAgentStatus;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  revision: number;
+  conversation: Record<string, unknown>[];
+  result: string | null;
+  error: SubAgentError | null;
+  usage: SubAgentUsage;
+}
+
+export interface SubAgentCancelResponse {
+  workspace_id: string;
+  session_id: string;
+  cancelled: boolean;
+  agent: SubAgentDetail;
+}
+
+export interface SubAgentEventPayload {
+  agent_id: string;
+  revision: number;
+  occurred_at: string;
+  data: Record<string, unknown>;
+}
+
 export type ConfirmationOrigin = "foreground" | "background";
 
 export interface ConfirmationRequest {

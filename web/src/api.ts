@@ -53,6 +53,9 @@ import type {
   SkillReloadResponse,
   RuntimeStatusResponse,
   ServiceRestartResponse,
+  SubAgentCancelResponse,
+  SubAgentDetail,
+  SubAgentListResponse,
 } from "./protocol";
 
 const API_PREFIX = "/api/v1";
@@ -270,6 +273,41 @@ export function getWorkspaceSession(
     `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}?claim_version=${claimVersion}`,
     { extraHeaders: { "X-Aide-Claim": claimCredential } },
   ).then((response) => response.snapshot);
+}
+
+export function getSubAgents(
+  workspaceId: string,
+  sessionId: string,
+  options: { cursor?: string; limit?: number } = {},
+): Promise<SubAgentListResponse> {
+  const query = new URLSearchParams();
+  if (options.cursor !== undefined) query.set("cursor", options.cursor);
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  const queryString = query.toString();
+  return request<SubAgentListResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/subagents${queryString ? `?${queryString}` : ""}`,
+  );
+}
+
+export function getSubAgent(
+  workspaceId: string,
+  sessionId: string,
+  agentId: string,
+): Promise<SubAgentDetail> {
+  return request<SubAgentDetail>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}`,
+  );
+}
+
+export function cancelSubAgent(
+  workspaceId: string,
+  sessionId: string,
+  agentId: string,
+): Promise<SubAgentCancelResponse> {
+  return request<SubAgentCancelResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}`,
+    { method: "DELETE", mutation: true },
+  );
 }
 
 export function releaseWorkspaceSession(

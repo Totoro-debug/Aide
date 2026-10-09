@@ -42,10 +42,10 @@ from aide.provider.models import (
 )
 from aide.schedule.history import read_schedule_history
 from aide.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
-from aide.schedule.service import ScheduleClock, ScheduleService
+from aide.schedule.service import ScheduleClock, ScheduleJobExecutionError, ScheduleService
 from aide.schedule.store import WorkspaceScheduleStore
 from aide.templates import render_template
-from tests.configuration.test_config import VALID_CONFIG
+from tests.configuration.test_config import SCHEDULE_ROUTE, VALID_CONFIG
 from tests.fixtures import (
     FakeClock,
     ProviderCall,
@@ -266,7 +266,7 @@ def _agent_loop(
     provider: _ScheduleProvider,
     *,
     schedule_clock: ScheduleClock,
-    config_text: str = VALID_CONFIG,
+    config_text: str = VALID_CONFIG + SCHEDULE_ROUTE,
 ) -> tuple[
     AgentRunExecutor,
     ModelRouter,
@@ -491,6 +491,38 @@ async def test_agent_loop_manages_schedule_jobs_without_confirmation(
         assert _tool_json(loop)[-1]["action"] == "remove"
     finally:
         await _close_components(loop, router, schedule, dream)
+
+
+@pytest.mark.asyncio
+async def test_missing_schedule_route_fails_job_without_affecting_foreground(
+    agent_home: Path,
+    workspace: Path,
+) -> None:
+    provider = _ScheduleProvider(chat_responses=(_response("Foreground works."),))
+    loop, router, schedule, dream, _dispatcher, bus = _agent_loop(
+        agent_home,
+        workspace,
+        provider,
+        schedule_clock=_BlockingClock(NOW),
+        config_text=VALID_CONFIG,
+    )
+    await loop.start()
+    try:
+        await collect_foreground_outbound(bus, "Run foreground.")
+        with pytest.raises(ScheduleJobExecutionError) as raised:
+            await loop.run_schedule_job(_due_job(message="Run Schedule."))
+    finally:
+        await _close_components(loop, router, schedule, dream)
+
+    assert raised.value.error.code == "route_unavailable"
+    assert "[models.routes.schedule]" in raised.value.error.message
+    assert len(provider.stream_requests) == 1
+    persisted = Session.load(
+        WorkspaceState(workspace),
+        f"schedule_{JOB_UUID}",
+        partition=SessionStoragePartition.SCHEDULE,
+    )
+    assert persisted.messages[-1]["error"]["code"] == "route_unavailable"
 
 
 @pytest.mark.asyncio
@@ -1184,7 +1216,7 @@ async def test_concurrent_runs_keep_summaries_and_micro_compression_state_isolat
         workspace,
         provider,
         schedule_clock=clock,
-        config_text=VALID_CONFIG.replace(
+        config_text=(VALID_CONFIG + SCHEDULE_ROUTE).replace(
             "[runtime]\n", "[runtime]\nenable_tool_micro_compression = true\n", 1
         ),
     )
@@ -1481,7 +1513,7 @@ async def test_foreground_and_schedule_artifacts_remain_separate(
             _response("Schedule artifact stored."),
         ),
     )
-    config_text = VALID_CONFIG.replace(
+    config_text = (VALID_CONFIG + SCHEDULE_ROUTE).replace(
         "max_tool_result_chars = 60000", "max_tool_result_chars = 1000"
     )
     loop, router, schedule, dream, _dispatcher, _bus = _agent_loop(

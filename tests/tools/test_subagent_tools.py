@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -101,6 +102,26 @@ def _harness(
         tool_context=ToolRunContext(workspace=workspace, subagent=tool_context),
     )
     return state, repository, pool, executor, gateway
+
+
+@pytest.mark.asyncio
+async def test_spawn_without_creator_snapshot_does_not_register_a_task(tmp_path: Path) -> None:
+    _, repository, _, _, gateway = _harness(tmp_path)
+    context = gateway.tool_context
+    assert context is not None and context.subagent is not None
+    unavailable_gateway = ToolGateway(
+        workspace=context.workspace,
+        additional_tools=build_subagent_tools(),
+        tool_context=replace(context, subagent=replace(context.subagent, creator_snapshot=None)),
+    )
+    result = await unavailable_gateway.call(ModelToolCall(
+        id="spawn",
+        name="spawn_agent",
+        arguments=json.dumps({"title": "Inspect tests", "task": "Find focused tests."}),
+    ))
+    assert result.status == "error"
+    assert "SubAgent Model Route is unavailable" in result.content
+    assert repository.list().items == ()
 
 
 @pytest.mark.asyncio

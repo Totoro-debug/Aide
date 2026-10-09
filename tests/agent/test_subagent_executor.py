@@ -38,6 +38,7 @@ from aide.agent.tools.tool_gateway import (
     ToolGateway,
 )
 from aide.agent.workspace_state import WorkspaceState
+from aide.config.config import UserConfiguration
 from aide.errors import ErrorInfo
 from aide.provider.errors import ModelCallError
 from aide.provider.model_router import ModelRouter
@@ -180,8 +181,17 @@ def _tool_call(name: str, call_id: str, arguments: dict[str, object]) -> ModelCo
 
 def _router(provider: ScriptedFakeProvider) -> ModelRouter:
     return ModelRouter(
-        configuration=configuration(),
+        configuration=_subagent_configuration(configuration()),
         provider_factory=lambda _: provider,
+    )
+
+
+def _subagent_configuration(base: UserConfiguration) -> UserConfiguration:
+    return replace(
+        base,
+        models=replace(base.models, routes={
+            **base.models.routes, "subagent": base.models.routes["chat"],
+        }),
     )
 
 
@@ -592,7 +602,9 @@ async def test_compaction_summaries_are_persisted_in_child_context_state(
         workspace_id="workspace-id",
         workspace_state=state,
         repository=store,
-        model_router=ModelRouter(configuration=config, provider_factory=lambda _: provider),
+        model_router=ModelRouter(
+            configuration=_subagent_configuration(config), provider_factory=lambda _: provider,
+        ),
         tool_gateway=gateway,
         compact_ratio=0.5,
         max_iterations=50,
@@ -635,7 +647,8 @@ def _executor(
         workspace_state=state,
         repository=store,
         model_router=ModelRouter(
-            configuration=configuration(), provider_factory=lambda _: provider
+            configuration=_subagent_configuration(configuration()),
+            provider_factory=lambda _: provider,
         ),
         tool_gateway=gateway,
         compact_ratio=0.9,
@@ -889,7 +902,10 @@ async def test_snapshot_permission_shell_and_model_survive_parent_configuration_
             StreamScript(events=(_response("done"),)),
         )
     )
-    router = ModelRouter(configuration=routed_configuration(), provider_factory=lambda _: provider)
+    router = ModelRouter(
+        configuration=_subagent_configuration(routed_configuration()),
+        provider_factory=lambda _: provider,
+    )
     router.set_reasoning_effort("low")
     assert router.route_status("title").model != snapshot.model
     host = _exec_host()
@@ -1193,7 +1209,9 @@ async def test_compaction_keeps_earlier_model_output_in_the_persisted_conversati
         workspace_id="workspace-id",
         workspace_state=state,
         repository=store,
-        model_router=ModelRouter(configuration=config, provider_factory=lambda _: provider),
+        model_router=ModelRouter(
+            configuration=_subagent_configuration(config), provider_factory=lambda _: provider,
+        ),
         tool_gateway=ToolGateway(
             workspace=state.workspace_path,
             tool_context=_tool_context(state.workspace_path),
@@ -1246,7 +1264,9 @@ async def test_failed_child_summary_save_keeps_its_consumed_memory_usage(tmp_pat
         workspace_id="workspace-id",
         workspace_state=state,
         repository=store,
-        model_router=ModelRouter(configuration=config, provider_factory=lambda _: provider),
+        model_router=ModelRouter(
+            configuration=_subagent_configuration(config), provider_factory=lambda _: provider,
+        ),
         tool_gateway=ToolGateway(
             workspace=state.workspace_path, tool_context=_tool_context(state.workspace_path)
         ),
@@ -1330,7 +1350,9 @@ async def test_concurrent_compaction_keeps_summaries_and_raw_activity_in_each_ch
         workspace_id="workspace-id",
         workspace_state=state,
         repository=store,
-        model_router=ModelRouter(configuration=config, provider_factory=lambda _: provider),
+        model_router=ModelRouter(
+            configuration=_subagent_configuration(config), provider_factory=lambda _: provider,
+        ),
         tool_gateway=ToolGateway._for_memory(
             (_MarkerTool(),),
             permission_context=PermissionContext(workspace_root=state.workspace_path),

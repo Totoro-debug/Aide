@@ -50,7 +50,8 @@ temperature = 0.2
 reasoning_effort = "mid"
 timeout = 120
 
-# Remove any optional purpose-specific route to fall back to chat.
+# Only title and memory fall back to chat when missing or unavailable.
+# Schedule and SubAgent require their own usable routes when enabled.
 [models.routes.chat]
 provider_id = "openai-local"
 model = "replace-with-a-model-id"

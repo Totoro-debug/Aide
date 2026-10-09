@@ -28,6 +28,7 @@ from aide.service.discovery import create_credential
 from aide.service.errors import ServiceError
 from aide.service.runtime import AgentService, ClientState, SessionClaim, WorkspaceRecord
 from aide.service.transport import create_app
+from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
 from tests.memory.test_dream import _response
 from tests.service.test_protocol_contract import _validator
@@ -53,6 +54,18 @@ async def management_case(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> AsyncIterator[ManagementCase]:
     home = _prepare_agent_home(tmp_path / "agent-home")
+    (home.path / "config.toml").write_text(
+        MINIMAL_VALID_CONFIG + """
+[models.routes.schedule]
+provider_id = "primary"
+model = "small-model"
+context_window = 8192
+max_output = 1024
+temperature = 0
+timeout = 30
+""",
+        encoding="utf-8",
+    )
     path = tmp_path / "workspace"
     path.mkdir()
     session_id = await _persist_session(

@@ -271,16 +271,16 @@ class UserConfiguration:
     web: WebConfiguration = field(default_factory=WebConfiguration)
 
     def resolve_route(self, requested_route: str) -> ResolvedModelRoute:
-        """Resolve a Model Route, using chat for unavailable auxiliary routes."""
+        """Resolve a route, using chat only for unavailable title and memory routes."""
         _require_supported_route(requested_route)
 
         candidate = _usable_route(self.models, requested_route)
         selected_route = requested_route
-        if candidate is None and requested_route != "chat":
+        if candidate is None and requested_route in {"title", "memory"}:
             candidate = _usable_route(self.models, "chat")
             selected_route = "chat"
         if candidate is None:
-            raise _route_unavailable_error(self.models)
+            raise _route_unavailable_error(self.models, requested_route)
         provider, route = candidate
         if provider.model_configurations is not None:
             route = _configured_model_route(provider.provider_id, route.model,
@@ -324,7 +324,9 @@ class UserConfiguration:
             raise ValueError("Session Model Configuration has no known context window")
         selected = self.resolve_route(requested_route)
         if capacity <= selected.route.max_output:
-            raise ValueError("Session Model Configuration cannot satisfy the chat output budget")
+            raise ValueError(
+                "Session Model Configuration cannot satisfy the selected route output budget"
+            )
         route = replace(
             selected.route,
             provider_id=provider_id,
@@ -545,10 +547,15 @@ def _require_supported_route(requested_route: str) -> None:
         _invalid("models.routes", "was requested with an unsupported route name")
 
 
-def _route_unavailable_error(models: ModelsConfiguration) -> ConfigError:
-    message = "Chat Model Route is unavailable."
-    if "chat" not in models.routes:
-        message = "Chat Model Route is missing. Add [models.routes.chat] to User Configuration."
+def _route_unavailable_error(models: ModelsConfiguration, requested_route: str) -> ConfigError:
+    route_name = "chat" if requested_route in {"title", "memory"} else requested_route
+    label = "SubAgent" if route_name == "subagent" else route_name.capitalize()
+    message = f"{label} Model Route is unavailable."
+    if route_name not in models.routes:
+        message = (
+            f"{label} Model Route is missing. "
+            f"Add [models.routes.{route_name}] to User Configuration."
+        )
     return ConfigError(ErrorInfo("route_unavailable", message))
 
 

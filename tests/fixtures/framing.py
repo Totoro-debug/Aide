@@ -10,7 +10,7 @@ from copy import deepcopy
 from typing import Any, cast
 
 from aide.agent.runner import AgentRunnerRoute, AgentRunnerRouter
-from aide.config.config import UserConfiguration
+from aide.config.config import ConfigError, UserConfiguration
 from aide.provider.model_router import ModelAttemptGuard, ModelRouteStatus
 from aide.provider.models import (
     ModelContinuation,
@@ -34,11 +34,18 @@ class TaskFramingRouterAdapter:
         self._outcomes = None if outcomes is None else deque(outcomes)
         self.framing_requests: list[ModelMessages] = []
         self._configured_statuses: dict[ModelRoute, ModelRouteStatus] = {}
+        self._unavailable_routes: dict[ModelRoute, ConfigError] = {}
         self._last_statuses: dict[ModelRoute, ModelRouteStatus] = {}
 
     def bind_configuration(self, configuration: UserConfiguration) -> None:
         for route in cast(tuple[ModelRoute, ...], ("chat", "title", "schedule", "memory", "subagent")):
-            resolved = configuration.resolve_route(route)
+            try:
+                resolved = configuration.resolve_route(route)
+            except ConfigError as error:
+                if error.error.code != "route_unavailable":
+                    raise
+                self._unavailable_routes[route] = error
+                continue
             self._configured_statuses[route] = ModelRouteStatus(
                 requested_route=route,
                 selected_route=cast(ModelRoute, resolved.selected_route),
@@ -152,6 +159,8 @@ class TaskFramingRouterAdapter:
                 return status
         status = self._configured_statuses.get(route)
         if status is None:
+            if route in self._unavailable_routes:
+                raise self._unavailable_routes[route]
             raise AssertionError("test Router requires a bound configuration")
         return status
 
@@ -165,6 +174,8 @@ class TaskFramingRouterAdapter:
     ) -> None:
         status = self._configured_statuses.get(route)
         if status is None:
+            if route in self._unavailable_routes:
+                raise self._unavailable_routes[route]
             raise AssertionError("test Router requires a bound configuration")
         self._last_statuses[route] = status
         if guard is not None:

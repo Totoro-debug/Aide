@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Protocol, cast
 
 from loguru import logger
 
@@ -25,6 +25,7 @@ from aide.provider.session_configuration import SessionModelConfiguration
 _MAX_ATTEMPTS = 5
 _RETRYABLE_CODES = frozenset({"provider_rate_limited", "provider_timeout", "provider_unavailable"})
 _FALLBACK_CODES = frozenset({"route_unavailable", "provider_auth_error"})
+_FALLBACK_ROUTES = frozenset({"title", "memory"})
 
 
 class RetryClock(Protocol):
@@ -257,7 +258,7 @@ class ModelRouter:
         session_model_configuration: SessionModelConfiguration | None = None,
         subagent_model_configuration: SessionModelConfiguration | None = None,
     ) -> RunModelRouter:
-        """Bind a per-attempt guard and final route status to an Agent Run."""
+        """Bind a per-selected-route guard and final route status to an Agent Run."""
         return RunModelRouter(
             self,
             guard=guard,
@@ -358,8 +359,11 @@ class ModelRouter:
         if continuation is not None and continuation.provider_id != resolved.provider.provider_id:
             continuation = None
 
+        guarded_route: ResolvedModelRoute | None = None
         for attempt in range(1, _MAX_ATTEMPTS + 1):
-            self._check_attempt_guard(resolved, messages=messages, tools=tools, guard=guard)
+            if guarded_route is not resolved:
+                self._check_attempt_guard(resolved, messages=messages, tools=tools, guard=guard)
+                guarded_route = resolved
             provider = self._provider(resolved.provider)
             emitted = False
             try:
@@ -436,8 +440,11 @@ class ModelRouter:
         if continuation is not None and continuation.provider_id != resolved.provider.provider_id:
             continuation = None
 
+        guarded_route: ResolvedModelRoute | None = None
         for attempt in range(1, _MAX_ATTEMPTS + 1):
-            self._check_attempt_guard(resolved, messages=messages, tools=tools, guard=guard)
+            if guarded_route is not resolved:
+                self._check_attempt_guard(resolved, messages=messages, tools=tools, guard=guard)
+                guarded_route = resolved
             provider = self._provider(resolved.provider)
             try:
                 return await provider.complete(
@@ -515,8 +522,12 @@ class ModelRouter:
         publish_route_status: bool,
     ) -> ResolvedModelRoute:
         code = failure.error.code
+        may_fallback = (
+            current.requested_route in _FALLBACK_ROUTES
+            and current.selected_route != "chat"
+        )
         if failure.error.retryable and code in _RETRYABLE_CODES:
-            if current.selected_route != "chat" and attempt == _MAX_ATTEMPTS - 1:
+            if may_fallback and attempt == _MAX_ATTEMPTS - 1:
                 return self._fallback_to_chat(
                     current, failure, attempt=attempt,
                     reasoning_effort=reasoning_effort,
@@ -538,7 +549,7 @@ class ModelRouter:
         allows_fallback = code in _FALLBACK_CODES or (
             code == "provider_unavailable" and not failure.error.retryable
         )
-        if current.selected_route == "chat" or not allows_fallback or attempt == _MAX_ATTEMPTS:
+        if not may_fallback or not allows_fallback or attempt == _MAX_ATTEMPTS:
             raise failure
         return self._fallback_to_chat(
             current, failure, attempt=attempt,
@@ -635,20 +646,10 @@ class ModelRouter:
         session_model_configuration: SessionModelConfiguration | None,
         subagent_model_configuration: SessionModelConfiguration | None,
     ) -> ResolvedModelRoute:
-        if continuation is not None:
+        if continuation is not None and requested_route in _FALLBACK_ROUTES:
             previous = self.current_call_status(requested_route)
             if previous is not None and previous.provider_id == continuation.provider_id:
-                selected = (
-                    session_model_configuration if requested_route == "chat"
-                    else subagent_model_configuration if requested_route == "subagent" else None
-                )
-                if selected is not None and previous.selected_route == requested_route:
-                    resolved = self._configuration.resolve_session_model_route(
-                        selected.provider_id, selected.model, selected.reasoning_effort,
-                        requested_route=cast(Literal["chat", "subagent"], requested_route),
-                    )
-                else:
-                    resolved = self._configuration.resolve_route(previous.selected_route)
+                resolved = self._configuration.resolve_route(previous.selected_route)
                 if (
                     resolved.selected_route == previous.selected_route
                     and resolved.provider.provider_id == previous.provider_id
@@ -666,20 +667,12 @@ class ModelRouter:
                 session_model_configuration.reasoning_effort,
             )
         if subagent_model_configuration is not None and requested_route == "subagent":
-            resolved = self._configuration.resolve_session_model_route(
+            return self._configuration.resolve_session_model_route(
                 subagent_model_configuration.provider_id,
                 subagent_model_configuration.model,
                 subagent_model_configuration.reasoning_effort,
                 requested_route="subagent",
             )
-            configured = self._configuration.resolve_route("subagent")
-            if (
-                configured.used_fallback
-                and configured.provider.provider_id == resolved.provider.provider_id
-                and configured.route.model == resolved.route.model
-            ):
-                return replace(resolved, selected_route="chat", used_fallback=True)
-            return resolved
         return self._configuration.resolve_route(requested_route)
 
     def _remember_current_call_status(

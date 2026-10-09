@@ -55,7 +55,7 @@ model = "your-model-id"
 
 选择支持工具调用的模型，替换服务地址、API Key 和两处模型 ID。模型的上下文窗口、最大输出、温度、默认推理强度和请求超时集中配置在 Provider 下的模型中；路由仅引用 Provider 和模型。按模型实际限制设置 `context_window` 与 `max_output`，单位为 token，后者必须小于前者。
 
-`protocol` 支持 `openai-compatible` 和 `anthropic`；只配置 `chat` 路由即可用于对话、标题、记忆、定时任务和 SubAgent。更多选项见[配置模板](aide/templates/default-config.md)。
+`protocol` 支持 `openai-compatible` 和 `anthropic`。`chat` 路由用于对话；`title`、`memory` 未配置或不可用时可降级到 `chat`。定时任务和 SubAgent 分别需要可用的 `schedule`、`subagent` 路由，均不会降级。更多选项见[配置模板](aide/templates/default-config.md)。
 
 Web 模型设置以小卡片编辑参数，点击 Provider 下的加号添加模型；chat、title、memory、schedule、subagent 从已配置的 Provider 和模型中选择。保存设置后，所有会话从下一轮 AgentRun 开始生效，无需重启服务。切换会话模型时采用所选模型自身的输出上限等参数，会话显式推理强度覆盖模型默认值。
 

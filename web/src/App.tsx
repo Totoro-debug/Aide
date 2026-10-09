@@ -3027,7 +3027,7 @@ function SettingsView({
                   return (
                   <div className={styles.settingsCollectionItem} key={route.name} id={fieldId(`models.routes.${route.name}`)} tabIndex={-1}>
                     <div className={styles.settingsCollectionItemHeader}>
-                      <h4>{route.name === "chat" ? t("settings.chatFallback") : route.name}</h4>
+                      <h4>{route.name === "chat" ? t("settings.chatRequired") : route.name}</h4>
                       <button
                         className={styles.iconButton}
                         type="button"

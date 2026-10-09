@@ -61,7 +61,8 @@ temperature = 0.2
 reasoning_effort = "mid"
 timeout = 120
 
-# Remove any optional purpose-specific route to fall back to chat.
+# Only title and memory fall back to chat when missing or unavailable.
+# Schedule and SubAgent require their own usable routes when enabled.
 [models.routes.chat]
 provider_id = "openai-local"
 model = "replace-with-a-model-id"
@@ -582,7 +583,7 @@ def test_startup_gate_does_not_resolve_provider_or_model_usability(agent_home: P
     assert configuration.models.routes["chat"].provider_id == "anthropic-default"
 
 
-def test_schedule_route_resolves_directly_and_falls_back_to_default_when_unusable(
+def test_schedule_route_resolves_directly_and_fails_when_unusable(
     agent_home: Path,
 ) -> None:
     loader = ConfigLoader(AgentHome(agent_home))
@@ -608,25 +609,22 @@ def test_schedule_route_resolves_directly_and_falls_back_to_default_when_unusabl
     )
     configuration = loader.load()
 
-    fallback = configuration.resolve_route("schedule")
-
-    assert (
-        fallback.requested_route,
-        fallback.selected_route,
-        fallback.provider.provider_id,
-        fallback.route.model,
-        fallback.used_fallback,
-    ) == ("schedule", "chat", "anthropic-default", "claude-model", True)
+    with pytest.raises(ConfigError) as raised:
+        configuration.resolve_route("schedule")
+    assert raised.value.error.code == "route_unavailable"
+    assert raised.value.error.message == "Schedule Model Route is unavailable."
 
 
-@pytest.mark.parametrize("purpose", ("title", "memory", "schedule", "subagent"))
+@pytest.mark.parametrize("purpose", ("chat", "title", "memory", "schedule", "subagent"))
 @pytest.mark.parametrize("availability", ("configured", "missing", "missing_provider", "missing_model", "unusable_provider"))
-def test_auxiliary_routes_use_chat_when_their_model_is_unavailable(
+def test_only_title_and_memory_use_chat_when_their_model_is_unavailable(
     agent_home: Path, purpose: str, availability: str,
 ) -> None:
     loader = ConfigLoader(AgentHome(agent_home))
     loader.ensure_default()
     content = VALID_CONFIG
+    if purpose == "chat":
+        content = content.partition("\n[models.routes.chat]")[0] + "\n"
     if availability == "unusable_provider":
         content += """
 [models.providers.unusable]
@@ -654,11 +652,19 @@ timeout = 120
 """
     loader.path.write_text(content, encoding="utf-8")
 
-    resolved = loader.load_for_startup().resolve_route(purpose)
+    configuration = loader.load_for_startup() if purpose != "chat" or availability == "configured" else loader.load()
+    if availability != "configured" and purpose in {"chat", "schedule", "subagent"}:
+        with pytest.raises(ConfigError) as raised:
+            configuration.resolve_route(purpose)
+        assert raised.value.error.code == "route_unavailable"
+        if availability == "missing":
+            assert f"[models.routes.{purpose}]" in raised.value.error.message
+        return
 
+    resolved = configuration.resolve_route(purpose)
     selected = purpose if availability == "configured" else "chat"
     assert (resolved.requested_route, resolved.selected_route, resolved.used_fallback) == (
-        purpose, selected, selected == "chat",
+        purpose, selected, selected != purpose,
     )
     assert resolved.route.model == "claude-model"
 

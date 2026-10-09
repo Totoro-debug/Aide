@@ -2409,7 +2409,7 @@ async def test_runner_final_projection_changes_revision_and_repeats_stably(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "change",
-    ("message", "tools", "route", "capacity", "estimator", "continuation", "micro"),
+    ("message", "tools", "model", "capacity", "estimator", "continuation", "micro"),
 )
 async def test_react_revision_changes_for_each_model_visible_input_source(
     workspace: Path,
@@ -2470,15 +2470,15 @@ async def test_react_revision_changes_for_each_model_visible_input_source(
         changed["tools"] = (
             {"type": "function", "function": {"name": "new_tool", "parameters": {}}},
         )
-    elif change == "route":
+    elif change == "model":
         changed["route_status"] = ModelRouteStatus(
             requested_route="chat",
-            selected_route="default",
+            selected_route="chat",
             provider_id="other-provider",
             model="other-model",
             context_window=1_000,
             max_output=200,
-            used_fallback=True,
+            used_fallback=False,
         )
     elif change == "capacity":
         changed["route_status"] = ModelRouteStatus(

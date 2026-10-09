@@ -83,7 +83,7 @@ from aide.agent.tools.tool_gateway import (
 )
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
-from aide.config.config import UserConfiguration
+from aide.config.config import ConfigError, UserConfiguration
 from aide.errors import (
     MODEL_CONTEXT_OVERFLOW_MESSAGE,
     TURN_CANCELLED_MESSAGE,
@@ -459,22 +459,24 @@ class AgentRunExecutor:
         shared_router = self._subagent_model_router
         if shared_router is None:
             raise RuntimeError("SubAgent execution requires the shared Service Model Router")
-        route_status = shared_router.call_route_status("subagent", continuation=None)
-        if route_status.selected_route == "chat":
-            reasoning_effort = shared_router.reasoning_effort
+        try:
+            route_status = shared_router.call_route_status("subagent", continuation=None)
+        except ConfigError as error:
+            if error.error.code != "route_unavailable":
+                raise
+            snapshot = None
         else:
-            reasoning_effort = self._configuration.resolve_route(
-                route_status.selected_route
-            ).route.reasoning_effort
-        snapshot = SubAgentCreatorSnapshot(
-            provider_id=route_status.provider_id,
-            model=route_status.model,
-            reasoning_effort=reasoning_effort,
-            permission_level=permission_snapshot.level,
-            shell=self._exec_host.resolved_shell.selector,
-            tool_names=tuple(tool.name for tool in run_gateway.catalog),
-            system_prompt=system_prompt,
-        )
+            snapshot = SubAgentCreatorSnapshot(
+                provider_id=route_status.provider_id,
+                model=route_status.model,
+                reasoning_effort=(
+                    self._configuration.resolve_route("subagent").route.reasoning_effort
+                ),
+                permission_level=permission_snapshot.level,
+                shell=self._exec_host.resolved_shell.selector,
+                tool_names=tuple(tool.name for tool in run_gateway.catalog),
+                system_prompt=system_prompt,
+            )
         base_context = self._tool_gateway.tool_context
         if base_context is None:
             raise RuntimeError("SubAgent execution requires a Tool Run context")
@@ -488,7 +490,9 @@ class AgentRunExecutor:
             ),
         )
         return self._new_run_gateway(
-            excluded_names=excluded_names,
+            excluded_names=(
+                (*excluded_names, "spawn_agent") if snapshot is None else excluded_names
+            ),
             permission_context=permission_context,
             permission_snapshot=(None if permission_context is not None else permission_snapshot),
             tool_context=tool_context,
@@ -943,6 +947,10 @@ class AgentRunExecutor:
                 raise asyncio.CancelledError() from None
             if failure.error.code == "model_context_overflow":
                 raise ScheduleJobExecutionError(failure.error) from failure
+            self._commit_schedule_failure(session, run_context, current_user, failure.error, job)
+        except ConfigError as failure:
+            if self._aborted:
+                raise asyncio.CancelledError() from None
             self._commit_schedule_failure(session, run_context, current_user, failure.error, job)
         except Exception as failure:
             if self._aborted:

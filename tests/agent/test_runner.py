@@ -201,7 +201,7 @@ async def test_runner_uses_run_local_router_and_request_provenance_recorder() ->
         ) -> dict[str, object]:
             del request_messages, tools, response, increment
             self.recorded += 1
-            return {"selected_route": "default"}
+            return {"selected_route": "chat"}
 
     initial_messages = [{"role": "user", "content": "request"}]
     router = Router()
@@ -218,7 +218,7 @@ async def test_runner_uses_run_local_router_and_request_provenance_recorder() ->
     )
 
     assert preparer.recorded == 1
-    assert result.messages[0]["context_usage"] == {"selected_route": "default"}
+    assert result.messages[0]["context_usage"] == {"selected_route": "chat"}
 
 
 class _ClosingRouter:

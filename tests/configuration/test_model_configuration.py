@@ -111,7 +111,9 @@ async def test_session_switch_uses_selected_model_request_parameters(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_memory_schedule_and_default_fallback_use_model_parameters(tmp_path: Path) -> None:
+async def test_memory_uses_model_parameters_while_missing_schedule_route_fails(
+    tmp_path: Path,
+) -> None:
     loader = model_loader(tmp_path, MODEL_CONFIG.replace(
         '[models.routes.schedule]\nprovider_id = "primary"\nmodel = "vendor/small.v1"\n', "",
     ))
@@ -119,16 +121,16 @@ async def test_memory_schedule_and_default_fallback_use_model_parameters(tmp_pat
         message=AssistantModelMessage(content="done"),
         usage=ModelUsage(input_tokens=10, output_tokens=1, total_tokens=11), finish_reason="stop",
     )
-    provider = ScriptedFakeProvider(completions=[response, response])
+    provider = ScriptedFakeProvider(completions=[response])
     router = ModelRouter(configuration=loader.load(), provider_factory=lambda _configuration: provider)
-    for purpose in ("memory", "schedule"):
-        await router.complete(purpose, messages=[{"role": "user", "content": "hello"}], tools=[])
-    memory, schedule = provider.complete_requests
+    await router.complete("memory", messages=[{"role": "user", "content": "hello"}], tools=[])
+    with pytest.raises(ConfigError) as raised:
+        await router.complete("schedule", messages=[{"role": "user", "content": "hello"}], tools=[])
+    assert raised.value.error.code == "route_unavailable"
+    assert len(provider.complete_requests) == 1
+    memory = provider.complete_requests[0]
     assert (memory.model, memory.max_output, memory.temperature, memory.timeout) == (
         "vendor/small.v1", 512, 0.7, 17,
-    )
-    assert (schedule.model, schedule.max_output, schedule.temperature, schedule.timeout) == (
-        "large", 16384, 0.1, 91,
     )
     await router.close()
 

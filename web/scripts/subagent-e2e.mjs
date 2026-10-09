@@ -263,7 +263,7 @@ try {
   });
   const alphaActivity = panel.getByRole("group", { name: "Run activity", exact: true });
   await expect(alphaActivity).toHaveCount(1);
-  await alphaActivity.locator("summary").click();
+  await alphaActivity.locator(":scope > summary").click();
   await expect(alphaActivity.getByText("read_file", { exact: true })).toBeVisible();
   const alphaCheckpoint = fixtureDetails.get(taskIds[0]);
   alphaCheckpoint.revision = 11;
@@ -272,10 +272,11 @@ try {
   ] });
   serviceEvent("snapshot.required", taskIds[0], 11, {});
   await expect(alphaActivity.getByText("alpha live", { exact: true })).toHaveCount(1);
-  if (!await alphaActivity.evaluate((element) => element.open)) await alphaActivity.locator("summary").click();
+  if (!await alphaActivity.evaluate((element) => element.open)) await alphaActivity.locator(":scope > summary").click();
   serviceEvent("subagent.activity", taskIds[0], 12, {
     type: "tool_call_finished", tool_call_id: "alpha-tool", tool_name: "read_file", status: "success", result: "Alpha tool result",
   });
+  await alphaActivity.locator("li details > summary").click();
   await expect(alphaActivity.getByText("Alpha tool result", { exact: true })).toBeVisible();
   serviceEvent("subagent.output", taskIds[0], 13, { type: "text_delta", delta: "Alpha final output" });
   const completedAlpha = fixtureDetails.get(taskIds[0]);

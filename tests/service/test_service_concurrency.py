@@ -290,7 +290,18 @@ def _response(content: str) -> ModelResponse:
 def _configured_home(path: Path) -> AgentHome:
     home = AgentHome(path)
     home.initialize()
-    (home.path / "config.toml").write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
+    (home.path / "config.toml").write_text(
+        MINIMAL_VALID_CONFIG + """
+[models.routes.schedule]
+provider_id = "primary"
+model = "small-model"
+context_window = 8192
+max_output = 1024
+temperature = 0
+timeout = 30
+""",
+        encoding="utf-8",
+    )
     return home
 
 

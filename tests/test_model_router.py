@@ -104,6 +104,17 @@ def routed_configuration() -> UserConfiguration:
     )
 
 
+def multi_turn_configuration() -> UserConfiguration:
+    configured = routed_configuration()
+    routes = configured.models.routes
+    return replace(
+        configured,
+        models=replace(configured.models, routes={
+            **routes, "schedule": routes["title"], "subagent": routes["title"],
+        }),
+    )
+
+
 def same_provider_routed_configuration() -> UserConfiguration:
     default = configuration()
     provider = ProviderConfiguration(
@@ -1282,6 +1293,86 @@ async def test_retryable_auxiliary_failure_reserves_the_fifth_attempt_for_chat()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("route", ("chat", "schedule", "subagent"))
+@pytest.mark.parametrize("stream", (False, True))
+async def test_multi_turn_routes_do_not_fallback_after_permanent_failure(
+    route: ModelRoute, stream: bool,
+) -> None:
+    failure = permanent_failure()
+    providers = {
+        provider_id: ScriptedFakeProvider(
+            streams=(StreamScript(events=(), error=failure),),
+            completions=(failure,),
+        )
+        for provider_id in ("default-provider", "chat-provider")
+    }
+    router = ModelRouter(
+        configuration=multi_turn_configuration(),
+        provider_factory=lambda provider: providers[provider.provider_id],
+        clock=FakeClock(NOW),
+        jitter=None,
+    )
+
+    with pytest.raises(ModelCallError) as raised:
+        if stream:
+            await collect(router.stream(route, **request()))
+        else:
+            await router.complete(route, **request())
+
+    assert raised.value.error.code == "provider_auth_error"
+    selected_provider = "default-provider" if route == "chat" else "chat-provider"
+    for provider_id, provider in providers.items():
+        calls = provider.stream_requests if stream else provider.complete_requests
+        assert len(calls) == (1 if provider_id == selected_provider else 0)
+    status = router.current_call_status(route)
+    assert status is not None
+    assert status.selected_route == route and not status.used_fallback
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ("chat", "schedule", "subagent"))
+@pytest.mark.parametrize("stream", (False, True))
+async def test_multi_turn_routes_retry_without_fallback_or_rechecking_budget(
+    route: ModelRoute, stream: bool,
+) -> None:
+    failures = tuple(retryable_timeout() for _ in range(5))
+    providers = {
+        provider_id: ScriptedFakeProvider(
+            streams=tuple(StreamScript(events=(), error=failure) for failure in failures),
+            completions=failures,
+        )
+        for provider_id in ("default-provider", "chat-provider")
+    }
+    clock = FakeClock(NOW)
+    router = ModelRouter(
+        configuration=multi_turn_configuration(),
+        provider_factory=lambda provider: providers[provider.provider_id],
+        clock=clock,
+        jitter=None,
+    )
+    guarded: list[ModelRouteStatus] = []
+
+    def guard(status: ModelRouteStatus, _messages: object, _tools: object) -> bool:
+        guarded.append(status)
+        return True
+
+    with pytest.raises(ModelCallError) as raised:
+        if stream:
+            await collect(router.stream(route, **request(), guard=guard))
+        else:
+            await router.complete(route, **request(), guard=guard)
+
+    assert raised.value.error.code == "provider_timeout"
+    selected_provider = "default-provider" if route == "chat" else "chat-provider"
+    for provider_id, provider in providers.items():
+        calls = provider.stream_requests if stream else provider.complete_requests
+        assert len(calls) == (5 if provider_id == selected_provider else 0)
+    assert len(guarded) == 1
+    assert guarded[0].selected_route == route
+    assert clock.sleeps == [0.5, 1.0, 2.0, 4.0]
+
+
+@pytest.mark.asyncio
 async def test_model_router_route_status_recovers_on_the_next_logical_completion() -> None:
     memory_provider = ScriptedFakeProvider(
         completions=(permanent_failure(), response("Memory recovered."))
@@ -1626,16 +1717,15 @@ async def test_subagent_selection_is_bound_independently_of_the_chat_session_mod
 ) -> None:
     base = routed_configuration()
     routes = dict(base.models.routes)
-    if configured:
-        routes["subagent"] = routes["title"]
+    routes["subagent"] = routes["title"] if configured else routes["chat"]
     configuration_with_subagent = replace(base, models=replace(base.models, routes=routes))
     chat_provider = ScriptedFakeProvider(
         streams=(StreamScript(events=(completed("SubAgent response"),)),)
     )
-    fallback_provider = ScriptedFakeProvider(
-        streams=(StreamScript(events=(completed("Fallback response"),)),)
+    default_provider = ScriptedFakeProvider(
+        streams=(StreamScript(events=(completed("Default response"),)),)
     )
-    providers = {"chat-provider": chat_provider, "default-provider": fallback_provider}
+    providers = {"chat-provider": chat_provider, "default-provider": default_provider}
     router = ModelRouter(
         configuration=configuration_with_subagent,
         provider_factory=lambda provider: providers[provider.provider_id],
@@ -1660,19 +1750,19 @@ async def test_subagent_selection_is_bound_independently_of_the_chat_session_mod
     await collect(subagent_run.stream("subagent", **request()))
 
     assert (status.requested_route, status.selected_route, status.provider_id) == (
-        "subagent", "subagent" if configured else "chat", selected_provider,
+        "subagent", "subagent", selected_provider,
     )
-    assert status.used_fallback is (not configured)
-    provider = chat_provider if configured else fallback_provider
+    assert status.used_fallback is False
+    provider = chat_provider if configured else default_provider
     assert provider.stream_requests[0].reasoning_effort == "max"
     assert chat_run.call_route_status("chat", continuation=None).provider_id == "chat-provider"
     assert router.route_status("chat").provider_id == "default-provider"
 
 
 @pytest.mark.asyncio
-async def test_model_router_runtime_effort_reaches_routes_inheriting_default() -> None:
+async def test_model_router_runtime_effort_reaches_title_and_memory_inheriting_chat() -> None:
     provider = ScriptedFakeProvider(
-        completions=(response("memory"), response("schedule")),
+        completions=(response("memory"), response("title")),
     )
     router = ModelRouter(
         configuration=configuration(),
@@ -1682,11 +1772,11 @@ async def test_model_router_runtime_effort_reaches_routes_inheriting_default() -
 
     router.set_reasoning_effort("xhigh")
     await router.complete("memory", **request())
-    await router.complete("schedule", **request())
+    await router.complete("title", **request())
 
     assert [call.reasoning_effort for call in provider.complete_requests] == ["xhigh", "xhigh"]
     assert router.route_status("memory").selected_route == "chat"
-    assert router.route_status("schedule").selected_route == "chat"
+    assert router.route_status("title").selected_route == "chat"
 
 
 @pytest.mark.asyncio
@@ -1903,7 +1993,7 @@ async def test_agent_runner_next_tool_loop_request_reads_latest_runtime_effort()
 
 
 @pytest.mark.asyncio
-async def test_model_router_calls_guard_before_each_stream_retry_with_actual_request() -> None:
+async def test_model_router_checks_one_stream_route_once_across_retries() -> None:
     provider = ScriptedFakeProvider(
         streams=(
             StreamScript(events=(), error=retryable_timeout()),
@@ -1927,17 +2017,8 @@ async def test_model_router_calls_guard_before_each_stream_retry_with_actual_req
     observed = await collect(router.stream("title", messages=messages, tools=tools, guard=guard))
 
     assert observed == [completed("retried")]
-    assert len(guard_calls) == 2
+    assert len(guard_calls) == 1
     assert [call[0] for call in guard_calls] == [
-        ModelRouteStatus(
-            requested_route="title",
-            selected_route="title",
-            provider_id="chat-provider",
-            model="chat-model",
-            context_window=200_000,
-            max_output=8192,
-            used_fallback=False,
-        ),
         ModelRouteStatus(
             requested_route="title",
             selected_route="title",
@@ -1951,12 +2032,8 @@ async def test_model_router_calls_guard_before_each_stream_retry_with_actual_req
     assert all(call[1] is messages for call in guard_calls)
     assert all(call[2] is tools for call in guard_calls)
     assert len(provider.stream_requests) == 2
-    assert [call[1] for call in guard_calls] == [
-        provider_call.messages for provider_call in provider.stream_requests
-    ]
-    assert [call[2] for call in guard_calls] == [
-        provider_call.tools for provider_call in provider.stream_requests
-    ]
+    assert all(call.messages == messages for call in provider.stream_requests)
+    assert all(call.tools == tools for call in provider.stream_requests)
 
 
 @pytest.mark.asyncio
@@ -2299,7 +2376,7 @@ async def test_run_model_router_preserves_retry_and_continuation(explicit_select
         None,
         continuation,
     ]
-    assert len(guarded_attempts) == 3
+    assert len(guarded_attempts) == 2
     assert run.current_call_status(route) == guarded_attempts[-1]
     if explicit_selection:
         assert [call.reasoning_effort for call in provider.complete_requests] == ["high"] * 3

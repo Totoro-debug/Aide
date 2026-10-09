@@ -15,14 +15,16 @@ class SubAgentToolContext:
     coordinator: SubAgentSessionCoordinator
     parent_run_id: str
     source: SubAgentSource
-    creator_snapshot: SubAgentCreatorSnapshot
+    creator_snapshot: SubAgentCreatorSnapshot | None
 
     def __post_init__(self) -> None:
         if not isinstance(self.parent_run_id, str) or not self.parent_run_id.strip():
             raise ValueError("SubAgent Tool Context parent_run_id must not be empty")
         if not isinstance(self.source, SubAgentSource):
             raise TypeError("SubAgent Tool Context requires a valid task source")
-        if not isinstance(self.creator_snapshot, SubAgentCreatorSnapshot):
+        if self.creator_snapshot is not None and not isinstance(
+            self.creator_snapshot, SubAgentCreatorSnapshot
+        ):
             raise TypeError("SubAgent Tool Context requires a creator snapshot")
         if not isinstance(getattr(self.coordinator, "session_id", None), str):
             raise TypeError("SubAgent Tool Context requires a Session coordinator")

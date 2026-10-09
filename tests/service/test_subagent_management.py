@@ -12,9 +12,11 @@ from uuid import uuid4
 import aiohttp
 import pytest
 import pytest_asyncio
+import tomlkit
 from aiohttp.test_utils import TestServer
 
 from aide.agent.confirmation import ConfirmationEnvelope, SubAgentConfirmationOwner
+from aide.agent.runner import AgentRunner, AgentRunnerResult
 from aide.agent.session.deletion import begin_session_deletion
 from aide.agent.session.session import Session
 from aide.agent.subagents.coordinator import SubAgentPool
@@ -36,6 +38,7 @@ from aide.agent.subagents.store import (
 )
 from aide.agent.tools.tool_gateway import ConfirmationRequest, ModelToolCall, ToolGateway
 from aide.agent.workspace_state import WorkspaceState
+from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigLoader
 from aide.provider.models import (
     AssistantModelMessage,
@@ -61,6 +64,20 @@ _RUN_ID = "123e4567-e89b-42d3-a456-426614174000"
 _RESTORE_TOKEN = "123e4567-e89b-42d3-a456-426614174001"
 
 
+def _add_model_routes(home: AgentHome, *names: str) -> None:
+    path = home.path / "config.toml"
+    document = tomlkit.parse(path.read_text(encoding="utf-8"))
+    models = cast(tomlkit.items.Table, document["models"])
+    routes = cast(tomlkit.items.Table, models["routes"])
+    chat = cast(tomlkit.items.Table, routes["chat"])
+    for name in names:
+        route = tomlkit.table()
+        for key, value in chat.items():
+            route[key] = value
+        routes[name] = route
+    path.write_text(tomlkit.dumps(document), encoding="utf-8")
+
+
 def _snapshot() -> SubAgentCreatorSnapshot:
     return SubAgentCreatorSnapshot(
         provider_id="test-provider",
@@ -73,7 +90,7 @@ def _snapshot() -> SubAgentCreatorSnapshot:
     )
 
 
-def _register(repository: SubAgentRecordStore, title: str) -> SubAgentRecord:
+def _register(repository: SubAgentRecordRepository, title: str) -> SubAgentRecord:
     return repository.register(
         title=title,
         task=f"Complete {title}.",
@@ -86,7 +103,7 @@ def _register(repository: SubAgentRecordStore, title: str) -> SubAgentRecord:
     )
 
 
-def _complete(repository: SubAgentRecordStore, record: SubAgentRecord) -> SubAgentRecord:
+def _complete(repository: SubAgentRecordRepository, record: SubAgentRecord) -> SubAgentRecord:
     running = repository.save(
         replace(
             record,
@@ -573,6 +590,7 @@ async def management_case(
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[tuple[AgentService, WorkspaceRecord, str, str, str]]:
     home = _prepare_agent_home(tmp_path / "agent-home")
+    _add_model_routes(home, "schedule", "subagent")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
     session_id = await _persist_session(
@@ -979,6 +997,87 @@ async def test_foreground_main_run_delegates_and_later_reads_the_completed_resul
         assert provider.old_result_seen.is_set(), provider.wait_result_contents
     finally:
         provider.release_child.set()
+
+
+@pytest.mark.asyncio
+async def test_missing_subagent_route_keeps_main_runs_and_existing_task_queries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    _add_model_routes(home, "schedule")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ConcurrentProvider()
+    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_args: provider)
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    observed: list[tuple[str, ToolGateway]] = []
+    original_run = AgentRunner.run
+
+    async def record_run(
+        runner: AgentRunner,
+        initial_messages: Sequence[dict[str, Any]],
+        **kwargs: Any,
+    ) -> AgentRunnerResult:
+        observed.append((cast(str, kwargs["model"]), kwargs["tool_gateway"]))
+        return await original_run(runner, initial_messages, **kwargs)
+
+    monkeypatch.setattr(AgentRunner, "run", record_run)
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, workspace_path)
+        session_id = await workspace.create_draft(
+            client.client_id, reuse_startup_session=False, creation_scope="chat",
+        )
+        claim_payload = cast(
+            dict[str, Any],
+            (await service.claim(client.client_id, workspace.workspace_id, session_id))["claim"],
+        )
+        claim_version = cast(int, claim_payload["claim_version"])
+        await workspace.input(
+            client.client_id, session_id, claim_version,
+            "Run foreground without SubAgent routing.", _RUN_ID,
+        )
+        await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=5)
+
+        repository = workspace.subagent_repository(session_id)
+        completed = _complete(repository, _register(repository, "Existing task"))
+        chat_gateway = next(gateway for route, gateway in observed if route == "chat")
+        chat_tools = {tool.name for tool in chat_gateway.catalog}
+        assert "spawn_agent" not in chat_tools
+        assert {"wait_agent", "list_agents"} <= chat_tools
+        chat_gateway.expose(("wait_agent", "list_agents"))
+        listed = await chat_gateway.call(ModelToolCall(id="list", name="list_agents", arguments="{}"))
+        waited = await chat_gateway.call(ModelToolCall(
+            id="wait", name="wait_agent",
+            arguments=json.dumps({"agent_ids": [completed.agent_id]}),
+        ))
+        assert listed.status == waited.status == "success"
+        assert completed.agent_id in listed.content
+        assert completed.agent_id in waited.content
+
+        job = ScheduleJob(
+            job_id=str(uuid4()),
+            message="Run Schedule without SubAgent routing.",
+            title="No SubAgent route",
+            schedule=JobSchedule.every(3600),
+            created_at_ms=1,
+            updated_at_ms=1,
+        )
+        await workspace.schedule_service.add_user_job(job)
+        workspace.schedule_service._reserve(
+            job, current_monotonic=asyncio.get_running_loop().time(),
+        )
+        await asyncio.wait_for(workspace.schedule_service._active_runs[job.job_id].task, timeout=5)
+        schedule_gateway = next(gateway for route, gateway in observed if route == "schedule")
+        schedule_tools = {tool.name for tool in schedule_gateway.catalog}
+        assert "spawn_agent" not in schedule_tools
+        assert {"wait_agent", "list_agents"} <= schedule_tools
+    finally:
+        await service.stop()
 
 
 @pytest.mark.asyncio

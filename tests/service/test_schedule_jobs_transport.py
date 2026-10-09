@@ -38,10 +38,21 @@ def _free_port() -> int:
         return int(listener.getsockname()[1])
 
 
-def _prepare_agent_home(path: Path) -> AgentHome:
+def _prepare_agent_home(path: Path, *, schedule_route: bool = False) -> AgentHome:
     home = AgentHome(path)
     home.initialize()
-    (home.path / "config.toml").write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
+    schedule = """
+[models.routes.schedule]
+provider_id = "primary"
+model = "small-model"
+context_window = 8192
+max_output = 1024
+temperature = 0
+timeout = 30
+""" if schedule_route else ""
+    (home.path / "config.toml").write_text(
+        MINIMAL_VALID_CONFIG + schedule, encoding="utf-8",
+    )
     return home
 
 
@@ -693,7 +704,7 @@ async def test_schedule_http_delete_drains_real_tool_and_preserves_session_termi
         return "unreachable"
 
     monkeypatch.setattr(ReadFileTool, "execute_authorized_for_context", blocked_read)
-    home = _prepare_agent_home(tmp_path / "home")
+    home = _prepare_agent_home(tmp_path / "home", schedule_route=True)
     path = tmp_path / "workspace"
     path.mkdir()
     (path / "task.txt").write_text("user data", encoding="utf-8")

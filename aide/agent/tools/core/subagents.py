@@ -100,6 +100,8 @@ class SpawnAgentTool(_SubAgentTool):
     ) -> str:
         del authorization, kwargs
         request = _run_context(context)
+        if request.creator_snapshot is None:
+            raise ToolError("SubAgent Model Route is unavailable.")
         try:
             record = request.coordinator.submit(
                 title=arguments["title"],

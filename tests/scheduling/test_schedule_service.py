@@ -42,7 +42,7 @@ from aide.schedule.service import (
 from aide.schedule.store import ScheduleStoreFaultedError, WorkspaceScheduleStore
 from aide.utils import scheduler as scheduler_module
 from aide.utils.scheduler import AsyncioSchedulerClock
-from tests.configuration.test_config import VALID_CONFIG
+from tests.configuration.test_config import SCHEDULE_ROUTE, VALID_CONFIG
 from tests.fixtures import (
     ProviderCall,
     ScriptedFakeProvider,
@@ -321,7 +321,7 @@ def _agent_loop(
     provider: ModelProvider,
     *,
     schedule_clock: object,
-    config_text: str = VALID_CONFIG,
+    config_text: str = VALID_CONFIG + SCHEDULE_ROUTE,
 ) -> tuple[AgentRunExecutor, ModelRouter, ScheduleService, MessageBus]:
     home = AgentHome(agent_home)
     home.initialize()

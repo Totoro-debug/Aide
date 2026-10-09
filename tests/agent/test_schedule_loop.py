@@ -49,6 +49,15 @@ from tests.fixtures.session import seed_session_state
 
 NOW = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
 JOB_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
+SCHEDULE_CONFIG = MINIMAL_VALID_CONFIG + """
+[models.routes.schedule]
+provider_id = "primary"
+model = "small-model"
+context_window = 8192
+max_output = 1024
+temperature = 0
+timeout = 30
+"""
 
 
 class _ScheduleRouter:
@@ -331,7 +340,7 @@ def _loop(
     tmp_path: Path,
     router: _ScheduleRouter,
     *,
-    config_text: str = MINIMAL_VALID_CONFIG,
+    config_text: str = SCHEDULE_CONFIG,
     skill_loader: SkillLoader | None = None,
     externalize_result_for: Callable[[Session], Callable[[ToolResult], ToolResult]] | None = None,
     task_framing_router: TaskFramingRouterAdapter | None = None,
@@ -943,7 +952,7 @@ async def test_schedule_run_start_hard_overflow_does_not_commit_or_call_provider
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = MINIMAL_VALID_CONFIG.replace("max_output = 1024", "max_output = 7000")
+    config = SCHEDULE_CONFIG.replace("max_output = 1024", "max_output = 7000")
     router = _ScheduleRouter()
     loop, state, _, bus = _loop(tmp_path, router, config_text=config)
     job = replace(_job(), message="x" * 20_000)
@@ -1267,7 +1276,7 @@ async def test_schedule_agent_loop_micro_compression_keeps_artifacts_and_session
     loop, state, _service, _bus = _loop(
         tmp_path,
         router,
-        config_text=MINIMAL_VALID_CONFIG.replace(
+        config_text=SCHEDULE_CONFIG.replace(
             "compact_ratio = 0.9",
             "compact_ratio = 0.9\nmax_tool_result_chars = 1000\n"
             f"enable_tool_micro_compression = {str(enabled).lower()}",
@@ -1367,7 +1376,7 @@ async def test_schedule_run_uses_isolated_catalog_during_concurrent_foreground_r
     state.initialize(agent_home_root=tmp_path / "agent-home")
     agent_home = AgentHome(tmp_path / "agent-home")
     agent_home.initialize()
-    (agent_home.path / "config.toml").write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
+    (agent_home.path / "config.toml").write_text(SCHEDULE_CONFIG, encoding="utf-8")
     configuration = ConfigLoader(agent_home).load()
 
     async def execute_user_job(job: ScheduleJob) -> None:

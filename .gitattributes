@@ -6,3 +6,5 @@ aide/web_assets/manifest.json whitespace=blank-at-eol,blank-at-eof,space-before-
 # Keep Vite input resources consistent before publishing their exact bytes.
 web/index.html text eol=lf
 web/public/favicon.svg text eol=lf
+# Tokenizer vocabulary hashes refer to published bytes, including line endings.
+aide/agent/context/tokenizer_data/** -text

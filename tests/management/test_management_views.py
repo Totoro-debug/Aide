@@ -404,7 +404,7 @@ async def test_memory_view_converts_read_failure_to_safe_persistence_error(
 
 
 @pytest.mark.asyncio
-async def test_status_reports_prepared_session_and_frozen_utf8_token_estimate(
+async def test_status_reports_prepared_session_and_tokenizer_estimate(
     agent_home: Path,
     workspace: Path,
 ) -> None:
@@ -456,9 +456,9 @@ async def test_status_reports_prepared_session_and_frozen_utf8_token_estimate(
         available_context=10,
         compact_ratio=0.9,
         compact_context_window=9,
-        projected_next_request_tokens=13,
+        projected_next_request_tokens=16,
         projection_source="estimated",
-        input_budget_used_percent=130.0,
+        input_budget_used_percent=160.0,
         session_message_count=0,
         last_compacted=0,
         cumulative_usage={

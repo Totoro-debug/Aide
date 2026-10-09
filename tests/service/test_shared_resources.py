@@ -689,7 +689,10 @@ def test_startup_and_skill_reload_do_not_estimate_context_budget(
         raise AssertionError("Skill activation must not estimate Model request tokens")
 
     monkeypatch.setattr(run_context_module, "estimate_request_tokens", reject_estimate)
-    monkeypatch.setattr(management_service_module, "estimate_request_tokens", reject_estimate)
+    monkeypatch.setattr(
+        run_context_module.ContextController, "estimate_request_tokens", staticmethod(reject_estimate)
+    )
+    monkeypatch.setattr(management_service_module, "project_next_request_usage", reject_estimate)
     loop.preflight()
     metadata = service.reload_skills()
 

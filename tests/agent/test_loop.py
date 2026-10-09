@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import random
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -19,6 +20,7 @@ from loguru import logger
 import aide.agent.context.run_context as compactor_module
 import aide.agent.loop as loop_module
 from aide.agent.blackboard import Blackboard
+from aide.agent.context.tokenizer import context_estimator_version_for_model
 from aide.agent.loop import ConfirmationRequestView
 from aide.agent.memory.manager import MemoryManager
 from aide.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
@@ -528,7 +530,7 @@ def _status_context_usage(
         "context_window": context_window,
         "max_output": max_output,
         "anchor_estimated_tokens": 20,
-        "estimator_version": "utf8-bytes-div4-v1",
+        "estimator_version": context_estimator_version_for_model(model),
         "run_projected_tokens": 80,
         "run_projection_source": "estimated",
     }
@@ -2118,7 +2120,13 @@ async def test_foreground_run_start_hard_overflow_does_not_commit_or_call_provid
 
     await loop.start()
     try:
-        await bus.put_inbound(InboundMessage("x" * 100_000))
+        overflow_text = "".join(
+            random.Random("context-overflow").choices(
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                k=100_000,
+            )
+        )
+        await bus.put_inbound(InboundMessage(overflow_text))
         terminal = (await _terminals(bus, 1))[0]
     finally:
         await loop.close()

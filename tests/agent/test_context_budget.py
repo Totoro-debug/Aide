@@ -8,6 +8,7 @@ from aide.agent.context.budget import (
     ContextProjection,
     ContextUsageSnapshot,
     estimate_request_tokens,
+    estimate_run_slice_tokens,
     project_next_request_tokens,
     reported_model_usage_total,
     request_fits_model_context,
@@ -420,21 +421,38 @@ def test_snapshot_copy_can_change_run_projection_without_changing_route_identity
 
 
 def test_run_slice_budget_uses_only_raw_target_messages_and_available_context() -> None:
-    budget = ContextBudget(100, 0, 0.9)
-    ten_percent = [{"role": "user", "content": "x" * 9}]
-    fifty_percent = [{"role": "user", "content": "x" * 169}]
+    model = "test-model"
+    run_slice = [{"role": "user", "content": "hello"}]
+    slice_tokens = estimate_run_slice_tokens(run_slice, model=model)
 
-    assert budget.can_retain_run_slice(ten_percent, percentage=10)
-    assert budget.can_retain_run_slice(fifty_percent, percentage=50)
-    assert not budget.can_retain_run_slice([{"role": "user", "content": "x" * 173}], percentage=50)
+    assert ContextBudget(slice_tokens * 10, 0, 0.9).can_retain_run_slice(
+        run_slice, percentage=10, model=model
+    )
+    assert not ContextBudget(slice_tokens * 10 - 1, 0, 0.9).can_retain_run_slice(
+        run_slice, percentage=10, model=model
+    )
+    assert ContextBudget(slice_tokens * 2, 0, 0.9).can_retain_run_slice(
+        run_slice, percentage=50, model=model
+    )
+    assert not ContextBudget(slice_tokens * 2 - 1, 0, 0.9).can_retain_run_slice(
+        run_slice, percentage=50, model=model
+    )
 
 
 def test_run_slice_budget_rejects_non_run_inputs_and_unsupported_percentages() -> None:
-    budget = ContextBudget(100, 0, 0.9)
-
     with pytest.raises(ValueError, match="run slice"):
-        budget.can_retain_run_slice([{"role": "system", "content": "fixed"}], percentage=10)
+        ContextBudget(100, 0, 0.9).can_retain_run_slice(
+            [{"role": "system", "content": "fixed"}], percentage=10, model="test-model"
+        )
     with pytest.raises(ValueError, match="percentage"):
-        budget.can_retain_run_slice([{"role": "user", "content": "hello"}], percentage=25)  # type: ignore[arg-type]
+        ContextBudget(100, 0, 0.9).can_retain_run_slice(
+            [{"role": "user", "content": "hello"}],
+            percentage=25,  # type: ignore[arg-type]
+            model="test-model",
+        )
     with pytest.raises(ValueError, match="percentage"):
-        budget.can_retain_run_slice([{"role": "user", "content": "hello"}], percentage=10.0)  # type: ignore[arg-type]
+        ContextBudget(100, 0, 0.9).can_retain_run_slice(
+            [{"role": "user", "content": "hello"}],
+            percentage=10.0,  # type: ignore[arg-type]
+            model="test-model",
+        )

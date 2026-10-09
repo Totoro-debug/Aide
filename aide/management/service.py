@@ -9,12 +9,10 @@ from loguru import logger
 
 from aide import __version__
 from aide.agent.context.budget import (
-    CONTEXT_ESTIMATOR_VERSION,
     ContextBudget,
     ContextUsageSnapshot,
     ProjectionSource,
-    estimate_request_tokens,
-    project_next_request_tokens,
+    project_next_request_usage,
 )
 from aide.agent.memory.dream import DreamResult
 from aide.agent.permission import (
@@ -436,13 +434,10 @@ class ManagementViewService:
                 max_output=projection.max_output,
                 compact_ratio=projection.compact_ratio,
             )
-            estimated = estimate_request_tokens(
+            reported_usage = dict(projection.latest_reported_usage)
+            projected = project_next_request_usage(
                 projection.projected_messages,
                 projection.projected_tools,
-            )
-            reported_usage = dict(projection.latest_reported_usage)
-            projected = project_next_request_tokens(
-                estimated,
                 snapshot=projection.latest_usage_context,
                 reported_usage=reported_usage,
                 requested_route=projection.requested_route,
@@ -451,7 +446,6 @@ class ManagementViewService:
                 model=projection.model,
                 context_window=budget.context_window,
                 max_output=budget.max_output,
-                estimator_version=CONTEXT_ESTIMATOR_VERSION,
             )
             started_at = projection.generation_started_at
             uptime = 0 if started_at is None else max(0, int(self._monotonic() - started_at))

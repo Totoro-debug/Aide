@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import replace
@@ -10,6 +11,7 @@ from typing import Any, Literal, cast
 
 import pytest
 
+import aide.agent.context.run_context as compactor_module
 from aide.agent.context.budget import (
     estimate_request_tokens,
     estimate_run_slice_tokens,
@@ -22,6 +24,7 @@ from aide.agent.context.run_context import (
     agent_run_attempt_guard,
     latest_main_agent_usage_anchor,
 )
+from aide.agent.context.tokenizer import context_estimator_version_for_model
 from aide.agent.memory.manager import MemoryManager
 from aide.agent.run_errors import CommittableAgentRunError
 from aide.agent.runner import AgentRunner
@@ -337,6 +340,13 @@ def _assistant_history_message(
     }
 
 
+_FIXTURE_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _.,;:{}[]()"
+
+
+def _fixture_content(seed: str, size: int) -> str:
+    return "".join(random.Random(seed).choices(_FIXTURE_ALPHABET, k=size))
+
+
 def _tool_run_history(
     label: str,
     *,
@@ -356,7 +366,7 @@ def _tool_run_history(
         },
         {
             "role": "tool",
-            "content": f"{label} tool result " + "r" * result_size,
+            "content": f"{label} tool result " + _fixture_content(f"{label}:tool", result_size),
             "timestamp": timestamp,
             "tool_call_id": f"call-{label}",
             "name": "read_file",
@@ -376,11 +386,11 @@ def _run_history(
     return [
         {
             "role": "user",
-            "content": f"{label} user " + "u" * size,
+            "content": f"{label} user " + _fixture_content(f"{label}:user", size),
             "timestamp": timestamp,
         },
         _assistant_history_message(
-            f"{label} assistant " + "a" * size,
+            f"{label} assistant " + _fixture_content(f"{label}:assistant", size),
             timestamp=timestamp,
             token_usage=token_usage,
         ),
@@ -391,7 +401,7 @@ def _react_cycle(label: str, *, size: int = 80) -> list[dict[str, Any]]:
     return [
         {
             "role": "assistant",
-            "content": f"{label} assistant " + "a" * size,
+            "content": f"{label} assistant " + _fixture_content(f"{label}:assistant", size),
             "tool_calls": [{"id": f"{label}-call", "name": "read_file", "arguments": "{}"}],
             "status": "completed",
             "error": None,
@@ -402,7 +412,7 @@ def _react_cycle(label: str, *, size: int = 80) -> list[dict[str, Any]]:
             "tool_call_id": f"{label}-call",
             "name": "read_file",
             "status": "success",
-            "content": f"{label} result " + "r" * size,
+            "content": f"{label} result " + _fixture_content(f"{label}:result", size),
             "artifact": None,
         },
     ]
@@ -434,7 +444,7 @@ async def _prepare_controller(
     tools: Sequence[dict[str, Any]] = (),
     memory_route_status: ModelRouteStatus | None = None,
     provider_id: str = "",
-    model: str = "",
+    model: str = "test-model",
 ) -> tuple[dict[str, Any], ...]:
     route_status = _chat_status(
         context_window=context_window,
@@ -461,7 +471,7 @@ def _chat_status(
     context_window: int,
     max_output: int = 100,
     provider_id: str = "",
-    model: str = "",
+    model: str = "test-model",
 ) -> ModelRouteStatus:
     return ModelRouteStatus(
         requested_route="chat",
@@ -581,21 +591,21 @@ async def test_controller_stages_run_start_compaction_from_detached_snapshot(
         messages=[
             {
                 "role": "user",
-                "content": "Old user " + "u" * 500,
+                "content": "Old user " + _fixture_content("old-user", 500),
                 "timestamp": timestamp,
             },
             _assistant_history_message(
-                "Old assistant " + "a" * 500,
+                "Old assistant " + _fixture_content("old-assistant", 500),
                 timestamp=timestamp,
                 token_usage=_usage(),
             ),
             {
                 "role": "user",
-                "content": "Current persisted history " + "h" * 500,
+                "content": "Current persisted history " + _fixture_content("current-user", 500),
                 "timestamp": timestamp,
             },
             _assistant_history_message(
-                "Current history assistant " + "c" * 500,
+                "Current history assistant " + _fixture_content("current-assistant", 500),
                 timestamp=timestamp,
                 token_usage=_usage(),
             ),
@@ -1038,7 +1048,7 @@ async def test_react_current_run_at_exactly_fifty_percent_keeps_current_run_and_
     controller = _controller(workspace, session, provider)
     current_user = {"role": "user", "content": "current request"}
     increment = _react_cycle("current")
-    available = estimate_run_slice_tokens([current_user, *increment]) * 2
+    available = estimate_run_slice_tokens([current_user, *increment], model="test-model") * 2
 
     result = await controller.prepare_react(
         project_messages=_project_messages,
@@ -1064,12 +1074,12 @@ async def test_react_sole_current_run_may_compact_at_or_below_fifty_percent(
 ) -> None:
     state = _state(workspace)
     session = Session.create(state)
-    session.update_metadata(summary="previous action " + "x" * 300)
+    session.update_metadata(summary="previous action " + _fixture_content("previous-action", 300))
     provider = ScriptedFakeProvider(completions=(_response("facts"), _response("action")))
     controller = _controller(workspace, session, provider)
     current_user = {"role": "user", "content": "current request"}
     increment = _react_cycle("current", size=300)
-    available = estimate_run_slice_tokens([current_user, *increment]) * 2
+    available = estimate_run_slice_tokens([current_user, *increment], model="test-model") * 2
 
     result = await controller.prepare_react(
         project_messages=_project_messages,
@@ -1102,7 +1112,9 @@ async def test_react_sole_current_run_may_compact_at_or_below_fifty_percent(
         estimator_version="utf8-bytes-div4-v1",
     )
 
-    assert context.run_projected_tokens == estimate_run_slice_tokens([*increment, response_message])
+    assert context.run_projected_tokens == estimate_run_slice_tokens(
+        [*increment, response_message], model="test-model"
+    )
 
 
 @pytest.mark.asyncio
@@ -1130,7 +1142,7 @@ async def test_react_current_run_just_above_fifty_percent_may_select_early_curre
     controller = _controller(workspace, session, provider)
     current_user = {"role": "user", "content": "current request"}
     increment = _react_cycle("current")
-    current_slice = estimate_run_slice_tokens([current_user, *increment])
+    current_slice = estimate_run_slice_tokens([current_user, *increment], model="test-model")
     available = current_slice * 2 - 1
 
     result = await controller.prepare_react(
@@ -1167,7 +1179,7 @@ async def test_react_compaction_consumes_only_new_batch_after_current_user_is_co
     first_increment: list[dict[str, Any]] = [
         {
             "role": "assistant",
-            "content": "early assistant " + "a" * 4_000,
+            "content": "early assistant " + _fixture_content("early-assistant", 4_000),
             "tool_calls": [{"id": "early-call", "name": "read_file", "arguments": "{}"}],
             "status": "completed",
             "error": None,
@@ -1178,14 +1190,14 @@ async def test_react_compaction_consumes_only_new_batch_after_current_user_is_co
             "tool_call_id": "early-call",
             "name": "read_file",
             "status": "success",
-            "content": "early result " + "r" * 4_000,
+            "content": "early result " + _fixture_content("early-result", 4_000),
             "artifact": None,
         },
         *_react_cycle("latest", size=700),
     ]
     kwargs: dict[str, Any] = {
         "project_messages": _project_messages,
-        "route_status": _chat_status(context_window=4_000, max_output=100),
+        "route_status": _chat_status(context_window=8_000, max_output=100),
         "current_user": current_user,
         "compact_ratio": 0.5,
         "memory_route_status": _memory_status(context_window=10_000),
@@ -1454,7 +1466,7 @@ async def test_react_action_failure_keeps_fact_and_retries_only_the_pending_acti
         "project_messages": _project_messages,
         "increment": increment,
         "latest_cycle_start": 0,
-        "route_status": _chat_status(context_window=4_000, max_output=100),
+        "route_status": _chat_status(context_window=7_000, max_output=100),
         "current_user": current_user,
         "compact_ratio": 0.5,
         "memory_route_status": _memory_status(context_window=10_000),
@@ -1539,8 +1551,8 @@ async def test_cursor_intersects_recovered_run_boundary_without_selecting_fragme
 
     await _prepare_controller(
         controller,
-        current_user="cursor current " + "c" * 2_000,
-        context_window=1_200,
+        current_user="cursor current " + _fixture_content("cursor-current", 2_000),
+        context_window=3_000,
         max_output=200,
         memory_route_status=_memory_status(context_window=4_000),
     )
@@ -1563,7 +1575,7 @@ async def test_fact_summary_contains_complete_tool_results_and_current_user_is_e
         messages=[
             {
                 "role": "user",
-                "content": "old user " + "u" * 800,
+                "content": "old user " + _fixture_content("old:user", 800),
                 "timestamp": timestamp,
             },
             *_tool_run_history(
@@ -1585,8 +1597,8 @@ async def test_fact_summary_contains_complete_tool_results_and_current_user_is_e
 
     await _prepare_controller(
         controller,
-        current_user="must not be summarized " + "n" * 1_800,
-        context_window=1_200,
+        current_user="must not be summarized " + _fixture_content("must-not-summarize", 1_800),
+        context_window=1_800,
         max_output=200,
         memory_route_status=_memory_status(context_window=4_000),
     )
@@ -1634,19 +1646,19 @@ async def test_consecutive_staging_consumes_only_new_batch_and_replaces_action_s
     )
     controller = _controller(workspace, session, provider)
     kwargs: dict[str, Any] = {
-        "context_window": 1_800,
+        "context_window": 2_600,
         "max_output": 200,
         "memory_route_status": _memory_status(context_window=4_000),
     }
 
     first = await _prepare_controller(
         controller,
-        current_user="new user " + "n" * 3_000,
+        current_user="new user " + _fixture_content("new-user-one", 1_800),
         **kwargs,
     )
     second = await _prepare_controller(
         controller,
-        current_user="new user changed " + "n" * 3_000,
+        current_user="new user changed " + _fixture_content("new-user-two", 1_800),
         **kwargs,
     )
 
@@ -1976,7 +1988,7 @@ async def test_action_replacement_is_checked_against_the_final_hard_limit(
         },
         last_compacted=0,
     )
-    oversized_action = "action " + "x" * 4_000
+    oversized_action = "action " + _fixture_content("oversized-action", 4_000)
     provider = ScriptedFakeProvider(completions=(_response("facts"), _response(oversized_action)))
     controller = _controller(workspace, session, provider)
     kwargs: dict[str, Any] = {
@@ -2016,7 +2028,7 @@ async def test_compatible_main_agent_usage_changes_the_run_start_compaction_deci
                 **_assistant_history_message(
                     "old answer",
                     timestamp=timestamp,
-                    token_usage=_usage(100, 10),
+                    token_usage=_usage(130, 20),
                 ),
                 "context_usage": {
                     "requested_route": "chat",
@@ -2026,7 +2038,7 @@ async def test_compatible_main_agent_usage_changes_the_run_start_compaction_deci
                     "context_window": 360,
                     "max_output": 200,
                     "anchor_estimated_tokens": 20,
-                    "estimator_version": "utf8-bytes-div4-v1",
+                    "estimator_version": context_estimator_version_for_model("model"),
                     "run_projected_tokens": 80,
                     "run_projection_source": "estimated",
                 },
@@ -2034,7 +2046,7 @@ async def test_compatible_main_agent_usage_changes_the_run_start_compaction_deci
         ],
         metadata={
             "title": "Untitled session",
-            "token_usage": _usage(100, 10),
+            "token_usage": _usage(130, 20),
             "summary": "",
         },
         last_compacted=0,
@@ -2167,12 +2179,12 @@ async def test_main_response_provenance_anchors_completed_response_and_then_uses
             provider_id="provider",
             model="model",
         ),
-        estimator_version="utf8-bytes-div4-v1",
+        estimator_version=context_estimator_version_for_model("model"),
     )
 
     assert first_context.run_projection_source == "estimated"
-    assert first_context.anchor_estimated_tokens == estimate_request_tokens(
-        [*preparation, first_message], tools
+    assert first_context.anchor_estimated_tokens == ContextController.estimate_request_tokens(
+        [*preparation, first_message], tools, model="model"
     )
 
     tool_message = {
@@ -2199,13 +2211,13 @@ async def test_main_response_provenance_anchors_completed_response_and_then_uses
             provider_id="provider",
             model="model",
         ),
-        estimator_version="utf8-bytes-div4-v1",
+        estimator_version=context_estimator_version_for_model("model"),
     )
 
     assert second_context.run_projection_source == "reported_delta"
     assert second_context.run_projected_tokens == first_context.run_projected_tokens + 5
-    assert second_context.anchor_estimated_tokens == estimate_request_tokens(
-        [*second_request, second_message], tools
+    assert second_context.anchor_estimated_tokens == ContextController.estimate_request_tokens(
+        [*second_request, second_message], tools, model="model"
     )
 
 
@@ -2367,7 +2379,10 @@ async def test_controller_first_prepare_runs_run_start_without_duplicate_summary
 
     assert len(provider.complete_requests) == 2
     assert prepared[0] == {"role": "system", "content": "SYSTEM"}
-    assert all(message["content"] != "old user " + "u" * 800 for message in prepared)
+    assert all(
+        message["content"] != "old user " + _fixture_content("old:user", 800)
+        for message in prepared
+    )
     assert sum(message.get("content") == "current request" for message in prepared) == 1
 
 
@@ -2636,7 +2651,7 @@ async def test_react_preparer_compacts_early_sole_run_and_preserves_latest_cycle
     increment: list[dict[str, Any]] = [
         {
             "role": "assistant",
-            "content": "early assistant " + "a" * 4_000,
+            "content": "early assistant " + _fixture_content("early-assistant", 4_000),
             "tool_calls": [{"id": "early-call", "name": "read_file", "arguments": "{}"}],
             "status": "completed",
             "error": None,
@@ -2647,7 +2662,7 @@ async def test_react_preparer_compacts_early_sole_run_and_preserves_latest_cycle
             "tool_call_id": "early-call",
             "name": "read_file",
             "status": "success",
-            "content": "complete early result " + "r" * 4_000,
+            "content": "complete early result " + _fixture_content("complete-early-result", 4_000),
             "artifact": None,
         },
         {
@@ -2749,7 +2764,7 @@ async def test_visible_tool_schema_change_rechecks_a_new_revision(
     )
     controller = _controller(workspace, session, provider)
     base_kwargs: dict[str, Any] = {
-        "context_window": 1_800,
+        "context_window": 4_500,
         "max_output": 200,
         "memory_route_status": _memory_status(context_window=4_000),
     }
@@ -2757,13 +2772,13 @@ async def test_visible_tool_schema_change_rechecks_a_new_revision(
     second = await _prepare_controller(
         controller,
         **base_kwargs,
-        current_user="changed user " + "c" * 1_200,
+        current_user="changed user " + _fixture_content("changed-user", 1_200),
         tools=(
             {
                 "type": "function",
                 "function": {
                     "name": "new_tool",
-                    "description": "x" * 2_000,
+                    "description": _fixture_content("new-tool-description", 3_000),
                     "parameters": {"type": "object", "properties": {}},
                 },
             },
@@ -2790,11 +2805,12 @@ async def test_final_local_capacity_is_enforced_with_an_underestimated_reported_
     history = _run_history("old", size=1_600, timestamp=NOW.isoformat(), token_usage=_usage())
     current_user = {"role": "user", "content": "continue"}
     candidate = _project_messages(history, current_user, (), 0, None)
-    estimated = estimate_request_tokens(candidate)
+    estimated = ContextController.estimate_request_tokens(candidate, model="model")
     context_window = estimated + 200 + available_offset
     history[-1]["context_usage"] = {
         **_context_usage(context_window=context_window),
         "anchor_estimated_tokens": estimated,
+        "estimator_version": context_estimator_version_for_model("model"),
     }
     seed_session_state(session, messages=history, metadata={}, last_compacted=0)
     provider = ScriptedFakeProvider(
@@ -2952,4 +2968,244 @@ def _estimate_latest_run(session: Session) -> int:
     user_indices = [
         index for index, message in enumerate(session.messages) if message["role"] == "user"
     ]
-    return estimate_run_slice_tokens(session.messages[user_indices[-1] :])
+    return estimate_run_slice_tokens(session.messages[user_indices[-1] :], model="test-model")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["run_start", "react"])
+@pytest.mark.parametrize("historical_tokens", [399, 400, 401])
+async def test_history_at_soft_threshold_skips_candidate_delta_even_when_delta_is_negative(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    historical_tokens: int,
+) -> None:
+    session = Session.create(_state(workspace))
+    history = _run_history(
+        "old", size=1, timestamp=NOW.isoformat(), token_usage=_usage(historical_tokens, 0)
+    )
+    history[-1]["context_usage"] = {
+        **_context_usage(context_window=1000),
+        "anchor_estimated_tokens": 5000,
+        "estimator_version": context_estimator_version_for_model("model"),
+    }
+    seed_session_state(session, messages=history, metadata={}, last_compacted=0)
+    original = deepcopy(session.messages)
+    provider = ScriptedFakeProvider(completions=(_response("facts"), _response("action")))
+    controller = _controller(workspace, session, provider)
+    count = ContextController.estimate_request_tokens
+    candidate_counts = 0
+
+    def observe(
+        messages: Sequence[dict[str, Any]], tools: Sequence[dict[str, Any]] = (), *, model: str
+    ) -> int:
+        nonlocal candidate_counts
+        if any("old user" in str(message.get("content")) for message in messages):
+            candidate_counts += 1
+        return count(messages, tools, model=model)
+
+    monkeypatch.setattr(ContextController, "estimate_request_tokens", staticmethod(observe))
+    options: dict[str, Any] = dict(
+        project_messages=_project_messages,
+        current_user={"role": "user", "content": "continue"},
+        route_status=_chat_status(
+            context_window=1000, max_output=200, provider_id="provider", model="model"
+        ),
+        memory_route_status=_memory_status(context_window=4000),
+        compact_ratio=0.5,
+    )
+    if phase == "run_start":
+        await controller.prepare_run_start(**options)
+    else:
+        await controller.prepare_react(
+            **options, increment=_react_cycle("latest", size=1), latest_cycle_start=0
+        )
+    should_compact = historical_tokens >= 400
+    assert candidate_counts == (0 if should_compact else 1)
+    assert len(provider.complete_requests) == (2 if should_compact else 0)
+    assert controller.terminal_commit_values().pending_last_compacted == (
+        len(history) if should_compact else 0
+    )
+    assert session.messages == original
+
+
+@pytest.mark.asyncio
+async def test_prepare_reuses_unchanged_counts_without_character_estimates(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = Session.create(_state(workspace))
+    provider = ScriptedFakeProvider()
+    controller = _controller(
+        workspace,
+        session,
+        provider,
+        request_router=_context_router(provider),
+        requested_route="chat",
+        project_messages=_project_messages,
+        current_user={"role": "user", "content": "中文 user"},
+    )
+    count = ContextController.estimate_request_tokens
+    counts = 0
+
+    def observe(
+        messages: Sequence[dict[str, Any]], tools: Sequence[dict[str, Any]] = (), *, model: str
+    ) -> int:
+        nonlocal counts
+        counts += 1
+        return count(messages, tools, model=model)
+
+    def reject_character_estimate(*args: object, **kwargs: object) -> int:
+        pytest.fail("multi-turn preparation called the character estimate")
+
+    monkeypatch.setattr(ContextController, "estimate_request_tokens", staticmethod(observe))
+    monkeypatch.setattr(compactor_module, "estimate_request_tokens", reject_character_estimate)
+    await controller.prepare(
+        increment=(),
+        latest_cycle_start=None,
+        tools=(),
+        continuation=None,
+        continuation_revision=0,
+        is_micro_compression_eligible=None,
+    )
+    assert counts == 1
+    assert provider.complete_requests == []
+
+
+@pytest.mark.asyncio
+async def test_high_historical_usage_with_no_remaining_batch_uses_the_local_hard_limit(
+    workspace: Path,
+) -> None:
+    session = Session.create(_state(workspace))
+    history = _run_history("old", size=1, timestamp=NOW.isoformat(), token_usage=_usage(900, 0))
+    history[-1]["context_usage"] = {
+        **_context_usage(context_window=1000),
+        "estimator_version": context_estimator_version_for_model("model"),
+    }
+    seed_session_state(
+        session,
+        messages=history,
+        metadata={"summary": "already compacted"},
+        last_compacted=len(history),
+    )
+    provider = ScriptedFakeProvider()
+    controller = _controller(workspace, session, provider)
+    prepared = await _prepare_controller(
+        controller, context_window=1000, max_output=200, provider_id="provider", model="model"
+    )
+    assert any(message["content"] == "new user" for message in prepared)
+    assert provider.complete_requests == []
+    assert controller.terminal_commit_values().pending_last_compacted == len(history)
+
+
+@pytest.mark.asyncio
+async def test_tool_schema_growth_pushes_history_below_the_threshold_into_compaction(
+    workspace: Path,
+) -> None:
+    session = Session.create(_state(workspace))
+    history = _run_history("old", size=1, timestamp=NOW.isoformat(), token_usage=_usage(399, 0))
+    current = {"role": "user", "content": "new user"}
+    candidate = _project_messages(history, current, (), 0, None)
+    history[-1]["context_usage"] = {
+        **_context_usage(context_window=1000),
+        "anchor_estimated_tokens": ContextController.estimate_request_tokens(
+            candidate, model="model"
+        ),
+        "estimator_version": context_estimator_version_for_model("model"),
+    }
+    seed_session_state(session, messages=history, metadata={}, last_compacted=0)
+    provider = ScriptedFakeProvider(completions=(_response("facts"), _response("action")))
+    controller = _controller(workspace, session, provider)
+    await _prepare_controller(
+        controller,
+        context_window=1000,
+        max_output=200,
+        provider_id="provider",
+        model="model",
+        tools=({"name": "read_file", "parameters": {"type": "object"}},),
+    )
+    assert len(provider.complete_requests) == 2
+    assert controller.terminal_commit_values().pending_last_compacted == len(history)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_first_request_checks_the_hard_limit_after_summary_and_tool_projection(
+    workspace: Path,
+    enabled: bool,
+) -> None:
+    session = Session.create(_state(workspace))
+    timestamp = NOW.isoformat()
+    older = _run_history("old", size=1, timestamp=timestamp, token_usage=_usage())
+    recent: list[dict[str, Any]] = [
+        {"role": "user", "content": "latest task", "timestamp": timestamp}
+    ]
+    for number in range(11):
+        cycle = _react_cycle(f"latest-{number}", size=1)
+        cycle[-1]["content"] = _fixture_content(f"micro-result-{number}", 600)
+        for message in cycle:
+            message["timestamp"] = timestamp
+        recent.extend(cycle)
+    recent.append(_assistant_history_message("done", timestamp=timestamp, token_usage=_usage()))
+    history = [*older, *recent]
+    current = {"role": "user", "content": "continue"}
+    system = _fixture_content("micro-system", 100000)
+    action = _fixture_content("micro-action", 1800)
+
+    def project(
+        raw: Sequence[dict[str, Any]],
+        user: dict[str, Any] | None,
+        increment: Sequence[dict[str, Any]],
+        cursor: int,
+        summary: str | None,
+    ) -> list[dict[str, Any]]:
+        messages = _project_messages_with_tool_calls(raw, user, increment, cursor, summary)
+        messages[0]["content"] = system
+        return messages
+
+    initial_tokens = ContextController.estimate_request_tokens(
+        project(history, current, (), 0, None), model="test-model"
+    )
+    available = initial_tokens + 300
+    assert estimate_run_slice_tokens(recent, model="test-model") * 10 <= available
+    after_summary = project(history, current, (), len(older), action)
+    assert ContextController.estimate_request_tokens(after_summary, model="test-model") >= available
+    seed_session_state(session, messages=history, metadata={}, last_compacted=0)
+    original = deepcopy(session.messages)
+    provider = ScriptedFakeProvider(completions=(_response("facts"), _response(action)))
+    controller = _controller(
+        workspace,
+        session,
+        provider,
+        request_router=_context_router(
+            provider, chat_status=_chat_status(context_window=available + 200, max_output=200)
+        ),
+        requested_route="chat",
+        project_messages=project,
+        current_user=current,
+        project_tool_results=ContextBuilder.project_tool_results,
+        enable_tool_micro_compression=enabled,
+    )
+    options: dict[str, Any] = dict(
+        increment=(),
+        latest_cycle_start=None,
+        tools=(),
+        continuation=None,
+        continuation_revision=0,
+        is_micro_compression_eligible=lambda name: name == "read_file",
+    )
+    if enabled:
+        prepared = await controller.prepare(**options)
+        assert ContextController.estimate_request_tokens(prepared, model="test-model") < available
+        omitted = [
+            message
+            for message in prepared
+            if "result omitted from context" in str(message["content"])
+        ]
+        assert len(omitted) == 10
+        assert any(message["content"] == recent[-2]["content"] for message in prepared)
+    else:
+        with pytest.raises(ModelCallError) as raised:
+            await controller.prepare(**options)
+        assert raised.value.error.code == "model_context_overflow"
+    assert len(provider.complete_requests) == 2
+    assert session.messages == original

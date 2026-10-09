@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from pathlib import Path
@@ -59,11 +60,22 @@ timeout = 120
     )
 
 
+_FIXTURE_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+
+def _fixture_content(seed: str, size: int) -> str:
+    return "".join(random.Random(seed).choices(_FIXTURE_ALPHABET, k=size))
+
+
 def _old_run() -> list[dict[str, Any]]:
     timestamp = NOW.isoformat(timespec="milliseconds")
     usage = {"model_calls": 1, "input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
     messages: list[dict[str, Any]] = [
-        {"role": "user", "content": "old request " + "u" * 5_000, "timestamp": timestamp}
+        {
+            "role": "user",
+            "content": "old request " + _fixture_content("old-request", 5_000),
+            "timestamp": timestamp,
+        }
     ]
     for number in range(11):
         call_id = f"old-{number}"
@@ -83,7 +95,7 @@ def _old_run() -> list[dict[str, Any]]:
                     "tool_call_id": call_id,
                     "name": "read_file",
                     "status": "success",
-                    "content": "r" * 513,
+                    "content": _fixture_content(f"old-result:{number}", 513),
                     "artifact": None,
                     "timestamp": timestamp,
                 },
@@ -342,12 +354,21 @@ async def test_run_entry_summarizes_full_history_before_micro_compression(
         ]
         assert len(main_requests) == 1
         assert len(summary_requests) == 2
-        assert all("r" * 513 in json.dumps(request.messages) for request in summary_requests)
+        expected_results = tuple(
+            _fixture_content(f"old-result:{number}", 513) for number in range(11)
+        )
+        assert all(
+            result in json.dumps(request.messages)
+            for result in expected_results
+            for request in summary_requests
+        )
         assert all(
             "result omitted from context" not in json.dumps(request.messages)
             for request in summary_requests
         )
-        assert "r" * 513 not in json.dumps(main_requests[0].messages)
+        assert all(
+            result not in json.dumps(main_requests[0].messages) for result in expected_results
+        )
         assert "result omitted from context" not in json.dumps(main_requests[0].messages)
         assert (
             sum(

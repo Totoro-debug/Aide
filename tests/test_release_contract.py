@@ -335,9 +335,15 @@ def test_clean_distributions_build_and_import_cleanly(
         sdist_members = {member.name.replace("\\", "/") for member in archive.getmembers()}
     with zipfile.ZipFile(wheels[0]) as archive:
         wheel_members = {member.replace("\\", "/") for member in archive.namelist()}
+        metadata_path = next(
+            member for member in wheel_members if member.endswith(".dist-info/METADATA")
+        )
+        wheel_metadata = archive.read(metadata_path).decode("utf-8")
 
     assert any(member.endswith("/aide/__init__.py") for member in sdist_members)
     assert "aide/__init__.py" in wheel_members
+    assert not any("/tokenizer_data/" in member for member in sdist_members | wheel_members)
+    assert any(line.startswith("Requires-Dist: tiktoken") for line in wheel_metadata.splitlines())
 
     install_root = tmp_path / "clean-install"
     install_result = subprocess.run(

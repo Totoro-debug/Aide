@@ -52,7 +52,6 @@ include = ["aide*"]
 
 [tool.setuptools.package-data]
 "aide.templates" = ["*.md"]
-"aide.agent.context" = ["tokenizer_data/*"]
 "aide.service.protocol" = ["*.json"]
 "aide.web_assets" = [
     "*.html",

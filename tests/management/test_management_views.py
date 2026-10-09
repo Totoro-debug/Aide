@@ -3,6 +3,7 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+import tiktoken
 
 from aide.agent.memory.dream import DreamResult
 from aide.agent.memory.manager import MemoryManager
@@ -11,6 +12,7 @@ from aide.agent.session.session import Session
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
 from aide.errors import ErrorInfo
+from aide.management.commands import ManagementCommandDispatcher
 from aide.management.service import (
     ManagementError,
     RuntimeStatus,
@@ -484,6 +486,40 @@ async def test_status_projects_the_current_runtime_reasoning_effort(
 
     assert status.chat_reasoning_effort == "xhigh"
     assert status.to_dict()["chat_reasoning_effort"] == "xhigh"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "code", "message"),
+    [
+        ("gpt-4o", "model_failed", "Check network access"),
+        ("gpt-4", "model_invalid_request", "Legacy model"),
+    ],
+)
+async def test_status_preserves_safe_tokenizer_failures_for_protocol_clients(
+    agent_home: Path, model: str, code: str, message: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = AgentHome(agent_home)
+    home.initialize()
+    projection = RuntimeStatusInput(
+        projected_messages=({"role": "user", "content": "hello"},),
+        model=model,
+        context_window=200000,
+    )
+    service = management_service(home, current_agent_loop=lambda: _StatusProjectionLoop(projection))
+
+    def reject_load(name: str) -> tiktoken.Encoding:
+        raise OSError("raw-secret download details")
+
+    monkeypatch.setattr(tiktoken, "get_encoding", reject_load)
+    result = await ManagementCommandDispatcher(service).status()
+
+    assert result.status_view is None
+    assert result.management_error is not None
+    assert result.management_error.code == code
+    assert message in result.management_error.message
+    assert result.output is not None and result.output.startswith(code)
+    assert "raw-secret" not in result.output
 
 
 @pytest.mark.asyncio

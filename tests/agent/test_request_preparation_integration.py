@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 import pytest
+import tiktoken
 
+from aide.agent.context.run_context import ContextController
 from aide.agent.session.execution_state import TitleWork
 from aide.agent.session.session import Session, SessionStoragePartition
 from aide.agent.tools.tool_gateway import ModelToolCall
@@ -122,6 +124,62 @@ def _selectable_configuration() -> str:
         "[models.providers.anthropic-default.model_context_windows]\n"
         "claude-model = 200000\nselected-small = 4096\nlarge-model = 200000",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_response", [False, True])
+async def test_tokenizer_download_failure_preserves_normal_model_failure_terminal_state(
+    agent_home: Path, workspace: Path, after_response: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (workspace / "example.txt").write_text("tool contents", encoding="utf-8")
+    provider = _ScheduleProvider(
+        chat_responses=(
+            _response(
+                "read", tool_call=ModelToolCall("read", "read_file", '{"path":"example.txt"}')
+            ),
+        ),
+    )
+    loop, router, schedule, dream, _dispatcher, bus = _agent_loop(
+        agent_home,
+        workspace,
+        provider,
+        schedule_clock=_BlockingClock(NOW),
+        config_text=_configuration(),
+    )
+    object.__setattr__(loop._session_run_state, "start_title", lambda *args: None)
+    original_prepare = ContextController.prepare
+    preparation_calls = 0
+
+    def reject_load(name: str) -> tiktoken.Encoding:
+        raise OSError("private download details")
+
+    async def prepare(controller: ContextController, **kwargs: Any) -> list[dict[str, Any]]:
+        nonlocal preparation_calls
+        preparation_calls += 1
+        if not after_response or preparation_calls > 1:
+            monkeypatch.setattr(tiktoken, "get_encoding", reject_load)
+        return await original_prepare(controller, **kwargs)
+
+    monkeypatch.setattr(ContextController, "prepare", prepare)
+    try:
+        await loop.start()
+        await collect_foreground_outbound(bus, "read the file")
+        assert len(provider.stream_requests) == int(after_response)
+        assert provider.complete_requests == []
+        assert loop.session.metadata["token_usage"]["model_calls"] == int(after_response)
+        roles = [message["role"] for message in loop.session.messages]
+        assert roles == (
+            ["user", "assistant", "tool", "assistant"] if after_response else ["user", "assistant"]
+        )
+        terminal = loop.session.messages[-1]
+        assert terminal["status"] == "error"
+        assert terminal["error"]["code"] == "model_failed"
+        assert "Check network access" in terminal["error"]["message"]
+        assert "private" not in terminal["error"]["message"]
+        if after_response:
+            assert "tool contents" in loop.session.messages[2]["content"]
+    finally:
+        await _close_components(loop, router, schedule, dream)
 
 
 @pytest.mark.asyncio

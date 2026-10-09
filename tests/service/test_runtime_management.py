@@ -15,6 +15,7 @@ from uuid import uuid4
 import aiohttp
 import pytest
 import pytest_asyncio
+import tiktoken
 from aiohttp.test_utils import TestServer
 
 from aide.agent.loop import AgentRunExecutor
@@ -747,7 +748,7 @@ async def test_named_management_operations_reject_stale_claims(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["memory/read", "skills/reload"])
+@pytest.mark.parametrize("operation", ["memory/read", "skills/reload", "runtime/status"])
 async def test_named_management_failure_is_an_error_and_preserves_previous_data(
     management_case: ManagementCase, operation: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -758,6 +759,11 @@ async def test_named_management_failure_is_an_error_and_preserves_previous_data(
     if operation == "memory/read":
         resources.memory_manager.long_term_path.write_bytes(b"\xff")
         error_code = "persistence_error"
+    elif operation == "runtime/status":
+        def fail_encoding(name: str) -> tiktoken.Encoding:
+            raise OSError("private download details")
+        monkeypatch.setattr(tiktoken, "get_encoding", fail_encoding)
+        error_code = "model_failed"
     else:
         def fail_reload(*_args: object, **_kwargs: object) -> None:
             raise OSError("private skill failure")

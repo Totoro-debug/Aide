@@ -339,6 +339,7 @@ class ManagementCommandDispatcher:
                 return ManagementCommandResult(
                     handled=True,
                     output=f"{management_error.error.code}: {management_error.error.message}",
+                    management_error=management_error.error,
                 )
             return ManagementCommandResult(handled=True, output=None, status_view=status)
 

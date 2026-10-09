@@ -4,5 +4,4 @@ include aide/web_assets/index.html
 include aide/web_assets/favicon.svg
 include aide/web_assets/manifest.json
 recursive-include aide/web_assets/assets *
-recursive-include aide/agent/context/tokenizer_data *
 global-exclude __pycache__ *.py[cod]

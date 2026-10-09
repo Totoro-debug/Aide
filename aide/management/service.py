@@ -14,6 +14,7 @@ from aide.agent.context.budget import (
     ProjectionSource,
     project_next_request_usage,
 )
+from aide.agent.context.tokenizer import ContextTokenizerError
 from aide.agent.memory.dream import DreamResult
 from aide.agent.permission import (
     RuntimePermissionControl,
@@ -482,6 +483,8 @@ class ManagementViewService:
             )
         except ManagementError:
             raise
+        except ContextTokenizerError as error:
+            raise ManagementError(error.error) from error
         except (OSError, UnicodeError, ValueError) as error:
             raise ManagementError(
                 ErrorInfo("persistence_error", "Runtime status could not be read.")

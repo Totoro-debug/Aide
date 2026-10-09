@@ -13,11 +13,9 @@ from uuid import UUID, uuid4
 
 from aide.agent.context.builder import ContextBuilder
 from aide.agent.context.run_context import (
-    AgentRunContextController,
-    AgentRunContextRequestPreparer,
     AgentRunContextSnapshot,
     AgentRunTerminalCommitValues,
-    agent_run_attempt_guard,
+    ContextController,
 )
 from aide.agent.permission import PermissionSnapshot, ToolPermissionLevel
 from aide.agent.runner import (
@@ -175,7 +173,7 @@ class SubAgentRunnerExecutor:
         event_revision = record.revision
         runner_message_count = 0
         latest_runner_usage = empty_token_usage()
-        controller: AgentRunContextController | None = None
+        controller: ContextController | None = None
         artifact_paths: list[str] = list(record.artifact_paths)
         try:
             run_router, run_gateway = self._create_run_resources(record)
@@ -204,26 +202,6 @@ class SubAgentRunnerExecutor:
                     )
                 )
 
-            context_state = deepcopy(record.context_state or {})
-            last_compacted = cast(object, context_state.get("last_compacted", 0))
-            if (
-                isinstance(last_compacted, bool)
-                or not isinstance(last_compacted, int)
-                or not 0 <= last_compacted <= len(current_record[0].conversation)
-            ):
-                raise ValueError("SubAgent compaction cursor is invalid")
-            run_controller = AgentRunContextController(
-                snapshot=AgentRunContextSnapshot(
-                    messages=current_record[0].conversation,
-                    metadata=context_state,
-                    last_compacted=last_compacted,
-                ),
-                provider=run_router,
-                append_summary=append_summary,
-                now=self._now,
-            )
-            controller = run_controller
-
             def project_messages(
                 history: Sequence[dict[str, Any]],
                 current_user: dict[str, Any] | None,
@@ -243,17 +221,33 @@ class SubAgentRunnerExecutor:
                     ),
                 )
 
-            request_preparer = AgentRunContextRequestPreparer(
-                run_controller,
-                router=run_router,
+            context_state = deepcopy(record.context_state or {})
+            last_compacted = cast(object, context_state.get("last_compacted", 0))
+            if (
+                isinstance(last_compacted, bool)
+                or not isinstance(last_compacted, int)
+                or not 0 <= last_compacted <= len(current_record[0].conversation)
+            ):
+                raise ValueError("SubAgent compaction cursor is invalid")
+            run_controller = ContextController(
+                snapshot=AgentRunContextSnapshot(
+                    messages=current_record[0].conversation,
+                    metadata=context_state,
+                    last_compacted=last_compacted,
+                ),
+                provider=run_router,
+                append_summary=append_summary,
+                now=self._now,
+                request_router=run_router,
                 requested_route="subagent",
                 project_messages=project_messages,
                 project_tool_results=ContextBuilder.project_tool_results,
-                current_user=None,
                 compact_ratio=self._compact_ratio,
                 enable_tool_micro_compression=self._enable_tool_micro_compression,
             )
-            runner = AgentRunner(run_router, request_preparer)
+            controller = run_controller
+
+            runner = AgentRunner(run_router, run_controller)
 
             async def publish(kind: SubAgentEventKind, data: dict[str, Any]) -> None:
                 nonlocal event_revision
@@ -436,7 +430,6 @@ class SubAgentRunnerExecutor:
         creator = record.creator_snapshot
         run_router = RunModelRouter(
             self._model_router,
-            guard=agent_run_attempt_guard,
             subagent_model_configuration=SessionModelConfiguration(
                 creator.provider_id,
                 creator.model,

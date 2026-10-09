@@ -858,7 +858,7 @@ def test_agent_loop_request_paths_stay_inside_context_builder() -> None:
             for node in ast.walk(method)
         )
 
-    assert any(
+    assert not any(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "_validate_model_context_budget"
@@ -927,12 +927,7 @@ def test_issue_243_production_model_calls_use_one_explicit_run_context_seam() ->
         and node.func.id in {"getattr", "hasattr"}
         for node in ast.walk(run_router)
     )
-    assert any(
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "_foreground_runtime_status_input"
-        for node in ast.walk(methods["_validate_model_context_budget"])
-    )
+    assert "_validate_model_context_budget" not in methods
     service_tree = ast.parse((PACKAGE_ROOT / "service" / "runtime.py").read_text(encoding="utf-8"))
     assert any(
         isinstance(node, ast.Call)

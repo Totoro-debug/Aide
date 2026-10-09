@@ -134,7 +134,7 @@ class RunModelRouter:
         self,
         router: ModelRouterDelegate,
         *,
-        guard: ModelAttemptGuard,
+        guard: ModelAttemptGuard | None = None,
         session_model_configuration: SessionModelConfiguration | None = None,
         subagent_model_configuration: SessionModelConfiguration | None = None,
     ) -> None:
@@ -254,7 +254,7 @@ class ModelRouter:
     def for_run(
         self,
         *,
-        guard: ModelAttemptGuard,
+        guard: ModelAttemptGuard | None = None,
         session_model_configuration: SessionModelConfiguration | None = None,
         subagent_model_configuration: SessionModelConfiguration | None = None,
     ) -> RunModelRouter:

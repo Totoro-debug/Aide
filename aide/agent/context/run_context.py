@@ -55,11 +55,10 @@ _MICRO_COMPRESSION_TOOL_CALL_THRESHOLD = 10
 _TOOL_RESULT_MICRO_COMPRESSION_CHAR_LIMIT = 512
 
 __all__ = [
-    "AgentRunContextController",
     "AgentRunContextModelRouter",
-    "AgentRunContextRequestPreparer",
     "AgentRunContextSnapshot",
     "AgentRunTerminalCommitValues",
+    "ContextController",
     "agent_run_attempt_guard",
     "latest_main_agent_usage_anchor",
 ]
@@ -120,20 +119,7 @@ class _PendingFactBatch:
     selected_payload: str
 
 
-@dataclass(frozen=True, slots=True)
-class _ReactRevisionObservation:
-    current_user: dict[str, Any] | None
-    tools: tuple[dict[str, Any], ...]
-    route_status: ModelRouteStatus
-    memory_route_status: ModelRouteStatus | None
-    compact_ratio: float
-    estimator_version: str
-    increment: tuple[dict[str, Any], ...]
-    latest_cycle_start: int | None
-    continuation_revision: int
-
-
-class AgentRunContextController:
+class ContextController:
     """Run-local staged context state shared by Run-start and ReAct preparation."""
 
     def __init__(
@@ -143,6 +129,14 @@ class AgentRunContextController:
         provider: AgentRunContextModelRouter,
         append_summary: Callable[[str, datetime], Awaitable[object]],
         now: Callable[[], datetime],
+        request_router: RunModelRouter | None = None,
+        requested_route: Literal["chat", "schedule", "subagent"] | None = None,
+        project_messages: CompactionProjection | None = None,
+        project_tool_results: ToolResultProjection | None = None,
+        current_user: dict[str, Any] | None = None,
+        compact_ratio: float = 0.9,
+        enable_tool_micro_compression: bool = False,
+        estimator_version: str = CONTEXT_ESTIMATOR_VERSION,
     ) -> None:
         self._snapshot = AgentRunContextSnapshot(
             messages=snapshot.messages,
@@ -152,6 +146,16 @@ class AgentRunContextController:
         self._provider = provider
         self._append_summary = append_summary
         self._now = now
+        self._request_router = request_router
+        self._requested_route = requested_route
+        self._project_messages = project_messages
+        self._project_tool_results = project_tool_results
+        self._request_current_user = None if current_user is None else deepcopy(current_user)
+        self._compact_ratio = compact_ratio
+        self._enable_tool_micro_compression = enable_tool_micro_compression
+        self._estimator_version = estimator_version
+        self._run_start_prepared = False
+        self._micro_compression_enabled = False
         self._pending_last_compacted = snapshot.last_compacted
         self._pending_action_summary = _normalized_staged_action_summary(
             snapshot.metadata.get("summary")
@@ -177,13 +181,29 @@ class AgentRunContextController:
         provider: AgentRunContextModelRouter,
         append_summary: Callable[[str, datetime], Awaitable[object]],
         now: Callable[[], datetime],
-    ) -> AgentRunContextController:
+        request_router: RunModelRouter | None = None,
+        requested_route: Literal["chat", "schedule", "subagent"] | None = None,
+        project_messages: CompactionProjection | None = None,
+        project_tool_results: ToolResultProjection | None = None,
+        current_user: dict[str, Any] | None = None,
+        compact_ratio: float = 0.9,
+        enable_tool_micro_compression: bool = False,
+        estimator_version: str = CONTEXT_ESTIMATOR_VERSION,
+    ) -> ContextController:
         """Create a controller without retaining the writable Session object."""
         return cls(
             snapshot=AgentRunContextSnapshot.from_session(session),
             provider=provider,
             append_summary=append_summary,
             now=now,
+            request_router=request_router,
+            requested_route=requested_route,
+            project_messages=project_messages,
+            project_tool_results=project_tool_results,
+            current_user=current_user,
+            compact_ratio=compact_ratio,
+            enable_tool_micro_compression=enable_tool_micro_compression,
+            estimator_version=estimator_version,
         )
 
     def terminal_commit_values(self) -> AgentRunTerminalCommitValues:
@@ -193,6 +213,164 @@ class AgentRunContextController:
             pending_action_summary=self._pending_action_summary,
             usage_delta=dict(self._pending_compaction_usage),
         )
+
+    @staticmethod
+    def estimate_request_tokens(
+        messages: Sequence[dict[str, Any]],
+        tools: Sequence[dict[str, Any]] = (),
+        *,
+        model: str,
+    ) -> int:
+        """Count the complete local request without preparing or publishing Run state."""
+        del model
+        return estimate_request_tokens(messages, tools)
+
+    def initial_messages(self) -> list[dict[str, Any]]:
+        """Return the initial runtime projection without performing budget preparation."""
+        if self._project_messages is None:
+            return []
+        current_user = deepcopy(self._request_current_user)
+        return self._project_messages(
+            self._snapshot.messages,
+            current_user,
+            (),
+            self._pending_last_compacted,
+            self._pending_action_summary,
+        )
+
+    async def prepare(
+        self,
+        *,
+        increment: Sequence[dict[str, Any]],
+        latest_cycle_start: int | None,
+        tools: Sequence[dict[str, Any]],
+        continuation: ModelContinuation | None,
+        continuation_revision: int,
+        is_micro_compression_eligible: Callable[[str], bool] | None,
+    ) -> list[dict[str, Any]]:
+        """Prepare the first or next logical Agent Run request before routing it."""
+        if (
+            self._request_router is None
+            or self._requested_route is None
+            or self._project_messages is None
+        ):
+            raise RuntimeError("request preparation is not configured")
+
+        copied_increment = tuple(deepcopy(list(increment)))
+        _validate_react_increment(copied_increment)
+        _validate_latest_cycle_start(latest_cycle_start, copied_increment)
+        if not self._run_start_prepared and copied_increment:
+            raise ValueError("the first request increment must be empty")
+
+        route_status = self._request_router.call_route_status(
+            self._requested_route,
+            continuation=continuation,
+        )
+        memory_route_status = self._request_router.call_route_status("memory", continuation=None)
+        effective_tools = deepcopy(list(tools))
+        current_user = deepcopy(self._request_current_user)
+        if not self._run_start_prepared:
+            prepared_messages = await self.prepare_run_start(
+                project_messages=self._project_messages,
+                route_status=route_status,
+                memory_route_status=memory_route_status,
+                tools=effective_tools,
+                current_user=current_user,
+                compact_ratio=self._compact_ratio,
+                estimator_version=self._estimator_version,
+            )
+            self._run_start_prepared = True
+        else:
+            prepared_messages = await self.prepare_react(
+                project_messages=self._project_messages,
+                increment=copied_increment,
+                latest_cycle_start=latest_cycle_start,
+                route_status=route_status,
+                memory_route_status=memory_route_status,
+                tools=effective_tools,
+                current_user=current_user,
+                compact_ratio=self._compact_ratio,
+                estimator_version=self._estimator_version,
+                continuation_revision=continuation_revision,
+                micro_compression_enabled=self._micro_compression_enabled,
+            )
+
+        request_messages = deepcopy(list(prepared_messages))
+        micro_compression_enabled = (
+            self._enable_tool_micro_compression
+            and is_micro_compression_eligible is not None
+            and _micro_compression_eligible_count(
+                request_messages,
+                is_micro_compression_eligible=is_micro_compression_eligible,
+            )
+            > _MICRO_COMPRESSION_TOOL_CALL_THRESHOLD
+        )
+        if micro_compression_enabled:
+            assert is_micro_compression_eligible is not None
+            if self._project_tool_results is None:
+                raise RuntimeError("Tool-result projection is not configured")
+            request_messages = self._project_tool_results(
+                request_messages,
+                _micro_compression_omission_indices(
+                    request_messages,
+                    is_micro_compression_eligible=is_micro_compression_eligible,
+                ),
+            )
+
+        final_estimated_tokens = self.estimate_request_tokens(
+            request_messages,
+            effective_tools,
+            model=route_status.model,
+        )
+        budget = ContextBudget(
+            context_window=route_status.context_window,
+            max_output=route_status.max_output,
+            compact_ratio=self._compact_ratio,
+        )
+        revision = self._context_revision(
+            current_user=current_user,
+            tools=effective_tools,
+            projected=request_messages,
+            route_status=route_status,
+            memory_route_status=memory_route_status,
+            compact_ratio=self._compact_ratio,
+            estimator_version=self._estimator_version,
+            increment=copied_increment,
+            latest_cycle_start=latest_cycle_start,
+            continuation_revision=continuation_revision,
+            micro_compression_enabled=micro_compression_enabled,
+        )
+        if budget.exceeds_available_context(final_estimated_tokens):
+            overflow_error = model_context_overflow_error()
+            self._record_failure(revision, overflow_error)
+            raise overflow_error
+
+        self._checked_preparation_revision = revision
+        self._micro_compression_enabled = micro_compression_enabled
+        return deepcopy(request_messages)
+
+    def record_response(
+        self,
+        *,
+        request_messages: Sequence[dict[str, Any]],
+        tools: Sequence[dict[str, Any]],
+        response: ModelResponse,
+        increment: Sequence[dict[str, Any]],
+    ) -> dict[str, object]:
+        """Record one completed main request and return its persisted context usage."""
+        if self._request_router is None or self._requested_route is None:
+            raise RuntimeError("response recording is not configured")
+        route_status = self._request_router.current_call_status(self._requested_route)
+        if route_status is None:
+            raise RuntimeError("response recording requires one completed Model call")
+        return self.record_main_agent_response(
+            request_messages=request_messages,
+            tools=tools,
+            response=response,
+            increment=increment,
+            route_status=route_status,
+            estimator_version=self._estimator_version,
+        ).to_dict()
 
     async def prepare_run_start(
         self,
@@ -400,7 +578,7 @@ class AgentRunContextController:
         return context
 
     def _current_user_for_run(self) -> dict[str, Any] | None:
-        """Return the detached current User captured by the request preparer."""
+        """Return the detached current User captured for this Agent Run."""
         return None if self._run_current_user is None else deepcopy(self._run_current_user)
 
     async def prepare_react(
@@ -526,29 +704,6 @@ class AgentRunContextController:
         )
         self._checked_preparation_revision = final_revision
         return tuple(deepcopy(final_projected))
-
-    def observe_react_request_projection(
-        self,
-        observation: _ReactRevisionObservation,
-        messages: Sequence[dict[str, Any]],
-        *,
-        micro_compression_enabled: bool,
-    ) -> None:
-        """Record the final Provider projection before the Provider call."""
-        preparation_revision = self._context_revision(
-            current_user=observation.current_user,
-            tools=observation.tools,
-            projected=tuple(deepcopy(list(messages))),
-            route_status=observation.route_status,
-            memory_route_status=observation.memory_route_status,
-            compact_ratio=observation.compact_ratio,
-            estimator_version=observation.estimator_version,
-            increment=observation.increment,
-            latest_cycle_start=observation.latest_cycle_start,
-            continuation_revision=observation.continuation_revision,
-            micro_compression_enabled=micro_compression_enabled,
-        )
-        self._checked_preparation_revision = preparation_revision
 
     def _react_project_candidate(
         self,
@@ -687,7 +842,7 @@ class AgentRunContextController:
         else:
             usage_context, usage = usage_anchor
         return project_next_request_tokens(
-            estimate_request_tokens(projected, tools),
+            self.estimate_request_tokens(projected, tools, model=route_status.model),
             snapshot=usage_context,
             reported_usage=usage,
             requested_route=route_status.requested_route,
@@ -918,122 +1073,6 @@ class AgentRunContextController:
     def _persisted_now(self) -> datetime:
         value = self._now()
         return value.replace(microsecond=value.microsecond // 1000 * 1000)
-
-
-class AgentRunContextRequestPreparer:
-    """Adapt one staged controller to the Agent Runner's narrow request seam."""
-
-    def __init__(
-        self,
-        controller: AgentRunContextController,
-        *,
-        router: RunModelRouter,
-        requested_route: Literal["chat", "schedule", "subagent"],
-        project_messages: CompactionProjection,
-        project_tool_results: ToolResultProjection | None = None,
-        current_user: dict[str, Any] | None = None,
-        compact_ratio: float = 0.9,
-        enable_tool_micro_compression: bool = False,
-        estimator_version: str = CONTEXT_ESTIMATOR_VERSION,
-    ) -> None:
-        self._controller = controller
-        self._router = router
-        self._requested_route = requested_route
-        self._project_messages = project_messages
-        self._project_tool_results = project_tool_results
-        self._current_user = None if current_user is None else deepcopy(current_user)
-        self._compact_ratio = compact_ratio
-        self._enable_tool_micro_compression = enable_tool_micro_compression
-        self._estimator_version = estimator_version
-        self._micro_compression_enabled = False
-
-    async def prepare(
-        self,
-        *,
-        increment: Sequence[dict[str, Any]],
-        latest_cycle_start: int | None,
-        tools: Sequence[dict[str, Any]],
-        continuation: ModelContinuation | None,
-        continuation_revision: int,
-        is_micro_compression_eligible: Callable[[str], bool] | None,
-    ) -> list[dict[str, Any]]:
-        route_status = self._router.call_route_status(
-            self._requested_route,
-            continuation=continuation,
-        )
-        memory_route_status = self._router.call_route_status("memory", continuation=None)
-        prepared_messages = await self._controller.prepare_react(
-            project_messages=self._project_messages,
-            increment=deepcopy(list(increment)),
-            latest_cycle_start=latest_cycle_start,
-            route_status=route_status,
-            memory_route_status=memory_route_status,
-            tools=deepcopy(list(tools)),
-            current_user=None if self._current_user is None else deepcopy(self._current_user),
-            compact_ratio=self._compact_ratio,
-            estimator_version=self._estimator_version,
-            continuation_revision=continuation_revision,
-            micro_compression_enabled=self._micro_compression_enabled,
-        )
-        request_messages = deepcopy(list(prepared_messages))
-        micro_compression_enabled = (
-            self._enable_tool_micro_compression
-            and is_micro_compression_eligible is not None
-            and _micro_compression_eligible_count(
-                request_messages, is_micro_compression_eligible=is_micro_compression_eligible
-            )
-            > _MICRO_COMPRESSION_TOOL_CALL_THRESHOLD
-        )
-        if micro_compression_enabled:
-            assert is_micro_compression_eligible is not None
-            if self._project_tool_results is None:
-                raise RuntimeError("Tool-result projection is not configured")
-            request_messages = self._project_tool_results(
-                request_messages,
-                _micro_compression_omission_indices(
-                    request_messages,
-                    is_micro_compression_eligible=is_micro_compression_eligible,
-                ),
-            )
-        observation = _ReactRevisionObservation(
-            current_user=None if self._current_user is None else deepcopy(self._current_user),
-            tools=tuple(deepcopy(list(tools))),
-            route_status=route_status,
-            memory_route_status=memory_route_status,
-            compact_ratio=self._compact_ratio,
-            estimator_version=self._estimator_version,
-            increment=tuple(deepcopy(list(increment))),
-            latest_cycle_start=latest_cycle_start,
-            continuation_revision=continuation_revision,
-        )
-        self._controller.observe_react_request_projection(
-            observation,
-            request_messages,
-            micro_compression_enabled=micro_compression_enabled,
-        )
-        self._micro_compression_enabled = micro_compression_enabled
-        return deepcopy(request_messages)
-
-    def record_response(
-        self,
-        *,
-        request_messages: Sequence[dict[str, Any]],
-        tools: Sequence[dict[str, Any]],
-        response: ModelResponse,
-        increment: Sequence[dict[str, Any]],
-    ) -> dict[str, object] | None:
-        """Attach the usage anchor for the assistant response just produced."""
-        route_status = self._router.current_call_status(self._requested_route)
-        if route_status is None:
-            raise RuntimeError("response recording requires one completed Model call")
-        return self._controller.record_main_agent_response(
-            request_messages=request_messages,
-            tools=tools,
-            response=response,
-            increment=increment,
-            route_status=route_status,
-            estimator_version=self._estimator_version,
-        ).to_dict()
 
 
 def _micro_compression_eligible_count(

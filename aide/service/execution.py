@@ -19,7 +19,7 @@ from aide.management.service import RuntimeStatusInput
 from aide.provider.session_configuration import SessionModelConfiguration
 from aide.schedule.model import ScheduleJob
 from aide.schedule.service import ScheduleOccurrence
-from aide.skills.catalog import LoadedSkill, SkillMetadata
+from aide.skills.catalog import SkillMetadata
 
 
 class SessionExecution:
@@ -195,6 +195,3 @@ class SessionExecution:
 
     def reload_skill(self) -> tuple[SkillMetadata, ...]:
         return self._reload_skills()
-
-    def _validate_model_context_budget(self, skills: tuple[LoadedSkill, ...]) -> None:
-        self._create_executor()._validate_model_context_budget(skills)

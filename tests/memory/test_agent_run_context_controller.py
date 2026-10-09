@@ -17,9 +17,8 @@ from aide.agent.context.budget import (
 )
 from aide.agent.context.builder import ContextBuilder
 from aide.agent.context.run_context import (
-    AgentRunContextController,
-    AgentRunContextRequestPreparer,
     AgentRunContextSnapshot,
+    ContextController,
     agent_run_attempt_guard,
     latest_main_agent_usage_anchor,
 )
@@ -413,18 +412,20 @@ def _controller(
     workspace: Path,
     session: Session,
     provider: ScriptedFakeProvider,
-) -> AgentRunContextController:
+    **request_options: Any,
+) -> ContextController:
     state = session.workspace_state
-    return AgentRunContextController(
+    return ContextController(
         snapshot=AgentRunContextSnapshot.from_session(session),
         provider=ScriptedFakeRouter(provider),
         append_summary=MemoryManager(state).append_summary,
         now=lambda: NOW,
+        **request_options,
     )
 
 
 async def _prepare_controller(
-    controller: AgentRunContextController,
+    controller: ContextController,
     *,
     current_user: str = "new user",
     context_window: int = 1_800,
@@ -501,10 +502,7 @@ def _context_router(
         ),
         "memory": memory_status or _memory_status(context_window=16_384, max_output=1_024),
     }
-    return RunModelRouter(
-        ScriptedFakeRouter(provider, route_statuses=statuses),
-        guard=agent_run_attempt_guard,
-    )
+    return RunModelRouter(ScriptedFakeRouter(provider, route_statuses=statuses))
 
 
 def _project_messages(
@@ -618,7 +616,7 @@ async def test_controller_stages_run_start_compaction_from_detached_snapshot(
     provider = ScriptedFakeProvider(
         completions=(_response("Facts"), _response("Updated action")),
     )
-    manager = AgentRunContextController(
+    manager = ContextController(
         snapshot=snapshot,
         provider=ScriptedFakeRouter(provider),
         append_summary=MemoryManager(state).append_summary,
@@ -715,7 +713,7 @@ async def test_controller_detaches_from_the_supplied_snapshot(workspace: Path) -
     )
     snapshot = AgentRunContextSnapshot.from_session(session)
     provider = ScriptedFakeProvider(completions=(_response("facts"), _response("action")))
-    controller = AgentRunContextController(
+    controller = ContextController(
         snapshot=snapshot,
         provider=ScriptedFakeRouter(provider),
         append_summary=MemoryManager(state).append_summary,
@@ -1398,18 +1396,19 @@ async def test_controller_preparer_rebuilds_runner_requests_and_preserves_opaque
     )
     state = _state(workspace)
     session = Session.create(state)
-    controller = _controller(workspace, session, provider)
     router = _context_router(provider)
-    preparer = AgentRunContextRequestPreparer(
-        controller,
-        router=router,
+    controller = _controller(
+        workspace,
+        session,
+        provider,
+        request_router=router,
         requested_route="chat",
         project_messages=_project_messages,
         project_tool_results=ContextBuilder.project_tool_results,
         current_user={"role": "user", "content": "canonical task"},
     )
 
-    result = await AgentRunner(router, preparer).run(
+    result = await AgentRunner(router, controller).run(
         [{"role": "system", "content": "stale"}, {"role": "user", "content": "stale"}],
         model="chat",
         tool_gateway=Gateway(),  # type: ignore[arg-type]
@@ -2317,7 +2316,7 @@ async def test_same_context_revision_is_a_noop_after_successful_staging(
 
 
 @pytest.mark.asyncio
-async def test_request_preparer_reuses_run_start_revision_without_duplicate_summary(
+async def test_controller_first_prepare_runs_run_start_without_duplicate_summary(
     workspace: Path,
 ) -> None:
     state = _state(workspace)
@@ -2338,7 +2337,6 @@ async def test_request_preparer_reuses_run_start_revision_without_duplicate_summ
         last_compacted=0,
     )
     provider = ScriptedFakeProvider(completions=(_response("facts"), _response("action")))
-    controller = _controller(workspace, session, provider)
     route_status = _chat_status(context_window=1_000, max_output=200)
     memory_route_status = _memory_status(context_window=4_000)
     router = _context_router(
@@ -2346,9 +2344,11 @@ async def test_request_preparer_reuses_run_start_revision_without_duplicate_summ
         chat_status=route_status,
         memory_status=memory_route_status,
     )
-    preparer = AgentRunContextRequestPreparer(
-        controller,
-        router=router,
+    controller = _controller(
+        workspace,
+        session,
+        provider,
+        request_router=router,
         requested_route="chat",
         project_messages=_project_messages,
         project_tool_results=ContextBuilder.project_tool_results,
@@ -2356,14 +2356,7 @@ async def test_request_preparer_reuses_run_start_revision_without_duplicate_summ
         compact_ratio=0.5,
     )
 
-    await controller.prepare_run_start(
-        project_messages=_project_messages,
-        current_user={"role": "user", "content": "current request"},
-        route_status=route_status,
-        compact_ratio=0.5,
-        memory_route_status=memory_route_status,
-    )
-    prepared = await preparer.prepare(
+    prepared = await controller.prepare(
         increment=(),
         latest_cycle_start=None,
         tools=(),
@@ -2387,14 +2380,16 @@ async def test_runner_final_projection_changes_revision_and_repeats_stably(
     state = _state(workspace)
     session = Session.create(state)
     provider = ScriptedFakeProvider()
-    controller = _controller(workspace, session, provider)
-    preparer = AgentRunContextRequestPreparer(
-        controller,
-        router=_context_router(
-            provider,
-            chat_status=_chat_status(context_window=16_384, max_output=100),
-            memory_status=_memory_status(context_window=16_384, max_output=100),
-        ),
+    router = _context_router(
+        provider,
+        chat_status=_chat_status(context_window=16_384, max_output=100),
+        memory_status=_memory_status(context_window=16_384, max_output=100),
+    )
+    controller = _controller(
+        workspace,
+        session,
+        provider,
+        request_router=router,
         requested_route="chat",
         project_messages=_project_messages_with_tool_calls,
         project_tool_results=ContextBuilder.project_tool_results,
@@ -2406,8 +2401,16 @@ async def test_runner_final_projection_changes_revision_and_repeats_stably(
         message for number in range(11) for message in _react_cycle(str(number), size=513)
     )
     original_increment = deepcopy(increment)
+    await controller.prepare(
+        increment=(),
+        latest_cycle_start=None,
+        tools=(),
+        continuation=None,
+        continuation_revision=0,
+        is_micro_compression_eligible=None,
+    )
     requests = [
-        await preparer.prepare(
+        await controller.prepare(
             increment=increment,
             latest_cycle_start=len(increment) - 2,
             tools=(),
@@ -2530,7 +2533,7 @@ async def test_react_revision_changes_for_each_model_visible_input_source(
 
 
 @pytest.mark.asyncio
-async def test_request_preparer_uses_configured_capacity_after_previous_fallback(
+async def test_controller_uses_configured_capacity_after_previous_fallback(
     workspace: Path,
 ) -> None:
     state = _state(workspace)
@@ -2553,12 +2556,17 @@ async def test_request_preparer_uses_configured_capacity_after_previous_fallback
     router = ModelRouter(
         configuration=configuration,
         provider_factory=lambda provider: providers[provider.provider_id],
-    ).for_run(guard=agent_run_attempt_guard)
-    controller = AgentRunContextController(
+    ).for_run()
+    controller = ContextController(
         snapshot=AgentRunContextSnapshot.from_session(session),
         provider=router,
         append_summary=MemoryManager(state).append_summary,
         now=lambda: NOW,
+        request_router=router,
+        requested_route="chat",
+        project_messages=_project_messages,
+        project_tool_results=ContextBuilder.project_tool_results,
+        current_user={"role": "user", "content": "request " + "x" * 2_500},
     )
     await router.complete(
         "title",
@@ -2569,16 +2577,7 @@ async def test_request_preparer_uses_configured_capacity_after_previous_fallback
     assert fallback_status is not None
     assert fallback_status.selected_route == "chat"
 
-    preparer = AgentRunContextRequestPreparer(
-        controller,
-        router=router,
-        requested_route="chat",
-        project_messages=_project_messages,
-        project_tool_results=ContextBuilder.project_tool_results,
-        current_user={"role": "user", "content": "request " + "x" * 2_500},
-    )
-
-    result = await AgentRunner(router, preparer).run(
+    result = await AgentRunner(router, controller).run(
         [],
         model="chat",
         tool_gateway=None,
@@ -2778,6 +2777,175 @@ async def test_visible_tool_schema_change_rechecks_a_new_revision(
     terminal = controller.terminal_commit_values()
     assert terminal.pending_action_summary == "action two"
     assert terminal.usage_delta["model_calls"] == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("available_offset", (-1, 0, 1))
+async def test_final_local_capacity_is_enforced_with_an_underestimated_reported_anchor(
+    workspace: Path,
+    available_offset: int,
+) -> None:
+    state = _state(workspace)
+    session = Session.create(state)
+    history = _run_history("old", size=1_600, timestamp=NOW.isoformat(), token_usage=_usage())
+    current_user = {"role": "user", "content": "continue"}
+    candidate = _project_messages(history, current_user, (), 0, None)
+    estimated = estimate_request_tokens(candidate)
+    context_window = estimated + 200 + available_offset
+    history[-1]["context_usage"] = {
+        **_context_usage(context_window=context_window),
+        "anchor_estimated_tokens": estimated,
+    }
+    seed_session_state(session, messages=history, metadata={}, last_compacted=0)
+    provider = ScriptedFakeProvider(
+        streams=(StreamScript(events=(ModelCompleted(response=_response("done")),)),),
+    )
+    router = _context_router(
+        provider,
+        chat_status=_chat_status(
+            context_window=context_window,
+            max_output=200,
+            provider_id="provider",
+            model="model",
+        ),
+    )
+    controller = _controller(
+        workspace,
+        session,
+        provider,
+        request_router=router,
+        requested_route="chat",
+        project_messages=_project_messages,
+        current_user=current_user,
+    )
+    notifications: list[bool] = []
+    run = AgentRunner(router, controller).run(
+        controller.initial_messages(),
+        model="chat",
+        tool_gateway=None,
+        on_output=None,
+        confirmation=None,
+        externalize_result=None,
+        cancel_requested=None,
+        max_iterations=50,
+        on_first_request_prepared=lambda: notifications.append(True),
+    )
+
+    if available_offset <= 0:
+        with pytest.raises(ModelCallError) as raised:
+            await run
+        assert raised.value.error.code == "model_context_overflow"
+        assert provider.stream_requests == []
+        assert notifications == []
+    else:
+        result = await run
+        assert result.finish_reason == "completed"
+        assert len(provider.stream_requests) == 1
+        assert notifications == [True]
+    assert provider.complete_requests == []
+    assert session.messages == history
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("increment", "latest_cycle_start", "error"),
+    (
+        ([{"role": "user", "content": "invalid"}], None, "assistant or tool"),
+        ([], 0, "latest_cycle_start"),
+        ([{"role": "assistant", "content": "already formed"}], None, "first request"),
+    ),
+)
+async def test_first_prepare_rejects_invalid_or_nonempty_increment(
+    workspace: Path,
+    increment: list[dict[str, Any]],
+    latest_cycle_start: int | None,
+    error: str,
+) -> None:
+    session = Session.create(_state(workspace))
+    provider = ScriptedFakeProvider()
+    controller = _controller(
+        workspace,
+        session,
+        provider,
+        request_router=_context_router(provider),
+        requested_route="chat",
+        project_messages=_project_messages,
+    )
+
+    with pytest.raises(ValueError, match=error):
+        await controller.prepare(
+            increment=increment,
+            latest_cycle_start=latest_cycle_start,
+            tools=(),
+            continuation=None,
+            continuation_revision=0,
+            is_micro_compression_eligible=None,
+        )
+    assert provider.complete_requests == provider.stream_requests == []
+    assert session.messages == []
+
+
+@pytest.mark.asyncio
+async def test_real_router_retry_reuses_one_controller_preparation_without_a_main_guard(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ScriptedFakeProvider(
+        streams=(
+            StreamScript(
+                events=(),
+                error=ModelCallError(ErrorInfo("provider_timeout", "retry", retryable=True)),
+            ),
+            StreamScript(events=(ModelCompleted(response=_response("recovered")),)),
+        ),
+    )
+    router = ModelRouter(
+        configuration=_router_configuration(
+            chat_context_window=4_000, default_context_window=4_000
+        ),
+        provider_factory=lambda _: provider,
+        clock=FakeClock(NOW),
+        jitter=None,
+    ).for_run()
+    session = Session.create(_state(workspace))
+    controller = _controller(
+        workspace,
+        session,
+        provider,
+        request_router=router,
+        requested_route="chat",
+        project_messages=_project_messages,
+        current_user={"role": "user", "content": "request"},
+    )
+    preparations = 0
+    original_prepare = controller.prepare
+
+    async def prepare(**kwargs: Any) -> list[dict[str, Any]]:
+        nonlocal preparations
+        preparations += 1
+        return await original_prepare(**kwargs)
+
+    def reject_guard(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("main Router requests must not run a budget guard")
+
+    monkeypatch.setattr(controller, "prepare", prepare)
+    monkeypatch.setattr("aide.agent.context.run_context.agent_run_attempt_guard", reject_guard)
+    result = await AgentRunner(router, controller).run(
+        controller.initial_messages(),
+        model="chat",
+        tool_gateway=None,
+        on_output=None,
+        confirmation=None,
+        externalize_result=None,
+        cancel_requested=None,
+        max_iterations=50,
+    )
+
+    assert result.finish_reason == "completed"
+    assert result.usage["model_calls"] == preparations == 1
+    assert len(provider.stream_requests) == 2
+    assert provider.stream_requests[0].messages == provider.stream_requests[1].messages
+    assert provider.complete_requests == []
 
 
 def _estimate_latest_run(session: Session) -> int:

@@ -10,7 +10,7 @@ from copy import deepcopy
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -19,7 +19,7 @@ from loguru import logger
 import aide.agent.context.run_context as compactor_module
 import aide.agent.loop as loop_module
 from aide.agent.blackboard import Blackboard
-from aide.agent.loop import ConfirmationRequestView, ModelContextOverflowError
+from aide.agent.loop import ConfirmationRequestView
 from aide.agent.memory.manager import MemoryManager
 from aide.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
 from aide.agent.permission import PermissionSnapshot, RuntimePermissionControl
@@ -34,7 +34,7 @@ from aide.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
 from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
-from aide.config.config import ConfigLoader
+from aide.config.config import ConfigError, ConfigLoader
 from aide.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.logging.session import session_log as real_session_log
 from aide.provider.errors import ModelCallError
@@ -1055,21 +1055,18 @@ async def test_agent_loop_restores_action_summary_for_foreground_and_preflight_c
     assert all(message.get("content") != action_summary for message in restored.messages)
 
 
-def test_agent_loop_preflight_budget_includes_action_summary(tmp_path: Path) -> None:
-    control_root = tmp_path / "control"
-    control_root.mkdir()
-    control, _control_session, _control_bus = _runtime(control_root, _Router(()))
-    control.preflight()
-
-    summary_root = tmp_path / "summary"
-    summary_root.mkdir()
-    loop, session, _bus = _runtime(summary_root, _Router(()))
+def test_agent_loop_preflight_does_not_estimate_context_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop, session, _bus = _runtime(tmp_path, _Router(()))
     session.update_metadata(summary="- " + ("x" * 30_000))
 
-    with pytest.raises(ModelContextOverflowError) as raised:
-        loop.preflight()
+    def reject_estimate(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("startup must not estimate Model request tokens")
 
-    assert raised.value.error.code == "model_context_overflow"
+    monkeypatch.setattr(compactor_module, "estimate_request_tokens", reject_estimate)
+    loop.preflight()
 
 
 @pytest.mark.asyncio
@@ -1712,7 +1709,7 @@ def test_foreground_projection_scope_restores_published_state_after_failure(
         "---\nname: reviewer\ndescription: Review work\n---\nnew body\n",
         encoding="utf-8",
     )
-    loop._skill_loader.load(validate=loop._validate_model_context_budget)
+    loop._skill_loader.load()
 
     with pytest.raises(error_type):
         with loop._context_builder.foreground_projection_scope(old_skills):
@@ -2183,7 +2180,7 @@ async def test_foreground_commits_summary_failure_once(
         object.__setattr__(loop, "_prepare_agent_run", fail_run_start)
     else:
         monkeypatch.setattr(
-            compactor_module.AgentRunContextRequestPreparer,
+            compactor_module.ContextController,
             "prepare",
             fail_react,
         )
@@ -2661,6 +2658,106 @@ async def test_preparation_cancellation_publishes_the_cancelled_terminal(
         assert session.messages[0]["restore_anchor_id"] == 1
         assert session.messages[0]["restore_before"]["last_compacted"] == 0
         assert session.metadata["token_usage"]["model_calls"] == 0
+    finally:
+        await loop.close()
+
+
+@pytest.mark.asyncio
+async def test_first_controller_unexpected_failure_commits_error_and_allows_the_next_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_prepare = compactor_module.ContextController.prepare
+    attempts = 0
+
+    async def prepare(
+        controller: compactor_module.ContextController, **kwargs: Any
+    ) -> list[dict[str, Any]]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("unexpected preparation failure")
+        return await original_prepare(controller, **kwargs)
+
+    router = _Router((_response("recovered"),))
+    loop, session, bus = _runtime(tmp_path, cast(AgentRunnerRouter, router))
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", prepare)
+    await loop.start()
+    try:
+        await bus.put_inbound(InboundMessage("first input"))
+        first = (await asyncio.wait_for(_terminals(bus, 1), timeout=2))[0]
+        assert first.metadata["error_code"] == "model_failed"
+        assert session.messages[-1]["status"] == "error"
+        assert session.messages[-1]["token_usage"]["model_calls"] == 0
+        assert loop._active_foreground_owner is None
+
+        await bus.put_inbound(InboundMessage("second input"))
+        second = (await asyncio.wait_for(_terminals(bus, 1), timeout=2))[0]
+        assert second.metadata == {"_streamed": True}
+        assert session.messages[-1]["content"] == "recovered"
+        assert [message["role"] for message in session.messages] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+        assert loop._active_foreground_owner is None
+        assert attempts == 2
+    finally:
+        await loop.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_on", (1, 2))
+async def test_controller_config_error_keeps_first_and_later_preparation_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_on: int,
+) -> None:
+    original_prepare = compactor_module.ContextController.prepare
+    attempts = 0
+    formed_increment: list[dict[str, Any]] = []
+    failure = ConfigError(ErrorInfo("route_unavailable", "route unavailable"))
+
+    async def prepare(
+        controller: compactor_module.ContextController, **kwargs: Any
+    ) -> list[dict[str, Any]]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == failure_on:
+            formed_increment.extend(deepcopy(kwargs["increment"]))
+            raise failure
+        return await original_prepare(controller, **kwargs)
+
+    router = _Router(
+        (
+            _response(
+                "formed response",
+                tool_call=ModelToolCall(id="call", name="unknown_tool", arguments="{}"),
+            ),
+        )
+    )
+    loop, session, _bus = _runtime(tmp_path, cast(AgentRunnerRouter, router))
+    loop.disable_foreground_consumer()
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", prepare)
+    await loop.start()
+    try:
+        if failure_on == 1:
+            await loop.run_foreground(InboundMessage("task"))
+            assert [message["role"] for message in session.messages] == ["user", "assistant"]
+            assert session.messages[-1]["token_usage"]["model_calls"] == 0
+            assert session.messages[-1]["error"]["code"] == "model_failed"
+            assert router.calls == []
+        else:
+            with pytest.raises(ConfigError) as raised:
+                await loop.run_foreground(InboundMessage("task"))
+            assert raised.value is failure
+            assert [message["role"] for message in formed_increment] == ["assistant", "tool"]
+            assert session.messages == []
+            assert len(router.calls) == 1
+        assert attempts == failure_on
+        assert loop._active_foreground_owner is None
+        assert loop._execution_task is None
     finally:
         await loop.close()
 

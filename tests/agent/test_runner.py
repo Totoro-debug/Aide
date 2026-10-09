@@ -457,6 +457,82 @@ def test_runner_constructor_and_module_exclude_product_orchestration_dependencie
 
 
 @pytest.mark.asyncio
+async def test_runner_notifies_once_after_first_request_preparation_before_provider_call() -> None:
+    order: list[str] = []
+    provider = ScriptedFakeProvider(
+        streams=(
+            StreamScript(
+                events=(
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(content="Done"),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="stop",
+                        )
+                    ),
+                )
+            ),
+        )
+    )
+
+    class ObservedRouter:
+        def __init__(self, router: ScriptedFakeRouter) -> None:
+            self._router = router
+
+        def stream(
+            self,
+            route: Literal["chat", "schedule", "subagent"],
+            *,
+            messages: Sequence[dict[str, Any]],
+            tools: Sequence[dict[str, Any]],
+            continuation: ModelContinuation | None = None,
+        ) -> AsyncIterator[ModelStreamEvent]:
+            order.append("provider")
+            return self._router.stream(
+                route,
+                messages=messages,
+                tools=tools,
+                continuation=continuation,
+            )
+
+        async def complete(
+            self,
+            route: Literal["chat", "schedule", "subagent"],
+            *,
+            messages: Sequence[dict[str, Any]],
+            tools: Sequence[dict[str, Any]],
+            continuation: ModelContinuation | None = None,
+        ) -> ModelResponse:
+            return await self._router.complete(
+                route,
+                messages=messages,
+                tools=tools,
+                continuation=continuation,
+            )
+
+    def first_request_prepared() -> None:
+        order.append("prepared")
+
+    initial_messages = [{"role": "user", "content": "Run."}]
+    await AgentRunner(
+        ObservedRouter(ScriptedFakeRouter(provider)),
+        DetachedRequestPreparer(initial_messages),
+    ).run(
+        initial_messages,
+        model="chat",
+        tool_gateway=None,
+        on_output=_ignore_output,
+        confirmation=None,
+        externalize_result=None,
+        cancel_requested=None,
+        max_iterations=50,
+        on_first_request_prepared=first_request_prepared,
+    )
+
+    assert order == ["prepared", "provider"]
+
+
+@pytest.mark.asyncio
 async def test_runner_prepares_each_logical_request_with_run_local_context() -> None:
     first_call = ModelToolCall(id="call-1", name="work", arguments="{}")
     second_call = ModelToolCall(id="call-2", name="work", arguments="{}")
@@ -515,6 +591,7 @@ async def test_runner_prepares_each_logical_request_with_run_local_context() -> 
         {"role": "user", "content": "Run."},
     ]
     preparer = _RecordingRequestPreparer(initial_messages)
+    prepared_notifications: list[bool] = []
 
     result = await AgentRunner(ScriptedFakeRouter(provider), preparer).run(
         initial_messages,
@@ -525,10 +602,12 @@ async def test_runner_prepares_each_logical_request_with_run_local_context() -> 
         externalize_result=None,
         cancel_requested=None,
         max_iterations=50,
+        on_first_request_prepared=lambda: prepared_notifications.append(True),
     )
 
     assert result.finish_reason == "completed"
     assert len(provider.stream_requests) == len(preparer.requests) == 3
+    assert prepared_notifications == [True]
     assert [request["latest_cycle_start"] for request in preparer.requests] == [None, 0, 2]
     assert [request["continuation_revision"] for request in preparer.requests] == [0, 1, 2]
     assert [

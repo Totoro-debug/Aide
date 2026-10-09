@@ -11,10 +11,8 @@ from mcp.types import CallToolResult
 
 from aide.agent.context.builder import ContextBuilder
 from aide.agent.context.run_context import (
-    AgentRunContextController,
-    AgentRunContextRequestPreparer,
     AgentRunContextSnapshot,
-    agent_run_attempt_guard,
+    ContextController,
 )
 from aide.agent.memory.manager import MemoryManager
 from aide.agent.runner import AgentRunner, AgentRunnerResult
@@ -119,13 +117,7 @@ async def _run_once(
             for route in routes
         },
     )
-    adapter = RunModelRouter(router, guard=agent_run_attempt_guard)
-    controller = AgentRunContextController(
-        snapshot=AgentRunContextSnapshot.from_session(session),
-        provider=router,
-        append_summary=MemoryManager(state).append_summary,
-        now=lambda: NOW,
-    )
+    adapter = RunModelRouter(router)
 
     def project_messages(
         history: Sequence[dict[str, Any]],
@@ -146,15 +138,19 @@ async def _run_once(
             ],
         )
 
-    preparer = AgentRunContextRequestPreparer(
-        controller,
-        router=adapter,
+    controller = ContextController(
+        snapshot=AgentRunContextSnapshot.from_session(session),
+        provider=adapter,
+        append_summary=MemoryManager(state).append_summary,
+        now=lambda: NOW,
+        request_router=adapter,
         requested_route="chat",
         project_messages=project_messages,
         project_tool_results=ContextBuilder.project_tool_results,
         current_user={"role": "user", "content": "current request"},
         enable_tool_micro_compression=enable_tool_micro_compression,
     )
+
     remote = MCPTool(
         MCPToolSpec(
             server_name="test",
@@ -175,7 +171,7 @@ async def _run_once(
         ),
         additional_tools=(remote,),
     ).for_run(exposed_names=())
-    result = await AgentRunner(adapter, preparer).run(
+    result = await AgentRunner(adapter, controller).run(
         [{"role": "user", "content": "current request"}],
         model="chat",
         tool_gateway=gateway,

@@ -7,23 +7,18 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Event as ThreadEvent
-from threading import Thread
 from typing import Any, Literal, cast
 from uuid import uuid4
 
 import pytest
 
-import aide.agent.loop as loop_module
 import aide.service.runtime as service_runtime
 from aide.agent.context.budget import estimate_request_tokens
-from aide.agent.loop import ModelContextOverflowError
 from aide.agent.message_bus import InboundMessage, MessageBus
 from aide.agent.session.session import Session, SessionStoragePartition
 from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigLoader
-from aide.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE
 from aide.provider.models import (
     AssistantModelMessage,
     ModelCompleted,
@@ -38,9 +33,8 @@ from aide.schedule.model import JobSchedule, ScheduleJob
 from aide.service.errors import ServiceError
 from aide.service.execution import SessionExecution
 from aide.service.runtime import AgentService, SessionClaim, WorkspaceRecord
-from aide.skills.catalog import LoadedSkill, SkillLoader, SkillMetadata
-from tests.agent.test_context import _FrozenDateTime
-from tests.agent.test_loop import _LargeSchemaTool, _response, _Router, _runtime, _terminals
+from aide.skills.catalog import LoadedSkill, SkillLoader
+from tests.agent.test_loop import _response, _Router, _runtime, _terminals
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures.agent_loop import DrivenExecutor
 from tests.fixtures.project_removal import wait_for_project_removal
@@ -502,7 +496,7 @@ async def test_global_reload_keeps_active_run_snapshot_and_updates_other_workspa
 
 
 @pytest.mark.asyncio
-async def test_global_reload_rejects_candidate_that_overflows_another_workspace(
+async def test_global_reload_publishes_candidate_that_exceeds_another_workspace_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = _home(tmp_path / "agent-home")
@@ -523,24 +517,10 @@ async def test_global_reload_rejects_candidate_that_overflows_another_workspace(
         await memory.edit_long_term(old=memory.memory_snapshot(), new="B_MEMORY " * 1200)
         snapshot = service.skill_loader.skills
         _skill(home, "reviewer", "candidate " * 850, always=True)
-        # The real projection fits the caller and overflows the other Workspace.
-        candidate = SkillLoader(
-            root=home.skills_directory, reserved_names=(), enable_always_load=True
-        )
-        candidate.load()
-        first.claim.loop._validate_model_context_budget(candidate.skills)
-        second.claim.loop._validate_model_context_budget(snapshot)
-        with pytest.raises(ModelContextOverflowError):
-            second.claim.loop._validate_model_context_budget(candidate.skills)
-        result = await first.reload("reject-global")
-        assert cast(dict[str, object], result["management_error"])["code"] == "skill_reload_failed"
-        assert service.skill_loader.skills is snapshot
-        await asyncio.gather(
-            first.submit("/planner still-valid-a", "kept-a"),
-            second.submit("/planner still-valid-b", "kept-b"),
-        )
-        await asyncio.gather(first.completed("kept-a"), second.completed("kept-b"))
-        assert service.skill_loader.skills is snapshot
+        result = await first.reload("publish-global")
+        assert "management_error" not in result
+        assert service.skill_loader.skills is not snapshot
+        assert tuple(item.name for item in service.skill_loader.metadata) == ("reviewer",)
     finally:
         await service.stop()
 
@@ -680,8 +660,9 @@ def test_agent_loop_reload_returns_the_current_loader_metadata_and_reuses_genera
 
 
 
-def test_agent_loop_reload_rejects_an_always_loaded_budget_overrun_before_publication(
+def test_startup_and_skill_reload_do_not_estimate_context_budget(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     instruction = tmp_path / "agent-home" / "skills" / "always" / "SKILL.md"
     instruction.parent.mkdir(parents=True)
@@ -695,372 +676,86 @@ def test_agent_loop_reload_rejects_an_always_loaded_budget_overrun_before_public
     )
     loop, _session, _bus, service = _reload_runtime(tmp_path, _Router(()), config_text=config)
     loader = loop._skill_loader
-    before_skills = loader.skills
-    before_metadata = loader.metadata
-    before_invocation = loader.resolve_manual("/always request")
     instruction.write_text(
         "---\nname: always\ndescription: Always loaded\nalways: true\n---\n"
         + ("oversized body\n" * 20_000),
         encoding="utf-8",
     )
 
-    with pytest.raises(ModelContextOverflowError):
-        service.reload_skills()
+    import aide.agent.context.run_context as run_context_module
+    import aide.management.service as management_service_module
 
-    assert loader.skills == before_skills
-    assert loader.metadata == before_metadata
-    assert loader.get("always") is before_skills[0]
-    assert loader.resolve_manual("/always request") == before_invocation
+    def reject_estimate(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("Skill activation must not estimate Model request tokens")
+
+    monkeypatch.setattr(run_context_module, "estimate_request_tokens", reject_estimate)
+    monkeypatch.setattr(management_service_module, "estimate_request_tokens", reject_estimate)
+    loop.preflight()
+    metadata = service.reload_skills()
+
+    assert tuple(item.name for item in metadata) == ("always",)
+    assert loader.resolve_manual("/always request") is not None
+    assert loader.skills[0].always is True
 
 
 
-def test_reload_validator_candidate_projection_is_isolated_until_atomic_publish(
+def test_skill_reload_does_not_build_a_candidate_context_projection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     instruction = tmp_path / "agent-home" / "skills" / "planner" / "SKILL.md"
     instruction.parent.mkdir(parents=True)
     instruction.write_text(
-        "---\nname: planner\ndescription: Plan work\nalways: true\n---\nold body\n",
+        "---\nname: planner\ndescription: Plan work\n---\nold body\n",
         encoding="utf-8",
     )
-    config = MINIMAL_VALID_CONFIG.replace(
-        "compact_ratio = 0.9",
-        "compact_ratio = 0.9\nenable_skill_always_load = true",
-    )
-    loop, _session, _bus, service = _reload_runtime(tmp_path, _Router(()), config_text=config)
+    loop, _session, _bus, service = _reload_runtime(tmp_path, _Router(()))
     loader = loop._skill_loader
-    before_skills = loader.skills
-    before_invocation = loader.resolve_manual("/planner request")
     instruction.write_text(
-        "---\nname: reviewer\ndescription: Review work\nalways: true\n---\nnew body\n",
+        "---\nname: reviewer\ndescription: Review work\n---\nnew body\n",
         encoding="utf-8",
     )
 
-    validation_started = ThreadEvent()
-    release_validation = ThreadEvent()
-    candidate_prompts: list[str] = []
+    def reject_projection(*_args: object, **_kwargs: object) -> list[dict[str, Any]]:
+        raise AssertionError("Skill reload must not build a Model request context")
 
-    def block_candidate_estimate(
-        messages: Sequence[dict[str, Any]],
-        tools: Sequence[dict[str, Any]],
-    ) -> int:
-        del tools
-        candidate_prompts.append(str(messages[0]["content"]))
-        public_messages = loop._context_builder.build_status_messages(
-            (), session_id=loop.session.session_id
-        )
-        assert '"name":"planner"' in public_messages[0]["content"]
-        assert '"name":"reviewer"' not in public_messages[0]["content"]
-        validation_started.set()
-        if not release_validation.wait(timeout=5):
-            raise AssertionError("candidate validation was not released")
-        return 0
+    monkeypatch.setattr(loop._context_builder, "build_status_messages", reject_projection)
+    metadata = service.reload_skills()
 
-    monkeypatch.setattr(loop_module, "estimate_request_tokens", block_candidate_estimate)
-    published: list[tuple[SkillMetadata, ...]] = []
-    failures: list[BaseException] = []
-
-    def reload_in_thread() -> None:
-        try:
-            published.append(service.reload_skills())
-        except BaseException as error:
-            failures.append(error)
-
-    reload_thread = Thread(target=reload_in_thread)
-    reload_thread.start()
-    try:
-        assert validation_started.wait(timeout=5)
-        assert len(candidate_prompts) == 1
-        assert '"name":"reviewer"' in candidate_prompts[0]
-        assert '"name":"planner"' not in candidate_prompts[0]
-        assert loader.skills == before_skills
-        assert loader.resolve_manual("/planner request") == before_invocation
-        assert loader.resolve_manual("/reviewer request") is None
-
-        public_messages = loop._context_builder.build_status_messages(
-            (),
-            session_id=loop.session.session_id,
-        )
-        assert '"name":"planner"' in str(public_messages[0]["content"])
-        assert '"name":"reviewer"' not in str(public_messages[0]["content"])
-    finally:
-        release_validation.set()
-        reload_thread.join(timeout=5)
-
-    assert not reload_thread.is_alive()
-    assert failures == []
-    assert published == [loader.metadata]
+    assert metadata == loader.metadata
     assert tuple(item.name for item in loader.metadata) == ("reviewer",)
     assert loader.resolve_manual("/planner request") is None
     assert loader.resolve_manual("/reviewer request") is not None
 
 
 
-@pytest.mark.parametrize("over_budget", [False, True], ids=["published", "rejected"])
-def test_reload_candidate_validation_restores_the_active_skill_snapshot(
+def test_runtime_status_keeps_the_complete_read_only_context_projection(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    over_budget: bool,
 ) -> None:
     instruction = tmp_path / "agent-home" / "skills" / "planner" / "SKILL.md"
     instruction.parent.mkdir(parents=True)
     instruction.write_text(
-        "---\nname: active\ndescription: Active snapshot\n---\nactive body\n",
-        encoding="utf-8",
-    )
-    loop, session, _bus, service = _reload_runtime(tmp_path, _Router(()))
-    loader = loop._skill_loader
-    builder = loop._context_builder
-    active_skills = loader.skills
-    instruction.write_text(
-        "---\nname: published\ndescription: Published snapshot\n---\npublished body\n",
-        encoding="utf-8",
-    )
-    loader.load()
-    published_skills = loader.skills
-    published_metadata = loader.metadata
-    published_invocation = loader.resolve_manual("/published request")
-    candidate_document = (
-        "---\nname: candidate\ndescription: Candidate snapshot\n---\ncandidate body\n"
-    )
-    instruction.write_text(candidate_document, encoding="utf-8", newline="")
-    candidate_prompts: list[str] = []
-    chat_route = loop._configuration.resolve_route("chat").route
-    available_input = chat_route.context_window - chat_route.max_output
-
-    def estimate_candidate(
-        messages: Sequence[dict[str, Any]],
-        tools: Sequence[dict[str, Any]],
-    ) -> int:
-        del tools
-        candidate_prompts.append(str(messages[0]["content"]))
-        assert loader.skills == published_skills
-        public_messages = builder.build_status_messages((), session_id=session.session_id)
-        assert '"name":"active"' in public_messages[0]["content"]
-        assert '"name":"candidate"' not in public_messages[0]["content"]
-        assert '"name":"published"' not in public_messages[0]["content"]
-        return available_input - 1 + int(over_budget)
-
-    monkeypatch.setattr(loop_module, "estimate_request_tokens", estimate_candidate)
-    with builder.foreground_projection_scope(active_skills):
-        if over_budget:
-            with pytest.raises(ModelContextOverflowError) as raised:
-                service.reload_skills()
-            assert raised.value.error.code == "model_context_overflow"
-            assert raised.value.error.message == MODEL_CONTEXT_OVERFLOW_MESSAGE
-            assert loader.skills == published_skills
-            assert loader.metadata == published_metadata
-            assert loader.resolve_manual("/published request") == published_invocation
-            assert loader.resolve_manual("/candidate request") is None
-        else:
-            assert service.reload_skills() == loader.metadata
-            assert tuple(item.name for item in loader.metadata) == ("candidate",)
-            invocation = loader.resolve_manual("/candidate request")
-            assert invocation is not None
-            assert invocation.body == candidate_document
-            assert loader.resolve_manual("/published request") is None
-
-        assert len(candidate_prompts) == 1
-        assert '"name":"candidate"' in candidate_prompts[0]
-        assert '"name":"active"' not in candidate_prompts[0]
-        assert '"name":"published"' not in candidate_prompts[0]
-        public_messages = builder.build_status_messages((), session_id=session.session_id)
-        assert '"name":"active"' in public_messages[0]["content"]
-        assert '"name":"candidate"' not in public_messages[0]["content"]
-        assert '"name":"published"' not in public_messages[0]["content"]
-
-    public_messages = builder.build_status_messages((), session_id=session.session_id)
-    expected_name = "published" if over_budget else "candidate"
-    assert f'"name":"{expected_name}"' in public_messages[0]["content"]
-    assert '"name":"active"' not in public_messages[0]["content"]
-
-
-
-@pytest.mark.parametrize("operation", ["preflight", "reload"])
-@pytest.mark.parametrize("empty_candidate", [False, True], ids=["skills", "empty"])
-@pytest.mark.parametrize("over_budget", [False, True], ids=["below-budget", "over-budget"])
-def test_skill_budget_uses_public_status_projection_and_complete_tools(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    operation: str,
-    empty_candidate: bool,
-    over_budget: bool,
-) -> None:
-    monkeypatch.setattr("aide.agent.context.builder.datetime", _FrozenDateTime)
-    instruction = tmp_path / "agent-home" / "skills" / "planner" / "SKILL.md"
-    instruction.parent.mkdir(parents=True)
-    instruction.write_text(
-        "---\nname: active\ndescription: Active snapshot\n---\nactive body\n",
+        "---\nname: active\ndescription: Active snapshot\nalways: true\n---\nactive body\n",
         encoding="utf-8",
     )
     config = MINIMAL_VALID_CONFIG.replace(
         "compact_ratio = 0.9",
         "compact_ratio = 0.9\nenable_skill_always_load = true",
     )
-    mcp_tool = _LargeSchemaTool()
-    loop, session, _bus, service = _reload_runtime(tmp_path, _Router(()), config_text=config, mcp_tools=(mcp_tool,))
-    action_summary = "- Preserved the active Session work."
-    session.update_metadata(summary=action_summary)
-    builder = loop._context_builder
+    loop, _session, _bus, _service = _reload_runtime(
+        tmp_path,
+        _Router(()),
+        config_text=config,
+    )
     loader = loop._skill_loader
-    active_skills = loader.skills
-    if empty_candidate:
-        instruction.unlink()
-    else:
-        instruction.write_text(
-            "---\nname: candidate\ndescription: Candidate snapshot\nalways: true\n---\n"
-            "candidate instructions\n",
-            encoding="utf-8",
-        )
-    if operation == "preflight":
-        loader.load()
-    published_skills = loader.skills
-    expected_tools = loop.tool_schemas
-    assert len(expected_tools) > 1
-    original_build_status = builder.build_status_messages
-    public_projections: list[list[dict[str, Any]]] = []
-    observed_summaries: list[str] = []
-    estimated_requests: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
-    chat_route = loop._configuration.resolve_route("chat").route
-    available_input = chat_route.context_window - chat_route.max_output
+    status = loop.execution.runtime_status_input()
+    messages = list(status.projected_messages)
+    tools = list(status.projected_tools)
 
-    def observe_public_status(
-        history: Sequence[dict[str, Any]],
-        *,
-        session_id: str,
-        summary: str = "",
-    ) -> list[dict[str, Any]]:
-        assert tuple(history) == ()
-        assert session_id == session.session_id
-        assert loader.skills == published_skills
-        observed_summaries.append(summary)
-        projected = original_build_status(history, session_id=session_id, summary=summary)
-        public_projections.append(projected)
-        return projected
-
-    def observe_estimate(
-        messages: Sequence[dict[str, Any]],
-        tools: Sequence[dict[str, Any]],
-    ) -> int:
-        estimated_requests.append((deepcopy(list(messages)), deepcopy(list(tools))))
-        projected = original_build_status((), session_id=session.session_id)
-        assert '"name":"active"' in projected[0]["content"]
-        assert '"name":"candidate"' not in projected[0]["content"]
-        assert loader.skills == published_skills
-        return available_input - 1 + int(over_budget)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(builder, "build_status_messages", observe_public_status)
-        patch.setattr(loop_module, "estimate_request_tokens", observe_estimate)
-        with builder.foreground_projection_scope(active_skills):
-            validate = loop.preflight if operation == "preflight" else service.reload_skills
-            if over_budget:
-                with pytest.raises(ModelContextOverflowError) as raised:
-                    validate()
-                assert raised.value.error.code == "model_context_overflow"
-                assert raised.value.error.message == MODEL_CONTEXT_OVERFLOW_MESSAGE
-                assert loader.skills == published_skills
-            else:
-                validate()
-                expected_names = () if empty_candidate else ("candidate",)
-                assert tuple(item.name for item in loader.metadata) == expected_names
-            restored = original_build_status((), session_id=session.session_id)
-            assert '"name":"active"' in restored[0]["content"]
-            assert '"name":"candidate"' not in restored[0]["content"]
-
-    assert len(public_projections) == len(estimated_requests) == 1
-    assert observed_summaries == [action_summary]
-    assert public_projections[0][1] == {"role": "user", "content": action_summary}
-    budget_messages, budget_tools = estimated_requests[0]
-    assert '"name":"active"' not in budget_messages[0]["content"]
-    assert ('"name":"candidate"' in budget_messages[0]["content"]) is not empty_candidate
-    assert ("candidate instructions" in budget_messages[0]["content"]) is not empty_candidate
-    assert budget_messages == public_projections[0]
-    assert tuple(budget_tools) == expected_tools
-    assert all("large_schema" not in schema for schema in budget_tools)
-    assert estimate_request_tokens(budget_messages, budget_tools) > estimate_request_tokens(
-        budget_messages,
-    )
-    if not over_budget:
-        ordinary_status = loop.execution.runtime_status_input()
-        assert ordinary_status.projected_messages == tuple(budget_messages)
-        assert ordinary_status.projected_tools == tuple(budget_tools)
-        assert estimate_request_tokens(
-            ordinary_status.projected_messages,
-            ordinary_status.projected_tools,
-        ) == estimate_request_tokens(budget_messages, budget_tools)
-
-
-
-@pytest.mark.parametrize("error_type", [ValueError, asyncio.CancelledError])
-def test_reload_public_projection_failure_restores_scope_without_publication(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    error_type: type[BaseException],
-) -> None:
-    instruction = tmp_path / "agent-home" / "skills" / "planner" / "SKILL.md"
-    instruction.parent.mkdir(parents=True)
-    instruction.write_text(
-        "---\nname: active\ndescription: Active snapshot\n---\nactive body\n",
-        encoding="utf-8",
-    )
-    loop, session, _bus, service = _reload_runtime(tmp_path, _Router(()))
-    builder = loop._context_builder
-    loader = loop._skill_loader
-    active_skills = loader.skills
-    instruction.write_text(
-        "---\nname: published\ndescription: Published snapshot\n---\npublished body\n",
-        encoding="utf-8",
-    )
-    loader.load()
-    published_skills = loader.skills
-    published_metadata = loader.metadata
-    published_invocation = loader.resolve_manual("/published request")
-    instruction.write_text(
-        "---\nname: candidate\ndescription: Candidate snapshot\n---\ncandidate body\n",
-        encoding="utf-8",
-    )
-    original_build_status = builder.build_status_messages
-    projected_prompts: list[str] = []
-    observed_summaries: list[str] = []
-    error = error_type("candidate projection failed")
-
-    def fail_public_status(
-        history: Sequence[dict[str, Any]],
-        *,
-        session_id: str,
-        summary: str = "",
-    ) -> list[dict[str, Any]]:
-        observed_summaries.append(summary)
-        projected = original_build_status(history, session_id=session_id, summary=summary)
-        projected_prompts.append(projected[0]["content"])
-        raise error
-
-    with monkeypatch.context() as patch:
-        patch.setattr(builder, "build_status_messages", fail_public_status)
-        with builder.foreground_projection_scope(active_skills):
-            with pytest.raises(error_type) as raised:
-                service.reload_skills()
-            assert raised.value is error
-            restored = original_build_status((), session_id=session.session_id)
-            assert '"name":"active"' in restored[0]["content"]
-            assert '"name":"candidate"' not in restored[0]["content"]
-            assert '"name":"published"' not in restored[0]["content"]
-
-    assert len(projected_prompts) == 1
-    assert observed_summaries == [""]
-    assert '"name":"candidate"' in projected_prompts[0]
-    assert '"name":"active"' not in projected_prompts[0]
-    assert '"name":"published"' not in projected_prompts[0]
-    assert loader.skills == published_skills
-    assert loader.metadata == published_metadata
-    assert loader.resolve_manual("/published request") == published_invocation
-    assert loader.resolve_manual("/candidate request") is None
-    restored = builder.build_status_messages((), session_id=session.session_id)
-    assert '"name":"published"' in restored[0]["content"]
-    assert '"name":"active"' not in restored[0]["content"]
-    assert '"name":"candidate"' not in restored[0]["content"]
+    assert '"name":"active"' in messages[0]["content"]
+    assert tuple(tools) == loop.tool_schemas
+    assert estimate_request_tokens(messages, tools) > estimate_request_tokens(messages)
+    assert loader.skills
 
 
 

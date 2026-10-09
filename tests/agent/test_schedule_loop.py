@@ -27,7 +27,7 @@ from aide.agent.tools.permission import PermissionContext
 from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway, ToolResult
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
-from aide.config.config import ConfigLoader
+from aide.config.config import ConfigError, ConfigLoader
 from aide.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.provider.errors import ModelCallError
 from aide.provider.models import (
@@ -902,19 +902,18 @@ async def test_schedule_cancelled_runner_persists_user_and_propagates_cancelled_
 @pytest.mark.asyncio
 async def test_schedule_context_preparation_failures_preserve_cancel(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     success_loop, _, _, _success_bus = _loop(tmp_path / "success", _ScheduleRouter())
     await success_loop.run_schedule_job(_job())
 
     failed_loop, failed_state, _, _failed_bus = _loop(tmp_path / "failed", _ScheduleRouter())
 
-    async def unexpected_prepare(
-        context: Any, *, tool_gateway: ToolGateway
-    ) -> list[dict[str, Any]]:
-        del context, tool_gateway
+    async def unexpected_prepare(controller: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        del controller, kwargs
         raise RuntimeError("unexpected preparation failure")
 
-    object.__setattr__(failed_loop, "_prepare_agent_run", unexpected_prepare)
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", unexpected_prepare)
     with pytest.raises(ScheduleJobExecutionError) as failed:
         await failed_loop.run_schedule_job(_job())
     assert failed.value.error.code == "model_failed"
@@ -923,11 +922,11 @@ async def test_schedule_context_preparation_failures_preserve_cancel(
         tmp_path / "cancelled", _ScheduleRouter()
     )
 
-    async def cancelled_prepare(context: Any, *, tool_gateway: ToolGateway) -> list[dict[str, Any]]:
-        del context, tool_gateway
+    async def cancelled_prepare(controller: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        del controller, kwargs
         raise asyncio.CancelledError()
 
-    object.__setattr__(cancelled_loop, "_prepare_agent_run", cancelled_prepare)
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", cancelled_prepare)
     with pytest.raises(asyncio.CancelledError):
         await cancelled_loop.run_schedule_job(_job())
 
@@ -945,6 +944,64 @@ async def test_schedule_context_preparation_failures_preserve_cancel(
     assert [message["role"] for message in cancelled_session.messages] == ["user", "assistant"]
     assert cancelled_session.messages[-1]["status"] == "interrupted"
     assert cancelled_session.messages[-1]["error"]["code"] == "turn_cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_on", (1, 2))
+async def test_schedule_controller_config_error_keeps_first_and_later_preparation_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_on: int,
+) -> None:
+    original_prepare = compactor_module.ContextController.prepare
+    attempts = 0
+    formed_increment: list[dict[str, Any]] = []
+    failure = ConfigError(ErrorInfo("route_unavailable", "route unavailable"))
+
+    async def prepare(
+        controller: compactor_module.ContextController, **kwargs: Any
+    ) -> list[dict[str, Any]]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == failure_on:
+            formed_increment.extend(kwargs["increment"])
+            raise failure
+        return await original_prepare(controller, **kwargs)
+
+    router = _ScheduleRouter(
+        ModelResponse(
+            message=AssistantModelMessage(
+                content="formed response",
+                tool_calls=(ModelToolCall(id="call", name="unknown_tool", arguments="{}"),),
+            ),
+            usage=ModelUsage(input_tokens=2, output_tokens=1, total_tokens=3),
+            finish_reason="tool_calls",
+        )
+    )
+    loop, state, _service, _bus = _loop(tmp_path, router)
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", prepare)
+
+    if failure_on == 1:
+        with pytest.raises(ScheduleJobExecutionError) as raised:
+            await loop.run_schedule_job(_job())
+        assert raised.value.error == failure.error
+        session = Session.load(
+            state,
+            f"schedule_{JOB_ID}",
+            partition=SessionStoragePartition.SCHEDULE,
+        )
+        assert [message["role"] for message in session.messages] == ["user", "assistant"]
+        assert session.messages[-1]["token_usage"]["model_calls"] == 0
+        assert router.requests == []
+    else:
+        with pytest.raises(ConfigError) as config_raised:
+            await loop.run_schedule_job(_job())
+        assert config_raised.value is failure
+        assert [message["role"] for message in formed_increment] == ["assistant", "tool"]
+        assert len(router.requests) == 1
+        with pytest.raises(FileNotFoundError):
+            Session.load(state, f"schedule_{JOB_ID}", partition=SessionStoragePartition.SCHEDULE)
+    assert attempts == failure_on
 
 
 @pytest.mark.asyncio
@@ -1029,7 +1086,7 @@ async def test_schedule_commits_summary_failure_once(
         object.__setattr__(loop, "_prepare_agent_run", fail_run_start)
     else:
         monkeypatch.setattr(
-            compactor_module.AgentRunContextRequestPreparer,
+            compactor_module.ContextController,
             "prepare",
             fail_react,
         )

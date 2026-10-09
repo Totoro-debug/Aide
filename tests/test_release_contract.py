@@ -725,7 +725,7 @@ def test_runtime_status_uses_the_canonical_usage_anchor_and_configured_chat_rout
     ]
     assert len(anchor_definitions) == 1
 
-    controller = _source_class(compactor_tree, "AgentRunContextController")
+    controller = _source_class(compactor_tree, "ContextController")
     controller_init = _direct_method(controller, "__init__")
     controller_anchor_calls = [
         node
@@ -772,7 +772,7 @@ def test_runtime_status_uses_the_canonical_usage_anchor_and_configured_chat_rout
 def test_agent_run_context_exports_current_request_and_terminal_contracts() -> None:
     compactor_tree = _source_ast(ROOT / "aide" / "agent" / "context" / "run_context.py")
     class_names = {node.name for node in compactor_tree.body if isinstance(node, ast.ClassDef)}
-    expected_contracts = {"AgentRunContextRequestPreparer", "AgentRunTerminalCommitValues"}
+    expected_contracts = {"ContextController", "AgentRunTerminalCommitValues"}
 
     assert expected_contracts <= class_names
 
@@ -785,5 +785,5 @@ def test_agent_run_context_exports_current_request_and_terminal_contracts() -> N
     exports = ast.literal_eval(exports_assignment.value)
     assert expected_contracts <= set(exports)
 
-    controller = _source_class(compactor_tree, "AgentRunContextController")
+    controller = _source_class(compactor_tree, "ContextController")
     assert _direct_method(controller, "terminal_commit_values")

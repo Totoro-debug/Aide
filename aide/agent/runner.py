@@ -199,6 +199,7 @@ class AgentRunner:
         propagate_unexpected_errors: bool = False,
         tool_calls_as_tasks: bool = True,
         on_checkpoint: AgentRunnerCheckpointCallback | None = None,
+        on_first_request_prepared: Callable[[], None] | None = None,
     ) -> AgentRunnerResult:
         _validate_max_iterations(max_iterations)
 
@@ -217,6 +218,7 @@ class AgentRunner:
         externalize = externalize_result or _identity_tool_result
         latest_cycle_start: int | None = None
         continuation_revision = 0
+        first_request_prepared = False
 
         async def emit(event: AgentRunnerOutput) -> None:
             if on_output is None:
@@ -318,6 +320,10 @@ class AgentRunner:
                         error,
                         "Agent Runner request preparation failed",
                     ) from error
+                if not first_request_prepared:
+                    first_request_prepared = True
+                    if on_first_request_prepared is not None:
+                        on_first_request_prepared()
                 model_call_started = True
                 usage["model_calls"] += 1
                 if model in {"chat", "subagent"}:

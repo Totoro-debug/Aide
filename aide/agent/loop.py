@@ -22,13 +22,11 @@ from aide.agent.confirmation import (
     ConfirmationUnavailable,
     ForegroundConfirmationOwner,
 )
-from aide.agent.context.budget import ContextBudget, ContextUsageSnapshot, estimate_request_tokens
+from aide.agent.context.budget import ContextUsageSnapshot
 from aide.agent.context.builder import ContextBuilder
 from aide.agent.context.run_context import (
-    AgentRunContextController,
-    AgentRunContextRequestPreparer,
     CompactionProjection,
-    agent_run_attempt_guard,
+    ContextController,
     latest_main_agent_usage_anchor,
 )
 from aide.agent.memory.manager import MemoryManager
@@ -85,11 +83,7 @@ from aide.agent.tools.tool_gateway import (
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigError, UserConfiguration
-from aide.errors import (
-    MODEL_CONTEXT_OVERFLOW_MESSAGE,
-    TURN_CANCELLED_MESSAGE,
-    ErrorInfo,
-)
+from aide.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.logging.session import session_log
 from aide.management.service import RuntimeStatusInput
 from aide.provider.errors import ModelCallError
@@ -113,7 +107,7 @@ from aide.schedule.service import (
     ScheduleOccurrence,
     ScheduleService,
 )
-from aide.skills.catalog import LoadedSkill, ManualSkillInvocation, SkillLoader
+from aide.skills.catalog import ManualSkillInvocation, SkillLoader
 from aide.utils.async_tasks import await_task_preserving_cancellation
 from aide.utils.text import normalize_title, normalize_title_candidate
 
@@ -197,7 +191,7 @@ class _AgentRunContext:
     current_user: dict[str, Any]
     project_messages: CompactionProjection
     router: RunModelRouter
-    controller: AgentRunContextController
+    controller: ContextController
     runner: AgentRunner
 
 
@@ -325,7 +319,6 @@ class AgentRunExecutor:
         self._aborted = False
         self._started = False
         self._preflighted = False
-        self._preflight_error: Exception | None = None
         self._session_abandoned = False
         self._run_model_configuration: SessionModelConfiguration | None = None
         self._captured_foreground: tuple[
@@ -531,43 +524,7 @@ class AgentRunExecutor:
             return
         if self._preflighted:
             return
-        if self._preflight_error is not None:
-            raise self._preflight_error
-        try:
-            self._validate_model_context_budget(self._skill_loader.skills)
-        except Exception as error:
-            self._preflight_error = error
-            raise
         self._preflighted = True
-
-    def _validate_model_context_budget(
-        self,
-        skills: tuple[LoadedSkill, ...],
-    ) -> None:
-        chat_route = self._configuration.resolve_route("chat").route
-        tool_schemas = self.tool_schemas
-        with self._context_builder.foreground_projection_scope(skills):
-            status_input = _foreground_runtime_status_input(
-                context_builder=self._context_builder,
-                history=(),
-                session_id=self._session.session_id,
-                tool_schemas=tool_schemas,
-                summary=_action_summary_from_metadata(self._session.metadata),
-            )
-        budget = ContextBudget(
-            context_window=chat_route.context_window,
-            max_output=chat_route.max_output,
-            compact_ratio=self._configuration.runtime.compact_ratio,
-        )
-        projected_messages = status_input.projected_messages
-        estimated = estimate_request_tokens(projected_messages, status_input.projected_tools)
-        if budget.exceeds_available_context(estimated):
-            raise ModelContextOverflowError(
-                ErrorInfo(
-                    "model_context_overflow",
-                    MODEL_CONTEXT_OVERFLOW_MESSAGE,
-                )
-            )
 
     def _activate_prepared(self) -> None:
         """Sample uptime and atomically publish the preflighted Loop activation."""
@@ -985,6 +942,12 @@ class AgentRunExecutor:
                 job,
             )
 
+        first_request_prepared = False
+
+        def notify_schedule_prepared() -> None:
+            nonlocal first_request_prepared
+            first_request_prepared = True
+
         try:
             result = await run_context.runner.run(
                 initial_messages,
@@ -997,6 +960,7 @@ class AgentRunExecutor:
                     job.job_id
                 ),
                 max_iterations=self._max_iterations,
+                on_first_request_prepared=notify_schedule_prepared,
             )
         except ConfirmationAborted:
             if self._aborted:
@@ -1014,6 +978,45 @@ class AgentRunExecutor:
             raise
         except ModelCallError as failure:
             raise ScheduleJobExecutionError(failure.error) from failure
+        except ConfigError as failure:
+            if self._aborted:
+                raise asyncio.CancelledError() from None
+            if first_request_prepared:
+                raise
+            self._commit_schedule_failure(
+                session,
+                run_context,
+                current_user,
+                failure.error,
+                job,
+            )
+        except asyncio.CancelledError:
+            if not self._aborted and not first_request_prepared:
+                self._record_schedule_failure(
+                    session,
+                    run_context,
+                    current_user,
+                    ErrorInfo("turn_cancelled", TURN_CANCELLED_MESSAGE),
+                    job,
+                )
+            raise
+        except Exception as failure:
+            if self._aborted:
+                raise asyncio.CancelledError() from None
+            if first_request_prepared:
+                raise
+            _runtime_logger().error(
+                "Schedule Agent Run preparation failed unexpectedly job_id={} type={}",
+                job.job_id,
+                type(failure).__name__,
+            )
+            self._commit_schedule_failure(
+                session,
+                run_context,
+                current_user,
+                ErrorInfo("model_failed", "The model request failed."),
+                job,
+            )
         if self._aborted:
             raise asyncio.CancelledError()
         if result.finish_reason == "cancelled" and not result.messages:
@@ -1048,24 +1051,22 @@ class AgentRunExecutor:
     ) -> _AgentRunContext:
         run_router = RunModelRouter(
             self._model_router,
-            guard=agent_run_attempt_guard,
             session_model_configuration=session_model_configuration,
         )
-        controller = AgentRunContextController.from_session(
+        controller = ContextController.from_session(
             session,
             provider=run_router,
             append_summary=self._memory_manager.append_summary,
             now=self._now,
-        )
-        request_preparer = AgentRunContextRequestPreparer(
-            controller,
-            router=run_router,
+            request_router=run_router,
             requested_route=route,
             project_messages=project_messages,
             project_tool_results=self._context_builder.project_tool_results,
             current_user=current_user,
             compact_ratio=self._configuration.runtime.compact_ratio,
-            enable_tool_micro_compression=self._configuration.runtime.enable_tool_micro_compression,
+            enable_tool_micro_compression=(
+                self._configuration.runtime.enable_tool_micro_compression
+            ),
         )
         return _AgentRunContext(
             route=route,
@@ -1073,7 +1074,7 @@ class AgentRunExecutor:
             project_messages=project_messages,
             router=run_router,
             controller=controller,
-            runner=AgentRunner(run_router, request_preparer),
+            runner=AgentRunner(run_router, controller),
         )
 
     async def _prepare_agent_run(
@@ -1082,17 +1083,8 @@ class AgentRunExecutor:
         *,
         tool_gateway: ToolGateway,
     ) -> list[dict[str, Any]]:
-        route_status = context.router.call_route_status(context.route, continuation=None)
-        memory_route_status = context.router.call_route_status("memory", continuation=None)
-        retained_messages = await context.controller.prepare_run_start(
-            project_messages=context.project_messages,
-            route_status=route_status,
-            memory_route_status=memory_route_status,
-            tools=tool_gateway.schemas,
-            current_user=deepcopy(context.current_user),
-            compact_ratio=self._configuration.runtime.compact_ratio,
-        )
-        return list(deepcopy(retained_messages))
+        del tool_gateway
+        return context.controller.initial_messages()
 
     def _commit_agent_run(
         self,
@@ -1444,8 +1436,6 @@ class AgentRunExecutor:
                 restore_run_token=restore_run_token,
             )
 
-        if title_work is not None and not title_work.coordination.prepared.done():
-            title_work.coordination.prepared.set_result(True)
         foreground_owner = ForegroundConfirmationOwner(
             generation_id=self._session_run_state.generation_id,
             run_id=self._new_uuid(),
@@ -1455,6 +1445,15 @@ class AgentRunExecutor:
             active_session.workspace_state,
             active_session.session_id,
         )
+
+        first_request_prepared = False
+
+        def notify_title_prepared() -> None:
+            nonlocal first_request_prepared
+            first_request_prepared = True
+            if title_work is not None and not title_work.coordination.prepared.done():
+                title_work.coordination.prepared.set_result(True)
+
         try:
             result = await run_context.runner.run(
                 initial_messages,
@@ -1467,6 +1466,7 @@ class AgentRunExecutor:
                 max_iterations=self._max_iterations,
                 file_mutation_recorder=file_mutation_recorder,
                 run_token=restore_run_token,
+                on_first_request_prepared=notify_title_prepared,
             )
         except ModelCallError as failure:
             if failure.error.code == "turn_cancelled":
@@ -1483,6 +1483,20 @@ class AgentRunExecutor:
                 )
             await self._publish_preparation_failure(failure.error)
             return True
+        except ConfigError:
+            if first_request_prepared:
+                raise
+            return await self._finish_foreground_terminal(
+                active_session,
+                run_context,
+                current_user,
+                error=ErrorInfo("model_failed", "The model request failed."),
+                framing_usage=framing_usage,
+                metadata_updates=metadata_patch()[0],
+                metadata_removals=metadata_patch()[1],
+                restore_before=restore_before,
+                restore_run_token=restore_run_token,
+            )
         except asyncio.CancelledError:
             if not self._cancel_requested:
                 raise
@@ -1491,6 +1505,24 @@ class AgentRunExecutor:
                 run_context,
                 current_user,
                 error=ErrorInfo("turn_cancelled", TURN_CANCELLED_MESSAGE),
+                framing_usage=framing_usage,
+                metadata_updates=metadata_patch()[0],
+                metadata_removals=metadata_patch()[1],
+                restore_before=restore_before,
+                restore_run_token=restore_run_token,
+            )
+        except Exception as failure:
+            if first_request_prepared:
+                raise
+            _runtime_logger().error(
+                "Agent Run preparation failed unexpectedly type={}",
+                type(failure).__name__,
+            )
+            return await self._finish_foreground_terminal(
+                active_session,
+                run_context,
+                current_user,
+                error=ErrorInfo("model_failed", "The model request failed."),
                 framing_usage=framing_usage,
                 metadata_updates=metadata_patch()[0],
                 metadata_removals=metadata_patch()[1],

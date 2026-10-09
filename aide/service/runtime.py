@@ -137,7 +137,7 @@ from aide.service.errors import ServiceError, service_error
 from aide.service.execution import SessionExecution
 from aide.service.projects import ProjectCatalog, ProjectCatalogError, ProjectRecord
 from aide.service.resources import WorkspaceResourceManager, WorkspaceResources
-from aide.skills.catalog import LoadedSkill, SkillLoader, SkillMetadata
+from aide.skills.catalog import SkillLoader, SkillMetadata
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from aide.utils.scheduler import AsyncioSchedulerClock
 from aide.utils.text import normalize_title_candidate
@@ -3180,14 +3180,8 @@ class AgentService:
                 self._memory_schedules[workspace.workspace_id] = schedule
 
     def reload_skills(self) -> tuple[SkillMetadata, ...]:
-        """Validate every loaded Session before publishing one global Skill snapshot."""
-
-        def validate(skills: tuple[LoadedSkill, ...]) -> None:
-            for workspace in self._workspaces.values():
-                for state in workspace.loops.values():
-                    state.loop._validate_model_context_budget(skills)
-
-        self.skill_loader.load(validate=validate)
+        """Reload and publish the globally validated Skill snapshot."""
+        self.skill_loader.load()
         return self.skill_loader.metadata
 
     @property

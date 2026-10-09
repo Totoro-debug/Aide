@@ -235,7 +235,6 @@ class SubAgentRunnerExecutor:
                     metadata=context_state,
                     last_compacted=last_compacted,
                 ),
-                provider=run_router,
                 append_summary=append_summary,
                 now=self._now,
                 request_router=run_router,

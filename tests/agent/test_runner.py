@@ -1309,7 +1309,7 @@ async def test_runner_honors_cancellation_after_schedule_response() -> None:
             ),
         )
     )
-    cancellation = iter((False, True)).__next__
+    cancellation = iter((False, False, True)).__next__
 
     result = await _runner(ScriptedFakeRouter(provider)).run(
         [{"role": "user", "content": "Cancel schedule."}],
@@ -1385,7 +1385,7 @@ async def test_reasoning_cancellation_closes_segment_without_fabricating_a_messa
     provider = ScriptedFakeProvider(
         streams=(StreamScript(events=(ReasoningDelta(delta="visible reasoning"),)),)
     )
-    cancellation = iter((False, True)).__next__
+    cancellation = iter((False, False, True)).__next__
     observed: list[object] = []
 
     result = await _runner(ScriptedFakeRouter(provider)).run(
@@ -1499,7 +1499,7 @@ async def test_entry_cancellation_does_not_start_a_model_call() -> None:
 @pytest.mark.asyncio
 async def test_runner_repairs_partial_response_on_cooperative_cancellation() -> None:
     provider = ScriptedFakeProvider(streams=(StreamScript(events=(TextDelta(delta="partial"),)),))
-    cancellation = iter((False, True)).__next__
+    cancellation = iter((False, False, True)).__next__
     observed: list[object] = []
     runner = _runner(ScriptedFakeRouter(provider))
 
@@ -1545,7 +1545,7 @@ async def test_runner_cancellation_repairs_only_unfinished_tools() -> None:
     first = FakeTool(name="first", description="first", outcomes=("done-first",))
     second = FakeTool(name="second", description="second", outcomes=("done-second",))
     gateway = SingleToolGateway((first, second))
-    cancellation = iter((False, False, False, True)).__next__
+    cancellation = iter((False, False, False, False, True)).__next__
     runner = _runner(ScriptedFakeRouter(provider))
 
     result = await runner.run(
@@ -1585,7 +1585,7 @@ async def test_cancellation_after_completed_tool_response_keeps_one_assistant_se
         )
     )
     work = FakeTool(name="work", description="work", outcomes=("unused",))
-    cancellation = iter((False, False, True)).__next__
+    cancellation = iter((False, False, False, True)).__next__
 
     result = await _runner(ScriptedFakeRouter(provider)).run(
         [{"role": "user", "content": "Cancel after the model response."}],

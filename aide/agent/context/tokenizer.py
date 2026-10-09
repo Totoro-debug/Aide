@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from itertools import chain
 from typing import Any
 
 import tiktoken
@@ -47,20 +48,11 @@ def estimate_context_request_tokens(
     model: str,
 ) -> int:
     """Count the complete model-visible request with local ordinary-text encoding."""
-    encoding = _encoding_for_name(_encoding_name_for_model(model))
-    system_prompt = ""
-    retained = messages
-    if messages and messages[0].get("role") == "system":
-        content = messages[0].get("content")
-        if not isinstance(content, str):
-            raise TypeError("system message content must be a string")
-        system_prompt = content
-        retained = messages[1:]
-
-    components = [system_prompt]
-    components.extend(_canonical_json(message) for message in retained)
-    components.extend(_canonical_json(tool) for tool in tools)
-    return sum(len(encoding.encode_ordinary(component)) for component in components)
+    encoding = context_encoding_for_model(model)
+    return sum(
+        len(encoding.encode_ordinary(component))
+        for component in request_text_components(messages, tools)
+    )
 
 
 def estimate_context_run_slice_tokens(
@@ -71,11 +63,15 @@ def estimate_context_run_slice_tokens(
     """Count only a target Run's raw User, assistant, and Tool messages."""
     if any(message.get("role") not in {"user", "assistant", "tool"} for message in messages):
         raise ValueError("run slice must contain only user, assistant, and tool messages")
-    encoding = _encoding_for_name(_encoding_name_for_model(model))
-    return sum(len(encoding.encode_ordinary(_canonical_json(message))) for message in messages)
+    encoding = context_encoding_for_model(model)
+    return sum(
+        len(encoding.encode_ordinary(component)) for component in request_text_components(messages)
+    )
 
 
-def _encoding_for_name(name: str) -> tiktoken.Encoding:
+def context_encoding_for_model(model: str) -> tiktoken.Encoding:
+    """Load the configured encoding through tiktoken's official cache."""
+    name = _encoding_name_for_model(model)
     try:
         return tiktoken.get_encoding(name)
     except Exception as error:
@@ -88,11 +84,24 @@ def _encoding_for_name(name: str) -> tiktoken.Encoding:
         ) from error
 
 
-def _canonical_json(value: dict[str, Any]) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        allow_nan=False,
-        sort_keys=True,
-    )
+def request_text_components(
+    messages: Sequence[dict[str, Any]], tools: Sequence[dict[str, Any]] = ()
+) -> list[str]:
+    """Build the same deterministic request text for byte and tokenizer counts."""
+    system_prompt = ""
+    retained = messages
+    if messages and messages[0].get("role") == "system":
+        content = messages[0].get("content")
+        if not isinstance(content, str):
+            raise TypeError("system message content must be a string")
+        system_prompt = content
+        retained = messages[1:]
+    return [
+        system_prompt,
+        *[
+            json.dumps(
+                value, ensure_ascii=False, separators=(",", ":"), allow_nan=False, sort_keys=True
+            )
+            for value in chain(retained, tools)
+        ],
+    ]

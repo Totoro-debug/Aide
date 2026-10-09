@@ -1083,12 +1083,12 @@ async def test_foreground_context_and_runner_share_exactly_one_run_gateway(
         task_framing_outcomes=(_framing_response(blackboard, input_tokens=1, output_tokens=1),),
     )
     created_gateways: list[ToolGateway] = []
-    context_gateways: list[ToolGateway] = []
+    context_schemas: list[Sequence[dict[str, Any]]] = []
     runner_gateways: list[ToolGateway] = []
     context_snapshots: list[object] = []
     gateway_snapshots: list[PermissionSnapshot] = []
     original_new_run_gateway = loop._new_run_gateway
-    original_prepare = loop._prepare_agent_run
+    original_prepare = compactor_module.ContextController.prepare
     original_run = AgentRunner.run
     original_build_foreground = loop._context_builder.build_foreground_messages
 
@@ -1109,12 +1109,10 @@ async def test_foreground_context_and_runner_share_exactly_one_run_gateway(
         return gateway
 
     async def prepare(
-        context: Any,
-        *,
-        tool_gateway: ToolGateway,
+        context: compactor_module.ContextController, **options: Any
     ) -> list[dict[str, Any]]:
-        context_gateways.append(tool_gateway)
-        return await original_prepare(context, tool_gateway=tool_gateway)
+        context_schemas.append(options["tools"])
+        return await original_prepare(context, **options)
 
     async def run(*args: Any, **kwargs: Any) -> AgentRunnerResult:
         gateway = kwargs["tool_gateway"]
@@ -1127,7 +1125,7 @@ async def test_foreground_context_and_runner_share_exactly_one_run_gateway(
         return original_build_foreground(*args, **kwargs)
 
     object.__setattr__(loop, "_new_run_gateway", new_run_gateway)
-    object.__setattr__(loop, "_prepare_agent_run", prepare)
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", prepare)
     object.__setattr__(loop._context_builder, "build_foreground_messages", build_foreground)
     monkeypatch.setattr(AgentRunner, "run", run)
 
@@ -1139,9 +1137,10 @@ async def test_foreground_context_and_runner_share_exactly_one_run_gateway(
         await loop.close()
 
     assert len(created_gateways) == 1
-    assert len(context_gateways) == 1
+    assert len(context_schemas) == 1
     assert len(runner_gateways) == 1
-    assert created_gateways[0] is context_gateways[0] is runner_gateways[0]
+    assert created_gateways[0] is runner_gateways[0]
+    assert list(context_schemas[0]) == created_gateways[0].schemas
     assert created_gateways[0].exposed_names == RUN_BASELINE_TOOL_NAMES
     foreground_snapshots = [snapshot for snapshot in context_snapshots if snapshot is not None]
     assert foreground_snapshots
@@ -1960,6 +1959,7 @@ async def test_ordinary_turn_after_manual_skill_reuses_preserved_blackboard(
 @pytest.mark.asyncio
 async def test_manual_skill_context_failure_preserves_blackboard_and_usage(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     loader = _planner_skill_loader(tmp_path)
     router = TaskFramingRouterAdapter(_Router(()))
@@ -1971,11 +1971,13 @@ async def test_manual_skill_context_failure_preserves_blackboard_and_usage(
         skill_loader=loader,
     )
 
-    async def fail_prepare(context: Any, *, tool_gateway: ToolGateway) -> list[dict[str, Any]]:
-        del context, tool_gateway
+    async def fail_prepare(
+        context: compactor_module.ContextController, **options: Any
+    ) -> list[dict[str, Any]]:
+        del context, options
         raise ModelCallError(ErrorInfo("model_failed", "context failed"))
 
-    object.__setattr__(loop, "_prepare_agent_run", fail_prepare)
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", fail_prepare)
     session.update_metadata(
         blackboard={
             "goal": "Preserved goal",
@@ -2004,13 +2006,16 @@ async def test_manual_skill_context_failure_preserves_blackboard_and_usage(
 @pytest.mark.asyncio
 async def test_manual_skill_context_cancellation_preserves_blackboard_and_usage(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     loader = _planner_skill_loader(tmp_path)
     router = TaskFramingRouterAdapter(_Router(()))
     started = asyncio.Event()
 
-    async def block_prepare(context: Any, *, tool_gateway: ToolGateway) -> list[dict[str, Any]]:
-        del context, tool_gateway
+    async def block_prepare(
+        context: compactor_module.ContextController, **options: Any
+    ) -> list[dict[str, Any]]:
+        del context, options
         started.set()
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
@@ -2021,7 +2026,7 @@ async def test_manual_skill_context_cancellation_preserves_blackboard_and_usage(
         task_framing_outcomes=None,
         skill_loader=loader,
     )
-    object.__setattr__(loop, "_prepare_agent_run", block_prepare)
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", block_prepare)
     session.update_metadata(
         blackboard={
             "goal": "Preserved goal",
@@ -2054,21 +2059,24 @@ async def test_manual_skill_context_cancellation_preserves_blackboard_and_usage(
 @pytest.mark.asyncio
 async def test_loop_preparation_failure_has_no_session_commit_and_fifo_continues(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     router = _Router((_response("after failure"),))
     calls = 0
 
     loop, session, _bus = _runtime(tmp_path, router)
-    original_prepare = loop._prepare_agent_run
+    original_prepare = compactor_module.ContextController.prepare
 
-    async def wrapped_prepare(context: Any, *, tool_gateway: ToolGateway) -> list[dict[str, Any]]:
+    async def wrapped_prepare(
+        context: compactor_module.ContextController, **options: Any
+    ) -> list[dict[str, Any]]:
         nonlocal calls
         calls += 1
         if calls == 1:
             raise ModelCallError(ErrorInfo("model_failed", "preparation failed"))
-        return await original_prepare(context, tool_gateway=tool_gateway)
+        return await original_prepare(context, **options)
 
-    object.__setattr__(loop, "_prepare_agent_run", wrapped_prepare)
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", wrapped_prepare)
     await loop.start()
     try:
         await _bus.put_inbound(InboundMessage("first"))
@@ -2172,11 +2180,9 @@ async def test_foreground_commits_summary_failure_once(
         original_commit(active, messages, **kwargs)
 
     async def fail_run_start(
-        context: Any,
-        *,
-        tool_gateway: ToolGateway,
+        context: compactor_module.ContextController, **options: Any
     ) -> list[dict[str, Any]]:
-        del context, tool_gateway
+        del context, options
         raise failure
 
     async def fail_react(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
@@ -2185,7 +2191,7 @@ async def test_foreground_commits_summary_failure_once(
 
     monkeypatch.setattr(Session, "commit_agent_run", commit_agent_run)
     if stage == "run_start":
-        object.__setattr__(loop, "_prepare_agent_run", fail_run_start)
+        monkeypatch.setattr(compactor_module.ContextController, "prepare", fail_run_start)
     else:
         monkeypatch.setattr(
             compactor_module.ContextController,
@@ -2236,15 +2242,13 @@ async def test_foreground_commits_cancelled_summary_failure_once(
         original_commit(active, messages, **kwargs)
 
     async def fail_run_start(
-        context: Any,
-        *,
-        tool_gateway: ToolGateway,
+        context: compactor_module.ContextController, **options: Any
     ) -> list[dict[str, Any]]:
-        del context, tool_gateway
+        del context, options
         raise CommittableAgentRunError(error)
 
     monkeypatch.setattr(Session, "commit_agent_run", commit_agent_run)
-    object.__setattr__(loop, "_prepare_agent_run", fail_run_start)
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", fail_run_start)
 
     await loop.start()
     try:
@@ -2635,17 +2639,20 @@ async def test_permission_downgrade_does_not_revoke_the_admitted_full_access_run
 @pytest.mark.asyncio
 async def test_preparation_cancellation_publishes_the_cancelled_terminal(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     started = asyncio.Event()
 
-    async def prepare(context: Any, *, tool_gateway: ToolGateway) -> list[dict[str, Any]]:
-        del context, tool_gateway
+    async def prepare(
+        context: compactor_module.ContextController, **options: Any
+    ) -> list[dict[str, Any]]:
+        del context, options
         started.set()
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
     loop, session, _bus = _runtime(tmp_path, _Router(()))
-    object.__setattr__(loop, "_prepare_agent_run", prepare)
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", prepare)
     await loop.start()
     try:
         await _bus.put_inbound(InboundMessage("cancel during preparation"))
@@ -2773,9 +2780,12 @@ async def test_controller_config_error_keeps_first_and_later_preparation_boundar
 @pytest.mark.asyncio
 async def test_preparation_failure_does_not_start_title_or_accumulate_usage(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fail_preparation(context: Any, *, tool_gateway: ToolGateway) -> list[dict[str, Any]]:
-        del context, tool_gateway
+    async def fail_preparation(
+        context: compactor_module.ContextController, **options: Any
+    ) -> list[dict[str, Any]]:
+        del context, options
         raise ModelCallError(ErrorInfo("model_failed", "preparation failed"))
 
     router = _Router((_response("must not become a title"),))
@@ -2784,7 +2794,7 @@ async def test_preparation_failure_does_not_start_title_or_accumulate_usage(
         router,
         title_prompt="Generate a title",
     )
-    object.__setattr__(loop, "_prepare_agent_run", fail_preparation)
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", fail_preparation)
     await loop.start()
     try:
         await _bus.put_inbound(InboundMessage("uncommitted input"))
@@ -2808,14 +2818,15 @@ async def test_preparation_failure_does_not_start_title_or_accumulate_usage(
 @pytest.mark.asyncio
 async def test_async_preparation_failure_discards_parallel_title_result(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     preparation_started = asyncio.Event()
     release_preparation = asyncio.Event()
 
     async def fail_after_waiting(
-        context: Any, *, tool_gateway: ToolGateway
+        context: compactor_module.ContextController, **options: Any
     ) -> list[dict[str, Any]]:
-        del context, tool_gateway
+        del context, options
         preparation_started.set()
         await release_preparation.wait()
         raise ModelCallError(ErrorInfo("model_failed", "preparation failed"))
@@ -2826,7 +2837,7 @@ async def test_async_preparation_failure_discards_parallel_title_result(
         router,
         title_prompt="Generate a title",
     )
-    object.__setattr__(loop, "_prepare_agent_run", fail_after_waiting)
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", fail_after_waiting)
     await loop.start()
     try:
         await _bus.put_inbound(InboundMessage("uncommitted input"))
@@ -3567,12 +3578,15 @@ async def test_framing_cancellation_reclaims_first_title_task_without_commit(
 @pytest.mark.asyncio
 async def test_context_failure_after_framing_preserves_previous_blackboard_and_usage(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     previous = Blackboard(goal="Previous goal", completion_boundary="Previous boundary")
     staged = Blackboard(goal="Staged goal", completion_boundary="Staged boundary")
 
-    async def fail_prepare(context: Any, *, tool_gateway: ToolGateway) -> list[dict[str, Any]]:
-        del context, tool_gateway
+    async def fail_prepare(
+        context: compactor_module.ContextController, **options: Any
+    ) -> list[dict[str, Any]]:
+        del context, options
         raise ModelCallError(ErrorInfo("model_failed", "context failed"))
 
     loop, session, _bus = _runtime(
@@ -3580,7 +3594,7 @@ async def test_context_failure_after_framing_preserves_previous_blackboard_and_u
         _Router(()),
         task_framing_outcomes=(_framing_response(staged, input_tokens=4, output_tokens=2),),
     )
-    object.__setattr__(loop, "_prepare_agent_run", fail_prepare)
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", fail_prepare)
     session.update_metadata(
         blackboard={"goal": previous.goal, "completion_boundary": previous.completion_boundary}
     )
@@ -3611,13 +3625,16 @@ async def test_context_failure_after_framing_preserves_previous_blackboard_and_u
 @pytest.mark.asyncio
 async def test_context_cancellation_after_framing_preserves_previous_blackboard_and_usage(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     previous = Blackboard(goal="Previous goal", completion_boundary="Previous boundary")
     staged = Blackboard(goal="Staged goal", completion_boundary="Staged boundary")
     started = asyncio.Event()
 
-    async def block_prepare(context: Any, *, tool_gateway: ToolGateway) -> list[dict[str, Any]]:
-        del context, tool_gateway
+    async def block_prepare(
+        context: compactor_module.ContextController, **options: Any
+    ) -> list[dict[str, Any]]:
+        del context, options
         started.set()
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
@@ -3627,7 +3644,7 @@ async def test_context_cancellation_after_framing_preserves_previous_blackboard_
         _Router(()),
         task_framing_outcomes=(_framing_response(staged, input_tokens=4, output_tokens=2),),
     )
-    object.__setattr__(loop, "_prepare_agent_run", block_prepare)
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", block_prepare)
     session.update_metadata(
         blackboard={"goal": previous.goal, "completion_boundary": previous.completion_boundary}
     )

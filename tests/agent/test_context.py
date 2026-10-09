@@ -1075,10 +1075,15 @@ def test_context_builder_uses_subagent_prompt_snapshot_and_projects_action_summa
     ]
     original = deepcopy(conversation)
 
-    projected = ContextBuilder.build_subagent_messages(
+    projected = ContextBuilder.build_run_messages(
         conversation,
-        system_prompt="captured creator prompt",
+        current_user=None,
+        increment=(),
+        compaction_cursor=0,
         action_summary="child action summary",
+        project_messages=lambda messages: ContextBuilder.build_subagent_messages(
+            messages, system_prompt="captured creator prompt"
+        ),
     )
 
     assert projected == [

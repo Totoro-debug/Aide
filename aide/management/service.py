@@ -1,5 +1,6 @@
 """Concrete read-only views exposed through the Management Port."""
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -12,8 +13,8 @@ from aide.agent.context.budget import (
     ContextBudget,
     ContextUsageSnapshot,
     ProjectionSource,
-    project_next_request_usage,
 )
+from aide.agent.context.run_context import ContextController
 from aide.agent.context.tokenizer import ContextTokenizerError
 from aide.agent.memory.dream import DreamResult
 from aide.agent.permission import (
@@ -436,7 +437,8 @@ class ManagementViewService:
                 compact_ratio=projection.compact_ratio,
             )
             reported_usage = dict(projection.latest_reported_usage)
-            projected = project_next_request_usage(
+            projected = await asyncio.to_thread(
+                ContextController.project_next_request_usage,
                 projection.projected_messages,
                 projection.projected_tools,
                 snapshot=projection.latest_usage_context,

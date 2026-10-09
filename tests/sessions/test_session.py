@@ -8,7 +8,8 @@ from uuid import UUID
 
 import pytest
 
-from aide.agent.context.budget import CONTEXT_ESTIMATOR_VERSION, ContextUsageSnapshot
+from aide.agent.context.budget import ContextUsageSnapshot
+from aide.agent.context.tokenizer import context_estimator_version_for_model
 from aide.agent.session.session import Session, SessionStoragePartition
 from aide.agent.workspace_state import WorkspaceState
 from aide.utils.host_filesystem import HOST_FILESYSTEM
@@ -43,7 +44,7 @@ def _context_usage() -> dict[str, object]:
         context_window=8192,
         max_output=2048,
         anchor_estimated_tokens=120,
-        estimator_version=CONTEXT_ESTIMATOR_VERSION,
+        estimator_version=context_estimator_version_for_model("model-1"),
         run_projected_tokens=240,
         run_projection_source="reported_delta",
     ).to_dict()

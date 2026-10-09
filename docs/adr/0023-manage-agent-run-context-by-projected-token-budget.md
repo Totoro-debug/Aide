@@ -30,4 +30,6 @@ A Run captures its Skill snapshot and current-input projection across asynchrono
 
 Runtime status projects the next independent foreground request from committed Session state. It uses the same estimation rules without triggering compaction, admission checks, model calls, or Session persistence. Vocabulary initialization may access the network and tiktoken's disk cache. It does not expose uncommitted ReAct state. A previous Title or Memory fallback does not change the next initial route.
 
+Run preparation initializes the official encoding in a worker thread before synchronous counting; status performs its pure projection in a worker thread. Vocabulary download must not block the service event loop. Cancellation during initialization releases the Run without starting the main Provider request or publishing first-preparation success; a worker may finish populating tiktoken's cache after its caller is cancelled.
+
 Dream remains a direct one-shot Memory request with hard capacity checks. It advances the Summary Cursor before processing and applies edits sequentially; a later failure does not roll back the cursor or completed edits.

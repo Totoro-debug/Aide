@@ -12,11 +12,12 @@ from uuid import uuid4
 
 import pytest
 
+import aide.agent.context.run_context as compactor_module
 import aide.service.runtime as service_runtime
 from aide.agent.context.budget import estimate_request_tokens
 from aide.agent.message_bus import InboundMessage, MessageBus
 from aide.agent.session.session import Session, SessionStoragePartition
-from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
+from aide.agent.tools.tool_gateway import ModelToolCall
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigLoader
 from aide.provider.models import (
@@ -683,16 +684,21 @@ def test_startup_and_skill_reload_do_not_estimate_context_budget(
     )
 
     import aide.agent.context.run_context as run_context_module
-    import aide.management.service as management_service_module
 
     def reject_estimate(*_args: object, **_kwargs: object) -> int:
         raise AssertionError("Skill activation must not estimate Model request tokens")
 
     monkeypatch.setattr(run_context_module, "estimate_request_tokens", reject_estimate)
     monkeypatch.setattr(
-        run_context_module.ContextController, "estimate_request_tokens", staticmethod(reject_estimate)
+        run_context_module.ContextController,
+        "estimate_request_tokens",
+        staticmethod(reject_estimate),
     )
-    monkeypatch.setattr(management_service_module, "project_next_request_usage", reject_estimate)
+    monkeypatch.setattr(
+        run_context_module.ContextController,
+        "project_next_request_usage",
+        staticmethod(reject_estimate),
+    )
     loop.preflight()
     metadata = service.reload_skills()
 
@@ -844,6 +850,7 @@ async def test_reload_during_active_run_preserves_old_request_and_updates_future
 @pytest.mark.asyncio
 async def test_reload_during_context_preparation_keeps_run_skill_snapshot(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     instruction = tmp_path / "agent-home" / "skills" / "planner" / "SKILL.md"
     instruction.parent.mkdir(parents=True)
@@ -880,18 +887,16 @@ async def test_reload_during_context_preparation_keeps_run_skill_snapshot(
     )
     preparation_started = asyncio.Event()
     release_preparation = asyncio.Event()
-    original_prepare = loop._prepare_agent_run
+    original_prepare = compactor_module.ContextController.prepare
 
     async def blocked_prepare(
-        context: Any,
-        *,
-        tool_gateway: ToolGateway,
+        context: compactor_module.ContextController, **options: Any
     ) -> list[dict[str, Any]]:
         preparation_started.set()
         await release_preparation.wait()
-        return await original_prepare(context, tool_gateway=tool_gateway)
+        return await original_prepare(context, **options)
 
-    object.__setattr__(loop, "_prepare_agent_run", blocked_prepare)
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", blocked_prepare)
     before_messages = deepcopy(session.messages)
     await loop.start()
     try:

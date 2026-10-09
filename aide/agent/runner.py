@@ -320,6 +320,8 @@ class AgentRunner:
                         error,
                         "Agent Runner request preparation failed",
                     ) from error
+                if is_cancel_requested():
+                    return finish_cancelled(final_content="")
                 if not first_request_prepared:
                     first_request_prepared = True
                     if on_first_request_prepared is not None:

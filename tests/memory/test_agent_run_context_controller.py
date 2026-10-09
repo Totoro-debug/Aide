@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import random
+import threading
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import replace
@@ -10,11 +12,12 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 import pytest
+import tiktoken
 
 import aide.agent.context.run_context as compactor_module
 from aide.agent.context.budget import (
+    ContextUsageSnapshot,
     estimate_request_tokens,
-    estimate_run_slice_tokens,
     request_fits_model_context,
 )
 from aide.agent.context.builder import ContextBuilder
@@ -24,7 +27,10 @@ from aide.agent.context.run_context import (
     agent_run_attempt_guard,
     latest_main_agent_usage_anchor,
 )
-from aide.agent.context.tokenizer import context_estimator_version_for_model
+from aide.agent.context.tokenizer import (
+    context_estimator_version_for_model,
+    estimate_context_run_slice_tokens,
+)
 from aide.agent.memory.manager import MemoryManager
 from aide.agent.run_errors import CommittableAgentRunError
 from aide.agent.runner import AgentRunner
@@ -418,24 +424,128 @@ def _react_cycle(label: str, *, size: int = 80) -> list[dict[str, Any]]:
     ]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_task", (False, True), ids=("requested", "task"))
+async def test_cancel_during_first_encoding_load_keeps_service_responsive(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, cancel_task: bool
+) -> None:
+    official = tiktoken.get_encoding("o200k_base")
+    started = threading.Event()
+    released = threading.Event()
+    finished = threading.Event()
+
+    def load(name: str) -> tiktoken.Encoding:
+        if not started.is_set():
+            started.set()
+            released.wait(timeout=1)
+            finished.set()
+        return official
+
+    provider = ScriptedFakeProvider(
+        streams=(StreamScript(events=(ModelCompleted(response=_response("answer")),)),)
+    )
+    router = _context_router(provider)
+    session = Session.create(_state(workspace))
+    controller = _controller(
+        workspace,
+        session,
+        provider,
+        request_router=router,
+        requested_route="chat",
+        project_messages=_project_messages,
+        project_tool_results=ContextBuilder.project_tool_results,
+        current_user={"role": "user", "content": "current request"},
+    )
+    cancelled = False
+    notifications: list[bool] = []
+    monkeypatch.setattr(tiktoken, "get_encoding", load)
+    task = asyncio.create_task(
+        AgentRunner(router, controller).run(
+            controller.initial_messages(),
+            model="chat",
+            tool_gateway=None,
+            on_output=None,
+            confirmation=None,
+            externalize_result=None,
+            cancel_requested=lambda: cancelled,
+            max_iterations=50,
+            on_first_request_prepared=lambda: notifications.append(True),
+        )
+    )
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        assert not finished.is_set(), "encoding loading blocked the service event loop"
+        if cancel_task:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            cancelled = True
+            released.set()
+            result = await task
+            assert result.finish_reason == "cancelled"
+        assert provider.stream_requests == []
+        assert notifications == []
+        assert session.messages == []
+    finally:
+        released.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        assert await asyncio.to_thread(finished.wait, 2)
+
+
+class _PhaseController(ContextController):
+    """Adapt policy-phase fixtures without keeping their entry points in production."""
+
+    async def prepare_run_start(self, **options: Any) -> tuple[dict[str, Any], ...]:
+        self._project_messages = options.pop("project_messages")
+        self._request_current_user = deepcopy(options.pop("current_user", None))
+        self._compact_ratio = options.pop("compact_ratio", 0.9)
+        delegate = self._request_router._router
+        assert isinstance(delegate, ScriptedFakeRouter)
+        delegate._route_statuses["memory"] = options["memory_route_status"]
+        return await self._prepare_run_start(**options)
+
+    async def prepare_react(self, **options: Any) -> tuple[dict[str, Any], ...]:
+        self._project_messages = options.pop("project_messages")
+        self._request_current_user = deepcopy(options.pop("current_user", None))
+        self._compact_ratio = options.pop("compact_ratio", 0.9)
+        delegate = self._request_router._router
+        assert isinstance(delegate, ScriptedFakeRouter)
+        delegate._route_statuses["memory"] = options["memory_route_status"]
+        return await self._prepare_react(**options)
+
+    def record_main_agent_response(self, **options: Any) -> ContextUsageSnapshot:
+        route_status = options.pop("route_status")
+        self._request_router._call_statuses[self._requested_route] = route_status
+        return ContextUsageSnapshot.from_dict(self.record_response(**options))
+
+
 def _controller(
     workspace: Path,
     session: Session,
     provider: ScriptedFakeProvider,
     **request_options: Any,
-) -> ContextController:
+) -> _PhaseController:
     state = session.workspace_state
-    return ContextController(
+    options = {
+        "request_router": _context_router(provider),
+        "requested_route": "chat",
+        "project_messages": _project_messages,
+        "project_tool_results": ContextBuilder.project_tool_results,
+        **request_options,
+    }
+    return _PhaseController(
         snapshot=AgentRunContextSnapshot.from_session(session),
-        provider=ScriptedFakeRouter(provider),
         append_summary=MemoryManager(state).append_summary,
         now=lambda: NOW,
-        **request_options,
+        **options,
     )
 
 
 async def _prepare_controller(
-    controller: ContextController,
+    controller: _PhaseController,
     *,
     current_user: str = "new user",
     context_window: int = 1_800,
@@ -626,9 +736,12 @@ async def test_controller_stages_run_start_compaction_from_detached_snapshot(
     provider = ScriptedFakeProvider(
         completions=(_response("Facts"), _response("Updated action")),
     )
-    manager = ContextController(
+    manager = _PhaseController(
         snapshot=snapshot,
-        provider=ScriptedFakeRouter(provider),
+        request_router=_context_router(provider),
+        requested_route="chat",
+        project_messages=_project_messages,
+        project_tool_results=ContextBuilder.project_tool_results,
         append_summary=MemoryManager(state).append_summary,
         now=lambda: NOW,
     )
@@ -723,9 +836,12 @@ async def test_controller_detaches_from_the_supplied_snapshot(workspace: Path) -
     )
     snapshot = AgentRunContextSnapshot.from_session(session)
     provider = ScriptedFakeProvider(completions=(_response("facts"), _response("action")))
-    controller = ContextController(
+    controller = _PhaseController(
         snapshot=snapshot,
-        provider=ScriptedFakeRouter(provider),
+        request_router=_context_router(provider),
+        requested_route="chat",
+        project_messages=_project_messages,
+        project_tool_results=ContextBuilder.project_tool_results,
         append_summary=MemoryManager(state).append_summary,
         now=lambda: NOW,
     )
@@ -824,14 +940,16 @@ async def test_prepare_react_returns_a_detached_message_tuple(workspace: Path) -
 async def test_prepare_react_rejects_an_invalid_increment_role(workspace: Path) -> None:
     state = _state(workspace)
     controller = _controller(workspace, Session.create(state), ScriptedFakeProvider())
+    options: dict[str, Any] = dict(
+        tools=(), continuation=None, continuation_revision=0, is_micro_compression_eligible=None
+    )
+    await controller.prepare(increment=(), latest_cycle_start=None, **options)
 
     with pytest.raises(ValueError, match="ReAct increment message 0 must be assistant or tool"):
-        await controller.prepare_react(
-            project_messages=_project_messages,
+        await controller.prepare(
             increment=({"role": "user", "content": "invalid"},),
             latest_cycle_start=None,
-            route_status=_chat_status(context_window=10_000, max_output=100),
-            memory_route_status=_memory_status(context_window=10_000, max_output=100),
+            **options,
         )
 
 
@@ -841,17 +959,19 @@ async def test_prepare_react_rejects_latest_cycle_start_at_a_tool_message(
 ) -> None:
     state = _state(workspace)
     controller = _controller(workspace, Session.create(state), ScriptedFakeProvider())
+    options: dict[str, Any] = dict(
+        tools=(), continuation=None, continuation_revision=0, is_micro_compression_eligible=None
+    )
+    await controller.prepare(increment=(), latest_cycle_start=None, **options)
 
     with pytest.raises(
         ValueError,
         match="latest_cycle_start must identify an assistant in the increment",
     ):
-        await controller.prepare_react(
-            project_messages=_project_messages,
+        await controller.prepare(
             increment=_react_cycle("current", size=20),
             latest_cycle_start=1,
-            route_status=_chat_status(context_window=10_000, max_output=100),
-            memory_route_status=_memory_status(context_window=10_000, max_output=100),
+            **options,
         )
 
 
@@ -1048,7 +1168,9 @@ async def test_react_current_run_at_exactly_fifty_percent_keeps_current_run_and_
     controller = _controller(workspace, session, provider)
     current_user = {"role": "user", "content": "current request"}
     increment = _react_cycle("current")
-    available = estimate_run_slice_tokens([current_user, *increment], model="test-model") * 2
+    available = (
+        estimate_context_run_slice_tokens([current_user, *increment], model="test-model") * 2
+    )
 
     result = await controller.prepare_react(
         project_messages=_project_messages,
@@ -1079,7 +1201,9 @@ async def test_react_sole_current_run_may_compact_at_or_below_fifty_percent(
     controller = _controller(workspace, session, provider)
     current_user = {"role": "user", "content": "current request"}
     increment = _react_cycle("current", size=300)
-    available = estimate_run_slice_tokens([current_user, *increment], model="test-model") * 2
+    available = (
+        estimate_context_run_slice_tokens([current_user, *increment], model="test-model") * 2
+    )
 
     result = await controller.prepare_react(
         project_messages=_project_messages,
@@ -1109,10 +1233,9 @@ async def test_react_sole_current_run_may_compact_at_or_below_fifty_percent(
             provider_id="provider",
             model="model",
         ),
-        estimator_version="utf8-bytes-div4-v1",
     )
 
-    assert context.run_projected_tokens == estimate_run_slice_tokens(
+    assert context.run_projected_tokens == estimate_context_run_slice_tokens(
         [*increment, response_message], model="test-model"
     )
 
@@ -1142,7 +1265,9 @@ async def test_react_current_run_just_above_fifty_percent_may_select_early_curre
     controller = _controller(workspace, session, provider)
     current_user = {"role": "user", "content": "current request"}
     increment = _react_cycle("current")
-    current_slice = estimate_run_slice_tokens([current_user, *increment], model="test-model")
+    current_slice = estimate_context_run_slice_tokens(
+        [current_user, *increment], model="test-model"
+    )
     available = current_slice * 2 - 1
 
     result = await controller.prepare_react(
@@ -2179,7 +2304,6 @@ async def test_main_response_provenance_anchors_completed_response_and_then_uses
             provider_id="provider",
             model="model",
         ),
-        estimator_version=context_estimator_version_for_model("model"),
     )
 
     assert first_context.run_projection_source == "estimated"
@@ -2211,7 +2335,6 @@ async def test_main_response_provenance_anchors_completed_response_and_then_uses
             provider_id="provider",
             model="model",
         ),
-        estimator_version=context_estimator_version_for_model("model"),
     )
 
     assert second_context.run_projection_source == "reported_delta"
@@ -2453,7 +2576,7 @@ async def test_runner_final_projection_changes_revision_and_repeats_stably(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "change",
-    ("message", "tools", "model", "capacity", "estimator", "continuation", "micro"),
+    ("message", "tools", "model", "capacity", "encoding", "continuation", "micro"),
 )
 async def test_react_revision_changes_for_each_model_visible_input_source(
     workspace: Path,
@@ -2534,8 +2657,8 @@ async def test_react_revision_changes_for_each_model_visible_input_source(
             max_output=200,
             used_fallback=False,
         )
-    elif change == "estimator":
-        changed["estimator_version"] = "another-estimator"
+    elif change == "encoding":
+        changed["route_status"] = replace(base_status, model="gpt-oss-120b")
     elif change == "continuation":
         changed["continuation_revision"] = 1
     else:
@@ -2574,7 +2697,6 @@ async def test_controller_uses_configured_capacity_after_previous_fallback(
     ).for_run()
     controller = ContextController(
         snapshot=AgentRunContextSnapshot.from_session(session),
-        provider=router,
         append_summary=MemoryManager(state).append_summary,
         now=lambda: NOW,
         request_router=router,
@@ -2968,7 +3090,9 @@ def _estimate_latest_run(session: Session) -> int:
     user_indices = [
         index for index, message in enumerate(session.messages) if message["role"] == "user"
     ]
-    return estimate_run_slice_tokens(session.messages[user_indices[-1] :], model="test-model")
+    return estimate_context_run_slice_tokens(
+        session.messages[user_indices[-1] :], model="test-model"
+    )
 
 
 @pytest.mark.asyncio
@@ -3166,7 +3290,7 @@ async def test_first_request_checks_the_hard_limit_after_summary_and_tool_projec
         project(history, current, (), 0, None), model="test-model"
     )
     available = initial_tokens + 300
-    assert estimate_run_slice_tokens(recent, model="test-model") * 10 <= available
+    assert estimate_context_run_slice_tokens(recent, model="test-model") * 10 <= available
     after_summary = project(history, current, (), len(older), action)
     assert ContextController.estimate_request_tokens(after_summary, model="test-model") >= available
     seed_session_state(session, messages=history, metadata={}, last_compacted=0)

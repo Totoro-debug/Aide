@@ -755,18 +755,15 @@ async def test_agent_loop_reuses_occurrence_snapshot_for_context_gateway_and_env
     def new_run_context(*args: object, **kwargs: object) -> object:
         del args
         captured_projector.append(kwargs["project_messages"])
-        return SimpleNamespace(runner=_Runner())
-
-    async def prepare(*args: object, **kwargs: object) -> list[dict[str, object]]:
-        del args, kwargs
-        return []
+        return SimpleNamespace(
+            runner=_Runner(), controller=SimpleNamespace(initial_messages=lambda: [])
+        )
 
     def commit(*args: object, **kwargs: object) -> None:
         del args, kwargs
 
     monkeypatch.setattr(loop, "_new_run_gateway", new_gateway)
     monkeypatch.setattr(loop, "_new_agent_run_context", new_run_context)
-    monkeypatch.setattr(loop, "_prepare_agent_run", prepare)
     monkeypatch.setattr(loop, "_commit_schedule_run", commit)
     monkeypatch.setattr(schedule, "occurrence_owner", lambda active: owner)
     monkeypatch.setattr(schedule, "confirmation_waiting", lambda active: None)
@@ -786,7 +783,9 @@ async def test_agent_loop_reuses_occurrence_snapshot_for_context_gateway_and_env
     assert context.level == snapshot.level
     assert context.exec_shell == snapshot.exec_shell
     assert len(captured_projector) == 1
-    projected = captured_projector[0]([{"role": "user", "content": job.message}])  # type: ignore[operator]
+    projected = captured_projector[0](  # type: ignore[operator]
+        (), {"role": "user", "content": job.message}, (), 0, None
+    )
     assert snapshot.level in str(projected)
     assert len(envelopes) == 1
     assert envelopes[0].origin == "background"
@@ -862,11 +861,9 @@ async def test_agent_loop_records_confirmation_abort_and_preserves_its_type(
 
     def new_run_context(*args: object, **kwargs: object) -> object:
         del args, kwargs
-        return SimpleNamespace(runner=_Runner())
-
-    async def prepare(*args: object, **kwargs: object) -> list[dict[str, object]]:
-        del args, kwargs
-        return []
+        return SimpleNamespace(
+            runner=_Runner(), controller=SimpleNamespace(initial_messages=lambda: [])
+        )
 
     def record_failure(*args: object, **kwargs: object) -> None:
         del args, kwargs
@@ -874,12 +871,13 @@ async def test_agent_loop_records_confirmation_abort_and_preserves_its_type(
 
     monkeypatch.setattr(loop, "_new_run_gateway", lambda **kwargs: object())
     monkeypatch.setattr(loop, "_new_agent_run_context", new_run_context)
-    monkeypatch.setattr(loop, "_prepare_agent_run", prepare)
     monkeypatch.setattr(loop, "_record_schedule_failure", record_failure)
     monkeypatch.setattr(schedule, "occurrence_owner", lambda active: owner)
     monkeypatch.setattr(schedule, "confirmation_waiting", lambda active: lifecycle.append("wait"))
     monkeypatch.setattr(schedule, "confirmation_aborted", lambda active: lifecycle.append("abort"))
-    monkeypatch.setattr(schedule, "confirmation_finished", lambda active: lifecycle.append("finish"))
+    monkeypatch.setattr(
+        schedule, "confirmation_finished", lambda active: lifecycle.append("finish")
+    )
 
     session = Session.create_schedule(
         loop.session.workspace_state,

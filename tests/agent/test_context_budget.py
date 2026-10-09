@@ -3,15 +3,17 @@ from dataclasses import replace
 import pytest
 
 from aide.agent.context.budget import (
-    CONTEXT_ESTIMATOR_VERSION,
     ContextBudget,
     ContextProjection,
     ContextUsageSnapshot,
     estimate_request_tokens,
-    estimate_run_slice_tokens,
     project_next_request_tokens,
     reported_model_usage_total,
     request_fits_model_context,
+)
+from aide.agent.context.tokenizer import (
+    context_estimator_version_for_model,
+    estimate_context_run_slice_tokens,
 )
 
 
@@ -24,7 +26,7 @@ def _snapshot(**updates: object) -> ContextUsageSnapshot:
         "context_window": 1000,
         "max_output": 100,
         "anchor_estimated_tokens": 80,
-        "estimator_version": CONTEXT_ESTIMATOR_VERSION,
+        "estimator_version": context_estimator_version_for_model("model-a"),
         "run_projected_tokens": 20,
         "run_projection_source": "estimated",
     }
@@ -55,6 +57,7 @@ def _project(
         "model": "model-a",
         "context_window": 1000,
         "max_output": 100,
+        "estimator_version": context_estimator_version_for_model("model-a"),
     }
     route.update(route_updates)
     return project_next_request_tokens(
@@ -211,7 +214,7 @@ def test_context_usage_snapshot_round_trips_exact_shape() -> None:
         "context_window": 1000,
         "max_output": 100,
         "anchor_estimated_tokens": 80,
-        "estimator_version": CONTEXT_ESTIMATOR_VERSION,
+        "estimator_version": context_estimator_version_for_model("model-a"),
         "run_projected_tokens": 20,
         "run_projection_source": "estimated",
     }
@@ -423,7 +426,7 @@ def test_snapshot_copy_can_change_run_projection_without_changing_route_identity
 def test_run_slice_budget_uses_only_raw_target_messages_and_available_context() -> None:
     model = "test-model"
     run_slice = [{"role": "user", "content": "hello"}]
-    slice_tokens = estimate_run_slice_tokens(run_slice, model=model)
+    slice_tokens = estimate_context_run_slice_tokens(run_slice, model=model)
 
     assert ContextBudget(slice_tokens * 10, 0, 0.9).can_retain_run_slice(
         run_slice, percentage=10, model=model

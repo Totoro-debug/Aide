@@ -135,7 +135,6 @@ class ContextBuilder:
         messages: Sequence[dict[str, Any]],
         *,
         system_prompt: str,
-        action_summary: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build a SubAgent request from its captured creator prompt and conversation."""
         if not isinstance(system_prompt, str):
@@ -144,7 +143,7 @@ class ContextBuilder:
             {"role": "system", "content": deepcopy(system_prompt)},
             *deepcopy(list(messages)),
         ]
-        return _insert_action_summary(projected, action_summary)
+        return projected
 
     @staticmethod
     def build_run_messages(

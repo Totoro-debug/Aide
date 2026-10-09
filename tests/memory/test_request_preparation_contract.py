@@ -140,7 +140,6 @@ async def _run_once(
 
     controller = ContextController(
         snapshot=AgentRunContextSnapshot.from_session(session),
-        provider=adapter,
         append_summary=MemoryManager(state).append_summary,
         now=lambda: NOW,
         request_router=adapter,

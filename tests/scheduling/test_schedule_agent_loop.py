@@ -15,6 +15,7 @@ from uuid import UUID
 import pytest
 
 import aide.agent.context.builder as context
+import aide.agent.context.run_context as compactor_module
 from aide.agent.context.builder import ContextBuilder
 from aide.agent.loop import ConfirmationRequestView
 from aide.agent.memory.dream import Dream
@@ -1664,19 +1665,18 @@ async def test_schedule_shutdown_during_preparation_persists_user(
         provider,
         schedule_clock=_BlockingClock(NOW),
     )
-    original_prepare = loop._prepare_agent_run
+    original_prepare = compactor_module.ContextController.prepare
 
     async def block_schedule_preparation(
-        run_context: Any,
-        *,
-        tool_gateway: ToolGateway,
+        run_context: compactor_module.ContextController, **options: Any
     ) -> list[dict[str, Any]]:
-        if run_context.current_user["content"] == job.message:
+        assert run_context._request_current_user is not None
+        if run_context._request_current_user["content"] == job.message:
             context_started.set()
             await context_never_completes.wait()
-        return await original_prepare(run_context, tool_gateway=tool_gateway)
+        return await original_prepare(run_context, **options)
 
-    object.__setattr__(loop, "_prepare_agent_run", block_schedule_preparation)
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", block_schedule_preparation)
 
     schedule.start()
     await context_started.wait()
@@ -1723,19 +1723,18 @@ async def test_schedule_failure_logs_one_safe_session_warning(
         provider,
         schedule_clock=_BlockingClock(NOW),
     )
-    original_prepare = loop._prepare_agent_run
+    original_prepare = compactor_module.ContextController.prepare
 
     async def fail_schedule_preparation(
-        run_context: Any,
-        *,
-        tool_gateway: ToolGateway,
+        run_context: compactor_module.ContextController, **options: Any
     ) -> list[dict[str, Any]]:
-        if run_context.current_user["content"] == job.message:
+        assert run_context._request_current_user is not None
+        if run_context._request_current_user["content"] == job.message:
             failure_started.set()
             raise RuntimeError("PRIVATE_SCHEDULE_PREPARATION_BODY")
-        return await original_prepare(run_context, tool_gateway=tool_gateway)
+        return await original_prepare(run_context, **options)
 
-    object.__setattr__(loop, "_prepare_agent_run", fail_schedule_preparation)
+    monkeypatch.setattr(compactor_module.ContextController, "prepare", fail_schedule_preparation)
     capture = capture_diagnostics()
     try:
         schedule.start()

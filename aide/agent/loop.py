@@ -25,6 +25,7 @@ from aide.agent.confirmation import (
 from aide.agent.context.budget import ContextUsageSnapshot
 from aide.agent.context.builder import ContextBuilder
 from aide.agent.context.run_context import (
+    AgentRunContextSnapshot,
     CompactionProjection,
     ContextController,
     latest_main_agent_usage_anchor,
@@ -187,10 +188,6 @@ type RuntimeConfirmationRequester = Callable[
 class _AgentRunContext:
     """Run-local budget, projection and guarded Router collaborators."""
 
-    route: Literal["chat", "schedule"]
-    current_user: dict[str, Any]
-    project_messages: CompactionProjection
-    router: RunModelRouter
     controller: ContextController
     runner: AgentRunner
 
@@ -898,10 +895,7 @@ class AgentRunExecutor:
             schedule_confirmation = request_schedule_confirmation
 
         try:
-            initial_messages = await self._prepare_agent_run(
-                run_context,
-                tool_gateway=run_gateway,
-            )
+            initial_messages = run_context.controller.initial_messages()
         except asyncio.CancelledError:
             if not self._aborted:
                 self._record_schedule_failure(
@@ -1053,9 +1047,8 @@ class AgentRunExecutor:
             self._model_router,
             session_model_configuration=session_model_configuration,
         )
-        controller = ContextController.from_session(
-            session,
-            provider=run_router,
+        controller = ContextController(
+            snapshot=AgentRunContextSnapshot.from_session(session),
             append_summary=self._memory_manager.append_summary,
             now=self._now,
             request_router=run_router,
@@ -1069,22 +1062,9 @@ class AgentRunExecutor:
             ),
         )
         return _AgentRunContext(
-            route=route,
-            current_user=deepcopy(current_user),
-            project_messages=project_messages,
-            router=run_router,
             controller=controller,
             runner=AgentRunner(run_router, controller),
         )
-
-    async def _prepare_agent_run(
-        self,
-        context: _AgentRunContext,
-        *,
-        tool_gateway: ToolGateway,
-    ) -> list[dict[str, Any]]:
-        del tool_gateway
-        return context.controller.initial_messages()
 
     def _commit_agent_run(
         self,
@@ -1374,10 +1354,7 @@ class AgentRunExecutor:
                 system_prompt=self._context_builder.foreground_system_prompt(),
             )
         try:
-            initial_messages = await self._prepare_agent_run(
-                run_context,
-                tool_gateway=run_gateway,
-            )
+            initial_messages = run_context.controller.initial_messages()
         except asyncio.CancelledError:
             if not self._cancel_requested:
                 raise

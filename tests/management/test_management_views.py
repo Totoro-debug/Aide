@@ -1,3 +1,5 @@
+import asyncio
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
@@ -403,6 +405,36 @@ async def test_memory_view_converts_read_failure_to_safe_persistence_error(
         "persistence_error",
         "Long-term Memory could not be read.",
     )
+
+
+@pytest.mark.asyncio
+async def test_status_encoding_load_keeps_service_responsive(
+    agent_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    official = tiktoken.get_encoding("o200k_base")
+    started = threading.Event()
+    released = threading.Event()
+    finished = threading.Event()
+
+    def load(name: str) -> tiktoken.Encoding:
+        started.set()
+        released.wait(timeout=1)
+        finished.set()
+        return official
+
+    home = AgentHome(agent_home)
+    home.initialize()
+    service = management_service(home)
+    monkeypatch.setattr(tiktoken, "get_encoding", load)
+    task = asyncio.create_task(service.status())
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        assert not finished.is_set(), "status encoding loading blocked the service event loop"
+        released.set()
+        assert (await task).projection_source == "estimated"
+    finally:
+        released.set()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

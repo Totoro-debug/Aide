@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -10,19 +9,16 @@ from decimal import Decimal
 from typing import Any, Literal, Self, cast
 
 from aide.agent.context.tokenizer import (
-    context_estimator_version_for_model,
-    estimate_context_request_tokens,
     estimate_context_run_slice_tokens,
+    request_text_components,
 )
 from aide.utils.validation import require_nonnegative_int, token_usage_validation_issue
 
-CONTEXT_ESTIMATOR_VERSION = "tiktoken-v1:o200k_base"
 type ProjectionSource = Literal["estimated", "reported_delta"]
 type RetentionPercentage = Literal[10, 50]
 
 _MODEL_ROUTES = frozenset({"chat", "title", "memory", "schedule", "subagent"})
 _PROJECTION_SOURCES = frozenset({"estimated", "reported_delta"})
-_RUN_MESSAGE_ROLES = frozenset({"user", "assistant", "tool"})
 _CONTEXT_USAGE_FIELDS = frozenset(
     {
         "requested_route",
@@ -39,14 +35,12 @@ _CONTEXT_USAGE_FIELDS = frozenset(
 )
 
 __all__ = [
-    "CONTEXT_ESTIMATOR_VERSION",
     "ContextBudget",
     "ContextProjection",
     "ContextUsageSnapshot",
     "ProjectionSource",
     "RetentionPercentage",
     "estimate_request_tokens",
-    "estimate_run_slice_tokens",
     "project_next_request_tokens",
     "reported_model_usage_total",
     "request_fits_model_context",
@@ -104,7 +98,7 @@ class ContextBudget:
         """Return whether a target Run's raw message slice fits its retention share."""
         if type(percentage) is not int or percentage not in (10, 50):
             raise ValueError("run slice percentage must be 10 or 50")
-        slice_tokens = estimate_run_slice_tokens(messages, model=model)
+        slice_tokens = estimate_context_run_slice_tokens(messages, model=model)
         return slice_tokens * 100 <= self.available_context * percentage
 
 
@@ -203,19 +197,9 @@ def estimate_request_tokens(
     tools: Sequence[dict[str, Any]] = (),
 ) -> int:
     """Estimate one provider-neutral request as ceil(canonical UTF-8 bytes / 4)."""
-    system_prompt = ""
-    retained = messages
-    if messages and messages[0].get("role") == "system":
-        content = messages[0].get("content")
-        if not isinstance(content, str):
-            raise TypeError("system message content must be a string")
-        system_prompt = content
-        retained = messages[1:]
-
-    components = [system_prompt]
-    components.extend(_canonical_json(message) for message in retained)
-    components.extend(_canonical_json(tool) for tool in tools)
-    byte_count = sum(len(component.encode("utf-8")) for component in components)
+    byte_count = sum(
+        len(component.encode("utf-8")) for component in request_text_components(messages, tools)
+    )
     return (byte_count + 3) // 4
 
 
@@ -235,13 +219,6 @@ def request_fits_model_context(
     return not budget.exceeds_available_context(estimate_request_tokens(messages, tools))
 
 
-def estimate_run_slice_tokens(messages: Sequence[dict[str, Any]], *, model: str) -> int:
-    """Count only a target Agent Run's uncompacted raw User/assistant/Tool slice."""
-    if any(message.get("role") not in _RUN_MESSAGE_ROLES for message in messages):
-        raise ValueError("run slice must contain only user, assistant, and tool messages")
-    return estimate_context_run_slice_tokens(messages, model=model)
-
-
 def project_next_request_tokens(
     estimated_tokens: int,
     *,
@@ -253,7 +230,7 @@ def project_next_request_tokens(
     model: str,
     context_window: int,
     max_output: int,
-    estimator_version: str = CONTEXT_ESTIMATOR_VERSION,
+    estimator_version: str,
 ) -> ContextProjection:
     """Prefer one compatible reported-usage anchor, otherwise use the full estimate."""
     require_nonnegative_int(estimated_tokens, field="estimated_tokens")
@@ -275,39 +252,6 @@ def project_next_request_tokens(
 
     projected = max(0, reported_total + estimated_tokens - snapshot.anchor_estimated_tokens)
     return ContextProjection(projected, "reported_delta")
-
-
-def project_next_request_usage(
-    messages: Sequence[dict[str, Any]],
-    tools: Sequence[dict[str, Any]] = (),
-    *,
-    snapshot: ContextUsageSnapshot | None,
-    reported_usage: Mapping[str, object] | None,
-    requested_route: str,
-    selected_route: str,
-    provider_id: str,
-    model: str,
-    context_window: int,
-    max_output: int,
-    estimator_version: str | None = None,
-) -> ContextProjection:
-    """Purely estimate and project one request using its model's local tokenizer."""
-    return project_next_request_tokens(
-        estimate_context_request_tokens(messages, tools, model=model),
-        snapshot=snapshot,
-        reported_usage=reported_usage,
-        requested_route=requested_route,
-        selected_route=selected_route,
-        provider_id=provider_id,
-        model=model,
-        context_window=context_window,
-        max_output=max_output,
-        estimator_version=(
-            context_estimator_version_for_model(model)
-            if estimator_version is None
-            else estimator_version
-        ),
-    )
 
 
 def _snapshot_matches(
@@ -339,13 +283,3 @@ def reported_model_usage_total(value: Mapping[str, object] | None) -> int | None
     if value["model_calls"] != 1:
         return None
     return cast(int, value["total_tokens"])
-
-
-def _canonical_json(value: dict[str, Any]) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        allow_nan=False,
-        sort_keys=True,
-    )

@@ -147,7 +147,8 @@ def test_request_count_uses_ordinary_encoding_for_mixed_user_text(content: str, 
 
 
 def test_estimator_identity_change_uses_full_local_count() -> None:
-    from aide.agent.context.budget import ContextUsageSnapshot, project_next_request_usage
+    from aide.agent.context.budget import ContextUsageSnapshot
+    from aide.agent.context.run_context import ContextController
 
     messages = [{"role": "user", "content": "中文代码 print('hello')"}]
     route: dict[str, Any] = dict(
@@ -167,7 +168,7 @@ def test_estimator_identity_change_uses_full_local_count() -> None:
             run_projected_tokens=0,
             run_projection_source="estimated",
         )
-        projection = project_next_request_usage(
+        projection = ContextController.project_next_request_usage(
             messages, snapshot=snapshot, reported_usage=reported, **route
         )
         assert projection.source == "estimated"
@@ -179,7 +180,8 @@ def test_estimator_identity_change_uses_full_local_count() -> None:
 def test_tokenizer_projection_applies_prompt_and_schema_reduction_without_adding_cached_usage() -> (
     None
 ):
-    from aide.agent.context.budget import ContextUsageSnapshot, project_next_request_usage
+    from aide.agent.context.budget import ContextUsageSnapshot
+    from aide.agent.context.run_context import ContextController
 
     messages = [{"role": "system", "content": "中文上下文" * 500}]
     tools = [{"name": "read_file", "description": "字段说明" * 500}]
@@ -205,10 +207,10 @@ def test_tokenizer_projection_applies_prompt_and_schema_reduction_without_adding
         total_tokens=300,
     )
     usage = {"model_calls": 1, **model_usage.to_dict()}
-    unchanged = project_next_request_usage(
+    unchanged = ContextController.project_next_request_usage(
         messages, tools, snapshot=snapshot, reported_usage=usage, **route
     )
-    reduced = project_next_request_usage(
+    reduced = ContextController.project_next_request_usage(
         [{"role": "system", "content": "short"}], snapshot=snapshot, reported_usage=usage, **route
     )
     assert unchanged.source == reduced.source == "reported_delta"

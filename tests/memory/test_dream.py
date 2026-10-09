@@ -17,6 +17,7 @@ from aide.config.agent_home import AgentHome
 from aide.config.config import (
     ConfigLoader,
     MemoryConfiguration,
+    ModelConfiguration,
     ModelsConfiguration,
     ProviderConfiguration,
     RouteConfiguration,
@@ -88,14 +89,14 @@ def _memory_configuration(
         protocol="openai-compatible",
         base_url="https://memory.example/v1",
         api_key="memory-secret",
-        models=("memory-model",),
+        models={'memory-model': ModelConfiguration(memory_context_window, memory_max_output, 0, "low", 60)},
     )
     default_provider = ProviderConfiguration(
         provider_id="default-provider",
         protocol="openai-compatible",
         base_url="https://default.example/v1",
         api_key="default-secret",
-        models=("default-model",),
+        models={'default-model': ModelConfiguration(default_context_window, default_max_output, 0, "low", 60)},
     )
     return UserConfiguration(
         runtime=RuntimeConfiguration(max_tool_result_chars=4096),

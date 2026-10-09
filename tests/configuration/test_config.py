@@ -84,7 +84,7 @@ provider_id = "openai-local"
 model = "replace-with-a-model-id"
 """
 
-VALID_CONFIG = """[runtime]
+VALID_CONFIG = '''[runtime]
 max_tool_result_chars = 60000
 compact_ratio = 0.9
 
@@ -96,23 +96,30 @@ schedule = "15 * * * *"
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "sk-ant-secret"
-models = ["claude-model"]
 
-[models.routes.chat]
-provider_id = "anthropic-default"
-model = "claude-model"
+[models.providers.anthropic-default.models."claude-model"]
 context_window = 200000
 max_output = 8192
 temperature = 0.2
 reasoning_effort = "mid"
 timeout = 120
-"""
 
-MINIMAL_VALID_CONFIG = """[models.providers.primary]
+[models.routes.chat]
+provider_id = "anthropic-default"
+model = "claude-model"
+'''
+
+MINIMAL_VALID_CONFIG = '''[models.providers.primary]
 protocol = "openai-compatible"
 base_url = "https://models.example/v1"
 api_key = "minimal-secret"
-models = ["small-model"]
+
+[models.providers.primary.models."small-model"]
+context_window = 8192
+max_output = 1024
+temperature = 0
+reasoning_effort = "mid"
+timeout = 30
 
 [runtime]
 compact_ratio = 0.9
@@ -120,13 +127,9 @@ compact_ratio = 0.9
 [models.routes.chat]
 provider_id = "primary"
 model = "small-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-timeout = 30
-"""
+'''
 
-PROJECTED_CONFIG = """unexpected = true
+PROJECTED_CONFIG = '''unexpected = true
 
 [runtime]
 max_tool_result_chars = 60000
@@ -139,44 +142,46 @@ ignored_models_field = true
 protocol = "openai-compatible"
 base_url = "https://models.example/v1"
 api_key = "minimal-secret"
-models = ["small-model"]
 ignored_provider_field = true
+
+[models.providers.primary.models."small-model"]
+context_window = 8192
+max_output = 1024
+temperature = 0
+reasoning_effort = "mid"
+timeout = 30
 
 [models.routes.chat]
 provider_id = "primary"
 model = "small-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-timeout = 30
-ignored_route_field = true
 
 [models.routes.cron]
 this_legacy_route_is_ignored = true
 
 [models.routes.future]
 this_undefined_route_is_ignored = true
-"""
+'''
 
-SCHEDULE_ROUTE = """
+SCHEDULE_ROUTE = '''
 
 [models.providers.schedule-provider]
 protocol = "openai-compatible"
 base_url = "https://schedule.example/v1"
 api_key = "schedule-secret"
-models = ["schedule-model"]
 
-[models.routes.schedule]
-provider_id = "schedule-provider"
-model = "schedule-model"
+[models.providers.schedule-provider.models."schedule-model"]
 context_window = 100000
 max_output = 4096
 temperature = 0.1
 reasoning_effort = "high"
 timeout = 90
-"""
 
-REDACTION_CONFIG = """# User Configuration
+[models.routes.schedule]
+provider_id = "schedule-provider"
+model = "schedule-model"
+'''
+
+REDACTION_CONFIG = '''# User Configuration
 [runtime]
 max_tool_result_chars = 50000
 compact_ratio = 0.9
@@ -189,24 +194,27 @@ schedule = "0 * * * *"
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "plaintext-primary-key"
-models = ["model-id"]
+
+[models.providers.primary.models."model-id"]
+context_window = 4096
+max_output = 512
+temperature = 0.2
+reasoning_effort = "mid"
+timeout = 60
 
 [models.providers.empty-template]
 protocol = "openai-compatible"
 base_url = ""
 api_key = ""
-models = []
+
+[models.providers.empty-template.models]
 
 [models.routes.chat]
 provider_id = "primary"
 model = "model-id"
-context_window = 4096
-max_output = 512
-temperature = 0.2
-timeout = 60
-"""
+'''
 
-EXPECTED_REDACTED_CONFIG = """# User Configuration
+EXPECTED_REDACTED_CONFIG = '''# User Configuration
 [runtime]
 max_tool_result_chars = 50000
 compact_ratio = 0.9
@@ -219,78 +227,85 @@ schedule = "0 * * * *"
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "***REDACTED***"
-models = ["model-id"]
+
+[models.providers.primary.models."model-id"]
+context_window = 4096
+max_output = 512
+temperature = 0.2
+reasoning_effort = "mid"
+timeout = 60
 
 [models.providers.empty-template]
 protocol = "openai-compatible"
 base_url = ""
 api_key = ""
-models = []
+
+[models.providers.empty-template.models]
 
 [models.routes.chat]
 provider_id = "primary"
 model = "model-id"
-context_window = 4096
-max_output = 512
-temperature = 0.2
-timeout = 60
-"""
+'''
 
-OVERLAPPING_API_KEY_CONFIG = """# model-id must remain visible outside api_key
+OVERLAPPING_API_KEY_CONFIG = '''# model-id must remain visible outside api_key
 [models.providers.model-id]
 protocol = "openai-compatible"
 base_url = "https://model-id.example/v1/model-id"
 api_key = "model-id"
-models = ["model-id"]
+
+[models.providers.model-id.models."model-id"]
+context_window = 4096
+max_output = 512
+temperature = 0
+reasoning_effort = "mid"
+timeout = 60
 
 [models.routes.chat]
 provider_id = "model-id"
 model = "model-id"
-context_window = 4096
-max_output = 512
-temperature = 0
-timeout = 60
-"""
+'''
 
-EXPECTED_REDACTED_OVERLAPPING_CONFIG = """# model-id must remain visible outside api_key
+EXPECTED_REDACTED_OVERLAPPING_CONFIG = '''# model-id must remain visible outside api_key
 [models.providers.model-id]
 protocol = "openai-compatible"
 base_url = "https://model-id.example/v1/model-id"
 api_key = "***REDACTED***"
-models = ["model-id"]
+
+[models.providers.model-id.models."model-id"]
+context_window = 4096
+max_output = 512
+temperature = 0
+reasoning_effort = "mid"
+timeout = 60
 
 [models.routes.chat]
 provider_id = "model-id"
 model = "model-id"
-context_window = 4096
-max_output = 512
-temperature = 0
-timeout = 60
-"""
+'''
 
 MULTILINE_DOTTED_API_KEY_CONFIG = '''models.providers.primary.protocol = "anthropic"
 models.providers.primary.base_url = "https://api.anthropic.com"
 models.providers.primary.api_key = """line-one-secret
 line-two-secret"""
-models.providers.primary.models = ["model-id"]
+models.providers.primary.models.model-id.context_window = 4096
+models.providers.primary.models.model-id.max_output = 512
+models.providers.primary.models.model-id.temperature = 0
+models.providers.primary.models.model-id.reasoning_effort = "mid"
+models.providers.primary.models.model-id.timeout = 30
 models.routes.chat.provider_id = "primary"
 models.routes.chat.model = "model-id"
-models.routes.chat.context_window = 4096
-models.routes.chat.max_output = 512
-models.routes.chat.temperature = 0
-models.routes.chat.timeout = 60
 '''
 
 EXPECTED_REDACTED_MULTILINE_DOTTED_CONFIG = """models.providers.primary.protocol = "anthropic"
 models.providers.primary.base_url = "https://api.anthropic.com"
 models.providers.primary.api_key = "***REDACTED***"
-models.providers.primary.models = ["model-id"]
+models.providers.primary.models.model-id.context_window = 4096
+models.providers.primary.models.model-id.max_output = 512
+models.providers.primary.models.model-id.temperature = 0
+models.providers.primary.models.model-id.reasoning_effort = "mid"
+models.providers.primary.models.model-id.timeout = 30
 models.routes.chat.provider_id = "primary"
 models.routes.chat.model = "model-id"
-models.routes.chat.context_window = 4096
-models.routes.chat.max_output = 512
-models.routes.chat.temperature = 0
-models.routes.chat.timeout = 60
 """
 
 MALFORMED_CONFIG = """[runtime
@@ -309,20 +324,22 @@ not_api_key = "not-a-provider-key"
 broken = [
 """
 
-SCHEMA_INVALID_API_KEY_ALIAS_CONFIG = """[models.providers.primary]
+SCHEMA_INVALID_API_KEY_ALIAS_CONFIG = '''[models.providers.primary]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 API-Key = "sk-schema-alias-secret"
-models = ["model-id"]
+
+[models.providers.primary.models."model-id"]
+context_window = 4096
+max_output = 512
+temperature = 0
+reasoning_effort = "mid"
+timeout = 60
 
 [models.routes.chat]
 provider_id = "primary"
 model = "model-id"
-context_window = 4096
-max_output = 512
-temperature = 0
-timeout = 60
-"""
+'''
 
 MALFORMED_DOTTED_API_KEY_CONFIG = """models.providers.primary.API-Key = "sk-dotted-secret"
 models.providers.primary.protocol = "anthropic"
@@ -382,7 +399,7 @@ def test_generated_configuration_scaffolds_one_provider_and_all_model_routes(
     models = loader.load().models
     assert set(models.providers) == {"openai-local"}
     provider = models.providers["openai-local"]
-    assert (provider.protocol, provider.base_url, provider.api_key, provider.models) == (
+    assert (provider.protocol, provider.base_url, provider.api_key, tuple(provider.models)) == (
         "openai-compatible",
         "",
         "",
@@ -626,13 +643,19 @@ def test_only_title_and_memory_use_chat_when_their_model_is_unavailable(
     if purpose == "chat":
         content = content.partition("\n[models.routes.chat]")[0] + "\n"
     if availability == "unusable_provider":
-        content += """
+        content += '''
 [models.providers.unusable]
 protocol = "future-protocol"
 base_url = "https://unusable.example/v1"
 api_key = "secret"
-models = ["other-model"]
-"""
+[models.providers.unusable.models."other-model"]
+context_window = 200000
+max_output = 8192
+temperature = 0.2
+reasoning_effort = "mid"
+timeout = 120
+
+'''
     if availability != "missing":
         provider_id = "unusable" if availability == "unusable_provider" else (
             "absent" if availability == "missing_provider" else "anthropic-default"
@@ -644,14 +667,14 @@ models = ["other-model"]
 [models.routes.{purpose}]
 provider_id = "{provider_id}"
 model = "{model}"
-context_window = 200000
-max_output = 8192
-temperature = 0.2
-reasoning_effort = "mid"
-timeout = 120
 """
     loader.path.write_text(content, encoding="utf-8")
 
+    if purpose == "chat" and availability == "missing_model":
+        with pytest.raises(ConfigError) as raised:
+            loader.load()
+        assert "models.routes.chat.model" in raised.value.field_errors
+        return
     configuration = loader.load_for_startup() if purpose != "chat" or availability == "configured" else loader.load()
     if availability != "configured" and purpose in {"chat", "schedule", "subagent"}:
         with pytest.raises(ConfigError) as raised:
@@ -669,38 +692,30 @@ timeout = 120
     assert resolved.route.model == "claude-model"
 
 
-def test_legacy_default_route_migrates_to_chat_on_next_write(agent_home: Path) -> None:
+def test_legacy_default_route_is_rejected_without_rewriting(agent_home: Path) -> None:
     loader = ConfigLoader(AgentHome(agent_home))
     loader.ensure_default()
     legacy = VALID_CONFIG.replace("[models.routes.chat]", "[models.routes.default]")
     loader.path.write_text(legacy, encoding="utf-8")
-
-    configuration = loader.load_for_startup()
-    assert set(configuration.models.routes) == {"chat"}
+    with pytest.raises(ConfigError) as raised:
+        loader.load_for_startup()
+    assert "models.routes.default" in raised.value.field_errors
+    assert loader.web_snapshot().state == "invalid"
     assert loader.path.read_text(encoding="utf-8") == legacy
-    assert loader.web_snapshot().state == "active"
-    assert "default" not in loader.web_snapshot().fields["models"]["routes"]
-    loader.update_reasoning_effort("high")
-
-    saved = loader.path.read_text(encoding="utf-8")
-    assert "[models.routes.default]" not in saved
-    assert "[models.routes.chat]" in saved
-    with pytest.raises(ConfigError):
-        loader.load().resolve_route("default")
 
 
-def test_explicit_chat_route_wins_over_legacy_default(agent_home: Path) -> None:
+def test_legacy_default_route_is_rejected_even_with_chat(agent_home: Path) -> None:
     loader = ConfigLoader(AgentHome(agent_home))
     loader.ensure_default()
     loader.path.write_text(
-        VALID_CONFIG + "\n[models.routes.default]\nprovider_id = \"absent\"\nmodel = \"old\"\n",
+        VALID_CONFIG + '\n[models.routes.default]\nprovider_id = "absent"\nmodel = "old"\n',
         encoding="utf-8",
     )
-
-    configuration = loader.load_for_startup()
-
-    assert configuration.resolve_route("memory").route.model == "claude-model"
-    assert set(configuration.models.routes) == {"chat"}
+    before = loader.path.read_bytes()
+    with pytest.raises(ConfigError) as raised:
+        loader.load_for_startup()
+    assert "models.routes.default" in raised.value.field_errors
+    assert loader.path.read_bytes() == before
 
 
 def test_failed_startup_generation_leaves_no_partial_configuration(
@@ -735,7 +750,7 @@ def test_valid_configuration_loads_as_typed_values(agent_home: Path) -> None:
         configuration.runtime.exec_shell,
         configuration.memory.batch_size,
         configuration.memory.schedule,
-        configuration.models.providers["anthropic-default"].models,
+        tuple(configuration.models.providers["anthropic-default"].models),
         configuration.models.routes["chat"].reasoning_effort,
         configuration.models.routes["chat"].timeout,
     ) == (
@@ -790,15 +805,18 @@ def test_all_reasoning_effort_levels_load_as_route_values(
     assert loader.path.read_bytes() == before
 
 
-def test_unsupported_reasoning_effort_uses_default_policy_without_rewriting(agent_home: Path) -> None:
+def test_unsupported_model_reasoning_effort_is_rejected_without_rewriting(agent_home: Path) -> None:
     loader = ConfigLoader(AgentHome(agent_home))
     loader.ensure_default()
-    loader.path.write_text(VALID_CONFIG.replace('reasoning_effort = "mid"', 'reasoning_effort = "medium"'), encoding="utf-8")
+    loader.path.write_text(
+        VALID_CONFIG.replace('reasoning_effort = "mid"', 'reasoning_effort = "medium"'),
+        encoding="utf-8",
+    )
     before = loader.path.read_bytes()
-    configuration = loader.load_for_startup()
-    assert all(route.reasoning_effort == "mid" for route in configuration.models.routes.values())
-    assert loader.diagnostics
-    assert loader.web_snapshot().fields["models"]["routes"]
+    with pytest.raises(ConfigError) as raised:
+        loader.load_for_startup()
+    assert "models.providers.anthropic-default.models.claude-model.reasoning_effort" in raised.value.field_errors
+    assert loader.web_snapshot().state == "invalid"
     assert loader.path.read_bytes() == before
 
 
@@ -1087,17 +1105,15 @@ def test_config_view_ignores_undefined_configuration_fields(agent_home: Path) ->
             "models.providers.anthropic-default.api_key",
         ),
         (
-            VALID_CONFIG.replace(
-                'models = ["claude-model"]', 'models = ["claude-model", "claude-model"]'
-            ),
+            VALID_CONFIG[:VALID_CONFIG.index('[models.providers.anthropic-default.models.')] + 'models = ["claude-model", "claude-model"]\n' + VALID_CONFIG[VALID_CONFIG.index('[models.routes.chat]'):],
             "models.providers.anthropic-default.models",
         ),
         (
-            VALID_CONFIG.replace('models = ["claude-model"]', 'models = [""]'),
+            VALID_CONFIG.replace('[models.providers.anthropic-default.models."claude-model"]', '[models.providers.anthropic-default.models.""]'),
             "models.providers.anthropic-default.models",
         ),
         (
-            VALID_CONFIG.replace('models = ["claude-model"]', "models = [1]"),
+            VALID_CONFIG.replace('[models.providers.anthropic-default.models."claude-model"]', '[models.providers.anthropic-default.models]\nclaude-model = 1'),
             "models.providers.anthropic-default.models",
         ),
         (
@@ -1118,31 +1134,31 @@ def test_config_view_ignores_undefined_configuration_fields(agent_home: Path) ->
         ),
         (
             VALID_CONFIG.replace("context_window = 200000", "context_window = 1023"),
-            "models.routes.chat.context_window",
+            "models.providers.anthropic-default.models.claude-model.context_window",
         ),
         (
             VALID_CONFIG.replace("context_window = 200000", "context_window = true"),
-            "models.routes.chat.context_window",
+            "models.providers.anthropic-default.models.claude-model.context_window",
         ),
         (
             VALID_CONFIG.replace("max_output = 8192", "max_output = 0"),
-            "models.routes.chat.max_output",
+            "models.providers.anthropic-default.models.claude-model.max_output",
         ),
         (
             VALID_CONFIG.replace("max_output = 8192", "max_output = 200000"),
-            "models.routes.chat.max_output",
+            "models.providers.anthropic-default.models.claude-model.max_output",
         ),
         (
             VALID_CONFIG.replace("temperature = 0.2", "temperature = nan"),
-            "models.routes.chat.temperature",
+            "models.providers.anthropic-default.models.claude-model.temperature",
         ),
         (
             VALID_CONFIG.replace("temperature = 0.2", 'temperature = "0.2"'),
-            "models.routes.chat.temperature",
+            "models.providers.anthropic-default.models.claude-model.temperature",
         ),
         (
             VALID_CONFIG.replace("timeout = 120", "timeout = 601"),
-            "models.routes.chat.timeout",
+            "models.providers.anthropic-default.models.claude-model.timeout",
         ),
     ],
 )
@@ -1161,22 +1177,24 @@ def test_configuration_rejects_schema_violations(
     assert "sk-ant-secret" not in str(raised.value)
 
 
-UNUSABLE_CHAT_PROVIDER = """
+UNUSABLE_CHAT_PROVIDER = '''
 
 [models.providers.chat-provider]
 protocol = "anthropic"
 base_url = "not-an-absolute-url"
 api_key = "chat-secret"
-models = ["chat-model"]
+
+[models.providers.chat-provider.models."chat-model"]
+context_window = 100000
+max_output = 4096
+temperature = 0.1
+reasoning_effort = "mid"
+timeout = 90
 
 [models.routes.title]
 provider_id = "chat-provider"
 model = "chat-model"
-context_window = 100000
-max_output = 4096
-temperature = 0.1
-timeout = 90
-"""
+'''
 
 UNKNOWN_PROTOCOL_CHAT_PROVIDER = UNUSABLE_CHAT_PROVIDER.replace(
     'protocol = "anthropic"', 'protocol = "future-protocol"'
@@ -1187,10 +1205,6 @@ MISSING_PROVIDER_CHAT_ROUTE = """
 [models.routes.title]
 provider_id = "missing-provider"
 model = "chat-model"
-context_window = 100000
-max_output = 4096
-temperature = 0.1
-timeout = 90
 """
 
 OUTSIDE_CATALOG_CHAT_ROUTE = MISSING_PROVIDER_CHAT_ROUTE.replace(
@@ -1221,7 +1235,7 @@ OUTSIDE_CATALOG_CHAT_ROUTE = MISSING_PROVIDER_CHAT_ROUTE.replace(
             None,
         ),
         (VALID_CONFIG.replace('api_key = "sk-ant-secret"', 'api_key = ""'), "chat", None),
-        (VALID_CONFIG.replace('models = ["claude-model"]', "models = []"), "chat", None),
+        (VALID_CONFIG[:VALID_CONFIG.index('[models.providers.anthropic-default.models.')] + '[models.providers.anthropic-default.models]\n' + VALID_CONFIG[VALID_CONFIG.index('[models.routes.chat]'):], "chat", None),
         (
             VALID_CONFIG.replace(
                 'provider_id = "anthropic-default"', 'provider_id = "missing-provider"'
@@ -1245,7 +1259,12 @@ def test_model_route_resolution_uses_only_a_usable_default(
     loader = ConfigLoader(AgentHome(agent_home))
     loader.ensure_default()
     loader.path.write_text(content, encoding="utf-8")
-    configuration = loader.load()
+    try:
+        configuration = loader.load()
+    except ConfigError as error:
+        assert expected_selected_route is None
+        assert "models.routes.chat.model" in error.field_errors
+        return
 
     if expected_selected_route is None:
         with pytest.raises(ConfigError) as raised:
@@ -1285,7 +1304,7 @@ def test_update_reasoning_effort_reopens_latest_document_and_preserves_unrelated
 ) -> None:
     loader = ConfigLoader(AgentHome(agent_home))
     loader.ensure_default()
-    content = """# Keep this comment and every unrelated route.
+    content = '''# Keep this comment and every unrelated route.
 [runtime]
 max_tool_result_chars = 60000
 
@@ -1293,35 +1312,33 @@ max_tool_result_chars = 60000
 protocol = "openai-compatible"
 base_url = "https://models.example/v1"
 api_key = "latest-secret"
-models = ["chat-model", "memory-model"]
 
-[models.routes.chat]
-provider_id = "primary"
-model = "chat-model"
+[models.providers.primary.models."chat-model"]
 context_window = 8192
 max_output = 1024
 temperature = 0
 reasoning_effort = "low"
 timeout = 30
 
-[models.routes.title]
-provider_id = "primary"
-model = "chat-model"
-context_window = 8192
-max_output = 1024
-temperature = 0.2
-reasoning_effort = "high"
-timeout = 45
-
-[models.routes.memory]
-provider_id = "primary"
-model = "memory-model"
+[models.providers.primary.models."memory-model"]
 context_window = 8192
 max_output = 1024
 temperature = 0.1
 reasoning_effort = "max"
 timeout = 60
-"""
+
+[models.routes.chat]
+provider_id = "primary"
+model = "chat-model"
+
+[models.routes.title]
+provider_id = "primary"
+model = "chat-model"
+
+[models.routes.memory]
+provider_id = "primary"
+model = "memory-model"
+'''
     loader.path.write_text(content, encoding="utf-8")
 
     loader.update_reasoning_effort("xhigh")
@@ -1331,7 +1348,6 @@ timeout = 60
     assert 'api_key = "latest-secret"' in updated
     assert 'model = "memory-model"' in updated
     assert updated.count('reasoning_effort = "xhigh"') == 1
-    assert 'reasoning_effort = "high"' in updated
     assert 'reasoning_effort = "max"' in updated
 
 
@@ -1377,7 +1393,6 @@ def test_update_reasoning_effort_holds_shared_lock_from_latest_read_through_repl
     updated = loader.path.read_text(encoding="utf-8")
     assert "# Added by a cooperating writer." in updated
     assert "max_output = 2048" in updated
-    assert 'reasoning_effort = "high"' in updated
 
 
 def test_update_reasoning_effort_keeps_external_edits_and_inherited_chat_absent(

@@ -195,6 +195,25 @@ def _subagent_configuration(base: UserConfiguration) -> UserConfiguration:
     )
 
 
+def _compaction_configuration() -> UserConfiguration:
+    base = configuration()
+    provider = base.models.providers["default-provider"]
+    parameters = provider.models["default-model"]
+    return replace(
+        base,
+        models=replace(
+            base.models,
+            providers={provider.provider_id: replace(provider, models={
+                "default-model": replace(parameters, context_window=4000, max_output=500),
+                "memory-model": parameters,
+            })},
+            routes={**base.models.routes, "memory": replace(
+                base.models.routes["chat"], model="memory-model",
+            )},
+        ),
+    )
+
+
 @pytest.mark.asyncio
 async def test_subagent_runner_uses_frozen_context_and_persists_full_tool_artifact(
     tmp_path: Path,
@@ -594,15 +613,7 @@ async def test_compaction_summaries_are_persisted_in_child_context_state(
         permission_context=PermissionContext(workspace_root=state.workspace_path),
         tool_context=_tool_context(state.workspace_path),
     )
-    config = configuration()
-    chat_route = replace(config.models.routes["chat"], context_window=4000, max_output=500)
-    config = replace(
-        config,
-        models=replace(
-            config.models,
-            routes={**config.models.routes, "chat": chat_route, "memory": config.models.routes["chat"]},
-        ),
-    )
+    config = _compaction_configuration()
     executor = SubAgentRunnerExecutor(
         workspace_id="workspace-id",
         workspace_state=state,
@@ -1288,13 +1299,7 @@ async def test_compaction_keeps_earlier_model_output_in_the_persisted_conversati
         ),
         completions=(_response(f"summary-{index}").response for index in range(6)),
     )
-    config = configuration()
-    chat_route = replace(config.models.routes["chat"], context_window=4000, max_output=500)
-    config = replace(
-        config, models=replace(config.models, routes={
-            **config.models.routes, "chat": chat_route, "memory": config.models.routes["chat"],
-        })
-    )
+    config = _compaction_configuration()
     executor = SubAgentRunnerExecutor(
         workspace_id="workspace-id",
         workspace_state=state,
@@ -1343,13 +1348,7 @@ async def test_failed_child_summary_save_keeps_its_consumed_memory_usage(tmp_pat
         task="long-task " * 2000,
     )
     provider = ScriptedFakeProvider(completions=(_response("fact-summary").response,))
-    config = configuration()
-    chat_route = replace(config.models.routes["chat"], context_window=4000, max_output=500)
-    config = replace(
-        config, models=replace(config.models, routes={
-            **config.models.routes, "chat": chat_route, "memory": config.models.routes["chat"],
-        })
-    )
+    config = _compaction_configuration()
     executor = SubAgentRunnerExecutor(
         workspace_id="workspace-id",
         workspace_state=state,
@@ -1428,13 +1427,7 @@ async def test_concurrent_compaction_keeps_summaries_and_raw_activity_in_each_ch
         )
         for marker in markers
     ]
-    config = configuration()
-    chat_route = replace(config.models.routes["chat"], context_window=4000, max_output=500)
-    config = replace(
-        config, models=replace(config.models, routes={
-            **config.models.routes, "chat": chat_route, "memory": config.models.routes["chat"],
-        })
-    )
+    config = _compaction_configuration()
     provider = ConcurrentProvider()
     executor = SubAgentRunnerExecutor(
         workspace_id="workspace-id",

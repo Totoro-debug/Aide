@@ -182,6 +182,7 @@ class ScriptedFakeRouter:
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None = None,
         session_model_configuration: SessionModelConfiguration | None = None,
+        subagent_model_configuration: SessionModelConfiguration | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         status = self.call_route_status(route, continuation=continuation)
@@ -207,6 +208,7 @@ class ScriptedFakeRouter:
         tools: Sequence[dict[str, Any]],
         continuation: ModelContinuation | None = None,
         session_model_configuration: SessionModelConfiguration | None = None,
+        subagent_model_configuration: SessionModelConfiguration | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> ModelResponse:
         status = self.call_route_status(route, continuation=continuation)
@@ -234,8 +236,9 @@ class ScriptedFakeRouter:
         *,
         continuation: ModelContinuation | None,
         session_model_configuration: SessionModelConfiguration | None = None,
+        subagent_model_configuration: SessionModelConfiguration | None = None,
     ) -> ModelRouteStatus:
-        del continuation, session_model_configuration
+        del continuation, session_model_configuration, subagent_model_configuration
         return self._route_statuses.get(
             route,
             ModelRouteStatus(

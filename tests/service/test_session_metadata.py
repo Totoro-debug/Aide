@@ -112,33 +112,34 @@ async def _metadata_service(
 
 def _session_model_test_configuration(home: AgentHome) -> None:
     (home.path / "config.toml").write_text(
-        """[models.providers.first-provider]
+        '''[models.providers.first-provider]
 protocol = "openai-compatible"
 base_url = "https://first.example/v1"
 api_key = "first-secret"
-models = ["shared-model"]
 
-[models.providers.first-provider.model_context_windows]
-shared-model = 32000
-
-[models.providers.second-provider]
-protocol = "anthropic"
-base_url = "https://second.example/v1"
-api_key = "second-secret"
-models = ["shared-model"]
-
-[models.providers.second-provider.model_context_windows]
-shared-model = 16000
-
-[models.routes.chat]
-provider_id = "first-provider"
-model = "shared-model"
+[models.providers.first-provider.models."shared-model"]
 context_window = 32000
 max_output = 4096
 temperature = 0.2
 reasoning_effort = "mid"
 timeout = 60
-""",
+
+[models.providers.second-provider]
+protocol = "anthropic"
+base_url = "https://second.example/v1"
+api_key = "second-secret"
+
+[models.providers.second-provider.models."shared-model"]
+context_window = 16000
+max_output = 8192
+temperature = 0.2
+reasoning_effort = "mid"
+timeout = 120
+
+[models.routes.chat]
+provider_id = "first-provider"
+model = "shared-model"
+''',
         encoding="utf-8",
     )
 

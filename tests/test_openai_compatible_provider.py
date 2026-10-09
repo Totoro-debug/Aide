@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from aide.agent.tools.tool_gateway import ModelToolCall
-from aide.config.config import ProviderConfiguration
+from aide.config.config import ModelConfiguration, ProviderConfiguration
 from aide.provider.errors import ModelCallError
 from aide.provider.models import (
     ModelCompleted,
@@ -98,7 +98,7 @@ def configuration() -> ProviderConfiguration:
         protocol="openai-compatible",
         base_url="https://openai-compatible.test/v1",
         api_key="secret-key",
-        models=("model-test",),
+        models={'model-test': ModelConfiguration(200_000, 8192, 0.2, "mid", 120)},
     )
 
 

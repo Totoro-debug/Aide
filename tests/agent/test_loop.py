@@ -90,7 +90,7 @@ class _Router:
 
     def stream(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -110,7 +110,7 @@ class _Router:
 
     async def complete(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -127,7 +127,7 @@ class _CapturingRouter(_Router):
 
     def stream(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -165,7 +165,7 @@ class _MaxRouter(_Router):
 
     def stream(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -192,7 +192,7 @@ class _BlockingRouter(_Router):
 
     def stream(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -219,7 +219,7 @@ class _ConcurrentTitleRouter(_Router):
 
     def stream(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -249,7 +249,7 @@ class _SlowTitleLogRouter(_Router):
 
     def stream(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -279,7 +279,7 @@ class _EventRouter(_Router):
 
     def stream(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -316,7 +316,7 @@ class _TitleBehaviorRouter(_Router):
 
     def stream(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -861,7 +861,7 @@ async def test_agent_loop_does_not_compact_by_message_count(
 
         def stream(
             self,
-            route: Literal["chat", "schedule"],
+            route: Literal["chat", "schedule", "subagent"],
             *,
             messages: Sequence[dict[str, Any]],
             tools: Sequence[dict[str, Any]],
@@ -877,7 +877,7 @@ async def test_agent_loop_does_not_compact_by_message_count(
 
         async def complete(
             self,
-            route: Literal["chat", "schedule"],
+            route: Literal["chat", "schedule", "subagent"],
             *,
             messages: Sequence[dict[str, Any]],
             tools: Sequence[dict[str, Any]],
@@ -1533,17 +1533,29 @@ async def test_title_fallback_does_not_change_the_next_configured_chat_attempt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = """[models.providers.chat-provider]
+    config = '''[models.providers.chat-provider]
 protocol = "openai-compatible"
 base_url = "https://chat.example/v1"
 api_key = "chat-secret"
-models = ["chat-model"]
+
+[models.providers.chat-provider.models."chat-model"]
+context_window = 32000
+max_output = 2048
+temperature = 0
+reasoning_effort = "mid"
+timeout = 30
 
 [models.providers.default-provider]
 protocol = "anthropic"
 base_url = "https://default.example/v1"
 api_key = "default-secret"
-models = ["default-model"]
+
+[models.providers.default-provider.models."default-model"]
+context_window = 16000
+max_output = 1024
+temperature = 0
+reasoning_effort = "mid"
+timeout = 30
 
 [runtime]
 compact_ratio = 0.9
@@ -1551,19 +1563,11 @@ compact_ratio = 0.9
 [models.routes.title]
 provider_id = "chat-provider"
 model = "chat-model"
-context_window = 32000
-max_output = 2048
-temperature = 0
-timeout = 30
 
 [models.routes.chat]
 provider_id = "default-provider"
 model = "default-model"
-context_window = 16000
-max_output = 1024
-temperature = 0
-timeout = 30
-"""
+'''
     router_home = AgentHome(tmp_path / "router-home")
     router_home.initialize()
     (router_home.path / "config.toml").write_text(config, encoding="utf-8")
@@ -2584,7 +2588,7 @@ async def test_permission_downgrade_does_not_revoke_the_admitted_full_access_run
     class BlockingPermissionRouter(_Router):
         def stream(
             self,
-            route: Literal["chat", "schedule"],
+            route: Literal["chat", "schedule", "subagent"],
             *,
             messages: Sequence[dict[str, Any]],
             tools: Sequence[dict[str, Any]],
@@ -3412,7 +3416,7 @@ async def test_tool_iterations_reuse_one_framing_and_context_projection_before_o
 
         def stream(
             self,
-            route: Literal["chat", "schedule"],
+            route: Literal["chat", "schedule", "subagent"],
             *,
             messages: Sequence[dict[str, Any]],
             tools: Sequence[dict[str, Any]],
@@ -4049,7 +4053,7 @@ async def test_default_agent_loop_wiring_reduces_keep_replace_and_clear(
 
         async def complete(
             self,
-            route: Literal["chat", "schedule"],
+            route: Literal["chat", "schedule", "subagent"],
             *,
             messages: Sequence[dict[str, Any]],
             tools: Sequence[dict[str, Any]],
@@ -4131,7 +4135,7 @@ async def test_default_agent_loop_wiring_skips_router_completion_for_manual_skil
 
         async def complete(
             self,
-            route: Literal["chat", "schedule"],
+            route: Literal["chat", "schedule", "subagent"],
             *,
             messages: Sequence[dict[str, Any]],
             tools: Sequence[dict[str, Any]],

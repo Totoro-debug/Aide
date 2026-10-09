@@ -690,7 +690,7 @@ class Session:
             pending = loop.create_task(self._persist_after(previous, content))
             self._pending_persist = pending
             self._persist_tasks.add(pending)
-            pending.add_done_callback(self._persist_task_finished)
+            pending.add_done_callback(self._consume_persist_task)
         except Exception:
             return
 
@@ -725,9 +725,6 @@ class Session:
             if not pending_tasks:
                 return
             await asyncio.gather(*pending_tasks, return_exceptions=True)
-
-    def _persist_task_finished(self, task: asyncio.Task[None]) -> None:
-        self._consume_persist_task(task)
 
     def _consume_persist_task(self, task: asyncio.Task[None]) -> None:
         self._persist_tasks.discard(task)

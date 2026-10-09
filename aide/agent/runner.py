@@ -82,10 +82,6 @@ class AgentRunnerToolCallFinished:
     result: str = ""
 
 
-class AgentRunnerOutputCallback(Protocol):
-    async def __call__(self, event: AgentRunnerOutput) -> None: ...
-
-
 class AgentRunnerRouter(Protocol):
     def stream(
         self,
@@ -188,7 +184,7 @@ class AgentRunner:
         *,
         model: AgentRunnerRoute,
         tool_gateway: ToolGateway | None,
-        on_output: AgentRunnerOutputCallback | None,
+        on_output: Callable[[AgentRunnerOutput], Awaitable[None]] | None,
         confirmation: ConfirmationRequester | None,
         externalize_result: Callable[[ToolResult], ToolResult] | None,
         cancel_requested: Callable[[], bool] | None,
@@ -845,7 +841,6 @@ __all__ = [
     "AgentRunner",
     "AgentRunnerFinishReason",
     "AgentRunnerOutput",
-    "AgentRunnerOutputCallback",
     "AgentRunnerResponseSegmentEnd",
     "AgentRunnerResult",
     "AgentRunnerRoute",

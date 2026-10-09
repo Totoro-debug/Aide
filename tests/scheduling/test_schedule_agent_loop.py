@@ -965,7 +965,9 @@ async def test_schedule_summary_flows_through_memory_to_a_later_schedule_run(
 
 [models.routes.schedule]
 provider_id = "anthropic-default"
-model = "claude-model"
+model = "claude-schedule"
+
+[models.providers.anthropic-default.models.claude-schedule]
 context_window = 4096
 max_output = 512
 temperature = 0.2
@@ -975,11 +977,6 @@ timeout = 120
 [models.routes.memory]
 provider_id = "anthropic-default"
 model = "claude-model"
-context_window = 200000
-max_output = 8192
-temperature = 0.2
-reasoning_effort = "mid"
-timeout = 120
 """
     )
     home = AgentHome(agent_home)

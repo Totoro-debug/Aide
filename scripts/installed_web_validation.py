@@ -706,7 +706,18 @@ async def validate_install(wheel: Path, root: Path, node: str) -> dict[str, obje
 protocol = "openai-compatible"
 base_url = "{base_url}"
 api_key = "installed-fixture-key"
-models = ["small-model", "installed-new-model"]
+[models.providers.fixture.models.small-model]
+context_window = 8192
+max_output = 1024
+temperature = 0
+reasoning_effort = "mid"
+timeout = 120
+[models.providers.fixture.models.installed-new-model]
+context_window = 8192
+max_output = 1024
+temperature = 0
+reasoning_effort = "mid"
+timeout = 120
 
 [runtime]
 permission_level = "workspace-write"
@@ -714,10 +725,6 @@ permission_level = "workspace-write"
 [models.routes.chat]
 provider_id = "fixture"
 model = "small-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-timeout = 120
 '''
     discovery_path = home / "service.json"
     cross_ready_path = root / "cross-browser-ready.json"

@@ -39,6 +39,7 @@ from aide.agent.tools.tool_gateway import ModelToolCall, ToolResult
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.config import (
     MemoryConfiguration,
+    ModelConfiguration,
     ModelsConfiguration,
     ProviderConfiguration,
     RouteConfiguration,
@@ -74,14 +75,14 @@ def _router_configuration(
         protocol="openai-compatible",
         base_url="https://chat.example/v1",
         api_key="chat-secret",
-        models=("chat-model",),
+        models={"chat-model": ModelConfiguration(chat_context_window, max_output, 0, "mid", 30)},
     )
     default_provider = ProviderConfiguration(
         provider_id="default-provider",
         protocol="anthropic",
         base_url="https://default.example/v1",
         api_key="default-secret",
-        models=("default-model",),
+        models={"default-model": ModelConfiguration(default_context_window, max_output, 0, "mid", 30)},
     )
 
     def route(provider_id: str, model: str, context_window: int) -> RouteConfiguration:

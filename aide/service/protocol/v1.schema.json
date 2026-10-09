@@ -152,55 +152,9 @@
               "type": "null"
             }
           ]
-        },
-        "migration_candidates": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/config_model_migration_candidate"
-          }
-        }
-      }
+        }}
     },
-    "config_model_migration_candidate": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "route",
-        "context_window",
-        "max_output",
-        "temperature",
-        "reasoning_effort",
-        "timeout"
-      ],
-      "properties": {
-        "route": {
-          "type": "string"
-        },
-        "context_window": {
-          "type": "integer",
-          "minimum": 1024,
-          "maximum": 10000000
-        },
-        "max_output": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 9999999
-        },
-        "temperature": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 2
-        },
-        "reasoning_effort": {
-          "$ref": "#/$defs/reasoning_effort"
-        },
-        "timeout": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 600
-        }
-      }
-    },
+
     "config_provider_fields": {
       "type": "object",
       "additionalProperties": false,
@@ -294,39 +248,23 @@
           "type": "string"
         },
         "models": {
-          "anyOf": [
-            {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": {
-                "$ref": "#/$defs/config_model_parameters"
-              }
-            }
-          ]
-        },
-        "model_context_windows": {
           "type": "object",
           "additionalProperties": {
-            "type": "integer"
+            "$ref": "#/$defs/config_model_parameters"
           }
         }
       }
     },
     "config_patch_route_fields": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "provider_id": {"type": "string"},
-        "model": {"type": "string"},
-        "context_window": {"type": "integer", "minimum": 1024, "maximum": 10000000},
-        "max_output": {"type": "integer", "minimum": 1, "maximum": 9999999},
-        "temperature": {"type": "number", "minimum": 0, "maximum": 2},
-        "reasoning_effort": {"$ref": "#/$defs/reasoning_effort"},
-        "timeout": {"type": "integer", "minimum": 1, "maximum": 600}
+        "provider_id": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        }
       }
     },
     "config_patch_mcp_fields": {

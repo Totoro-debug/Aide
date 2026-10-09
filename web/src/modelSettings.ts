@@ -1,4 +1,4 @@
-import type { ConfigModelMigrationCandidate, ReasoningEffort } from "./protocol";
+import type { ReasoningEffort } from "./protocol";
 
 export interface ModelForm {
   id: string;
@@ -8,7 +8,6 @@ export interface ModelForm {
   temperature: string;
   reasoning_effort: ReasoningEffort | "";
   timeout: string;
-  migration_candidates?: ConfigModelMigrationCandidate[];
 }
 
 export function modelSettingsFieldId(provider: string, model: string, field = "") {

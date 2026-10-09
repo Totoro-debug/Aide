@@ -31,7 +31,7 @@ from aide.agent.tools.core.schedule import ScheduleTool
 from aide.agent.tools.core.web_fetch import WebFetchTool
 from aide.agent.tools.core.web_search import WebSearchTool
 from aide.agent.tools.core.write_file import WriteFileTool
-from aide.agent.tools.file_mutation import FileMutationRecorder
+from aide.agent.tools.file_mutation import FileMutationRecorder, is_protected_restore_target
 from aide.agent.tools.mcp import MCPTool
 from aide.agent.tools.permission import (
     MCPToolIdentity,
@@ -508,7 +508,10 @@ class ToolGateway:
             if not isinstance(facts, ToolInvocationFacts):
                 raise TypeError("Tool preparation returned an invalid value")
             execution_arguments = facts.execution_arguments
-            mutation_target = _file_mutation_target(facts)
+            mutation_target = next(
+                (access.path for access in facts.file_accesses if access.role == "write"),
+                None,
+            )
         except asyncio.CancelledError:
             raise
         except ToolError as error:
@@ -657,6 +660,13 @@ class ToolGateway:
         mutation_target: Path | None,
         tool_context: ToolRunContext | None = None,
     ) -> str | None:
+        if (
+            tool_context is not None
+            and mutation_target is not None
+            and isinstance(tool, (WriteFileTool, EditFileTool))
+            and is_protected_restore_target(tool_context.workspace, mutation_target)
+        ):
+            return "Built-in File Tools cannot write to protected restore state."
         refusal_arguments = deepcopy(prepared_arguments)
         if mutation_target is not None and isinstance(tool, (WriteFileTool, EditFileTool)):
             refusal_arguments["path"] = str(mutation_target)
@@ -762,13 +772,6 @@ def _context_from_snapshot(
         workspace_root=workspace_root,
         origin=context.origin,
         configured_schedule_level=context.configured_schedule_level,
-    )
-
-
-def _file_mutation_target(facts: ToolInvocationFacts) -> Path | None:
-    return next(
-        (access.path for access in facts.file_accesses if access.role == "write"),
-        None,
     )
 
 

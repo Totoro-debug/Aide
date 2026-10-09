@@ -3416,10 +3416,6 @@ h1 {
 .modelCardRemove { position: absolute; top: 9px; right: 6px; }
 .modelCardFields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding: 0 0 16px; }
 .modelCardFields > label:first-of-type { grid-column: 1 / -1; }
-.modelMigration { grid-column: 1 / -1; display: grid; gap: 8px; font-size: 12px; }
-.modelMigration p { margin: 0; }
-.modelMigration button { display: grid; justify-items: start; white-space: normal; text-align: left; }
-.modelMigration small { font-size: 11px; }
 
 .settingsCollectionItem {
   display: grid;

@@ -42,7 +42,7 @@ try {
   await page.locator("#app-sidebar").getByRole("link", { name: "Settings", exact: true }).click();
   const section = page.getByRole("navigation", { name: "Settings sections", exact: true });
   await section.getByRole("button", { name: "Models", exact: true }).click();
-  console.log("Model configuration: opened legacy settings");
+  console.log("Model configuration: opened model settings");
   const providerCard = page.locator('[id="settings-models-providers-primary"]');
   const card = (provider, model) => page.locator(`[id="settings-model-${encodeURIComponent(provider)}-${encodeURIComponent(model).replaceAll(".", "%2E")}"]`);
   const openCard = async target => {
@@ -51,11 +51,11 @@ try {
   const fillModel = async (target, { id, context = 8192, output = 512, temperature = 0.7, effort = "mid", timeout = 17 } = {}) => {
     await openCard(target);
     if (id !== undefined) await target.getByLabel("Model", { exact: true }).fill(id);
+    await target.getByLabel("Context window", { exact: true }).fill(String(context));
     await target.getByLabel("Maximum output", { exact: true }).fill(String(output));
     await target.getByLabel("Temperature", { exact: true }).fill(String(temperature));
     await target.getByLabel("Reasoning effort", { exact: true }).selectOption(effort);
     await target.getByLabel("Timeout (seconds)", { exact: true }).fill(String(timeout));
-    await target.getByLabel("Context window", { exact: true }).fill(String(context));
     await target.getByLabel("Context window", { exact: true }).press("Tab");
   };
   const savedModel = async (provider, model, expectedOutput) => {
@@ -63,16 +63,16 @@ try {
     await expect(page.locator('[role="status"][data-state="saving"]')).toHaveCount(0);
   };
   const initial = await control.command("config-read");
-  assert.equal(initial.fields.models.providers.primary.models["small-model"].reasoning_effort, null);
-  await card("primary", "small-model").getByRole("button", { name: /^Use chat parameters/ }).click();
+  assert.equal(initial.fields.models.providers.primary.models["small-model"].reasoning_effort, "mid");
   await page.locator('[id="settings-models-providers-retired"]').getByRole("button", { name: "Remove provider", exact: true }).click();
+  await expect.poll(async () => (await control.command("config-read")).fields.models.providers.retired).toBeUndefined();
+  await expect(page.locator('[role="status"][data-state="saving"]')).toHaveCount(0);
   await fillModel(card("primary", "large-model"), { context: 65536, output: 16384, temperature: 0.1, effort: "high", timeout: 91 });
   await savedModel("primary", "large-model", 16384);
-  console.log("Model configuration: legacy parameters migrated");
-  const migrated = await control.command("config-read");
-  assert.equal(migrated.fields.models.providers.primary.models["small-model"].migration_candidates, undefined);
-  for (const route of Object.values(migrated.fields.models.routes)) assert.deepEqual(Object.keys(route).sort(), ["model", "provider_id"]);
-  assert.equal(JSON.stringify(migrated).includes("e2e-provider-secret-302"), false);
+  console.log("Model configuration: current parameters saved");
+  const saved = await control.command("config-read");
+  for (const route of Object.values(saved.fields.models.routes)) assert.deepEqual(Object.keys(route).sort(), ["model", "provider_id"]);
+  assert.equal(JSON.stringify(saved).includes("e2e-provider-secret-302"), false);
   assert.match(await readFile(configPath, "utf8"), /e2e-provider-secret-302/);
   await expect(card("primary", "small-model").getByRole("button", { name: "Remove model", exact: true })).toBeDisabled();
 
@@ -191,7 +191,7 @@ try {
   assert.equal(budget.max_output, 512);
   assert.equal(budget.available_context, 7680);
   assert.deepEqual(errors, []);
-  console.log("Model configuration E2E passed: explicit migration, model cards, duplicate/range validation, provider-scoped routes, 12 layout variants, restart and real request budget.");
+  console.log("Model configuration E2E passed: current model parameters, model cards, duplicate/range validation, provider-scoped routes, 12 layout variants, restart and real request budget.");
 } catch (error) {
   if (page) {
     console.error("Model configuration diagnostics:", JSON.stringify(await page.getByRole("alert").allTextContents()));

@@ -1,6 +1,6 @@
 import pytest
 
-from aide.config.config import ProviderConfiguration
+from aide.config.config import ModelConfiguration, ProviderConfiguration
 from aide.provider.anthropic import AnthropicProvider
 from aide.provider.factory import create_provider
 from aide.provider.openai_compatible import OpenAICompatibleProvider
@@ -24,7 +24,7 @@ async def test_configured_provider_factory_selects_the_official_sdk_adapter(
         protocol=protocol,
         base_url=base_url,
         api_key="test-api-key",
-        models=("model-id",),
+        models={'model-id': ModelConfiguration(200_000, 8192, 0.2, "mid", 120)},
     )
 
     provider = create_provider(configuration)

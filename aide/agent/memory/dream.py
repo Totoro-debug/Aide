@@ -203,10 +203,6 @@ class Dream:
             return
         await asyncio.shield(task)
 
-    @property
-    def is_running(self) -> bool:
-        return self._running
-
     def abort(self) -> None:
         if self._aborted:
             return
@@ -231,7 +227,16 @@ class Dream:
         except SummaryClaimError as failure:
             self._capture_terminal_failure(failure.cause)
             if failure.phase == "write_cursor":
-                return _cursor_write_failure(cursor=failure.cursor)
+                return DreamResult(
+                    status="Memory Task failed.",
+                    processed_count=0,
+                    memory_updated=False,
+                    cursor=failure.cursor,
+                    error=ErrorInfo(
+                        code="persistence_error",
+                        message="Summary Cursor could not be updated.",
+                    ),
+                )
             return _state_read_failure(cursor=failure.cursor)
         except (OSError, UnicodeError, ValueError) as error:
             self._capture_terminal_failure(error)
@@ -401,19 +406,6 @@ def _state_read_failure(*, cursor: int) -> DreamResult:
         error=ErrorInfo(
             code="persistence_error",
             message="Memory Task state could not be read.",
-        ),
-    )
-
-
-def _cursor_write_failure(*, cursor: int) -> DreamResult:
-    return DreamResult(
-        status="Memory Task failed.",
-        processed_count=0,
-        memory_updated=False,
-        cursor=cursor,
-        error=ErrorInfo(
-            code="persistence_error",
-            message="Summary Cursor could not be updated.",
         ),
     )
 

@@ -25,15 +25,17 @@ schedule = "0 * * * *"
 protocol = "openai-compatible"
 base_url = "https://provider.example/v1"
 api_key = "secret"
-models = ["model"]
+
+[models.providers.primary.models."model"]
+context_window = 100000
+max_output = 2048
+temperature = 0.2
+reasoning_effort = "mid"
+timeout = 30
 
 [models.routes.chat]
 provider_id = "primary"
 model = "model"
-context_window = 100000
-max_output = 2048
-temperature = 0.2
-timeout = 30
 """
 
 

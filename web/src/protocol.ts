@@ -199,16 +199,6 @@ export interface ConfigModelFields {
   temperature: number | null;
   reasoning_effort: ReasoningEffort | null;
   timeout: number | null;
-  migration_candidates?: ConfigModelMigrationCandidate[];
-}
-
-export interface ConfigModelMigrationCandidate {
-  route: string;
-  context_window: number;
-  max_output: number;
-  temperature: number;
-  reasoning_effort: ReasoningEffort;
-  timeout: number;
 }
 
 export interface AvailableModel {
@@ -762,22 +752,6 @@ export interface SessionRenameResponse {
   session: SessionSummary;
 }
 
-export interface SessionCreation {
-  request_id: string;
-  project_id: string;
-  workspace_id: string;
-  session_id: string;
-}
-
-export interface SessionClaimResponse {
-  request_id: string;
-  project_id: string;
-  workspace_id: string;
-  session_id: string;
-  claim: SessionClaim;
-  snapshot: SessionSnapshot;
-}
-
 export interface SessionRelease {
   request_id: string;
   released: true;
@@ -825,12 +799,6 @@ export interface RegisteredClient {
   permission_level: ToolPermissionLevel;
   current_workspace_id: string | null;
   current_session_id: string | null;
-}
-
-export interface WebLaunchTicket {
-  request_id: string;
-  ticket: string;
-  expires_in: number;
 }
 
 export interface ServiceErrorBody {

@@ -1712,12 +1712,13 @@ async def test_web_draft_stays_empty_when_workspace_has_startup_restore(
         claim = await service.claim_project_session(client.client_id, record.project_id, draft_id)
         assert cast(dict[str, object], claim["snapshot"])["messages"] == []
         claim_data = cast(dict[str, object], claim["claim"])
-        await service.release_project_session(
+        await service.release_conversation(
             client.client_id,
-            record.project_id,
+            workspace.workspace_id,
             draft_id,
             cast(int, claim_data["claim_version"]),
             cast(str, claim_data["reconnect_credential"]),
+            project_id=record.project_id,
         )
         assert not (WorkspaceState(project).sessions_directory / f"{draft_id}.jsonl").exists()
         assert (WorkspaceState(project).sessions_directory / f"{restored_id}.jsonl").exists()
@@ -1991,6 +1992,21 @@ async def test_last_real_client_disconnect_exits_service_process(
                     },
                     protocols=("aide-v1",),
                 )
+                request_id = str(uuid4())
+                await socket.send_json({
+                    "request_id": request_id,
+                    "type": "subscribe",
+                    "workspace_id": None,
+                    "session_id": None,
+                    "claim_version": None,
+                    "payload": {"last_seq": None, "stream_id": None},
+                })
+                async with asyncio.timeout(5):
+                    while True:
+                        event = await socket.receive_json()
+                        if event.get("request_id") == request_id:
+                            assert event["accepted"] is True
+                            break
                 await launcher.close()
                 await socket.close()
         async with asyncio.timeout(5):
@@ -2033,9 +2049,11 @@ async def test_launcher_waits_for_draining_service_before_starting_replacement(
     registration_rejected = asyncio.Event()
     original_register = service.register_client
 
-    async def register_stopping_client(*args: object, **kwargs: object) -> object:
+    async def register_stopping_client(
+        kind: str, reconnect_credential: str | None = None,
+    ) -> object:
         try:
-            return await original_register(*args, **kwargs)
+            return await original_register(kind, reconnect_credential=reconnect_credential)
         except ServiceError as error:
             if error.code == "admission_closed":
                 registration_rejected.set()
@@ -2092,7 +2110,7 @@ async def test_cli_restore_refreshes_claim_and_conversation_projection(tmp_path:
         plan_result = await client.management_dispatcher.restore_inspect(1)
         assert plan_result.restore_plan is not None
         committed = await client.management_dispatcher.restore_commit(
-            plan_result.restore_plan, RestoreMode.CONVERSATION_ONLY
+            plan_result.restore_plan.anchor_id, RestoreMode.CONVERSATION_ONLY
         )
         assert committed.restore_result is not None
         assert client.claim_version == original_version + 1

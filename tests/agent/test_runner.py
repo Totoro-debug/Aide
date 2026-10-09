@@ -137,7 +137,7 @@ async def test_runner_uses_run_local_router_and_request_provenance_recorder() ->
     class Router:
         def stream(
             self,
-            route: Literal["chat", "schedule"],
+            route: Literal["chat", "schedule", "subagent"],
             *,
             messages: Sequence[dict[str, Any]],
             tools: Sequence[dict[str, Any]],
@@ -158,7 +158,7 @@ async def test_runner_uses_run_local_router_and_request_provenance_recorder() ->
 
         async def complete(
             self,
-            route: Literal["chat", "schedule"],
+            route: Literal["chat", "schedule", "subagent"],
             *,
             messages: Sequence[dict[str, Any]],
             tools: Sequence[dict[str, Any]],

@@ -44,15 +44,12 @@ def _configuration() -> str:
 [models.routes.schedule]
 provider_id = "anthropic-default"
 model = "claude-model"
-context_window = 4096
-max_output = 512
-temperature = 0.2
-reasoning_effort = "mid"
-timeout = 120
 
 [models.routes.memory]
 provider_id = "anthropic-default"
-model = "claude-model"
+model = "claude-memory"
+
+[models.providers.anthropic-default.models.claude-memory]
 context_window = 200000
 max_output = 8192
 temperature = 0.2
@@ -118,12 +115,20 @@ def _old_run() -> list[dict[str, Any]]:
 
 
 def _selectable_configuration() -> str:
-    return _configuration().replace(
-        'models = ["claude-model"]',
-        'models = ["claude-model", "selected-small", "large-model"]\n'
-        "[models.providers.anthropic-default.model_context_windows]\n"
-        "claude-model = 200000\nselected-small = 4096\nlarge-model = 200000",
-    )
+    return _configuration() + '''
+[models.providers.anthropic-default.models.selected-small]
+context_window = 4096
+max_output = 512
+temperature = 0.2
+reasoning_effort = "mid"
+timeout = 120
+[models.providers.anthropic-default.models.large-model]
+context_window = 200000
+max_output = 8192
+temperature = 0.2
+reasoning_effort = "mid"
+timeout = 120
+'''
 
 
 @pytest.mark.asyncio

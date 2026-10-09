@@ -12,6 +12,7 @@ from httpx import Request
 
 from aide.config.config import (
     MemoryConfiguration,
+    ModelConfiguration,
     ModelsConfiguration,
     ProviderConfiguration,
     RouteConfiguration,
@@ -50,7 +51,7 @@ def _configuration() -> UserConfiguration:
         protocol="openai-compatible",
         base_url="https://provider.example/v1",
         api_key="secret",
-        models=("resolved-model",),
+        models={'resolved-model': ModelConfiguration(100_000, 2048, 0.2, "high", 42)},
     )
     route = RouteConfiguration(
         provider_id=provider.provider_id,
@@ -245,7 +246,7 @@ def _fallback_configuration() -> UserConfiguration:
         protocol="openai-compatible",
         base_url="https://chat.example/v1",
         api_key="secret",
-        models=("chat-model",),
+        models={'chat-model': ModelConfiguration(100_000, 1024, 0.1, "low", 24)},
     )
     route = RouteConfiguration(
         provider_id=provider.provider_id,
@@ -362,7 +363,7 @@ def _provider_configuration(protocol: str) -> ProviderConfiguration:
         protocol=protocol,
         base_url="https://provider.example/v1",
         api_key="secret",
-        models=("model",),
+        models={'model': ModelConfiguration(200_000, 8192, 0.2, "mid", 120)},
     )
 
 

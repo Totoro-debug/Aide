@@ -12,6 +12,7 @@ from aide.agent.runner import AgentRunner
 from aide.agent.tools.tool_gateway import ModelToolCall, ToolResult
 from aide.config.config import (
     MemoryConfiguration,
+    ModelConfiguration,
     ModelsConfiguration,
     ProviderConfiguration,
     RouteConfiguration,
@@ -52,7 +53,7 @@ def configuration() -> UserConfiguration:
         protocol="anthropic",
         base_url="https://default.example/v1",
         api_key="default-secret",
-        models=("default-model",),
+        models={'default-model': ModelConfiguration(100_000, 4096, 0.2, "mid", 120)},
     )
     route = RouteConfiguration(
         provider_id=provider.provider_id,
@@ -83,7 +84,7 @@ def routed_configuration() -> UserConfiguration:
         protocol="openai-compatible",
         base_url="https://chat.example/v1",
         api_key="chat-secret",
-        models=("chat-model",),
+        models={'chat-model': ModelConfiguration(200_000, 8192, 0.1, "high", 90)},
     )
     chat_route = RouteConfiguration(
         provider_id=chat_provider.provider_id,
@@ -122,7 +123,7 @@ def same_provider_routed_configuration() -> UserConfiguration:
         protocol="anthropic",
         base_url="https://default.example/v1",
         api_key="default-secret",
-        models=("default-model", "chat-model"),
+        models={'default-model': ModelConfiguration(100_000, 4096, 0.2, "mid", 120), 'chat-model': ModelConfiguration(200_000, 8192, 0.1, "high", 90)},
     )
     chat_route = RouteConfiguration(
         provider_id=provider.provider_id,
@@ -147,7 +148,7 @@ def test_model_router_status_and_budget_use_provider_model_context_window() -> N
     base = configuration()
     provider = replace(
         base.models.providers["default-provider"],
-        model_context_windows={"default-model": 32_000},
+        models={"default-model": replace(base.models.providers["default-provider"].models["default-model"], context_window=32_000)},
     )
     config = replace(
         base,
@@ -179,7 +180,7 @@ def memory_configuration() -> UserConfiguration:
         protocol="openai-compatible",
         base_url="https://memory.example/v1",
         api_key="memory-secret",
-        models=("memory-model",),
+        models={'memory-model': ModelConfiguration(80_000, 2048, 0, "low", 60)},
     )
     memory_route = RouteConfiguration(
         provider_id=memory_provider.provider_id,
@@ -1597,7 +1598,7 @@ async def test_model_router_runtime_effort_keeps_explicit_routes_independent() -
         protocol="anthropic",
         base_url="https://schedule.example/v1",
         api_key="schedule-secret",
-        models=("schedule-model",),
+        models={'schedule-model': ModelConfiguration(70_000, 1024, 0.2, "xhigh", 45)},
     )
     schedule_route = RouteConfiguration(
         provider_id=schedule_provider.provider_id,
@@ -1648,8 +1649,7 @@ async def test_run_model_router_uses_its_session_model_without_changing_shared_r
         protocol="anthropic",
         base_url="https://alternate.example/v1",
         api_key="alternate-secret",
-        models=("chat-model",),
-        model_context_windows={"chat-model": 16_384},
+        models={'chat-model': ModelConfiguration(16_384, 4096, 0.2, "mid", 120)},
     )
     configuration_with_alternate = replace(
         base,
@@ -1896,6 +1896,11 @@ async def test_model_router_runtime_effort_does_not_repeat_an_effectively_identi
 ):
     base = configuration()
     default_route = base.models.routes["chat"]
+    base = replace(base, models=replace(base.models, providers={
+        "default-provider": replace(base.models.providers["default-provider"], models={
+            "default-model": replace(base.models.providers["default-provider"].models["default-model"], reasoning_effort="max"),
+        }),
+    }))
     configuration_with_same_route = UserConfiguration(
         runtime=base.runtime,
         memory=base.memory,

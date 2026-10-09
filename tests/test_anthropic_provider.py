@@ -22,7 +22,7 @@ from anthropic import (
 from httpx import Request, Response
 
 from aide.agent.tools.tool_gateway import ModelToolCall
-from aide.config.config import ProviderConfiguration
+from aide.config.config import ModelConfiguration, ProviderConfiguration
 from aide.provider.anthropic import AnthropicProvider
 from aide.provider.errors import EmptyModelResponseError, ModelCallError
 from aide.provider.models import (
@@ -98,7 +98,7 @@ def configuration() -> ProviderConfiguration:
         protocol="anthropic",
         base_url="https://api.anthropic.test",
         api_key="secret-key",
-        models=("claude-test",),
+        models={'claude-test': ModelConfiguration(200_000, 8192, 0.2, "mid", 120)},
     )
 
 

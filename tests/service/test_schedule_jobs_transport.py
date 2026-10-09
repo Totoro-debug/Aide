@@ -45,10 +45,6 @@ def _prepare_agent_home(path: Path, *, schedule_route: bool = False) -> AgentHom
 [models.routes.schedule]
 provider_id = "primary"
 model = "small-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-timeout = 30
 """ if schedule_route else ""
     (home.path / "config.toml").write_text(
         MINIMAL_VALID_CONFIG + schedule, encoding="utf-8",

@@ -53,10 +53,6 @@ SCHEDULE_CONFIG = MINIMAL_VALID_CONFIG + """
 [models.routes.schedule]
 provider_id = "primary"
 model = "small-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-timeout = 30
 """
 
 
@@ -70,7 +66,7 @@ class _ScheduleRouter:
 
     def stream(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -90,7 +86,7 @@ class _ScheduleRouter:
 
     async def complete(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -118,7 +114,7 @@ class _ScheduleRouter:
 class _MaxScheduleRouter(_ScheduleRouter):
     async def complete(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -153,7 +149,7 @@ class _OverlapRouter(_ScheduleRouter):
 
     def stream(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -170,7 +166,7 @@ class _OverlapRouter(_ScheduleRouter):
 
     async def complete(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -192,7 +188,7 @@ class _SearchOverlapRouter(_ScheduleRouter):
 
     def stream(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -226,7 +222,7 @@ class _SearchOverlapRouter(_ScheduleRouter):
 
     async def complete(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -260,7 +256,7 @@ class _ScheduleToolOverlapRouter(_ScheduleRouter):
 
     def stream(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],
@@ -292,7 +288,7 @@ class _ScheduleToolOverlapRouter(_ScheduleRouter):
 
     async def complete(
         self,
-        route: Literal["chat", "schedule"],
+        route: Literal["chat", "schedule", "subagent"],
         *,
         messages: Sequence[dict[str, Any]],
         tools: Sequence[dict[str, Any]],

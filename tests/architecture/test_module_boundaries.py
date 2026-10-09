@@ -973,10 +973,14 @@ def test_runner_summary_and_dream_keep_context_builder_out_of_their_boundaries()
         PACKAGE_ROOT / "agent" / "memory" / "dream.py",
     )
     violations = [
-        f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
+        f"{path.relative_to(PROJECT_ROOT)}:{reference.line} imports {reference.symbol}"
         for path in paths
-        for module, line in _imports(path)
-        if module == "aide.agent.context.builder"
+        for reference in _resolved_static_imports(
+            path.read_text(encoding="utf-8"),
+            package=tuple(path.relative_to(PROJECT_ROOT).parts[:-1]),
+        )
+        if reference.source_module == "aide.agent.context.builder"
+        and reference.symbol != "project_history_message"
     ]
     assert violations == []
 

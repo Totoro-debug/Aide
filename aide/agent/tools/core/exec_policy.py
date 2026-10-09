@@ -260,7 +260,7 @@ def catastrophic_matches(command: str) -> tuple[CatastrophicMatch, ...]:
                 add("git-reset-hard", evidence)
             elif subcommand == "checkout" and _git_checkout_is_broad_force(arguments):
                 add("git-force-checkout-or-restore", evidence)
-            elif subcommand == "restore" and _git_restore_is_broad(arguments):
+            elif subcommand == "restore" and _git_pathspecs_are_broad(_git_restore_pathspecs(arguments)):
                 add("git-force-checkout-or-restore", evidence)
             alias_command = _git_alias_command(invocation, subcommand)
             if alias_command is not None:
@@ -891,10 +891,6 @@ def _git_checkout_is_broad_force(arguments: tuple[str, ...]) -> bool:
         return True
     pathspecs = arguments[arguments.index("--") + 1 :]
     return _git_pathspecs_are_broad(pathspecs)
-
-
-def _git_restore_is_broad(arguments: tuple[str, ...]) -> bool:
-    return _git_pathspecs_are_broad(_git_restore_pathspecs(arguments))
 
 
 def _git_restore_pathspecs(arguments: tuple[str, ...]) -> tuple[str, ...]:

@@ -1353,7 +1353,6 @@ function modelFormsFromConfig(
     temperature: model.temperature === null ? "" : String(model.temperature),
     reasoning_effort: model.reasoning_effort ?? "",
     timeout: model.timeout === null ? "" : String(model.timeout),
-    ...(model.migration_candidates === undefined ? {} : { migration_candidates: model.migration_candidates }),
   }]));
 }
 
@@ -1549,9 +1548,6 @@ function settingsRowsForComparison<T extends { id?: string; name?: string }>(
 function changedConfigFieldPaths(baseline: ConfigFields, candidate: ConfigPatchFields): string[][] {
   const comparable = structuredClone(candidate);
   const comparableBaseline: ConfigPatchFields = structuredClone(baseline);
-  for (const provider of Object.values(comparableBaseline.models?.providers ?? {})) {
-    for (const model of Object.values(provider.models ?? {})) delete model.migration_candidates;
-  }
   for (const server of Object.values(comparableBaseline.mcp ?? {})) {
     server.header_rows = Object.entries(server.headers ?? {}).map(([name, secret]) => ({ name, secret }));
     server.tool_keyword_rows = Object.entries(server.tool_keywords ?? {}).map(([name, keywords]) => ({ name, keywords }));

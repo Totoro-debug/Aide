@@ -21,6 +21,7 @@ from aide.agent.context.budget import (
     reported_model_usage_total,
     request_fits_model_context,
 )
+from aide.agent.context.builder import project_history_message
 from aide.agent.context.tokenizer import (
     context_encoding_for_model,
     context_estimator_version_for_model,
@@ -1177,44 +1178,11 @@ def _summary_request_messages(*, template_name: str, selected_payload: str) -> M
     ]
 
 
-def _project_compaction_message(message: dict[str, Any]) -> dict[str, Any] | None:
-    role = message["role"]
-    if role == "user":
-        return {"role": "user", "content": deepcopy(message["content"])}
-
-    if role == "assistant":
-        content = message["content"]
-        tool_calls = [
-            {
-                "id": deepcopy(tool_call["id"]),
-                "name": deepcopy(tool_call["name"]),
-                "arguments": deepcopy(tool_call["arguments"]),
-            }
-            for tool_call in message["tool_calls"]
-        ]
-        if message["status"] == "error" and not content and not tool_calls:
-            return None
-        if message["status"] == "interrupted":
-            content = f"{content}\n\n[Turn interrupted by user.]"
-        return {
-            "role": "assistant",
-            "content": deepcopy(content),
-            "tool_calls": tool_calls,
-        }
-
-    return {
-        "role": "tool",
-        "tool_call_id": deepcopy(message["tool_call_id"]),
-        "name": deepcopy(message["name"]),
-        "content": deepcopy(message["content"]),
-    }
-
-
 def _compaction_user_context(messages: list[dict[str, Any]]) -> str:
     records = [
         projected
         for message in messages
-        if (projected := _project_compaction_message(message)) is not None
+        if (projected := project_history_message(message)) is not None
     ]
     serialized = json.dumps(
         records,

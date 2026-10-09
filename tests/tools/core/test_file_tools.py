@@ -460,6 +460,7 @@ async def test_path_failures_keep_resolution_context_and_original_os_error(
     failure_stage: str,
 ) -> None:
     target = workspace / "resolve-error.txt"
+    target.write_text("old", encoding="utf-8")
     original_resolve = Path.resolve
     workspace_resolution_count = 0
     raw_error = f"raw {failure_stage} failure"

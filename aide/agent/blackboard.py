@@ -91,10 +91,13 @@ class Blackboard:
                 messages=[
                     {
                         "role": "system",
-                        "content": _build_blackboard_system_prompt(
-                            user_input=current_user_input,
-                            last_task=last_task,
-                            latest_assistant_content=last_assistant_content,
+                        "content": render_template(
+                            "blackboard-system-prompt.md",
+                            **{
+                                "User input": current_user_input,
+                                "Last Task": last_task,
+                                "Latest assistant content": last_assistant_content,
+                            },
                         ),
                     },
                 ],
@@ -120,22 +123,6 @@ class Blackboard:
             usage_delta=usage_delta,
             status="resolved" if resolved else "invalid_response",
         )
-
-
-def _build_blackboard_system_prompt(
-    *,
-    user_input: str,
-    last_task: str,
-    latest_assistant_content: str,
-) -> str:
-    return render_template(
-        "blackboard-system-prompt.md",
-        **{
-            "User input": user_input,
-            "Last Task": last_task,
-            "Latest assistant content": latest_assistant_content,
-        },
-    )
 
 
 @dataclass(frozen=True, slots=True)

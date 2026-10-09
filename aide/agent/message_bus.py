@@ -47,10 +47,6 @@ class MessageBus:
         async with self._condition:
             return tuple(self._inbound)
 
-    @property
-    def has_pending_input(self) -> bool:
-        return bool(self._inbound)
-
     async def put_inbound(self, message: InboundMessage) -> None:
         async with self._condition:
             self._inbound.append(message)

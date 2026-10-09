@@ -26,49 +26,55 @@ from tests.fixtures.diagnostic_capture import capture_diagnostics
 from tests.fixtures.session import seed_session_state
 from tests.management.factories import management_service
 
-CONFIG_WITH_PLAINTEXT_KEYS = """# User Configuration remains source-preserved.
+CONFIG_WITH_PLAINTEXT_KEYS = '''# User Configuration remains source-preserved.
 [models.providers.primary]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "first-plaintext-key"
-models = ["model-id"]
+
+[models.providers.primary.models."model-id"]
+context_window = 4096
+max_output = 512
+temperature = 0
+reasoning_effort = "mid"
+timeout = 60
 
 [models.providers.empty-template]
 protocol = "openai-compatible"
 base_url = ""
 api_key = ""
-models = []
+
+[models.providers.empty-template.models]
 
 [models.routes.chat]
 provider_id = "primary"
 model = "model-id"
-context_window = 4096
-max_output = 512
-temperature = 0
-timeout = 60
-"""
+'''
 
-EXPECTED_REDACTED_CONFIG = """# User Configuration remains source-preserved.
+EXPECTED_REDACTED_CONFIG = '''# User Configuration remains source-preserved.
 [models.providers.primary]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "***REDACTED***"
-models = ["model-id"]
+
+[models.providers.primary.models."model-id"]
+context_window = 4096
+max_output = 512
+temperature = 0
+reasoning_effort = "mid"
+timeout = 60
 
 [models.providers.empty-template]
 protocol = "openai-compatible"
 base_url = ""
 api_key = ""
-models = []
+
+[models.providers.empty-template.models]
 
 [models.routes.chat]
 provider_id = "primary"
 model = "model-id"
-context_window = 4096
-max_output = 512
-temperature = 0
-timeout = 60
-"""
+'''
 
 
 LOCAL_OFFSET = timezone(timedelta(hours=8))
@@ -613,23 +619,25 @@ async def test_permission_update_is_process_local_and_same_level_is_stable(
     home.initialize()
     config_path = home.path / "config.toml"
     config_path.write_text(
-        """[runtime]
+        '''[runtime]
 permission_level = "full-access"
 
 [models.providers.primary]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "secret"
-models = ["model-id"]
+
+[models.providers.primary.models."model-id"]
+context_window = 4096
+max_output = 512
+temperature = 0
+reasoning_effort = "mid"
+timeout = 60
 
 [models.routes.chat]
 provider_id = "primary"
 model = "model-id"
-context_window = 4096
-max_output = 512
-temperature = 0
-timeout = 60
-""",
+''',
         encoding="utf-8",
     )
     permission_control = RuntimePermissionControl("full-access")

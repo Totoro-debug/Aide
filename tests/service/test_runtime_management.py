@@ -60,10 +60,6 @@ async def management_case(
 [models.routes.schedule]
 provider_id = "primary"
 model = "small-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-timeout = 30
 """,
         encoding="utf-8",
     )
@@ -499,8 +495,7 @@ async def test_concurrent_client_effort_updates_keep_last_runtime_and_persisted_
     with config_path.open("a", encoding="utf-8") as source:
         source.write(
             "\n# Preserve this configuration comment.\n[models.routes.title]\n"
-            "provider_id = 'primary'\nmodel = 'small-model'\ncontext_window = 8192\n"
-            "max_output = 1024\ntemperature = 0\ntimeout = 30\nreasoning_effort = 'mid'\n"
+            "provider_id = 'primary'\nmodel = 'small-model'\n"
         )
     published: list[str] = []
     original = ConfigLoader.update_reasoning_effort

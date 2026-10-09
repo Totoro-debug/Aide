@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from importlib import import_module
 from types import MappingProxyType
-from typing import Any, Final, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 from aide.agent.tools.tool_gateway import ModelToolCall
 from aide.config.config import ProviderConfiguration
@@ -32,6 +32,13 @@ from aide.provider.models import (
     require_tool_call_sequence,
 )
 
+if TYPE_CHECKING:
+    from openai import AsyncOpenAI
+    from openai.types.chat.chat_completion import Choice
+    from openai.types.chat.chat_completion_message_function_tool_call import (
+        ChatCompletionMessageFunctionToolCall,
+    )
+
 _REASONING_EFFORT_MAP: Final[Mapping[ReasoningEffort, str]] = MappingProxyType(
     {
         "low": "low",
@@ -41,40 +48,6 @@ _REASONING_EFFORT_MAP: Final[Mapping[ReasoningEffort, str]] = MappingProxyType(
         "max": "max",
     }
 )
-
-
-class _Completions(Protocol):
-    async def create(self, **kwargs: object) -> object: ...
-
-
-class _Chat(Protocol):
-    completions: _Completions
-
-
-class _OpenAIClient(Protocol):
-    chat: _Chat
-
-    async def close(self) -> None: ...
-
-
-class _CompletionMessage(Protocol):
-    content: object
-    tool_calls: list[object] | None
-
-
-class _CompletionChoice(Protocol):
-    message: _CompletionMessage
-    finish_reason: object
-
-
-class _FunctionCall(Protocol):
-    name: object
-    arguments: object
-
-
-class _CompleteToolCall(Protocol):
-    id: object
-    function: _FunctionCall
 
 
 type OpenAIClientFactory = Callable[..., object]
@@ -105,7 +78,7 @@ class OpenAICompatibleProvider:
         factory = _official_client_factory if client_factory is None else client_factory
         self._provider_id = configuration.provider_id
         self._client = cast(
-            _OpenAIClient,
+            "AsyncOpenAI",
             factory(
                 api_key=configuration.api_key,
                 base_url=configuration.base_url,
@@ -178,17 +151,20 @@ class OpenAICompatibleProvider:
         continuation: ModelContinuation | None,
     ) -> AsyncIterator[ModelStreamEvent]:
         result = await self._client.chat.completions.create(
-            **_request_arguments(
-                messages=messages,
-                tools=tools,
-                model=model,
-                max_output=max_output,
-                temperature=temperature,
-                reasoning_effort=reasoning_effort,
-                timeout=timeout,
-                stream=True,
-                provider_id=self._provider_id,
-                continuation=continuation,
+            **cast(
+                Any,
+                _request_arguments(
+                    messages=messages,
+                    tools=tools,
+                    model=model,
+                    max_output=max_output,
+                    temperature=temperature,
+                    reasoning_effort=reasoning_effort,
+                    timeout=timeout,
+                    stream=True,
+                    provider_id=self._provider_id,
+                    continuation=continuation,
+                ),
             )
         )
         chunks = cast(AsyncIterator[object], result)
@@ -295,23 +271,26 @@ class OpenAICompatibleProvider:
         continuation: ModelContinuation | None,
     ) -> ModelResponse:
         result = await self._client.chat.completions.create(
-            **_request_arguments(
-                messages=messages,
-                tools=tools,
-                model=model,
-                max_output=max_output,
-                temperature=temperature,
-                reasoning_effort=reasoning_effort,
-                timeout=timeout,
-                stream=False,
-                provider_id=self._provider_id,
-                continuation=continuation,
+            **cast(
+                Any,
+                _request_arguments(
+                    messages=messages,
+                    tools=tools,
+                    model=model,
+                    max_output=max_output,
+                    temperature=temperature,
+                    reasoning_effort=reasoning_effort,
+                    timeout=timeout,
+                    stream=False,
+                    provider_id=self._provider_id,
+                    continuation=continuation,
+                ),
             )
         )
         choices = cast(list[object], getattr(result, "choices", []))
         if not choices:
             raise _empty_response_error()
-        choice = cast(_CompletionChoice, choices[0])
+        choice = cast("Choice", choices[0])
         message = choice.message
         content = message.content
         usage = getattr(result, "usage", None)
@@ -423,7 +402,7 @@ def _openai_continuation_content(
 
 
 def _complete_tool_call(tool_call: object) -> ModelToolCall:
-    complete_tool_call = cast(_CompleteToolCall, tool_call)
+    complete_tool_call = cast("ChatCompletionMessageFunctionToolCall", tool_call)
     function = complete_tool_call.function
     return ModelToolCall(
         id=str(complete_tool_call.id),

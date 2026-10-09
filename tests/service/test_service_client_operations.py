@@ -13,12 +13,13 @@ import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
 from aide.config.config import ConfigLoader
-from aide.service.client import ServiceClient, ServiceStartupError
+from aide.service.client import ServiceStartupError
 from aide.service.discovery import ServiceDiscovery, create_credential, write_discovery
 from aide.service.errors import ServiceError
 from aide.service.runtime import AgentService
 from aide.service.transport import _WebSocketSink, create_app
 from aide.terminal.conversation import TerminalConversationApp, _ConversationInput
+from tests.fixtures.service_client import ObservedServiceClient
 from tests.service.test_protocol_contract import _validator
 from tests.service.test_service_concurrency import _CollectingSink, _ConcurrentProvider
 from tests.service.test_service_transport import _persist_session, _prepare_agent_home
@@ -41,7 +42,7 @@ async def _keep_service_online(service: AgentService, stack: AsyncExitStack) -> 
 @pytest_asyncio.fixture
 async def connected_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> AsyncIterator[tuple[ServiceClient, AgentService, AsyncExitStack]]:
+) -> AsyncIterator[tuple[ObservedServiceClient, AgentService, AsyncExitStack]]:
     home = _prepare_agent_home(tmp_path / "agent-home")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -57,7 +58,7 @@ async def connected_client(
         create_credential(home)
         assert server.port is not None
         write_discovery(home, ServiceDiscovery(service.service_instance_id, 1, "127.0.0.1", server.port, 0))
-        client = await ServiceClient.connect_or_start(home, workspace)
+        client = cast(ObservedServiceClient, await ObservedServiceClient.connect_or_start(home, workspace))
         stack.push_async_callback(client.close)
         await client.open_conversation(session_id=session_id)
         yield client, service, stack
@@ -69,7 +70,7 @@ async def connected_client(
     [("B", ["C"], 1), ("unknown", ["B", "C"], 0), (None, ["C"], 2)],
 )
 async def test_input_acceptance_preserves_other_queued_messages_and_run_output(
-    connected_client: tuple[ServiceClient, AgentService, AsyncExitStack],
+    connected_client: tuple[ObservedServiceClient, AgentService, AsyncExitStack],
     request_id: str | None,
     remaining: list[str],
     notifications: int,
@@ -108,7 +109,7 @@ async def test_input_acceptance_preserves_other_queued_messages_and_run_output(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("recovery", ["short", "expired", "instance"])
 async def test_client_recovers_connection_and_never_reuses_expired_claim(
-    connected_client: tuple[ServiceClient, AgentService, AsyncExitStack], recovery: str,
+    connected_client: tuple[ObservedServiceClient, AgentService, AsyncExitStack], recovery: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, service, stack = connected_client
@@ -176,7 +177,7 @@ async def test_client_recovers_connection_and_never_reuses_expired_claim(
 
 @pytest.mark.asyncio
 async def test_state_subscription_discards_old_duplicate_events_and_recovers_gap(
-    connected_client: tuple[ServiceClient, AgentService, AsyncExitStack],
+    connected_client: tuple[ObservedServiceClient, AgentService, AsyncExitStack],
 ) -> None:
     client, service, _stack = connected_client
     received: list[Mapping[str, object]] = []
@@ -199,7 +200,7 @@ async def test_state_subscription_discards_old_duplicate_events_and_recovers_gap
 @pytest.mark.asyncio
 @pytest.mark.parametrize("complete_offline", [False, True])
 async def test_textual_recovers_active_run_and_keeps_unsent_draft(
-    connected_client: tuple[ServiceClient, AgentService, AsyncExitStack],
+    connected_client: tuple[ObservedServiceClient, AgentService, AsyncExitStack],
     monkeypatch: pytest.MonkeyPatch, complete_offline: bool,
 ) -> None:
     client, service, stack = connected_client
@@ -263,7 +264,7 @@ async def test_textual_recovers_active_run_and_keeps_unsent_draft(
 
 @pytest.mark.asyncio
 async def test_recovery_retries_when_socket_closes_immediately_after_subscribe_ack(
-    connected_client: tuple[ServiceClient, AgentService, AsyncExitStack], monkeypatch: pytest.MonkeyPatch,
+    connected_client: tuple[ObservedServiceClient, AgentService, AsyncExitStack], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, service, stack = connected_client
     await _keep_service_online(service, stack)
@@ -287,7 +288,7 @@ async def test_recovery_retries_when_socket_closes_immediately_after_subscribe_a
 
 @pytest.mark.asyncio
 async def test_unknown_input_result_is_not_resent_during_reconnection(
-    connected_client: tuple[ServiceClient, AgentService, AsyncExitStack], monkeypatch: pytest.MonkeyPatch,
+    connected_client: tuple[ObservedServiceClient, AgentService, AsyncExitStack], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, service, stack = connected_client
     await _keep_service_online(service, stack)
@@ -313,7 +314,7 @@ async def test_unknown_input_result_is_not_resent_during_reconnection(
 async def test_named_session_operations_send_current_claim_and_return_operation_dtos(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = object.__new__(ServiceClient)
+    client = object.__new__(ObservedServiceClient)
     client.workspace_id = "workspace-1"
     client.session_id = "session-1"
     client.claim_version = 4
@@ -375,7 +376,7 @@ async def test_named_session_operations_send_current_claim_and_return_operation_
 
 @pytest.mark.asyncio
 async def test_resume_returns_complete_context_without_a_second_request(
-    connected_client: tuple[ServiceClient, AgentService, AsyncExitStack],
+    connected_client: tuple[ObservedServiceClient, AgentService, AsyncExitStack],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, service, _stack = connected_client
@@ -410,7 +411,7 @@ async def test_resume_returns_complete_context_without_a_second_request(
 
 @pytest.mark.asyncio
 async def test_resume_replay_returns_the_same_claim_and_snapshot(
-    connected_client: tuple[ServiceClient, AgentService, AsyncExitStack],
+    connected_client: tuple[ObservedServiceClient, AgentService, AsyncExitStack],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, service, _stack = connected_client
@@ -446,7 +447,7 @@ async def test_resume_replay_returns_the_same_claim_and_snapshot(
 
 @pytest.mark.asyncio
 async def test_lost_resume_response_disables_old_claim_and_explicit_retry_replays(
-    connected_client: tuple[ServiceClient, AgentService, AsyncExitStack],
+    connected_client: tuple[ObservedServiceClient, AgentService, AsyncExitStack],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, service, _stack = connected_client
@@ -486,7 +487,7 @@ async def test_lost_resume_response_disables_old_claim_and_explicit_retry_replay
 @pytest.mark.asyncio
 @pytest.mark.parametrize("recovery", ["expired", "instance"])
 async def test_textual_resume_then_recovery_preserves_draft_and_accepts_one_input(
-    connected_client: tuple[ServiceClient, AgentService, AsyncExitStack], recovery: str,
+    connected_client: tuple[ObservedServiceClient, AgentService, AsyncExitStack], recovery: str,
 ) -> None:
     client, service, stack = connected_client
     directory = service.workspace(client.workspace_id).workspace_path
@@ -550,7 +551,7 @@ async def test_textual_resume_then_recovery_preserves_draft_and_accepts_one_inpu
 @pytest.mark.asyncio
 @pytest.mark.parametrize("refusal", ["missing", "occupied", "configuration"])
 async def test_textual_recovery_refusal_offers_retry_and_new_session(
-    connected_client: tuple[ServiceClient, AgentService, AsyncExitStack],
+    connected_client: tuple[ObservedServiceClient, AgentService, AsyncExitStack],
     monkeypatch: pytest.MonkeyPatch, refusal: str,
 ) -> None:
     client, service, stack = connected_client
@@ -640,7 +641,7 @@ async def test_textual_recovery_refusal_offers_retry_and_new_session(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ending", ["close", "new_instance"])
 async def test_pending_recovery_is_cancelled_or_discards_the_old_response(
-    connected_client: tuple[ServiceClient, AgentService, AsyncExitStack],
+    connected_client: tuple[ObservedServiceClient, AgentService, AsyncExitStack],
     monkeypatch: pytest.MonkeyPatch, ending: str,
 ) -> None:
     client, service, stack = connected_client
@@ -674,7 +675,7 @@ async def test_pending_recovery_is_cancelled_or_discards_the_old_response(
         await client.close()
         assert finished.is_set()
         assert client.closed
-        assert not any(getattr(task.get_coro(), "__qualname__", None) == "ServiceClient._reconnect"
+        assert not any(getattr(task.get_coro(), "__qualname__", None) == "ObservedServiceClient._reconnect"
                        for task in asyncio.all_tasks())
         return
     await service.stop()
@@ -701,7 +702,7 @@ async def test_pending_recovery_is_cancelled_or_discards_the_old_response(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("refusal", ["occupied", "missing", "active", "restore"])
 async def test_resume_refusal_preserves_context_and_force_preserves_the_old_run(
-    connected_client: tuple[ServiceClient, AgentService, AsyncExitStack],
+    connected_client: tuple[ObservedServiceClient, AgentService, AsyncExitStack],
     monkeypatch: pytest.MonkeyPatch, refusal: str,
 ) -> None:
     client, service, _stack = connected_client

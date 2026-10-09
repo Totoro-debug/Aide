@@ -158,10 +158,6 @@ def _home(path: Path) -> AgentHome:
 [models.routes.schedule]
 provider_id = "primary"
 model = "small-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-timeout = 30
 """,
         encoding="utf-8",
     )
@@ -333,21 +329,23 @@ async def test_service_closes_all_shared_providers_after_workspace_and_provider_
     home = _home(tmp_path / "agent-home")
     config = (
         MINIMAL_VALID_CONFIG
-        + """
+        + '''
 [models.providers.secondary]
 protocol = "openai-compatible"
 base_url = "https://models.example/v1"
 api_key = "fixture-key"
-models = ["small-model"]
+
+[models.providers.secondary.models."small-model"]
+context_window = 8192
+max_output = 1024
+temperature = 0
+reasoning_effort = "mid"
+timeout = 30
 
 [models.routes.memory]
 provider_id = "secondary"
 model = "small-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-timeout = 30
-"""
+'''
     )
     (home.path / "config.toml").write_text(config, encoding="utf-8")
     providers: list[_CountingProvider] = []
@@ -788,7 +786,7 @@ async def test_reload_during_active_run_preserves_old_request_and_updates_future
 
         def stream(
             self,
-            route: Literal["chat", "schedule"],
+            route: Literal["chat", "schedule", "subagent"],
             *,
             messages: Sequence[dict[str, Any]],
             tools: Sequence[dict[str, Any]],
@@ -866,7 +864,7 @@ async def test_reload_during_context_preparation_keeps_run_skill_snapshot(
 
         def stream(
             self,
-            route: Literal["chat", "schedule"],
+            route: Literal["chat", "schedule", "subagent"],
             *,
             messages: Sequence[dict[str, Any]],
             tools: Sequence[dict[str, Any]],

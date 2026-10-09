@@ -327,7 +327,7 @@ def _project_history_messages(
     return [
         projected
         for message in messages
-        if (projected := _project_history_message(message)) is not None
+        if (projected := project_history_message(message)) is not None
     ]
 
 
@@ -351,7 +351,7 @@ def _last_user_index(messages: Sequence[dict[str, Any]]) -> int:
     return len(messages)
 
 
-def _project_history_message(message: dict[str, Any]) -> dict[str, Any] | None:
+def project_history_message(message: dict[str, Any]) -> dict[str, Any] | None:
     """Project one validated Session message without durable fields."""
     role = message["role"]
     if role == "user":
@@ -504,4 +504,4 @@ def _markdown_safe_json(value: object) -> str:
     ).translate(_MARKDOWN_SAFE_JSON_TRANSLATION)
 
 
-__all__ = ["ContextBuilder"]
+__all__ = ["ContextBuilder", "project_history_message"]

@@ -217,13 +217,20 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
                     "revision": revision,
                     "fields": {
                         "models": {
+                            "providers": {
+                                "primary": {
+                                    "models": {
+                                        "small-model": {"context_window": 8192, "max_output": 1024,
+                                                        "temperature": 0, "reasoning_effort": "mid", "timeout": 30},
+                                        "large-model": {"context_window": 16384, "max_output": 1536,
+                                                        "temperature": 0.4, "reasoning_effort": "high", "timeout": 40},
+                                    },
+                                },
+                                "retired": {},
+                            },
                             "routes": {
                                 name: {
                                     "model": "large-model",
-                                    "max_output": 1536,
-                                    "temperature": 0.4,
-                                    "reasoning_effort": "high",
-                                    "timeout": 40,
                                 }
                                 for name in ("chat", "title", "memory", "schedule")
                             }

@@ -3216,15 +3216,6 @@ class TerminalConversationApp(App[None]):
         self._confirmation_callback = None
         self._confirmation_control = None
 
-    async def _stop_outbound_worker(self) -> None:
-        worker = self._outbound_worker
-        self._outbound_worker = None
-        if worker is None:
-            return
-        worker.cancel()
-        with suppress(WorkerError, CancelledError):
-            await worker.wait()
-
     @property
     def command_completion_visible(self) -> bool:
         return bool(self._completion_options)
@@ -4760,7 +4751,7 @@ class TerminalConversationApp(App[None]):
                 return
 
             committed = True
-            commit = await self._management_dispatcher.restore_commit(plan, mode)
+            commit = await self._management_dispatcher.restore_commit(plan.anchor_id, mode)
             result = commit.restore_result
             if not isinstance(result, RestoreResult):
                 await self._mount_management_rows(

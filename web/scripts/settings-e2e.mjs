@@ -167,7 +167,7 @@ async function settingsRowCollisionAcceptance({ page, configPath, openSettings, 
   const cases = [
     {
       section: "Models", button: "Add provider", label: "Provider ID", row: "new-provider",
-      external: '\n[models.providers.new-provider]\nprotocol = "openai-compatible"\nbase_url = "http://127.0.0.1:1/external"\nmodels = []\napi_key = "collision-external-secret"\n',
+      external: '\n[models.providers.new-provider]\nprotocol = "openai-compatible"\nbase_url = "http://127.0.0.1:1/external"\napi_key = "collision-external-secret"\n[models.providers.new-provider.models]\n',
     },
     {
       section: "MCP", button: "Add MCP server", label: "Server name", row: "new-mcp",
@@ -534,7 +534,7 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   const initial = await openSettings(page);
   assert.ok(initial.fields.models.providers.primary.models["small-model"]);
   assert.equal(initial.fields.models.routes.chat.model, "small-model");
-  const defaultReasoningEffort = initial.fields.models.providers.primary.models["small-model"].migration_candidates.find(candidate => candidate.route === "chat").reasoning_effort;
+  const defaultReasoningEffort = initial.fields.models.providers.primary.models["small-model"].reasoning_effort;
   assert.equal(await smallModelContextWindow(page).inputValue(), "8192");
   assert.equal(initial.fields.models.providers.primary.models["large-model"].context_window, null);
   const activeModels = await availableModels(page);

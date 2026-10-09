@@ -551,13 +551,6 @@ class _LoopState:
     schedule: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class _RestorePlanReference:
-    """Wire-safe reference to the service-owned Restore plan."""
-
-    anchor_id: int
-
-
 @dataclass(slots=True)
 class _ProjectRemoval:
     """One persisted Project removal and its in-process completion task."""
@@ -1897,9 +1890,9 @@ class WorkspaceRecord:
                 await self._release_restore_barrier(client_id)
                 raise
 
-        async def restore_commit(plan: Any, mode: Any) -> Any:
+        async def restore_commit(anchor_id: int, mode: Any) -> Any:
             loop = current_loop()
-            stored = self._restore_plans.get((client_id, plan.anchor_id))
+            stored = self._restore_plans.get((client_id, anchor_id))
             if (
                 stored is None
                 or stored.session_id != loop.session.session_id
@@ -3214,14 +3207,11 @@ class AgentService:
         if configuration is None:
             return {"models": [], "default_combination": None}
 
-        capacities = configuration.effective_model_context_windows()
         try:
             default = configuration.resolve_route("chat")
         except ConfigError:
-            minimum_capacity = None
             default_combination = None
         else:
-            minimum_capacity = default.route.max_output
             default_combination = {
                 "provider_id": default.provider.provider_id,
                 "model": default.route.model,
@@ -3231,17 +3221,12 @@ class AgentService:
             {
                 "provider_id": provider_id,
                 "model": model,
-                "context_window": capacities[provider_id][model],
+                "context_window": parameters.context_window,
             }
             for provider_id, provider in configuration.models.providers.items()
             if provider.is_usable
-            for model in provider.models
-            if model in capacities[provider_id]
-            and minimum_capacity is not None
-            and (
-                provider.model_configurations is not None
-                or capacities[provider_id][model] > minimum_capacity
-            )
+            for model, parameters in provider.models.items()
+            if default_combination is not None
         ]
         return {"models": models, "default_combination": default_combination}
 
@@ -4463,19 +4448,6 @@ class AgentService:
         if project_id is not None:
             result["project_id"] = project_id
         return result
-
-    async def release_project_session(
-        self,
-        client_id: str,
-        project_id: str,
-        session_id: str,
-        claim_version: int,
-        claim_credential: str,
-    ) -> None:
-        async with self._project_lifecycle_lock:
-            _record, workspace = await self._project_workspace_owned(client_id, project_id)
-            workspace.require_claim(client_id, session_id, claim_version, claim_credential)
-            await workspace.release(client_id, session_id)
 
     async def release_conversation(
         self,
@@ -5768,7 +5740,7 @@ class AgentService:
             if not isinstance(mode, str) or not mode:
                 raise service_error("validation_error", "Restore mode is required.", status=422)
             try:
-                result = await dispatcher.restore_commit(_RestorePlanReference(anchor_id), mode)
+                result = await dispatcher.restore_commit(anchor_id, mode)
             except Exception as error:
                 raise service_error(
                     "restore_failed",

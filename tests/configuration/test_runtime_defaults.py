@@ -4,12 +4,13 @@ import pytest
 
 from aide.config.agent_home import AgentHome
 from aide.config.config import (
+    ConfigError,
     ConfigLoader,
     DefaultValueDiagnostic,
     UserConfiguration,
 )
 
-BASE_CONFIG = """[runtime]
+BASE_CONFIG = '''[runtime]
 max_tool_result_chars = 4096
 max_iterations = 50
 enable_skill_always_load = false
@@ -26,17 +27,18 @@ schedule = "0 * * * *"
 protocol = "openai-compatible"
 base_url = "https://provider.example/v1"
 api_key = "secret"
-models = ["model"]
 
-[models.routes.chat]
-provider_id = "primary"
-model = "model"
+[models.providers.primary.models."model"]
 context_window = 100000
 max_output = 2048
 temperature = 0.2
 reasoning_effort = "mid"
 timeout = 30
-"""
+
+[models.routes.chat]
+provider_id = "primary"
+model = "model"
+'''
 
 
 DEFAULTABLE_FIELDS = (
@@ -129,16 +131,6 @@ DEFAULTABLE_FIELDS = (
         "15 * * * *",
         "'0 * * * *'",
         "not-a-cron",
-    ),
-    (
-        "models.routes.chat.reasoning_effort",
-        'reasoning_effort = "mid"',
-        'reasoning_effort = "high"',
-        'reasoning_effort = "turbo"',
-        "mid",
-        "high",
-        "'mid'",
-        "turbo",
     ),
 )
 
@@ -283,13 +275,6 @@ def test_config_view_exposes_effective_permission_and_exec_shell(tmp_path: Path)
             "0 * * * *",
             "'0 * * * *'",
         ),
-        (
-            'reasoning_effort = "mid"',
-            'reasoning_effort = ["not-an-effort"]',
-            "models.routes.chat.reasoning_effort",
-            "mid",
-            "'mid'",
-        ),
     ),
 )
 def test_untyped_defaultable_values_use_sanitized_fallbacks(
@@ -314,51 +299,28 @@ def test_untyped_defaultable_values_use_sanitized_fallbacks(
 
 
 def _config_with_route_reasoning(route_name: str, reasoning_line: str | None) -> str:
-    if route_name == "chat":
-        replacement = "" if reasoning_line is None else reasoning_line
-        return BASE_CONFIG.replace('reasoning_effort = "mid"', replacement)
-    route = f"""
-
-[models.routes.{route_name}]
-provider_id = "primary"
-model = "model"
-context_window = 100000
-max_output = 2048
-temperature = 0.2
-{reasoning_line or ""}
-timeout = 30
-"""
-    return BASE_CONFIG + route
+    replacement = "" if reasoning_line is None else reasoning_line
+    content = BASE_CONFIG.replace('reasoning_effort = "mid"', replacement)
+    if route_name != "chat":
+        content += f'\n[models.routes.{route_name}]\nprovider_id = "primary"\nmodel = "model"\n'
+    return content
 
 
 @pytest.mark.parametrize("route_name", ("chat", "title", "memory", "schedule", "subagent"))
-@pytest.mark.parametrize(
-    ("reasoning_line", "expected", "diagnostic_count"),
-    (
-        ('reasoning_effort = "high"', "high", 0),
-        (None, "mid", 0),
-        ('reasoning_effort = ["route-secret"]', "mid", 1),
-    ),
-    ids=("valid", "missing", "invalid"),
-)
-def test_each_route_reasoning_effort_uses_the_defaultable_contract(
-    tmp_path: Path,
-    route_name: str,
-    reasoning_line: str | None,
-    expected: str,
-    diagnostic_count: int,
+@pytest.mark.parametrize("reasoning_line", ('reasoning_effort = "high"', None, 'reasoning_effort = ["route-secret"]'))
+def test_each_route_uses_explicit_valid_model_reasoning(
+    tmp_path: Path, route_name: str, reasoning_line: str | None,
 ) -> None:
     loader = _loader(tmp_path, _config_with_route_reasoning(route_name, reasoning_line))
-
-    configuration = loader.load()
-
-    assert configuration.models.routes[route_name].reasoning_effort == expected
-    assert len(loader.diagnostics) == diagnostic_count
-    if diagnostic_count:
-        diagnostic = loader.diagnostics[0]
-        assert isinstance(diagnostic, DefaultValueDiagnostic)
-        assert diagnostic.field == f"models.routes.{route_name}.reasoning_effort"
-        assert "route-secret" not in diagnostic.message
+    before = loader.path.read_bytes()
+    if reasoning_line == 'reasoning_effort = "high"':
+        assert loader.load().models.routes[route_name].reasoning_effort == "high"
+    else:
+        with pytest.raises(ConfigError) as raised:
+            loader.load()
+        assert "models.providers.primary.models.model.reasoning_effort" in raised.value.field_errors
+        assert "route-secret" not in str(raised.value)
+    assert loader.path.read_bytes() == before
 
 
 def test_repeated_load_and_view_do_not_accumulate_default_diagnostics(tmp_path: Path) -> None:

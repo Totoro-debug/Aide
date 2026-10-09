@@ -50,23 +50,35 @@ def _config(
     mcp_args: list[str],
     mcp_cwd: str,
 ) -> str:
-    model_capacities = (
-        "[models.providers.primary.model_context_windows]\nlarge-model = 65536\n"
-        if os.environ.get("AIDE_E2E_SESSION_MODELS") == "1"
-        else ""
-    )
+    large_context_window = 65536 if os.environ.get("AIDE_E2E_SESSION_MODELS") == "1" else 8192
     return f"""[models.providers.primary]
 protocol = "openai-compatible"
 base_url = "{base_url}"
 api_key = "e2e-provider-secret-302"
-models = ["small-model", "large-model"]
+[models.providers.primary.models.small-model]
+context_window = 8192
+max_output = 1024
+temperature = 0
+reasoning_effort = "mid"
+timeout = 30
+[models.providers.primary.models.large-model]
+context_window = {large_context_window}
+max_output = 1024
+temperature = 0
+reasoning_effort = "mid"
+timeout = 30
 
-{model_capacities}
 [models.providers.retired]
 protocol = "openai-compatible"
 base_url = "{base_url}"
 api_key = "e2e-retired-secret-302"
-models = ["retired-model"]
+
+[models.providers.retired.models."retired-model"]
+context_window = 200000
+max_output = 8192
+temperature = 0.2
+reasoning_effort = "mid"
+timeout = 120
 
 [runtime]
 compact_ratio = 0.9
@@ -75,38 +87,18 @@ permission_level = "full-access"
 [models.routes.chat]
 provider_id = "primary"
 model = "small-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-reasoning_effort = "mid"
-timeout = 30
 
 [models.routes.title]
 provider_id = "primary"
 model = "small-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-reasoning_effort = "mid"
-timeout = 30
 
 [models.routes.memory]
 provider_id = "primary"
 model = "small-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-reasoning_effort = "low"
-timeout = 30
 
 [models.routes.schedule]
 provider_id = "primary"
 model = "small-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-reasoning_effort = "mid"
-timeout = 30
 
 [mcp.servers.fixture]
 enabled = true

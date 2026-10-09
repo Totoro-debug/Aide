@@ -19,29 +19,37 @@ from aide.service.discovery import create_credential
 from aide.service.runtime import AgentService
 from aide.service.transport import create_app
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
-from tests.fixtures.model_configuration import complete_model_settings
+from tests.fixtures.model_configuration import TEST_MODEL_PARAMETERS, complete_model_settings
 
 ConfigHttp = tuple[AgentService, BaseTestServer, str, str]
 
-FULL_CONFIG = """[models.providers.primary]
+FULL_CONFIG = '''[models.providers.primary]
 protocol = "openai-compatible"
 base_url = "https://models.example/v1"
 api_key = "transport-provider-secret-302"
-models = ["small-model"]
+
+[models.providers.primary.models."small-model"]
+context_window = 8192
+max_output = 1024
+temperature = 0
+reasoning_effort = "mid"
+timeout = 30
 
 [models.providers.retired]
 protocol = "anthropic"
 base_url = "https://anthropic.example"
 api_key = "transport-retired-secret-302"
-models = ["retired-model"]
+
+[models.providers.retired.models."retired-model"]
+context_window = 200000
+max_output = 8192
+temperature = 0.2
+reasoning_effort = "mid"
+timeout = 120
 
 [models.routes.chat]
 provider_id = "primary"
 model = "small-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-timeout = 30
 
 [mcp.servers.http]
 enabled = true
@@ -50,7 +58,7 @@ url = "https://mcp.example/tools"
 headers = { Authorization = "transport-header-secret-302" }
 connect_timeout = 30
 call_timeout = 60
-"""
+'''
 
 
 @pytest_asyncio.fixture
@@ -116,7 +124,7 @@ async def test_available_models_exposes_active_capacity_and_default_without_secr
             cast(str, service.config_view()["revision"]),
             {
                 "models": {
-                    "providers": {"primary": {"model_context_windows": {"small-model": 16384}}}
+                    "providers": {"primary": {"models": {"small-model": {**TEST_MODEL_PARAMETERS, "context_window": 16384}}}}
                 }
             },
             client_id=client_id,
@@ -168,7 +176,7 @@ async def test_available_models_excludes_unusable_providers(
     known: dict[str, ProviderConfiguration] = {
         name: replace(
             value,
-            model_context_windows={"small-model": 1024 if name == "too-small" else 16384},
+            models={"small-model": replace(value.models["small-model"], context_window=1024 if name == "too-small" else 16384, max_output=512)},
         )
         for name, value in unavailable.items()
     }
@@ -178,7 +186,8 @@ async def test_available_models_excludes_unusable_providers(
     )
 
     assert service.available_models_view()["models"] == [
-        {"provider_id": "primary", "model": "small-model", "context_window": 8192}
+        {"provider_id": "primary", "model": "small-model", "context_window": 8192},
+        {"provider_id": "too-small", "model": "small-model", "context_window": 1024},
     ]
 
     current_configuration = service.configuration
@@ -193,6 +202,10 @@ async def test_available_models_excludes_unusable_providers(
         models=replace(
             current_configuration.models,
             routes={**current_configuration.models.routes, "chat": chat_route},
+            providers={**current_configuration.models.providers, "primary": replace(
+                provider, models={"small-model": replace(provider.models["small-model"],
+                                                        context_window=16384, reasoning_effort="high")},
+            )},
         ),
     )
     assert service.available_models_view()["default_combination"] == {
@@ -711,7 +724,7 @@ async def test_partial_config_edit_preserves_nonoverlapping_external_leaf_fields
     configuration = loader.load()
     if section == "models":
         assert configuration.models.providers["primary"].base_url == "https://external.example/v1"
-        assert configuration.models.providers["primary"].model_context_windows["small-model"] == 16384
+        assert configuration.models.providers["primary"].models["small-model"].context_window == 16384
     else:
         assert configuration.mcp["http"].url == "https://external.example/tools"
         assert configuration.mcp["http"].call_timeout == 90

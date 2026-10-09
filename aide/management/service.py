@@ -277,7 +277,7 @@ class ManagementViewService:
         permission_control: RuntimePermissionControl,
         restore_listing: Callable[[], Awaitable[RestoreListingReport]] | None = None,
         restore_inspect: Callable[[int], Awaitable[RestorePlan]] | None = None,
-        restore_commit: Callable[[RestorePlan, RestoreMode | str], Awaitable[RestoreResult]]
+        restore_commit: Callable[[int, RestoreMode | str], Awaitable[RestoreResult]]
         | None = None,
         restore_result: Callable[[], Awaitable[RestoreResult | None]] | None = None,
         restore_cancel: Callable[[], Awaitable[None]] | None = None,
@@ -577,11 +577,11 @@ class ManagementViewService:
 
     async def restore_commit(
         self,
-        plan: RestorePlan,
+        anchor_id: int,
         mode: RestoreMode | str,
     ) -> RestoreResult:
         """Commit one previously inspected Session Restore plan."""
-        return await self._restore_commit(plan, mode)
+        return await self._restore_commit(anchor_id, mode)
 
     async def restore_result(self) -> RestoreResult | None:
         """Return the latest completed restore result, if one is available."""
@@ -623,7 +623,7 @@ async def _restore_unavailable_inspect(_anchor_id: int) -> RestorePlan:
 
 
 async def _restore_unavailable_commit(
-    _plan: RestorePlan,
+    _anchor_id: int,
     _mode: RestoreMode | str,
 ) -> RestoreResult:
     raise ManagementError(ErrorInfo("route_unavailable", "Session Restore is unavailable."))

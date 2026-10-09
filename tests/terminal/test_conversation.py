@@ -1488,7 +1488,7 @@ async def test_restore_workflow_refills_selected_anchor_after_partial_file_failu
 
         async def restore_commit(
             self,
-            _plan: RestorePlan,
+            _anchor_id: int,
             mode: RestoreMode | str,
         ) -> RestoreResult:
             selected_modes.append(mode)
@@ -1687,7 +1687,7 @@ async def test_restore_workflow_cancellation_branches_do_not_refill_draft(
 
         async def restore_commit(
             self,
-            _plan: RestorePlan,
+            _anchor_id: int,
             _mode: RestoreMode | str,
         ) -> RestoreResult:
             raise AssertionError("cancelled restore must not commit")
@@ -1808,7 +1808,7 @@ async def test_restore_workflow_conversation_only_refills_unsubmitted_draft(
     class Management:
         async def restore_commit(
             self,
-            _plan: RestorePlan,
+            _anchor_id: int,
             _mode: RestoreMode | str,
         ) -> RestoreResult:
             return result
@@ -1955,7 +1955,7 @@ async def test_restore_workflow_identity_and_failure_guards_do_not_refill_draft(
         return True
 
     async def commit_restore(
-        _plan: RestorePlan,
+        _anchor_id: int,
         _mode: RestoreMode | str,
     ) -> ManagementCommandResult:
         nonlocal commit_calls
@@ -2043,7 +2043,7 @@ async def test_restore_waiting_barrier_can_be_cancelled_before_inspection_finish
 
         async def restore_commit(
             self,
-            _plan: RestorePlan,
+            _anchor_id: int,
             _mode: RestoreMode | str,
         ) -> RestoreResult:
             raise AssertionError("cancelled inspection must not commit")

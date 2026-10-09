@@ -21,12 +21,11 @@ interface Props {
 
 export function ModelSettingsCard({ providerId, row, model, persisted, referencedBy, disabled, errorFor, onChange, onRemove }: Props) {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(!persisted || model.migration_candidates !== undefined);
+  const [expanded, setExpanded] = useState(!persisted);
   const prefix = `models.providers.${providerId}.models.${model.id || row}`;
   const identityError = errorFor(`models.providers.${providerId}.models.${row}.id`) ?? errorFor(`${prefix}.id`);
   const fields = ["context_window", "max_output", "temperature", "timeout"] as const;
   const labels = { context_window: "contextWindow", max_output: "maxOutput", temperature: "temperature", timeout: "timeout" };
-  const hasConflict = model.migration_candidates !== undefined && (fields.some((name) => model[name] === "") || model.reasoning_effort === "");
   return (
     <div className={styles.modelCard} id={modelSettingsFieldId(providerId, row)}>
       <details open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
@@ -38,20 +37,6 @@ export function ModelSettingsCard({ providerId, row, model, persisted, reference
           <ChevronDown size={15} aria-hidden="true" />
         </summary>
         <div className={styles.modelCardFields}>
-          {model.migration_candidates !== undefined && hasConflict ? (
-            <div className={styles.modelMigration}>
-              <p>{t("settings.modelMigrationConflict")}</p>
-              {model.migration_candidates.map((candidate) => (
-                <button className={styles.secondaryButton} key={candidate.route} type="button" disabled={disabled} onClick={() => onChange({
-                  context_window: String(candidate.context_window), max_output: String(candidate.max_output),
-                  temperature: String(candidate.temperature), reasoning_effort: candidate.reasoning_effort, timeout: String(candidate.timeout),
-                })}>
-                  {t("settings.useRouteParameters", { route: candidate.route })}
-                  <small>{t("settings.modelParameterSummary", { ...candidate })}</small>
-                </button>
-              ))}
-            </div>
-          ) : null}
           <label className={styles.settingsField} htmlFor={modelSettingsFieldId(providerId, row, "id")}>
             <span className={styles.fieldLabel} id={`${modelSettingsFieldId(providerId, row, "id")}-label`}>{t("settings.model")}</span>
             <input className={styles.textInput} id={modelSettingsFieldId(providerId, row, "id")} value={model.id} readOnly={persisted} disabled={disabled}

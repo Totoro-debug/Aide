@@ -30,7 +30,6 @@ import type {
   SubmitUserInputResult,
   RecalledConversationInput,
   RecallQueuedInputsResult,
-  InputCapabilitiesResponse,
   ManagementResult,
   ManagementResponse,
   ToolPermissionLevel,
@@ -482,10 +481,6 @@ export function getConfig(): Promise<ConfigResponse> {
 
 export function getAvailableModels(): Promise<AvailableModelsResponse> {
   return request<AvailableModelsResponse>("/models/available");
-}
-
-export function getInputCapabilities(): Promise<InputCapabilitiesResponse> {
-  return request<InputCapabilitiesResponse>("/input-capabilities");
 }
 
 type ConfigEditOptions = {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
@@ -9,55 +10,55 @@ import pytest
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigError, ConfigLoader, ConfigRevisionConflict
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
+from tests.fixtures.model_configuration import TEST_MODEL_PARAMETERS
 
-FULL_EDITABLE_CONFIG = """# preserve this comment
+FULL_EDITABLE_CONFIG = '''# preserve this comment
 [models.providers.primary]
 protocol = "openai-compatible"
 base_url = "https://models.example/v1"
 api_key = "provider-secret-canary-302"
-models = ["small-model", "large-model"]
 
-[models.providers.retired]
-protocol = "anthropic"
-base_url = "https://anthropic.example"
-api_key = "retired-secret-canary-302"
-models = ["retired-model"]
-
-[models.routes.chat]
-provider_id = "primary"
-model = "small-model"
+[models.providers.primary.models."small-model"]
 context_window = 8192
 max_output = 1024
 temperature = 0
 reasoning_effort = "mid"
 timeout = 30
 
-[models.routes.title]
-provider_id = "primary"
-model = "large-model"
+[models.providers.primary.models."large-model"]
 context_window = 16384
 max_output = 2048
 temperature = 0.2
 reasoning_effort = "high"
 timeout = 45
 
+[models.providers.retired]
+protocol = "anthropic"
+base_url = "https://anthropic.example"
+api_key = "retired-secret-canary-302"
+
+[models.providers.retired.models."retired-model"]
+context_window = 200000
+max_output = 8192
+temperature = 0.2
+reasoning_effort = "mid"
+timeout = 120
+
+[models.routes.chat]
+provider_id = "primary"
+model = "small-model"
+
+[models.routes.title]
+provider_id = "primary"
+model = "large-model"
+
 [models.routes.memory]
 provider_id = "primary"
 model = "small-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-reasoning_effort = "low"
-timeout = 30
 
 [models.routes.schedule]
 provider_id = "primary"
 model = "small-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-reasoning_effort = "mid"
-timeout = 30
 
 [mcp.servers.http]
 enabled = true
@@ -78,7 +79,7 @@ args = ["server.py"]
 cwd = "."
 connect_timeout = 30
 call_timeout = 60
-"""
+'''
 
 
 def _loader(tmp_path: Path, content: str = MINIMAL_VALID_CONFIG) -> ConfigLoader:
@@ -259,110 +260,61 @@ def test_web_snapshot_projects_all_model_route_and_mcp_fields_without_secrets(
     assert "mcp-header-canary-302" not in repr(fields)
 
 
-def test_model_context_windows_are_provider_scoped_and_preserve_comments(tmp_path: Path) -> None:
-    content = FULL_EDITABLE_CONFIG + '''
-[models.providers.primary.model_context_windows]
-# Keep the comment with this provider/model capacity.
-"large-model" = 16384
-
+def test_model_capacities_are_provider_scoped_and_preserve_comments(tmp_path: Path) -> None:
+    content = FULL_EDITABLE_CONFIG.replace('context_window = 16384', '# Keep the capacity comment.\ncontext_window = 16384') + '''
 [models.providers.secondary]
 protocol = "openai-compatible"
 base_url = "https://secondary.example/v1"
 api_key = "secondary-secret-302"
-models = ["large-model"]
-
-[models.providers.secondary.model_context_windows]
-"large-model" = 65536
+[models.providers.secondary.models.large-model]
+context_window = 16384
+max_output = 2048
+temperature = 0.2
+reasoning_effort = "mid"
+timeout = 120
 '''
     loader = _loader(tmp_path, content)
     before = loader.web_snapshot()
-    primary = cast(
-        Mapping[str, object], before.fields["models"]["providers"]
-    )["primary"]
-    assert {model: parameters["context_window"] for model, parameters in
-            cast(Mapping[str, Mapping[str, object]], cast(Mapping[str, object], primary)["models"]).items()} == {
-        "small-model": 8192,
-        "large-model": 16384,
-    }
-
-    result = loader.patch_editable_fields(
-        before.revision,
-        {
-            "models": {
-                "providers": {
-                    "primary": {
-                        "model_context_windows": {
-                            "small-model": 8192,
-                            "large-model": 32768,
-                        }
-                    },
-                    "secondary": {
-                        "model_context_windows": {"large-model": 65536}
-                    },
-                }
-            }
-        },
-    )
-
-    assert result.configuration.models.providers["primary"].model_context_windows == {
-        "small-model": 8192,
-        "large-model": 32768,
-    }
-    assert result.configuration.models.providers["secondary"].model_context_windows == {
-        "large-model": 65536,
-    }
+    models = json.loads(json.dumps(before.fields["models"]))
+    for provider in models["providers"].values():
+        provider.pop("api_key")
+    models["providers"]["primary"]["models"]["large-model"]["context_window"] = 32768
+    models["providers"]["secondary"]["models"]["large-model"]["context_window"] = 65536
+    result = loader.patch_editable_fields(before.revision, {"models": models})
+    assert result.configuration.models.providers["primary"].models["small-model"].context_window == 8192
+    assert result.configuration.models.providers["primary"].models["large-model"].context_window == 32768
+    assert result.configuration.models.providers["secondary"].models["large-model"].context_window == 65536
     assert result.configuration.resolve_route("title").route.context_window == 32768
     saved = loader.path.read_text(encoding="utf-8")
-    assert "# Keep the comment with this provider/model capacity." in saved
+    assert "# Keep the capacity comment." in saved
     assert "secondary-secret-302" in saved
     assert "provider-secret-canary-302" not in repr(result.fields)
 
 
-def test_larger_model_context_window_allows_output_above_legacy_route_capacity(
-    tmp_path: Path,
-) -> None:
+def test_larger_model_capacity_allows_larger_output(tmp_path: Path) -> None:
     loader = _loader(tmp_path, FULL_EDITABLE_CONFIG)
     snapshot = loader.web_snapshot()
-    result = loader.patch_editable_fields(
-        snapshot.revision,
-        {
-            "models": {
-                "providers": {"primary": {"model_context_windows": {"small-model": 65536}}},
-                "routes": {"chat": {"context_window": 8192, "max_output": 16384}},
-            }
-        },
-    )
-
+    models = json.loads(json.dumps(snapshot.fields["models"]))
+    for provider in models["providers"].values():
+        provider.pop("api_key")
+    models["providers"]["primary"]["models"]["small-model"].update(context_window=65536, max_output=16384)
+    result = loader.patch_editable_fields(snapshot.revision, {"models": models})
     resolved = result.configuration.resolve_route("chat").route
-    assert resolved.context_window == 65536
-    assert resolved.max_output == 16384
-    restarted = loader.load_for_startup().resolve_route("chat").route
-    assert restarted == resolved
-    projected = cast(Mapping[str, object], result.fields["models"]["routes"])["chat"]
-    assert cast(Mapping[str, object], projected) == {"provider_id": "primary", "model": "small-model"}
+    assert (resolved.context_window, resolved.max_output) == (65536, 16384)
+    assert loader.load_for_startup().resolve_route("chat").route == resolved
+    assert cast(Mapping[str, object], result.fields["models"]["routes"])["chat"] == {"provider_id": "primary", "model": "small-model"}
 
 
-def test_model_context_window_not_greater_than_route_output_keeps_original_bytes(
-    tmp_path: Path,
-) -> None:
+def test_model_capacity_not_greater_than_output_keeps_original_bytes(tmp_path: Path) -> None:
     loader = _loader(tmp_path, FULL_EDITABLE_CONFIG)
     before = loader.path.read_bytes()
-
+    models = json.loads(json.dumps(loader.web_snapshot().fields["models"]))
+    for provider in models["providers"].values():
+        provider.pop("api_key")
+    models["providers"]["primary"]["models"]["small-model"]["context_window"] = 1024
     with pytest.raises(ConfigError) as error:
-        loader.patch_editable_fields(
-            loader.web_snapshot().revision,
-            {
-                "models": {
-                    "providers": {
-                        "primary": {
-                            "model_context_windows": {"small-model": 1024}
-                        }
-                    }
-                }
-            },
-        )
-
-    assert "models.routes.chat.max_output" in error.value.field_errors
+        loader.patch_editable_fields(loader.revision(), {"models": models})
+    assert "models.providers.primary.models.small-model.max_output" in error.value.field_errors
     assert loader.path.read_bytes() == before
 
 
@@ -378,50 +330,30 @@ def test_model_route_mcp_patch_replaces_collections_and_secrets_atomically(tmp_p
                     "primary": {
                         "protocol": "openai-compatible",
                         "base_url": "https://new-models.example/v2",
-                        "models": ["new-model"],
+                        "models": {"new-model": {**TEST_MODEL_PARAMETERS, "context_window": 16384, "max_output": 2048, "temperature": 0.1, "reasoning_effort": "high", "timeout": 60}},
                     },
                     "added": {
                         "protocol": "anthropic",
                         "base_url": "https://new-anthropic.example",
-                        "models": ["added-model"],
+                        "models": {"added-model": {**TEST_MODEL_PARAMETERS, "context_window": 16384, "max_output": 2048, "timeout": 60}},
                     },
                 },
                 "routes": {
                     "title": {
                         "provider_id": "primary",
                         "model": "new-model",
-                        "context_window": 16384,
-                        "max_output": 2048,
-                        "temperature": 0.1,
-                        "reasoning_effort": "high",
-                        "timeout": 60,
                     },
                     "chat": {
                         "provider_id": "added",
                         "model": "added-model",
-                        "context_window": 16384,
-                        "max_output": 2048,
-                        "temperature": 0.2,
-                        "reasoning_effort": "mid",
-                        "timeout": 60,
                     },
                     "memory": {
                         "provider_id": "primary",
                         "model": "new-model",
-                        "context_window": 16384,
-                        "max_output": 2048,
-                        "temperature": 0,
-                        "reasoning_effort": "low",
-                        "timeout": 60,
                     },
                     "schedule": {
                         "provider_id": "added",
                         "model": "added-model",
-                        "context_window": 16384,
-                        "max_output": 2048,
-                        "temperature": 0.2,
-                        "reasoning_effort": "high",
-                        "timeout": 60,
                     },
                 },
             },
@@ -536,7 +468,7 @@ def test_dangling_route_candidate_keeps_original_bytes(tmp_path: Path) -> None:
                         "primary": {
                             "protocol": "openai-compatible",
                             "base_url": "https://models.example/v1",
-                            "models": ["small-model", "large-model"],
+                            "models": {"small-model": dict(TEST_MODEL_PARAMETERS), "large-model": dict(TEST_MODEL_PARAMETERS)},
                         },
                     },
                     "routes": {

@@ -295,10 +295,6 @@ def _configured_home(path: Path) -> AgentHome:
 [models.routes.schedule]
 provider_id = "primary"
 model = "small-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-timeout = 30
 """,
         encoding="utf-8",
     )

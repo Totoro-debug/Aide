@@ -14,7 +14,6 @@ from aide.provider.model_router import ModelRouter
 from aide.provider.models import AssistantModelMessage, ModelResponse, ModelUsage
 from aide.provider.session_configuration import SessionModelConfiguration
 from aide.service.runtime import AgentService
-from tests.configuration.test_config_editing import FULL_EDITABLE_CONFIG
 from tests.fixtures import ScriptedFakeProvider
 
 MODEL_CONFIG = '''# Preserve this configuration comment.
@@ -220,33 +219,25 @@ def test_model_save_preserves_comments_and_removes_deleted_models(tmp_path: Path
         route["model"] = "large"
     loader.patch_editable_fields(loader.revision(), {"models": models})
     assert "# Preserve this model comment." in loader.path.read_text(encoding="utf-8")
-    assert loader.load().models.providers["primary"].models == ("large",)
+    assert tuple(loader.load().models.providers["primary"].models) == ("large",)
     assert loader.load().resolve_route("schedule").route.max_output == 1024
 
 
-def test_legacy_conflicts_require_resolution_and_migrate_atomically(tmp_path: Path) -> None:
-    loader = model_loader(tmp_path, FULL_EDITABLE_CONFIG)
+@pytest.mark.parametrize("legacy", [
+    'models = ["legacy-model"]',
+    '[models.providers.primary.model_context_windows]\nlegacy-model = 8192',
+])
+def test_legacy_provider_formats_are_rejected_without_conversion(tmp_path: Path, legacy: str) -> None:
+    start = MODEL_CONFIG.index("[models.providers.primary.models.large]")
+    end = MODEL_CONFIG.index("[models.routes.chat]")
+    loader = model_loader(tmp_path, MODEL_CONFIG[:start] + legacy + "\n" + MODEL_CONFIG[end:])
     before = loader.path.read_bytes()
-    models = editable_models(loader)
-    small = models["providers"]["primary"]["models"]["small-model"]
-    assert small["reasoning_effort"] is None
-    candidates = small.pop("migration_candidates")
     with pytest.raises(ConfigError):
-        loader.patch_editable_fields(loader.revision(), {"models": models})
+        loader.load()
+    snapshot = loader.web_snapshot()
+    assert snapshot.state == "invalid"
+    assert "migration_candidates" not in repr(snapshot.fields)
     assert loader.path.read_bytes() == before
-    selected = next(candidate for candidate in candidates if candidate["route"] == "chat")
-    selected.pop("route")
-    models["providers"]["primary"]["models"]["small-model"] = selected
-    models["providers"]["retired"]["models"]["retired-model"] = {
-        "context_window": 8192, "max_output": 1024, "temperature": 0.2,
-        "reasoning_effort": "mid", "timeout": 120,
-    }
-    loader.patch_editable_fields(loader.revision(), {"models": models})
-    content = tomllib.loads(loader.path.read_text(encoding="utf-8"))
-    assert isinstance(content["models"]["providers"]["primary"]["models"], dict)
-    assert "model_context_windows" not in content["models"]["providers"]["primary"]
-    assert all(set(route) == {"provider_id", "model"} for route in content["models"]["routes"].values())
-    assert loader.load().models.providers["primary"].api_key == "provider-secret-canary-302"
 
 
 def test_effort_persistence_updates_models_without_route_parameters(tmp_path: Path) -> None:
@@ -256,3 +247,58 @@ def test_effort_persistence_updates_models_without_route_parameters(tmp_path: Pa
     assert content["models"]["providers"]["primary"]["models"]["large"]["reasoning_effort"] == "max"
     assert content["models"]["providers"]["primary"]["models"]["vendor/small.v1"]["reasoning_effort"] == "mid"
     assert all(set(route) == {"provider_id", "model"} for route in content["models"]["routes"].values())
+
+
+@pytest.mark.parametrize("legacy", [
+    '''[models.providers.primary]
+protocol = "openai-compatible"
+base_url = "https://models.example/v1"
+api_key = "repair-secret"
+models = ["old"]
+[models.routes.default]
+provider_id = "primary"
+model = "old"
+context_window = 65536
+max_output = 8192
+temperature = 0.2
+reasoning_effort = "high"
+timeout = 120
+''',
+    MODEL_CONFIG + '\n[models.providers.primary.model_context_windows]\nlarge = 65536\n',
+    MODEL_CONFIG.replace('model = "large"', 'model = "large"\nmax_output = 8192', 1),
+])
+def test_explicit_current_fields_repair_unsupported_model_structure(
+    tmp_path: Path, legacy: str,
+) -> None:
+    legacy = legacy.replace('[models.providers.primary]\n',
+                            '[models.providers.primary]\nextension = "keep"\n', 1)
+    loader = model_loader(tmp_path, legacy + '''
+[models.routes.future]
+extension = "keep"
+[future]
+value = 42
+''')
+    before = loader.path.read_bytes()
+    snapshot = loader.web_snapshot()
+    assert snapshot.state == "invalid"
+    assert loader.path.read_bytes() == before
+    fields = cast(dict[str, Any], json.loads(json.dumps(dict(snapshot.fields))))
+    fields["models"] = {
+        "providers": {"primary": {
+            "protocol": "openai-compatible", "base_url": "https://models.example/v1",
+            "models": {"chosen": {"context_window": 4096, "max_output": 512,
+                                  "temperature": 0.7, "reasoning_effort": "mid", "timeout": 17}},
+        }},
+        "routes": {"chat": {"provider_id": "primary", "model": "chosen"}},
+    }
+    result = loader.repair_editable_fields(snapshot.revision, fields)
+    route = result.configuration.resolve_route("chat").route
+    assert (route.model, route.context_window, route.max_output, route.timeout) == ("chosen", 4096, 512, 17)
+    saved = tomllib.loads(loader.path.read_text(encoding="utf-8"))
+    assert saved["future"] == {"value": 42}
+    assert saved["models"]["providers"]["primary"]["extension"] == "keep"
+    assert "model_context_windows" not in saved["models"]["providers"]["primary"]
+    assert set(saved["models"]["routes"]) == {"chat", "future"}
+    assert saved["models"]["routes"]["future"] == {"extension": "keep"}
+    assert set(saved["models"]["routes"]["chat"]) == {"provider_id", "model"}
+    assert result.configuration.models.providers["primary"].api_key in {"repair-secret", "model-configuration-secret"}

@@ -68,16 +68,17 @@ def _semantic_invalid_config(provider_base_url: str) -> str:
 protocol = "openai-compatible"
 base_url = "{provider_base_url}"
 api_key = ""
-models = ["small-model"]
+[models.providers.openai-local.models.small-model]
+context_window = 8192
+max_output = 1024
+temperature = 0
+reasoning_effort = "mid"
+timeout = 30
 
 # The required chat route is intentionally absent for the semantic-repair case.
 [models.routes.title]
 provider_id = "openai-local"
 model = "old-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-timeout = 30
 '''
 
 
@@ -86,15 +87,16 @@ def _malformed_config() -> bytes:
 protocol = "openai-compatible"
 base_url = "https://old.example/v1"
 api_key = "{MALFORMED_SECRET}"
-models = ["old-model"]
+[models.providers.old.models.old-model]
+context_window = 8192
+max_output = 1024
+temperature = 0
+reasoning_effort = "mid"
+timeout = 30
 
 [models.routes.chat]
 provider_id = "old"
 model = "old-model"
-context_window = 8192
-max_output = 1024
-temperature = 0
-timeout = 30
 
 [broken
 value = true

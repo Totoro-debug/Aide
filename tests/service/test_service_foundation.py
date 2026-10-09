@@ -533,7 +533,7 @@ async def test_project_removal_waits_for_restore_transaction(
 
     monkeypatch.setattr(RestoreManager, "execute", gated_execute)
     restore_task = asyncio.create_task(
-        dispatcher.restore_commit(inspected.restore_plan, RestoreMode.CONVERSATION_ONLY)
+        dispatcher.restore_commit(inspected.restore_plan.anchor_id, RestoreMode.CONVERSATION_ONLY)
     )
     try:
         await asyncio.wait_for(restore_started.wait(), timeout=2)

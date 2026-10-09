@@ -102,7 +102,7 @@ class ManagementPort(Protocol):
 
     async def restore_commit(
         self,
-        plan: RestorePlan,
+        anchor_id: int,
         mode: RestoreMode | str,
     ) -> RestoreResult: ...
 
@@ -464,12 +464,12 @@ class ManagementCommandDispatcher:
 
     async def restore_commit(
         self,
-        plan: RestorePlan,
+        anchor_id: int,
         mode: RestoreMode | str,
     ) -> ManagementCommandResult:
         with without_session_log():
             try:
-                result = await self._management.restore_commit(plan, mode)
+                result = await self._management.restore_commit(anchor_id, mode)
             except FatalManagementError:
                 raise
             except ManagementError as management_error:

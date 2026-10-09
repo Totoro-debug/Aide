@@ -11,7 +11,6 @@ from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.file_mutation import (
     FileMutationRecorder,
     execute_recorded_mutation,
-    is_protected_restore_target,
 )
 from aide.agent.tools.permission import FileAccess
 
@@ -46,20 +45,6 @@ class WriteFileTool(BaseTool):
                 role="write",
             ),
         )
-
-    def refusal_reason_for_context(
-        self,
-        prepared_arguments: dict[str, object],
-        *,
-        context: ToolRunContext,
-    ) -> str | None:
-        path = prepared_arguments.get("path")
-        if not isinstance(path, str):
-            raise ToolError("Write File arguments are invalid.")
-        target = self.resolve_path_argument(workspace=context.workspace, requested=path)
-        if is_protected_restore_target(context.workspace, target):
-            return "Built-in File Tools cannot write to protected restore state."
-        return None
 
     async def execute_authorized_for_context(
         self,

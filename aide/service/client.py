@@ -11,7 +11,7 @@ import socket
 import subprocess
 import sys
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -350,8 +350,8 @@ class RemoteManagementCommandDispatcher:
     async def restore_inspect(self, anchor_id: int) -> Any:
         return _management_result(await self.client.inspect_restore(anchor_id))
 
-    async def restore_commit(self, plan: RestorePlan, mode: RestoreMode | str) -> Any:
-        return _management_result(await self.client.commit_restore(plan.anchor_id, str(mode)))
+    async def restore_commit(self, anchor_id: int, mode: RestoreMode | str) -> Any:
+        return _management_result(await self.client.commit_restore(anchor_id, str(mode)))
 
     async def restore_result(self) -> Any:
         return _management_result(await self.client.get_restore_result())
@@ -401,7 +401,6 @@ class ServiceClient:
         self._resume_retry: tuple[str, dict[str, object], dict[str, str]] | None = None
         self._needs_conversation_recovery = False
         self._recovery_request: tuple[bool, str] | None = None
-        self._state_listeners: set[Callable[[Mapping[str, object]], None]] = set()
         self._send_lock = asyncio.Lock()
         self._pending: dict[str, asyncio.Future[dict[str, object]]] = {}
         self._closed = False
@@ -635,13 +634,6 @@ class ServiceClient:
             )
         await self.subscribe_state()
 
-    def add_state_listener(
-        self, listener: Callable[[Mapping[str, object]], None]
-    ) -> Callable[[], None]:
-        """Deliver authenticated state events without retaining UI drafts."""
-        self._state_listeners.add(listener)
-        return lambda: self._state_listeners.discard(listener)
-
     async def subscribe_state(self) -> dict[str, object]:
         return await self._command(
             "subscribe",
@@ -688,9 +680,6 @@ class ServiceClient:
             self._awaiting_snapshot = False
         self._event_cursor = (stream_id, sequence)
         await self._handle_event(event, recover_display=recover_display)
-        for listener in tuple(self._state_listeners):
-            with suppress(Exception):
-                listener(event)
 
     async def _reconnect(self) -> None:
         try:
@@ -1223,28 +1212,11 @@ class ServiceClient:
             raise ServiceStartupError("service_protocol_error", "Service operation response is invalid.")
         return response
 
-    async def get_runtime_memory(self) -> dict[str, object]:
-        """Read the current Workspace's Long-term Memory through its named operation."""
-        response = await self._named_session_operation("memory/read")
-        if not isinstance(response.get("content"), str):
-            raise ServiceStartupError("service_protocol_error", "Memory response is invalid.")
-        return response
-
     async def run_dream(self) -> dict[str, object]:
         """Run Dream for the current foreground Session and return its typed result."""
         response = await self._named_session_operation("memory/dream")
         if not isinstance(response.get("result"), dict):
             raise ServiceStartupError("service_protocol_error", "Dream response is invalid.")
-        return response
-
-    async def reload_runtime_skills(self) -> dict[str, object]:
-        """Reload the shared Skill catalog and return published metadata."""
-        response = await self._named_session_operation("skills/reload")
-        skills = response.get("skills")
-        if not isinstance(skills, list) or any(
-            not isinstance(item, dict) for item in skills
-        ):
-            raise ServiceStartupError("service_protocol_error", "Skill response is invalid.")
         return response
 
     async def get_runtime_status(self) -> dict[str, object]:

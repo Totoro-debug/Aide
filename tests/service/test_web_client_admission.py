@@ -68,6 +68,8 @@ async def test_unconnected_web_reservation_expires_without_deadline_extension(
     admission_service: tuple[AgentService, FakeClock, asyncio.Event],
 ) -> None:
     service, clock, timer = admission_service
+    cli = await service.register_client("cli")
+    await service.connect_client(cli.client_id, _CollectingSink())
     client = await service.register_client("web")
     expiry = client.disconnect_task
     assert expiry is not None
@@ -79,6 +81,7 @@ async def test_unconnected_web_reservation_expires_without_deadline_extension(
         await service.register_client("web", client.reconnect_credential)
     timer.set()
     await asyncio.wait_for(expiry, timeout=2)
+    timer.clear()
     replacement = await service.register_client("web")
     assert replacement.client_id != client.client_id
 

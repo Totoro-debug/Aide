@@ -30,20 +30,22 @@ from tests.management.factories import management_service
 if TYPE_CHECKING:
     from loguru import Message
 
-CONFIG_CONTENT = """[models.providers.primary]
+CONFIG_CONTENT = '''[models.providers.primary]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "command-secret"
-models = ["model-id"]
+
+[models.providers.primary.models."model-id"]
+context_window = 4096
+max_output = 512
+temperature = 0
+reasoning_effort = "mid"
+timeout = 60
 
 [models.routes.chat]
 provider_id = "primary"
 model = "model-id"
-context_window = 4096
-max_output = 512
-temperature = 0
-timeout = 60
-"""
+'''
 
 
 class _ResultDream:
@@ -73,20 +75,22 @@ class _ReloadableLoop:
         return self.metadata
 
 
-REDACTED_CONFIG_CONTENT = """[models.providers.primary]
+REDACTED_CONFIG_CONTENT = '''[models.providers.primary]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "***REDACTED***"
-models = ["model-id"]
+
+[models.providers.primary.models."model-id"]
+context_window = 4096
+max_output = 512
+temperature = 0
+reasoning_effort = "mid"
+timeout = 60
 
 [models.routes.chat]
 provider_id = "primary"
 model = "model-id"
-context_window = 4096
-max_output = 512
-temperature = 0
-timeout = 60
-"""
+'''
 
 MALFORMED_CONFIG_CONTENT = """[runtime
 api_key = "first-command-secret"
@@ -410,37 +414,41 @@ async def test_dream_command_projects_the_complete_final_result(
     assert dream.calls == 1
 
 
-SCHEMA_INVALID_CONFIG_CONTENT = """[models.providers.primary]
+SCHEMA_INVALID_CONFIG_CONTENT = '''[models.providers.primary]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "schema-command-secret"
-models = ["model-id"]
 unexpected = true
+
+[models.providers.primary.models."model-id"]
+context_window = 4096
+max_output = 512
+temperature = 0
+reasoning_effort = "mid"
+timeout = 60
 
 [models.routes.chat]
 provider_id = "primary"
 model = "model-id"
-context_window = 4096
-max_output = 512
-temperature = 0
-timeout = 60
-"""
+'''
 
-REDACTED_SCHEMA_INVALID_CONFIG_CONTENT = """[models.providers.primary]
+REDACTED_SCHEMA_INVALID_CONFIG_CONTENT = '''[models.providers.primary]
 protocol = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "***REDACTED***"
-models = ["model-id"]
 unexpected = true
+
+[models.providers.primary.models."model-id"]
+context_window = 4096
+max_output = 512
+temperature = 0
+reasoning_effort = "mid"
+timeout = 60
 
 [models.routes.chat]
 provider_id = "primary"
 model = "model-id"
-context_window = 4096
-max_output = 512
-temperature = 0
-timeout = 60
-"""
+'''
 
 
 class _StatusProjectionLoop:

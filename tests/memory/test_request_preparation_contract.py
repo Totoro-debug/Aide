@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any
 import pytest
 from mcp.types import CallToolResult
 
+from aide.agent.context.builder import ContextBuilder
 from aide.agent.context.run_context import (
     AgentRunContextController,
     AgentRunContextRequestPreparer,
@@ -124,14 +126,32 @@ async def _run_once(
         append_summary=MemoryManager(state).append_summary,
         now=lambda: NOW,
     )
+
+    def project_messages(
+        history: Sequence[dict[str, Any]],
+        current_user: dict[str, Any] | None,
+        increment: Sequence[dict[str, Any]],
+        compaction_cursor: int,
+        action_summary: str | None,
+    ) -> list[dict[str, Any]]:
+        return ContextBuilder.build_run_messages(
+            history,
+            current_user=current_user,
+            increment=increment,
+            compaction_cursor=compaction_cursor,
+            action_summary=action_summary,
+            project_messages=lambda messages: [
+                {"role": "system", "content": "system"},
+                *deepcopy(list(messages)),
+            ],
+        )
+
     preparer = AgentRunContextRequestPreparer(
         controller,
         router=adapter,
         requested_route="chat",
-        project_messages=lambda messages: [
-            {"role": "system", "content": "system"},
-            *deepcopy(list(messages)),
-        ],
+        project_messages=project_messages,
+        project_tool_results=ContextBuilder.project_tool_results,
         current_user={"role": "user", "content": "current request"},
         enable_tool_micro_compression=enable_tool_micro_compression,
     )

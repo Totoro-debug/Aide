@@ -264,6 +264,11 @@ async def test_subagent_runner_uses_frozen_context_and_persists_full_tool_artifa
     assert result.status is SubAgentStatus.COMPLETED
     assert result.result == "child-finished"
     assert len(provider.stream_requests) == 3
+    for index, request in enumerate(provider.stream_requests):
+        assert request.messages == [
+            {"role": "system", "content": snapshot.system_prompt},
+            *result.conversation[: 1 + 2 * index],
+        ]
     assert all(call.model == "default-model" for call in provider.stream_requests)
     assert all(call.reasoning_effort == "high" for call in provider.stream_requests)
     assert [message["role"] for message in result.conversation[:2]] == ["user", "assistant"]
@@ -621,6 +626,16 @@ async def test_compaction_summaries_are_persisted_in_child_context_state(
         {"timestamp": _NOW.isoformat(), "content": "child-fact-summary"}
     ]
     assert result.context_state["summary"] == "child-action-summary"
+    expected_prefix = [
+        {"role": "system", "content": record.creator_snapshot.system_prompt},
+        {"role": "user", "content": "child-action-summary"},
+    ]
+    assert len(provider.stream_requests) == 2
+    assert provider.stream_requests[0].messages == expected_prefix
+    assert provider.stream_requests[1].messages == [
+        *expected_prefix,
+        *result.conversation[1:3],
+    ]
     assert persisted is not None
     assert persisted.status is SubAgentStatus.RUNNING
     assert persisted.context_state == result.context_state
@@ -634,6 +649,81 @@ async def test_compaction_summaries_are_persisted_in_child_context_state(
 
 async def _ignore_event(event: object) -> None:
     del event
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", (False, True))
+async def test_subagent_micro_compression_preserves_conversation_and_artifacts(
+    tmp_path: Path,
+    enabled: bool,
+) -> None:
+    state, session_id = _workspace(tmp_path)
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    record = _register_running(
+        store,
+        title="Read large results",
+        snapshot=_creator_snapshot("read_file", "tool_search"),
+    )
+    (state.workspace_path / "large.txt").write_text("x" * 4000, encoding="utf-8")
+    provider = ScriptedFakeProvider(
+        streams=(
+            *(
+                StreamScript(
+                    events=(
+                        _tool_call(
+                            "read_file", f"read-{index}", {"path": "large.txt", "limit": 10000}
+                        ),
+                    )
+                )
+                for index in range(12)
+            ),
+            StreamScript(events=(_response("done"),)),
+        )
+    )
+    executor = SubAgentRunnerExecutor(
+        workspace_id="workspace-id",
+        workspace_state=state,
+        repository=store,
+        model_router=_router(provider),
+        tool_gateway=ToolGateway(
+            workspace=state.workspace_path,
+            tool_context=_tool_context(state.workspace_path),
+        ),
+        compact_ratio=0.9,
+        max_iterations=50,
+        max_tool_result_chars=1000,
+        enable_tool_micro_compression=enabled,
+        now=lambda: _NOW,
+    )
+
+    result = await executor.execute(record, emit=_ignore_event)
+    persisted = store.get(record.agent_id)
+
+    assert result.status is SubAgentStatus.COMPLETED
+    assert len(provider.stream_requests) == 13
+    assert provider.complete_requests == []
+    for index, request in enumerate(provider.stream_requests):
+        expected = [
+            {"role": "system", "content": record.creator_snapshot.system_prompt},
+            *deepcopy(result.conversation[: 1 + 2 * index]),
+        ]
+        expected_tools = [message for message in expected if message.get("role") == "tool"]
+        if enabled and index > 10:
+            for message in expected_tools[:-1]:
+                message["content"] = "[read_file result omitted from context]"
+        assert request.messages == expected
+        if expected_tools:
+            assert len(expected_tools[-1]["content"]) > 512
+
+    assert persisted is not None
+    assert persisted.conversation == result.conversation
+    raw_tools = [message for message in persisted.conversation if message.get("role") == "tool"]
+    assert len(raw_tools) == len(result.artifact_paths) == 12
+    for message in raw_tools:
+        assert len(message["content"]) > 512
+        assert "result omitted from context" not in message["content"]
+        artifact = message["artifact"]
+        assert (state.workspace_path / artifact["path"]).read_text(encoding="utf-8") == "x" * 4000
 
 
 def _executor(

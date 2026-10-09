@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+from aide.agent.context.builder import ContextBuilder
 from aide.agent.context.run_context import (
     AgentRunContextController,
     AgentRunContextRequestPreparer,
@@ -222,14 +223,32 @@ class SubAgentRunnerExecutor:
                 now=self._now,
             )
             controller = run_controller
+
+            def project_messages(
+                history: Sequence[dict[str, Any]],
+                current_user: dict[str, Any] | None,
+                increment: Sequence[dict[str, Any]],
+                compaction_cursor: int,
+                action_summary: str | None,
+            ) -> list[dict[str, Any]]:
+                return ContextBuilder.build_run_messages(
+                    history,
+                    current_user=current_user,
+                    increment=increment,
+                    compaction_cursor=compaction_cursor,
+                    action_summary=action_summary,
+                    project_messages=lambda messages: ContextBuilder.build_subagent_messages(
+                        messages,
+                        system_prompt=record.creator_snapshot.system_prompt,
+                    ),
+                )
+
             request_preparer = AgentRunContextRequestPreparer(
                 run_controller,
                 router=run_router,
                 requested_route="subagent",
-                project_messages=lambda messages: [
-                    {"role": "system", "content": record.creator_snapshot.system_prompt},
-                    *deepcopy(list(messages)),
-                ],
+                project_messages=project_messages,
+                project_tool_results=ContextBuilder.project_tool_results,
                 current_user=None,
                 compact_ratio=self._compact_ratio,
                 enable_tool_micro_compression=self._enable_tool_micro_compression,

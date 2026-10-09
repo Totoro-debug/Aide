@@ -1033,6 +1033,88 @@ def test_context_builder_injects_action_summary_after_system_for_each_lane(
     assert without_summary[1]["content"] != summary
 
 
+def test_context_builder_builds_run_messages_from_compaction_cursor_and_increment() -> None:
+    history = [
+        {"role": "user", "content": "old request"},
+        {"role": "assistant", "content": "old response"},
+    ]
+    current_user = {"role": "user", "content": "current request"}
+    increment = [
+        {"role": "assistant", "content": "compacted response"},
+        {"role": "tool", "name": "read_file", "tool_call_id": "tool-1", "content": "result"},
+        {"role": "assistant", "content": "latest response"},
+    ]
+    original = deepcopy((history, current_user, increment))
+
+    projected = ContextBuilder.build_run_messages(
+        history,
+        current_user=current_user,
+        increment=increment,
+        compaction_cursor=4,
+        action_summary="action summary",
+        project_messages=lambda messages: [
+            {"role": "system", "content": "run system"},
+            *deepcopy(list(messages)),
+        ],
+    )
+
+    assert projected == [
+        {"role": "system", "content": "run system"},
+        {"role": "user", "content": "action summary"},
+        current_user,
+        increment[1],
+        increment[2],
+    ]
+    assert (history, current_user, increment) == original
+
+
+def test_context_builder_uses_subagent_prompt_snapshot_and_projects_action_summary() -> None:
+    conversation = [
+        {"role": "user", "content": "child task"},
+        {"role": "assistant", "content": "child response", "status": "completed"},
+    ]
+    original = deepcopy(conversation)
+
+    projected = ContextBuilder.build_subagent_messages(
+        conversation,
+        system_prompt="captured creator prompt",
+        action_summary="child action summary",
+    )
+
+    assert projected == [
+        {"role": "system", "content": "captured creator prompt"},
+        {"role": "user", "content": "child action summary"},
+        *conversation,
+    ]
+    assert conversation == original
+
+
+def test_context_builder_projects_only_selected_tool_results_on_a_detached_copy() -> None:
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": "system"},
+        {
+            "role": "tool",
+            "name": "read_file",
+            "tool_call_id": "tool-1",
+            "content": "x" * 513,
+            "artifact": {"path": "result.txt"},
+        },
+        {"role": "tool", "name": "read_file", "tool_call_id": "tool-2", "content": "latest"},
+    ]
+    original = deepcopy(messages)
+
+    projected = ContextBuilder.project_tool_results(messages, omission_indices={1})
+
+    assert projected[1] == {
+        **messages[1],
+        "content": "[read_file result omitted from context]",
+    }
+    assert projected[2] == messages[2]
+    assert messages == original
+    assert projected is not messages
+    assert projected[1] is not messages[1]
+
+
 def test_runtime_lane_projections_keep_current_turn_continuation_separate(
     monkeypatch: pytest.MonkeyPatch,
     workspace: Path,

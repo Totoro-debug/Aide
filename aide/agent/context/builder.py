@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import platform
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
@@ -129,6 +129,67 @@ class ContextBuilder:
             {"role": "system", "content": self.session_title_prompt()},
             {"role": "user", "content": deepcopy(content)},
         ]
+
+    @staticmethod
+    def build_subagent_messages(
+        messages: Sequence[dict[str, Any]],
+        *,
+        system_prompt: str,
+        action_summary: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Build a SubAgent request from its captured creator prompt and conversation."""
+        if not isinstance(system_prompt, str):
+            raise TypeError("SubAgent system prompt must be a string")
+        projected = [
+            {"role": "system", "content": deepcopy(system_prompt)},
+            *deepcopy(list(messages)),
+        ]
+        return _insert_action_summary(projected, action_summary)
+
+    @staticmethod
+    def build_run_messages(
+        history: Sequence[dict[str, Any]],
+        *,
+        current_user: dict[str, Any] | None,
+        increment: Sequence[dict[str, Any]],
+        compaction_cursor: int,
+        action_summary: str | None,
+        project_messages: Callable[[Sequence[dict[str, Any]]], list[dict[str, Any]]],
+    ) -> list[dict[str, Any]]:
+        """Build one complete Run candidate through its existing lane projection."""
+        if type(compaction_cursor) is not int or compaction_cursor < 0:
+            raise ValueError("compaction_cursor must be a nonnegative integer")
+
+        history_start = min(compaction_cursor, len(history))
+        increment_start = max(
+            0,
+            compaction_cursor - len(history) - (1 if current_user is not None else 0),
+        )
+        source = deepcopy(list(history[history_start:]))
+        if current_user is not None:
+            source.append(deepcopy(current_user))
+        source.extend(deepcopy(list(increment[increment_start:])))
+        projected = project_messages(source)
+        return _insert_action_summary(projected, action_summary)
+
+    @staticmethod
+    def project_tool_results(
+        messages: Sequence[dict[str, Any]],
+        omission_indices: Collection[int],
+    ) -> list[dict[str, Any]]:
+        """Return a detached model projection with only selected Tool Results omitted."""
+        projected = deepcopy(list(messages))
+        for index in omission_indices:
+            if type(index) is not int or not 0 <= index < len(projected):
+                raise ValueError("tool-result omission index is out of range")
+            message = projected[index]
+            if message.get("role") != "tool":
+                raise ValueError("tool-result omission index must refer to a Tool message")
+            name = message.get("name")
+            if not isinstance(name, str):
+                raise ValueError("Tool message name must be a string")
+            message["content"] = f"[{name} result omitted from context]"
+        return projected
 
     def build_status_messages(
         self,
@@ -269,6 +330,18 @@ def _project_history_messages(
         for message in messages
         if (projected := _project_history_message(message)) is not None
     ]
+
+
+def _insert_action_summary(
+    projected: Sequence[dict[str, Any]],
+    action_summary: str | None,
+) -> list[dict[str, Any]]:
+    result = deepcopy(list(projected))
+    if action_summary is None:
+        return result
+    index = 1 if result and result[0].get("role") == "system" else 0
+    result.insert(index, {"role": "user", "content": deepcopy(action_summary)})
+    return result
 
 
 def _last_user_index(messages: Sequence[dict[str, Any]]) -> int:

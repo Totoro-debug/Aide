@@ -15,6 +15,7 @@ from aide.agent.context.budget import (
     estimate_run_slice_tokens,
     request_fits_model_context,
 )
+from aide.agent.context.builder import ContextBuilder
 from aide.agent.context.run_context import (
     AgentRunContextController,
     AgentRunContextRequestPreparer,
@@ -507,32 +508,54 @@ def _context_router(
 
 
 def _project_messages(
-    messages: Sequence[dict[str, Any]],
+    history: Sequence[dict[str, Any]],
+    current_user: dict[str, Any] | None,
+    increment: Sequence[dict[str, Any]],
+    compaction_cursor: int,
+    action_summary: str | None,
 ) -> list[dict[str, Any]]:
-    return [
-        {"role": "system", "content": "SYSTEM"},
-        *[
-            {
-                "role": message["role"],
-                "content": message["content"],
-                **(
-                    {"tool_call_id": message["tool_call_id"], "name": message["name"]}
-                    if message["role"] == "tool"
-                    else {}
-                ),
-            }
-            for message in messages
+    return ContextBuilder.build_run_messages(
+        history,
+        current_user=current_user,
+        increment=increment,
+        compaction_cursor=compaction_cursor,
+        action_summary=action_summary,
+        project_messages=lambda messages: [
+            {"role": "system", "content": "SYSTEM"},
+            *[
+                {
+                    "role": message["role"],
+                    "content": message["content"],
+                    **(
+                        {"tool_call_id": message["tool_call_id"], "name": message["name"]}
+                        if message["role"] == "tool"
+                        else {}
+                    ),
+                }
+                for message in messages
+            ],
         ],
-    ]
+    )
 
 
 def _project_messages_with_tool_calls(
-    messages: Sequence[dict[str, Any]],
+    history: Sequence[dict[str, Any]],
+    current_user: dict[str, Any] | None,
+    increment: Sequence[dict[str, Any]],
+    compaction_cursor: int,
+    action_summary: str | None,
 ) -> list[dict[str, Any]]:
-    return [
-        {"role": "system", "content": "SYSTEM"},
-        *deepcopy(list(messages)),
-    ]
+    return ContextBuilder.build_run_messages(
+        history,
+        current_user=current_user,
+        increment=increment,
+        compaction_cursor=compaction_cursor,
+        action_summary=action_summary,
+        project_messages=lambda messages: [
+            {"role": "system", "content": "SYSTEM"},
+            *deepcopy(list(messages)),
+        ],
+    )
 
 
 def _summary_payload(
@@ -1382,6 +1405,7 @@ async def test_controller_preparer_rebuilds_runner_requests_and_preserves_opaque
         router=router,
         requested_route="chat",
         project_messages=_project_messages,
+        project_tool_results=ContextBuilder.project_tool_results,
         current_user={"role": "user", "content": "canonical task"},
     )
 
@@ -2327,6 +2351,7 @@ async def test_request_preparer_reuses_run_start_revision_without_duplicate_summ
         router=router,
         requested_route="chat",
         project_messages=_project_messages,
+        project_tool_results=ContextBuilder.project_tool_results,
         current_user={"role": "user", "content": "current request"},
         compact_ratio=0.5,
     )
@@ -2372,6 +2397,7 @@ async def test_runner_final_projection_changes_revision_and_repeats_stably(
         ),
         requested_route="chat",
         project_messages=_project_messages_with_tool_calls,
+        project_tool_results=ContextBuilder.project_tool_results,
         current_user={"role": "user", "content": "current request"},
         enable_tool_micro_compression=enabled,
     )
@@ -2548,6 +2574,7 @@ async def test_request_preparer_uses_configured_capacity_after_previous_fallback
         router=router,
         requested_route="chat",
         project_messages=_project_messages,
+        project_tool_results=ContextBuilder.project_tool_results,
         current_user={"role": "user", "content": "request " + "x" * 2_500},
     )
 

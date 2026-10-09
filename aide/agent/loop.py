@@ -27,6 +27,7 @@ from aide.agent.context.builder import ContextBuilder
 from aide.agent.context.run_context import (
     AgentRunContextController,
     AgentRunContextRequestPreparer,
+    CompactionProjection,
     agent_run_attempt_guard,
     latest_main_agent_usage_anchor,
 )
@@ -194,7 +195,7 @@ class _AgentRunContext:
 
     route: Literal["chat", "schedule"]
     current_user: dict[str, Any]
-    project_messages: Callable[[Sequence[dict[str, Any]]], list[dict[str, Any]]]
+    project_messages: CompactionProjection
     router: RunModelRouter
     controller: AgentRunContextController
     runner: AgentRunner
@@ -860,11 +861,27 @@ class AgentRunExecutor:
             permission_context=permission_context,
         )
 
-        def project_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+        def project_messages(
+            history: Sequence[dict[str, Any]],
+            current_user: dict[str, Any] | None,
+            increment: Sequence[dict[str, Any]],
+            compaction_cursor: int,
+            action_summary: str | None,
+        ) -> list[dict[str, Any]]:
             kwargs: dict[str, Any] = {"session_id": session.session_id, "summary": ""}
             if permission_snapshot is not None:
                 kwargs["permission_snapshot"] = permission_snapshot
-            return self._context_builder.build_schedule_messages(messages, **kwargs)
+            return self._context_builder.build_run_messages(
+                history,
+                current_user=current_user,
+                increment=increment,
+                compaction_cursor=compaction_cursor,
+                action_summary=action_summary,
+                project_messages=lambda messages: self._context_builder.build_schedule_messages(
+                    messages,
+                    **kwargs,
+                ),
+            )
 
         run_context = self._new_agent_run_context(
             session,
@@ -1026,7 +1043,7 @@ class AgentRunExecutor:
         *,
         current_user: dict[str, Any],
         route: Literal["chat", "schedule"],
-        project_messages: Callable[[Sequence[dict[str, Any]]], list[dict[str, Any]]],
+        project_messages: CompactionProjection,
         session_model_configuration: SessionModelConfiguration | None = None,
     ) -> _AgentRunContext:
         run_router = RunModelRouter(
@@ -1045,6 +1062,7 @@ class AgentRunExecutor:
             router=run_router,
             requested_route=route,
             project_messages=project_messages,
+            project_tool_results=self._context_builder.project_tool_results,
             current_user=current_user,
             compact_ratio=self._configuration.runtime.compact_ratio,
             enable_tool_micro_compression=self._configuration.runtime.enable_tool_micro_compression,
@@ -1264,14 +1282,27 @@ class AgentRunExecutor:
 
         staged_blackboard: Blackboard | None = None
 
-        def project_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-            return self._context_builder.build_foreground_messages(
-                messages,
-                session_id=active_session.session_id,
-                blackboard=staged_blackboard,
-                manual_invocation=manual_invocation,
-                summary="",
-                permission_snapshot=permission_snapshot,
+        def project_messages(
+            history: Sequence[dict[str, Any]],
+            current_user: dict[str, Any] | None,
+            increment: Sequence[dict[str, Any]],
+            compaction_cursor: int,
+            action_summary: str | None,
+        ) -> list[dict[str, Any]]:
+            return self._context_builder.build_run_messages(
+                history,
+                current_user=current_user,
+                increment=increment,
+                compaction_cursor=compaction_cursor,
+                action_summary=action_summary,
+                project_messages=lambda messages: self._context_builder.build_foreground_messages(
+                    messages,
+                    session_id=active_session.session_id,
+                    blackboard=staged_blackboard,
+                    manual_invocation=manual_invocation,
+                    summary="",
+                    permission_snapshot=permission_snapshot,
+                ),
             )
 
         run_context = self._new_agent_run_context(

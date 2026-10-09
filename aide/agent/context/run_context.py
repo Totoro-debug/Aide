@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
@@ -37,7 +37,17 @@ from aide.templates import render_template
 from aide.utils.validation import empty_token_usage
 
 type CompactionProjection = Callable[
-    [Sequence[dict[str, Any]]],
+    [
+        Sequence[dict[str, Any]],
+        dict[str, Any] | None,
+        Sequence[dict[str, Any]],
+        int,
+        str | None,
+    ],
+    list[dict[str, Any]],
+]
+type ToolResultProjection = Callable[
+    [Sequence[dict[str, Any]], Collection[int]],
     list[dict[str, Any]],
 ]
 _COMPACTION_JSON_TRANSLATION = str.maketrans({"`": r"\u0060"})
@@ -547,20 +557,11 @@ class AgentRunContextController:
         current_user: dict[str, Any] | None,
         project_messages: CompactionProjection,
     ) -> list[dict[str, Any]]:
-        snapshot_length = len(self._snapshot.messages)
-        user_offset = 1 if current_user is not None else 0
-        increment_start = max(
-            0,
-            self._pending_last_compacted - snapshot_length - user_offset,
-        )
-        source = list(
-            deepcopy(self._snapshot.messages[min(self._pending_last_compacted, snapshot_length) :])
-        )
-        if current_user is not None:
-            source.append(deepcopy(current_user))
-        source.extend(deepcopy(list(increment[increment_start:])))
-        return _insert_action_summary(
-            project_messages(source),
+        return project_messages(
+            self._snapshot.messages,
+            current_user,
+            increment,
+            self._pending_last_compacted,
             self._pending_action_summary,
         )
 
@@ -580,9 +581,13 @@ class AgentRunContextController:
         else:
             increment_start = min(max(latest_cycle_start, 0), len(increment))
             protected_increment = increment[increment_start:]
-        source = [] if current_user is None else [deepcopy(current_user)]
-        source.extend(deepcopy(list(protected_increment)))
-        projected = _insert_action_summary(project_messages(source), self._pending_action_summary)
+        projected = project_messages(
+            (),
+            current_user,
+            protected_increment,
+            0,
+            self._pending_action_summary,
+        )
         return self._projection_from_candidate(
             projected,
             tools=tools,
@@ -633,11 +638,11 @@ class AgentRunContextController:
         *,
         current_user: dict[str, Any] | None,
     ) -> list[dict[str, Any]]:
-        raw_messages = list(self._snapshot.messages[self._pending_last_compacted :])
-        if current_user is not None:
-            raw_messages.append(deepcopy(current_user))
-        return _insert_action_summary(
-            project_messages(deepcopy(raw_messages)),
+        return project_messages(
+            self._snapshot.messages,
+            current_user,
+            (),
+            self._pending_last_compacted,
             self._pending_action_summary,
         )
 
@@ -651,10 +656,13 @@ class AgentRunContextController:
         route_status: ModelRouteStatus,
         estimator_version: str,
     ) -> ContextProjection:
-        source = list(deepcopy(list(raw_messages)))
-        if current_user is not None:
-            source.append(deepcopy(current_user))
-        projected = _insert_action_summary(project_messages(source), self._pending_action_summary)
+        projected = project_messages(
+            raw_messages,
+            current_user,
+            (),
+            0,
+            self._pending_action_summary,
+        )
         return self._projection_from_candidate(
             projected,
             tools=tools,
@@ -922,6 +930,7 @@ class AgentRunContextRequestPreparer:
         router: RunModelRouter,
         requested_route: Literal["chat", "schedule", "subagent"],
         project_messages: CompactionProjection,
+        project_tool_results: ToolResultProjection | None = None,
         current_user: dict[str, Any] | None = None,
         compact_ratio: float = 0.9,
         enable_tool_micro_compression: bool = False,
@@ -931,6 +940,7 @@ class AgentRunContextRequestPreparer:
         self._router = router
         self._requested_route = requested_route
         self._project_messages = project_messages
+        self._project_tool_results = project_tool_results
         self._current_user = None if current_user is None else deepcopy(current_user)
         self._compact_ratio = compact_ratio
         self._enable_tool_micro_compression = enable_tool_micro_compression
@@ -976,10 +986,14 @@ class AgentRunContextRequestPreparer:
         )
         if micro_compression_enabled:
             assert is_micro_compression_eligible is not None
-            request_messages = _project_for_model_request(
+            if self._project_tool_results is None:
+                raise RuntimeError("Tool-result projection is not configured")
+            request_messages = self._project_tool_results(
                 request_messages,
-                omit_tool_results_before=_latest_completed_cycle_start(request_messages),
-                is_micro_compression_eligible=is_micro_compression_eligible,
+                _micro_compression_omission_indices(
+                    request_messages,
+                    is_micro_compression_eligible=is_micro_compression_eligible,
+                ),
             )
         observation = _ReactRevisionObservation(
             current_user=None if self._current_user is None else deepcopy(self._current_user),
@@ -1051,30 +1065,24 @@ def _latest_completed_cycle_start(messages: Sequence[dict[str, Any]]) -> int | N
     return None
 
 
-def _project_for_model_request(
+def _micro_compression_omission_indices(
     messages: Sequence[dict[str, Any]],
     *,
-    omit_tool_results_before: int | None,
     is_micro_compression_eligible: Callable[[str], bool],
-) -> list[dict[str, Any]]:
-    projected = deepcopy(list(messages))
-    if omit_tool_results_before is None:
-        return projected
+) -> frozenset[int]:
+    cycle_start = _latest_completed_cycle_start(messages)
+    if cycle_start is None:
+        return frozenset()
 
-    for index, message in enumerate(projected):
-        if index >= omit_tool_results_before or message.get("role") != "tool":
-            continue
-        name = message.get("name")
-        content = message.get("content")
-        if (
-            not isinstance(name, str)
-            or not is_micro_compression_eligible(name)
-            or not isinstance(content, str)
-            or len(content) <= _TOOL_RESULT_MICRO_COMPRESSION_CHAR_LIMIT
-        ):
-            continue
-        message["content"] = f"[{name} result omitted from context]"
-    return projected
+    return frozenset(
+        index
+        for index, message in enumerate(messages[:cycle_start])
+        if message.get("role") == "tool"
+        and isinstance(message.get("name"), str)
+        and is_micro_compression_eligible(message["name"])
+        and isinstance(message.get("content"), str)
+        and len(message["content"]) > _TOOL_RESULT_MICRO_COMPRESSION_CHAR_LIMIT
+    )
 
 
 def _completed_run_ranges(messages: Sequence[dict[str, Any]]) -> list[tuple[int, int]]:
@@ -1206,18 +1214,6 @@ def _action_summary_user_context(previous: str | None, selected_payload: str) ->
     if previous is None:
         return selected_payload
     return f"## Previous Action Summary\n\n{previous}\n\n{selected_payload}"
-
-
-def _insert_action_summary(
-    projected: Sequence[dict[str, Any]],
-    action_summary: str | None,
-) -> list[dict[str, Any]]:
-    result = deepcopy(list(projected))
-    if action_summary is None:
-        return result
-    index = 1 if result and result[0].get("role") == "system" else 0
-    result.insert(index, {"role": "user", "content": deepcopy(action_summary)})
-    return result
 
 
 def _summary_request_messages(*, template_name: str, selected_payload: str) -> ModelMessages:

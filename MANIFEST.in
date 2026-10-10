@@ -1,5 +1,6 @@
-include LICENSE README.md MANIFEST.in pyproject.toml setup.py
+include LICENSE README.md MANIFEST.in pyproject.toml
 include scripts/*.py
+recursive-include scripts/packaging *.py
 include aide/web_assets/index.html
 include aide/web_assets/favicon.svg
 include aide/web_assets/manifest.json

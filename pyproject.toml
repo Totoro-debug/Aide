@@ -46,6 +46,9 @@ dev = [
 [project.scripts]
 aide = "aide.terminal.process_entry:run"
 
+[tool.setuptools.cmdclass]
+build_py = "scripts.packaging.commands.build_py"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["aide*"]

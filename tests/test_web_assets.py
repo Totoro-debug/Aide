@@ -1,5 +1,4 @@
 import json
-import runpy
 import shutil
 import subprocess
 from hashlib import sha256
@@ -8,6 +7,7 @@ from pathlib import Path
 import pytest
 from setuptools import Distribution  # type: ignore[import-untyped]
 
+from scripts.packaging.commands import build_py
 from scripts.validate_web_assets import WebAssetError, build_manifest, validate_web_assets
 
 ASSET_ROOT = Path(__file__).parents[1] / "aide" / "web_assets"
@@ -70,12 +70,8 @@ def test_manifest_rejects_stale_file_hash(tmp_path: Path) -> None:
         validate_web_assets(root)
 
 
-def test_build_cleanup_rejects_source_directory(monkeypatch: pytest.MonkeyPatch) -> None:
-    import setuptools
-
-    monkeypatch.setattr(setuptools, "setup", lambda **_kwargs: None)
-    namespace = runpy.run_path(str(ASSET_ROOT.parents[1] / "setup.py"))
-    command = namespace["build_py"](Distribution())
+def test_build_cleanup_rejects_source_directory() -> None:
+    command = build_py(Distribution())
     command.build_lib = str(ASSET_ROOT.parents[1])
     before = {path: path.read_bytes() for path in ASSET_ROOT.rglob("*") if path.is_file()}
 

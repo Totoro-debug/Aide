@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from shutil import rmtree
 
-from setuptools import setup  # type: ignore[import-untyped]
 from setuptools.command.build_py import build_py as _build_py  # type: ignore[import-untyped]
 
 
@@ -15,7 +14,7 @@ class build_py(_build_py):  # type: ignore[misc]  # Setuptools commands are not 
     def run(self) -> None:
         stale_assets = Path(self.build_lib) / "aide" / "web_assets"
         if stale_assets.is_dir():
-            build_root = Path(__file__).resolve().parent / "build"
+            build_root = Path(__file__).resolve().parents[2] / "build"
             if not stale_assets.resolve().is_relative_to(build_root.resolve()):
                 raise ValueError(
                     "Web asset cleanup requires a build directory inside project/build"
@@ -26,5 +25,3 @@ class build_py(_build_py):  # type: ignore[misc]  # Setuptools commands are not 
             rmtree(stale_assets)
         super().run()
 
-
-setup(cmdclass={"build_py": build_py})

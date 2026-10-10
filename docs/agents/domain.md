@@ -2,7 +2,7 @@
 
 Aide has one bounded context. Use these sources:
 
-- [CONTEXT.md](../../CONTEXT.md): domain vocabulary.
+- [CONTEXT.md](../domain/CONTEXT.md): domain vocabulary.
 - [README.md](../../README.md): installation, configuration, and current user behavior.
 - [GitHub Issues](https://github.com/Totoro-debug/Aide/issues): product requirements, accepted discussions, and delivery history; retrieve them using [issue-tracker.md](issue-tracker.md).
 - [ADR](../adr/): architectural trade-offs that still constrain changes.

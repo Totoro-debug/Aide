@@ -4,7 +4,7 @@ status: accepted
 
 # Manage Agent Run Context by Projected Token Budget
 
-Chat, Schedule, and SubAgent Runs prepare their multi-turn context immediately before each logical model request. Startup and Skill loading do not check context budgets or trigger compaction. Token occupancy, rather than message count, controls compaction. One-shot requests, including Title, Dream, and Summary, retain their separate preparation boundaries. Definitions are in [CONTEXT](../../CONTEXT.md); defaults are in the [configuration template](../../aide/templates/default-config.md).
+Chat, Schedule, and SubAgent Runs prepare their multi-turn context immediately before each logical model request. Startup and Skill loading do not check context budgets or trigger compaction. Token occupancy, rather than message count, controls compaction. One-shot requests, including Title, Dream, and Summary, retain their separate preparation boundaries. Definitions are in [CONTEXT](../domain/CONTEXT.md); defaults are in the [configuration template](../../aide/templates/default-config.md).
 
 ContextBuilder owns model-visible context construction and projection for these multi-turn Runs. ContextController owns token estimation, budget decisions, compaction control, and staged context state. Its `estimate_request_tokens` method calculates local token usage; its `prepare` method coordinates compaction and final validation through the Agent Runner request-preparation interface. Dedicated data types are retained for shared contracts, while controller-local bundles remain internal state. This keeps request construction and control consistent across all three execution paths.
 

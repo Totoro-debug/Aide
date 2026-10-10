@@ -1,4 +1,4 @@
-import type { ReasoningEffort } from "./protocol";
+import type { ReasoningEffort } from "../../protocol";
 
 export interface ModelForm {
   id: string;

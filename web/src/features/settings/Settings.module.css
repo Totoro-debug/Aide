@@ -1,0 +1,316 @@
+
+
+.managementHint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settingsSidebar {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 28px;
+  overflow-y: auto;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--settings-sidebar-bg);
+  padding: 20px 14px;
+}
+
+.settingsBack {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 8px 6px;
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.settingsBack:hover {
+  background: var(--surface-hover);
+}
+
+.settingsContent {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.settingsContentInner {
+  display: grid;
+  width: min(100%, 864px);
+  gap: 16px;
+  margin: 0 auto;
+  padding: 56px 44px 72px;
+}
+
+.settingsNavigation {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+}
+
+.settingsNavigationLabel {
+  padding: 0 10px 2px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.settingsNavigationItem {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 7px;
+  padding: 7px 10px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settingsNavigationItem:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.settingsNavigationItem:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.settingsNavigationItem[aria-current="page"] {
+  background: var(--settings-sidebar-selected);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.settingsNavigationItem:focus-visible,
+.settingsBack:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.settingsDetail {
+  min-width: 0;
+}
+
+.settingsServiceStatus {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 24px 0 0;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 16px;
+}
+
+.settingsServiceStatus div {
+  min-width: 0;
+}
+
+.settingsServiceStatus dt {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.settingsServiceStatus dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.settingsErrorActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settingsStatus {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  padding: 0 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.settingsStatus[data-state="active"] {
+  border-color: var(--success-border);
+  color: var(--success-text);
+}
+
+.settingsStatus[data-state="pending"] {
+  border-color: var(--warning-border);
+  color: var(--warning-text);
+}
+
+.settingsStatus[data-state="failed-to-apply"] {
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+
+.settingsStatus[data-state="error"] {
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+
+.settingsStatus[data-state="next-run-required"],
+.settingsStatus[data-state="pending-repair"] {
+  border-color: var(--warning-border);
+  color: var(--warning-text);
+}
+
+.settingsStatus[data-state="saving"],
+.settingsStatus[data-state="unsaved"] {
+  border-color: var(--border-subtle);
+  color: var(--text-muted);
+}
+
+.settingsForm {
+  display: grid;
+  gap: 16px;
+}
+
+.settingsSection {
+  min-width: 0;
+  padding: 0;
+}
+
+.settingsSubsection {
+  display: grid;
+  gap: 14px;
+  padding-top: 28px;
+}
+
+.settingsSubsection h3,
+.settingsSubsection h4 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.settingsCollection {
+  display: grid;
+  gap: 12px;
+}
+
+.modelCards {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+
+.modelCard {
+  position: relative;
+  min-width: 0;
+  align-self: start;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.modelCardSummary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 42px 16px 0;
+  cursor: pointer;
+  list-style: none;
+}
+
+.modelCardSummary::-webkit-details-marker { display: none; }
+.modelCardSummary > span { display: grid; min-width: 0; gap: 5px; flex: 1; }
+.modelCardSummary strong { font-size: 13px; overflow-wrap: anywhere; }
+.modelCardSummary small { color: var(--text-muted); font-size: 11px; overflow-wrap: anywhere; }
+.modelCardSummary > svg { flex-shrink: 0; }
+.modelCard details[open] > summary > svg { transform: rotate(180deg); }
+.modelCardSummary:focus-visible { outline: 2px solid var(--text-primary); outline-offset: -2px; }
+.modelCardRemove { position: absolute; top: 9px; right: 6px; }
+
+.textArea {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface-app);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  padding: 9px 10px;
+}
+
+.textArea:focus {
+  border-color: var(--accent-strong);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+@media (max-width: 900px) {
+
+  .settingsContentInner {
+    padding: 32px 28px 48px;
+  }
+}
+
+@media (max-width: 760px) {
+
+  .settingsSidebar {
+    gap: 8px;
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 10px 16px 12px;
+  }
+
+  .settingsContentInner {
+    padding: 24px 20px 40px;
+  }
+
+  .settingsNavigation {
+    display: flex;
+    min-width: 0;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .settingsNavigationLabel {
+    display: none;
+  }
+
+  .settingsNavigationItem {
+    flex: 0 0 auto;
+  }
+
+  .settingsServiceStatus {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 680px) {
+
+  .settingsSection {
+    padding: 12px 0;
+  }
+
+  .settingsStatus {
+    max-width: 100%;
+  }
+}

@@ -14,7 +14,7 @@ from uuid import uuid4
 import pytest
 from aiohttp.test_utils import TestServer
 
-import aide.service.runtime as service_runtime
+import aide.service.runtime.service as service_runtime
 from aide.agent.memory.manager import MemoryManager
 from aide.agent.message_bus import InboundMessage
 from aide.agent.session.deletion import begin_session_deletion

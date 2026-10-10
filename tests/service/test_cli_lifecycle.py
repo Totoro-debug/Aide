@@ -28,7 +28,7 @@ async def test_cli_failed_target_preparation_preserves_selected_claim_and_resour
     directory = tmp_path / "workspace"
     directory.mkdir()
     provider = _ConcurrentProvider()
-    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda *_args: provider)
     target = await _persist_session(
         directory,
         home=home,
@@ -85,7 +85,7 @@ async def test_cli_disconnect_leaves_other_client_runtime_and_schedule_alive(
     directory = tmp_path / "workspace"
     directory.mkdir()
     provider = _ConcurrentProvider()
-    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda *_args: provider)
     async with cli_service(home) as service:
         first = await ServiceClient.connect_or_start(home, directory)
         second = await ServiceClient.connect_or_start(home, directory)
@@ -119,7 +119,7 @@ async def test_same_cli_session_waits_for_queued_snapshot_and_keeps_live_authori
     directory = tmp_path / "workspace"
     directory.mkdir()
     monkeypatch.setattr(
-        "aide.service.runtime.create_provider", lambda *_args: _ConcurrentProvider()
+        "aide.service.runtime.service.create_provider", lambda *_args: _ConcurrentProvider()
     )
     async with cli_service(home) as service:
         client = await ServiceClient.connect_or_start(home, directory)

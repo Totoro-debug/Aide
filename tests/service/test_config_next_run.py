@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import pytest
 
-import aide.service.runtime as service_runtime
+import aide.service.runtime.service as service_runtime
 from aide.agent.session.restore import RestoreManager
 from aide.agent.tools.tool_gateway import ModelToolCall
 from aide.config.agent_home import AgentHome

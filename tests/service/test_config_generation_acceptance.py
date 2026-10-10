@@ -14,7 +14,7 @@ from uuid import uuid4
 import aiohttp
 import pytest
 
-import aide.service.runtime as service_runtime
+import aide.service.runtime.service as service_runtime
 from aide.agent.confirmation import ConfirmationDecision, ConfirmationEnvelope
 from aide.agent.session.backup_store import FileBackupStore
 from aide.agent.session.restore import RestoreManager

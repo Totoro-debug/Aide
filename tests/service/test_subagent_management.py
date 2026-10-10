@@ -608,7 +608,7 @@ async def management_case(
         content="Other Session history.",
     )
     monkeypatch.setattr(
-        "aide.service.runtime.create_provider", lambda *_args: _ConcurrentProvider()
+        "aide.service.runtime.service.create_provider", lambda *_args: _ConcurrentProvider()
     )
     service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
@@ -1009,7 +1009,7 @@ async def test_missing_subagent_route_keeps_main_runs_and_existing_task_queries(
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
     provider = _ConcurrentProvider()
-    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda *_args: provider)
     service = AgentService(home, ConfigLoader(home).load_for_startup())
     observed: list[tuple[str, ToolGateway]] = []
     original_run = AgentRunner.run
@@ -2293,7 +2293,7 @@ async def test_workspace_startup_interrupts_persisted_subagent_tasks(
         )
     )
     monkeypatch.setattr(
-        "aide.service.runtime.create_provider", lambda *_args: _ConcurrentProvider()
+        "aide.service.runtime.service.create_provider", lambda *_args: _ConcurrentProvider()
     )
     service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()

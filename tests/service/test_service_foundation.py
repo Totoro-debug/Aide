@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import pytest
 
-import aide.service.runtime as service_runtime
+import aide.service.runtime.service as service_runtime
 from aide.agent.confirmation import (
     BackgroundConfirmationOwner,
     ConfirmationAborted,

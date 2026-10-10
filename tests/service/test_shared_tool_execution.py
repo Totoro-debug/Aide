@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 
-import aide.service.runtime as service_runtime
+import aide.service.runtime.service as service_runtime
 from aide.agent.session.backup_store import FileBackupStore
 from aide.agent.session.session import Session, SessionStoragePartition
 from aide.agent.tools.tool_gateway import BuiltInToolCatalog, ModelToolCall

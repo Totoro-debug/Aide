@@ -13,7 +13,7 @@ from aide.agent.memory.dream import DreamResult
 from aide.management.commands import ManagementCommandResult
 from aide.management.service import RuntimeStatus
 from aide.service.client import _management_result
-from aide.service.runtime import _encode_management_result
+from aide.service.runtime.projections import _encode_management_result
 from aide.utils.errors import ErrorInfo
 
 

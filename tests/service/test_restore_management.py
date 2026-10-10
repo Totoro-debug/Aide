@@ -33,7 +33,7 @@ from tests.service.test_service_transport import _persist_session, _prepare_agen
 @pytest.fixture
 def restore_provider(monkeypatch: pytest.MonkeyPatch) -> _ConcurrentProvider:
     provider = _ConcurrentProvider(block_b=True)
-    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda *_args: provider)
     return provider
 
 

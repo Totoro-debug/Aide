@@ -15,7 +15,7 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
-import aide.service.runtime as service_runtime
+import aide.service.runtime.service as service_runtime
 from aide.agent.confirmation import BackgroundConfirmationOwner
 from aide.agent.session.session import Session, SessionStoragePartition
 from aide.agent.tools.core.read_file import ReadFileTool
@@ -26,7 +26,7 @@ from aide.config.config import ConfigLoader
 from aide.schedule.store import WorkspaceScheduleStore
 from aide.service.client import ServiceClient
 from aide.service.discovery import create_credential
-from aide.service.runtime import AgentService
+from aide.service.runtime import AgentService, WorkspaceRecord
 from aide.service.transport import create_app
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.scheduling.test_schedule_agent_loop import _response, _ScheduleProvider
@@ -606,7 +606,7 @@ async def test_schedule_queued_retry_rechecks_current_identity(
 
         def record_check(
             client_id: str, workspace_id: str
-        ) -> service_runtime.WorkspaceRecord:
+        ) -> WorkspaceRecord:
             result = original(client_id, workspace_id)
             checked.set()
             return result

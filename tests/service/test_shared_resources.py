@@ -13,7 +13,7 @@ from uuid import uuid4
 import pytest
 
 import aide.agent.context.run_context as compactor_module
-import aide.service.runtime as service_runtime
+import aide.service.runtime.service as service_runtime
 from aide.agent.context.budget import estimate_request_tokens
 from aide.agent.message_bus import InboundMessage, MessageBus
 from aide.agent.session.session import Session, SessionStoragePartition
@@ -34,6 +34,7 @@ from aide.schedule.model import JobSchedule, ScheduleJob
 from aide.service.errors import ServiceError
 from aide.service.execution import SessionExecution
 from aide.service.runtime import AgentService, SessionClaim, WorkspaceRecord
+from aide.service.runtime.records import _LoopState
 from aide.skills.catalog import LoadedSkill, SkillLoader
 from tests.agent.test_loop import _response, _Router, _runtime, _terminals
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
@@ -600,7 +601,7 @@ def _reload_runtime(
         session, bus, lambda _state: loop, service.reload_skills, loop.execution.runtime_status_input,
         run_state=loop._session_run_state,
     )
-    workspace._loops[session.session_id] = service_runtime._LoopState(loop=handle, bus=bus, owner_client_id=None)
+    workspace._loops[session.session_id] = _LoopState(loop=handle, bus=bus, owner_client_id=None)
     service._workspaces[workspace.workspace_id] = workspace
     return loop, session, bus, service
 

@@ -33,7 +33,7 @@ async def test_cli_session_selection_preserves_workspace_resources_and_client_se
         content="Durable target input",
     )
     provider = _ConcurrentProvider()
-    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda *_args: provider)
     async with cli_service(home) as service:
         client = await ServiceClient.connect_or_start(home, directory)
         try:
@@ -84,7 +84,7 @@ async def test_cli_failed_resume_leaves_current_claim_and_management_usable(
         content="Durable target input",
     )
     provider = _ConcurrentProvider()
-    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda *_args: provider)
     async with cli_service(home):
         client = await ServiceClient.connect_or_start(home, directory)
         try:

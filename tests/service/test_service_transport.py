@@ -20,7 +20,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from yarl import URL
 
-import aide.service.runtime as service_runtime
+import aide.service.runtime.projections as service_runtime
 import aide.terminal.cli as cli
 from aide.agent.session.restore import RestoreMode
 from aide.agent.session.session import Session
@@ -50,7 +50,8 @@ from aide.service.discovery import (
 )
 from aide.service.errors import ServiceError
 from aide.service.projects import ProjectCatalog
-from aide.service.runtime import AgentService, _project_job_summary
+from aide.service.runtime import AgentService
+from aide.service.runtime.projections import _project_job_summary
 from aide.service.transport import create_app
 from aide.terminal.conversation import TerminalConversationApp, _ConversationInput
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG

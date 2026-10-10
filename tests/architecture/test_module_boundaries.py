@@ -928,7 +928,7 @@ def test_issue_243_production_model_calls_use_one_explicit_run_context_seam() ->
         for node in ast.walk(run_router)
     )
     assert "_validate_model_context_budget" not in methods
-    service_tree = ast.parse((PACKAGE_ROOT / "service" / "runtime.py").read_text(encoding="utf-8"))
+    service_tree = ast.parse((PACKAGE_ROOT / "service" / "runtime" / "workspace.py").read_text(encoding="utf-8"))
     assert any(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
@@ -1013,7 +1013,7 @@ def test_service_runtime_exclusively_owns_the_confirmation_coordinator() -> None
         ):
             constructor_sites.append(path.relative_to(PROJECT_ROOT))
 
-    assert set(constructor_sites) == {Path("aide/service/runtime.py")}
+    assert set(constructor_sites) == {Path("aide/service/runtime/service.py")}
 
     loop_path = PACKAGE_ROOT / "agent" / "loop.py"
     terminal_path = PACKAGE_ROOT / "terminal" / "conversation.py"

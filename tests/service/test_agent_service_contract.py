@@ -43,7 +43,7 @@ async def test_backpressured_run_survives_reconnect_at_29_seconds(
     path = tmp_path / "workspace"
     path.mkdir()
     provider = _ConcurrentProvider(early_a_delta=True)
-    monkeypatch.setattr("aide.service.runtime.create_provider", lambda _config: provider)
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _config: provider)
     clock = FakeClock(datetime(2026, 10, 4, tzinfo=UTC))
     timer_started, wake_timer = asyncio.Event(), asyncio.Event()
     blocked, release_output = asyncio.Event(), asyncio.Event()
@@ -152,7 +152,7 @@ async def test_backpressured_client_expiry_preserves_another_active_session(
     path = tmp_path / "workspace"
     path.mkdir()
     provider = _ConcurrentProvider(block_b=True, early_a_delta=True)
-    monkeypatch.setattr("aide.service.runtime.create_provider", lambda _config: provider)
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _config: provider)
     clock = FakeClock(datetime(2026, 10, 4, tzinfo=UTC))
     timer_started, wake_timer = asyncio.Event(), asyncio.Event()
     blocked, release_output = asyncio.Event(), asyncio.Event()
@@ -477,7 +477,7 @@ async def test_takeover_captures_current_client_permission_and_retires_executors
     path.mkdir()
     provider = _ConcurrentProvider()
     provider.release_b.set()
-    monkeypatch.setattr("aide.service.runtime.create_provider", lambda _config: provider)
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _config: provider)
     service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     observed: list[str] = []
@@ -598,7 +598,7 @@ async def test_departure_cancels_blocked_title_and_flushes_retained_history(
             return title()
 
     provider = Provider()
-    monkeypatch.setattr("aide.service.runtime.create_provider", lambda _config: provider)
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _config: provider)
     home = _home(tmp_path / "home")
     path = tmp_path / "workspace"
     path.mkdir()

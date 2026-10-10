@@ -1030,11 +1030,11 @@ async def _run_cli_terminal_case(
             async with self.run_test(size=size) as pilot:
                 await scenario(self, pilot)
 
-    monkeypatch.setattr("aide.service.runtime.AgentRunExecutor", DeterministicExecutor)
+    monkeypatch.setattr("aide.service.runtime.workspace.AgentRunExecutor", DeterministicExecutor)
     monkeypatch.setattr(cli, "TerminalConversationApp", ScenarioApp)
     monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
     monkeypatch.setattr(
-        "aide.service.runtime.create_provider", lambda _configuration: selected_provider
+        "aide.service.runtime.service.create_provider", lambda _configuration: selected_provider
     )
     async with cli_service(home):
         await cli._run_service_cli_conversation(agent_home=home, workspace=workspace)

@@ -80,7 +80,7 @@ model = "small-model"
         wake_timer.clear()
 
     provider = _ConcurrentProvider()
-    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda *_args: provider)
     service = AgentService(
         home,
         ConfigLoader(home).load_for_startup(),

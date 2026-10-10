@@ -24,7 +24,7 @@ async def test_project_memory_is_scoped_and_does_not_create_sessions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = _prepare_agent_home(tmp_path / "home")
-    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_: _ConcurrentProvider())
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda *_: _ConcurrentProvider())
     service = AgentService(home)
     await service.start()
     try:
@@ -97,7 +97,7 @@ async def test_hosted_restart_applies_config_and_keeps_browser_authentication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = _prepare_agent_home(tmp_path / "home")
-    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_: _ConcurrentProvider())
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda *_: _ConcurrentProvider())
     host = asyncio.create_task(serve_service(home, port=0, reconnect_timeout=3))
     headers: dict[str, str] = {}
     base = ""

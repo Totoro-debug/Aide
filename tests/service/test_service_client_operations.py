@@ -49,7 +49,7 @@ async def connected_client(
     session_id = await _persist_session(
         workspace, home=home, title="Recovery", created_at=datetime.now(UTC), content="saved history",
     )
-    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_args: _ConcurrentProvider())
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda *_args: _ConcurrentProvider())
     service = AgentService(home, ConfigLoader(home).load_for_startup())
     await service.start()
     async with AsyncExitStack() as stack:

@@ -109,7 +109,7 @@ async def test_cli_real_mcp_flow_persists_result_reuses_session_snapshot_and_clo
     )
     (home.path / "config.toml").write_text(content, encoding="utf-8")
     provider = _EchoProvider()
-    monkeypatch.setattr("aide.service.runtime.create_provider", lambda *_args: provider)
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda *_args: provider)
     async with cli_service(home) as service:
         client = await ServiceClient.connect_or_start(home, directory)
         try:
@@ -197,7 +197,7 @@ async def test_cli_workspace_wire_discovery_retains_safe_aggregate_skip_report(
     directory = tmp_path / "workspace"
     directory.mkdir()
     monkeypatch.setattr(
-        "aide.service.runtime.create_provider", lambda *_args: _ConcurrentProvider()
+        "aide.service.runtime.service.create_provider", lambda *_args: _ConcurrentProvider()
     )
     observed = ObservedLifetimes(monkeypatch)
     async with cli_service(home) as service:

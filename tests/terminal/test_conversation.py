@@ -86,16 +86,11 @@ from aide.provider.models import (
 from aide.service.client import RemoteManagementCommandDispatcher
 from aide.skills.catalog import SkillMetadata
 from aide.templates import render_template
-from aide.terminal.conversation import (
-    TerminalConversationApp,
-    _ConversationInput,
-    _format_activity_duration,
-    _RestoreConfirmationScreen,
-    _RestoreModeScreen,
-)
-from aide.terminal.conversation import (
-    _MessageBusRunProjection as _AgentRunProjection,
-)
+from aide.terminal.conversation import TerminalConversationApp
+from aide.terminal.ui.activity import _format_activity_duration
+from aide.terminal.ui.dialogs.restore import _RestoreConfirmationScreen, _RestoreModeScreen
+from aide.terminal.ui.input import _ConversationInput
+from aide.terminal.ui.rendering import _MessageBusRunProjection as _AgentRunProjection
 from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from aide.utils.json_types import JsonObject
@@ -1257,7 +1252,9 @@ async def _wait_for_turn(app: TerminalConversationApp) -> None:
             or getattr(text_area, "active_turn_token", None) is not None
             or app._active_run_projection is not None
         ):
-            await asyncio.sleep(0)
+            refreshed = asyncio.Event()
+            app.call_after_refresh(refreshed.set)
+            await refreshed.wait()
         refreshed = asyncio.Event()
         app.call_after_refresh(refreshed.set)
         await refreshed.wait()
@@ -2920,17 +2917,18 @@ async def test_resumed_long_history_starts_latest_and_preserves_input_history(
         await _wait_for_session_picker(app, pilot)
         await pilot.press("enter")
         display = app.query_one("#conversation-display")
-        async with asyncio.timeout(3):
-            while (
-                app._control.project_foreground_conversation().session_id != target.session_id
-                or not display.is_vertical_scroll_end
-                or "Restored line 59" not in _visible_screen_text(app)
-            ):
-                await pilot.pause()
+        await _wait_for_refresh_condition(
+            app,
+            lambda: (
+                app._control.project_foreground_conversation().session_id == target.session_id
+                and display.is_vertical_scroll_end
+                and "Restored line 59" in _visible_screen_text(app)
+            ),
+        )
 
         assert not app.query_one("#new-content").display
         await pilot.resize_terminal(40, 20)
-        await pilot.pause()
+        await _wait_for_refresh_condition(app, lambda: display.is_vertical_scroll_end)
         assert display.is_vertical_scroll_end
         input_area = app.query_one("#conversation-input", TextArea)
         assert app.screen.focused is input_area
@@ -4532,8 +4530,8 @@ async def test_tool_confirmation_actions_stay_visible_with_long_details(
 
     async with app.run_test(size=size) as pilot:
         submission = asyncio.create_task(pilot.press(*list("inspect"), "enter"))
-        await asyncio.wait_for(conversation.confirmation_requested.wait(), timeout=1)
         await _wait_for_confirmation(app, pilot)
+        assert conversation.confirmation_requested.is_set()
         decline = app.screen.query_one("#confirmation-decline", Button)
         approve = app.screen.query_one("#confirmation-approve", Button)
         details = app.screen.query_one("#confirmation-details-scroll")
@@ -5628,17 +5626,18 @@ async def test_streamed_markdown_reflows_cjk_content_after_resize() -> None:
 
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.press(*list("cjk"), "enter")
-        await asyncio.sleep(0.1)
+        await _wait_for_turn(app)
+        await _wait_for_refresh_condition(app, lambda: _content_text_nodes(app, content) == [content])
         assert _content_text_nodes(app, content) == [content]
 
         await pilot.resize_terminal(40, 18)
-        await asyncio.sleep(0.05)
+        await _wait_for_refresh_condition(app, lambda: len(_content_text_nodes(app, content)) == 2)
         narrow_lines = _content_text_nodes(app, content)
         assert len(narrow_lines) == 2
         assert "".join(narrow_lines) == content
 
         await pilot.resize_terminal(80, 24)
-        await asyncio.sleep(0.05)
+        await _wait_for_refresh_condition(app, lambda: _content_text_nodes(app, content) == [content])
         assert _content_text_nodes(app, content) == [content]
 
 
@@ -6513,8 +6512,8 @@ async def test_undersized_terminal_blocks_an_open_confirmation_until_recovery() 
 
     async with app.run_test(size=(80, 24)) as pilot:
         submission = asyncio.create_task(pilot.press(*list("inspect"), "enter"))
-        await asyncio.wait_for(conversation.confirmation_requested.wait(), timeout=1)
-        await pilot.pause()
+        await _wait_for_confirmation(app, pilot)
+        assert conversation.confirmation_requested.is_set()
 
         await pilot.resize_terminal(19, 9)
         await pilot.pause()

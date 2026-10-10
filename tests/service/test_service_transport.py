@@ -53,7 +53,8 @@ from aide.service.projects import ProjectCatalog
 from aide.service.runtime import AgentService
 from aide.service.runtime.projections import _project_job_summary
 from aide.service.transport import create_app
-from aide.terminal.conversation import TerminalConversationApp, _ConversationInput
+from aide.terminal.conversation import TerminalConversationApp
+from aide.terminal.ui.input import _ConversationInput
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 
 

@@ -10,7 +10,7 @@ from setuptools import build_meta as _setuptools  # type: ignore[import-untyped]
 from scripts.validate_web_assets import validate_web_assets
 
 ROOT = Path(__file__).resolve().parents[1]
-ASSET_ROOT = ROOT / "aide" / "web_assets"
+ASSET_ROOT = ROOT / "aide" / "client" / "web" / "assets"
 
 
 def _validate_assets() -> None:

@@ -32,7 +32,7 @@ from textual.pilot import Pilot
 from textual.widget import Widget
 from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
 
-import aide.terminal.cli as cli
+import aide.client.cli.cli as cli
 from aide.agent.confirmation import (
     BackgroundConfirmationOwner,
     ConfirmationAborted,
@@ -63,6 +63,11 @@ from aide.agent.tools.tool_gateway import (
     ModelToolCall,
 )
 from aide.agent.workspace_state import WorkspaceState
+from aide.client.cli.conversation import TerminalConversationApp
+from aide.client.cli.ui.activity import _format_activity_duration
+from aide.client.cli.ui.dialogs.restore import _RestoreConfirmationScreen, _RestoreModeScreen
+from aide.client.cli.ui.input import _ConversationInput
+from aide.client.cli.ui.rendering import _MessageBusRunProjection as _AgentRunProjection
 from aide.config.agent_home import AgentHome
 from aide.management.commands import (
     MANAGEMENT_COMMANDS,
@@ -86,11 +91,6 @@ from aide.provider.models import (
 from aide.service.client import RemoteManagementCommandDispatcher
 from aide.skills.catalog import SkillMetadata
 from aide.templates import render_template
-from aide.terminal.conversation import TerminalConversationApp
-from aide.terminal.ui.activity import _format_activity_duration
-from aide.terminal.ui.dialogs.restore import _RestoreConfirmationScreen, _RestoreModeScreen
-from aide.terminal.ui.input import _ConversationInput
-from aide.terminal.ui.rendering import _MessageBusRunProjection as _AgentRunProjection
 from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from aide.utils.json_types import JsonObject

@@ -6,7 +6,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from web.scripts import e2e_service
+from aide.client.web.frontend.scripts import e2e_service
 
 
 @pytest.mark.asyncio

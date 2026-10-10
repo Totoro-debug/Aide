@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from aide.terminal.keyboard import EnhancedKeyboardAction, EnhancedKeyboardAdapter
+from aide.client.cli.keyboard import EnhancedKeyboardAction, EnhancedKeyboardAdapter
 
 
 class RecordingTerminal:

@@ -10,7 +10,8 @@ from setuptools import Distribution  # type: ignore[import-untyped]
 from scripts.packaging.commands import build_py
 from scripts.validate_web_assets import WebAssetError, build_manifest, validate_web_assets
 
-ASSET_ROOT = Path(__file__).parents[2] / "aide" / "web_assets"
+ROOT = Path(__file__).parents[2]
+ASSET_ROOT = ROOT / "aide" / "client" / "web" / "assets"
 
 
 def test_packaged_web_assets_have_a_verified_manifest() -> None:
@@ -72,7 +73,7 @@ def test_manifest_rejects_stale_file_hash(tmp_path: Path) -> None:
 
 def test_build_cleanup_rejects_source_directory() -> None:
     command = build_py(Distribution())
-    command.build_lib = str(ASSET_ROOT.parents[1])
+    command.build_lib = str(ROOT)
     before = {path: path.read_bytes() for path in ASSET_ROOT.rglob("*") if path.is_file()}
 
     with pytest.raises(ValueError, match="inside project/build"):
@@ -85,9 +86,9 @@ def test_windows_git_checkout_preserves_manifest_bytes(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     shutil.copytree(
-        ASSET_ROOT, source / "aide/web_assets", ignore=shutil.ignore_patterns("__pycache__")
+        ASSET_ROOT, source / "aide/client/web/assets", ignore=shutil.ignore_patterns("__pycache__")
     )
-    shutil.copy2(ASSET_ROOT.parents[1] / ".gitattributes", source / ".gitattributes")
+    shutil.copy2(ROOT / ".gitattributes", source / ".gitattributes")
 
     def git(*arguments: str) -> None:
         subprocess.run(
@@ -121,4 +122,4 @@ def test_windows_git_checkout_preserves_manifest_bytes(tmp_path: Path) -> None:
     checkout = tmp_path / "checkout"
     git("clone", "--quiet", "-c", "core.autocrlf=true", str(source), str(checkout))
 
-    assert validate_web_assets(checkout / "aide/web_assets") == validate_web_assets(ASSET_ROOT)
+    assert validate_web_assets(checkout / "aide/client/web/assets") == validate_web_assets(ASSET_ROOT)

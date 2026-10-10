@@ -10,9 +10,9 @@ from loguru import logger
 
 from aide.agent.tools.mcp import MCPTool
 from aide.agent.tools.mcp_runtime import MCPRuntimeManager, MCPWorkspaceRuntimeManager
+from aide.client.cli.process_entry import run
 from aide.config.config import MCPServerConfiguration
 from aide.logging.process import configure_process_logging
-from aide.terminal.process_entry import run
 
 if TYPE_CHECKING:
     from loguru import Record

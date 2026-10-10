@@ -1,8 +1,9 @@
 include LICENSE README.md MANIFEST.in pyproject.toml
 include scripts/*.py
 recursive-include scripts/packaging *.py
-include aide/web_assets/index.html
-include aide/web_assets/favicon.svg
-include aide/web_assets/manifest.json
-recursive-include aide/web_assets/assets *
+include aide/client/web/assets/index.html
+include aide/client/web/assets/favicon.svg
+include aide/client/web/assets/manifest.json
+recursive-include aide/client/web/assets/assets *
+prune aide/client/web/frontend
 global-exclude __pycache__ *.py[cod]

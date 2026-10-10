@@ -1666,7 +1666,7 @@ def _safe_asset_path(value: str) -> bool:
 def _read_web_asset(asset_path: str) -> bytes:
     if not _safe_asset_path(asset_path):
         raise FileNotFoundError(asset_path)
-    package = resources.files("aide.web_assets")
+    package = resources.files("aide.client.web.assets")
     asset = package.joinpath(*asset_path.split("/"))
     if isinstance(package, Path) and isinstance(asset, Path):
         if not asset.resolve().is_relative_to(package.resolve()):

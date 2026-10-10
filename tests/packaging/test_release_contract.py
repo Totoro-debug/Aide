@@ -287,7 +287,7 @@ def test_distribution_directly_declares_host_timezone_discovery() -> None:
 def test_distribution_metadata_builds_one_windows_runtime_wheel() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
 
-    assert project["scripts"]["aide"] == "aide.terminal.process_entry:run"
+    assert project["scripts"]["aide"] == "aide.client.cli.process_entry:run"
     assert "Operating System :: OS Independent" not in project["classifiers"]
     assert "Operating System :: Microsoft :: Windows" in project["classifiers"]
     setup_path = ROOT / "setup.cfg"
@@ -296,7 +296,17 @@ def test_distribution_metadata_builds_one_windows_runtime_wheel() -> None:
 
 
 def _ignore_unclean_build_inputs(_directory: str, names: list[str]) -> set[str]:
-    ignored = {".codegraph", ".git", ".pytest_cache", ".scratch", "build", "dist", "__pycache__"}
+    ignored = {
+        ".codegraph",
+        ".git",
+        ".pytest_cache",
+        ".scratch",
+        "build",
+        "dist",
+        "__pycache__",
+        "node_modules",
+        "test-results",
+    }
     return {name for name in names if name in ignored or name.endswith(".egg-info")}
 
 
@@ -342,6 +352,12 @@ def test_clean_distributions_build_and_import_cleanly(
 
     assert any(member.endswith("/aide/__init__.py") for member in sdist_members)
     assert "aide/__init__.py" in wheel_members
+    assert "aide/client/cli/cli.py" in wheel_members
+    assert "aide/client/web/assets/index.html" in wheel_members
+    assert not any(
+        "aide/client/web/frontend/" in member or "node_modules/" in member
+        for member in sdist_members | wheel_members
+    )
     assert not any("/tokenizer_data/" in member for member in sdist_members | wheel_members)
     assert any(line.startswith("Requires-Dist: tiktoken") for line in wheel_metadata.splitlines())
 
@@ -370,7 +386,7 @@ def test_clean_distributions_build_and_import_cleanly(
         [
             sys.executable,
             "-c",
-            ("import aide\nimport aide.terminal.cli\n"),
+            ("import aide\nimport aide.client.cli.cli\n"),
         ],
         cwd=clean_import_dir,
         env={**os.environ, "PYTHONPATH": str(install_root)},
@@ -622,7 +638,7 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
 
 
 def test_cli_source_uses_service_client_and_runtime_resource_shutdown_order() -> None:
-    cli_tree = _source_ast(ROOT / "aide" / "terminal" / "cli.py")
+    cli_tree = _source_ast(ROOT / "aide" / "client" / "cli" / "cli.py")
     conversation = _source_function(cli_tree, "_run_service_cli_conversation")
     assert _attribute_call_lines(conversation, "ServiceClient", "connect_or_start")
     assert _attribute_call_lines(conversation, "client", "close")
@@ -677,7 +693,7 @@ def test_composition_and_store_signatures_match_current_contracts() -> None:
     )
 
     terminal = _source_class(
-        _source_ast(ROOT / "aide" / "terminal" / "conversation.py"),
+        _source_ast(ROOT / "aide" / "client" / "cli" / "conversation.py"),
         "TerminalConversationApp",
     )
     terminal_init = _direct_method(terminal, "__init__")

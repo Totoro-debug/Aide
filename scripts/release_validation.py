@@ -363,7 +363,7 @@ def _source_identity() -> dict[str, object]:
         identity["working_tree"] = _working_tree_identity()
     except (OSError, subprocess.SubprocessError) as error:
         identity["working_tree"] = {"error": _exception_payload(error)}
-    manifest = ROOT / "aide" / "web_assets" / "manifest.json"
+    manifest = ROOT / "aide" / "client" / "web" / "assets" / "manifest.json"
     if manifest.is_file():
         identity["web_asset_manifest"] = {
             "path": str(manifest),
@@ -519,8 +519,8 @@ class AcceptanceScenario:
 _INSTALLED_VALIDATION_COMMAND = (
     "python -m scripts.installed_web_validation --output <external-output-dir>"
 )
-_PRODUCTION_BROWSER_COMMAND = "npm --prefix web run test:e2e"
-_STARTUP_BROWSER_COMMAND = "npm --prefix web run test:e2e:startup"
+_PRODUCTION_BROWSER_COMMAND = "npm --prefix aide/client/web/frontend run test:e2e"
+_STARTUP_BROWSER_COMMAND = "npm --prefix aide/client/web/frontend run test:e2e:startup"
 _FULL_PYTEST_COMMAND = "python -m pytest -q"
 
 
@@ -540,7 +540,7 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/e2e-runner.mjs launches aide web and asserts the isolated service URL",
+            "aide/client/web/frontend/scripts/e2e-runner.mjs launches aide web and asserts the isolated service URL",
             "the production browser path does not itself start two CLI processes",
         ),
         _INSTALLED_VALIDATION_COMMAND,
@@ -564,12 +564,12 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/e2e-runner.mjs rejects copied-tab Claim and keeps the available Session body private",
+            "aide/client/web/frontend/scripts/e2e-runner.mjs rejects copied-tab Claim and keeps the available Session body private",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
-            "web/scripts/installed-web-e2e.mjs holds distinct CLI/browser provider requests together before release and asserts both completed JSONL histories",
-            "web/scripts/installed_cli_probe.py rejects the browser Session Claim and its history GET without returning the private body",
+            "aide/client/web/frontend/scripts/installed-web-e2e.mjs holds distinct CLI/browser provider requests together before release and asserts both completed JSONL histories",
+            "aide/client/web/frontend/scripts/installed_cli_probe.py rejects the browser Session Claim and its history GET without returning the private body",
         ),
     ),
     AcceptanceScenario(
@@ -592,7 +592,7 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/e2e-runner.mjs observes socket close/reconnect and asserts one accepted Run",
+            "aide/client/web/frontend/scripts/e2e-runner.mjs observes socket close/reconnect and asserts one accepted Run",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
@@ -615,8 +615,8 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/e2e-runner.mjs releases an Empty draft and asserts no draft JSONL remains",
-            "web/scripts/e2e-runner.mjs hands an available Session to the second browser client",
+            "aide/client/web/frontend/scripts/e2e-runner.mjs releases an Empty draft and asserts no draft JSONL remains",
+            "aide/client/web/frontend/scripts/e2e-runner.mjs hands an available Session to the second browser client",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
@@ -639,12 +639,12 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/e2e-runner.mjs records confirmation source, resolution, and persisted terminal messages",
-            "web/scripts/settings-e2e.mjs keeps an existing Tool confirmation usable during config save",
+            "aide/client/web/frontend/scripts/e2e-runner.mjs records confirmation source, resolution, and persisted terminal messages",
+            "aide/client/web/frontend/scripts/settings-e2e.mjs keeps an existing Tool confirmation usable during config save",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
-            "web/scripts/installed-joint-e2e.mjs races two Web Clients on one background confirmation: one acceptance, one confirmation_resolved, both dialogs close, and one persisted exact Tool result",
+            "aide/client/web/frontend/scripts/installed-joint-e2e.mjs races two Web Clients on one background confirmation: one acceptance, one confirmation_resolved, both dialogs close, and one persisted exact Tool result",
         ),
     ),
     AcceptanceScenario(
@@ -664,7 +664,7 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/e2e-runner.mjs removes a registered project and asserts the removal notice plus detached registration",
+            "aide/client/web/frontend/scripts/e2e-runner.mjs removes a registered project and asserts the removal notice plus detached registration",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
@@ -685,8 +685,8 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _STARTUP_BROWSER_COMMAND,
         (
-            "web/scripts/config-startup-e2e.mjs asserts available=false, awaiting_resume, preserved saved Jobs, and config_invalid session admission",
-            "web/scripts/config-startup-e2e.mjs asserts post-repair awaiting_resume and an enabled Resume schedule control",
+            "aide/client/web/frontend/scripts/config-startup-e2e.mjs asserts available=false, awaiting_resume, preserved saved Jobs, and config_invalid session admission",
+            "aide/client/web/frontend/scripts/config-startup-e2e.mjs asserts post-repair awaiting_resume and an enabled Resume schedule control",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         ("installed lifecycle does not exercise restart-time Job admission",),
@@ -706,7 +706,7 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/e2e-runner.mjs uses the real service lifecycle controller and asserts reconnect/stop cleanup",
+            "aide/client/web/frontend/scripts/e2e-runner.mjs uses the real service lifecycle controller and asserts reconnect/stop cleanup",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
@@ -730,8 +730,8 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/e2e-runner.mjs exercises filtered rename and conflict retry",
-            "web/scripts/e2e-runner.mjs asserts delete confirmation, focus, retry, and preservation of another Session",
+            "aide/client/web/frontend/scripts/e2e-runner.mjs exercises filtered rename and conflict retry",
+            "aide/client/web/frontend/scripts/e2e-runner.mjs asserts delete confirmation, focus, retry, and preservation of another Session",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         ("installed lifecycle does not exercise rename/delete management",),
@@ -752,7 +752,7 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/e2e-runner.mjs covers Restore preview, cancel, overwrite, stale response, failure acknowledgement, and refresh",
+            "aide/client/web/frontend/scripts/e2e-runner.mjs covers Restore preview, cancel, overwrite, stale response, failure acknowledgement, and refresh",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         ("installed lifecycle does not exercise Restore UI",),
@@ -774,8 +774,8 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/e2e-runner.mjs loads real Schedule history, 20 groups, cursor pagination, and retry focus",
-            "web/scripts/e2e-runner.mjs exercises at/every/cron CRUD, lost-ack retry, deletion, and status polling",
+            "aide/client/web/frontend/scripts/e2e-runner.mjs loads real Schedule history, 20 groups, cursor pagination, and retry focus",
+            "aide/client/web/frontend/scripts/e2e-runner.mjs exercises at/every/cron CRUD, lost-ack retry, deletion, and status polling",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
@@ -799,8 +799,8 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/settings-e2e.mjs asserts stale model save leaves bytes unchanged",
-            "web/scripts/settings-e2e.mjs records structured secret replace/keep/clear and invalid-byte evidence",
+            "aide/client/web/frontend/scripts/settings-e2e.mjs asserts stale model save leaves bytes unchanged",
+            "aide/client/web/frontend/scripts/settings-e2e.mjs records structured secret replace/keep/clear and invalid-byte evidence",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
@@ -826,8 +826,8 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/settings-e2e.mjs keeps an active Tool confirmation through save",
-            "web/scripts/settings-e2e.mjs records save/restart with real model and MCP resources",
+            "aide/client/web/frontend/scripts/settings-e2e.mjs keeps an active Tool confirmation through save",
+            "aide/client/web/frontend/scripts/settings-e2e.mjs records save/restart with real model and MCP resources",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
@@ -850,7 +850,7 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _STARTUP_BROWSER_COMMAND,
         (
-            "web/scripts/config-startup-e2e.mjs runs missing/semantic-invalid/malformed states, repair, backup bytes, and no secret exposure",
+            "aide/client/web/frontend/scripts/config-startup-e2e.mjs runs missing/semantic-invalid/malformed states, repair, backup bytes, and no secret exposure",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         ("installed lifecycle starts from a valid config and does not exercise repair mode",),
@@ -872,8 +872,8 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/e2e-runner.mjs rejects a consumed browser ticket with 401",
-            "web/scripts/installed-web-e2e.mjs asserts CSP, asset MIME/cache, and 404 missing resources",
+            "aide/client/web/frontend/scripts/e2e-runner.mjs rejects a consumed browser ticket with 401",
+            "aide/client/web/frontend/scripts/installed-web-e2e.mjs asserts CSP, asset MIME/cache, and 404 missing resources",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         ("installed browser evidence records CSP, MIME/cache, and 404 assertions",),
@@ -889,8 +889,8 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         ),
         _PRODUCTION_BROWSER_COMMAND,
         (
-            "web/scripts/e2e-runner.mjs checks en/zh-CN x light/dark x three viewports and geometry",
-            "web/scripts/e2e-runner.mjs checks keyboard dialog focus restoration",
+            "aide/client/web/frontend/scripts/e2e-runner.mjs checks en/zh-CN x light/dark x three viewports and geometry",
+            "aide/client/web/frontend/scripts/e2e-runner.mjs checks keyboard dialog focus restoration",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
@@ -906,11 +906,11 @@ ACCEPTANCE_SCENARIOS: Final[tuple[AcceptanceScenario, ...]] = (
         _INSTALLED_VALIDATION_COMMAND,
         (
             "scripts/installed_web_validation.py runs direct and sdist-rebuilt wheels in isolated venvs",
-            "web/scripts/installed-web-e2e.mjs records API, deep route, Settings, WebSocket, conversation, and 404 results",
+            "aide/client/web/frontend/scripts/installed-web-e2e.mjs records API, deep route, Settings, WebSocket, conversation, and 404 results",
         ),
         _INSTALLED_VALIDATION_COMMAND,
         (
-            "web/scripts/installed_cli_probe.py asserts installed aide console entry, no node/npm, same service discovery, and JSONL assistant persistence",
+            "aide/client/web/frontend/scripts/installed_cli_probe.py asserts installed aide console entry, no node/npm, same service discovery, and JSONL assistant persistence",
             "direct and rebuilt reports both record stop=passed and port/discovery cleanup",
         ),
     ),
@@ -1926,7 +1926,7 @@ assert not module_path.is_relative_to(source_root)
 assert shutil.which("node") is None
 assert shutil.which("npm") is None
 
-asset_root = files("aide.web_assets")
+asset_root = files("aide.client.web.assets")
 manifest = json.loads((asset_root / "manifest.json").read_text(encoding="utf-8"))
 assert manifest["schema_version"] == 1
 assert manifest["entry"] == "index.html"
@@ -2023,7 +2023,7 @@ def _artifact_environment() -> dict[str, str]:
 
 
 def _source_web_asset_bytes() -> dict[str, bytes]:
-    asset_root = ROOT / "aide" / "web_assets"
+    asset_root = ROOT / "aide" / "client" / "web" / "assets"
     validator_module = cast(
         Any,
         import_module("scripts.validate_web_assets" if __package__ else "validate_web_assets"),
@@ -2038,10 +2038,10 @@ def _source_web_asset_bytes() -> dict[str, bytes]:
 
 
 def _assert_wheel_web_assets(wheel: Path, expected: Mapping[str, bytes]) -> None:
-    prefix = "aide/web_assets/"
+    prefix = "aide/client/web/assets/"
     with zipfile.ZipFile(wheel) as archive:
         names = {name.replace("\\", "/") for name in archive.namelist()}
-        if any("/web/" in name or "node_modules/" in name for name in names):
+        if any("aide/client/web/frontend/" in name or "node_modules/" in name for name in names):
             raise RuntimeError(f"wheel contains frontend source or node_modules: {wheel}")
         actual = {name.removeprefix(prefix) for name in names if name.startswith(prefix)}
         allowed = set(expected) | {"__init__.py"}
@@ -2056,10 +2056,10 @@ def _assert_wheel_web_assets(wheel: Path, expected: Mapping[str, bytes]) -> None
 
 
 def _assert_sdist_web_assets(sdist: Path, expected: Mapping[str, bytes]) -> None:
-    marker = "/aide/web_assets/"
+    marker = "/aide/client/web/assets/"
     with tarfile.open(sdist, "r:gz") as archive:
         members = {member.name.replace("\\", "/"): member for member in archive.getmembers()}
-        if any("/web/" in name or "node_modules/" in name for name in members):
+        if any("aide/client/web/frontend/" in name or "node_modules/" in name for name in members):
             raise RuntimeError(f"sdist contains frontend source or node_modules: {sdist}")
         asset_members = {
             name.split(marker, 1)[1]: member

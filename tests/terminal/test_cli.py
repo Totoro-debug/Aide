@@ -12,7 +12,7 @@ from typing import Any, cast
 import pytest
 from typer.testing import CliRunner
 
-import aide.terminal.cli as cli
+import aide.client.cli.cli as cli
 from aide.agent.loop import ModelContextOverflowError
 from aide.agent.workspace_state import WorkspaceStateError
 from aide.config.agent_home import AgentHome

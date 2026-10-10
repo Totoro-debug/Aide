@@ -3,8 +3,8 @@ import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 
 const source = resolve(process.cwd(), "dist");
-const target = resolve(process.cwd(), "../aide/web_assets");
-const projectRoot = resolve(process.cwd(), "..");
+const target = resolve(process.cwd(), "../assets");
+const projectRoot = resolve(process.cwd(), "../../../..");
 const python = process.env.PYTHON || "python";
 const validator = join(projectRoot, "scripts", "validate_web_assets.py");
 const staging = await mkdtemp(join(dirname(target), ".web-assets-staging-"));

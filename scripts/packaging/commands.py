@@ -12,7 +12,7 @@ class build_py(_build_py):  # type: ignore[misc]  # Setuptools commands are not 
     """Prevent stale generated Web files from leaking into a new wheel."""
 
     def run(self) -> None:
-        stale_assets = Path(self.build_lib) / "aide" / "web_assets"
+        stale_assets = Path(self.build_lib) / "aide" / "client" / "web" / "assets"
         if stale_assets.is_dir():
             build_root = Path(__file__).resolve().parents[2] / "build"
             if not stale_assets.resolve().is_relative_to(build_root.resolve()):

@@ -2,8 +2,8 @@ import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 
 export default async function setup({ shutdownTimeoutMs = 15000, sessionModels = false } = {}) {
-  const child = spawn("python", ["-u", "-m", "web.scripts.e2e_service"], {
-    cwd: resolve(process.cwd(), ".."),
+  const child = spawn("python", ["-u", "-m", "aide.client.web.frontend.scripts.e2e_service"], {
+    cwd: resolve(process.cwd(), "../../../.."),
     stdio: ["pipe", "pipe", "pipe"],
     env: {
       ...process.env,

@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import ts from "typescript";
 
-const schemaPath = resolve(process.cwd(), "../aide/service/protocol/v1.schema.json");
+const schemaPath = resolve(process.cwd(), "../../../service/protocol/v1.schema.json");
 const schema = JSON.parse(await readFile(schemaPath, "utf8"));
 const definitions = schema.$defs;
 const protocolSource = ts.createSourceFile(

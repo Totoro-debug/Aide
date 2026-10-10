@@ -15,6 +15,7 @@ from aide.agent.message_bus import MessageBus
 from aide.agent.session.execution_state import SessionRunState
 from aide.agent.session.session import RestoreAnchor, Session
 from aide.agent.workspace_state import WorkspaceState
+from aide.client.cli.conversation import TerminalConversationApp
 from aide.management.commands import (
     ManagementCommandDispatcher,
     ManagementPort,
@@ -23,7 +24,6 @@ from aide.management.commands import (
 from aide.management.service import (
     RestoreListingReport,
 )
-from aide.terminal.conversation import TerminalConversationApp
 
 SESSION_ID = "20260926-120000-000000_550e8400-e29b-41d4-a716-446655440000"
 ANCHOR_TOKEN = UUID("550e8400-e29b-41d4-a716-446655440001")

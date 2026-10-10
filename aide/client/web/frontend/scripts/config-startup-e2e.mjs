@@ -14,7 +14,7 @@ if (process.platform !== "win32") {
   process.exit(1);
 }
 
-const repoRoot = resolve(process.cwd(), "..");
+const repoRoot = resolve(process.cwd(), "../../../..");
 const output = resolve(process.cwd(), "test-results", "config-startup-e2e");
 const narrowViewport = { width: 390, height: 844 };
 const viewports = [narrowViewport, { width: 768, height: 1024 }, { width: 1024, height: 768 }, { width: 1440, height: 900 }];
@@ -32,7 +32,7 @@ function startupCli(homeRoot, command) {
   const argv = JSON.stringify(["aide", ...command]);
   const source = [
     "import sys, webbrowser",
-    "from aide.terminal.process_entry import run",
+    "from aide.client.cli.process_entry import run",
     "webbrowser.open_new_tab = lambda _url: False",
     `sys.argv = ${argv}`,
     "run()",
@@ -53,7 +53,7 @@ function startupCli(homeRoot, command) {
 async function startHarness(state, root) {
   const child = spawn(
     "python",
-    ["-u", "-m", "web.scripts.config_startup_e2e_service", "--state", state, "--root", root],
+    ["-u", "-m", "aide.client.web.frontend.scripts.config_startup_e2e_service", "--state", state, "--root", root],
     { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] },
   );
   let stdout = "";

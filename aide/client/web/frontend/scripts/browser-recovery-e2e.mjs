@@ -67,7 +67,7 @@ export default async function browserRecoveryAcceptance({ page: initialPage, con
       "        await client.close()",
       "asyncio.run(run())",
     ].join("\n"), control.details.home_root, control.details.cli_workspace], {
-      cwd: "..", encoding: "utf8", timeout: 30000,
+      cwd: "../../../..", encoding: "utf8", timeout: 30000,
     });
     assert.equal(launch.status, 0, "The CLI could not issue a fresh browser authorization ticket");
     const launchUrl = launch.stdout.match(/http:\/\/127\.0\.0\.1:\d+\/#ticket=[\w-]+/)?.[0];

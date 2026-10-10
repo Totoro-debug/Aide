@@ -44,54 +44,45 @@ from aide.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
 from aide.agent.permission import ToolPermissionLevel
 from aide.agent.session.restore import RestoreMode, RestorePlan, RestoreResult
 from aide.agent.session.session import RestoreAnchor
-from aide.management.commands import (
-    RELOAD_SKILL_MANAGEMENT_COMMAND,
-    RESUME_MANAGEMENT_COMMAND,
-    ManagementCommandDispatcher,
-    ManagementCommandResult,
-)
-from aide.management.service import FatalManagementError, RuntimeStatus, SessionListingEntry
-from aide.provider.models import ReasoningEffort
-from aide.skills.catalog import SkillMetadata
-from aide.terminal.keyboard import EnhancedKeyboardAdapter
-from aide.terminal.ui.activity import (
+from aide.client.cli.keyboard import EnhancedKeyboardAdapter
+from aide.client.cli.ui.activity import (
     _activity_group_heading_text,
     _ActivityGroupHeading,
     _ActivityGroupState,
     _tool_row_content,
     _ToolRowStatus,
 )
-from aide.terminal.ui.dialogs.confirmation import (
+from aide.client.cli.ui.dialogs.confirmation import (
     ConfirmationDecision,
     _FullAccessWarningScreen,
     _ToolConfirmationScreen,
 )
-from aide.terminal.ui.dialogs.restore import (
+from aide.client.cli.ui.dialogs.restore import (
     _RestoreAnchorPickerScreen,
     _RestoreConfirmationScreen,
     _RestoreFailureScreen,
     _RestoreModeScreen,
     _RestoreWaitingScreen,
 )
-from aide.terminal.ui.dialogs.sessions import (
+from aide.client.cli.ui.dialogs.sessions import (
     _ConversationRecoveryScreen,
     _SessionPickerScreen,
     _SessionSwitchConfirmationScreen,
 )
-from aide.terminal.ui.dialogs.size import (
+from aide.client.cli.ui.dialogs.size import (
     _MIN_TERMINAL_HEIGHT,
     _MIN_TERMINAL_WIDTH,
     _SizeInsufficientScreen,
 )
-from aide.terminal.ui.display import _COMPACT_MESSAGE_MAX_WIDTH, _ConversationDisplay
-from aide.terminal.ui.input import (
+from aide.client.cli.ui.display import _COMPACT_MESSAGE_MAX_WIDTH, _ConversationDisplay
+from aide.client.cli.ui.input import (
     _CommandCompletion,
     _completion_candidates,
     _CompletionCandidate,
     _CompletionCandidateKind,
     _ConversationInput,
 )
-from aide.terminal.ui.rendering import (
+from aide.client.cli.ui.rendering import (
     _classify_historical_partition,
     _markdown_parser,
     _MessageBusRunProjection,
@@ -102,7 +93,16 @@ from aide.terminal.ui.rendering import (
     _queue_excerpt,
     _status_view_text,
 )
-from aide.terminal.ui.selectors import _PermissionSelector, _ReasoningEffortSelector
+from aide.client.cli.ui.selectors import _PermissionSelector, _ReasoningEffortSelector
+from aide.management.commands import (
+    RELOAD_SKILL_MANAGEMENT_COMMAND,
+    RESUME_MANAGEMENT_COMMAND,
+    ManagementCommandDispatcher,
+    ManagementCommandResult,
+)
+from aide.management.service import FatalManagementError, RuntimeStatus, SessionListingEntry
+from aide.provider.models import ReasoningEffort
+from aide.skills.catalog import SkillMetadata
 
 _RELOAD_SKILL_MANAGEMENT_COMMAND_TOKEN = RELOAD_SKILL_MANAGEMENT_COMMAND.token
 

@@ -19,15 +19,15 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import aide
-import aide.terminal.cli as cli
+import aide.client.cli.cli as cli
 from aide.agent.message_bus import InboundMessage
 from aide.agent.workspace_state import WorkspaceState
+from aide.client.cli.conversation import TerminalConversationApp
 from aide.config.agent_home import AgentHome
 from aide.schedule.store import WorkspaceScheduleStore
 from aide.service.client import ServiceClient
 from aide.service.discovery import read_discovery
 from aide.service.errors import ServiceError
-from aide.terminal.conversation import TerminalConversationApp
 
 
 class _ProcessExitWitness:

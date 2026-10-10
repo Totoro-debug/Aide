@@ -15,13 +15,13 @@ from typing import Literal
 from uuid import uuid4
 
 from aide.agent.workspace_state import WorkspaceState
+from aide.client.web.frontend.scripts.e2e_service import _start_fixture_provider
 from aide.config.agent_home import AgentHome
 from aide.schedule.model import JobSchedule, ScheduleJob
 from aide.schedule.store import WorkspaceScheduleStore
 from aide.service.client import ServiceClient
 from aide.service.discovery import DEFAULT_SERVICE_PORT, discovery_path, read_discovery
 from aide.service.projects import ProjectCatalog
-from web.scripts.e2e_service import _start_fixture_provider
 
 StartupState = Literal["missing", "invalid", "malformed"]
 MALFORMED_SECRET = "malformed-secret-303"
@@ -33,7 +33,7 @@ async def _launch_web(root: Path, workspace: Path) -> str:
         listener.bind(("127.0.0.1", DEFAULT_SERVICE_PORT))
     source = (
         "import sys, webbrowser; "
-        "from aide.terminal.process_entry import run; "
+        "from aide.client.cli.process_entry import run; "
         "webbrowser.open_new_tab = lambda _url: False; "
         "sys.argv = ['aide', 'web']; run()"
     )
@@ -41,7 +41,7 @@ async def _launch_web(root: Path, workspace: Path) -> str:
         **os.environ,
         "USERPROFILE": str(root),
         "HOME": str(root),
-        "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+        "PYTHONPATH": str(Path(__file__).resolve().parents[5]),
     }
     process = await asyncio.create_subprocess_exec(
         sys.executable,

@@ -12,14 +12,14 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
+from aide.client.cli.conversation import TerminalConversationApp
+from aide.client.cli.ui.input import _ConversationInput
 from aide.config.config import ConfigLoader
 from aide.service.client import ServiceStartupError
 from aide.service.discovery import ServiceDiscovery, create_credential, write_discovery
 from aide.service.errors import ServiceError
 from aide.service.runtime import AgentService
 from aide.service.transport import _WebSocketSink, create_app
-from aide.terminal.conversation import TerminalConversationApp
-from aide.terminal.ui.input import _ConversationInput
 from tests.fixtures.service_client import ObservedServiceClient
 from tests.service.test_protocol_contract import _validator
 from tests.service.test_service_concurrency import _CollectingSink, _ConcurrentProvider

@@ -20,8 +20,7 @@ from textual.widget import Widget
 from textual.widgets import Markdown
 
 from aide.agent.message_bus import OutboundMessage
-from aide.management.service import RuntimeStatus
-from aide.terminal.ui.activity import (
+from aide.client.cli.ui.activity import (
     _activity_group_heading_text,
     _ActivityGroupState,
     _TerminalOutcome,
@@ -29,10 +28,11 @@ from aide.terminal.ui.activity import (
     _ToolRowState,
     _ToolRowStatus,
 )
-from aide.terminal.ui.display import _ConversationDisplay
+from aide.client.cli.ui.display import _ConversationDisplay
+from aide.management.service import RuntimeStatus
 
 if TYPE_CHECKING:
-    from aide.terminal.conversation import TerminalConversationApp
+    from aide.client.cli.conversation import TerminalConversationApp
 
 
 _SPARSE_MARKERS = ("_stream_delta", "_stream_end", "_streamed")

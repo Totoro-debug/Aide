@@ -16,7 +16,7 @@ from textual.scrollbar import ScrollTo
 from textual.widget import Widget
 from textual.widgets import Static
 
-from aide.terminal.ui.activity import _ActivityGroupHeading
+from aide.client.cli.ui.activity import _ActivityGroupHeading
 
 _COMPACT_MESSAGE_MAX_WIDTH = 60
 

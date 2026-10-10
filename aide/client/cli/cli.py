@@ -12,6 +12,10 @@ from aide.agent.loop import ModelContextOverflowError
 from aide.agent.workspace_state import (
     WorkspaceStateError,
 )
+from aide.client.cli.conversation import (
+    TerminalConversationApp,
+    is_interactive_terminal,
+)
 from aide.config.agent_home import AgentHome
 from aide.management.commands import ManagementCommandDispatcher
 from aide.management.service import (
@@ -20,10 +24,6 @@ from aide.management.service import (
 from aide.service.client import ServiceClient, ServiceStartupError
 from aide.service.errors import ServiceError
 from aide.skills.catalog import SkillMetadata
-from aide.terminal.conversation import (
-    TerminalConversationApp,
-    is_interactive_terminal,
-)
 from aide.utils.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
 
 app = typer.Typer(

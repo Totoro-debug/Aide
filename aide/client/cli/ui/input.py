@@ -12,12 +12,12 @@ from textual.events import Key
 from textual.message import Message
 from textual.widgets import OptionList, TextArea
 
+from aide.client.cli.keyboard import EnhancedKeyboardAction, EnhancedKeyboardAdapter
+from aide.client.cli.ui.display import _CONVERSATION_NAVIGATION_KEYS, _ConversationDisplay
 from aide.management.commands import (
     MANAGEMENT_COMMANDS,
 )
 from aide.skills.catalog import SkillMetadata
-from aide.terminal.keyboard import EnhancedKeyboardAction, EnhancedKeyboardAdapter
-from aide.terminal.ui.display import _CONVERSATION_NAVIGATION_KEYS, _ConversationDisplay
 
 type _ControlAction = Literal["cancel_active_turn", "clear_draft", "drain_pending", "exit"]
 

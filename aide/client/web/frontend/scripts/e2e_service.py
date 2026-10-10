@@ -723,7 +723,7 @@ async def _run_e2e(provider_base_url: str) -> None:
     global CONFIRMATION_PATH, MODEL_MCP_ENTERED, MODEL_MCP_RELEASE, PROVIDER_OBSERVATION_PATH
     with tempfile.TemporaryDirectory(prefix="aide-web-e2e-") as root:
         path = Path(root)
-        repo_root = Path(__file__).resolve().parents[2]
+        repo_root = Path(__file__).resolve().parents[5]
         CONFIRMATION_PATH = str(path / "confirmation-outside.txt")
         Path(CONFIRMATION_PATH).write_text("confirmation fixture content\n", encoding="utf-8")
         MODEL_MCP_ENTERED.clear()

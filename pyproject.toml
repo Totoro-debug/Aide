@@ -44,7 +44,7 @@ dev = [
 ]
 
 [project.scripts]
-aide = "aide.terminal.process_entry:run"
+aide = "aide.client.cli.process_entry:run"
 
 [tool.setuptools.cmdclass]
 build_py = "scripts.packaging.commands.build_py"
@@ -52,11 +52,12 @@ build_py = "scripts.packaging.commands.build_py"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["aide*"]
+exclude = ["aide.client.web.frontend*"]
 
 [tool.setuptools.package-data]
 "aide.templates" = ["*.md"]
 "aide.service.protocol" = ["*.json"]
-"aide.web_assets" = [
+"aide.client.web.assets" = [
     "*.html",
     "*.json",
     "*.js",
@@ -81,5 +82,6 @@ select = ["B", "E4", "E7", "E9", "F", "I", "RUF", "UP"]
 
 [tool.mypy]
 files = ["aide", "tests"]
+exclude = ["^aide/client/web/frontend/"]
 python_version = "3.12"
 strict = true

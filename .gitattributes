@@ -1,8 +1,8 @@
-aide/web_assets/assets/* -text -diff
+aide/client/web/assets/assets/* -text -diff
 # Published resources must retain the exact bytes recorded in manifest.json.
-aide/web_assets/** -text
+aide/client/web/assets/** -text
 # The Windows manifest writer uses CRLF; preserve its published bytes.
-aide/web_assets/manifest.json whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+aide/client/web/assets/manifest.json whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 # Keep Vite input resources consistent before publishing their exact bytes.
-web/index.html text eol=lf
-web/public/favicon.svg text eol=lf
+aide/client/web/frontend/index.html text eol=lf
+aide/client/web/frontend/public/favicon.svg text eol=lf

@@ -18,7 +18,8 @@ from pathlib import Path
 
 import aiohttp
 
-import web.scripts.e2e_service as fixture_service
+import aide.client.web.frontend.scripts.e2e_service as fixture_service
+from aide.client.web.frontend.scripts.e2e_service import _start_fixture_provider
 from aide.config.agent_home import AgentHome
 from aide.service.discovery import read_credential, read_discovery
 from aide.utils.platform import WINDOWS_REQUIRED_ERROR, is_windows_host
@@ -36,7 +37,6 @@ from scripts.release_validation import (
     _source_web_asset_bytes,
     build_acceptance_matrix,
 )
-from web.scripts.e2e_service import _start_fixture_provider
 
 
 def build_distributions(output: Path) -> tuple[Path, Path]:
@@ -241,7 +241,7 @@ async def _run_installed_cli_competition(
                     "command": [
                         str(python),
                         "-I",
-                        str(ROOT / "web/scripts/installed_cli_probe.py"),
+                        str(ROOT / "aide/client/web/frontend/scripts/installed_cli_probe.py"),
                     ],
                     "environment": {
                         **scenario_environment,
@@ -378,8 +378,8 @@ async def _run_installed_last_client_exit(
         "AIDE_CLI_DONE": str(companion_done),
         "AIDE_CLI_PROMPT": "installed CLI companion streaming markdown",
     }
-    keep_command = [str(python), "-I", str(ROOT / "web/scripts/installed_cli_probe.py")]
-    companion_command = [str(python), "-I", str(ROOT / "web/scripts/installed_cli_probe.py")]
+    keep_command = [str(python), "-I", str(ROOT / "aide/client/web/frontend/scripts/installed_cli_probe.py")]
+    companion_command = [str(python), "-I", str(ROOT / "aide/client/web/frontend/scripts/installed_cli_probe.py")]
     keep_process = await asyncio.create_subprocess_exec(
         *keep_command,
         cwd=workspace,
@@ -566,7 +566,7 @@ async def _run_installed_joint(
         }
         browser_process = await asyncio.create_subprocess_exec(
             node,
-            str(ROOT / "web/scripts/installed-joint-e2e.mjs"),
+            str(ROOT / "aide/client/web/frontend/scripts/installed-joint-e2e.mjs"),
             cwd=workspace,
             env=browser_environment,
             stdout=asyncio.subprocess.PIPE,
@@ -607,7 +607,7 @@ async def _run_installed_joint(
         cli_process = await asyncio.create_subprocess_exec(
             str(python),
             "-I",
-            str(ROOT / "web/scripts/installed_cli_probe.py"),
+            str(ROOT / "aide/client/web/frontend/scripts/installed_cli_probe.py"),
             cwd=workspace,
             env=cli_environment,
             stdout=asyncio.subprocess.PIPE,
@@ -638,11 +638,11 @@ async def _run_installed_joint(
             raise RuntimeError(f"installed joint evidence is invalid: {result}")
         return {
             **result,
-            "browser_command": [node, str(ROOT / "web/scripts/installed-joint-e2e.mjs")],
+            "browser_command": [node, str(ROOT / "aide/client/web/frontend/scripts/installed-joint-e2e.mjs")],
             "cli_command": [
                 str(python),
                 "-I",
-                str(ROOT / "web/scripts/installed_cli_probe.py"),
+                str(ROOT / "aide/client/web/frontend/scripts/installed_cli_probe.py"),
             ],
         }
     finally:
@@ -796,7 +796,7 @@ model = "small-model"
         }
         browser_process = await asyncio.create_subprocess_exec(
             node,
-            str(ROOT / "web/scripts/installed-web-e2e.mjs"),
+            str(ROOT / "aide/client/web/frontend/scripts/installed-web-e2e.mjs"),
             cwd=workspace,
             env=browser_environment,
             stdout=asyncio.subprocess.PIPE,
@@ -818,7 +818,7 @@ model = "small-model"
             cli_process = await asyncio.create_subprocess_exec(
                 str(python),
                 "-I",
-                str(ROOT / "web/scripts/installed_cli_probe.py"),
+                str(ROOT / "aide/client/web/frontend/scripts/installed_cli_probe.py"),
                 discovery["service_instance_id"],
                 str(discovery["pid"]),
                 cwd=workspace,
@@ -851,7 +851,7 @@ model = "small-model"
             [
                 str(python),
                 "-I",
-                str(ROOT / "web/scripts/installed_cli_probe.py"),
+                str(ROOT / "aide/client/web/frontend/scripts/installed_cli_probe.py"),
                 discovery["service_instance_id"],
                 str(discovery["pid"]),
             ],
@@ -915,11 +915,11 @@ model = "small-model"
             "cross_client": {
                 "browser_ready": browser_ready,
                 "cli": cross_cli,
-                "browser_command": [node, str(ROOT / "web/scripts/installed-web-e2e.mjs")],
+                "browser_command": [node, str(ROOT / "aide/client/web/frontend/scripts/installed-web-e2e.mjs")],
                 "cli_command": [
                     str(python),
                     "-I",
-                    str(ROOT / "web/scripts/installed_cli_probe.py"),
+                    str(ROOT / "aide/client/web/frontend/scripts/installed_cli_probe.py"),
                 ],
             },
             "cli": cli_evidence,
@@ -1045,10 +1045,10 @@ async def validate(wheels: tuple[Path, Path], output: Path, node: str) -> None:
             name: sha256((ROOT / name).read_bytes()).hexdigest()
             for name in (
                 "scripts/installed_web_validation.py",
-                "web/scripts/installed_cli_probe.py",
-                "web/scripts/installed-web-e2e.mjs",
-                "web/scripts/installed-joint-e2e.mjs",
-                "web/scripts/e2e_service.py",
+                "aide/client/web/frontend/scripts/installed_cli_probe.py",
+                "aide/client/web/frontend/scripts/installed-web-e2e.mjs",
+                "aide/client/web/frontend/scripts/installed-joint-e2e.mjs",
+                "aide/client/web/frontend/scripts/e2e_service.py",
             )
         },
         "terminal_validation": {

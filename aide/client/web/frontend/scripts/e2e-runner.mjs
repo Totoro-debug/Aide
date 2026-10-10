@@ -188,12 +188,12 @@ try {
   }
   const launch = spawnSync("python", ["-c", [
     "import sys, webbrowser",
-    "from aide.terminal.process_entry import run",
+    "from aide.client.cli.process_entry import run",
     "webbrowser.open_new_tab = lambda _url: False",
     "sys.argv = ['aide', 'web']",
     "run()",
   ].join("; ")], {
-    cwd: resolve(process.cwd(), ".."),
+    cwd: resolve(process.cwd(), "../../../.."),
     env: {
       ...process.env,
       USERPROFILE: process.env.AIDE_E2E_HOME_ROOT,

@@ -13,6 +13,6 @@ def run() -> None:
         raise SystemExit(1)
     configure_process_logging()
 
-    from aide.terminal.cli import app
+    from aide.client.cli.cli import app
 
     app()

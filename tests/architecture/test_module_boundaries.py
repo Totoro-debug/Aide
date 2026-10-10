@@ -13,7 +13,7 @@ from aide.agent.context.builder import ContextBuilder
 
 PROJECT_ROOT = Path(__file__).parents[2]
 PACKAGE_ROOT = PROJECT_ROOT / "aide"
-_CLI_PATH = Path("aide/terminal/cli.py")
+_CLI_PATH = Path("aide/client/cli/cli.py")
 _TOOL_EXECUTION_DISPATCH_METHODS = frozenset(
     {"execute", "execute_prepared", "execute_authorized", "execute_authorized_for_context"}
 )
@@ -69,7 +69,8 @@ def test_agent_owned_packages_have_no_top_level_compatibility_exports() -> None:
 
 
 def _python_files(root: Path) -> tuple[Path, ...]:
-    return tuple(sorted(root.rglob("*.py")))
+    frontend = PACKAGE_ROOT / "client" / "web" / "frontend"
+    return tuple(sorted(path for path in root.rglob("*.py") if not path.is_relative_to(frontend)))
 
 
 def _imports(path: Path) -> tuple[tuple[str, int], ...]:
@@ -543,7 +544,7 @@ def test_tools_do_not_depend_on_provider() -> None:
 def test_terminal_depends_on_ports_instead_of_tool_implementations() -> None:
     sources = {
         path.relative_to(PROJECT_ROOT): path.read_text(encoding="utf-8")
-        for path in _python_files(PACKAGE_ROOT / "terminal")
+        for path in _python_files(PACKAGE_ROOT / "client" / "cli")
     }
 
     violations = _terminal_tool_import_violations(
@@ -556,7 +557,7 @@ def test_terminal_depends_on_ports_instead_of_tool_implementations() -> None:
 def test_terminal_tool_import_checker_retains_original_symbol_form_and_line() -> None:
     references = _resolved_static_imports(
         "\nfrom aide.agent.tools.mcp_runtime import MCPRuntimeManager as Manager",
-        package=("aide", "terminal"),
+        package=("aide", "client", "cli"),
     )
 
     assert references == (
@@ -568,9 +569,9 @@ def test_terminal_tool_import_checker_retains_original_symbol_form_and_line() ->
     "path",
     [
         _CLI_PATH,
-        Path("aide/terminal/conversation.py"),
-        Path("aide/terminal/process_entry.py"),
-        Path("aide/terminal/internal/loader.py"),
+        Path("aide/client/cli/conversation.py"),
+        Path("aide/client/cli/process_entry.py"),
+        Path("aide/client/cli/internal/loader.py"),
     ],
 )
 def test_terminal_tool_import_checker_rejects_tools_in_every_terminal_module(path: Path) -> None:
@@ -592,10 +593,10 @@ def test_terminal_tool_import_checker_rejects_tools_in_every_terminal_module(pat
         "from aide.agent.tools import mcp_runtime",
         "from aide.agent.tools.mcp_runtime import *",
         "from aide.agent.tools.tool_gateway import ToolGateway as Gateway",
-        "from ..agent.tools.tool_gateway import ToolGateway",
+        "from ...agent.tools.tool_gateway import ToolGateway",
         "from aide.agent.tools.mcp_runtime import MCPRuntimeManager as Manager",
-        "from ..agent.tools.mcp_runtime import MCPRuntimeManager",
-        "from ..agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES as BUILT_INS",
+        "from ...agent.tools.mcp_runtime import MCPRuntimeManager",
+        "from ...agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES as BUILT_INS",
         "def load():\n    from aide.agent.tools.mcp_runtime import allocate_mcp_tool_name",
         "if TYPE_CHECKING:\n    from aide.agent.tools.mcp_runtime import allocate_mcp_tool_name",
     ],
@@ -648,8 +649,8 @@ def test_retired_mcp_runtime_export_is_absent() -> None:
         "import aide.mcp_runtime",
         "from aide.mcp_runtime import MCPRuntimeManager",
         "from aide import mcp_runtime",
-        "from ..mcp_runtime import MCPRuntimeManager",
-        "from .. import mcp_runtime",
+        "from ...mcp_runtime import MCPRuntimeManager",
+        "from ... import mcp_runtime",
     ],
 )
 def test_retired_mcp_runtime_import_checker_covers_import_forms(source: str) -> None:
@@ -990,7 +991,7 @@ def test_agent_modules_do_not_depend_on_terminal_presentation() -> None:
         f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
         for path in _python_files(PACKAGE_ROOT / "agent")
         for module, line in _imports(path)
-        if module == "aide.terminal" or module.startswith("aide.terminal.")
+        if module == "aide.client.cli" or module.startswith("aide.client.cli.")
     ]
 
     assert violations == []
@@ -1016,7 +1017,7 @@ def test_service_runtime_exclusively_owns_the_confirmation_coordinator() -> None
     assert set(constructor_sites) == {Path("aide/service/runtime/service.py")}
 
     loop_path = PACKAGE_ROOT / "agent" / "loop.py"
-    terminal_path = PACKAGE_ROOT / "terminal" / "conversation.py"
+    terminal_path = PACKAGE_ROOT / "client" / "cli" / "conversation.py"
     assert "ToolConfirmationCoordinator" not in loop_path.read_text(encoding="utf-8")
     assert "ToolConfirmationCoordinator" not in terminal_path.read_text(encoding="utf-8")
 
@@ -1052,7 +1053,7 @@ def test_service_runtime_exclusively_owns_the_confirmation_coordinator() -> None
 
 
 def test_terminal_conversation_lifecycle_has_no_business_lifecycle_calls() -> None:
-    path = PACKAGE_ROOT / "terminal" / "conversation.py"
+    path = PACKAGE_ROOT / "client" / "cli" / "conversation.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     app = next(
         node

@@ -7,7 +7,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
-web/node_modules/
-web/dist/
-web/test-results/
-aide/.web-assets-staging-*/
+aide/client/web/frontend/node_modules/
+aide/client/web/frontend/dist/
+aide/client/web/frontend/test-results/
+aide/client/web/.web-assets-staging-*/

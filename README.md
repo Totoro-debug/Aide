@@ -123,6 +123,10 @@ CLI 中，`Enter` 提交、`Ctrl+J` 换行、`Ctrl+C` 取消当前回复，输�
 
 ## 开发与发布验证
 
+用户端代码统一位于 `aide/client/`：`cli/` 包含命令入口和终端界面，`web/frontend/` 包含 Web 源码与开发脚本，`web/assets/` 包含随 Python 安装包发布的静态资源。
+
+开发 Web 时需要 Node.js 和 npm。在仓库根目录执行 `npm --prefix aide/client/web/frontend ci` 安装依赖，执行 `npm --prefix aide/client/web/frontend run build` 构建并校验发布资源。
+
 在安装了开发依赖的 Windows 工作区运行以下命令，验证覆盖、PowerShell 宿主、Python 回归与安装包。文件符号链接用例需要宿主启用开发者模式或具备相应权限；报告记录每项检查及跳过原因。
 
 ```powershell

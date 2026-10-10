@@ -1,6 +1,6 @@
 import {
   ApiError
-} from "../../api";
+} from "../../shared/service/api";
 
 export function managementErrorKey(error: unknown): string {
   if (error instanceof ApiError) {

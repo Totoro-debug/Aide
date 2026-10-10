@@ -31,8 +31,7 @@ import {
   getScheduleJob,
   getScheduleJobHistory,
   getScheduleJobs
-} from "../../api";
-import commonStyles from "../../App.module.css";
+} from "../../shared/service/api";
 import type {
   ProjectScheduleKind,
   RegisteredProject,
@@ -44,8 +43,9 @@ import type {
   ScheduleJobStatus,
   ScheduleJobsResponse,
   ScheduleStatus
-} from "../../protocol";
+} from "../../shared/service/protocol";
 import type { AuthState, ConnectionState } from "../../shared/service/types.ts";
+import commonStyles from "../../shared/styles/controls.module.css";
 import { HistoryMessageView } from "../conversations/history.tsx";
 import type { ScheduleHistoryLoadState, ScheduleLoadState } from "./presentation.ts";
 import { scheduleErrorKey, scheduleHistoryGroupKey, scheduleHistoryTime, scheduleJobLastResult, scheduleJobRule, scheduleRouteHref, sessionRouteHref } from "./presentation.ts";

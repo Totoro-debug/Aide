@@ -20,6 +20,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useLocation } from "react-router-dom";
+import type { Theme } from "../../app/theme.ts";
 import {
   ApiError,
   createRequestId,
@@ -28,9 +29,8 @@ import {
   reloadRuntimeSkills,
   repairConfig,
   restartService
-} from "../../api";
-import commonStyles from "../../App.module.css";
-import type { Theme } from "../../app/theme.ts";
+} from "../../shared/service/api";
+import { serviceStateLabel } from "../../shared/service/presentation.ts";
 import type {
   ConfigFields,
   ConfigResponse,
@@ -38,9 +38,9 @@ import type {
   SessionClaim,
   SkillMetadata,
   ToolPermissionLevel
-} from "../../protocol";
-import { serviceStateLabel } from "../../shared/service/presentation.ts";
+} from "../../shared/service/protocol";
 import type { AuthState, ConnectionState } from "../../shared/service/types.ts";
+import commonStyles from "../../shared/styles/controls.module.css";
 import { operationManagementErrorKey } from "../runtime/errors.ts";
 import { SecretInput, SettingsListField, SettingsNumberField } from "./fields.tsx";
 import type { ConfigSettingsSection, McpForm, PendingSettingsSave, ProviderForm, RouteForm, SecretDraft, SettingsFieldError, SettingsForm, SettingsSection } from "./forms.ts";

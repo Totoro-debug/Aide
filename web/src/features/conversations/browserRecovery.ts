@@ -1,5 +1,5 @@
-import type { ReasoningEffort, SessionModelConfiguration } from "../../protocol";
-import { isNonEmptyString, isRecord } from "../../validation.ts";
+import type { ReasoningEffort, SessionModelConfiguration } from "../../shared/service/protocol";
+import { isNonEmptyString, isRecord } from "../../shared/validation.ts";
 import { REASONING_EFFORTS } from "./reasoningEffort.ts";
 
 const BROWSER_RECOVERY_KEY = "aide.browser-recovery";

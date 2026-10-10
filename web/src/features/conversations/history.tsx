@@ -12,11 +12,11 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import commonStyles from "../../App.module.css";
 import type {
   RestoreAnchor,
   RestoreMode
-} from "../../protocol";
+} from "../../shared/service/protocol";
+import commonStyles from "../../shared/styles/controls.module.css";
 import conversationsStyles from "./Conversations.module.css";
 import { historyMessageText, historyRoleLabel, historyToolActivities, safeMarkdownUrl } from "./historyProjection.ts";
 import type { RunStatus, ToolActivity, ToolStatus } from "./run.ts";

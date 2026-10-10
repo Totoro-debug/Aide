@@ -1,13 +1,13 @@
 import {
   createRequestId
-} from "../../api";
+} from "../../shared/service/api";
 import type {
   ConfigFields,
   ConfigPatchFields,
   ConfigSecretChange,
   ConfigSecrets,
   ToolPermissionLevel
-} from "../../protocol";
+} from "../../shared/service/protocol";
 import type { ModelForm } from "./modelSettings";
 
 export type SettingsSection = "general" | "models" | "runtime" | "memory" | "mcp";
@@ -191,7 +191,7 @@ export function formFromConfig(
 }
 
 function modelFormsFromConfig(
-  models: import("../../protocol").ConfigProviderFields["models"],
+  models: import("../../shared/service/protocol").ConfigProviderFields["models"],
   previous?: Record<string, ModelForm>,
   latest?: Record<string, ModelForm>,
 ): Record<string, ModelForm> {

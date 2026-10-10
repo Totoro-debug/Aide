@@ -1,18 +1,21 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
-import { useTranslation } from "react-i18next";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Brain, CalendarClock, ChevronDown, ChevronRight, FolderOpen, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 
-import { getChatSessions, getProjectSessions } from "./api";
+import { getChatSessions, getProjectSessions } from "../shared/service/api";
 import type {
   ChatSessionSummary,
   ChatSessionsResponse,
   ProjectSessionsResponse,
   RegisteredProject,
   SessionSummary,
-} from "./protocol";
-import styles from "./App.module.css";
+} from "../shared/service/protocol";
+import commonStyles from "../shared/styles/controls.module.css";
+import moduleStyles from "./App.module.css";
+
+const styles = { ...commonStyles, ...moduleStyles };
 
 const EXPANDED_PROJECTS_KEY = "aide.sidebar.expanded-projects";
 const SESSION_PAGE_SIZE = 100;

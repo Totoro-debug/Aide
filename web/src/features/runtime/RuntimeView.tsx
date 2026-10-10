@@ -16,8 +16,9 @@ import {
   triggerRuntimeDream,
   updateRuntimeEffort,
   updateRuntimePermission
-} from "../../api";
-import styles from "../../App.module.css";
+} from "../../shared/service/api";
+import { PERMISSION_LEVELS } from "../../shared/service/permissions.ts";
+import { serviceStateLabel } from "../../shared/service/presentation.ts";
 import type {
   DreamResult,
   ReasoningEffort,
@@ -26,14 +27,16 @@ import type {
   SessionClaim,
   SessionModelConfiguration,
   ToolPermissionLevel
-} from "../../protocol";
-import { PERMISSION_LEVELS } from "../../shared/service/permissions.ts";
-import { serviceStateLabel } from "../../shared/service/presentation.ts";
+} from "../../shared/service/protocol";
 import type { AuthState, ConnectionState } from "../../shared/service/types.ts";
+import commonStyles from "../../shared/styles/controls.module.css";
 import { REASONING_EFFORTS } from "../conversations/reasoningEffort.ts";
 import type { LiveRun } from "../conversations/run.ts";
 import { isLiveRunActive } from "../conversations/run.ts";
 import { managementErrorKey, operationManagementErrorKey } from "./errors.ts";
+import moduleStyles from "./Runtime.module.css";
+
+const styles = { ...commonStyles, ...moduleStyles };
 
 interface StatusViewProps {
   authState: AuthState;

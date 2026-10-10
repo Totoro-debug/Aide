@@ -1,8 +1,8 @@
 import { ChevronDown, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import commonStyles from "../../App.module.css";
-import type { ReasoningEffort } from "../../protocol";
+import type { ReasoningEffort } from "../../shared/service/protocol";
+import commonStyles from "../../shared/styles/controls.module.css";
 import { REASONING_EFFORTS } from "../conversations/reasoningEffort.ts";
 import type { ModelForm } from "./modelSettings";
 import { modelSettingsFieldId } from "./modelSettings";

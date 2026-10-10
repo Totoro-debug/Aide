@@ -1,0 +1,203 @@
+
+
+.connectionBadge {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 0 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.connectionBadge[data-state="online"] {
+  border-color: var(--success-border);
+  color: var(--success-text);
+}
+
+.connectionBadge[data-state="recovering"] {
+  border-color: var(--warning-border);
+  color: var(--warning-text);
+}
+
+.statusGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--surface-panel);
+}
+
+.metric {
+  min-height: 116px;
+  padding: 20px;
+}
+
+.metric + .metric {
+  border-left: 1px solid var(--border-subtle);
+}
+
+.metricLabel {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.metricValue {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 18px;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.metricValue[data-state="ready"],
+.metricValue[data-state="online"] {
+  color: var(--success-text);
+}
+
+.managementDialog {
+  width: min(680px, calc(100vw - 32px));
+  max-height: min(720px, calc(100dvh - 32px));
+  overflow-y: auto;
+}
+
+.managementStatusGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin: 22px 0 0;
+  border: 1px solid var(--border-subtle);
+  background: var(--border-subtle);
+}
+
+.managementMetric {
+  min-width: 0;
+  background: var(--surface-app);
+  padding: 13px;
+}
+
+.managementMetric dt {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.managementMetric dd {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin: 7px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.managementMetric dd span {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.managementControls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 18px;
+}
+
+.managementTools {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 18px;
+}
+
+.managementMemory {
+  min-width: 0;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 12px;
+}
+
+.managementMemory h4 {
+  margin: 0 0 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.managementMemory pre {
+  max-height: min(340px, 36vh);
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  padding: 11px;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 680px) {
+
+  .managementStatusGrid,
+  .managementControls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 680px) {
+
+  .statusGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .metric:nth-child(3) {
+    border-top: 1px solid var(--border-subtle);
+    border-left: 0;
+  }
+
+  .metric:nth-child(4) {
+    border-top: 1px solid var(--border-subtle);
+  }
+}
+
+.runtimeStatusSummary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-height: 24px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.runtimeStatusSummary > span {
+  white-space: nowrap;
+}
+
+.runtimeStatusSummary > span:nth-child(-n + 2)::after {
+  content: "·";
+  margin-inline-start: 8px;
+}
+
+.runtimeStatusSummary > span:nth-child(3)::after,
+.runtimeStatusSummary > span:nth-child(4)::after {
+  content: "/";
+  margin-inline-start: 8px;
+}

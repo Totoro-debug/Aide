@@ -2,8 +2,8 @@ import { Check, ChevronDown, FolderPen, Shield, ShieldCheck } from "lucide-react
 import type { KeyboardEvent, ReactNode } from "react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import commonStyles from "../../App.module.css";
-import type { ToolPermissionLevel } from "../../protocol";
+import type { ToolPermissionLevel } from "../../shared/service/protocol";
+import commonStyles from "../../shared/styles/controls.module.css";
 import conversationsStyles from "./Conversations.module.css";
 
 import { PERMISSION_LEVELS } from "../../shared/service/permissions";

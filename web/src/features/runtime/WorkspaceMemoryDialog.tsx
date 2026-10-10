@@ -3,9 +3,12 @@ import { BookOpen, Brain, RefreshCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { getProjectMemory, getRuntimeMemory, triggerProjectDream, triggerRuntimeDream } from "./api";
-import type { DreamResult, SessionClaim } from "./protocol";
-import styles from "./App.module.css";
+import { getProjectMemory, getRuntimeMemory, triggerProjectDream, triggerRuntimeDream } from "../../shared/service/api";
+import type { DreamResult, SessionClaim } from "../../shared/service/protocol";
+import commonStyles from "../../shared/styles/controls.module.css";
+import moduleStyles from "./Runtime.module.css";
+
+const styles = { ...commonStyles, ...moduleStyles };
 
 export type WorkspaceMemoryTarget = {
   title: string;

@@ -18,8 +18,7 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import commonStyles from "../../App.module.css";
-import type { NavigationSession } from "../../NavigationSidebar";
+import type { NavigationSession } from "../../app/NavigationSidebar";
 import {
   ApiError,
   ServiceCommandError,
@@ -52,7 +51,8 @@ import {
   submitUserInput,
   subscribeState,
   updateRuntimePermission
-} from "../../api";
+} from "../../shared/service/api";
+import { PERMISSION_LEVELS } from "../../shared/service/permissions.ts";
 import type {
   AvailableModelsResponse,
   ClientCommand,
@@ -72,9 +72,9 @@ import type {
   SessionSummary,
   ToolPermissionLevel,
   WorkspaceSessionsResponse
-} from "../../protocol";
-import { PERMISSION_LEVELS } from "../../shared/service/permissions.ts";
+} from "../../shared/service/protocol";
 import type { AuthState, ConnectionState, ServiceEventListener } from "../../shared/service/types.ts";
+import commonStyles from "../../shared/styles/controls.module.css";
 import { ConversationRuntimeStatus, RuntimeManagementDialog } from "../runtime/RuntimeView";
 import ComposerControls from "./ComposerControls";
 import conversationsStyles from "./Conversations.module.css";

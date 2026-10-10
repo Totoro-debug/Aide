@@ -1,11 +1,11 @@
-import type { NavigationSessionAction } from "../../NavigationSidebar";
+import type { NavigationSessionAction } from "../../app/NavigationSidebar";
 import {
   ApiError
-} from "../../api";
+} from "../../shared/service/api";
 import type {
   SessionClaim,
   SessionSummary
-} from "../../protocol";
+} from "../../shared/service/protocol";
 
 export interface PendingSessionAction extends NavigationSessionAction {
   requestId: string;

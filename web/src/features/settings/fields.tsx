@@ -2,7 +2,7 @@ import {
   Trash2
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import commonStyles from "../../App.module.css";
+import commonStyles from "../../shared/styles/controls.module.css";
 import settingsStyles from "./Settings.module.css";
 import type { SecretAction, SecretDraft } from "./forms.ts";
 

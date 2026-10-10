@@ -1,10 +1,10 @@
 import {
   ApiError
-} from "../../api";
+} from "../../shared/service/api";
 import type {
   ScheduleHistoryGroup,
   ScheduleJob
-} from "../../protocol";
+} from "../../shared/service/protocol";
 
 export type ScheduleLoadState = "idle" | "loading" | "ready" | "error";
 

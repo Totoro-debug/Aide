@@ -19,7 +19,7 @@ export function toolStatusKey(status: ToolStatus): string {
 
 import type {
   ServiceEvent
-} from "../../protocol";
+} from "../../shared/service/protocol";
 
 export interface LiveRun {
   localId: string;

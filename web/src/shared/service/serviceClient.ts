@@ -1,3 +1,4 @@
+import type { EventStreamConnection } from "./api";
 import {
   ApiError,
   exchangeTicket,
@@ -8,7 +9,6 @@ import {
   ServiceCommandError,
   subscribeState,
 } from "./api";
-import type { EventStreamConnection } from "./api";
 import type {
   ClientCommand,
   RegisteredClient,

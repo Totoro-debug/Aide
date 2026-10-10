@@ -7,7 +7,7 @@ const schema = JSON.parse(await readFile(schemaPath, "utf8"));
 const definitions = schema.$defs;
 const protocolSource = ts.createSourceFile(
   "protocol.ts",
-  await readFile(resolve(process.cwd(), "src/protocol.ts"), "utf8"),
+  await readFile(resolve(process.cwd(), "src/shared/service/protocol.ts"), "utf8"),
   ts.ScriptTarget.Latest,
   true,
 );

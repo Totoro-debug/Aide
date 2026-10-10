@@ -94,11 +94,11 @@ def _assert_local_timestamp(value: Any) -> None:
     assert parsed.utcoffset() == datetime.now().astimezone().utcoffset()
 
 
-@pytest.mark.parametrize("legacy_location", ["metadata", "restore-anchor"])
+@pytest.mark.parametrize("invalid_location", ["metadata", "restore-anchor"])
 def test_unsupported_reasoning_effort_is_rejected_without_writes(
     agent_home: Path,
     workspace: Path,
-    legacy_location: str,
+    invalid_location: str,
 ) -> None:
     state = _state(workspace, agent_home)
     header = _header()
@@ -116,13 +116,13 @@ def test_unsupported_reasoning_effort_is_rejected_without_writes(
     )
     message = {
         "role": "user",
-        "content": "Legacy model selection",
+        "content": "Invalid model selection",
         "timestamp": UPDATED_AT.isoformat(timespec="milliseconds"),
         "restore_anchor_id": 1,
         "restore_run_token": str(RESTORE_TOKENS[0]),
         "restore_before": {"metadata": copy.deepcopy(metadata), "last_compacted": 0},
     }
-    if legacy_location == "restore-anchor":
+    if invalid_location == "restore-anchor":
         metadata["model_configuration"]["reasoning_effort"] = "mid"
     path = _write_jsonl(state, [header, message])
     before = path.read_bytes()
@@ -1771,7 +1771,7 @@ def test_session_rejects_cyclic_and_overdeep_json_values(agent_home: Path, works
             session.update_metadata(future=value)
 
 
-def test_known_message_contracts_and_unsupported_legacy_fields_are_validated(
+def test_known_message_contracts_and_unsupported_fields_are_validated(
     agent_home: Path,
     workspace: Path,
 ) -> None:
@@ -1791,7 +1791,7 @@ def test_known_message_contracts_and_unsupported_legacy_fields_are_validated(
         )
     with pytest.raises(ValueError, match="unsupported"):
         session.commit_agent_run(
-            [{"role": "user", "content": "Hello", "id": "legacy-message-id"}],
+            [{"role": "user", "content": "Hello", "id": "invalid-message-id"}],
             pending_last_compacted=0,
             pending_action_summary="",
         )

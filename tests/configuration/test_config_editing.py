@@ -240,7 +240,7 @@ def test_web_snapshot_projects_all_model_route_and_mcp_fields_without_secrets(
     assert set(model_fields) == {"small-model", "large-model"}
     assert model_fields["small-model"]["context_window"] == 8192
     assert model_fields["large-model"]["context_window"] == 16384
-    assert set(routes) == {"title", "chat", "memory", "schedule"}
+    assert set(routes) == {"chat", "title", "memory", "schedule", "subagent"}
     chat_route = cast(Mapping[str, object], routes["chat"])
     assert chat_route == {"provider_id": "primary", "model": "small-model"}
     assert model_fields["large-model"]["reasoning_effort"] == "high"

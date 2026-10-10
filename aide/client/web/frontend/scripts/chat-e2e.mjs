@@ -666,9 +666,9 @@ try {
   const savedProjectMenu = projectSessions.getByRole("group", { name: "Session actions for Saved project", exact: true });
   await projectSessions.locator('summary[aria-label="Session actions for Saved project"]').click();
   await savedProjectMenu.getByRole("button", { name: "View workspace directory", exact: true }).click();
-  const legacyDirectoryDialog = page.getByRole("dialog", { name: "Workspace directory", exact: true });
-  await expect(legacyDirectoryDialog.getByText(nextDirectory, { exact: true })).toBeVisible();
-  await legacyDirectoryDialog.getByRole("button", { name: "Close", exact: true }).click();
+  const savedDirectoryDialog = page.getByRole("dialog", { name: "Workspace directory", exact: true });
+  await expect(savedDirectoryDialog.getByText(nextDirectory, { exact: true })).toBeVisible();
+  await savedDirectoryDialog.getByRole("button", { name: "Close", exact: true }).click();
   await expect(projectSessions.locator('summary[aria-label="Session actions for Saved project"]')).toBeFocused();
 
   const explicitProjectMenu = projectSessions.getByRole("group", { name: "Session actions for Explicit project", exact: true });
@@ -705,8 +705,13 @@ try {
   await rename(unavailableDirectory, join(control.details.home_root, "unavailable-chat-moved"));
   const refreshHistoryButton = restartedNavigation.getByRole("button", { name: "Refresh sessions", exact: true });
   await expect(refreshHistoryButton).toBeEnabled();
+  const historyRefresh = page.waitForResponse(response => new URL(response.url()).pathname === "/api/v1/chat/sessions"
+    && response.request().method() === "GET");
   await refreshHistoryButton.click();
-  await expect(page.getByRole("status").filter({ hasText: unavailableDirectory })).toBeVisible();
+  const refreshedHistory = await (await historyRefresh).json();
+  assert.deepEqual(Object.keys(refreshedHistory).sort(), ["next_cursor", "sessions"]);
+  assert.ok(refreshedHistory.sessions.some(session => session.id === secondConversation.id));
+  await expect(page.getByRole("status").filter({ hasText: unavailableDirectory })).toHaveCount(0);
   await assert.rejects(stat(unavailableDirectory), { code: "ENOENT" });
   await rename(join(control.details.home_root, "unavailable-chat-moved"), unavailableDirectory);
 

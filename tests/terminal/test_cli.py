@@ -1,6 +1,4 @@
 import asyncio
-import importlib
-import importlib.util
 import os
 import shutil
 import socket
@@ -49,14 +47,6 @@ def stop_installed_test_service(agent_home: Path) -> None:
     port = _INSTALLED_SERVICE_PORTS.get(home_path)
     if port is not None:
         asyncio.run(ServiceClient.stop_existing(AgentHome(agent_home), port=port))
-
-
-def test_legacy_runtime_module_is_not_discoverable() -> None:
-    legacy_module = ".".join(("aide", "agent", "runtime"))
-    assert not (Path(__file__).resolve().parents[2] / "aide" / "agent" / "runtime.py").exists()
-    assert importlib.util.find_spec(legacy_module) is None
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module(legacy_module)
 
 
 def test_service_stop_without_an_active_service_prints_a_clear_error(
@@ -443,12 +433,12 @@ def assert_plaintext_absent(output: str, *plaintext_values: str) -> None:
         pytest.fail("CLI output leaked a plaintext provider API key", pytrace=False)
 
 
-def legacy_runtime_log_snapshot(agent_home: Path) -> dict[str, bytes]:
+def unrelated_log_snapshot(agent_home: Path) -> dict[str, bytes]:
     logs = agent_home / "logs"
     return {
         path.name: path.read_bytes()
         for path in logs.iterdir()
-        if path.is_file() and path.name.startswith("run.log.")
+        if path.is_file() and path.name.startswith("private.")
     }
 
 
@@ -484,24 +474,24 @@ def test_installed_aide_generates_missing_configuration_and_stops(
     assert not (agent_home / "logs").exists()
 
 
-def test_installed_aide_does_not_modify_legacy_runtime_log_data(
+def test_installed_aide_preserves_unrelated_log_data(
     agent_home: Path,
     workspace: Path,
 ) -> None:
     logs = agent_home / "logs"
     logs.mkdir(parents=True)
-    (logs / "run.log.0").write_bytes(b"legacy slot zero\n")
-    (logs / "run.log.1").write_bytes(b"legacy slot one\n")
-    (logs / "run.log.cursor").write_bytes(b"1\n")
-    (logs / "run.log.lock").write_bytes(b"legacy lock\n")
-    before = legacy_runtime_log_snapshot(agent_home)
+    (logs / "private.0").write_bytes(b"private slot zero\n")
+    (logs / "private.1").write_bytes(b"private slot one\n")
+    (logs / "private.cursor").write_bytes(b"1\n")
+    (logs / "private.lock").write_bytes(b"private lock\n")
+    before = unrelated_log_snapshot(agent_home)
 
     result = run_installed_aide(agent_home, workspace=workspace)
     config_result = run_installed_aide(agent_home, "config", workspace=workspace)
 
     assert result.returncode == 2
     assert config_result.returncode == 0
-    assert legacy_runtime_log_snapshot(agent_home) == before
+    assert unrelated_log_snapshot(agent_home) == before
 
 
 def test_installed_config_command_generates_and_displays_missing_configuration(

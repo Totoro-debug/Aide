@@ -400,17 +400,14 @@ def test_production_tool_execution_dispatch_has_one_gateway_boundary() -> None:
     assert violations == ()
 
 
-def test_production_tools_have_no_legacy_string_authorization_surface() -> None:
+def test_production_tools_use_typed_authorization() -> None:
     """Keep authorization decisions on typed invocation facts and one policy."""
     forbidden_identifiers = {
         "check_safety",
         "workspace_path_safety_reason",
         "safety_reason",
         "safety_assessment",
-        "legacy_safety_reason",
-        "_LegacyAuthorizationSession",
         "requires_confirmation",
-        "requires_legacy_destructive_confirmation",
         "authorization_callback",
         "_authorization_callback",
     }

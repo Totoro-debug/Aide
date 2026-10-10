@@ -190,7 +190,7 @@ def test_history_keeps_tool_messages_and_long_markdown_in_one_group(tmp_path: Pa
     assert messages[-1]["content"] == long_markdown
 
 
-def test_history_rejects_legacy_records_without_reparsing_or_writing(
+def test_history_rejects_incomplete_records_without_reparsing_or_writing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = _workspace(tmp_path)
@@ -202,7 +202,7 @@ def test_history_rejects_legacy_records_without_reparsing_or_writing(
         "updated_at": _BASE_TIME.isoformat(timespec="milliseconds"),
         "last_compacted": 0,
         "metadata": {
-            "title": "Legacy history",
+            "title": "Incomplete history",
             "token_usage": {
                 "model_calls": 0,
                 "input_tokens": 0,
@@ -212,9 +212,9 @@ def test_history_rejects_legacy_records_without_reparsing_or_writing(
             "summary": "",
         },
     }
-    legacy_assistant: dict[str, object] = {
+    incomplete_assistant: dict[str, object] = {
         "role": "assistant",
-        "content": "legacy result",
+        "content": "incomplete result",
         "tool_calls": [],
         "error": None,
         "token_usage": _USAGE,
@@ -227,10 +227,10 @@ def test_history_rejects_legacy_records_without_reparsing_or_writing(
                 header,
                 {
                     "role": "user",
-                    "content": "legacy input",
+                    "content": "stored input",
                     "timestamp": _BASE_TIME.isoformat(timespec="milliseconds"),
                 },
-                legacy_assistant,
+                incomplete_assistant,
             ]
         )
         + "\n",
@@ -463,8 +463,8 @@ def test_history_rejects_malformed_terminal_fields(
         _FIRST_JOB,
         _BASE_TIME,
         [
-            {"role": "user", "content": "legacy input"},
-            _assistant("legacy output", status="completed"),
+            {"role": "user", "content": "stored input"},
+            _assistant("stored output", status="completed"),
         ],
     )
     path = state.schedule_sessions_directory / f"schedule_{_FIRST_JOB}.jsonl"

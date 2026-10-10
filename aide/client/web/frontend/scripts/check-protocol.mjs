@@ -98,6 +98,7 @@ const referenceTypes = {
   config_provider_fields: "ConfigProviderFields",
   config_model_fields: "ConfigModelFields",
   config_route_fields: "ConfigRouteFields",
+  config_routes_fields: "ConfigRoutesFields",
   config_redacted_secret: "ConfigRedactedSecret",
   config_secret_revisions: "Record<string,string|null>",
   config_application: "ConfigApplication",
@@ -213,6 +214,8 @@ for (const [name, definitionName] of [
   ["ConfigModelFields", "config_model_fields"],
   ["ConfigProviderFields", "config_provider_fields"],
   ["ConfigRouteFields", "config_route_fields"],
+  ["ConfigRoutesFields", "config_routes_fields"],
+  ["ConfigModelsFields", "config_models_fields"],
   ["RestoreAnchor", "restore_anchor"],
 ]) {
   checkMembers(name, interfaceDeclaration(name).members, definitions[definitionName]);

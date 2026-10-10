@@ -1219,11 +1219,11 @@ COVERAGE_RULES: Final[tuple[CoverageRule, ...]] = (
         ),
     ),
     CoverageRule(
-        "title-migration",
+        "title-validation",
         5,
         _node_patterns(
             "tests/scheduling/test_schedule_store.py",
-            "test_old_schema_is_rejected_without_writes",
+            "test_missing_title_is_rejected_without_writes",
             "test_public_removal_detects_title_only_changes",
         )
         + _node_patterns(

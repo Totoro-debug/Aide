@@ -1014,8 +1014,6 @@ def _parse_datetime(value: Any, *, field: str) -> datetime:
 
 def _parse_message(record: dict[str, Any]) -> dict[str, Any]:
     message = _copy_json_object(record, field="message")
-    if any(key in message for key in ("record_" + "type", "schema_" + "version")):
-        raise ValueError("legacy Session message fields are unsupported")
     try:
         _validate_message(message)
     except KeyError as error:

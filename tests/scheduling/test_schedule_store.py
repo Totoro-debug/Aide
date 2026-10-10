@@ -190,11 +190,11 @@ async def test_write_failure_leaves_the_last_complete_document_for_restart(
 
 
 @pytest.mark.parametrize("source", ["user", "system"])
-def test_old_schema_is_rejected_without_writes(workspace: Path, source: str) -> None:
+def test_missing_title_is_rejected_without_writes(workspace: Path, source: str) -> None:
     state = _state(workspace)
-    legacy = _job(SYSTEM_ID if source == "system" else JOB_ID, source=source).to_dict()
-    legacy.pop("title")
-    document = json.dumps([legacy], separators=(",", ":"))
+    incomplete = _job(SYSTEM_ID if source == "system" else JOB_ID, source=source).to_dict()
+    incomplete.pop("title")
+    document = json.dumps([incomplete], separators=(",", ":"))
     state.schedule_path.write_text(document, encoding="utf-8")
     writes: list[str] = []
 
@@ -282,7 +282,7 @@ def test_strict_load_rejects_duplicate_nested_keys(workspace: Path) -> None:
     [
         lambda document: document.update({"title": None}),
         lambda document: document.update({"title": "  Canonical "}),
-        lambda document: document.update({"title": "Canonical", "legacy_field": True}),
+        lambda document: document.update({"title": "Canonical", "incomplete_field": True}),
         lambda document: document.update({"unknown_field": True}),
     ],
 )

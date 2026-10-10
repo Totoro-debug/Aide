@@ -6,8 +6,10 @@ import type {
   ConfigPatchFields,
   ConfigSecretChange,
   ConfigSecrets,
+  ModelRouteName,
   ToolPermissionLevel
 } from "../../shared/service/protocol";
+import { modelRouteNames } from "../../shared/service/protocol";
 import type { ModelForm } from "./modelSettings";
 
 export type SettingsSection = "general" | "models" | "runtime" | "memory" | "mcp";
@@ -33,7 +35,7 @@ export interface SettingsForm {
   };
   models: {
     providers: Record<string, ProviderForm>;
-    routes: Record<string, RouteForm>;
+    routes: Record<ModelRouteName, RouteForm>;
   };
   mcp: Record<string, McpForm>;
 }
@@ -69,7 +71,7 @@ export interface ProviderForm {
 }
 
 export interface RouteForm {
-  name: string;
+  name: ModelRouteName;
   provider_id: string;
   model: string;
 }
@@ -153,11 +155,11 @@ export function formFromConfig(
         models: modelFormsFromConfig(provider.models, previous?.models.providers[providerRows.get(id)!]?.models, latest?.models.providers[providerRows.get(id)!]?.models),
         api_key: secretDraft(provider.api_key.configured),
       }])),
-      routes: Object.fromEntries(Object.entries(fields.models.routes).map(([name, route]) => [name, {
+      routes: Object.fromEntries(modelRouteNames.map((name) => [name, {
         name,
-        provider_id: route.provider_id,
-        model: route.model,
-      }])),
+        provider_id: fields.models.routes[name].provider_id,
+        model: fields.models.routes[name].model,
+      }])) as Record<ModelRouteName, RouteForm>,
     },
     mcp: Object.fromEntries(Object.entries(fields.mcp).map(([name, server]) => {
       const row = serverRows.get(name)!;

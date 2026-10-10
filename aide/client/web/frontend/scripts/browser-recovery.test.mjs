@@ -89,7 +89,7 @@ test("initial connection respects an explicit session selection", () => {
   assert.equal(decision.navigation, null);
 });
 
-test("expected restart migrates identity while preserving unsent work", () => {
+test("expected restart updates identity while preserving unsent work", () => {
   const saved = recovery("high");
   const decision = reconcileBrowserRecovery(saved, connection({
     currentInstanceId: "service-2", expectedRestart: true,

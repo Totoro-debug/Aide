@@ -227,6 +227,17 @@ export interface ConfigRouteFields {
   model: string;
 }
 
+export const modelRouteNames = ["chat", "title", "memory", "schedule", "subagent"] as const;
+export type ModelRouteName = (typeof modelRouteNames)[number];
+
+export interface ConfigRoutesFields {
+  chat: ConfigRouteFields;
+  title: ConfigRouteFields;
+  memory: ConfigRouteFields;
+  schedule: ConfigRouteFields;
+  subagent: ConfigRouteFields;
+}
+
 export interface ConfigMcpFields {
   enabled: boolean;
   transport: "stdio" | "streamable-http";
@@ -242,7 +253,7 @@ export interface ConfigMcpFields {
 
 export interface ConfigModelsFields {
   providers: Record<string, ConfigProviderFields>;
-  routes: Record<string, ConfigRouteFields>;
+  routes: ConfigRoutesFields;
 }
 
 export type ConfigPatchFields = {
@@ -251,7 +262,7 @@ export type ConfigPatchFields = {
   web?: Partial<ConfigFields["web"]>;
   models?: {
     providers?: Record<string, Partial<Omit<ConfigProviderFields, "api_key"> & { id: string }>>;
-    routes?: Record<string, Partial<ConfigRouteFields>>;
+    routes?: Partial<Record<ModelRouteName, Partial<ConfigRouteFields>>>;
   };
   mcp?: Record<string, Partial<ConfigMcpFields> & {
     name?: string;
@@ -736,7 +747,6 @@ export interface ChatSessionSummary {
 export interface ChatSessionsResponse {
   sessions: ChatSessionSummary[];
   next_cursor: string | null;
-  unavailable_directories: string[];
 }
 
 export interface ChatWorkspaceEntry {

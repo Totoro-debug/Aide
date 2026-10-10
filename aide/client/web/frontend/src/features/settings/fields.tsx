@@ -1,4 +1,5 @@
 import {
+  Save,
   Trash2
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -7,6 +8,53 @@ import settingsStyles from "./Settings.module.css";
 import type { SecretAction, SecretDraft } from "./forms.ts";
 
 const styles = { ...commonStyles, ...settingsStyles };
+
+interface ApiKeyInputProps {
+  id: string;
+  configured: boolean;
+  value: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
+  onSave: () => void;
+  error?: string;
+}
+
+export function ApiKeyInput({ id, configured, value, disabled, onChange, onSave, error }: ApiKeyInputProps) {
+  const { t } = useTranslation();
+  return (
+    <div className={styles.settingsField} id={id} tabIndex={-1} data-api-key-editor>
+      <label className={styles.fieldLabel} htmlFor={`${id}-value`}>{t("settings.apiKey")}</label>
+      <div className={styles.apiKeyRow}>
+        {value.length > 0 ? (
+          <button
+            className={styles.apiKeySave}
+            id={`${id}-save`}
+            type="button"
+            aria-label={t("settings.saveApiKey")}
+            title={t("settings.saveApiKey")}
+            disabled={disabled}
+            onClick={onSave}
+          ><Save size={16} aria-hidden="true" /></button>
+        ) : null}
+        <input
+          className={styles.textInput}
+          id={`${id}-value`}
+          type="password"
+          autoComplete="new-password"
+          aria-invalid={error !== undefined}
+          aria-describedby={error !== undefined ? `${id}-error` : undefined}
+          value={value}
+          disabled={disabled}
+          onChange={(event) => onChange(event.currentTarget.value)}
+        />
+      </div>
+      {error !== undefined ? <span className={styles.fieldError} id={`${id}-error`}>{error}</span> : null}
+      <small className={styles.settingsSecretState}>
+        {configured ? t("settings.secretConfigured") : t("settings.secretNotConfigured")}
+      </small>
+    </div>
+  );
+}
 
 interface SecretInputProps {
   id: string;

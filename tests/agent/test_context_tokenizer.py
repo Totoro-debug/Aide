@@ -78,14 +78,14 @@ def test_special_token_literals_are_counted_as_ordinary_user_text() -> None:
 @pytest.mark.parametrize(
     "model", ["gpt2", "text-davinci-003", "text-davinci-edit-001", "davinci", "gpt-4"]
 )
-def test_legacy_models_are_rejected_before_loading_an_encoding(
+def test_unsupported_model_encodings_are_rejected_before_loading_an_encoding(
     model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def reject_load(name: str) -> tiktoken.Encoding:
-        pytest.fail(f"legacy encoding {name} must not load")
+        pytest.fail(f"unsupported encoding {name} must not load")
 
     monkeypatch.setattr(tiktoken, "get_encoding", reject_load)
-    with pytest.raises(tokenizer.ContextTokenizerError, match="Legacy model"):
+    with pytest.raises(tokenizer.ContextTokenizerError, match="Model"):
         estimate_context_request_tokens([{"role": "user", "content": "hello"}], model=model)
 
 

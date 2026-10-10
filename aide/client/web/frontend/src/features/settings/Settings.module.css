@@ -212,6 +212,46 @@
   gap: 12px;
 }
 
+.apiKeyRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.apiKeyRow input {
+  min-width: 0;
+  flex: 1;
+}
+
+.apiKeySave {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--surface-app);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.apiKeySave:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.apiKeySave:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.apiKeySave:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .modelCards {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -313,4 +353,42 @@
   .settingsStatus {
     max-width: 100%;
   }
+}
+
+.modelRouteRow {
+  display: grid;
+  grid-template-columns: 104px repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 12px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 14px 0;
+}
+
+.modelRouteRow h4 {
+  min-width: 104px;
+  padding-top: 9px;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.modelRouteField {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.modelRouteField select {
+  width: 100%;
+  min-width: 0;
+}
+
+.modelRouteField span:empty {
+  display: none;
+}
+
+@media (max-width: 680px) {
+  .modelRouteRow { gap: 8px; }
+  .modelRouteRow h4 { min-width: 0; font-size: 12px; }
+  .modelRouteField select { padding-right: 2px; padding-left: 6px; font-size: 12px; }
 }

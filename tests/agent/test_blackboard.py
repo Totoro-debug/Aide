@@ -563,7 +563,7 @@ async def test_balanced_scan_does_not_skip_an_earlier_braced_prose_fragment() ->
         '{"task":"replace","task_goal":"goal","completion_boundary":"boundary"}',
         '{"action":"replace","task_goal":"goal"} prose '
         '{"action":"clear","task_goal":null,"completion_boundary":null}',
-        '{"action":"replace","goal":"legacy","completion_boundary":"boundary"}',
+        '{"action":"replace","goal":"invalid","completion_boundary":"boundary"}',
         "```json\n" + _decision("replace", "Goal", "Boundary") + " trailing prose\n```",
     ],
 )

@@ -19,21 +19,18 @@ def test_first_initialization_creates_only_the_global_root(agent_home: Path) -> 
     assert tree == ()
 
 
-def test_repeated_initialization_preserves_all_legacy_state_bytes(agent_home: Path) -> None:
+def test_repeated_initialization_preserves_all_unrelated_state_bytes(agent_home: Path) -> None:
     home = AgentHome(agent_home)
     home.initialize()
-    legacy_files = {
-        agent_home / "memory" / "memory.md": b"# Legacy memory\r\n",
-        agent_home / "memory" / "summary.jsonl": b"invalid summary\xff",
-        agent_home / "memory" / ".cursor": b"not-a-cursor\n",
-        agent_home / "sessions" / "legacy" / "session.jsonl": b"invalid session\xff",
-        agent_home / "sessions" / "legacy" / "artifacts" / "result.txt": b"artifact",
-        agent_home / "obsolete-state.json": b"invalid obsolete state\xff",
+    unrelated_files = {
+        agent_home / "notes" / "private.md": b"# Private notes\r\n",
+        agent_home / "notes" / "attachment.bin": b"private attachment\xff",
+        agent_home / "scratch.json": b"invalid scratch state\xff",
     }
-    for path, content in legacy_files.items():
+    for path, content in unrelated_files.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
 
     home.initialize()
 
-    assert {path: path.read_bytes() for path in legacy_files} == legacy_files
+    assert {path: path.read_bytes() for path in unrelated_files} == unrelated_files

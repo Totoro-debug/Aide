@@ -512,9 +512,8 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
     });
     return { status: response.status, body: await response.json() };
   });
-  const primaryApiKeyAction = (target) => field(target, "settings-models-providers-primary-api_key-action");
+  const primaryApiKeySave = (target) => field(target, "settings-models-providers-primary-api_key-save");
   const primaryApiKeyValue = (target) => field(target, "settings-models-providers-primary-api_key-value");
-  const retiredApiKeyAction = (target) => field(target, "settings-models-providers-retired-api_key-action");
   const remoteHeaderAction = (target) => field(target, "settings-mcp-remote-headers-Authorization-action");
   const remoteHeaderValue = (target) => field(target, "settings-mcp-remote-headers-Authorization-value");
   const titleModel = (target) => field(target, "settings-models-routes-title-model");
@@ -536,11 +535,13 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   assert.equal(initial.fields.models.routes.chat.model, "small-model");
   const defaultReasoningEffort = initial.fields.models.providers.primary.models["small-model"].reasoning_effort;
   assert.equal(await smallModelContextWindow(page).inputValue(), "8192");
-  assert.equal(initial.fields.models.providers.primary.models["large-model"].context_window, null);
+  assert.equal(initial.fields.models.providers.primary.models["large-model"].context_window, 8192);
   const activeModels = await availableModels(page);
   assert.equal(activeModels.status, 200);
   assert.deepEqual(activeModels.body.models, [
     { provider_id: "primary", model: "small-model", context_window: 8192 },
+    { provider_id: "primary", model: "large-model", context_window: 8192 },
+    { provider_id: "retired", model: "retired-model", context_window: 200000 },
   ]);
   assert.deepEqual(activeModels.body.default_combination, {
     provider_id: "primary",
@@ -549,7 +550,6 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   });
   assert.equal(initial.fields.mcp.fixture.transport, "stdio");
   assert.equal(initial.fields.mcp.remote.headers.Authorization.configured, true);
-  await field(page, "settings-model-primary-small-model").getByRole("button", { name: /^Use chat parameters/ }).click();
   await completeModelCard(field(page, "settings-model-primary-large-model"), { context: 32768 });
   await completeModelCard(field(page, "settings-model-retired-retired-model"));
   await save(page);
@@ -565,8 +565,8 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   const primaryCard = field(page, "settings-models-providers-primary");
   await primaryCard.getByRole("button", { name: "Add model", exact: true }).click();
   await completeModelCard(primaryCard.locator('div[id^="settings-model-primary-"]').last(), { id: "expanded-model-302" });
-  await primaryApiKeyAction(page).selectOption("replace");
   await primaryApiKeyValue(page).fill("e2e-provider-secret-replaced-302");
+  await primaryApiKeySave(page).click();
   await save(page);
   await settingsSection(page, "MCP");
   await field(page, "settings-mcp-remote-url").fill("http://127.0.0.1:1/edited-mcp-302");
@@ -594,8 +594,8 @@ export async function settingsModelMcpAcceptance({ page, control, output }) {
   assert.doesNotMatch(savedText, /e2e-provider-secret-302/);
 
   await settingsSection(page, "Models");
-  await primaryApiKeyAction(page).selectOption("keep");
-  await retiredApiKeyAction(page).selectOption("clear");
+  await expect(primaryApiKeyValue(page)).toHaveValue("");
+  await field(page, "settings-models-providers-retired").getByRole("button", { name: "Remove provider", exact: true }).click();
   await save(page);
   await waitForSavedSettings(page);
   savedText = await readFile(configPath, "utf8");

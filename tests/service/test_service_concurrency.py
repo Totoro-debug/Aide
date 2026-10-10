@@ -2454,9 +2454,9 @@ async def test_snapshot_recovers_accepted_input_and_live_output_without_executio
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("legacy_history", [False, True])
+@pytest.mark.parametrize("existing_history", [False, True])
 async def test_snapshot_and_output_share_cursor_and_do_not_duplicate_committed_history(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_history: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing_history: bool
 ) -> None:
     home = _configured_home(tmp_path / "home")
     path = tmp_path / "workspace"
@@ -2483,10 +2483,10 @@ async def test_snapshot_and_output_share_cursor_and_do_not_duplicate_committed_h
         session = await workspace.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, workspace.workspace_id, session)
         previous_messages = []
-        if legacy_history:
+        if existing_history:
             persisted = workspace.loops[session].loop.session
             persisted.commit_agent_run(
-                [{"role": "user", "content": "legacy input"}],
+                [{"role": "user", "content": "existing input"}],
                 pending_last_compacted=0, pending_action_summary="",
             )
             await persisted.wait_for_pending_persist()
@@ -2509,7 +2509,7 @@ async def test_snapshot_and_output_share_cursor_and_do_not_duplicate_committed_h
         await asyncio.wait_for(sink.wait_for("run.completed", "run-a"), 2)
         snapshot = cast(dict[str, Any], workspace.session_snapshot(session))
         assert snapshot["live_state"]["runs"] == []
-        assert sum(message["role"] == "user" for message in snapshot["messages"]) == 1 + legacy_history
+        assert sum(message["role"] == "user" for message in snapshot["messages"]) == 1 + existing_history
     finally:
         release.set()
         provider.release_a.set()

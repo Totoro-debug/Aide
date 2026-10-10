@@ -1982,7 +1982,7 @@ async def test_workspace_git_executable_requires_confirmation(
 
 
 @pytest.mark.asyncio
-async def test_schedule_exec_keeps_legacy_authorization_behavior(tmp_path: Path) -> None:
+async def test_schedule_exec_uses_the_current_authorization_policy(tmp_path: Path) -> None:
     executable = r"C:\PowerShell\pwsh.exe"
     shell = resolve_exec_shell(
         "pwsh",
@@ -2025,7 +2025,7 @@ async def test_schedule_exec_keeps_legacy_authorization_behavior(tmp_path: Path)
 
     result = await gateway.call(
         ModelToolCall(
-            id="schedule-legacy-exec",
+            id="schedule-exec",
             name="exec",
             arguments=json.dumps({"command": "Get-Date"}),
         )

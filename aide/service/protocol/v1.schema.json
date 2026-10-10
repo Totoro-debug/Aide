@@ -220,6 +220,17 @@
         }
       }
     },
+    "config_routes_fields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["chat", "title", "memory", "schedule", "subagent"],
+      "properties": {
+        "chat": {"$ref": "#/$defs/config_route_fields"},
+        "title": {"$ref": "#/$defs/config_route_fields"},
+        "memory": {"$ref": "#/$defs/config_route_fields"},
+        "schedule": {"$ref": "#/$defs/config_route_fields"},
+        "subagent": {"$ref": "#/$defs/config_route_fields"}
+      }
+    },
     "config_models_fields": {
       "type": "object", "additionalProperties": false,
       "required": ["providers", "routes"],
@@ -228,10 +239,7 @@
           "type": "object",
           "additionalProperties": {"$ref": "#/$defs/config_provider_fields"}
         },
-        "routes": {
-          "type": "object",
-          "additionalProperties": {"$ref": "#/$defs/config_route_fields"}
-        }
+        "routes": {"$ref": "#/$defs/config_routes_fields"}
       }
     },
     "config_patch_provider_fields": {
@@ -399,9 +407,13 @@
               }
             },
             "routes": {
-              "type": "object",
-              "additionalProperties": {
-                "$ref": "#/$defs/config_patch_route_fields"
+              "type": "object", "additionalProperties": false,
+              "properties": {
+                "chat": {"$ref": "#/$defs/config_patch_route_fields"},
+                "title": {"$ref": "#/$defs/config_patch_route_fields"},
+                "memory": {"$ref": "#/$defs/config_patch_route_fields"},
+                "schedule": {"$ref": "#/$defs/config_patch_route_fields"},
+                "subagent": {"$ref": "#/$defs/config_patch_route_fields"}
               }
             }
           }

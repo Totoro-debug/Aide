@@ -321,7 +321,7 @@ class ManagementViewService:
     def bind_reasoning_effort_persistence(
         self, callback: Callable[[ReasoningEffort], Awaitable[None]]
     ) -> None:
-        """Bind service-coordinated persistence for the legacy effort control."""
+        """Bind service-coordinated persistence for the effort control."""
         self._persist_reasoning_effort = callback
 
     async def reload_skill(self) -> tuple[SkillMetadata, ...]:

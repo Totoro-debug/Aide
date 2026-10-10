@@ -532,9 +532,9 @@ async def test_unknown_v2_integrity_issue_disables_files_but_allows_conversation
 ) -> None:
     state = WorkspaceState(workspace)
     session = Session.create(state, new_uuid=lambda: FIRST_TOKEN, now=lambda: NOW)
-    target = workspace / "legacy-unknown.txt"
+    target = workspace / "untracked.txt"
     target.write_bytes(b"before")
-    _commit_user(session, "legacy unknown", FIRST_TOKEN)
+    _commit_user(session, "untracked modification", FIRST_TOKEN)
     store = FileBackupStore(state, session.session_id)
     ticket = store.before_write(FIRST_TOKEN, target)
     assert ticket is not None

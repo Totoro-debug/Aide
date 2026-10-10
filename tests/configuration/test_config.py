@@ -154,12 +154,6 @@ timeout = 30
 [models.routes.chat]
 provider_id = "primary"
 model = "small-model"
-
-[models.routes.cron]
-this_legacy_route_is_ignored = true
-
-[models.routes.future]
-this_undefined_route_is_ignored = true
 '''
 
 SCHEDULE_ROUTE = '''
@@ -428,7 +422,7 @@ def test_generated_configuration_scaffolds_one_provider_and_all_model_routes(
         )
 
 
-def test_configuration_projects_undefined_fields_and_legacy_routes(agent_home: Path) -> None:
+def test_configuration_projects_current_fields(agent_home: Path) -> None:
     loader = ConfigLoader(AgentHome(agent_home))
     loader.ensure_default()
     loader.path.write_text(PROJECTED_CONFIG, encoding="utf-8")
@@ -692,29 +686,29 @@ model = "{model}"
     assert resolved.route.model == "claude-model"
 
 
-def test_legacy_default_route_is_rejected_without_rewriting(agent_home: Path) -> None:
+def test_unknown_route_is_rejected_without_rewriting(agent_home: Path) -> None:
     loader = ConfigLoader(AgentHome(agent_home))
     loader.ensure_default()
-    legacy = VALID_CONFIG.replace("[models.routes.chat]", "[models.routes.default]")
-    loader.path.write_text(legacy, encoding="utf-8")
+    invalid = VALID_CONFIG.replace("[models.routes.chat]", "[models.routes.unknown]")
+    loader.path.write_text(invalid, encoding="utf-8")
     with pytest.raises(ConfigError) as raised:
         loader.load_for_startup()
-    assert "models.routes.default" in raised.value.field_errors
+    assert "models.routes.unknown" in raised.value.field_errors
     assert loader.web_snapshot().state == "invalid"
-    assert loader.path.read_text(encoding="utf-8") == legacy
+    assert loader.path.read_text(encoding="utf-8") == invalid
 
 
-def test_legacy_default_route_is_rejected_even_with_chat(agent_home: Path) -> None:
+def test_unknown_route_is_rejected_even_with_chat(agent_home: Path) -> None:
     loader = ConfigLoader(AgentHome(agent_home))
     loader.ensure_default()
     loader.path.write_text(
-        VALID_CONFIG + '\n[models.routes.default]\nprovider_id = "absent"\nmodel = "old"\n',
+        VALID_CONFIG + '\n[models.routes.unknown]\nprovider_id = "absent"\nmodel = "old"\n',
         encoding="utf-8",
     )
     before = loader.path.read_bytes()
     with pytest.raises(ConfigError) as raised:
         loader.load_for_startup()
-    assert "models.routes.default" in raised.value.field_errors
+    assert "models.routes.unknown" in raised.value.field_errors
     assert loader.path.read_bytes() == before
 
 

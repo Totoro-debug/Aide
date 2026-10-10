@@ -28,6 +28,8 @@
     "test:e2e:settings-notices": "node scripts/settings-notices-e2e.mjs",
     "pretest:e2e:models": "npm run build",
     "test:e2e:models": "node scripts/model-configuration-e2e.mjs",
+    "pretest:e2e:api-key": "npm run build",
+    "test:e2e:api-key": "node scripts/api-key-settings-e2e.mjs",
     "pretest:e2e:layout": "npm run build",
     "test:e2e:layout": "node scripts/workspace-layout-e2e.mjs",
     "pretest:e2e:subagents": "npm run build",

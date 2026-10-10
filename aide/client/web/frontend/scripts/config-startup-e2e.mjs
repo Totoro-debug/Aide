@@ -307,17 +307,13 @@ async function fillRepairForm(page, state, providerBaseUrl) {
   await keyboardReach(model.getByLabel("Reasoning effort", { exact: true }));
   await model.getByLabel("Reasoning effort", { exact: true }).press("Home");
   await model.getByLabel("Reasoning effort", { exact: true }).press("ArrowDown");
-  const action = page.locator("#settings-models-providers-openai-local-api_key-action");
-  await keyboardReach(action);
-  await action.press("Home");
-  await action.press("ArrowDown");
   await keyboardFill(page, page.locator("#settings-models-providers-openai-local-api_key-value"),
     `startup-secret-${state}-303`,
   );
+  await page.locator("#settings-models-providers-openai-local-api_key-value").press("Shift+Tab");
+  await keyboardActivate(page.locator("#settings-models-providers-openai-local-api_key-save"));
   const chatRoute = page.locator("#settings-models-routes-chat");
-  if (state === "invalid" && await chatRoute.count() === 0) {
-    await keyboardActivate(page.getByRole("button", { name: "Add route", exact: true }));
-  }
+  await expect(chatRoute).toBeVisible();
   for (const select of await page.locator('select[id^="settings-models-routes-"][id$="-provider_id"]').all()) {
     await keyboardReach(select);
     await select.press("End");

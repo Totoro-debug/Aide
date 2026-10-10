@@ -677,7 +677,7 @@ async def test_web_fetch_dns_failure_is_an_error_at_every_permission_level(
 
 
 @pytest.mark.asyncio
-async def test_schedule_keeps_legacy_fail_closed_behavior_for_unsafe_web_fetch() -> None:
+async def test_schedule_refuses_unsafe_network_access_for_unsafe_web_fetch() -> None:
     resolver = FakeResolver({"private.example": ("10.0.0.7",)})
     http = AuditedHTTPClient(())
     gateway = ToolGateway._for_memory(

@@ -449,7 +449,7 @@ try {
         { id: "history-failed-tool", name: "read_file", arguments: "<img src=x onerror=alert(1)>" },
       ] },
       { role: "tool", name: "read_file", tool_call_id: "history-failed-tool", status: "error", content: "Recorded tool failure" },
-      { role: "tool", name: "legacy_tool", tool_call_id: "legacy-tool", content: "Legacy tool without a result state" },
+      { role: "tool", name: "unknown_tool", tool_call_id: "unknown-tool", content: "Tool without a result state" },
     );
     body.groups[0].messages.at(-1).content += `\n\n[Unsafe link](javascript:alert(1))\n\n![Remote image](https://example.com/history.png)\n\n<img src=x onerror=alert(1)>\n\n\`\`\`text\n${"long-history-code ".repeat(200)}\n\`\`\``;
     await route.fulfill({ response, json: body });
@@ -459,7 +459,7 @@ try {
   const failedHistoryTool = page.locator('article[data-role="tool"]').filter({ hasText: "Recorded tool failure" });
   await failedHistoryTool.locator("summary").first().click();
   await expect(failedHistoryTool.getByText("Failed", { exact: true })).toBeVisible();
-  const unknownHistoryTool = page.locator('article[data-role="tool"]').filter({ hasText: "Legacy tool without a result state" });
+  const unknownHistoryTool = page.locator('article[data-role="tool"]').filter({ hasText: "Tool without a result state" });
   await unknownHistoryTool.locator("summary").first().click();
   await expect(unknownHistoryTool.getByText("Outcome unknown", { exact: true })).toBeVisible();
   const historyToolRequest = page.locator('article[data-role="assistant"]').filter({ has: page.getByText("Arguments", { exact: true }) });

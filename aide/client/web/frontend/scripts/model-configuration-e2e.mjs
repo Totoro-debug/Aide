@@ -77,8 +77,15 @@ try {
   await expect(card("primary", "small-model").getByRole("button", { name: "Remove model", exact: true })).toBeDisabled();
 
   const chatRoute = page.locator('[id="settings-models-routes-chat"]');
-  await expect(chatRoute.getByRole("button", { name: "Remove route", exact: true })).toBeDisabled();
-  await page.getByRole("button", { name: "Add route", exact: true }).click();
+  const routeNames = ["chat", "title", "memory", "schedule", "subagent"];
+  assert.deepEqual(Object.keys(initial.fields.models.routes), routeNames);
+  for (const route of routeNames) {
+    await expect(page.locator(`[id="settings-models-routes-${route}"]`)).toBeVisible();
+  }
+  await expect(chatRoute.getByRole("button")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Add route", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Remove route", exact: true })).toHaveCount(0);
+  await page.locator('[id="settings-models-routes-subagent-provider_id"]').selectOption("primary");
   const subagentRoute = page.locator('[id="settings-models-routes-subagent"]');
   await expect(subagentRoute).toBeVisible();
   await page.locator('[id="settings-models-routes-subagent-model"]').selectOption("small-model");
@@ -157,6 +164,15 @@ try {
         await routeField("chat", "model").focus();
         await expect(routeField("chat", "model")).toBeFocused();
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false);
+        for (const route of routeNames) {
+          const label = await page.locator(`[id="settings-models-routes-${route}"] h4`).boundingBox();
+          const provider = await routeField(route, "provider_id").boundingBox();
+          const model = await routeField(route, "model").boundingBox();
+          assert.ok(label && provider && model);
+          assert.ok(Math.abs(label.y - provider.y) <= 1, `${route} label left its row`);
+          assert.ok(Math.abs(provider.y - model.y) <= 1, `${route} selectors wrapped`);
+          assert.ok(label.x + label.width <= provider.x && provider.x + provider.width <= model.x);
+        }
         await page.screenshot({ path: resolve(output, `routes-${language}-${theme}-${width}.png`), fullPage: true });
         const summary = providerCard.locator('div[id^="settings-model-primary-"]').first().locator("summary");
         await summary.focus();
@@ -167,9 +183,12 @@ try {
   }
   await setInterfaceLanguage(page, "en");
   await page.setViewportSize({ width: 1440, height: 900 });
-  await subagentRoute.getByRole("button", { name: "Remove route", exact: true }).click();
+  await routeField("subagent", "provider_id").selectOption("");
+  await routeField("subagent", "provider_id").press("Tab");
   await expect.poll(async () => (await control.command("config-read")).fields.models.routes.subagent)
-    .toBeUndefined();
+    .toEqual({ provider_id: "", model: "" });
+  await expect(subagentRoute).toBeVisible();
+  await expect(routeField("subagent", "model")).toBeDisabled();
   await expect(page.locator('[role="status"][data-state="saving"]')).toHaveCount(0);
   const restarted = await control.restart();
   await page.goto("about:blank");

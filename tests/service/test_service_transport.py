@@ -364,12 +364,12 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
         content="project body",
         creation_scope="project",
     )
-    expected_legacy_project_id = await _persist_session(
+    expected_unregistered_project_id = await _persist_session(
         shared,
         home=home,
-        title="Legacy project",
+        title="Unregistered project",
         created_at=now + timedelta(seconds=2),
-        content="legacy project body",
+        content="unregistered project body",
     )
     expected_other_chat_id = await _persist_session(
         old_chat,
@@ -379,9 +379,9 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
         content="other chat body",
         creation_scope="chat",
     )
-    legacy_chat_path = old_chat / ".aide" / "sessions" / f"{expected_other_chat_id}.jsonl"
-    legacy_chat_header = legacy_chat_path.read_bytes().split(b"\n", 1)[0]
-    legacy_chat_path.write_bytes(legacy_chat_header + b"\nnot-loaded-by-history-listing\n")
+    other_chat_path = old_chat / ".aide" / "sessions" / f"{expected_other_chat_id}.jsonl"
+    other_chat_header = other_chat_path.read_bytes().split(b"\n", 1)[0]
+    other_chat_path.write_bytes(other_chat_header + b"\nnot-loaded-by-history-listing\n")
     unscoped_id = await _persist_session(
         old_chat,
         home=home,
@@ -391,8 +391,8 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
     )
     unscoped_path = old_chat / ".aide" / "sessions" / f"{unscoped_id}.jsonl"
     unscoped_before = unscoped_path.read_bytes()
-    legacy_project_path = shared / ".aide" / "sessions" / f"{expected_legacy_project_id}.jsonl"
-    legacy_project_before = legacy_project_path.read_bytes()
+    unregistered_project_path = shared / ".aide" / "sessions" / f"{expected_unregistered_project_id}.jsonl"
+    unregistered_project_before = unregistered_project_path.read_bytes()
     token = create_credential(home)
     server = TestServer(create_app(service))
     await service.start()
@@ -440,8 +440,8 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
         for item, expected_time in zip(sessions, (now + timedelta(seconds=3), now), strict=True):
             assert item["created_at"] == item["updated_at"] == expected_time.isoformat()
         assert second_page["next_cursor"] is None
-        assert first_page["unavailable_directories"] == []
-        assert second_page["unavailable_directories"] == []
+        assert set(first_page) == {"sessions", "next_cursor"}
+        assert set(second_page) == {"sessions", "next_cursor"}
         assert {item["id"] for item in sessions} == {
             expected_chat_id,
             expected_other_chat_id,
@@ -457,7 +457,7 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
             "Project scoped",
         }
         assert unscoped_path.read_bytes() == unscoped_before
-        assert legacy_project_path.read_bytes() == legacy_project_before
+        assert unregistered_project_path.read_bytes() == unregistered_project_before
         service.projects.remove(project_id)
         chat_page = service.list_chat_sessions_page(client.client_id)
         assert [item["id"] for item in cast(list[dict[str, object]], chat_page["sessions"])] == [
@@ -473,7 +473,7 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
             item["id"] for item in cast(list[dict[str, object]], reregistered_page["sessions"])
         ] == [expected_project_id]
         assert unscoped_path.read_bytes() == unscoped_before
-        assert legacy_project_path.read_bytes() == legacy_project_before
+        assert unregistered_project_path.read_bytes() == unregistered_project_before
         assert all("messages" not in item for item in sessions)
         assert any(item["directory"] == str(old_chat.resolve()) for item in sessions)
         assert all(
@@ -487,32 +487,42 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("directory_state", ["missing", "unreadable"])
-async def test_chat_history_reports_unavailable_workspace_without_recreating_it(
+async def test_chat_history_skips_unavailable_workspace_without_recreating_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     directory_state: str,
 ) -> None:
     home = _prepare_agent_home(tmp_path / "agent-home")
-    old_chat = tmp_path / "old-chat"
-    old_chat.mkdir()
+    unavailable_chat = tmp_path / "unavailable-chat"
+    unavailable_chat.mkdir()
     service = AgentService(home, ConfigLoader(home).load_for_startup())
-    service.conversation_workspaces.remember(old_chat)
+    service.conversation_workspaces.remember(unavailable_chat)
     await _persist_session(
-        old_chat,
+        unavailable_chat,
         home=home,
-        title="Old conversation",
+        title="Unavailable conversation",
         created_at=datetime(2026, 10, 4, 12, 0, tzinfo=UTC),
-        content="old body",
+        content="unavailable body",
         creation_scope="chat",
     )
-    expected_directory = str(old_chat.resolve())
+    available_chat = tmp_path / "available-chat"
+    available_chat.mkdir()
+    service.conversation_workspaces.remember(available_chat)
+    expected_session_id = await _persist_session(
+        available_chat,
+        home=home,
+        title="Available conversation",
+        created_at=datetime(2026, 10, 4, 13, 0, tzinfo=UTC),
+        content="available body",
+        creation_scope="chat",
+    )
     if directory_state == "missing":
-        shutil.rmtree(old_chat)
+        shutil.rmtree(unavailable_chat)
     else:
         original_iterdir = Path.iterdir
 
         def inaccessible_iterdir(directory: Path) -> Iterator[Path]:
-            if directory == old_chat / ".aide" / "sessions":
+            if directory == unavailable_chat / ".aide" / "sessions":
                 raise PermissionError("History directory cannot be enumerated")
             return original_iterdir(directory)
 
@@ -534,9 +544,10 @@ async def test_chat_history_reports_unavailable_workspace_without_recreating_it(
                 assert response.status == 200
                 page = await response.json()
 
-        assert page["sessions"] == []
-        assert page["unavailable_directories"] == [expected_directory]
-        assert old_chat.exists() is (directory_state != "missing")
+        assert set(page) == {"sessions", "next_cursor"}
+        assert [item["id"] for item in page["sessions"]] == [expected_session_id]
+        assert page["next_cursor"] is None
+        assert unavailable_chat.exists() is (directory_state != "missing")
     finally:
         await server.close()
         await service.stop()

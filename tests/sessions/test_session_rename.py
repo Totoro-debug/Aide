@@ -35,7 +35,7 @@ def _path(session: Session) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_legacy_jsonl_defaults_title_version_and_survives_rename(workspace: Path) -> None:
+async def test_initial_title_version_survives_persistence_and_rename(workspace: Path) -> None:
     session = await _persisted_session(workspace)
     raw = _path(session).read_bytes()
     header = json.loads(raw.splitlines()[0])
@@ -46,10 +46,10 @@ async def test_legacy_jsonl_defaults_title_version_and_survives_rename(workspace
     assert loaded.metadata_version == 0
     assert not loaded.has_manual_title
     assert _path(session).read_bytes() == raw
-    await _rename_session(loaded, "Manual legacy title", expected_metadata_version=0)
+    await _rename_session(loaded, "Manual title", expected_metadata_version=0)
 
     reloaded = Session.load(session.workspace_state, session.session_id)
-    assert reloaded.metadata["title"] == "Manual legacy title"
+    assert reloaded.metadata["title"] == "Manual title"
     assert reloaded.metadata_version == 1
     assert reloaded.has_manual_title
     assert reloaded.messages == session.messages

@@ -1,4 +1,4 @@
-"""Controlled resource workload for the AgentService migration (no external services)."""
+"""Controlled resource workload for AgentService (no external services)."""
 
 from __future__ import annotations
 

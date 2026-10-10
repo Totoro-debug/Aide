@@ -69,7 +69,7 @@ def test_assembly_only_templates_are_not_packaged() -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["", ".", "..", "legacy.txt", "nested/name.md", r"nested\name.md"],
+    ["", ".", "..", "invalid.txt", "nested/name.md", r"nested\name.md"],
 )
 def test_template_loader_rejects_non_markdown_or_nonlocal_names(name: str) -> None:
     with pytest.raises(ValueError, match="package-local"):

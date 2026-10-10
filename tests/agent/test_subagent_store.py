@@ -134,7 +134,7 @@ def test_record_round_trips_through_a_new_session_scoped_store(tmp_path: Path) -
     assert repository.session_id == session_id
 
 
-def test_legacy_session_lists_no_records_without_creating_subagent_storage(
+def test_session_without_subagents_lists_no_records_without_creating_subagent_storage(
     tmp_path: Path,
 ) -> None:
     state, session_id = _workspace(tmp_path)

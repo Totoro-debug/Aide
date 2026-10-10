@@ -84,7 +84,6 @@ def test_model_defaults_drive_routes_session_selection_and_available_models(tmp_
     }
     fields = loader.web_snapshot().fields["models"]
     assert all(set(route) == {"provider_id", "model"} for route in cast(dict[str, Any], fields["routes"]).values())
-    assert "model_context_windows" not in cast(dict[str, Any], fields["providers"])["primary"]
     assert "model-configuration-secret" not in repr(view) + repr(fields)
 
 
@@ -202,11 +201,11 @@ def test_scalar_model_row_is_visible_and_can_be_repaired(tmp_path: Path) -> None
     ("context_window", 65536), ("max_output", 512), ("temperature", 0.5),
     ("reasoning_effort", "mid"), ("timeout", 120),
 ])
-def test_new_routes_reject_parameters(tmp_path: Path, field: str, value: object) -> None:
+def test_routes_reject_model_parameters(tmp_path: Path, field: str, value: object) -> None:
     loader = model_loader(tmp_path)
     before = loader.path.read_bytes()
     with pytest.raises(ConfigError):
-        loader.patch_editable_fields(loader.revision(), {"models": {"routes": {"default": {field: value}}}})
+        loader.patch_editable_fields(loader.revision(), {"models": {"routes": {"chat": {field: value}}}})
     assert loader.path.read_bytes() == before
 
 
@@ -216,27 +215,23 @@ def test_model_save_preserves_comments_and_removes_deleted_models(tmp_path: Path
     models["providers"]["primary"]["models"]["large"]["max_output"] = 1024
     del models["providers"]["primary"]["models"]["vendor/small.v1"]
     for route in models["routes"].values():
-        route["model"] = "large"
+        if route["provider_id"]:
+            route["model"] = "large"
     loader.patch_editable_fields(loader.revision(), {"models": models})
     assert "# Preserve this model comment." in loader.path.read_text(encoding="utf-8")
     assert tuple(loader.load().models.providers["primary"].models) == ("large",)
     assert loader.load().resolve_route("schedule").route.max_output == 1024
 
 
-@pytest.mark.parametrize("legacy", [
-    'models = ["legacy-model"]',
-    '[models.providers.primary.model_context_windows]\nlegacy-model = 8192',
-])
-def test_legacy_provider_formats_are_rejected_without_conversion(tmp_path: Path, legacy: str) -> None:
+@pytest.mark.parametrize("invalid_models", ['42', '"model"', '["model"]'])
+def test_provider_requires_a_model_parameter_table(tmp_path: Path, invalid_models: str) -> None:
     start = MODEL_CONFIG.index("[models.providers.primary.models.large]")
     end = MODEL_CONFIG.index("[models.routes.chat]")
-    loader = model_loader(tmp_path, MODEL_CONFIG[:start] + legacy + "\n" + MODEL_CONFIG[end:])
+    loader = model_loader(tmp_path, MODEL_CONFIG[:start] + f"models = {invalid_models}\n" + MODEL_CONFIG[end:])
     before = loader.path.read_bytes()
     with pytest.raises(ConfigError):
         loader.load()
-    snapshot = loader.web_snapshot()
-    assert snapshot.state == "invalid"
-    assert "migration_candidates" not in repr(snapshot.fields)
+    assert loader.web_snapshot().state == "invalid"
     assert loader.path.read_bytes() == before
 
 
@@ -249,56 +244,66 @@ def test_effort_persistence_updates_models_without_route_parameters(tmp_path: Pa
     assert all(set(route) == {"provider_id", "model"} for route in content["models"]["routes"].values())
 
 
-@pytest.mark.parametrize("legacy", [
-    '''[models.providers.primary]
-protocol = "openai-compatible"
-base_url = "https://models.example/v1"
-api_key = "repair-secret"
-models = ["old"]
-[models.routes.default]
-provider_id = "primary"
-model = "old"
-context_window = 65536
-max_output = 8192
-temperature = 0.2
-reasoning_effort = "high"
-timeout = 120
-''',
-    MODEL_CONFIG + '\n[models.providers.primary.model_context_windows]\nlarge = 65536\n',
-    MODEL_CONFIG.replace('model = "large"', 'model = "large"\nmax_output = 8192', 1),
-])
-def test_explicit_current_fields_repair_unsupported_model_structure(
-    tmp_path: Path, legacy: str,
-) -> None:
-    legacy = legacy.replace('[models.providers.primary]\n',
-                            '[models.providers.primary]\nextension = "keep"\n', 1)
-    loader = model_loader(tmp_path, legacy + '''
-[models.routes.future]
-extension = "keep"
-[future]
-value = 42
-''')
+def test_fixed_route_fields_include_unconfigured_targets_without_writing(tmp_path: Path) -> None:
+    loader = model_loader(tmp_path)
     before = loader.path.read_bytes()
-    snapshot = loader.web_snapshot()
-    assert snapshot.state == "invalid"
+    routes = loader.web_snapshot().fields["models"]["routes"]
+    assert isinstance(routes, Mapping)
+    assert tuple(routes) == ("chat", "title", "memory", "schedule", "subagent")
+    assert routes["subagent"] == {"provider_id": "", "model": ""}
     assert loader.path.read_bytes() == before
-    fields = cast(dict[str, Any], json.loads(json.dumps(dict(snapshot.fields))))
-    fields["models"] = {
-        "providers": {"primary": {
-            "protocol": "openai-compatible", "base_url": "https://models.example/v1",
-            "models": {"chosen": {"context_window": 4096, "max_output": 512,
-                                  "temperature": 0.7, "reasoning_effort": "mid", "timeout": 17}},
-        }},
-        "routes": {"chat": {"provider_id": "primary", "model": "chosen"}},
-    }
-    result = loader.repair_editable_fields(snapshot.revision, fields)
-    route = result.configuration.resolve_route("chat").route
-    assert (route.model, route.context_window, route.max_output, route.timeout) == ("chosen", 4096, 512, 17)
-    saved = tomllib.loads(loader.path.read_text(encoding="utf-8"))
-    assert saved["future"] == {"value": 42}
-    assert saved["models"]["providers"]["primary"]["extension"] == "keep"
-    assert "model_context_windows" not in saved["models"]["providers"]["primary"]
-    assert set(saved["models"]["routes"]) == {"chat", "future"}
-    assert saved["models"]["routes"]["future"] == {"extension": "keep"}
-    assert set(saved["models"]["routes"]["chat"]) == {"provider_id", "model"}
-    assert result.configuration.models.providers["primary"].api_key in {"repair-secret", "model-configuration-secret"}
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_partial_route_update_preserves_omitted_targets(tmp_path: Path, stale: bool) -> None:
+    loader = model_loader(tmp_path)
+    snapshot = loader.web_snapshot()
+    if stale:
+        loader.patch_editable_fields(snapshot.revision, {
+            "models": {"routes": {"title": {"model": "vendor/small.v1"}}},
+        })
+    loader.patch_editable_fields(snapshot.revision, {
+        "models": {"routes": {"chat": {"model": "vendor/small.v1"}}},
+    }, baseline=snapshot.fields)
+    configuration = loader.load_for_startup()
+    assert configuration.models.routes["chat"].model == "vendor/small.v1"
+    assert configuration.models.routes["title"].model == ("vendor/small.v1" if stale else "large")
+    assert configuration.models.routes["memory"].model == "vendor/small.v1"
+    assert configuration.models.routes["schedule"].model == "vendor/small.v1"
+
+
+@pytest.mark.parametrize("name", ["title", "memory", "schedule", "subagent"])
+def test_optional_target_can_be_unconfigured_while_its_row_remains(
+    tmp_path: Path, name: str,
+) -> None:
+    loader = model_loader(tmp_path)
+    result = loader.patch_editable_fields(loader.revision(), {
+        "models": {"routes": {name: {"provider_id": "", "model": ""}}},
+    })
+    routes = cast(Mapping[str, object], result.fields["models"]["routes"])
+    assert routes[name] == {"provider_id": "", "model": ""}
+    assert name not in result.configuration.models.routes
+    if name in {"title", "memory"}:
+        assert result.configuration.resolve_route(name).selected_route == "chat"
+    else:
+        with pytest.raises(ConfigError) as raised:
+            result.configuration.resolve_route(name)
+        assert raised.value.error.code == "route_unavailable"
+
+
+@pytest.mark.parametrize("routes", [
+    {"chat": {"provider_id": "", "model": ""}},
+    {"unknown": {"provider_id": "primary", "model": "large"}},
+    {"title": None},
+    {"title": {"delete": True}},
+    {"title": {"provider_id": "", "model": "large"}},
+    {"title": {"provider_id": "primary", "model": ""}},
+])
+def test_invalid_route_updates_preserve_configuration(
+    tmp_path: Path, routes: dict[str, object],
+) -> None:
+    loader = model_loader(tmp_path)
+    before = loader.path.read_bytes()
+    with pytest.raises(ConfigError):
+        loader.patch_editable_fields(loader.revision(), {"models": {"routes": routes}})
+    assert loader.path.read_bytes() == before

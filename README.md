@@ -57,11 +57,11 @@ model = "your-model-id"
 
 `protocol` 支持 `openai-compatible` 和 `anthropic`。`chat` 路由用于对话；`title`、`memory` 未配置或不可用时可降级到 `chat`。定时任务和 SubAgent 分别需要可用的 `schedule`、`subagent` 路由，均不会降级。更多选项见[配置模板](aide/templates/default-config.md)。
 
-Web 模型设置以小卡片编辑参数，点击 Provider 下的加号添加模型；chat、title、memory、schedule、subagent 从已配置的 Provider 和模型中选择。保存设置后，所有会话从下一轮 AgentRun 开始生效，无需重启服务。切换会话模型时采用所选模型自身的输出上限等参数，会话显式推理强度覆盖模型默认值。
+Web 模型设置以卡片编辑参数，点击 Provider 下的加号添加模型。模型路由固定展示 `chat`、`title`、`memory`、`schedule`、`subagent` 五行，每行直接选择 Provider 和模型；`chat` 必须配置，其他路由可以选择“未配置”。已引用的模型需先更换对应路由的目标才能删除。
 
-旧模型列表与路由参数配置仍可读取。编辑模型设置时，参数一致的配置可以合并；同一模型存在不同路由参数时，卡片列出候选值，需要明确选择或补齐参数后再迁移保存。额外模型缺少参数时需要补齐，已引用的模型需先更换路由才能删除。
+Web 的 API Key 输入框不展示已保存的密钥。输入新 Key 后，点击输入框左侧的圆形保存按钮才确认修改；未点击时，其他设置的保存不会提交该 Key。保存成功后输入框恢复为空。
 
-Provider 模型仅接受参数表，路由仅接受 `provider_id` 和 `model`。旧模型数组、独立容量表、路由内参数及 `models.routes.default` 会报告配置错误；请通过配置编辑器修复。
+Provider 下的模型集中定义参数，路由仅包含 `provider_id` 和 `model`。保存设置后，所有会话从下一轮 Agent Run 开始使用新配置，无需重启；正在执行的轮次保留原配置。会话模型选择使用所选模型自身的参数，并以会话选择的推理强度覆盖模型默认值。
 
 ### 3. 开始对话
 

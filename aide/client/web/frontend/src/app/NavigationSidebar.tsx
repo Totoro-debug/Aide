@@ -353,13 +353,6 @@ export default function NavigationSidebar({
               );
             })}
           </ul>
-          {chatHistory !== null && chatHistory.unavailable_directories.length > 0 ? (
-            <p className={styles.sidebarStatus} role="status" aria-atomic="true">
-              {t("chat.historyDirectoriesUnavailable", {
-                directories: chatHistory.unavailable_directories.join("; "),
-              })}
-            </p>
-          ) : null}
           {chatHistory?.next_cursor !== null && chatHistory !== null ? (
             <button
               className={styles.chatHistoryMore}

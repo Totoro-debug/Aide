@@ -229,7 +229,7 @@ async def test_session_model_configuration_is_claimed_versioned_and_persisted(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "invalid",
-    ["unknown_model", "stale_claim", "missing_claim", "invalid_effort", "legacy_effort"],
+    ["unknown_model", "stale_claim", "missing_claim", "invalid_effort", "unsupported_effort"],
 )
 async def test_session_model_configuration_rejects_invalid_updates_without_mutation(
     tmp_path: Path,
@@ -247,7 +247,7 @@ async def test_session_model_configuration_rejects_invalid_updates_without_mutat
                 "unknown"
                 if invalid == "invalid_effort"
                 else "medium"
-                if invalid == "legacy_effort"
+                if invalid == "unsupported_effort"
                 else "high"
             ),
         }
@@ -270,7 +270,7 @@ async def test_session_model_configuration_rejects_invalid_updates_without_mutat
                 "stale_claim": "stale_claim",
                 "missing_claim": "stale_claim",
                 "invalid_effort": "validation_error",
-                "legacy_effort": "validation_error",
+                "unsupported_effort": "validation_error",
             }[invalid]
         )
         assert harness.session.model_configuration is None

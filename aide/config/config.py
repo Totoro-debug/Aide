@@ -35,7 +35,7 @@ type ExecShell = Literal["auto", "powershell", "pwsh"]
 
 _PROVIDER_ID_PATTERN: Final = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _MCP_NAME_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-_ROUTE_NAMES: Final = frozenset({"chat", "title", "memory", "schedule", "subagent"})
+_ROUTE_NAMES: Final = ("chat", "title", "memory", "schedule", "subagent")
 _MCP_TRANSPORTS: Final = frozenset({"stdio", "streamable-http"})
 _MCP_DEFAULT_CONNECT_TIMEOUT: Final = 30
 _MCP_DEFAULT_CALL_TIMEOUT: Final = 60
@@ -944,8 +944,6 @@ def _parse_provider(provider_id: str, value: object) -> ProviderConfiguration:
     if not _PROVIDER_ID_PATTERN.fullmatch(provider_id):
         _invalid(prefix, "must use a lowercase kebab-case provider ID")
     table = _table(value, prefix)
-    if "model_context_windows" in table:
-        _invalid(f"{prefix}.model_context_windows", "is not a supported Model Provider field")
     models_value = _table(_required(table, "models", f"{prefix}.models"), f"{prefix}.models")
     configurations = {
         _string(model, f"{prefix}.models", nonempty=True):
@@ -994,8 +992,7 @@ def _parse_models(document: Mapping[str, object]) -> ModelsConfiguration:
     table = _table(models_value, "models")
     provider_tables = _table(table.get("providers", {}), "models.providers")
     route_tables = _table(table.get("routes", {}), "models.routes")
-    if "default" in route_tables:
-        _invalid("models.routes.default", "is not a supported Model Route")
+    _reject_unknown_fields(route_tables, set(_ROUTE_NAMES), "models.routes")
     providers = {
         provider_id: _parse_provider(provider_id, provider)
         for provider_id, provider in provider_tables.items()
@@ -1003,7 +1000,6 @@ def _parse_models(document: Mapping[str, object]) -> ModelsConfiguration:
     routes = {
         route_name: _parse_route(route_name, route, providers=providers)
         for route_name, route in route_tables.items()
-        if route_name in _ROUTE_NAMES
     }
     return ModelsConfiguration(
         providers=MappingProxyType(providers),
@@ -1238,6 +1234,7 @@ def _merge_config_value(
     if requested is _CONFIG_MISSING:
         if (
             (len(path) == 2 and path[0] == "models")
+            or (len(path) == 3 and path[:2] == ("models", "routes"))
             or (len(path) == 4 and path[:2] in {("models", "providers"), ("models", "routes")})
             or (len(path) == 3 and path[0] == "mcp")
         ):
@@ -1347,13 +1344,13 @@ def _editable_configuration_fields(
         }
         for provider_id, provider in configuration.models.providers.items()
     }
-    routes = {
-        route_name: {
-            "provider_id": route.provider_id,
-            "model": route.model,
+    routes = {}
+    for route_name in _ROUTE_NAMES:
+        route = configuration.models.routes.get(route_name)
+        routes[route_name] = {
+            "provider_id": "" if route is None else route.provider_id,
+            "model": "" if route is None else route.model,
         }
-        for route_name, route in configuration.models.routes.items()
-    }
     mcp = {
         server_name: _editable_mcp_server_fields(server)
         for server_name, server in configuration.mcp.items()
@@ -1558,6 +1555,8 @@ def _validate_route_fields(route_name: str, value: object) -> dict[str, object]:
     table = _editable_table(value, field)
     allowed = {"provider_id", "model"}
     _reject_unknown_fields(table, allowed, field)
+    if route_name != "chat" and table == {"provider_id": "", "model": ""}:
+        return {"provider_id": "", "model": ""}
     normalized: dict[str, object] = {}
     if "provider_id" in table:
         provider_id = _string(table["provider_id"], f"{field}.provider_id", nonempty=True)
@@ -1805,7 +1804,6 @@ def _apply_model_fields(
                 table["api_key"] = ""
             for field, value in provider.items():
                 if field == "models" and isinstance(value, Mapping):
-                    table.pop("model_context_windows", None)
                     if not isinstance(table.get("models"), MutableMapping):
                         table.pop("models", None)
                     model_table = _mutable_toml_table(table, "models", "models")
@@ -1826,10 +1824,10 @@ def _apply_model_fields(
     if "routes" in values:
         routes = _mutable_toml_table(models, "routes", "models.routes")
         route_values = cast(Mapping[str, Mapping[str, object]], values["routes"])
-        for route_name in tuple(routes):
-            if (route_name in _ROUTE_NAMES or route_name == "default") and route_name not in route_values:
-                del routes[route_name]
         for route_name, route in route_values.items():
+            if route_name != "chat" and route == {"provider_id": "", "model": ""}:
+                routes.pop(route_name, None)
+                continue
             table = _mutable_toml_table(routes, route_name, f"models.routes.{route_name}")
             for existing_field in tuple(table):
                 if existing_field not in {"provider_id", "model"}:

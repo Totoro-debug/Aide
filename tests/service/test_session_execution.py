@@ -1,4 +1,4 @@
-"""Resident Session lifecycle tests migrated from executor management seams."""
+"""Resident Session lifecycle tests."""
 
 import asyncio
 from pathlib import Path

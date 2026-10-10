@@ -30,7 +30,7 @@ def _encoding_name_for_model(model: str) -> str:
         raise ContextTokenizerError(
             ErrorInfo(
                 "model_invalid_request",
-                f"Legacy model {model!r} uses unsupported context encoding {name!r}.",
+                f"Model {model!r} uses unsupported context encoding {name!r}.",
             )
         )
     return name

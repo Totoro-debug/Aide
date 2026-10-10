@@ -96,17 +96,16 @@ def test_initialization_rejects_agent_home_as_workspace(
     assert not (agent_home / "sessions").exists()
 
 
-def test_initialization_rejects_workspace_beneath_agent_home_without_reading_legacy_state(
+def test_initialization_rejects_workspace_beneath_agent_home_without_reading_unrelated_state(
     agent_home: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    legacy_files = {
-        agent_home / "memory" / "memory.md": b"legacy memory\r\n",
-        agent_home / "sessions" / "legacy-session.jsonl": b"legacy session\r\n",
-        agent_home / "obsolete-state.json": b"legacy obsolete state\r\n",
-        agent_home / "sessions" / "artifacts" / "legacy" / "tool.txt": b"legacy artifact\r\n",
+    unrelated_files = {
+        agent_home / "notes" / "private.md": b"# Private notes\r\n",
+        agent_home / "notes" / "attachment.bin": b"private attachment\xff",
+        agent_home / "scratch.json": b"invalid scratch state\xff",
     }
-    for path, content in legacy_files.items():
+    for path, content in unrelated_files.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
     workspace = agent_home / "nested-workspace"
@@ -115,29 +114,29 @@ def test_initialization_rejects_workspace_beneath_agent_home_without_reading_leg
     original_read_bytes = Path.read_bytes
     original_read_text = Path.read_text
 
-    def reject_legacy_bytes(path: Path) -> bytes:
-        if path in legacy_files:
-            raise AssertionError(f"legacy state was read: {path}")
+    def reject_unrelated_bytes(path: Path) -> bytes:
+        if path in unrelated_files:
+            raise AssertionError(f"unrelated state was read: {path}")
         return original_read_bytes(path)
 
-    def reject_legacy_text(
+    def reject_unrelated_text(
         path: Path,
         encoding: str | None = None,
         errors: str | None = None,
     ) -> str:
-        if path in legacy_files:
-            raise AssertionError(f"legacy state was read: {path}")
+        if path in unrelated_files:
+            raise AssertionError(f"unrelated state was read: {path}")
         return original_read_text(path, encoding=encoding, errors=errors)
 
     with monkeypatch.context() as guarded:
-        guarded.setattr(Path, "read_bytes", reject_legacy_bytes)
-        guarded.setattr(Path, "read_text", reject_legacy_text)
+        guarded.setattr(Path, "read_bytes", reject_unrelated_bytes)
+        guarded.setattr(Path, "read_text", reject_unrelated_text)
         with pytest.raises(WorkspaceStateError) as captured:
             state.initialize(agent_home_root=agent_home)
 
     assert captured.value.path == state.path
     assert not state.path.exists()
-    assert {path: path.read_bytes() for path in legacy_files} == legacy_files
+    assert {path: path.read_bytes() for path in unrelated_files} == unrelated_files
 
 
 def test_initialization_allows_only_the_explicit_agent_home_chat_workspace(

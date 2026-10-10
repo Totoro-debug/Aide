@@ -34,6 +34,7 @@ import { serviceStateLabel } from "../../shared/service/presentation.ts";
 import type {
   ConfigFields,
   ConfigResponse,
+  ModelRouteName,
   ServiceStatus,
   SessionClaim,
   SkillMetadata,
@@ -42,8 +43,8 @@ import type {
 import type { AuthState, ConnectionState } from "../../shared/service/types.ts";
 import commonStyles from "../../shared/styles/controls.module.css";
 import { operationManagementErrorKey } from "../runtime/errors.ts";
-import { SecretInput, SettingsListField, SettingsNumberField } from "./fields.tsx";
-import type { ConfigSettingsSection, McpForm, PendingSettingsSave, ProviderForm, RouteForm, SecretDraft, SettingsFieldError, SettingsForm, SettingsSection } from "./forms.ts";
+import { ApiKeyInput, SecretInput, SettingsListField, SettingsNumberField } from "./fields.tsx";
+import type { ConfigSettingsSection, McpForm, PendingSettingsSave, ProviderForm, RouteForm, SettingsFieldError, SettingsForm, SettingsSection } from "./forms.ts";
 import { changedConfigFieldPaths, configFieldsForSections, configFromForm, configSecretsForSections, formFromConfig, isCompleteModelForm, isSelectableProvider, preserveSettingsInput, sameSettingsValue, secretDraft, settingsSectionsForChanges } from "./forms.ts";
 import type { ModelForm } from "./modelSettings";
 import { modelSettingsFieldId } from "./modelSettings";
@@ -124,6 +125,7 @@ export function SettingsView({
   }, [location.hash]);
   const [response, setResponse] = useState<ConfigResponse | null>(null);
   const [draft, setDraft] = useState<SettingsForm | null>(null);
+  const [apiKeyInputs, setApiKeyInputs] = useState<Record<string, string>>({});
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -281,7 +283,7 @@ export function SettingsView({
     }));
   }, [updateDraft]);
 
-  const updateRoute = useCallback((id: string, update: Partial<RouteForm>) => {
+  const updateRoute = useCallback((id: ModelRouteName, update: Partial<RouteForm>) => {
     updateDraft((current) => ({
       ...current,
       models: {
@@ -304,6 +306,7 @@ export function SettingsView({
     let id = "new-provider";
     let index = 2;
     while (current.models.providers[id] !== undefined) id = `new-provider-${index++}`;
+    setApiKeyInputs((inputs) => ({ ...inputs, [id]: "" }));
     updateDraft((form) => ({
       ...form,
       models: {
@@ -317,6 +320,11 @@ export function SettingsView({
   }, [updateDraft]);
 
   const removeProvider = useCallback((id: string) => {
+    setApiKeyInputs((inputs) => {
+      const next = { ...inputs };
+      delete next[id];
+      return next;
+    });
     updateDraft((current) => {
       const providers = { ...current.models.providers };
       delete providers[id];
@@ -355,38 +363,6 @@ export function SettingsView({
       return { ...current, models: { ...current.models, providers: {
         ...current.models.providers, [providerRow]: { ...provider, models },
       } } };
-    });
-  }, [updateDraft]);
-
-  const addRoute = useCallback(() => {
-    const current = draftRef.current;
-    if (current === null) return;
-    const name = (["chat", "title", "memory", "schedule", "subagent"] as const).find(
-      (candidate) => current.models.routes[candidate] === undefined,
-    );
-    if (name === undefined) return;
-    updateDraft((form) => ({
-      ...form,
-      models: {
-        ...form.models,
-        routes: {
-          ...form.models.routes,
-          [name]: {
-            name,
-            provider_id: Object.values(form.models.providers)[0]?.id ?? "",
-            model: "",
-          },
-        },
-      },
-    }));
-  }, [updateDraft]);
-
-  const removeRoute = useCallback((id: string) => {
-    if (id === "chat") return;
-    updateDraft((current) => {
-      const routes = { ...current.models.routes };
-      delete routes[id];
-      return { ...current, models: { ...current.models, routes } };
     });
   }, [updateDraft]);
 
@@ -446,13 +422,25 @@ export function SettingsView({
     overwriteConflicts = false,
     focusError = false,
     autoSection?: ConfigSettingsSection | null,
+    confirmedApiKey?: { providerRow: string; value: string },
   ) => {
     if (authState !== "ready" || connectionState !== "online") {
       return;
     }
-    const pending = focusError && saveFailed ? retryOperationRef.current : null;
-    if (saveFailed && !focusError && pending === null) {
+    const keyProvider = confirmedApiKey === undefined ? undefined : draftRef.current?.models.providers[confirmedApiKey.providerRow];
+    const previousKeyChange = keyProvider === undefined ? undefined
+      : retryOperationRef.current?.secrets[`models.providers.${keyProvider.id}.api_key`];
+    const retryConfirmedKey = confirmedApiKey !== undefined && previousKeyChange?.action === "replace"
+      && previousKeyChange.value === confirmedApiKey.value;
+    const pending = saveFailed && (focusError || retryConfirmedKey) ? retryOperationRef.current : null;
+    if (saveFailed && !focusError && confirmedApiKey === undefined) {
       return;
+    }
+    if (confirmedApiKey !== undefined) {
+      if (keyProvider === undefined || confirmedApiKey.value.length === 0) return;
+      updateProvider(confirmedApiKey.providerRow, {
+        api_key: { ...keyProvider.api_key, action: "replace", value: confirmedApiKey.value },
+      });
     }
     focusErrorSummaryRef.current = focusError;
     const snapshot = pending?.snapshot ?? draftRef.current;
@@ -506,7 +494,10 @@ export function SettingsView({
         setSubmitError(t("settings.duplicateModel"));
         return;
       }
-      const incompleteRoute = Object.values(snapshot.models.routes).some((route) => route.provider_id === "" || route.model === "");
+      const incompleteRoute = Object.values(snapshot.models.routes).some((route) => (
+        route.name === "chat" ? route.provider_id === "" || route.model === ""
+          : (route.provider_id === "") !== (route.model === "")
+      ));
       if ((incompleteModels || incompleteRoute) && !focusError) return;
     }
     const changedPaths = fullCandidate === null ? [] : changedConfigFieldPaths(baseline, fullCandidate.fields);
@@ -584,6 +575,14 @@ export function SettingsView({
       const preservedDraft = preserveSettingsInput(snapshot, latestDraft, savedDraft) as SettingsForm;
       draftRef.current = preservedDraft;
       setDraft(preservedDraft);
+      setApiKeyInputs((inputs) => {
+        const nextInputs = { ...inputs };
+        for (const [row, provider] of Object.entries(operation.snapshot.models.providers)) {
+          const change = operation.secrets[`models.providers.${provider.id}.api_key`];
+          if (change?.action === "replace" && nextInputs[row] === change.value) delete nextInputs[row];
+        }
+        return nextInputs;
+      });
       baselineFieldsRef.current = next.fields;
       baselineSecretRevisionsRef.current = next.secret_revisions;
       const remainingCandidate = configFromForm(preservedDraft);
@@ -651,7 +650,7 @@ export function SettingsView({
         setSaving(false);
       }
     }
-  }, [authState, connectionState, fieldErrors, response?.configuration.repair_required, saveFailed, t]);
+  }, [authState, connectionState, fieldErrors, response?.configuration.repair_required, saveFailed, t, updateProvider]);
 
   const blurField = useCallback((path: string, value: string | boolean) => {
     void value;
@@ -677,6 +676,7 @@ export function SettingsView({
       setDirty(false);
       dirtySectionsRef.current.clear();
       applyResponse(next);
+      setApiKeyInputs({});
       setFieldErrors({});
       setSubmitError(null);
       setSaveFailed(false);
@@ -759,6 +759,7 @@ export function SettingsView({
     }
   }
   const captureSettingsBlur = (event?: React.FocusEvent<HTMLFormElement>) => {
+    if (event?.target instanceof Element && event.target.closest("[data-api-key-editor]") !== null) return;
     if (event !== undefined && !(event.target instanceof HTMLInputElement
       || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement)) return;
     if (event?.target instanceof HTMLSelectElement
@@ -781,13 +782,11 @@ export function SettingsView({
     if (!(event.target instanceof Element)) return;
     const button = event.target.closest("button");
     if (button === null || button.closest("nav") !== null) return;
+    if (button.closest("[data-api-key-editor]") !== null) return;
     const label = (button.getAttribute("aria-label") ?? button.textContent ?? "").trim();
     if (/^(?:add|添加)(?:\s|$)/i.test(label)) return;
     window.setTimeout(() => void saveDraft(false, false, activeSection === "general" ? null : activeSection), 0);
   };
-  const canAddRoute = draft !== null && (["chat", "title", "memory", "schedule", "subagent"] as const).some(
-    (name) => draft.models.routes[name] === undefined,
-  );
   const labelFor = (path: string): string => {
     const labels: Record<string, string> = {
       "runtime.max_tool_result_chars": t("settings.maxToolResultChars"),
@@ -1417,13 +1416,14 @@ export function SettingsView({
                         />
                         <span className={styles.fieldError} id={`${fieldId(`models.providers.${provider.id}.base_url`)}-error`}>{fieldError(`models.providers.${provider.id}.base_url`) ?? ""}</span>
                       </label>
-                      <SecretInput
+                      <ApiKeyInput
                         id={fieldId(`models.providers.${provider.id}.api_key`)}
-                        label={t("settings.apiKey")}
-                        secret={provider.api_key}
+                        configured={provider.api_key.configured}
+                        value={apiKeyInputs[providerRow] ?? ""}
                         error={groupError(`models.providers.${provider.id}.api_key`)}
                         disabled={controlDisabled}
-                        onChange={(update) => updateProvider(providerRow, { api_key: { ...provider.api_key, ...update } as SecretDraft })}
+                        onChange={(value) => setApiKeyInputs((inputs) => ({ ...inputs, [providerRow]: value }))}
+                        onSave={() => void saveDraft(false, false, "models", { providerRow, value: apiKeyInputs[providerRow] ?? "" })}
                       />
                     </div>
                     <div className={styles.settingsCollectionHeader}>
@@ -1446,9 +1446,6 @@ export function SettingsView({
             <div className={styles.settingsSubsection}>
               <div className={styles.settingsCollectionHeader} id="settings-models-routes" tabIndex={-1}>
                 <h3>{t("settings.routes")}</h3>
-                <button className={styles.secondaryButton} type="button" onClick={addRoute} disabled={controlDisabled || !canAddRoute}>
-                  <Plus size={14} aria-hidden="true" />{t("settings.addRoute")}
-                </button>
               </div>
               <div className={styles.settingsCollection}>
                 {Object.values(draft.models.routes).map((route) => {
@@ -1458,51 +1455,41 @@ export function SettingsView({
                   const unavailableProvider = route.provider_id !== "" && selectedProvider === undefined;
                   const unavailableModel = route.model !== "" && !selectableModels.some((model) => model.id === route.model);
                   return (
-                  <div className={styles.settingsCollectionItem} key={route.name} id={fieldId(`models.routes.${route.name}`)} tabIndex={-1}>
-                    <div className={styles.settingsCollectionItemHeader}>
-                      <h4>{route.name === "chat" ? t("settings.chatRequired") : route.name}</h4>
-                      <button
-                        className={styles.iconButton}
-                        type="button"
-                        aria-label={t("settings.removeRoute")}
-                        title={t("settings.removeRoute")}
-                        disabled={controlDisabled || route.name === "chat"}
-                        onClick={() => removeRoute(route.name)}
-                      ><Trash2 size={15} aria-hidden="true" /></button>
+                  <div className={styles.modelRouteRow} key={route.name} id={fieldId(`models.routes.${route.name}`)} tabIndex={-1}>
+                    <h4>{route.name === "chat" ? t("settings.chatRequired") : route.name}</h4>
+                    <div className={styles.modelRouteField}>
+                      <select
+                        className={styles.selectInput}
+                        id={fieldId(`models.routes.${route.name}.provider_id`)}
+                        aria-label={t("settings.providerId")}
+                        aria-describedby={fieldId(`models.routes.${route.name}.provider_id.error`)}
+                        value={route.provider_id}
+                        aria-invalid={unavailableProvider || fieldError(`models.routes.${route.name}.provider_id`) !== undefined}
+                        disabled={controlDisabled}
+                        onChange={(event) => updateRoute(route.name, { provider_id: event.currentTarget.value, model: "" })}
+                      >
+                        <option value="" disabled={route.name === "chat"}>{t(route.name === "chat" ? "settings.selectProvider" : "settings.unconfigured")}</option>
+                        {unavailableProvider ? <option value={route.provider_id} disabled>{route.provider_id} · {t("settings.unavailable")}</option> : null}
+                        {selectableProviders.map((provider) => <option key={provider.id} value={provider.id}>{provider.id}</option>)}
+                      </select>
+                      <span className={styles.fieldError} id={fieldId(`models.routes.${route.name}.provider_id.error`)}>{fieldError(`models.routes.${route.name}.provider_id`) ?? ""}</span>
                     </div>
-                    <div className={styles.settingsFieldGrid}>
-                      <label className={styles.settingsField} htmlFor={fieldId(`models.routes.${route.name}.provider_id`)}>
-                        <span className={styles.fieldLabel}>{t("settings.providerId")}</span>
-                        <select
-                          className={styles.selectInput}
-                          id={fieldId(`models.routes.${route.name}.provider_id`)}
-                          value={route.provider_id}
-                          aria-invalid={unavailableProvider || fieldError(`models.routes.${route.name}.provider_id`) !== undefined}
-                          disabled={controlDisabled}
-                          onChange={(event) => updateRoute(route.name, { provider_id: event.currentTarget.value, model: "" })}
-                        >
-                          <option value="" disabled>{t("settings.selectProvider")}</option>
-                          {unavailableProvider ? <option value={route.provider_id} disabled>{route.provider_id} · {t("settings.unavailable")}</option> : null}
-                          {selectableProviders.map((provider) => <option key={provider.id} value={provider.id}>{provider.id}</option>)}
-                        </select>
-                        <span className={styles.fieldError}>{fieldError(`models.routes.${route.name}.provider_id`) ?? ""}</span>
-                      </label>
-                      <label className={styles.settingsField} htmlFor={fieldId(`models.routes.${route.name}.model`)}>
-                        <span className={styles.fieldLabel}>{t("settings.model")}</span>
-                        <select
-                          className={styles.selectInput}
-                          id={fieldId(`models.routes.${route.name}.model`)}
-                          value={route.model}
-                          aria-invalid={unavailableModel || fieldError(`models.routes.${route.name}.model`) !== undefined}
-                          disabled={controlDisabled || selectedProvider === undefined}
-                          onChange={(event) => updateRoute(route.name, { model: event.currentTarget.value })}
-                        >
-                          <option value="" disabled>{t("settings.selectModel")}</option>
-                          {unavailableModel ? <option value={route.model} disabled>{route.model} · {t("settings.unavailable")}</option> : null}
-                          {selectableModels.map((model) => <option key={model.id} value={model.id}>{model.id}</option>)}
-                        </select>
-                        <span className={styles.fieldError}>{fieldError(`models.routes.${route.name}.model`) ?? ""}</span>
-                      </label>
+                    <div className={styles.modelRouteField}>
+                      <select
+                        className={styles.selectInput}
+                        id={fieldId(`models.routes.${route.name}.model`)}
+                        aria-label={t("settings.model")}
+                        aria-describedby={fieldId(`models.routes.${route.name}.model.error`)}
+                        value={route.model}
+                        aria-invalid={unavailableModel || fieldError(`models.routes.${route.name}.model`) !== undefined}
+                        disabled={controlDisabled || selectedProvider === undefined}
+                        onChange={(event) => updateRoute(route.name, { model: event.currentTarget.value })}
+                      >
+                        <option value="" disabled>{t("settings.selectModel")}</option>
+                        {unavailableModel ? <option value={route.model} disabled>{route.model} · {t("settings.unavailable")}</option> : null}
+                        {selectableModels.map((model) => <option key={model.id} value={model.id}>{model.id}</option>)}
+                      </select>
+                      <span className={styles.fieldError} id={fieldId(`models.routes.${route.name}.model.error`)}>{fieldError(`models.routes.${route.name}.model`) ?? ""}</span>
                     </div>
                   </div>
                 ); })}

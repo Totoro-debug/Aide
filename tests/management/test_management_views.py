@@ -219,7 +219,7 @@ async def test_reasoning_effort_configuration_failure_keeps_runtime_success_and_
     home.initialize()
     config_path = agent_home / "config.toml"
     config_path.write_text(
-        'api_key = "management-secret"\n[models.routes.default\n',
+        'api_key = "management-secret"\n[models.routes.chat\n',
         encoding="utf-8",
     )
     control = _ReasoningEffortControl()
@@ -236,7 +236,7 @@ async def test_reasoning_effort_configuration_failure_keeps_runtime_success_and_
         "Reasoning Effort persistence failed type=ConfigError"
     ]
     assert "management-secret" not in diagnostics.text
-    assert "models.routes.default" not in diagnostics.text
+    assert "models.routes.chat" not in diagnostics.text
 
 
 @pytest.mark.asyncio
@@ -294,7 +294,7 @@ async def test_reasoning_effort_failure_keeps_runtime_status_and_disk_unchanged(
         "Reasoning Effort persistence failed type=ConfigError"
     ]
     assert "management-secret" not in diagnostics.text
-    assert "models.routes.default" not in diagnostics.text
+    assert "models.routes.chat" not in diagnostics.text
 
 
 @pytest.mark.asyncio
@@ -531,7 +531,7 @@ async def test_status_projects_the_current_runtime_reasoning_effort(
     ("model", "code", "message"),
     [
         ("gpt-4o", "model_failed", "Check network access"),
-        ("gpt-4", "model_invalid_request", "Legacy model"),
+        ("gpt-4", "model_invalid_request", "Model"),
     ],
 )
 async def test_status_preserves_safe_tokenizer_failures_for_protocol_clients(

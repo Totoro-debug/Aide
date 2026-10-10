@@ -186,7 +186,7 @@ _Avoid_: Workspace snapshot, file version, metadata backup
 
 **Backup Gap**:
 A known eligible Built-in Tool modification that continued without a usable File Backup and makes File Restore unavailable for every restore range containing it.
-_Avoid_: file conflict, Tool error, missing legacy backup
+_Avoid_: file conflict, Tool error
 
 **Memory System**:
 The three-layer memory structure owned by a Workspace: Short-term Memory, Conversation Summary, and Long-term Memory.
@@ -345,5 +345,5 @@ A configured backend that implements model calls for one or more Model Routes.
 _Avoid_: Model Route, model string, gateway
 
 **User Configuration**:
-The single account-global persisted configuration that selects runtime, model, and memory behavior at Agent Service startup. Editing it saves settings for the next startup without replacing the current service's active configuration. The Default Conversation Workspace preference is read from the latest saved configuration when Web starts a new conversation.
+The single account-global persisted set of runtime, model, memory, and Default Conversation Workspace preferences. Changes govern subsequent Agent Runs while each active Run retains its configuration.
 _Avoid_: Agent profile, Session override, per-chat settings, identity prompt, repair mode

@@ -68,6 +68,7 @@ def test_invalid_row_retains_siblings_secrets_and_unknown_fields(
         "chat",
         "memory",
         "schedule",
+        "subagent",
     }
     assert set(snapshot.fields["mcp"]) == {"http", "stdio"}
     assert "canary" not in str(snapshot.fields)

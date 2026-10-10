@@ -217,14 +217,14 @@ class BaseTool(ABC, metaclass=_BaseToolMeta):
             _validate_execute_prepared(execute_prepared)
         if "parameters" not in cls.__dict__:
             try:
-                legacy = _schema_from_class(cls, execute)
+                schema = _schema_from_class(cls, execute)
             except (TypeError, ValueError):
-                # Keep declaration errors at the public to_schema boundary for the bridge.
-                if _has_legacy_declaration(cls, execute):
+                # Keep declaration errors at the public to_schema boundary.
+                if _has_parameter_declaration(cls, execute):
                     cast(Any, cls).parameters = {}
                     cast(Any, cls).__schema_declaration_invalid__ = True
             else:
-                cast(Any, cls).parameters = legacy.to_json_schema()
+                cast(Any, cls).parameters = schema.to_json_schema()
         update_abstractmethods(cls)
 
     async def execute(self, *args: Any, **kwargs: Any) -> str:
@@ -552,7 +552,7 @@ class BaseTool(ABC, metaclass=_BaseToolMeta):
         }
 
 
-def _has_legacy_declaration(tool_type: type[object], execute: object) -> bool:
+def _has_parameter_declaration(tool_type: type[object], execute: object) -> bool:
     return bool(tool_type.__dict__.get("__annotations__")) or execute is not None
 
 

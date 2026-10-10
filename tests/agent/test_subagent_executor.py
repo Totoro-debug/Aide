@@ -39,7 +39,6 @@ from aide.agent.tools.tool_gateway import (
 )
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.config import UserConfiguration
-from aide.errors import ErrorInfo
 from aide.provider.errors import ModelCallError
 from aide.provider.model_router import ModelRouter
 from aide.provider.models import (
@@ -53,6 +52,7 @@ from aide.provider.models import (
     ReasoningEffort,
     TextDelta,
 )
+from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from tests.fixtures import ScriptedFakeProvider, StreamScript
 from tests.test_model_router import configuration, routed_configuration

@@ -30,7 +30,6 @@ from aide.agent.context.tokenizer import (
 )
 from aide.agent.run_errors import CommittableAgentRunError
 from aide.agent.session.session import Session
-from aide.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.provider.errors import ModelCallError, model_context_overflow_error
 from aide.provider.model_router import ModelRouteStatus, RunModelRouter
 from aide.provider.models import (
@@ -39,6 +38,7 @@ from aide.provider.models import (
     ModelResponse,
 )
 from aide.templates import render_template
+from aide.utils.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.utils.validation import empty_token_usage
 
 type CompactionProjection = Callable[

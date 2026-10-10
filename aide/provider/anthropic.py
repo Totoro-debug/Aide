@@ -18,7 +18,6 @@ from anthropic import (
 
 from aide.agent.tools.tool_gateway import ModelToolCall
 from aide.config.config import ProviderConfiguration
-from aide.errors import ErrorInfo
 from aide.provider.errors import (
     EmptyModelResponseError,
     ModelCallError,
@@ -39,6 +38,7 @@ from aide.provider.models import (
     last_assistant_message_index,
     require_tool_call_sequence,
 )
+from aide.utils.errors import ErrorInfo
 from aide.utils.json_types import JsonObject, JsonValue
 
 _REASONING_EFFORT_MAP: Final[Mapping[ReasoningEffort, str]] = MappingProxyType(

@@ -16,13 +16,13 @@ import aide.terminal.cli as cli
 from aide.agent.loop import ModelContextOverflowError
 from aide.agent.workspace_state import WorkspaceStateError
 from aide.config.agent_home import AgentHome
-from aide.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
 from aide.management.service import (
     FatalManagementError,
 )
 from aide.service.client import ServiceClient, ServiceStartupError
 from aide.service.errors import ServiceError
 from aide.skills.catalog import SkillMetadata
+from aide.utils.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
 from tests.configuration.test_config import (
     EXPECTED_DEFAULT_CONFIG,
     EXPECTED_REDACTED_CONFIG,

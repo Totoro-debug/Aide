@@ -27,7 +27,6 @@ from aide.agent.tools.tool_gateway import ModelToolCall
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigLoader
-from aide.errors import ErrorInfo
 from aide.provider.errors import ModelCallError
 from aide.provider.model_router import ModelRouter
 from aide.provider.models import (
@@ -41,6 +40,7 @@ from aide.provider.models import (
 )
 from aide.schedule.service import ScheduleService
 from aide.templates import render_template
+from aide.utils.errors import ErrorInfo
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import TaskFramingRouterAdapter, collect_foreground_outbound
 from tests.fixtures.agent_loop import DrivenExecutor as AgentRunExecutor

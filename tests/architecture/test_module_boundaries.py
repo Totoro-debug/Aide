@@ -513,10 +513,10 @@ def test_prepare_contract_checker_rejects_tuple_and_subclass_override() -> None:
     assert len(_base_tool_prepare_contract_violations({path: source})) == 2
 
 
-@pytest.mark.parametrize("root", [PACKAGE_ROOT / "utils", PACKAGE_ROOT / "errors.py"])
+@pytest.mark.parametrize("root", [PACKAGE_ROOT / "utils", PACKAGE_ROOT / "utils" / "errors.py"])
 def test_foundation_modules_do_not_import_domain_modules(root: Path) -> None:
     files = (root,) if root.is_file() else _python_files(root)
-    allowed = {"aide.errors", "aide.utils"}
+    allowed = {"aide.utils"}
     violations = [
         f"{path.relative_to(PROJECT_ROOT)}:{line} imports {module}"
         for path in files

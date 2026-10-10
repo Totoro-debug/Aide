@@ -7,8 +7,8 @@ from typing import Any
 
 import tiktoken
 
-from aide.errors import ErrorInfo
 from aide.provider.errors import ModelCallError
+from aide.utils.errors import ErrorInfo
 
 _TOKENIZER_FORMAT_VERSION = "tiktoken-v1"
 _SUPPORTED_ENCODINGS = frozenset(("o200k_base", "o200k_harmony"))

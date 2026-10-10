@@ -13,7 +13,6 @@ from aide.agent.permission import RuntimePermissionControl
 from aide.agent.session.session import Session
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
-from aide.errors import ErrorInfo
 from aide.management.commands import ManagementCommandDispatcher
 from aide.management.service import (
     ManagementError,
@@ -21,6 +20,7 @@ from aide.management.service import (
     RuntimeStatusInput,
 )
 from aide.provider.models import ReasoningEffort
+from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from tests.fixtures.diagnostic_capture import capture_diagnostics
 from tests.fixtures.session import seed_session_state

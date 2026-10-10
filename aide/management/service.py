@@ -31,10 +31,10 @@ from aide.agent.session.session import (
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigLoader, ConfigView
-from aide.errors import ErrorInfo
 from aide.provider.models import REASONING_EFFORT_LEVELS, ReasoningEffort
 from aide.provider.session_configuration import SessionModelConfiguration
 from aide.skills.catalog import SkillMetadata
+from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from aide.utils.validation import require_nonnegative_int, require_nonnegative_number
 

@@ -12,7 +12,6 @@ from aide.agent.memory.dream import DreamResult
 from aide.agent.permission import ToolPermissionLevel
 from aide.agent.session.restore import RestoreMode, RestorePlan, RestoreResult
 from aide.config.config import ConfigView
-from aide.errors import ErrorInfo
 from aide.logging.session import without_session_log
 from aide.management.service import (
     FatalManagementError,
@@ -25,6 +24,7 @@ from aide.management.service import (
 )
 from aide.provider.models import ReasoningEffort
 from aide.skills.catalog import SkillMetadata
+from aide.utils.errors import ErrorInfo
 from aide.utils.time import format_rfc3339_milliseconds
 
 

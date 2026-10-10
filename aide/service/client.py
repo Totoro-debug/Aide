@@ -1690,7 +1690,7 @@ def _dream_result(value: object) -> Any:
 
 
 def _management_error(value: object) -> Any:
-    from aide.errors import ErrorCode, ErrorInfo
+    from aide.utils.errors import ErrorCode, ErrorInfo
 
     if not isinstance(value, dict):
         return None

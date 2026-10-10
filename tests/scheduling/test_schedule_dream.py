@@ -11,13 +11,13 @@ import pytest
 from aide.agent.memory.dream import Dream, DreamResult
 from aide.agent.memory.manager import MemoryManager
 from aide.agent.workspace_state import WorkspaceState
-from aide.errors import ErrorInfo
 from aide.logging.session import session_log
 from aide.provider.model_router import ModelRouteStatus
 from aide.provider.models import AssistantModelMessage, ModelResponse, ModelUsage
 from aide.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
 from aide.schedule.service import ScheduleService
 from aide.schedule.store import ScheduleStateError, WorkspaceScheduleStore
+from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from tests.fixtures import ScriptedFakeProvider, ScriptedFakeRouter
 

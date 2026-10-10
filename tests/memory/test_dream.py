@@ -24,7 +24,6 @@ from aide.config.config import (
     RuntimeConfiguration,
     UserConfiguration,
 )
-from aide.errors import ErrorInfo
 from aide.provider.errors import ModelCallError
 from aide.provider.model_router import ModelAttemptGuard, ModelRouter, ModelRouteStatus
 from aide.provider.models import (
@@ -34,6 +33,7 @@ from aide.provider.models import (
     ModelUsage,
 )
 from aide.templates import render_template
+from aide.utils.errors import ErrorInfo
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import FakeClock, ScriptedFakeProvider, ScriptedFakeRouter
 from tests.fixtures.diagnostic_capture import capture_diagnostics

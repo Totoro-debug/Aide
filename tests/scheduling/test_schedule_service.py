@@ -20,7 +20,6 @@ from aide.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigLoader
-from aide.errors import ErrorInfo
 from aide.provider.model_router import ModelRouter
 from aide.provider.models import (
     AssistantModelMessage,
@@ -41,6 +40,7 @@ from aide.schedule.service import (
 )
 from aide.schedule.store import ScheduleStoreFaultedError, WorkspaceScheduleStore
 from aide.utils import scheduler as scheduler_module
+from aide.utils.errors import ErrorInfo
 from aide.utils.scheduler import AsyncioSchedulerClock
 from tests.configuration.test_config import SCHEDULE_ROUTE, VALID_CONFIG
 from tests.fixtures import (

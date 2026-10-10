@@ -12,7 +12,6 @@ from aide.agent.blackboard import (
     FramingResult,
 )
 from aide.agent.runner import AgentRunnerRoute
-from aide.errors import ErrorInfo
 from aide.provider.errors import ModelCallError
 from aide.provider.models import (
     AssistantModelMessage,
@@ -23,6 +22,7 @@ from aide.provider.models import (
     ModelUsage,
 )
 from aide.templates import render_template
+from aide.utils.errors import ErrorInfo
 
 
 class _FakeRouter:

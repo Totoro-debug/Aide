@@ -13,7 +13,6 @@ from aide.agent.workspace_state import (
     WorkspaceStateError,
 )
 from aide.config.agent_home import AgentHome
-from aide.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
 from aide.management.commands import ManagementCommandDispatcher
 from aide.management.service import (
     FatalManagementError,
@@ -25,6 +24,7 @@ from aide.terminal.conversation import (
     TerminalConversationApp,
     is_interactive_terminal,
 )
+from aide.utils.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
 
 app = typer.Typer(
     add_completion=False,

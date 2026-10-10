@@ -37,7 +37,6 @@ from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigError, ConfigLoader
-from aide.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.logging.session import session_log as real_session_log
 from aide.provider.errors import ModelCallError
 from aide.provider.model_router import ModelRouter
@@ -57,6 +56,7 @@ from aide.skills.catalog import (
     LoadedSkill,
     SkillLoader,
 )
+from aide.utils.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import (
     BlockingTaskFramingRouterAdapter,

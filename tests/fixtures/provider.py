@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from aide.config.config import ProviderConfiguration
-from aide.errors import ErrorInfo
 from aide.provider.errors import ModelCallError
 from aide.provider.model_router import ModelAttemptGuard, ModelRouteStatus
 from aide.provider.models import (
@@ -20,6 +19,7 @@ from aide.provider.models import (
     SessionModelConfiguration,
 )
 from aide.templates import render_template
+from aide.utils.errors import ErrorInfo
 
 
 def unexpected_provider_factory(configuration: ProviderConfiguration) -> ModelProvider:

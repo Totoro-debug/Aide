@@ -13,7 +13,6 @@ from aide.agent.memory.manager import MemoryManager
 from aide.agent.session.session import Session
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
-from aide.errors import ErrorInfo
 from aide.management.commands import (
     MANAGEMENT_COMMANDS,
     RESUME_MANAGEMENT_COMMAND,
@@ -23,6 +22,7 @@ from aide.management.commands import (
 from aide.management.service import ManagementError, RuntimeStatusInput
 from aide.skills.catalog import SkillMetadata
 from aide.templates import load_template
+from aide.utils.errors import ErrorInfo
 from tests.fixtures.diagnostic_capture import capture_diagnostics, configured_process_logging
 from tests.fixtures.session import seed_session_state
 from tests.management.factories import management_service

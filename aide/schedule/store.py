@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Literal
 
 from aide.agent.workspace_state import WorkspaceState, WorkspaceStateError
-from aide.errors import ErrorInfo
 from aide.schedule.model import DREAM_JOB_ID, JobStatus, ScheduleJob, ScheduleJobState
+from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from aide.utils.json import strict_json_loads
 from aide.utils.validation import require_nonnegative_int, require_uuid4_string

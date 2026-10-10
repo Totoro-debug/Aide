@@ -27,7 +27,6 @@ from aide.agent.tools.tool_gateway import (
     ModelToolCall,
     ToolResult,
 )
-from aide.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.provider.errors import ModelCallError
 from aide.provider.models import (
     AssistantModelMessage,
@@ -39,6 +38,7 @@ from aide.provider.models import (
     ReasoningDelta,
     TextDelta,
 )
+from aide.utils.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from tests.fixtures import (
     DetachedRequestPreparer,
     FakeTool,

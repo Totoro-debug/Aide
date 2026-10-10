@@ -19,10 +19,6 @@ from aide.config.config import (
     RuntimeConfiguration,
     UserConfiguration,
 )
-from aide.errors import (
-    ErrorCode,
-    ErrorInfo,
-)
 from aide.provider.errors import ModelCallError
 from aide.provider.model_router import ModelRouter, ModelRouteStatus
 from aide.provider.models import (
@@ -34,6 +30,10 @@ from aide.provider.models import (
     ModelUsage,
     SessionModelConfiguration,
     TextDelta,
+)
+from aide.utils.errors import (
+    ErrorCode,
+    ErrorInfo,
 )
 from tests.fixtures import DetachedRequestPreparer, FakeClock, ScriptedFakeProvider, StreamScript
 from tests.fixtures.diagnostic_capture import capture_diagnostics

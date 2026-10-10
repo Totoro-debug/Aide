@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Final
 
-from aide.errors import ErrorInfo
 from aide.templates import load_template
+from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 
 _GITIGNORE_CONTENT: Final = "*\n"

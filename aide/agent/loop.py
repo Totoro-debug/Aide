@@ -84,7 +84,6 @@ from aide.agent.tools.tool_gateway import (
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigError, UserConfiguration
-from aide.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.logging.session import session_log
 from aide.management.service import RuntimeStatusInput
 from aide.provider.errors import ModelCallError
@@ -110,6 +109,7 @@ from aide.schedule.service import (
 )
 from aide.skills.catalog import ManualSkillInvocation, SkillLoader
 from aide.utils.async_tasks import await_task_preserving_cancellation
+from aide.utils.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.utils.text import normalize_title, normalize_title_candidate
 
 

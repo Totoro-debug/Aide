@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 from aide.agent.tools.tool_gateway import ModelToolCall
 from aide.config.config import ProviderConfiguration
-from aide.errors import ErrorCode, ErrorInfo
 from aide.provider.errors import (
     EmptyModelResponseError,
     ModelCallError,
@@ -31,6 +30,7 @@ from aide.provider.models import (
     last_assistant_message_index,
     require_tool_call_sequence,
 )
+from aide.utils.errors import ErrorCode, ErrorInfo
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI

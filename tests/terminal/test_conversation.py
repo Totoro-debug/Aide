@@ -64,7 +64,6 @@ from aide.agent.tools.tool_gateway import (
 )
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
-from aide.errors import ErrorInfo
 from aide.management.commands import (
     MANAGEMENT_COMMANDS,
     ManagementCommandDispatcher,
@@ -97,6 +96,7 @@ from aide.terminal.conversation import (
 from aide.terminal.conversation import (
     _MessageBusRunProjection as _AgentRunProjection,
 )
+from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from aide.utils.json_types import JsonObject
 from tests.agent.test_fixed_catalog import _agent_loop as _direct_agent_loop

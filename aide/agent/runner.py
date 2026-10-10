@@ -20,7 +20,6 @@ from aide.agent.tools.tool_gateway import (
     ToolGateway,
     ToolResult,
 )
-from aide.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.provider.errors import ModelCallError
 from aide.provider.models import (
     ModelCompleted,
@@ -31,6 +30,7 @@ from aide.provider.models import (
     ReasoningDelta,
     TextDelta,
 )
+from aide.utils.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.utils.validation import empty_token_usage, token_usage_validation_issue
 
 type AgentRunnerRoute = Literal["chat", "schedule", "subagent"]

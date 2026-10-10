@@ -2,7 +2,7 @@
 
 from math import isfinite
 
-from aide.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
+from aide.utils.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
 
 
 class EmptyModelResponseError(ValueError):

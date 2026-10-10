@@ -9,7 +9,6 @@ import pytest
 
 from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
 from aide.agent.workspace_state import WorkspaceState
-from aide.errors import ErrorInfo
 from aide.schedule.model import JobSchedule, ScheduleJob
 from aide.schedule.service import (
     DreamExecutor,
@@ -18,6 +17,7 @@ from aide.schedule.service import (
     ScheduleService,
 )
 from aide.schedule.store import WorkspaceScheduleStore
+from aide.utils.errors import ErrorInfo
 from tests.fixtures.schedule import wait_until as _wait_until
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)

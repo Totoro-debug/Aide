@@ -2,17 +2,17 @@ from typing import Any, cast
 
 import pytest
 
-from aide.errors import (
+from aide.provider.errors import (
+    ModelCallError,
+    model_context_overflow_error,
+    parse_retry_after_seconds,
+)
+from aide.utils.errors import (
     MODEL_CONTEXT_OVERFLOW_MESSAGE,
     STABLE_ERROR_CODES,
     TURN_CANCELLED_MESSAGE,
     ErrorCode,
     ErrorInfo,
-)
-from aide.provider.errors import (
-    ModelCallError,
-    model_context_overflow_error,
-    parse_retry_after_seconds,
 )
 
 

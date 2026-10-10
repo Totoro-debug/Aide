@@ -19,7 +19,6 @@ from aide.config.config import (
     RuntimeConfiguration,
     UserConfiguration,
 )
-from aide.errors import ErrorInfo
 from aide.provider.anthropic import AnthropicProvider
 from aide.provider.errors import ModelCallError
 from aide.provider.model_router import ModelRouter
@@ -34,6 +33,7 @@ from aide.provider.models import (
     ReasoningEffort,
 )
 from aide.provider.openai_compatible import OpenAICompatibleProvider
+from aide.utils.errors import ErrorInfo
 
 READ_FILE_SCHEMA: dict[str, Any] = {
     "type": "function",

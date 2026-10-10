@@ -21,10 +21,10 @@ import tomlkit
 from croniter import croniter  # type: ignore[import-untyped]
 
 from aide.config.agent_home import AgentHome
-from aide.errors import ErrorInfo
 from aide.provider.session_configuration import REASONING_EFFORT_LEVELS
 from aide.provider.session_configuration import ReasoningEffort as ReasoningEffort
 from aide.templates import load_template
+from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 
 DEFAULT_CONFIG_TEMPLATE: Final = load_template("default-config.md")

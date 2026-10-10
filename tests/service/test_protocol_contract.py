@@ -10,11 +10,11 @@ import pytest
 from jsonschema import Draft202012Validator, ValidationError
 
 from aide.agent.memory.dream import DreamResult
-from aide.errors import ErrorInfo
 from aide.management.commands import ManagementCommandResult
 from aide.management.service import RuntimeStatus
 from aide.service.client import _management_result
 from aide.service.runtime import _encode_management_result
+from aide.utils.errors import ErrorInfo
 
 
 def _schema() -> dict[str, Any]:

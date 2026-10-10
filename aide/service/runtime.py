@@ -84,7 +84,6 @@ from aide.config.config import (
     ReasoningEffort,
     UserConfiguration,
 )
-from aide.errors import ErrorInfo
 from aide.management.commands import MANAGEMENT_COMMANDS
 from aide.provider.factory import create_provider
 from aide.provider.model_router import ModelRouter
@@ -138,6 +137,7 @@ from aide.service.execution import SessionExecution
 from aide.service.projects import ProjectCatalog, ProjectCatalogError, ProjectRecord
 from aide.service.resources import WorkspaceResourceManager, WorkspaceResources
 from aide.skills.catalog import SkillLoader, SkillMetadata
+from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from aide.utils.scheduler import AsyncioSchedulerClock
 from aide.utils.text import normalize_title_candidate

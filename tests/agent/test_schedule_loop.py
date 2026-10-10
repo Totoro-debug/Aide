@@ -28,7 +28,6 @@ from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway, ToolResult
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigError, ConfigLoader
-from aide.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.provider.errors import ModelCallError
 from aide.provider.models import (
     AssistantModelMessage,
@@ -41,6 +40,7 @@ from aide.provider.models import (
 from aide.schedule.model import DREAM_JOB_ID, JobSchedule, ScheduleJob
 from aide.schedule.service import ScheduleJobExecutionError, ScheduleService
 from aide.skills.catalog import SkillLoader
+from aide.utils.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, TURN_CANCELLED_MESSAGE, ErrorInfo
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import TaskFramingRouterAdapter, collect_foreground_outbound
 from tests.fixtures.agent_loop import DrivenExecutor as AgentRunExecutor

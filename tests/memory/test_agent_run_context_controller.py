@@ -46,7 +46,6 @@ from aide.config.config import (
     RuntimeConfiguration,
     UserConfiguration,
 )
-from aide.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
 from aide.provider.errors import ModelCallError
 from aide.provider.model_router import ModelRouter, ModelRouteStatus, RunModelRouter
 from aide.provider.models import (
@@ -57,6 +56,7 @@ from aide.provider.models import (
     ModelRoute,
     ModelUsage,
 )
+from aide.utils.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
 from tests.fixtures import FakeClock, ScriptedFakeProvider, ScriptedFakeRouter, StreamScript
 from tests.fixtures.session import seed_session_state
 

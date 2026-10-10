@@ -16,7 +16,6 @@ from loguru import logger
 from aide.agent.confirmation import BackgroundConfirmationOwner, ConfirmationAborted
 from aide.agent.permission import PermissionSnapshot
 from aide.agent.workspace_state import WorkspaceState
-from aide.errors import ErrorInfo
 from aide.logging.session import session_log
 from aide.schedule.model import DREAM_JOB_ID, DREAM_JOB_TITLE, JobSchedule, ScheduleJob
 from aide.schedule.store import (
@@ -26,6 +25,7 @@ from aide.schedule.store import (
     WorkspaceScheduleStore,
 )
 from aide.utils.async_tasks import await_task_preserving_cancellation
+from aide.utils.errors import ErrorInfo
 
 ScheduleHealth = Literal["available", "faulted"]
 

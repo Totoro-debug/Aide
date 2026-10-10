@@ -10,7 +10,7 @@ from setuptools import Distribution  # type: ignore[import-untyped]
 from scripts.packaging.commands import build_py
 from scripts.validate_web_assets import WebAssetError, build_manifest, validate_web_assets
 
-ASSET_ROOT = Path(__file__).parents[1] / "aide" / "web_assets"
+ASSET_ROOT = Path(__file__).parents[2] / "aide" / "web_assets"
 
 
 def test_packaged_web_assets_have_a_verified_manifest() -> None:

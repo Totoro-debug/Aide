@@ -102,13 +102,13 @@ def test_coverage_uses_distinct_explicit_pytest_nodes_and_fails_on_rename(
 
 
 def test_windows_release_entry_is_documented_in_readme() -> None:
-    readme = Path(__file__).parents[1] / "README.md"
+    readme = Path(__file__).parents[2] / "README.md"
 
     assert "python scripts/release_validation.py --phase all" in readme.read_text(encoding="utf-8")
 
 
 def test_workflow_requires_windows_report_for_release_gate() -> None:
-    workflow = Path(__file__).parents[1] / ".github" / "workflows" / "release-validation.yml"
+    workflow = Path(__file__).parents[2] / ".github" / "workflows" / "release-validation.yml"
     document = yaml.load(workflow.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
     assert set(document["jobs"]) == {"windows-release", "release-gate"}

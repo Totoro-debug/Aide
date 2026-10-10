@@ -53,7 +53,7 @@ def stop_installed_test_service(agent_home: Path) -> None:
 
 def test_legacy_runtime_module_is_not_discoverable() -> None:
     legacy_module = ".".join(("aide", "agent", "runtime"))
-    assert not (Path(__file__).resolve().parents[1] / "aide" / "agent" / "runtime.py").exists()
+    assert not (Path(__file__).resolve().parents[2] / "aide" / "agent" / "runtime.py").exists()
     assert importlib.util.find_spec(legacy_module) is None
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module(legacy_module)
@@ -421,7 +421,7 @@ def run_installed_aide(
             _INSTALLED_SERVICE_PORTS[home_key] = listener.getsockname()[1]
     port = _INSTALLED_SERVICE_PORTS[home_key]
     environment["AIDE_SERVICE_PORT"] = str(port)
-    source_root = str(Path(__file__).parent.parent)
+    source_root = str(Path(__file__).parent.parent.parent)
     existing_pythonpath = environment.get("PYTHONPATH")
     environment["PYTHONPATH"] = (
         source_root

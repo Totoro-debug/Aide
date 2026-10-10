@@ -13,7 +13,7 @@ from urllib.parse import unquote, urlsplit
 import pytest
 import yaml  # type: ignore[import-untyped]
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _source_ast(path: Path) -> ast.Module:
@@ -473,7 +473,7 @@ def test_adr_status_contract_rejects_invalid_relationships(
 def test_mcp_transport_evidence_uses_local_fixtures() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     mcp_tests = (ROOT / "tests" / "tools" / "test_mcp.py").read_text(encoding="utf-8")
-    cli_mcp_tests = (ROOT / "tests" / "test_cli_mcp_lifecycle.py").read_text(encoding="utf-8")
+    cli_mcp_tests = (ROOT / "tests" / "terminal" / "test_cli_mcp_lifecycle.py").read_text(encoding="utf-8")
 
     assert "mcp>=2,<3" in project["dependencies"]
     test_urls = re.findall(r"https?://[^\"']+", mcp_tests)

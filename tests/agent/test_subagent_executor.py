@@ -55,7 +55,7 @@ from aide.provider.models import (
 from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from tests.fixtures import ScriptedFakeProvider, StreamScript
-from tests.test_model_router import configuration, routed_configuration
+from tests.fixtures.model_configuration import configuration, routed_configuration
 
 _NOW = datetime(2026, 10, 8, 9, 0, tzinfo=UTC)
 _RUN_ID = "123e4567-e89b-42d3-a456-426614174000"

@@ -976,7 +976,7 @@ try {
     "content before Restore\n",
   );
   await expect(page.locator("#sessions-heading")).toBeFocused();
-  assert.equal(await page.getByText("Restore branch should disappear from history", { exact: true }).count(), 0);
+  await expect(page.getByRole("log").getByText("Restore branch should disappear from history", { exact: true })).toHaveCount(0);
   await page.clock.runFor(9999);
   assert.equal(await restoreNotice.count(), 1, "Restore feedback expired before 10 seconds");
   await page.clock.runFor(1);

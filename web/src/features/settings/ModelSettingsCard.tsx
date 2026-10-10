@@ -2,11 +2,11 @@ import { ChevronDown,Trash2 } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import commonStyles from "../../App.module.css";
-import settingsStyles from "./Settings.module.css";
 import type { ReasoningEffort } from "../../protocol";
 import { REASONING_EFFORTS } from "../../reasoningEffort.ts";
 import type { ModelForm } from "./modelSettings";
 import { modelSettingsFieldId } from "./modelSettings";
+import settingsStyles from "./Settings.module.css";
 
 const styles = { ...commonStyles, ...settingsStyles };
 

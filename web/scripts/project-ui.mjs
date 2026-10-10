@@ -58,8 +58,9 @@ export async function projectMenuAction(item, label) {
 
 export async function openWorkspaceAction(page, label) {
   if (/Runtime status|运行状态/.test(String(label))) {
-    const trigger = page.getByRole("button", { name: label, exact: true });
-    await trigger.click();
+    const trigger = page.locator("textarea");
+    await trigger.fill("/permission");
+    await trigger.press("Enter");
     return trigger;
   }
   await showProjectNavigation(page);

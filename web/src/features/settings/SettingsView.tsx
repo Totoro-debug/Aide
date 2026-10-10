@@ -30,7 +30,6 @@ repairConfig,
 restartService
 } from "../../api";
 import commonStyles from "../../App.module.css";
-import settingsStyles from "./Settings.module.css";
 import type { Theme } from "../../app/theme.ts";
 import type {
 ConfigFields,
@@ -49,6 +48,7 @@ import { changedConfigFieldPaths,configFieldsForSections,configFromForm,configSe
 import type { ModelForm } from "./modelSettings";
 import { modelSettingsFieldId } from "./modelSettings";
 import { ModelSettingsCard } from "./ModelSettingsCard";
+import settingsStyles from "./Settings.module.css";
 
 const styles = { ...commonStyles, ...settingsStyles };
 

@@ -5,7 +5,7 @@ import {
   reconcileBrowserRecovery,
   writeBrowserRecoverySnapshot,
   clearBrowserRecoverySnapshot,
-} from "../src/browserRecovery.ts";
+} from "../src/features/conversations/browserRecovery.ts";
 
 function recovery(effort, draft = true) {
   return {

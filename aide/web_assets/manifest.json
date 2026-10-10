@@ -3,14 +3,14 @@
   "entry": "index.html",
   "files": [
     {
-      "path": "assets/index-BV0gQoe6.css",
-      "sha256": "7c773b07c27bb92e702be01ac337961c850f4c99539afa7bd7498f3cd020dbed",
-      "bytes": 86382
+      "path": "assets/index-BP8TlNSS.css",
+      "sha256": "32168a36ad09d4de5bc94d20c31bf6ecd14bf28b1e463394e07e08d5de37a6eb",
+      "bytes": 86241
     },
     {
-      "path": "assets/index-TGQOY7It.js",
-      "sha256": "8170d10ace81fe72d9e0227cf0c709d8a559349c9335a829ca3c69371dec2f65",
-      "bytes": 809860
+      "path": "assets/index-BbPdMBp8.js",
+      "sha256": "4b9e3ed50588530ef4b03aaa4daa2a6f23efd78b903edc3c8dc95a0625842611",
+      "bytes": 809858
     },
     {
       "path": "favicon.svg",
@@ -19,7 +19,7 @@
     },
     {
       "path": "index.html",
-      "sha256": "188058b2e11a9577a3619d1047dad6c0e09adc04e7b084d17e37f61647815d09",
+      "sha256": "8d794dd7515b9db9689c46a357b0d50abdbe033745393bdf9163278c7b6b7a93",
       "bytes": 483
     }
   ]

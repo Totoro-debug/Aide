@@ -1,55 +1,55 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import {
-Activity,
-ArrowLeft,
-Ban,
-BookOpen,
-CalendarClock,
-CircleAlert,
-CircleCheck,
-Clock3,
-Eye,
-FolderOpen,
-Info,
-MessageSquare,
-Plus,
-RefreshCw,
-Trash2,
-TriangleAlert,
-X
+  Activity,
+  ArrowLeft,
+  Ban,
+  BookOpen,
+  CalendarClock,
+  CircleAlert,
+  CircleCheck,
+  Clock3,
+  Eye,
+  FolderOpen,
+  Info,
+  MessageSquare,
+  Plus,
+  RefreshCw,
+  Trash2,
+  TriangleAlert,
+  X
 } from "lucide-react";
-import { useCallback,useEffect,useRef,useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Link,useParams,useSearchParams } from "react-router-dom";
-import commonStyles from "../../App.module.css";
-import schedulesStyles from "./Schedules.module.css";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
-ApiError,
-createRequestId,
-createScheduleJob,
-deleteScheduleJob,
-enterChatWorkspace,
-getProjectSessions,
-getScheduleJob,
-getScheduleJobHistory,
-getScheduleJobs
+  ApiError,
+  createRequestId,
+  createScheduleJob,
+  deleteScheduleJob,
+  enterChatWorkspace,
+  getProjectSessions,
+  getScheduleJob,
+  getScheduleJobHistory,
+  getScheduleJobs
 } from "../../api";
+import commonStyles from "../../App.module.css";
 import type {
-ProjectScheduleKind,
-RegisteredProject,
-ScheduleHistoryGroup,
-ScheduleHistoryResultState,
-ScheduleJob,
-ScheduleJobHistoryResponse,
-ScheduleJobInput,
-ScheduleJobStatus,
-ScheduleJobsResponse,
-ScheduleStatus
+  ProjectScheduleKind,
+  RegisteredProject,
+  ScheduleHistoryGroup,
+  ScheduleHistoryResultState,
+  ScheduleJob,
+  ScheduleJobHistoryResponse,
+  ScheduleJobInput,
+  ScheduleJobStatus,
+  ScheduleJobsResponse,
+  ScheduleStatus
 } from "../../protocol";
-import type { AuthState,ConnectionState } from "../../shared/service/types.ts";
+import type { AuthState, ConnectionState } from "../../shared/service/types.ts";
 import { HistoryMessageView } from "../conversations/history.tsx";
-import type { ScheduleHistoryLoadState,ScheduleLoadState } from "./presentation.ts";
-import { scheduleErrorKey,scheduleHistoryGroupKey,scheduleHistoryTime,scheduleJobLastResult,scheduleJobRule,scheduleRouteHref,sessionRouteHref } from "./presentation.ts";
+import type { ScheduleHistoryLoadState, ScheduleLoadState } from "./presentation.ts";
+import { scheduleErrorKey, scheduleHistoryGroupKey, scheduleHistoryTime, scheduleJobLastResult, scheduleJobRule, scheduleRouteHref, sessionRouteHref } from "./presentation.ts";
+import schedulesStyles from "./Schedules.module.css";
 
 const styles = { ...commonStyles, ...schedulesStyles };
 

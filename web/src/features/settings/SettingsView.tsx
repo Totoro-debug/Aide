@@ -1,50 +1,50 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import {
-Activity,
-ArrowLeft,
-BookOpen,
-Brain,
-CircleAlert,
-CircleCheck,
-Clock3,
-Gauge,
-Plus,
-RefreshCw,
-RotateCcw,
-Settings2,
-ShieldX,
-Trash2,
-TriangleAlert,
-X
+  Activity,
+  ArrowLeft,
+  BookOpen,
+  Brain,
+  CircleAlert,
+  CircleCheck,
+  Clock3,
+  Gauge,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Settings2,
+  ShieldX,
+  Trash2,
+  TriangleAlert,
+  X
 } from "lucide-react";
-import { useCallback,useEffect,useRef,useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Link,useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import {
-ApiError,
-createRequestId,
-getConfig,
-patchConfig,
-reloadRuntimeSkills,
-repairConfig,
-restartService
+  ApiError,
+  createRequestId,
+  getConfig,
+  patchConfig,
+  reloadRuntimeSkills,
+  repairConfig,
+  restartService
 } from "../../api";
 import commonStyles from "../../App.module.css";
 import type { Theme } from "../../app/theme.ts";
 import type {
-ConfigFields,
-ConfigResponse,
-ServiceStatus,
-SessionClaim,
-SkillMetadata,
-ToolPermissionLevel
+  ConfigFields,
+  ConfigResponse,
+  ServiceStatus,
+  SessionClaim,
+  SkillMetadata,
+  ToolPermissionLevel
 } from "../../protocol";
 import { serviceStateLabel } from "../../shared/service/presentation.ts";
-import type { AuthState,ConnectionState } from "../../shared/service/types.ts";
+import type { AuthState, ConnectionState } from "../../shared/service/types.ts";
 import { operationManagementErrorKey } from "../runtime/errors.ts";
-import { SecretInput,SettingsListField,SettingsNumberField } from "./fields.tsx";
-import type { ConfigSettingsSection,McpForm,PendingSettingsSave,ProviderForm,RouteForm,SecretDraft,SettingsFieldError,SettingsForm,SettingsSection } from "./forms.ts";
-import { changedConfigFieldPaths,configFieldsForSections,configFromForm,configSecretsForSections,formFromConfig,isCompleteModelForm,isSelectableProvider,preserveSettingsInput,sameSettingsValue,secretDraft,settingsSectionsForChanges } from "./forms.ts";
+import { SecretInput, SettingsListField, SettingsNumberField } from "./fields.tsx";
+import type { ConfigSettingsSection, McpForm, PendingSettingsSave, ProviderForm, RouteForm, SecretDraft, SettingsFieldError, SettingsForm, SettingsSection } from "./forms.ts";
+import { changedConfigFieldPaths, configFieldsForSections, configFromForm, configSecretsForSections, formFromConfig, isCompleteModelForm, isSelectableProvider, preserveSettingsInput, sameSettingsValue, secretDraft, settingsSectionsForChanges } from "./forms.ts";
 import type { ModelForm } from "./modelSettings";
 import { modelSettingsFieldId } from "./modelSettings";
 import { ModelSettingsCard } from "./ModelSettingsCard";

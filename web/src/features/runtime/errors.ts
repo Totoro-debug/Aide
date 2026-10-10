@@ -1,5 +1,5 @@
 import {
-ApiError
+  ApiError
 } from "../../api";
 
 export function managementErrorKey(error: unknown): string {

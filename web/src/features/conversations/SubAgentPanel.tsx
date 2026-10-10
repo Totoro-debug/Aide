@@ -5,8 +5,8 @@ import {
   CircleAlert,
   CircleCheck,
   Clock3,
-  LoaderCircle,
   ListTodo,
+  LoaderCircle,
   RefreshCw,
   Square,
   X,
@@ -14,7 +14,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { cancelSubAgent, getRuntimeStatus, getSubAgent, getSubAgents } from "./api";
+import { cancelSubAgent, getRuntimeStatus, getSubAgent, getSubAgents } from "../../api";
 import type {
   RuntimeStatus,
   ServiceEvent,
@@ -24,8 +24,8 @@ import type {
   SubAgentListItem,
   SubAgentStatus,
   SubAgentUsage,
-} from "./protocol";
-import { isRecord } from "./validation";
+} from "../../protocol";
+import { isRecord } from "../../validation";
 import styles from "./SubAgentPanel.module.css";
 
 const PAGE_LIMIT = 20;

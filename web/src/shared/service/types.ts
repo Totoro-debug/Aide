@@ -1,5 +1,5 @@
 import type {
-ServiceEvent
+  ServiceEvent
 } from "../../protocol";
 
 export type AuthState = "checking" | "ready" | "required" | "error" | "conflict";

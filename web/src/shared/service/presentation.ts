@@ -1,5 +1,5 @@
 import type {
-ServiceState
+  ServiceState
 } from "../../protocol";
 
 export function serviceStateLabel(state: ServiceState, translate: (key: string) => string): string {

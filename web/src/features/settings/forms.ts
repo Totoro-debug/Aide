@@ -1,12 +1,12 @@
 import {
-createRequestId
+  createRequestId
 } from "../../api";
 import type {
-ConfigFields,
-ConfigPatchFields,
-ConfigSecretChange,
-ConfigSecrets,
-ToolPermissionLevel
+  ConfigFields,
+  ConfigPatchFields,
+  ConfigSecretChange,
+  ConfigSecrets,
+  ToolPermissionLevel
 } from "../../protocol";
 import type { ModelForm } from "./modelSettings";
 

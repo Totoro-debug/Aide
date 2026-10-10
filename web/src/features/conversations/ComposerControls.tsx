@@ -1,12 +1,15 @@
 import { Check, ChevronDown, FolderPen, Shield, ShieldCheck } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { ToolPermissionLevel } from "./protocol";
-import styles from "./App.module.css";
+import commonStyles from "../../App.module.css";
+import type { ToolPermissionLevel } from "../../protocol";
+import conversationsStyles from "./Conversations.module.css";
 
-const PERMISSION_LEVELS: ToolPermissionLevel[] = ["read-only", "workspace-write", "full-access"];
+import { PERMISSION_LEVELS } from "../../shared/service/permissions";
 const PERMISSION_ICONS = { "read-only": ShieldCheck, "workspace-write": FolderPen, "full-access": Shield };
+
+const styles = { ...commonStyles, ...conversationsStyles };
 
 interface ComposerControlsProps {
   permission: ToolPermissionLevel;

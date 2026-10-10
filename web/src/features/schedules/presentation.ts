@@ -1,9 +1,9 @@
 import {
-ApiError
+  ApiError
 } from "../../api";
 import type {
-ScheduleHistoryGroup,
-ScheduleJob
+  ScheduleHistoryGroup,
+  ScheduleJob
 } from "../../protocol";
 
 export type ScheduleLoadState = "idle" | "loading" | "ready" | "error";

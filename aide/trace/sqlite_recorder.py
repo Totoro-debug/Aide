@@ -10,7 +10,7 @@ import threading
 import zlib
 from collections import defaultdict, deque
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar, cast
@@ -543,6 +543,38 @@ class SQLiteTraceRecorder(TraceRecorder):
             attempt_id=attempt.attempt_id,
         )
         return attempt
+
+    def set_endpoint(self, handle: TraceAttemptHandle, endpoint: str) -> None:
+        if not isinstance(endpoint, str) or not endpoint:
+            self._note_loss(
+                handle.record_id,
+                handle.attempt_id,
+                "endpoint",
+                "Provider endpoint metadata was invalid.",
+            )
+            return
+        with self._condition:
+            state = self._states.get(handle.record_id)
+            if state is None or state.finished:
+                return
+            attempt = state.attempts.get(handle.attempt_id)
+            if attempt is None:
+                return
+            ordinal, metadata = attempt
+            state.attempts[handle.attempt_id] = (ordinal, replace(metadata, endpoint=endpoint))
+        issue = TraceCaptureIssue(
+            state=TraceCaptureState.PARTIAL,
+            message="Provider endpoint metadata could not be queued.",
+            source="provider_transport",
+        )
+        self._enqueue(
+            "attempt_endpoint",
+            handle.record_id,
+            {"attempt_id": handle.attempt_id, "endpoint": endpoint},
+            attempt_id=handle.attempt_id,
+            source="endpoint",
+            dropped_issue=issue,
+        )
 
     def set_request(self, handle: TraceRawHandle, request: object) -> None:
         attempt_id = handle.attempt_id if isinstance(handle, TraceAttemptHandle) else None
@@ -1117,6 +1149,15 @@ class SQLiteTraceRecorder(TraceRecorder):
             self._write_begin(connection, event.record_id, event.payload)
         elif event.kind == "attempt":
             self._write_attempt(connection, event.record_id, event.payload)
+        elif event.kind == "attempt_endpoint":
+            connection.execute(
+                "UPDATE trace_attempts SET endpoint = ? WHERE record_id = ? AND attempt_id = ?",
+                (
+                    cast(str, event.payload["endpoint"]),
+                    event.record_id,
+                    cast(str, event.payload["attempt_id"]),
+                ),
+            )
         elif event.kind == "request":
             self._write_request(connection, event.record_id, event.payload)
         elif event.kind == "issue":

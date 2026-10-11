@@ -56,6 +56,7 @@ class TraceCaptureState(StrEnum):
 
 class TraceCaptureLayer(StrEnum):
     HTTP_BODY = "http_body"
+    HTTP_METADATA = "http_metadata"
     HTTP_DECODED_BODY = "http_decoded_body"
     JSON_RPC_MESSAGE = "json_rpc_message"
     SDK_RESULT = "sdk_result"

@@ -20,6 +20,7 @@ dependencies = [
     "anthropic>=0.104,<0.117",
     "croniter>=6,<7",
     "ddgs>=9,<10",
+    "httpx>=0.23,<1",
     "loguru>=0.7.3,<0.8",
     "mcp>=2,<3",
     "openai>=2.37,<3",

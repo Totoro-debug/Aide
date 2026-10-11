@@ -8,6 +8,8 @@ from importlib import import_module
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, cast
 
+import httpx
+
 from aide.agent.tools.tool_gateway import ModelToolCall
 from aide.config.config import ProviderConfiguration
 from aide.provider.errors import (
@@ -15,6 +17,7 @@ from aide.provider.errors import (
     ModelCallError,
     parse_retry_after_seconds,
 )
+from aide.provider.http_capture import capture_http_request, capture_http_response
 from aide.provider.models import (
     AssistantModelMessage,
     FinishReason,
@@ -74,16 +77,36 @@ class OpenAICompatibleProvider:
         configuration: ProviderConfiguration,
         *,
         client_factory: OpenAIClientFactory | None = None,
+        http_transport_factory: Callable[[], httpx.AsyncBaseTransport] | None = None,
     ) -> None:
         factory = _official_client_factory if client_factory is None else client_factory
         self._provider_id = configuration.provider_id
+        http_client: httpx.AsyncClient | None = None
+        if client_factory is None:
+            openai = import_module("openai")
+            http_arguments: dict[str, object] = {
+                "event_hooks": {
+                    "request": [capture_http_request],
+                    "response": [capture_http_response],
+                },
+            }
+            if http_transport_factory is not None:
+                http_arguments["transport"] = http_transport_factory()
+            http_client = cast(
+                httpx.AsyncClient,
+                openai.DefaultAsyncHttpxClient(**http_arguments),
+            )
+        self._http_client = http_client
+        client_arguments: dict[str, object] = {
+            "api_key": configuration.api_key,
+            "base_url": configuration.base_url,
+            "max_retries": 0,
+        }
+        if http_client is not None:
+            client_arguments["http_client"] = http_client
         self._client = cast(
             "AsyncOpenAI",
-            factory(
-                api_key=configuration.api_key,
-                base_url=configuration.base_url,
-                max_retries=0,
-            ),
+            factory(**client_arguments),
         )
 
     def stream(

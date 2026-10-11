@@ -847,6 +847,7 @@ export type TraceErrorCategory =
 export type TraceCaptureState = "complete" | "partial" | "unavailable";
 export type TraceCaptureLayer =
   | "http_body"
+  | "http_metadata"
   | "http_decoded_body"
   | "json_rpc_message"
   | "sdk_result"

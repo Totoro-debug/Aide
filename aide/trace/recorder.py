@@ -60,6 +60,8 @@ class TraceRecorder(Protocol):
         self, handle: TraceCaptureHandle, metadata: TraceAttemptMetadata
     ) -> TraceAttemptHandle: ...
 
+    def set_endpoint(self, handle: TraceAttemptHandle, endpoint: str) -> None: ...
+
     def set_request(self, handle: TraceRawHandle, request: object) -> None: ...
 
     def report_capture_issue(self, handle: TraceRawHandle, issue: TraceCaptureIssue) -> None: ...
@@ -147,6 +149,9 @@ class NoOpTraceRecorder:
     ) -> TraceAttemptHandle:
         del metadata
         return TraceAttemptHandle(record_id=handle.record_id, attempt_id=str(uuid4()))
+
+    def set_endpoint(self, handle: TraceAttemptHandle, endpoint: str) -> None:
+        del handle, endpoint
 
     def set_request(self, handle: TraceRawHandle, request: object) -> None:
         del handle, request

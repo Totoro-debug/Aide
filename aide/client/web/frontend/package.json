@@ -35,7 +35,9 @@
     "pretest:e2e:subagents": "npm run build",
     "test:e2e:subagents": "node scripts/subagent-e2e.mjs",
     "pretest:e2e:statistics": "npm run build",
-    "test:e2e:statistics": "node scripts/statistics-e2e.mjs"
+    "test:e2e:statistics": "node scripts/statistics-e2e.mjs",
+    "pretest:e2e:traces": "npm run build",
+    "test:e2e:traces": "node scripts/traces-e2e.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "1.1.14",

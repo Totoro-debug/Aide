@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
+import { traceSessionRoute } from "../traces/routing";
 import { ApiError, getTraceRecords, getTraceStats } from "../../shared/service/api";
 import type {
   TraceBreakdownDTO,
@@ -732,10 +733,6 @@ function selectedDimension(query: TraceStatsQueryDTO): { field: Dimension; key: 
   if (query.tool_name !== undefined) return { field: "tool_name", key: query.tool_name, label: query.tool_name };
   if (query.purpose !== undefined) return { field: "purpose", key: query.purpose, label: query.purpose };
   return null;
-}
-
-function traceSessionRoute(workspaceKey: string, sessionId: string): string {
-  return `/traces/sessions/${encodeURIComponent(workspaceKey)}/${encodeURIComponent(sessionId)}`;
 }
 
 function formatDuration(milliseconds: number, language: string): string {

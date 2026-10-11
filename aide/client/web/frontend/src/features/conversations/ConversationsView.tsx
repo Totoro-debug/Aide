@@ -1,6 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   ArrowUp,
+  Activity,
   Check,
   CircleAlert,
   CircleCheck,
@@ -76,6 +77,7 @@ import type {
 import type { AuthState, ConnectionState, ServiceEventListener } from "../../shared/service/types.ts";
 import commonStyles from "../../shared/styles/controls.module.css";
 import { ConversationRuntimeStatus, RuntimeManagementDialog } from "../runtime/RuntimeView";
+import { traceSessionRoute, traceWorkspaceKeyForPath } from "../traces/routing";
 import ComposerControls from "./ComposerControls";
 import conversationsStyles from "./Conversations.module.css";
 import SubAgentPanel from "./SubAgentPanel";
@@ -93,6 +95,43 @@ import type { PendingSessionAction, PendingSessionDeletion, PendingSubmission, S
 import { formatSessionTime, mergeSessionSummaries, readPendingDeletion, restoreSessionActionFocus, sessionDeleteErrorKey, sessionErrorKey } from "./session.ts";
 
 const styles = { ...commonStyles, ...conversationsStyles };
+
+function TraceSessionEntry({ sessionId, workspacePath }: { sessionId: string; workspacePath: string | null }) {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const [opening, setOpening] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  async function openTrace() {
+    if (workspacePath === null || opening) return;
+    setOpening(true);
+    setFailed(false);
+    try {
+      const workspaceKey = await traceWorkspaceKeyForPath(workspacePath);
+      navigate(traceSessionRoute(workspaceKey, sessionId));
+    } catch {
+      setFailed(true);
+    } finally {
+      setOpening(false);
+    }
+  }
+
+  return (
+    <>
+      <button
+        className={styles.secondaryButton}
+        type="button"
+        title={sessionId}
+        disabled={workspacePath === null || opening}
+        onClick={() => void openTrace()}
+      >
+        <Activity size={15} aria-hidden="true" />
+        {t(opening ? "traces.opening" : "traces.openSession")}
+      </button>
+      {failed ? <span className={styles.fieldError} role="alert">{t("traces.routeError")}</span> : null}
+    </>
+  );
+}
 
 interface ProjectSessionsViewProps {
   authState: AuthState;
@@ -251,6 +290,9 @@ export function ChatSessionsView({
         {workspaceEntry !== null && entryError !== null && (
           <div className={styles.errorBanner} role="alert">{t(entryError)}</div>
         )}
+        {entryError === "sessions.claimedError" && requestedSessionId !== null && requestedDirectory !== null ? (
+          <TraceSessionEntry sessionId={requestedSessionId} workspacePath={requestedDirectory} />
+        ) : null}
         {configurationNeedsSetup === true ? (
           <div className={styles.conversationStage} data-empty="true">
             <div className={styles.conversationViewport}>
@@ -2195,6 +2237,12 @@ function ProjectSessionsContent({
         <div className={styles.errorBanner} role="alert">
           <CircleAlert size={17} aria-hidden="true" />
           <span>{t(actionError)}</span>
+          {occupiedSessionId !== null ? (
+            <TraceSessionEntry
+              sessionId={occupiedSessionId}
+              workspacePath={isChat ? workspaceDirectory ?? null : project?.path ?? null}
+            />
+          ) : null}
         </div>
       ) : null}
       {pendingRestoreFailure !== null && pendingRestoreFailure.session_id === claim?.session_id && restoreNotice === null ? (
@@ -2302,6 +2350,10 @@ function ProjectSessionsContent({
                           <ConversationHistoryView messages={messages} t={t} />
                         </div>
                       )}
+                    />
+                    <TraceSessionEntry
+                      sessionId={claim.session_id}
+                      workspacePath={isChat ? workspaceDirectory ?? null : project?.path ?? null}
                     />
                   </div>
                   <div

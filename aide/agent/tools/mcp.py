@@ -31,6 +31,13 @@ from pydantic import ValidationError
 from aide.agent.tools.base import BaseTool, ToolError
 from aide.agent.tools.permission import MCPToolIdentity, ToolInvocationFacts
 from aide.config.config import MCPServerConfiguration
+from aide.trace.scope import TraceToolCallScope, current_trace_tool_call
+from aide.trace.types import (
+    TraceCaptureIssue,
+    TraceCaptureLayer,
+    TraceCaptureState,
+    TraceDirection,
+)
 from aide.utils.async_tasks import await_task_preserving_cancellation
 
 _MISSING = object()
@@ -96,6 +103,7 @@ class MCPTool(BaseTool):
         *,
         call_timeout: float = 60,
         on_closed: Callable[[], None] | None = None,
+        protocol_trace: _MCPProtocolTrace | None = None,
     ) -> None:
         if not isinstance(spec, MCPToolSpec):
             raise TypeError("MCPTool requires an MCPToolSpec")
@@ -110,12 +118,17 @@ class MCPTool(BaseTool):
         self._session = session
         self._call_timeout = float(call_timeout)
         self._on_closed = on_closed
+        self._protocol_trace = protocol_trace
         self._unavailable = False
 
     @property
     def unavailable(self) -> bool:
         """Whether a closed MCP session was observed during a Tool call."""
         return self._unavailable
+
+    @property
+    def transport_trace_available(self) -> bool:
+        return self._protocol_trace is not None
 
     async def prepare_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Forward the complete argument object without local schema processing."""
@@ -142,6 +155,12 @@ class MCPTool(BaseTool):
         """Call the remote Tool and project its result to text."""
         if self._unavailable:
             raise ToolError(_CONNECTION_UNAVAILABLE)
+        trace_scope = current_trace_tool_call() if self._protocol_trace is not None else None
+        if self._protocol_trace is not None:
+            try:
+                self._protocol_trace.begin(trace_scope)
+            except Exception:
+                logger.warning("Execution Trace MCP capture could not be started")
         try:
             async with asyncio.timeout(self._call_timeout):
                 result = await self._session.call_tool(self.remote_name, deepcopy(arguments))
@@ -154,6 +173,12 @@ class MCPTool(BaseTool):
                 self._mark_unavailable()
                 raise ToolError(_CONNECTION_UNAVAILABLE) from error
             raise
+        finally:
+            if self._protocol_trace is not None:
+                try:
+                    self._protocol_trace.finish(trace_scope)
+                except Exception:
+                    logger.warning("Execution Trace MCP capture could not be finished")
 
         content = _content_text(result)
         if _field(result, "is_error", "isError") is True:
@@ -320,6 +345,7 @@ async def discover_mcp_tools(
     call_timeout: float = 60,
     on_closed: Callable[[], None] | None = None,
     on_tool_skipped: Callable[[], None] | None = None,
+    protocol_trace: _MCPProtocolTrace | None = None,
 ) -> tuple[MCPTool, ...]:
     """Discover and wrap one Server's valid Tools."""
     specs = await discover_mcp_tool_specs(
@@ -329,7 +355,14 @@ async def discover_mcp_tools(
         on_tool_skipped=on_tool_skipped,
     )
     return tuple(
-        MCPTool(spec, session, call_timeout=call_timeout, on_closed=on_closed) for spec in specs
+        MCPTool(
+            spec,
+            session,
+            call_timeout=call_timeout,
+            on_closed=on_closed,
+            protocol_trace=protocol_trace,
+        )
+        for spec in specs
     )
 
 
@@ -436,6 +469,9 @@ class MCPServerConnection:
                 transport = self._transport_factory(self.configuration, self.workspace)
                 streams = await stack.enter_async_context(transport)
                 read_stream, write_stream = _transport_streams(streams)
+                protocol_trace = _MCPProtocolTrace(self.configuration.transport)
+                read_stream = _MCPTraceReadStream(read_stream, protocol_trace)
+                write_stream = _MCPTraceWriteStream(write_stream, protocol_trace)
                 session = (
                     self._session_factory(read_stream, write_stream)
                     if self._session_factory is not None
@@ -456,6 +492,7 @@ class MCPServerConnection:
                     call_timeout=self.configuration.call_timeout,
                     on_closed=on_closed,
                     on_tool_skipped=self._record_tool_skip,
+                    protocol_trace=protocol_trace,
                 )
             ready.set_result(self._tools)
             await close_requested.wait()
@@ -528,6 +565,223 @@ def _transport_for(
     if configuration.transport == "streamable-http":
         return streamable_http_transport(configuration, workspace)
     raise ValueError(f"Unsupported MCP transport: {configuration.transport}")
+
+
+@dataclass(slots=True)
+class _MCPTraceCall:
+    scope: TraceToolCallScope
+    request_seen: bool = False
+    response_seen: bool = False
+
+
+class _MCPProtocolTrace:
+    """Capture one Tool's JSON-RPC messages before SDK result validation."""
+
+    def __init__(self, transport: str) -> None:
+        self._source_prefix = "mcp_http" if transport == "streamable-http" else "mcp_stdio"
+        self._pending: dict[int | str, _MCPTraceCall] = {}
+        self._calls: dict[str, _MCPTraceCall] = {}
+
+    def begin(self, scope: TraceToolCallScope | None) -> None:
+        if scope is not None:
+            self._calls[scope.handle.record_id] = _MCPTraceCall(scope)
+
+    def finish(self, scope: TraceToolCallScope | None) -> None:
+        if scope is None:
+            return
+        call = self._calls.pop(scope.handle.record_id, None)
+        if call is None or not call.request_seen or not call.response_seen:
+            self._report_issue(scope, "MCP JSON-RPC request or response capture was incomplete.")
+        for request_id, pending in tuple(self._pending.items()):
+            if pending.scope.handle == scope.handle:
+                self._pending.pop(request_id, None)
+
+    def sent(self, item: object) -> None:
+        message = _field(item, "message")
+        if _field(message, "method") != "tools/call":
+            return
+        scope = current_trace_tool_call()
+        request_id = _field(message, "id")
+        if scope is None or isinstance(request_id, bool) or not isinstance(request_id, (int, str)):
+            return
+        call = self._calls.setdefault(scope.handle.record_id, _MCPTraceCall(scope))
+        call.request_seen = True
+        self._pending[request_id] = call
+        self._append_message(
+            scope,
+            source=f"{self._source_prefix}_request",
+            direction=TraceDirection.REQUEST,
+            message=message,
+        )
+
+    def received(self, item: object) -> None:
+        message = _field(item, "message")
+        if not isinstance(message, (types.JSONRPCResponse, types.JSONRPCError)):
+            return
+        request_id = _field(message, "id")
+        if isinstance(request_id, bool) or not isinstance(request_id, (int, str)):
+            return
+        call = self._pending.pop(request_id, None)
+        if call is None:
+            return
+        call.response_seen = True
+        self._append_message(
+            call.scope,
+            source=f"{self._source_prefix}_response",
+            direction=TraceDirection.RESPONSE,
+            message=message,
+        )
+        result = _field(message, "result")
+        if result is not _MISSING:
+            self._append_value(
+                call.scope,
+                source=f"{self._source_prefix}_result",
+                direction=TraceDirection.RESPONSE,
+                layer=TraceCaptureLayer.SDK_RESULT,
+                value=result,
+            )
+
+    def _append_message(
+        self,
+        scope: TraceToolCallScope,
+        *,
+        source: str,
+        direction: TraceDirection,
+        message: object,
+    ) -> None:
+        try:
+            data = (
+                cast(Any, message)
+                .model_dump_json(
+                    by_alias=True,
+                    exclude_unset=True,
+                )
+                .encode("utf-8")
+            )
+        except Exception:
+            self._report_issue(scope, f"MCP protocol source {source} could not be serialized.")
+            return
+        self._append_raw(
+            scope,
+            source=source,
+            direction=direction,
+            layer=TraceCaptureLayer.JSON_RPC_MESSAGE,
+            data=data,
+        )
+
+    def _append_value(
+        self,
+        scope: TraceToolCallScope,
+        *,
+        source: str,
+        direction: TraceDirection,
+        layer: TraceCaptureLayer,
+        value: object,
+    ) -> None:
+        try:
+            data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError):
+            self._report_issue(scope, f"MCP result source {source} could not be serialized.")
+            return
+        self._append_raw(scope, source=source, direction=direction, layer=layer, data=data)
+
+    @staticmethod
+    def _append_raw(
+        scope: TraceToolCallScope,
+        *,
+        source: str,
+        direction: TraceDirection,
+        layer: TraceCaptureLayer,
+        data: bytes,
+    ) -> None:
+        try:
+            scope.recorder.append_raw(
+                scope.handle,
+                source=source,
+                direction=direction,
+                layer=layer,
+                sequence=0,
+                data=data,
+                content_type="application/json",
+            )
+        except Exception:
+            _report_mcp_capture_issue(scope, f"MCP source {source} could not be captured.")
+
+    @staticmethod
+    def _report_issue(scope: TraceToolCallScope, message: str) -> None:
+        _report_mcp_capture_issue(scope, message)
+
+
+class _MCPTraceReadStream:
+    def __init__(self, stream: object, capture: _MCPProtocolTrace) -> None:
+        self._stream = stream
+        self._capture = capture
+
+    async def receive(self) -> object:
+        item = await cast(Any, self._stream).receive()
+        try:
+            self._capture.received(item)
+        except Exception:
+            logger.warning("Execution Trace MCP response could not be observed")
+        return item
+
+    def __aiter__(self) -> Any:
+        async def read() -> AsyncIterator[object]:
+            async for item in cast(Any, self._stream):
+                try:
+                    self._capture.received(item)
+                except Exception:
+                    logger.warning("Execution Trace MCP response could not be observed")
+                yield item
+
+        return read()
+
+    async def __aenter__(self) -> _MCPTraceReadStream:
+        await cast(Any, self._stream).__aenter__()
+        return self
+
+    async def __aexit__(self, *args: object) -> object:
+        return await cast(Any, self._stream).__aexit__(*args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+
+class _MCPTraceWriteStream:
+    def __init__(self, stream: object, capture: _MCPProtocolTrace) -> None:
+        self._stream = stream
+        self._capture = capture
+
+    async def send(self, item: object) -> None:
+        try:
+            self._capture.sent(item)
+        except Exception:
+            logger.warning("Execution Trace MCP request could not be observed")
+        await cast(Any, self._stream).send(item)
+
+    async def __aenter__(self) -> _MCPTraceWriteStream:
+        await cast(Any, self._stream).__aenter__()
+        return self
+
+    async def __aexit__(self, *args: object) -> object:
+        return await cast(Any, self._stream).__aexit__(*args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+
+def _report_mcp_capture_issue(scope: TraceToolCallScope, message: str) -> None:
+    try:
+        scope.recorder.report_capture_issue(
+            scope.handle,
+            TraceCaptureIssue(
+                state=TraceCaptureState.PARTIAL,
+                message=message,
+                source="mcp_transport",
+            ),
+        )
+    except Exception:
+        logger.warning("Execution Trace MCP capture issue could not be reported")
 
 
 class _MCPClientSession(ClientSession):

@@ -303,6 +303,8 @@ class _ToolTraceCapture:
         if tool is None:
             return
         if isinstance(tool, MCPTool):
+            if tool.transport_trace_available:
+                return
             message = "MCP transport messages are not available at the Tool Gateway boundary."
             source = "mcp_transport"
         elif tool.name == "exec":

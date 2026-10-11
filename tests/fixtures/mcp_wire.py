@@ -33,6 +33,7 @@ class WireServer:
     def __init__(self, scenario: dict[str, Any]) -> None:
         self.scenario = scenario
         self.requests: list[dict[str, Any]] = []
+        self.responses: list[dict[str, Any]] = []
         self.received = asyncio.Queue[dict[str, Any]]()
         self.sse_reconnected = asyncio.Event()
         self.close_sse = asyncio.Event()
@@ -41,7 +42,7 @@ class WireServer:
     def respond(self, request: dict[str, Any]) -> dict[str, Any] | None:
         self.requests.append(request)
         self.received.put_nowait(request)
-        if "id" not in request:
+        if "id" not in request or "method" not in request:
             return None
         method = request["method"]
         params = request.get("params") or {}
@@ -66,13 +67,24 @@ class WireServer:
                     error=types.ErrorData(code=-32603, message="fixture error"),
                 ).model_dump(by_alias=True, exclude_none=True)
             result = self.scenario.get("results", {}).get(
-                params["name"], wire_result(str(arguments.get("value", "wire text")))
+                params["name"],
+                wire_result(
+                    str(arguments.get("value", "wire text")),
+                    **self.scenario.get("result_fields", {}),
+                ),
             )
         else:
             result = {}
         return types.JSONRPCResponse(jsonrpc="2.0", id=request["id"], result=result).model_dump(
             by_alias=True, exclude_none=True
         )
+
+    async def delay_response(self, request: dict[str, Any]) -> None:
+        arguments = (request.get("params") or {}).get("arguments") or {}
+        delays = self.scenario.get("response_delay_ms_by_value", {})
+        delay_ms = delays.get(arguments.get("value"), 0)
+        if isinstance(delay_ms, (int, float)) and delay_ms > 0:
+            await asyncio.sleep(delay_ms / 1000)
 
     async def wait_for(self, method: str) -> dict[str, Any]:
         async with asyncio.timeout(10):
@@ -100,6 +112,18 @@ class WireServer:
         response_data = self.respond(message)
         if response_data is None:
             return web.Response(status=202)
+        await self.delay_response(message)
+        self.responses.append(response_data)
+        if self.scenario.get("ping_before_result") and message["method"] == "tools/call":
+            response = web.StreamResponse(
+                headers={"Content-Type": "text/event-stream", "Mcp-Session-Id": "wire-session"}
+            )
+            await response.prepare(request)
+            ping = {"jsonrpc": "2.0", "id": message["id"], "method": "ping"}
+            for payload in (ping, response_data):
+                await response.write(f"event: message\ndata: {json.dumps(payload)}\n\n".encode())
+            await response.write_eof()
+            return response
         return web.json_response(response_data, headers={"Mcp-Session-Id": "wire-session"})
 
 
@@ -214,14 +238,25 @@ class ObservedLifetimes:
 async def _run_stdio(scenario_path: Path) -> None:
     server = WireServer(json.loads(scenario_path.read_text(encoding="utf-8")))
     async with stdio_server() as (read, write):
-        async for message in read:
+
+        async def respond(message: object) -> None:
             if isinstance(message, Exception):
                 raise message
+            if not hasattr(message, "message"):
+                return
             request = message.message.model_dump(by_alias=True, exclude_none=True)
             with scenario_path.with_suffix(".jsonl").open("a", encoding="utf-8") as log:
                 log.write(json.dumps(request) + "\n")
             response = server.respond(request)
             if response is not None:
+                await server.delay_response(request)
+                server.responses.append(response)
+                if server.scenario.get("ping_before_result") and request["method"] == "tools/call":
+                    await write.send(
+                        SessionMessage(
+                            types.JSONRPCRequest(jsonrpc="2.0", id=request["id"], method="ping")
+                        )
+                    )
                 progress_token = (request.get("params") or {}).get("_meta", {}).get("progressToken")
                 if request["method"] == "tools/call" and progress_token is not None:
                     await write.send(
@@ -236,6 +271,10 @@ async def _run_stdio(scenario_path: Path) -> None:
                 await write.send(
                     SessionMessage(TypeAdapter(types.JSONRPCMessage).validate_python(response))
                 )
+
+        async with asyncio.TaskGroup() as task_group:
+            async for message in read:
+                task_group.create_task(respond(message))
 
 
 if __name__ == "__main__":

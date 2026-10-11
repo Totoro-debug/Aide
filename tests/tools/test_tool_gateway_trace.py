@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import AsyncExitStack
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.core.web_fetch import HTTPResponseBoundary, WebFetchTool
 from aide.agent.tools.deferred import build_agent_run_gateway
 from aide.agent.tools.mcp import MCPTool, MCPToolSpec
+from aide.agent.tools.mcp_runtime import MCPRuntimeManager
 from aide.agent.tools.permission import PermissionContext
 from aide.agent.tools.tool_gateway import (
     BuiltInToolCatalog,
@@ -51,6 +53,7 @@ from tests.fixtures import (
     ScriptedFakeRouter,
     StreamScript,
 )
+from tests.fixtures.mcp_wire import http_wire_server, stdio_requests, stdio_wire_configuration
 from tests.fixtures.model_configuration import configuration
 from tests.memory.test_dream import _FAKE_MEMORY_ROUTE_STATUS, _manager, _response
 from tests.tools.core.test_web_fetch import FakeHTTPClient, FakeResolver, FakeResponse
@@ -99,6 +102,192 @@ async def test_successful_mcp_uses_one_logical_record_and_marks_transport_gap(
         assert cast(dict[str, Any], detail.request)["arguments"] == {"value": "payload"}
         assert record.capture_state.value == "partial"
         assert detail.capture_issues[0].source == "mcp_transport"
+    finally:
+        await recorder.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["http", "stdio"])
+async def test_mcp_runtime_trace_correlates_wire_messages_by_request_id(
+    tmp_path: Path,
+    transport: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    scenario = {
+        "result_fields": {"vendorResult": {"revision": 2, "opaque": ["kept"]}},
+        "response_delay_ms_by_value": {"slow": 50},
+        "ping_before_result": True,
+    }
+    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
+    try:
+        async with AsyncExitStack() as stack:
+            if transport == "http":
+                wire, configuration = await stack.enter_async_context(http_wire_server(scenario))
+                configuration = replace(
+                    configuration,
+                    headers={"Authorization": "Bearer trace-secret"},
+                )
+                manager = MCPRuntimeManager(None, transport="streamable-http")
+            else:
+                wire = None
+                configuration = stdio_wire_configuration(workspace, scenario)
+                manager = MCPRuntimeManager(workspace, transport="stdio")
+
+            try:
+                await manager.start({"remote": configuration})
+                tool = manager.snapshot[0]
+                gateway = ToolGateway(catalog=BuiltInToolCatalog(), additional_tools=(tool,))
+                shared_manager = manager.fork()
+                stack.push_async_callback(shared_manager.close)
+                await shared_manager.start({"remote": configuration})
+                assert shared_manager.snapshot[0] is tool
+                shared_gateway = ToolGateway(
+                    catalog=BuiltInToolCatalog(), additional_tools=shared_manager.snapshot
+                )
+                source = TraceRootSource(
+                    workspace_key=workspace_key_for(workspace),
+                    workspace_path=str(workspace),
+                    origin=TraceOrigin.FOREGROUND,
+                    purpose=TracePurpose.AGENT_RUN,
+                )
+                calls = (
+                    ModelToolCall(
+                        "call-slow",
+                        tool.name,
+                        json.dumps({"value": "slow", "vendorArgument": {"kept": True}}),
+                    ),
+                    ModelToolCall(
+                        "call-fast",
+                        tool.name,
+                        json.dumps({"value": "fast", "vendorArgument": {"kept": True}}),
+                    ),
+                )
+
+                async def call_from_session(
+                    call: ModelToolCall, gateway: ToolGateway
+                ) -> ToolResult:
+                    session_source = replace(
+                        source, owner_session_id=call.id, run_id=f"run-{call.id}"
+                    )
+                    with trace_scope(recorder, session_source):
+                        return await gateway.call(call)
+
+                slow_result, fast_result = await asyncio.gather(
+                    call_from_session(calls[0], gateway),
+                    call_from_session(calls[1], shared_gateway),
+                )
+                await shared_manager.close()
+                with trace_scope(recorder, source):
+                    failed_result = await gateway.call(
+                        ModelToolCall("call-failed", tool.name, '{"error":true}')
+                    )
+
+                assert (slow_result.status, slow_result.content) == ("success", "slow")
+                assert (fast_result.status, fast_result.content) == ("success", "fast")
+                assert failed_result.status == "error"
+                await recorder.flush()
+
+                records = (await recorder.list_records()).items
+                assert len(records) == 3
+                by_call_id = {record.tool_call_id: record for record in records}
+                assert set(by_call_id) == {"call-slow", "call-fast", "call-failed"}
+
+                prefix = "mcp_http" if transport == "http" else "mcp_stdio"
+                for call_id, value in (("call-slow", "slow"), ("call-fast", "fast")):
+                    record = by_call_id[call_id]
+                    assert record.owner_session_id == call_id
+                    assert record.run_id == f"run-{call_id}"
+                    detail = await recorder.get_record(record.record_id)
+                    assert detail is not None
+                    assert cast(dict[str, Any], detail.request)["arguments"]["value"] == value
+                    sources = {item.source: item for item in detail.raw_sources}
+                    request_source = sources[f"{prefix}_request"]
+                    response_source = sources[f"{prefix}_response"]
+                    result_source = sources[f"{prefix}_result"]
+                    assert (request_source.direction, request_source.layer) == (
+                        TraceDirection.REQUEST,
+                        TraceCaptureLayer.JSON_RPC_MESSAGE,
+                    )
+                    assert (response_source.direction, response_source.layer) == (
+                        TraceDirection.RESPONSE,
+                        TraceCaptureLayer.JSON_RPC_MESSAGE,
+                    )
+                    assert result_source.layer is TraceCaptureLayer.SDK_RESULT
+
+                    request_bytes = (
+                        await recorder.read_raw(
+                            record.record_id,
+                            source=f"{prefix}_request",
+                            offset=0,
+                            limit_bytes=4096,
+                        )
+                    ).data
+                    assert b"trace-secret" not in request_bytes
+                    request_message = json.loads(request_bytes)
+                    response_message = json.loads(
+                        (
+                            await recorder.read_raw(
+                                record.record_id,
+                                source=f"{prefix}_response",
+                                offset=0,
+                                limit_bytes=4096,
+                            )
+                        ).data
+                    )
+                    raw_result = json.loads(
+                        (
+                            await recorder.read_raw(
+                                record.record_id,
+                                source=f"{prefix}_result",
+                                offset=0,
+                                limit_bytes=4096,
+                            )
+                        ).data
+                    )
+                    assert request_message["id"] == response_message["id"]
+                    assert request_message["params"]["arguments"]["value"] == value
+                    assert response_message["result"]["content"][0]["text"] == value
+                    assert raw_result["vendorResult"] == {"revision": 2, "opaque": ["kept"]}
+                    assert record.capture_state.value == "complete"
+                assert by_call_id["call-slow"].root_id != by_call_id["call-fast"].root_id
+
+                failed_record = by_call_id["call-failed"]
+                failed_detail = await recorder.get_record(failed_record.record_id)
+                assert failed_detail is not None
+                failed_response = json.loads(
+                    (
+                        await recorder.read_raw(
+                            failed_record.record_id,
+                            source=f"{prefix}_response",
+                            offset=0,
+                            limit_bytes=4096,
+                        )
+                    ).data
+                )
+                assert failed_response["error"]["message"] == "fixture error"
+                assert failed_record.status.value == "failed"
+                assert failed_detail.capture_issues == ()
+
+                wire_messages = wire.requests if wire is not None else stdio_requests(workspace)
+                methods = [message["method"] for message in wire_messages if "method" in message]
+                assert methods.count("initialize") == 1
+                assert methods.count("tools/list") == 1
+                assert methods.count("tools/call") == 3
+                if wire is not None:
+                    call_responses = [
+                        response
+                        for response in wire.responses
+                        if "result" in response and "content" in response["result"]
+                    ]
+                    assert [
+                        item["result"]["content"][0]["text"] for item in call_responses[:2]
+                    ] == [
+                        "fast",
+                        "slow",
+                    ]
+            finally:
+                await manager.close()
     finally:
         await recorder.close()
 

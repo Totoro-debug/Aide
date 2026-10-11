@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from importlib import import_module
 from types import MappingProxyType
 from typing import Any, Final, Protocol, cast
 
+import httpx
 from anthropic import (
     APIConnectionError,
     APIError,
@@ -23,6 +25,7 @@ from aide.provider.errors import (
     ModelCallError,
     parse_retry_after_seconds,
 )
+from aide.provider.http_capture import capture_http_request, capture_http_response
 from aide.provider.models import (
     AssistantModelMessage,
     FinishReason,
@@ -78,10 +81,16 @@ def _official_client_factory(
     api_key: str,
     base_url: str,
     max_retries: int,
+    http_client: httpx.AsyncClient | None = None,
 ) -> AnthropicClient:
     return cast(
         AnthropicClient,
-        AsyncAnthropic(api_key=api_key, base_url=base_url, max_retries=max_retries),
+        AsyncAnthropic(
+            api_key=api_key,
+            base_url=base_url,
+            max_retries=max_retries,
+            http_client=http_client,
+        ),
     )
 
 
@@ -92,14 +101,37 @@ class AnthropicProvider:
         self,
         configuration: ProviderConfiguration,
         *,
-        client_factory: AnthropicClientFactory = _official_client_factory,
+        client_factory: AnthropicClientFactory | None = None,
+        http_transport_factory: Callable[[], httpx.AsyncBaseTransport] | None = None,
     ) -> None:
         self._provider_id = configuration.provider_id
-        self._client = client_factory(
-            api_key=configuration.api_key,
-            base_url=configuration.base_url,
-            max_retries=0,
-        )
+        http_client: httpx.AsyncClient | None = None
+        if client_factory is None:
+            anthropic = import_module("anthropic")
+            http_arguments: dict[str, object] = {
+                "event_hooks": {
+                    "request": [capture_http_request],
+                    "response": [capture_http_response],
+                },
+            }
+            if http_transport_factory is not None:
+                http_arguments["transport"] = http_transport_factory()
+            http_client = cast(
+                httpx.AsyncClient,
+                anthropic.DefaultAsyncHttpxClient(**http_arguments),
+            )
+            self._client = _official_client_factory(
+                api_key=configuration.api_key,
+                base_url=configuration.base_url,
+                max_retries=0,
+                http_client=http_client,
+            )
+        else:
+            self._client = client_factory(
+                api_key=configuration.api_key,
+                base_url=configuration.base_url,
+                max_retries=0,
+            )
 
     def stream(
         self,

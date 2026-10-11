@@ -1,8 +1,8 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { Brain, CalendarClock, ChevronDown, ChevronRight, FolderOpen, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { Brain, CalendarClock, ChartLine, ChevronDown, ChevronRight, FolderOpen, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 
 import { getChatSessions, getProjectSessions } from "../shared/service/api";
 import type {
@@ -198,6 +198,14 @@ export default function NavigationSidebar({
           <MessageSquare size={16} aria-hidden="true" />
           <span>{t("nav.newChat")}</span>
         </Link>
+        <NavLink
+          className={({ isActive }) => isActive ? `${styles.navLink} ${styles.navLinkActive}` : styles.navLink}
+          to="/statistics"
+          onClick={onClose}
+        >
+          <ChartLine size={16} aria-hidden="true" />
+          <span>{t("nav.statistics")}</span>
+        </NavLink>
       </nav>
 
       <section className={styles.sidebarSection} aria-label={t("nav.projects")}>

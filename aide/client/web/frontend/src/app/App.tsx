@@ -26,6 +26,7 @@ import type { PendingSessionAction } from "../features/conversations/session.ts"
 import { StatusView } from "../features/runtime/RuntimeView.tsx";
 import type { WorkspaceMemoryTarget } from "../features/runtime/WorkspaceMemoryDialog";
 import WorkspaceMemoryDialog from "../features/runtime/WorkspaceMemoryDialog";
+import { StatisticsView } from "../features/statistics/StatisticsView.tsx";
 import { ScheduleJobHistoryView, ScheduleJobsView } from "../features/schedules/SchedulesView.tsx";
 import type { SettingsNavigationState, SettingsReturnLocation } from "../features/settings/navigation.ts";
 import { SettingsView } from "../features/settings/SettingsView.tsx";
@@ -705,6 +706,7 @@ function AppShell() {
                   />
                 }
               />
+              <Route path="/statistics" element={<StatisticsView authState={authState} />} />
               <Route path="/settings" element={null} />
               <Route path="/projects" element={<Navigate replace to="/" />} />
               <Route

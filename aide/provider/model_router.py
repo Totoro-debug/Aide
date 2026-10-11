@@ -29,6 +29,7 @@ from aide.trace.scope import (
     TraceExecutionScope,
     TraceProviderAttempt,
     current_trace_scope,
+    set_trace_parent_record_id,
     trace_provider_attempt,
 )
 from aide.trace.types import (
@@ -89,6 +90,7 @@ class _TraceModelCall:
                     ),
                 ),
             )
+            set_trace_parent_record_id(self.handle.record_id, scope=scope)
         except Exception:
             self.handle = None
             logger.warning("Execution Trace model capture could not be started")

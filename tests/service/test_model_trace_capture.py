@@ -28,7 +28,7 @@ from aide.service.runtime import AgentService
 from aide.templates import render_template
 from aide.trace.recorder import NoOpTraceRecorder
 from aide.trace.sqlite_recorder import SQLiteTraceRecorder
-from aide.trace.types import TraceErrorCategory, TraceOrigin, TracePurpose
+from aide.trace.types import TraceErrorCategory, TraceKind, TraceOrigin, TracePurpose
 from aide.utils.errors import ErrorInfo
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock, ScriptedFakeProvider, StreamScript
@@ -248,7 +248,13 @@ async def _exercise_sources(
                         assert record.run_id == "run-summary"
                         assert record.owner_session_id == sessions[1]
                     detail = await recorder.get_record(record.record_id)
-                    assert detail is not None and detail.capture_issues
+                    assert detail is not None
+                    if record.kind is TraceKind.MODEL:
+                        assert detail.capture_issues
+                    else:
+                        assert detail.request is not None and detail.result is not None
+                        assert record.capture_state.value == "complete"
+                        assert record.parent_record_id is not None
         finally:
             provider.child_release.set()
             await service.stop()

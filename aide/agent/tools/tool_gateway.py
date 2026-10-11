@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
@@ -44,6 +48,26 @@ from aide.agent.tools.permission import (
     ToolPermissionPolicy,
 )
 from aide.schedule.service import ScheduleService
+from aide.trace.scope import (
+    TraceExecutionScope,
+    TraceToolCallScope,
+    current_trace_scope,
+    trace_tool_call,
+)
+from aide.trace.types import (
+    TraceCallMetadata,
+    TraceCaptureHandle,
+    TraceCaptureIssue,
+    TraceCaptureLayer,
+    TraceCaptureState,
+    TraceDirection,
+    TraceErrorCategory,
+    TraceKind,
+    TraceOutcome,
+    TraceStatus,
+    TraceTokenUsage,
+    TraceUsageState,
+)
 from aide.utils.validation import require_uuid4
 
 type ConfirmationDecision = Literal["approved", "declined"]
@@ -200,6 +224,249 @@ class ToolResult:
         if self.confirmation is not None:
             result["confirmation"] = self.confirmation.to_dict()
         return result
+
+
+@dataclass(slots=True)
+class _ToolTraceCapture:
+    scope: TraceExecutionScope
+    handle: TraceCaptureHandle
+    started_monotonic: float
+    request: dict[str, object]
+    arguments_parsed: bool = False
+    arguments_prepared: bool = False
+    tool_resolved: bool = False
+    finished: bool = False
+
+    def set_request(self) -> None:
+        try:
+            self.scope.recorder.set_request(self.handle, deepcopy(self.request))
+        except Exception:
+            self._report_issue("Tool arguments could not be captured.")
+
+    def set_parsed_arguments(self, arguments: dict[str, Any]) -> None:
+        self.arguments_parsed = True
+        try:
+            self.request["arguments"] = deepcopy(arguments)
+            self.set_request()
+        except Exception:
+            self._report_issue("Parsed Tool arguments could not be captured.")
+
+    def set_prepared_arguments(self, normalized: dict[str, Any], execution: dict[str, Any]) -> None:
+        self.arguments_prepared = True
+        try:
+            self.request["normalized_arguments"] = deepcopy(normalized)
+            self.request["execution_arguments"] = deepcopy(execution)
+            self.set_request()
+        except Exception:
+            self._report_issue("Prepared Tool arguments could not be captured.")
+
+    def capture_result(self, result: ToolResult) -> None:
+        if result.confirmation is not None:
+            self.request["confirmation"] = result.confirmation.to_dict()
+            self.set_request()
+        if result.status == "success":
+            self._append_result(result.content)
+
+    def finish_result(self, result: ToolResult) -> None:
+        if result.status == "success":
+            self._finish(
+                TraceOutcome(
+                    status=TraceStatus.SUCCESS,
+                    finished_at=datetime.now(UTC),
+                    duration_ms=self._duration_ms(),
+                ),
+                result=result.to_dict(),
+            )
+            return
+
+        if result.status == "refused":
+            category = TraceErrorCategory.PERMISSION_DENIED
+        elif not self.arguments_parsed or (self.tool_resolved and not self.arguments_prepared):
+            category = TraceErrorCategory.VALIDATION_ERROR
+        elif not self.tool_resolved:
+            category = TraceErrorCategory.UNAVAILABLE
+        else:
+            category = TraceErrorCategory.TOOL_ERROR
+        self._finish(
+            TraceOutcome(
+                status=TraceStatus.FAILED,
+                finished_at=datetime.now(UTC),
+                duration_ms=self._duration_ms(),
+                error_category=category,
+                error_code=category.value,
+                error_message=result.content,
+            ),
+            result=result.to_dict(),
+        )
+
+    def _report_unavailable_raw_layer(self, tool: BaseTool | None) -> None:
+        if tool is None:
+            return
+        if isinstance(tool, MCPTool):
+            message = "MCP transport messages are not available at the Tool Gateway boundary."
+            source = "mcp_transport"
+        elif tool.name == "exec":
+            message = "Exec stdout and stderr bytes are not available at the Tool Gateway boundary."
+            source = "exec_process_stream"
+        elif tool.name == "web_fetch":
+            message = "Web Fetch response bytes before text conversion are unavailable."
+            source = "web_fetch_response"
+        elif tool.name == "web_search":
+            message = "Web Search results before formatting are unavailable."
+            source = "web_search_ddgs"
+        else:
+            return
+        self._report_issue(message, source=source)
+
+    def finish_cancelled(self, error: BaseException) -> None:
+        self._finish_error(
+            TraceErrorCategory.CANCELLED,
+            str(error) or "Tool call was cancelled.",
+            error_code="cancelled",
+        )
+
+    def finish_unexpected(self, error: Exception) -> None:
+        self._finish_error(
+            TraceErrorCategory.TOOL_ERROR,
+            "Tool call could not be completed.",
+            error_code=type(error).__name__,
+        )
+
+    def _finish_error(
+        self,
+        category: TraceErrorCategory,
+        message: str,
+        *,
+        error_code: str,
+    ) -> None:
+        self._finish(
+            TraceOutcome(
+                status=TraceStatus.FAILED,
+                finished_at=datetime.now(UTC),
+                duration_ms=self._duration_ms(),
+                error_category=category,
+                error_code=error_code,
+                error_message=message,
+            ),
+            result=None,
+        )
+
+    def _append_result(self, content: str) -> None:
+        try:
+            self.scope.recorder.append_raw(
+                self.handle,
+                source="tool_result",
+                direction=TraceDirection.RESPONSE,
+                layer=TraceCaptureLayer.TOOL_RESULT,
+                sequence=0,
+                data=content.encode("utf-8"),
+                content_type="text/plain; charset=utf-8",
+            )
+        except Exception:
+            self._report_issue("Tool result could not be captured.")
+
+    def _report_issue(self, message: str, *, source: str = "tool_gateway") -> None:
+        try:
+            self.scope.recorder.report_capture_issue(
+                self.handle,
+                TraceCaptureIssue(
+                    state=TraceCaptureState.PARTIAL,
+                    message=message,
+                    source=source,
+                ),
+            )
+        except Exception:
+            logger.warning("Execution Trace Tool capture issue could not be reported")
+
+    def _duration_ms(self) -> int:
+        return max(0, int((monotonic() - self.started_monotonic) * 1000))
+
+    def _finish(self, outcome: TraceOutcome, *, result: object) -> None:
+        if self.finished:
+            return
+        self.finished = True
+        try:
+            self.scope.recorder.finish_call(
+                self.handle,
+                outcome,
+                result=result,
+                usage=TraceTokenUsage(TraceUsageState.NOT_APPLICABLE),
+                retry_count=0,
+            )
+        except Exception:
+            logger.warning("Execution Trace Tool outcome could not be captured")
+
+
+@dataclass(slots=True)
+class ToolResultTrace:
+    """Own the Trace finalizer for one Runner call, including its child task."""
+
+    _capture: _ToolTraceCapture | None = None
+
+    def finish(self, result: ToolResult) -> None:
+        capture, self._capture = self._capture, None
+        if capture is not None:
+            try:
+                capture.finish_result(result)
+            except Exception:
+                logger.warning("Execution Trace final Tool result could not be captured")
+
+    def finish_cancelled(self, error: BaseException) -> None:
+        capture, self._capture = self._capture, None
+        if capture is not None:
+            try:
+                capture.finish_cancelled(error)
+            except Exception:
+                logger.warning("Execution Trace final Tool cancellation could not be captured")
+
+
+_ACTIVE_TOOL_RESULT_TRACE: ContextVar[ToolResultTrace | None] = ContextVar(
+    "aide_active_tool_result_trace", default=None
+)
+
+
+@contextmanager
+def trace_tool_result(trace: ToolResultTrace) -> Iterator[None]:
+    """Defer this call's publication until the Runner observes its final return channel."""
+    token = _ACTIVE_TOOL_RESULT_TRACE.set(trace)
+    try:
+        yield
+    finally:
+        _ACTIVE_TOOL_RESULT_TRACE.reset(token)
+
+
+def _start_tool_trace(tool_call: ModelToolCall) -> _ToolTraceCapture | None:
+    scope = current_trace_scope()
+    if scope is None:
+        return None
+    started_at = datetime.now(UTC)
+    try:
+        handle = scope.recorder.begin_call(
+            scope.context,
+            TraceCallMetadata(
+                kind=TraceKind.TOOL,
+                purpose=scope.purpose,
+                started_at=started_at,
+                tool_name=tool_call.name,
+                parent_record_id=scope.parent_record_id,
+                tool_call_id=tool_call.id,
+            ),
+        )
+    except Exception:
+        logger.warning("Execution Trace Tool call could not be started")
+        return None
+    capture = _ToolTraceCapture(
+        scope=scope,
+        handle=handle,
+        started_monotonic=monotonic(),
+        request={
+            "tool_call_id": tool_call.id,
+            "tool_name": tool_call.name,
+            "arguments_raw": tool_call.arguments,
+        },
+    )
+    capture.set_request()
+    return capture
 
 
 def _normalize_tool_names(names: Collection[str], *, label: str) -> tuple[str, ...]:
@@ -482,6 +749,50 @@ class ToolGateway:
         file_mutation_recorder: FileMutationRecorder | None = None,
         run_token: UUID | None = None,
     ) -> ToolResult:
+        trace_capture = _start_tool_trace(tool_call)
+        try:
+            result = await self._call_untraced(
+                tool_call,
+                confirmation=confirmation,
+                file_mutation_recorder=file_mutation_recorder,
+                run_token=run_token,
+                trace_capture=trace_capture,
+            )
+        except (asyncio.CancelledError, ConfirmationAborted) as error:
+            if trace_capture is not None:
+                try:
+                    trace_capture.finish_cancelled(error)
+                except Exception:
+                    logger.warning("Execution Trace Tool cancellation could not be captured")
+            raise
+        except Exception as error:
+            if trace_capture is not None:
+                try:
+                    trace_capture.finish_unexpected(error)
+                except Exception:
+                    logger.warning("Execution Trace Tool failure could not be captured")
+            raise
+        if trace_capture is not None:
+            try:
+                trace_capture.capture_result(result)
+                result_trace = _ACTIVE_TOOL_RESULT_TRACE.get()
+                if result_trace is None:
+                    trace_capture.finish_result(result)
+                else:
+                    result_trace._capture = trace_capture
+            except Exception:
+                logger.warning("Execution Trace Tool result could not be captured")
+        return result
+
+    async def _call_untraced(
+        self,
+        tool_call: ModelToolCall,
+        *,
+        confirmation: ConfirmationRequester | None = None,
+        file_mutation_recorder: FileMutationRecorder | None = None,
+        run_token: UUID | None = None,
+        trace_capture: _ToolTraceCapture | None,
+    ) -> ToolResult:
         """Parse, prepare, confirm when needed, execute, and normalize one call."""
         raw_arguments = tool_call.arguments
         if not isinstance(raw_arguments, str):
@@ -492,10 +803,14 @@ class ToolGateway:
             return _result(tool_call, "error", "Tool arguments could not be parsed.")
         if not isinstance(parsed, dict):
             return _result(tool_call, "error", "Tool arguments could not be parsed.")
+        if trace_capture is not None:
+            trace_capture.set_parsed_arguments(cast(dict[str, Any], parsed))
 
         tool = self._tools.get(tool_call.name)
         if tool is None:
             return _result(tool_call, "error", "The requested tool is not available.")
+        if trace_capture is not None:
+            trace_capture.tool_resolved = True
 
         try:
             if self._tool_context is None:
@@ -512,6 +827,11 @@ class ToolGateway:
                 (access.path for access in facts.file_accesses if access.role == "write"),
                 None,
             )
+            if trace_capture is not None:
+                trace_capture.set_prepared_arguments(
+                    facts.normalized_arguments,
+                    execution_arguments,
+                )
         except asyncio.CancelledError:
             raise
         except ToolError as error:
@@ -601,6 +921,7 @@ class ToolGateway:
                 run_token=run_token,
                 mutation_target=mutation_target,
                 tool_context=self._tool_context,
+                trace_capture=trace_capture,
             )
 
         try:
@@ -650,6 +971,7 @@ class ToolGateway:
             run_token=run_token,
             mutation_target=mutation_target,
             tool_context=self._tool_context,
+            trace_capture=trace_capture,
         )
 
     @staticmethod
@@ -694,27 +1016,36 @@ class ToolGateway:
         run_token: UUID | None,
         mutation_target: Path | None,
         tool_context: ToolRunContext | None,
+        trace_capture: _ToolTraceCapture | None = None,
     ) -> ToolResult:
         try:
-            if tool_context is not None:
-                contextual_recorder = (
-                    file_mutation_recorder
-                    if self._permission_context.origin == "foreground"
-                    else None
-                )
-                content = await tool.execute_authorized_for_context(
-                    deepcopy(prepared_arguments),
-                    authorization,
-                    context=tool_context,
-                    mutation_recorder=contextual_recorder,
-                    run_token=run_token,
-                    mutation_target=mutation_target,
-                )
-            else:
-                content = await tool.execute_authorized(
-                    deepcopy(prepared_arguments),
-                    authorization,
-                )
+            if trace_capture is not None:
+                trace_capture._report_unavailable_raw_layer(tool)
+            tool_scope = (
+                None
+                if trace_capture is None
+                else TraceToolCallScope(trace_capture.scope.recorder, trace_capture.handle)
+            )
+            with trace_tool_call(tool_scope):
+                if tool_context is not None:
+                    contextual_recorder = (
+                        file_mutation_recorder
+                        if self._permission_context.origin == "foreground"
+                        else None
+                    )
+                    content = await tool.execute_authorized_for_context(
+                        deepcopy(prepared_arguments),
+                        authorization,
+                        context=tool_context,
+                        mutation_recorder=contextual_recorder,
+                        run_token=run_token,
+                        mutation_target=mutation_target,
+                    )
+                else:
+                    content = await tool.execute_authorized(
+                        deepcopy(prepared_arguments),
+                        authorization,
+                    )
             if not isinstance(content, str):
                 raise TypeError("Tool execution must return a string")
         except asyncio.CancelledError:

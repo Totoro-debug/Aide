@@ -19,6 +19,8 @@ from aide.agent.tools.tool_gateway import (
     ModelToolCall,
     ToolGateway,
     ToolResult,
+    ToolResultTrace,
+    trace_tool_result,
 )
 from aide.provider.errors import ModelCallError
 from aide.provider.models import (
@@ -437,9 +439,16 @@ class AgentRunner:
                                 run_token=run_token,
                             )
                         except BaseException as failure:
+                            if (
+                                isinstance(failure, (asyncio.CancelledError, ConfirmationAborted))
+                                and state.result is None
+                            ):
+                                state.trace.finish_cancelled(failure)
                             if not isinstance(failure, Exception) and state.result is not None:
                                 try:
-                                    recovered = _externalize_tool_result(state.result, externalize)
+                                    recovered = _externalize_tool_result(
+                                        state.result, externalize, trace=state.trace
+                                    )
                                     _append_run_message(
                                         runtime_messages,
                                         increment,
@@ -465,7 +474,7 @@ class AgentRunner:
                             artifact=None,
                         )
 
-                    result = _externalize_tool_result(result, externalize)
+                    result = _externalize_tool_result(result, externalize, trace=state.trace)
                     _append_run_message(runtime_messages, increment, _tool_run_message(result))
                     pending_tool_calls.pop(0)
                     await emit(
@@ -613,14 +622,15 @@ async def _await_tool_call(
     run_token: UUID | None,
 ) -> ToolResult:
     async def invoke_gateway() -> ToolResult:
-        if file_mutation_recorder is None and run_token is None:
-            return await gateway.call(tool_call, confirmation=confirmation)
-        return await gateway.call(
-            tool_call,
-            confirmation=confirmation,
-            file_mutation_recorder=file_mutation_recorder,
-            run_token=run_token,
-        )
+        with trace_tool_result(state.trace):
+            if file_mutation_recorder is None and run_token is None:
+                return await gateway.call(tool_call, confirmation=confirmation)
+            return await gateway.call(
+                tool_call,
+                confirmation=confirmation,
+                file_mutation_recorder=file_mutation_recorder,
+                run_token=run_token,
+            )
 
     if not as_task:
         result = await invoke_gateway()
@@ -666,6 +676,7 @@ def _cancelled_result(
 @dataclass(slots=True)
 class _ToolCallState:
     result: ToolResult | None = None
+    trace: ToolResultTrace = field(default_factory=ToolResultTrace)
 
 
 def _model_failure() -> ModelCallError:
@@ -730,13 +741,14 @@ def _externalize_tool_result(
     externalize_result: Callable[[ToolResult], ToolResult],
     *,
     on_artifact_failure: Callable[[Exception, str], None] | None = None,
+    trace: ToolResultTrace | None = None,
 ) -> ToolResult:
     try:
-        return externalize_result(result)
+        final_result = externalize_result(result)
     except Exception as failure:
         if on_artifact_failure is not None:
             on_artifact_failure(failure, result.name)
-        return ToolResult(
+        final_result = ToolResult(
             tool_call_id=result.tool_call_id,
             name=result.name,
             status="error",
@@ -744,6 +756,9 @@ def _externalize_tool_result(
             artifact=None,
             confirmation=result.confirmation,
         )
+    if trace is not None:
+        trace.finish(final_result)
+    return final_result
 
 
 def _repair_cancelled_messages(

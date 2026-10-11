@@ -4,7 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -23,6 +23,9 @@ from aide.provider.models import (
 )
 from aide.schedule.model import JobSchedule, ScheduleJob
 from aide.service.runtime import AgentService
+from aide.trace.context import workspace_key_for
+from aide.trace.sqlite_recorder import SQLiteTraceRecorder
+from aide.trace.types import TraceErrorCategory, TraceKind
 from tests.service.test_shared_resources import _CountingProvider, _home, _session_case
 from tests.tools.test_shared_tool_context import _RecordingExecHost
 
@@ -153,6 +156,32 @@ async def test_service_foreground_and_schedule_reuse_catalog_with_workspace_and_
             )
             == 1
         )
+        recorder = service.trace_recorder
+        assert isinstance(recorder, SQLiteTraceRecorder)
+        await recorder.flush()
+        records = (await recorder.list_records(limit=200)).items
+        for i, foreground in enumerate(cases):
+            tools = [r for r in records if r.kind is TraceKind.TOOL and r.run_id == f"run-{i}"]
+            assert {r.tool_name for r in tools} == {"write_file", "read_file", "exec"}
+            assert len(tools) == 3
+            for record in tools:
+                assert record.owner_session_id == foreground.claim.session_id
+                assert record.workspace_key == workspace_key_for(
+                    foreground.workspace.workspace_path
+                )
+                parent = next(r for r in records if r.record_id == record.parent_record_id)
+                assert parent.kind is TraceKind.MODEL
+                assert (parent.root_id, parent.owner_session_id) == (
+                    record.root_id,
+                    record.owner_session_id,
+                )
+                detail = await recorder.get_record(record.record_id)
+                assert detail is not None and detail.request is not None
+                assert detail.result is not None and detail.raw_sources
+        scheduled = [
+            r for r in records if r.kind is TraceKind.TOOL and r.owner_session_id == job.session_id
+        ]
+        assert {r.tool_name for r in scheduled} == {"write_file", "read_file", "exec"}
     finally:
         await service.stop()
 
@@ -209,6 +238,28 @@ async def test_service_cancels_only_the_calling_run_on_a_shared_exec_host(
         await cases[1].completed("run-1")
         assert not host.cancelled["workspace-1"].is_set()
         assert host.executed == [cases[1].workspace.workspace_path]
+        cancelled_event = await asyncio.wait_for(
+            cases[0].sink.wait_for("run.completed", "run-0"), timeout=5
+        )
+        assert cast(dict[str, object], cancelled_event["payload"])["finish_reason"] == "cancelled"
+        recorder = service.trace_recorder
+        assert isinstance(recorder, SQLiteTraceRecorder)
+        await recorder.flush()
+        records = (await recorder.list_records(limit=200)).items
+        cancelled = next(
+            r
+            for r in records
+            if r.kind is TraceKind.TOOL and r.run_id == "run-0" and r.tool_name == "exec"
+        )
+        succeeded = next(
+            r
+            for r in records
+            if r.kind is TraceKind.TOOL and r.run_id == "run-1" and r.tool_name == "exec"
+        )
+        assert cancelled.error_category is TraceErrorCategory.CANCELLED
+        assert cancelled.status.value == "failed"
+        assert succeeded.status.value == "success"
+        assert cancelled.workspace_key != succeeded.workspace_key
     finally:
         host.release.set()
         await service.stop()

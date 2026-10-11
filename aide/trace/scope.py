@@ -1,4 +1,4 @@
-"""Task-local execution identity for model calls recorded by a shared Router."""
+"""Task-local execution identity for model and Tool calls in one Agent Run."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from loguru import logger
 from aide.trace.context import TraceContext, TraceRootSource
 from aide.trace.types import (
     TraceAttemptHandle,
+    TraceCaptureHandle,
     TraceCaptureIssue,
     TraceCaptureLayer,
     TraceCaptureState,
@@ -30,6 +31,13 @@ class TraceExecutionScope:
     recorder: TraceRecorder
     context: TraceContext
     purpose: TracePurpose
+    parent_record_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TraceToolCallScope:
+    recorder: TraceRecorder
+    handle: TraceCaptureHandle
 
 
 @dataclass(slots=True)
@@ -110,6 +118,9 @@ class TraceProviderAttempt:
 _ACTIVE_TRACE_SCOPE: ContextVar[TraceExecutionScope | None] = ContextVar(
     "aide_active_trace_scope", default=None
 )
+_ACTIVE_TRACE_TOOL_CALL: ContextVar[TraceToolCallScope | None] = ContextVar(
+    "aide_active_trace_tool_call", default=None
+)
 _ACTIVE_TRACE_PROVIDER_ATTEMPT: ContextVar[TraceProviderAttempt | None] = ContextVar(
     "aide_active_trace_provider_attempt", default=None
 )
@@ -120,9 +131,38 @@ def current_trace_scope() -> TraceExecutionScope | None:
     return _ACTIVE_TRACE_SCOPE.get()
 
 
+def current_trace_tool_call() -> TraceToolCallScope | None:
+    """Return the immutable capture handle active during one Tool execution."""
+    return _ACTIVE_TRACE_TOOL_CALL.get()
+
+
 def current_trace_provider_attempt() -> TraceProviderAttempt | None:
     """Return the provider attempt active in this task, if any."""
     return _ACTIVE_TRACE_PROVIDER_ATTEMPT.get()
+
+
+def set_trace_parent_record_id(record_id: str, *, scope: TraceExecutionScope) -> None:
+    """Bind the latest model record as parent for following Tool calls in this task."""
+    current = _ACTIVE_TRACE_SCOPE.get()
+    if (
+        current is not None
+        and current.context == scope.context
+        and current.recorder is scope.recorder
+    ):
+        _ACTIVE_TRACE_SCOPE.set(replace(current, parent_record_id=record_id))
+
+
+@contextmanager
+def trace_tool_call(scope: TraceToolCallScope | None) -> Iterator[None]:
+    """Bind one Tool capture handle through its awaited execution and restore its parent."""
+    if scope is None:
+        yield
+        return
+    token = _ACTIVE_TRACE_TOOL_CALL.set(scope)
+    try:
+        yield
+    finally:
+        _ACTIVE_TRACE_TOOL_CALL.reset(token)
 
 
 @contextmanager

@@ -10,10 +10,14 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final, Protocol, cast
+
+from loguru import logger
 
 from aide.agent.tools.core.exec_policy import (
     ExecAssessment,
@@ -34,6 +38,24 @@ EXEC_CAPABILITY_ERROR: Final = "Exec capability is unavailable because the selec
 _PROCESS_REAP_TIMEOUT: Final[float] = 5.0
 _INSPECTION_TIMEOUT: Final[int] = 5
 _INSPECTION_MAX_COMMAND_LENGTH: Final[int] = 1_048_576
+ExecProcessOutputObserver = Callable[[str, int, bytes], None]
+_ACTIVE_EXEC_PROCESS_OUTPUT_OBSERVER: ContextVar[ExecProcessOutputObserver | None] = ContextVar(
+    "aide_active_exec_process_output_observer",
+    default=None,
+)
+
+
+@contextmanager
+def observe_exec_process_output(
+    observer: ExecProcessOutputObserver | None,
+) -> Iterator[None]:
+    token = _ACTIVE_EXEC_PROCESS_OUTPUT_OBSERVER.set(observer)
+    try:
+        yield
+    finally:
+        _ACTIVE_EXEC_PROCESS_OUTPUT_OBSERVER.reset(token)
+
+
 _WINDOWS_ENVIRONMENT: Final[tuple[str, ...]] = (
     "HOME",
     "LANG",
@@ -546,7 +568,12 @@ class PowerShellExecHost:
                     self.resolved_shell.env if environment is None else environment
                 ),
             )
-            communication = asyncio.create_task(process.communicate())
+            observer = _ACTIVE_EXEC_PROCESS_OUTPUT_OBSERVER.get()
+            communication = asyncio.create_task(
+                process.communicate()
+                if observer is None
+                else _communicate_with_output_capture(process, observer)
+            )
             try:
                 stdout, stderr = await asyncio.wait_for(
                     asyncio.shield(communication),
@@ -967,6 +994,84 @@ async def _spawn_process(
         except BaseException:
             pass
         raise cancellation
+
+
+class _ObservedProcessStream:
+    def __init__(
+        self,
+        stream: Any,
+        *,
+        source: str,
+        observer: ExecProcessOutputObserver,
+    ) -> None:
+        self._stream = stream
+        self._source = source
+        self._observer = observer
+        self._sequence = 0
+
+    async def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            blocks: list[bytes] = []
+            while True:
+                block = await self.read(64 * 1024)
+                if not block:
+                    return b"".join(blocks)
+                blocks.append(block)
+        data = cast(bytes, await self._stream.read(size))
+        _observe_exec_process_output(self._observer, self._source, self._sequence, data)
+        self._sequence += 1
+        return data
+
+
+async def _communicate_with_output_capture(
+    process: ExecProcess,
+    observer: ExecProcessOutputObserver,
+) -> tuple[bytes | None, bytes | None]:
+    stdout_stream = getattr(process, "stdout", None)
+    stderr_stream = getattr(process, "stderr", None)
+    if stdout_stream is None and stderr_stream is None:
+        stdout, stderr = await process.communicate()
+        _observe_exec_process_output(observer, "exec_stdout", 0, _as_bytes(stdout))
+        _observe_exec_process_output(observer, "exec_stderr", 0, _as_bytes(stderr))
+        return stdout, stderr
+
+    capturable_process = cast(Any, process)
+    try:
+        if stdout_stream is not None:
+            capturable_process.stdout = _ObservedProcessStream(
+                stdout_stream,
+                source="exec_stdout",
+                observer=observer,
+            )
+        if stderr_stream is not None:
+            capturable_process.stderr = _ObservedProcessStream(
+                stderr_stream,
+                source="exec_stderr",
+                observer=observer,
+            )
+        stdout, stderr = await process.communicate()
+        if stdout_stream is None:
+            _observe_exec_process_output(observer, "exec_stdout", 0, _as_bytes(stdout))
+        if stderr_stream is None:
+            _observe_exec_process_output(observer, "exec_stderr", 0, _as_bytes(stderr))
+        return stdout, stderr
+    finally:
+        if stdout_stream is not None:
+            capturable_process.stdout = stdout_stream
+        if stderr_stream is not None:
+            capturable_process.stderr = stderr_stream
+
+
+def _observe_exec_process_output(
+    observer: ExecProcessOutputObserver,
+    source: str,
+    sequence: int,
+    data: bytes,
+) -> None:
+    try:
+        observer(source, sequence, data)
+    except Exception:
+        logger.warning("Execution Trace Exec process output could not be observed")
 
 
 async def _create_process(

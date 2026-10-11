@@ -26,7 +26,7 @@ from aide.agent.tools.base import (
 from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.core.edit_file import EditFileTool
 from aide.agent.tools.core.exec import ExecTool
-from aide.agent.tools.core.exec_host import ExecHost
+from aide.agent.tools.core.exec_host import ExecHost, observe_exec_process_output
 from aide.agent.tools.core.glob import GlobTool
 from aide.agent.tools.core.grep import GrepTool
 from aide.agent.tools.core.list_dir import ListDirTool
@@ -236,6 +236,7 @@ class _ToolTraceCapture:
     arguments_prepared: bool = False
     tool_resolved: bool = False
     finished: bool = False
+    process_streams_captured: bool = False
 
     def set_request(self) -> None:
         try:
@@ -308,6 +309,8 @@ class _ToolTraceCapture:
             message = "MCP transport messages are not available at the Tool Gateway boundary."
             source = "mcp_transport"
         elif tool.name == "exec":
+            if self.process_streams_captured:
+                return
             message = "Exec stdout and stderr bytes are not available at the Tool Gateway boundary."
             source = "exec_process_stream"
         elif tool.name == "web_fetch":
@@ -319,6 +322,21 @@ class _ToolTraceCapture:
         else:
             return
         self._report_issue(message, source=source)
+
+    def capture_process_output(self, source: str, sequence: int, data: bytes) -> None:
+        self.process_streams_captured = True
+        try:
+            self.scope.recorder.append_raw(
+                self.handle,
+                source=source,
+                direction=TraceDirection.RESPONSE,
+                layer=TraceCaptureLayer.PROCESS_STREAM,
+                sequence=sequence,
+                data=data,
+                content_type="application/octet-stream",
+            )
+        except Exception:
+            self._report_issue("Exec process output could not be captured.", source=source)
 
     def finish_cancelled(self, error: BaseException) -> None:
         self._finish_error(
@@ -1021,14 +1039,17 @@ class ToolGateway:
         trace_capture: _ToolTraceCapture | None = None,
     ) -> ToolResult:
         try:
-            if trace_capture is not None:
-                trace_capture._report_unavailable_raw_layer(tool)
             tool_scope = (
                 None
                 if trace_capture is None
                 else TraceToolCallScope(trace_capture.scope.recorder, trace_capture.handle)
             )
-            with trace_tool_call(tool_scope):
+            output_observer = (
+                trace_capture.capture_process_output
+                if trace_capture is not None and tool.name == "exec"
+                else None
+            )
+            with trace_tool_call(tool_scope), observe_exec_process_output(output_observer):
                 if tool_context is not None:
                     contextual_recorder = (
                         file_mutation_recorder
@@ -1078,6 +1099,9 @@ class ToolGateway:
                 _generic_tool_failure(tool.name),
                 confirmation=confirmation_state[0],
             )
+        finally:
+            if trace_capture is not None:
+                trace_capture._report_unavailable_raw_layer(tool)
         return _result(tool_call, "success", content, confirmation=confirmation_state[0])
 
     def _record_unexpected_failure(self, tool: BaseTool, error: Exception) -> None:

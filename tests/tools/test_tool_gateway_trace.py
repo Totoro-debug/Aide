@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import sys
 from contextlib import AsyncExitStack
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -15,6 +17,8 @@ from aide.agent.memory.dream import Dream
 from aide.agent.runner import AgentRunner
 from aide.agent.tools.base import BaseTool, ToolError
 from aide.agent.tools.context import ToolRunContext
+from aide.agent.tools.core.exec_host import PowerShellExecHost, resolve_exec_shell
+from aide.agent.tools.core.exec_policy import ExecAssessment
 from aide.agent.tools.core.web_fetch import HTTPResponseBoundary, WebFetchTool
 from aide.agent.tools.deferred import build_agent_run_gateway
 from aide.agent.tools.mcp import MCPTool, MCPToolSpec
@@ -62,6 +66,420 @@ from tests.tools.test_shared_tool_context import _RecordingExecHost, _schedule_s
 from tests.tools.test_subagent_tools import _harness
 
 _RAW_RESULT = "raw-result-" * 6_000
+
+
+class _TraceExecHost(PowerShellExecHost):
+    async def inspect(self, command: str, cwd: Path) -> ExecAssessment:
+        del command, cwd
+        return ExecAssessment(syntax_confidence="high", syntax_uncertain=False)
+
+
+def _trace_exec_gateway(
+    workspace: Path,
+    *,
+    host_type: type[PowerShellExecHost] = _TraceExecHost,
+    permission_context: PermissionContext | None = None,
+) -> ToolGateway:
+    shell = resolve_exec_shell(
+        "pwsh",
+        platform="windows",
+        which=lambda name: r"C:\PowerShell\pwsh.exe" if name == "pwsh" else None,
+        version_probe=lambda *_: (7, 5),
+        environment=os.environ,
+    )
+    return build_agent_run_gateway(
+        ToolGateway(
+            catalog=BuiltInToolCatalog(exec_host=host_type(shell)),
+            tool_context=ToolRunContext(workspace=workspace),
+            permission_context=(
+                PermissionContext(level="full-access", workspace_root=workspace)
+                if permission_context is None
+                else permission_context
+            ),
+        )
+    )
+
+
+async def _approve_exec_confirmation(_request: ConfirmationRequest) -> ConfirmationDecision:
+    return "approved"
+
+
+def _patch_python_process(
+    monkeypatch: pytest.MonkeyPatch, script: str
+) -> list[asyncio.subprocess.Process]:
+    processes: list[asyncio.subprocess.Process] = []
+
+    async def create_process(
+        *, argv: tuple[str, ...], cwd: Path, environment: dict[str, str]
+    ) -> asyncio.subprocess.Process:
+        del argv
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            script,
+            cwd=cwd,
+            env=environment,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr("aide.agent.tools.core.exec_host._create_process", create_process)
+    return processes
+
+
+async def _read_trace_raw(
+    recorder: SQLiteTraceRecorder,
+    record_id: str,
+    source: str,
+) -> bytes:
+    chunks: list[bytes] = []
+    offset = 0
+    while True:
+        page = await recorder.read_raw(
+            record_id,
+            source=source,
+            offset=offset,
+            limit_bytes=256 * 1024,
+        )
+        chunks.append(page.data)
+        if page.next_offset is None:
+            return b"".join(chunks)
+        assert page.next_offset > offset
+        offset = page.next_offset
+
+
+async def _exec_output_handshake_server() -> tuple[asyncio.AbstractServer, asyncio.Event, int]:
+    ready = asyncio.Event()
+
+    async def receive_output_handshake(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            if await reader.readexactly(5) == b"ready":
+                ready.set()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(receive_output_handshake, "127.0.0.1", 0)
+    address = server.sockets[0].getsockname()
+    return server, ready, int(address[1])
+
+
+def _exec_output_handshake_script(port: int) -> str:
+    return "\n".join(
+        (
+            "import socket, sys, time",
+            "sys.stdout.buffer.write(bytes(range(256)) * 1024)",
+            "sys.stdout.buffer.flush()",
+            "sys.stderr.buffer.write(bytes(reversed(range(256))) * 1024)",
+            "sys.stderr.buffer.flush()",
+            f"connection = socket.create_connection(('127.0.0.1', {port}))",
+            "connection.sendall(b'ready')",
+            "connection.close()",
+            "time.sleep(60)",
+        )
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_code", [0, 23])
+async def test_exec_trace_preserves_large_raw_process_streams_and_tool_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exit_code: int,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    stdout = bytes(range(256)) * 4096
+    stderr = bytes(reversed(range(256))) * 4096
+    script = "\n".join(
+        (
+            "import sys",
+            "sys.stdout.buffer.write(bytes(range(256)) * 4096)",
+            "sys.stdout.buffer.flush()",
+            "sys.stderr.buffer.write(bytes(reversed(range(256))) * 4096)",
+            "sys.stderr.buffer.flush()",
+            f"sys.exit({exit_code})",
+        )
+    )
+    _patch_python_process(monkeypatch, script)
+    gateway = _trace_exec_gateway(workspace)
+    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
+    source = TraceRootSource(
+        workspace_key=workspace_key_for(workspace),
+        workspace_path=str(workspace),
+        origin=TraceOrigin.FOREGROUND,
+        purpose=TracePurpose.AGENT_RUN,
+    )
+    arguments = json.dumps({"command": "Write-Output trace"})
+
+    try:
+        untraced = await gateway.call(
+            ModelToolCall("exec-untraced", "exec", arguments),
+            confirmation=_approve_exec_confirmation,
+        )
+        with trace_scope(NoOpTraceRecorder(), source):
+            baseline = await gateway.call(
+                ModelToolCall("exec-baseline", "exec", arguments),
+                confirmation=_approve_exec_confirmation,
+            )
+        with trace_scope(_BrokenCaptureRecorder(), source):
+            broken_capture = await gateway.call(
+                ModelToolCall("exec-broken-capture", "exec", arguments),
+                confirmation=_approve_exec_confirmation,
+            )
+        with trace_scope(recorder, source):
+            traced = await gateway.call(
+                ModelToolCall("exec-traced", "exec", arguments),
+                confirmation=_approve_exec_confirmation,
+            )
+        await recorder.flush()
+
+        (record,) = (await recorder.list_records()).items
+        detail = await recorder.get_record(record.record_id)
+        assert detail is not None
+        assert record.tool_call_id == "exec-traced"
+        assert record.status.value == "success"
+        assert record.capture_state.value == "complete"
+        assert detail.result == traced.to_dict()
+        assert (traced.status, traced.content) == (baseline.status, baseline.content)
+        assert (traced.status, traced.content) == (untraced.status, untraced.content)
+        assert (traced.status, traced.content) == (broken_capture.status, broken_capture.content)
+        assert traced.content.startswith(f"Exit code: {exit_code}\nstdout:\n")
+        assert len(traced.content) <= 4000
+        assert "\ufffd" in traced.content
+        assert {raw.source: (raw.direction, raw.layer) for raw in detail.raw_sources} == {
+            "exec_stdout": (TraceDirection.RESPONSE, TraceCaptureLayer.PROCESS_STREAM),
+            "exec_stderr": (TraceDirection.RESPONSE, TraceCaptureLayer.PROCESS_STREAM),
+            "tool_result": (TraceDirection.RESPONSE, TraceCaptureLayer.TOOL_RESULT),
+        }
+        assert await _read_trace_raw(recorder, record.record_id, "exec_stdout") == stdout
+        assert await _read_trace_raw(recorder, record.record_id, "exec_stderr") == stderr
+    finally:
+        await recorder.close()
+
+
+@pytest.mark.asyncio
+async def test_exec_trace_keeps_output_read_before_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    server, output_ready, port = await _exec_output_handshake_server()
+    _patch_python_process(monkeypatch, _exec_output_handshake_script(port))
+    gateway = _trace_exec_gateway(workspace)
+    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
+    source = TraceRootSource(
+        workspace_key=workspace_key_for(workspace),
+        workspace_path=str(workspace),
+        origin=TraceOrigin.FOREGROUND,
+        purpose=TracePurpose.AGENT_RUN,
+    )
+    execution: asyncio.Task[ToolResult] | None = None
+
+    try:
+        with trace_scope(recorder, source):
+            execution = asyncio.create_task(
+                gateway.call(
+                    ModelToolCall(
+                        "exec-timeout",
+                        "exec",
+                        json.dumps({"command": "Write-Output trace", "timeout": 1}),
+                    ),
+                    confirmation=_approve_exec_confirmation,
+                )
+            )
+            await asyncio.wait_for(output_ready.wait(), timeout=5)
+            timed_out = await asyncio.wait_for(execution, timeout=5)
+        await recorder.flush()
+
+        (record,) = (await recorder.list_records()).items
+        detail = await recorder.get_record(record.record_id)
+        assert detail is not None
+        assert timed_out.status == "error"
+        assert "Exec timed out after 1 seconds." in timed_out.content
+        assert record.status.value == "failed"
+        assert record.error_category is TraceErrorCategory.TOOL_ERROR
+        assert record.error_message == timed_out.content
+        assert record.capture_state.value == "complete"
+        assert await _read_trace_raw(recorder, record.record_id, "exec_stdout") == (
+            bytes(range(256)) * 1024
+        )
+        assert await _read_trace_raw(recorder, record.record_id, "exec_stderr") == (
+            bytes(reversed(range(256))) * 1024
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+        if execution is not None and not execution.done():
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+        await recorder.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stalled_cleanup", [False, True])
+async def test_exec_trace_keeps_output_read_before_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stalled_cleanup: bool,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    server, output_ready, port = await _exec_output_handshake_server()
+    processes = _patch_python_process(monkeypatch, _exec_output_handshake_script(port))
+    gateway = _trace_exec_gateway(workspace)
+    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
+    source = TraceRootSource(
+        workspace_key=workspace_key_for(workspace),
+        workspace_path=str(workspace),
+        origin=TraceOrigin.FOREGROUND,
+        purpose=TracePurpose.AGENT_RUN,
+    )
+    execution: asyncio.Task[ToolResult] | None = None
+    output_captured = asyncio.Event()
+    captured_bytes = {"exec_stdout": 0, "exec_stderr": 0}
+    append_raw = recorder.append_raw
+
+    def capture_raw(handle: TraceCaptureHandle, *, source: str, data: bytes, **kwargs: Any) -> None:
+        append_raw(handle, source=source, data=data, **kwargs)
+        if source in captured_bytes:
+            captured_bytes[source] += len(data)
+            if all(size == 256 * 1024 for size in captured_bytes.values()):
+                output_captured.set()
+
+    monkeypatch.setattr(recorder, "append_raw", capture_raw)
+
+    try:
+        with trace_scope(recorder, source):
+            execution = asyncio.create_task(
+                gateway.call(
+                    ModelToolCall(
+                        "exec-cancel",
+                        "exec",
+                        json.dumps({"command": "Write-Output trace"}),
+                    ),
+                    confirmation=_approve_exec_confirmation,
+                )
+            )
+            await asyncio.wait_for(output_ready.wait(), timeout=5)
+            # Both streams must reach capture while the process is still alive and has no EOF.
+            await asyncio.wait_for(output_captured.wait(), timeout=5)
+            if stalled_cleanup:
+                monkeypatch.setattr(processes[0], "kill", lambda: None)
+                monkeypatch.setattr("aide.agent.tools.core.exec_host._PROCESS_REAP_TIMEOUT", 0.1)
+            execution.cancel("cancelled after output handshake")
+            with pytest.raises(asyncio.CancelledError, match="cancelled after output handshake"):
+                await execution
+        await recorder.flush()
+
+        (record,) = (await recorder.list_records()).items
+        detail = await recorder.get_record(record.record_id)
+        assert detail is not None
+        assert record.status.value == "failed"
+        assert record.error_category is TraceErrorCategory.CANCELLED
+        assert record.error_message == "cancelled after output handshake"
+        assert record.capture_state.value == "complete"
+        assert detail.result is None
+        assert await _read_trace_raw(recorder, record.record_id, "exec_stdout") == (
+            bytes(range(256)) * 1024
+        )
+        assert await _read_trace_raw(recorder, record.record_id, "exec_stderr") == (
+            bytes(reversed(range(256))) * 1024
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+        if execution is not None and not execution.done():
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+        for process in processes:
+            if process.returncode is None:
+                # Bypass the injected stalled kill so the test releases its real subprocess.
+                asyncio.subprocess.Process.kill(process)
+                await process.wait()
+        await recorder.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["approved", "declined"])
+async def test_exec_trace_excludes_authorization_inspection_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    decision: ConfirmationDecision,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    process_count = 0
+
+    async def create_process(
+        *, argv: tuple[str, ...], cwd: Path, environment: dict[str, str]
+    ) -> asyncio.subprocess.Process:
+        nonlocal process_count
+        del argv
+        process_count += 1
+        output = (
+            json.dumps({"syntax_ok": True, "command_names": ["Set-Content"]})
+            if process_count == 1
+            else "command-output"
+        )
+        return await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            f"import sys; sys.stdout.write({output!r})",
+            cwd=cwd,
+            env=environment,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+    monkeypatch.setattr("aide.agent.tools.core.exec_host._create_process", create_process)
+    gateway = _trace_exec_gateway(
+        workspace,
+        host_type=PowerShellExecHost,
+        permission_context=PermissionContext(level="read-only", workspace_root=workspace),
+    )
+    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
+    source = TraceRootSource(
+        workspace_key=workspace_key_for(workspace),
+        workspace_path=str(workspace),
+        origin=TraceOrigin.FOREGROUND,
+        purpose=TracePurpose.AGENT_RUN,
+    )
+
+    async def confirm(_request: ConfirmationRequest) -> ConfirmationDecision:
+        return decision
+
+    try:
+        with trace_scope(recorder, source):
+            result = await gateway.call(
+                ModelToolCall(
+                    "exec-inspection", "exec", '{"command":"Set-Content trace.txt data"}'
+                ),
+                confirmation=confirm,
+            )
+        await recorder.flush()
+        (record,) = (await recorder.list_records()).items
+        detail = await recorder.get_record(record.record_id)
+        assert detail is not None
+        if decision == "approved":
+            assert result.status == "success"
+            assert process_count == 2
+            assert await _read_trace_raw(recorder, record.record_id, "exec_stdout") == (
+                b"command-output"
+            )
+        else:
+            assert result.status == "refused"
+            assert process_count == 1
+            assert detail.raw_sources == ()
+    finally:
+        await recorder.close()
 
 
 @pytest.mark.asyncio

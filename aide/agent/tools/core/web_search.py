@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Mapping
 from typing import Annotated, Final, cast
 
@@ -10,6 +11,9 @@ from ddgs import DDGS
 from ddgs.exceptions import DDGSException
 
 from aide.agent.tools.base import BaseTool, ToolError, ToolParam
+from aide.trace.sanitization import sanitize_trace_value
+from aide.trace.scope import current_trace_tool_call
+from aide.trace.types import TraceCaptureLayer, TraceDirection
 
 _SEARCH_TIMEOUT_SECONDS: Final[float] = 30.0
 
@@ -44,6 +48,7 @@ class WebSearchTool(BaseTool):
                 f"Web Search timed out after {_SEARCH_TIMEOUT_SECONDS:g} seconds."
             ) from error
 
+        _capture_ddgs_results(raw_results)
         return _format_results(raw_results[:count])
 
 
@@ -67,6 +72,33 @@ def _format_results(results: list[Mapping[str, object]]) -> str:
         snippet = _collapse_whitespace(_first_text(result, "body", "snippet"))
         blocks.append(f"{index}. Title: {title}\n   URL: {url}\n   Snippet: {snippet}")
     return "\n\n".join(blocks)
+
+
+def _capture_ddgs_results(results: list[Mapping[str, object]]) -> None:
+    scope = current_trace_tool_call()
+    if scope is None:
+        return
+    try:
+        encoded = json.dumps(
+            sanitize_trace_value(results),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except Exception:
+        scope.report_capture_issue(
+            "Web Search DDGS results could not be serialized.",
+            source="web_search_ddgs",
+        )
+        return
+    scope.append_raw(
+        source="web_search_ddgs",
+        direction=TraceDirection.RESPONSE,
+        layer=TraceCaptureLayer.SDK_RESULT,
+        sequence=0,
+        data=encoded,
+        content_type="application/json",
+    )
 
 
 def _collapse_whitespace(value: object) -> str:

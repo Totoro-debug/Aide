@@ -771,19 +771,43 @@ async def test_dream_edit_variant_records_arguments_and_actual_result(tmp_path: 
 async def test_real_builtin_gateway_arguments_and_results(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, arguments: dict[str, object]
 ) -> None:
+    if name == "web_fetch":
+        arguments = {
+            "url": "https://public.example/page?token=fetch-secret&display=full",
+            "format": "text",
+            "maxChars": 20,
+        }
+    elif name == "web_search":
+        arguments = {"query": "trace", "count": 1}
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "seed.txt").write_text("seed", encoding="utf-8")
-    response = FakeResponse(headers={"content-type": "text/plain"}, chunks=(b"page",))
+    response_body = b"<html><body>fetched readable result</body></html>"
+    response = FakeResponse(
+        status_code=207,
+        headers={
+            "content-type": "text/html; charset=utf-8",
+            "content-encoding": "gzip",
+        },
+        chunks=(response_body,),
+    )
     fetch = WebFetchTool(
         resolver=FakeResolver(("93.184.216.34",)),
         http_client=FakeHTTPClient((cast(HTTPResponseBoundary, response),)),
     )
     monkeypatch.setattr("aide.agent.tools.tool_gateway.WebFetchTool", lambda: fetch)
-    monkeypatch.setattr(
-        "aide.agent.tools.core.web_search._search_sync",
-        lambda *_: [{"title": "trace", "href": "https://public.example", "body": "found"}],
-    )
+    search_results = [
+        {
+            "title": "trace",
+            "href": "https://public.example/?lang=en",
+            "body": "found",
+            "published": "2025-01-02",
+            "canonical": "https://public.example/article?api_key=canonical-secret&lang=en",
+            "metadata": {"rank": 3},
+        },
+        {"title": "second", "url": "https://second.example/result", "body": "more"},
+    ]
+    monkeypatch.setattr("aide.agent.tools.core.web_search._search_sync", lambda *_: search_results)
     gateway = build_agent_run_gateway(
         ToolGateway(
             catalog=BuiltInToolCatalog(exec_host=_RecordingExecHost()),
@@ -820,15 +844,63 @@ async def test_real_builtin_gateway_arguments_and_results(
         )
         detail = await recorder.get_record(record.record_id)
         assert detail is not None
-        assert cast(dict[str, Any], detail.request)["arguments"] == arguments
+        expected_arguments = dict(arguments)
+        if name == "web_fetch":
+            expected_arguments["url"] = "https://public.example/page?display=full"
+            assert "fetch-secret" not in json.dumps(detail.request)
+        assert cast(dict[str, Any], detail.request)["arguments"] == expected_arguments
         assert detail.result == result.to_dict()
         raw = await recorder.read_raw(
             record.record_id, source="tool_result", offset=0, limit_bytes=100_000
         )
         assert raw.data.decode() == result.content
-        assert record.capture_state.value == (
-            "partial" if name in {"exec", "web_fetch", "web_search"} else "complete"
-        )
+        assert record.capture_state.value == ("partial" if name == "exec" else "complete")
+        if name == "web_fetch":
+            assert result.content == "fetc\n\n...[truncated]"
+            response_capture = await recorder.read_raw(
+                record.record_id,
+                source="web_fetch_response",
+                offset=0,
+                limit_bytes=100_000,
+            )
+            assert response_capture.data == response_body
+            assert response_capture.layer is TraceCaptureLayer.HTTP_DECODED_BODY
+            metadata_capture = await recorder.read_raw(
+                record.record_id,
+                source="web_fetch_response_metadata",
+                offset=0,
+                limit_bytes=100_000,
+            )
+            assert json.loads(metadata_capture.data) == {
+                "endpoint": "https://public.example/page?display=full",
+                "status_code": 207,
+                "content_type": "text/html; charset=utf-8",
+                "content_encoding": "gzip",
+                "content_decoding": "http_content_decoded",
+            }
+            assert metadata_capture.layer is TraceCaptureLayer.HTTP_METADATA
+        elif name == "web_search":
+            assert result.content == (
+                "1. Title: trace\n   URL: https://public.example/?lang=en\n   Snippet: found"
+            )
+            search_capture = await recorder.read_raw(
+                record.record_id,
+                source="web_search_ddgs",
+                offset=0,
+                limit_bytes=100_000,
+            )
+            assert json.loads(search_capture.data) == [
+                {
+                    "title": "trace",
+                    "href": "https://public.example/?lang=en",
+                    "body": "found",
+                    "published": "2025-01-02",
+                    "canonical": "https://public.example/article?lang=en",
+                    "metadata": {"rank": 3},
+                },
+                {"title": "second", "url": "https://second.example/result", "body": "more"},
+            ]
+            assert search_capture.layer is TraceCaptureLayer.SDK_RESULT
     finally:
         await recorder.close()
 

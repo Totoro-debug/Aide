@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -38,6 +38,51 @@ class TraceExecutionScope:
 class TraceToolCallScope:
     recorder: TraceRecorder
     handle: TraceCaptureHandle
+    captured_sources: set[str] = field(default_factory=set, compare=False, hash=False)
+
+    def append_raw(
+        self,
+        *,
+        source: str,
+        direction: TraceDirection,
+        layer: TraceCaptureLayer,
+        sequence: int,
+        data: bytes,
+        content_type: str | None = None,
+        content_encoding: str | None = None,
+    ) -> bool:
+        try:
+            self.recorder.append_raw(
+                self.handle,
+                source=source,
+                direction=direction,
+                layer=layer,
+                sequence=sequence,
+                data=data,
+                content_type=content_type,
+                content_encoding=content_encoding,
+            )
+        except Exception:
+            self.report_capture_issue(
+                f"Tool {source} could not be captured.",
+                source=source,
+            )
+            return False
+        self.captured_sources.add(source)
+        return True
+
+    def report_capture_issue(self, message: str, *, source: str) -> None:
+        try:
+            self.recorder.report_capture_issue(
+                self.handle,
+                TraceCaptureIssue(
+                    state=TraceCaptureState.PARTIAL,
+                    message=message,
+                    source=source,
+                ),
+            )
+        except Exception:
+            logger.warning("Execution Trace Tool capture issue could not be reported")
 
 
 @dataclass(slots=True)

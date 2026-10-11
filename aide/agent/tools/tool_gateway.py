@@ -48,6 +48,7 @@ from aide.agent.tools.permission import (
     ToolPermissionPolicy,
 )
 from aide.schedule.service import ScheduleService
+from aide.trace.sanitization import sanitize_trace_text_urls, sanitize_trace_value
 from aide.trace.scope import (
     TraceExecutionScope,
     TraceToolCallScope,
@@ -237,10 +238,11 @@ class _ToolTraceCapture:
     tool_resolved: bool = False
     finished: bool = False
     process_streams_captured: bool = False
+    captured_raw_sources: set[str] = field(default_factory=set, repr=False)
 
     def set_request(self) -> None:
         try:
-            self.scope.recorder.set_request(self.handle, deepcopy(self.request))
+            self.scope.recorder.set_request(self.handle, _trace_safe_tool_request(self.request))
         except Exception:
             self._report_issue("Tool arguments could not be captured.")
 
@@ -269,6 +271,9 @@ class _ToolTraceCapture:
             self._append_result(result.content)
 
     def finish_result(self, result: ToolResult) -> None:
+        saved_result = result.to_dict()
+        if result.name == "web_search":
+            saved_result["content"] = sanitize_trace_text_urls(result.content)
         if result.status == "success":
             self._finish(
                 TraceOutcome(
@@ -276,7 +281,7 @@ class _ToolTraceCapture:
                     finished_at=datetime.now(UTC),
                     duration_ms=self._duration_ms(),
                 ),
-                result=result.to_dict(),
+                result=saved_result,
             )
             return
 
@@ -295,9 +300,9 @@ class _ToolTraceCapture:
                 duration_ms=self._duration_ms(),
                 error_category=category,
                 error_code=category.value,
-                error_message=result.content,
+                error_message=cast(str, saved_result["content"]),
             ),
-            result=result.to_dict(),
+            result=saved_result,
         )
 
     def _report_unavailable_raw_layer(self, tool: BaseTool | None) -> None:
@@ -314,9 +319,13 @@ class _ToolTraceCapture:
             message = "Exec stdout and stderr bytes are not available at the Tool Gateway boundary."
             source = "exec_process_stream"
         elif tool.name == "web_fetch":
+            if "web_fetch_response" in self.captured_raw_sources:
+                return
             message = "Web Fetch response bytes before text conversion are unavailable."
             source = "web_fetch_response"
         elif tool.name == "web_search":
+            if "web_search_ddgs" in self.captured_raw_sources:
+                return
             message = "Web Search results before formatting are unavailable."
             source = "web_search_ddgs"
         else:
@@ -373,6 +382,8 @@ class _ToolTraceCapture:
 
     def _append_result(self, content: str) -> None:
         try:
+            if self.request.get("tool_name") == "web_search":
+                content = sanitize_trace_text_urls(content)
             self.scope.recorder.append_raw(
                 self.handle,
                 source="tool_result",
@@ -415,6 +426,26 @@ class _ToolTraceCapture:
             )
         except Exception:
             logger.warning("Execution Trace Tool outcome could not be captured")
+
+
+def _trace_safe_tool_request(request: dict[str, object]) -> dict[str, object]:
+    safe_request = deepcopy(request)
+    if safe_request.get("tool_name") == "web_fetch":
+        raw_arguments = safe_request.get("arguments_raw")
+        if isinstance(raw_arguments, str):
+            try:
+                parsed_arguments = json.loads(raw_arguments)
+            except (TypeError, ValueError):
+                safe_request["arguments_raw"] = "[redacted invalid Web Fetch arguments]"
+            else:
+                safe_arguments = sanitize_trace_value(parsed_arguments)
+                safe_request["arguments_raw"] = json.dumps(
+                    safe_arguments,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+        safe_request = cast(dict[str, object], sanitize_trace_value(safe_request))
+    return safe_request
 
 
 @dataclass(slots=True)
@@ -1042,7 +1073,11 @@ class ToolGateway:
             tool_scope = (
                 None
                 if trace_capture is None
-                else TraceToolCallScope(trace_capture.scope.recorder, trace_capture.handle)
+                else TraceToolCallScope(
+                    trace_capture.scope.recorder,
+                    trace_capture.handle,
+                    captured_sources=trace_capture.captured_raw_sources,
+                )
             )
             output_observer = (
                 trace_capture.capture_process_output

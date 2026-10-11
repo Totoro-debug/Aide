@@ -11,9 +11,8 @@ import zlib
 from collections import defaultdict, deque
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from time import sleep
 from typing import TypeVar, cast
 from uuid import uuid4
 
@@ -55,19 +54,24 @@ from aide.trace.types import (
 )
 
 __all__ = [
+    "TRACE_DATABASE_FILENAME",
     "TRACE_MAX_QUEUE_EVENTS",
     "TRACE_MAX_QUEUE_PAYLOAD_BYTES",
     "TRACE_MAX_RAW_CHUNK_BYTES",
+    "TRACE_RETENTION_DAYS",
     "SQLiteTraceRecorder",
     "TraceRecorderDiagnostics",
 ]
 
+TRACE_DATABASE_FILENAME = "traces.sqlite3"
 TRACE_MAX_QUEUE_PAYLOAD_BYTES = 64 * 1024 * 1024
 TRACE_MAX_QUEUE_EVENTS = 4096
 TRACE_MAX_RAW_CHUNK_BYTES = 64 * 1024
+TRACE_RETENTION_DAYS = 365
 _WRITER_RETRY_DELAYS = (0.1, 1.0, 5.0)
 _WRITER_BATCH_SIZE = 128
 _WRITER_BATCH_DELAY = 0.002
+_PURGE_BATCH_SIZE = 500
 _SCHEMA_VERSION = 1
 _PAGE_LIMIT_MAX = 1000
 _T = TypeVar("_T")
@@ -427,6 +431,7 @@ class SQLiteTraceRecorder(TraceRecorder):
         *,
         max_queue_events: int = TRACE_MAX_QUEUE_EVENTS,
         max_queue_payload_bytes: int = TRACE_MAX_QUEUE_PAYLOAD_BYTES,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         if (
             isinstance(max_queue_events, bool)
@@ -441,6 +446,7 @@ class SQLiteTraceRecorder(TraceRecorder):
         ):
             raise ValueError("max_queue_payload_bytes must be a positive integer")
         self.path = Path(path)
+        self._now = now if now is not None else lambda: datetime.now(UTC)
         self._max_queue_events = max_queue_events
         self._max_queue_payload_bytes = max_queue_payload_bytes
         self._condition = threading.Condition()
@@ -450,7 +456,9 @@ class SQLiteTraceRecorder(TraceRecorder):
         self._inflight_bytes = 0
         self._next_ticket = 0
         self._completed_ticket = 0
+        self._completed_out_of_order: set[int] = set()
         self._closing = False
+        self._stop_writer = threading.Event()
         self._worker_done = False
         self._ready = threading.Event()
         self._startup_error: Exception | None = None
@@ -482,6 +490,17 @@ class SQLiteTraceRecorder(TraceRecorder):
                 writer_retries=self._writer_retries,
                 published_records=self._published_records,
             )
+
+    @property
+    def startup_error(self) -> Exception | None:
+        return self._startup_error
+
+    async def wait_until_ready(self, timeout_seconds: float = 5.0) -> bool:
+        """Wait briefly for schema initialization without blocking the event loop."""
+        if timeout_seconds < 0:
+            raise ValueError("timeout_seconds must be non-negative")
+        ready = await asyncio.to_thread(self._ready.wait, timeout_seconds)
+        return ready and self._startup_error is None and not self._worker_done
 
     def new_root(self, source: TraceRootSource) -> TraceContext:
         return TraceContext.create(str(uuid4()), source)
@@ -642,13 +661,25 @@ class SQLiteTraceRecorder(TraceRecorder):
 
     async def purge_session(self, workspace_key: str, owner_session_id: str) -> None:
         self.close_session_scope(workspace_key, owner_session_id)
-        ticket = await asyncio.to_thread(
-            self._enqueue_control,
+        await self._run_maintenance_command(
             "purge",
-            "",
             {"workspace_key": workspace_key, "owner_session_id": owner_session_id},
         )
-        await self._wait_for_ticket_async(ticket)
+
+    async def purge_expired(self) -> None:
+        cutoff = self._retention_cutoff()
+        while True:
+            payload: dict[str, object] = {"cutoff": cutoff, "deleted": 0}
+            await self._run_maintenance_command("expire", payload)
+            if cast(int, payload["deleted"]) < _PURGE_BATCH_SIZE:
+                return
+
+    async def _run_maintenance_command(self, kind: str, payload: dict[str, object]) -> None:
+        ticket = await asyncio.to_thread(self._enqueue_control, kind, "", payload)
+        await asyncio.to_thread(self._wait_for_ticket, ticket, ordered=False)
+        error = payload.get("error")
+        if isinstance(error, Exception):
+            raise error
 
     def mark_restored(
         self,
@@ -724,6 +755,10 @@ class SQLiteTraceRecorder(TraceRecorder):
             self._closing = True
             self._condition.notify_all()
         await asyncio.to_thread(self._worker.join, max(0.0, timeout_seconds))
+        if self._worker.is_alive():
+            self._stop_writer.set()
+            with self._condition:
+                self._condition.notify_all()
 
     @staticmethod
     def _validate_limit(limit: int) -> None:
@@ -733,6 +768,27 @@ class SQLiteTraceRecorder(TraceRecorder):
             or not 1 <= limit <= _PAGE_LIMIT_MAX
         ):
             raise ValueError(f"limit must be between 1 and {_PAGE_LIMIT_MAX}")
+
+    def _retention_cutoff(self) -> str:
+        now = self._now()
+        if (
+            not isinstance(now, datetime)
+            or now.tzinfo is None
+            or now.utcoffset() != UTC.utcoffset(now)
+        ):
+            raise ValueError("Trace clock must return an aware UTC datetime")
+        return _utc_text(now - timedelta(days=TRACE_RETENTION_DAYS))
+
+    def _record_visibility_sql(self, alias: str = "r") -> tuple[str, list[object]]:
+        return (
+            f" AND {alias}.finished_at >= ? "
+            f"AND NOT trace_session_closed({alias}.workspace_key, {alias}.owner_session_id)",
+            [self._retention_cutoff()],
+        )
+
+    def _session_scope_closed(self, workspace_key: str, owner_session_id: str | None) -> bool:
+        with self._condition:
+            return (workspace_key, owner_session_id) in self._closed_sessions
 
     def _enqueue(
         self,
@@ -795,10 +851,13 @@ class SQLiteTraceRecorder(TraceRecorder):
             ):
                 self._condition.wait()
             if self._closing or self._worker_done:
-                return self._next_ticket
+                raise RuntimeError("Trace SQLite writer is closed")
             self._next_ticket += 1
             event = _Event(self._next_ticket, kind, record_id, payload, 0)
-            self._queue.append(event)
+            if kind == "purge":
+                self._queue.appendleft(event)
+            else:
+                self._queue.append(event)
             self._condition.notify()
             return event.ticket
 
@@ -816,14 +875,24 @@ class SQLiteTraceRecorder(TraceRecorder):
     async def _wait_for_ticket_async(self, ticket: int) -> None:
         await asyncio.to_thread(self._wait_for_ticket, ticket)
 
-    def _wait_for_ticket(self, ticket: int) -> None:
+    def _wait_for_ticket(self, ticket: int, *, ordered: bool = True) -> None:
         self._ready.wait()
         with self._condition:
-            while self._completed_ticket < ticket and not self._worker_done:
+            while (
+                self._completed_ticket < ticket
+                and (ordered or ticket not in self._completed_out_of_order)
+                and not self._worker_done
+            ):
                 self._condition.wait()
             error = self._startup_error
         if error is not None:
             raise RuntimeError("Trace SQLite writer is unavailable") from error
+
+    def _complete_ticket(self, ticket: int) -> None:
+        self._completed_out_of_order.add(ticket)
+        while self._completed_ticket + 1 in self._completed_out_of_order:
+            self._completed_ticket += 1
+            self._completed_out_of_order.remove(self._completed_ticket)
 
     async def _run_query(self, function: Callable[..., _T], *args: object) -> _T:
         await asyncio.to_thread(self._ready.wait)
@@ -836,6 +905,7 @@ class SQLiteTraceRecorder(TraceRecorder):
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
+        connection.create_function("trace_session_closed", 2, self._session_scope_closed)
         if writer:
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.execute("PRAGMA journal_mode = WAL")
@@ -872,7 +942,7 @@ class SQLiteTraceRecorder(TraceRecorder):
             with self._condition:
                 for event in self._queue:
                     self._writer_failed_events += 1
-                    self._completed_ticket = max(self._completed_ticket, event.ticket)
+                    self._complete_ticket(event.ticket)
                     if event.kind == "finish":
                         self._states.pop(event.record_id, None)
                 self._queue.clear()
@@ -888,12 +958,18 @@ class SQLiteTraceRecorder(TraceRecorder):
                 with self._condition:
                     while not self._queue and not self._closing:
                         self._condition.wait()
+                    if self._stop_writer.is_set():
+                        break
                     if not self._queue and self._closing:
                         break
                     if len(self._queue) < _WRITER_BATCH_SIZE and not self._closing:
                         self._condition.wait(timeout=_WRITER_BATCH_DELAY)
                     events: list[_Event] = []
                     while self._queue and len(events) < _WRITER_BATCH_SIZE:
+                        if events and (
+                            (events[0].kind == "purge") != (self._queue[0].kind == "purge")
+                        ):
+                            break
                         event = self._queue.popleft()
                         self._queue_bytes -= event.payload_bytes
                         self._inflight_events += 1
@@ -904,7 +980,7 @@ class SQLiteTraceRecorder(TraceRecorder):
                 self._process_events_with_retries(connection, events)
                 with self._condition:
                     for event in events:
-                        self._completed_ticket = max(self._completed_ticket, event.ticket)
+                        self._complete_ticket(event.ticket)
                         if event.kind == "finish":
                             self._states.pop(event.record_id, None)
                         elif event.kind == "purge":
@@ -924,8 +1000,8 @@ class SQLiteTraceRecorder(TraceRecorder):
             with self._condition:
                 if self._queue:
                     for event in self._queue:
-                        self._writer_failed_events += 1
-                        self._completed_ticket = max(self._completed_ticket, event.ticket)
+                        self._mark_writer_failure(event)
+                        self._complete_ticket(event.ticket)
                     self._queue.clear()
                     self._queue_bytes = 0
                 self._states.clear()
@@ -938,8 +1014,10 @@ class SQLiteTraceRecorder(TraceRecorder):
         retries = 0
         delays = _WRITER_RETRY_DELAYS if initial_failed else (0.0, *_WRITER_RETRY_DELAYS)
         for delay in delays:
+            if self._stop_writer.wait(delay):
+                self._mark_writer_failure(event)
+                return
             if delay:
-                sleep(delay)
                 retries += 1
             try:
                 published = self._apply_events_transaction(connection, (event,))
@@ -963,6 +1041,10 @@ class SQLiteTraceRecorder(TraceRecorder):
         connection: sqlite3.Connection,
         events: list[_Event],
     ) -> None:
+        if self._stop_writer.is_set():
+            for event in events:
+                self._mark_writer_failure(event)
+            return
         if len(events) == 1:
             self._process_event_with_retries(connection, events[0])
             return
@@ -978,6 +1060,8 @@ class SQLiteTraceRecorder(TraceRecorder):
 
     def _mark_writer_failure(self, event: _Event) -> None:
         with self._condition:
+            if event.kind in ("purge", "expire"):
+                event.payload["error"] = RuntimeError("Trace maintenance failed in the writer")
             self._writer_failed_events += 1
             state = self._states.get(event.record_id)
             if state is not None and event.kind != "finish":
@@ -1010,6 +1094,8 @@ class SQLiteTraceRecorder(TraceRecorder):
             published = 0
             for event in events:
                 published += self._apply_event(connection, event)
+            if self._stop_writer.is_set():
+                raise RuntimeError("Trace drain deadline expired")
             connection.execute("COMMIT")
             return published
         except Exception:
@@ -1017,9 +1103,15 @@ class SQLiteTraceRecorder(TraceRecorder):
             raise
 
     def _apply_event(self, connection: sqlite3.Connection, event: _Event) -> int:
+        if self._stop_writer.is_set():
+            raise RuntimeError("Trace drain deadline expired")
         if event.record_id:
             with self._condition:
-                if event.record_id not in self._states:
+                state = self._states.get(event.record_id)
+                if state is None or self._session_scope_closed(
+                    state.context.workspace_key,
+                    state.context.owner_session_id,
+                ):
                     return 0
         if event.kind == "begin":
             self._write_begin(connection, event.record_id, event.payload)
@@ -1037,6 +1129,8 @@ class SQLiteTraceRecorder(TraceRecorder):
             self._write_restore(connection, event.payload)
         elif event.kind == "purge":
             self._write_purge(connection, event.payload)
+        elif event.kind == "expire":
+            event.payload["deleted"] = self._write_expired(connection, event.payload)
         else:
             raise ValueError(f"Unknown Trace writer event {event.kind}")
         return 0
@@ -1517,6 +1611,24 @@ class SQLiteTraceRecorder(TraceRecorder):
             "(SELECT 1 FROM trace_records WHERE trace_records.root_id = trace_roots.root_id)"
         )
 
+    @staticmethod
+    def _write_expired(connection: sqlite3.Connection, payload: dict[str, object]) -> int:
+        deleted = connection.execute(
+            """DELETE FROM trace_records
+               WHERE record_id IN (
+                   SELECT record_id FROM trace_records
+                   WHERE published = 1 AND finished_at < ?
+                   ORDER BY finished_at LIMIT ?
+               )""",
+            (payload["cutoff"], _PURGE_BATCH_SIZE),
+        ).rowcount
+        if deleted:
+            connection.execute(
+                "DELETE FROM trace_roots WHERE NOT EXISTS "
+                "(SELECT 1 FROM trace_records WHERE trace_records.root_id = trace_roots.root_id)"
+            )
+        return deleted
+
     def _list_records_sync(
         self,
         filters: TraceRecordFilters | None,
@@ -1525,6 +1637,7 @@ class SQLiteTraceRecorder(TraceRecorder):
     ) -> TracePage:
         connection = self._connect()
         try:
+            visibility_sql, visibility_parameters = self._record_visibility_sql()
             if cursor is None:
                 snapshot = int(
                     connection.execute(
@@ -1550,10 +1663,17 @@ class SQLiteTraceRecorder(TraceRecorder):
                           r.error_category, r.error_code, r.error_message, r.restored
                    FROM trace_records AS r
                    WHERE r.published = 1 AND r.publish_sequence <= ?"""
+                + visibility_sql
                 + position_sql
                 + filter_sql
                 + " ORDER BY r.finished_at DESC, r.record_id DESC LIMIT ?",
-                (snapshot, *position_parameters, *filter_parameters, limit + 1),
+                (
+                    snapshot,
+                    *visibility_parameters,
+                    *position_parameters,
+                    *filter_parameters,
+                    limit + 1,
+                ),
             ).fetchall()
             has_more = len(rows) > limit
             page_rows = rows[:limit]
@@ -1580,6 +1700,7 @@ class SQLiteTraceRecorder(TraceRecorder):
     ) -> TraceSessionPage:
         connection = self._connect()
         try:
+            visibility_sql, visibility_parameters = self._record_visibility_sql()
             if cursor is None:
                 snapshot = int(
                     connection.execute(
@@ -1597,11 +1718,12 @@ class SQLiteTraceRecorder(TraceRecorder):
                    FROM trace_records AS r
                    WHERE r.published = 1 AND r.owner_session_id IS NOT NULL
                      AND r.publish_sequence <= ?"""
+                + visibility_sql
                 + filter_sql
                 + " GROUP BY r.workspace_key, r.owner_session_id, r.subject_session_id, r.origin "
                 " HAVING MAX(r.publish_sequence) < ?"
                 " ORDER BY group_sequence DESC LIMIT ?",
-                (snapshot, *filter_parameters, last, limit + 1),
+                (snapshot, *visibility_parameters, *filter_parameters, last, limit + 1),
             ).fetchall()
             has_more = len(rows) > limit
             page_rows = rows[:limit]
@@ -1631,9 +1753,11 @@ class SQLiteTraceRecorder(TraceRecorder):
     def _get_record_sync(self, record_id: str) -> TraceRecordDetail | None:
         connection = self._connect()
         try:
+            visibility_sql, visibility_parameters = self._record_visibility_sql()
             row = connection.execute(
-                "SELECT * FROM trace_records WHERE record_id = ? AND published = 1",
-                (record_id,),
+                "SELECT r.* FROM trace_records AS r "
+                "WHERE r.record_id = ? AND r.published = 1" + visibility_sql,
+                (record_id, *visibility_parameters),
             ).fetchone()
             if row is None:
                 return None
@@ -1695,6 +1819,7 @@ class SQLiteTraceRecorder(TraceRecorder):
     ) -> TraceRawPage:
         connection = self._connect()
         try:
+            visibility_sql, visibility_parameters = self._record_visibility_sql()
             stream = connection.execute(
                 """SELECT s.stream_id, s.direction, s.layer, s.content_type, s.content_encoding,
                           COALESCE(SUM(c.original_size), 0) AS total_bytes
@@ -1702,9 +1827,10 @@ class SQLiteTraceRecorder(TraceRecorder):
                    JOIN trace_records AS r ON r.record_id = s.record_id
                    LEFT JOIN trace_raw_chunks AS c ON c.stream_id = s.stream_id
                    WHERE s.record_id = ? AND s.source = ? AND s.attempt_id IS NULL
-                     AND r.published = 1
-                   GROUP BY s.stream_id""",
-                (record_id, source),
+                     AND r.published = 1"""
+                + visibility_sql
+                + " GROUP BY s.stream_id",
+                (record_id, source, *visibility_parameters),
             ).fetchone()
             if stream is None:
                 return TraceRawPage(
@@ -1754,10 +1880,13 @@ class SQLiteTraceRecorder(TraceRecorder):
     def _get_stats_sync(self, filters: TraceRecordFilters | None) -> TraceStats:
         connection = self._connect()
         try:
+            visibility_sql, visibility_parameters = self._record_visibility_sql()
             filter_sql, filter_parameters = _filter_sql(filters)
             rows = connection.execute(
-                "SELECT r.* FROM trace_records AS r WHERE r.published = 1" + filter_sql,
-                filter_parameters,
+                "SELECT r.* FROM trace_records AS r WHERE r.published = 1"
+                + visibility_sql
+                + filter_sql,
+                (*visibility_parameters, *filter_parameters),
             ).fetchall()
         finally:
             connection.close()

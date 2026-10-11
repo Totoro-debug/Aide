@@ -54,6 +54,20 @@ from aide.service.discovery import create_credential, read_credential
 from aide.service.errors import ServiceError
 from aide.service.runtime import AgentService, WorkspaceRecord
 from aide.service.transport import create_app
+from aide.trace.context import TraceRootSource, workspace_key_for
+from aide.trace.sqlite_recorder import SQLiteTraceRecorder
+from aide.trace.types import (
+    TraceCallMetadata,
+    TraceCaptureLayer,
+    TraceDirection,
+    TraceKind,
+    TraceOrigin,
+    TraceOutcome,
+    TracePurpose,
+    TraceStatus,
+    TraceTokenUsage,
+    TraceUsageState,
+)
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from tests.fixtures.project_removal import complete_project_removal
 from tests.service.test_service_concurrency import _CollectingSink, _ConcurrentProvider
@@ -1419,8 +1433,55 @@ async def test_cancel_reports_checkpoint_failure_and_can_retry_after_storage_rep
 @pytest.mark.asyncio
 async def test_session_delete_is_fenced_by_active_subagents_then_removes_them(
     management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, workspace, client_id, session_id, _other_session_id = management_case
+    recorder = service.trace_recorder
+    assert isinstance(recorder, SQLiteTraceRecorder)
+
+    def record_call(owner_session_id: str, subject_session_id: str) -> str:
+        is_subagent = subject_session_id != owner_session_id
+        context = recorder.new_root(
+            TraceRootSource(
+                workspace_key=workspace_key_for(workspace.workspace_path),
+                workspace_path=str(workspace.workspace_path),
+                origin=TraceOrigin.SUBAGENT if is_subagent else TraceOrigin.FOREGROUND,
+                purpose=TracePurpose.SUBAGENT_RUN if is_subagent else TracePurpose.AGENT_RUN,
+                owner_session_id=owner_session_id,
+                subject_session_id=subject_session_id,
+            )
+        )
+        purpose = TracePurpose.SUBAGENT_RUN if is_subagent else TracePurpose.AGENT_RUN
+        handle = recorder.begin_call(
+            context,
+            TraceCallMetadata(
+                kind=TraceKind.TOOL,
+                purpose=purpose,
+                started_at=_NOW,
+                tool_name="read_file",
+            ),
+        )
+        recorder.append_raw(
+            handle,
+            source="tool_result",
+            direction=TraceDirection.RESPONSE,
+            layer=TraceCaptureLayer.TOOL_RESULT,
+            sequence=0,
+            data=b"captured",
+        )
+        recorder.finish_call(
+            handle,
+            TraceOutcome(TraceStatus.SUCCESS, _NOW, 1),
+            result={"output": "done"},
+            usage=TraceTokenUsage(TraceUsageState.NOT_APPLICABLE),
+            retry_count=0,
+        )
+        return handle.record_id
+
+    owner_record = record_call(session_id, session_id)
+    child_record = record_call(session_id, "subagent-session")
+    other_record = record_call(_other_session_id, _other_session_id)
+    await recorder.flush()
     repository = SubAgentRecordStore(workspace.workspace_state, session_id, now=lambda: _NOW)
     executor = _HoldingExecutor()
     pool = SubAgentPool(repository, executor, now=lambda: _NOW)
@@ -1447,6 +1508,11 @@ async def test_session_delete_is_fenced_by_active_subagents_then_removes_them(
             "delete-busy",
         )
     assert busy.value.code == "session_busy"
+    assert {record.record_id for record in (await recorder.list_records()).items} == {
+        owner_record,
+        child_record,
+        other_record,
+    }
 
     cancellation = asyncio.create_task(
         service.cancel_subagent(client_id, workspace.workspace_id, session_id, record.agent_id)
@@ -1455,15 +1521,42 @@ async def test_session_delete_is_fenced_by_active_subagents_then_removes_them(
     executor.release[record.agent_id].set()
     await cancellation
 
-    result = await workspace.delete_session(
-        client_id,
-        session_id,
-        claim.version,
-        claim.credential,
-        "delete-after-cancel",
-    )
-    assert result["deleted"] is True
-    assert repository.get(record.agent_id) is None
+    cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    purge_session = recorder.purge_session
+
+    async def hold_cleanup(workspace_key: str, owner_id: str) -> None:
+        cleanup_started.set()
+        await cleanup_release.wait()
+        await purge_session(workspace_key, owner_id)
+        cleanup_finished.set()
+
+    monkeypatch.setattr(recorder, "purge_session", hold_cleanup)
+
+    try:
+        result = await asyncio.wait_for(
+            workspace.delete_session(
+                client_id,
+                session_id,
+                claim.version,
+                claim.credential,
+                "delete-after-cancel",
+            ),
+            timeout=1,
+        )
+        assert result["deleted"] is True
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        assert {record.record_id for record in (await recorder.list_records()).items} == {
+            other_record
+        }
+        assert await recorder.get_record(owner_record) is None
+        assert await recorder.get_record(child_record) is None
+        assert not cleanup_finished.is_set()
+        assert repository.get(record.agent_id) is None
+    finally:
+        cleanup_release.set()
+    await asyncio.wait_for(cleanup_finished.wait(), timeout=2)
 
 
 @pytest.mark.asyncio

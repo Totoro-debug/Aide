@@ -91,6 +91,8 @@ class TraceRecorder(Protocol):
 
     async def purge_session(self, workspace_key: str, owner_session_id: str) -> None: ...
 
+    async def purge_expired(self) -> None: ...
+
     def mark_restored(
         self,
         workspace_key: str,
@@ -182,6 +184,9 @@ class NoOpTraceRecorder:
 
     async def purge_session(self, workspace_key: str, owner_session_id: str) -> None:
         del workspace_key, owner_session_id
+
+    async def purge_expired(self) -> None:
+        return None
 
     def mark_restored(
         self,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -25,6 +25,19 @@ from aide.service.discovery import create_credential
 from aide.service.errors import ServiceError
 from aide.service.runtime import AgentService, SessionClaim, WorkspaceRecord
 from aide.service.transport import create_app
+from aide.trace.context import TraceRootSource, workspace_key_for
+from aide.trace.sqlite_recorder import SQLiteTraceRecorder
+from aide.trace.types import (
+    TraceCallMetadata,
+    TraceKind,
+    TraceOrigin,
+    TraceOutcome,
+    TracePurpose,
+    TraceRecordFilters,
+    TraceStatus,
+    TraceTokenUsage,
+    TraceUsageState,
+)
 from tests.service.test_protocol_contract import _validator
 from tests.service.test_service_concurrency import _CollectingSink, _ConcurrentProvider
 from tests.service.test_service_transport import _persist_session, _prepare_agent_home
@@ -199,6 +212,43 @@ async def test_named_restore_commit_returns_rotated_claim_and_new_snapshot(
 ) -> None:
     service, workspace, owner, claim, target = restore_case
     old_version, old_credential = claim.version, claim.credential
+    recorder = service.trace_recorder
+    assert isinstance(recorder, SQLiteTraceRecorder)
+    restore_plan = RestoreManager(
+        workspace.workspace_state,
+        claim.session_id,
+        subagent_repository=workspace.subagent_repository(claim.session_id),
+    ).inspect(claim.loop.session, 1)
+    discarded_token = restore_plan.discarded_run_tokens[0]
+    finished_at = datetime.now(UTC)
+    context = recorder.new_root(
+        TraceRootSource(
+            workspace_key=workspace_key_for(workspace.workspace_path),
+            workspace_path=str(workspace.workspace_path),
+            origin=TraceOrigin.FOREGROUND,
+            purpose=TracePurpose.AGENT_RUN,
+            owner_session_id=claim.session_id,
+            subject_session_id=claim.session_id,
+            restore_run_token=str(discarded_token),
+        )
+    )
+    trace_handle = recorder.begin_call(
+        context,
+        TraceCallMetadata(
+            kind=TraceKind.TOOL,
+            purpose=TracePurpose.AGENT_RUN,
+            started_at=finished_at - timedelta(milliseconds=1),
+            tool_name="write_file",
+        ),
+    )
+    recorder.finish_call(
+        trace_handle,
+        TraceOutcome(TraceStatus.SUCCESS, finished_at, 1),
+        result={"output": "written"},
+        usage=TraceTokenUsage(TraceUsageState.NOT_APPLICABLE),
+        retry_count=0,
+    )
+    await recorder.flush()
     inspected = await service.inspect_restore(
         owner,
         workspace.workspace_id,
@@ -221,6 +271,7 @@ async def test_named_restore_commit_returns_rotated_claim_and_new_snapshot(
         1,
         RestoreMode.CONVERSATION_ONLY.value,
     )
+    await recorder.flush()
 
     next_claim = cast(dict[str, Any], committed["claim"])
     _validator("management_result").validate(committed)
@@ -228,6 +279,10 @@ async def test_named_restore_commit_returns_rotated_claim_and_new_snapshot(
     assert cast(dict[str, Any], committed["restore_result"])["session_id"] == claim.session_id
     assert snapshot["session_id"] == claim.session_id
     assert snapshot["messages"] == []
+    traces = await recorder.list_records(TraceRecordFilters(owner_session_id=claim.session_id))
+    assert len(traces.items) == 1
+    assert traces.items[0].record_id == trace_handle.record_id
+    assert traces.items[0].restored is True
     assert target.read_bytes() == b"current branch"
     assert next_claim["claim_version"] > old_version
     replayed = await service.commit_restore(

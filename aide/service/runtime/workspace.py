@@ -91,6 +91,7 @@ from aide.service.runtime.records import (
     _LoopState,
 )
 from aide.skills.catalog import SkillLoader
+from aide.trace.context import workspace_key_for
 from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from aide.utils.time import local_now
@@ -1009,6 +1010,10 @@ class WorkspaceRecord:
                         )
                     await self._close_loop(session_id)
                 delete_session_data(self.workspace_state, session_id)
+                self.service.request_trace_session_purge(
+                    workspace_key_for(self.workspace_state.workspace_path),
+                    session_id,
+                )
             except ServiceError:
                 if (
                     coordinator is not None
@@ -1281,6 +1286,11 @@ class WorkspaceRecord:
                 manager.revalidate(stored)
                 result = await manager.execute(stored, mode)
                 executed = True
+                self.service.mark_trace_restored(
+                    workspace_key_for(self.workspace_state.workspace_path),
+                    stored.session_id,
+                    tuple(str(token) for token in stored.discarded_run_tokens),
+                )
                 await self._rebuild_restored_session(client_id, stored.session_id)
                 self._restore_results[(client_id, stored.session_id)] = result
                 return result

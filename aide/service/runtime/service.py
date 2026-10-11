@@ -14,6 +14,7 @@ from time import monotonic
 from typing import Any, Literal, cast
 from uuid import uuid4
 
+from loguru import logger as _logger
 from tzlocal import get_localzone_name
 
 from aide.agent.confirmation import (
@@ -133,9 +134,13 @@ from aide.service.runtime.schedule_input import (
 )
 from aide.service.runtime.workspace import WorkspaceRecord
 from aide.skills.catalog import SkillLoader, SkillMetadata
+from aide.trace.recorder import NoOpTraceRecorder, TraceRecorder
+from aide.trace.sqlite_recorder import TRACE_DATABASE_FILENAME, SQLiteTraceRecorder
 from aide.utils.scheduler import AsyncioSchedulerClock
 from aide.utils.time import local_now
 
+_TRACE_MAINTENANCE_INTERVAL_SECONDS = 24 * 60 * 60
+_TRACE_PURGE_RETRY_INTERVAL_SECONDS = 60
 _PROJECT_REMOVAL_FAILURE_MESSAGE = (
     "Project work could not be stopped; the registration remains blocked."
 )
@@ -172,6 +177,12 @@ class AgentService:
         self._workspaces: dict[str, WorkspaceRecord] = {}
         self._workspace_keys: dict[str, str] = {}
         self._workspace_resources = WorkspaceResourceManager()
+        self._trace_recorder: TraceRecorder = NoOpTraceRecorder()
+        self._trace_storage_available = False
+        self._trace_storage_error: str | None = None
+        self._trace_maintenance_task: asyncio.Task[None] | None = None
+        self._trace_maintenance_wakeup = asyncio.Event()
+        self._pending_trace_purges: set[tuple[str, str]] = set()
         self._skill_loader: SkillLoader | None = None
         self._model_router: ModelRouter | None = None
         self._mcp_manager: MCPRuntimeManager | None = None
@@ -474,6 +485,9 @@ class AgentService:
         if self.state != "starting":
             return
         self.agent_home.initialize()
+        await self._start_trace_storage()
+        self._trace_maintenance_wakeup.set()
+        self._trace_maintenance_task = asyncio.create_task(self._trace_maintenance_loop())
         self.configuration = self._configuration_editor.start()
         if self.configuration is not None:
             await self._prepare_shared_configuration(self._capture_configuration())
@@ -495,9 +509,127 @@ class AgentService:
         await self._reconcile_schedule_admission()
         self._global_reconnect_task = asyncio.create_task(self._stop_after_grace())
 
+    async def _start_trace_storage(self) -> None:
+        recorder: SQLiteTraceRecorder | None = None
+        try:
+            recorder = await asyncio.to_thread(
+                SQLiteTraceRecorder,
+                self.agent_home.path / TRACE_DATABASE_FILENAME,
+            )
+            if not await recorder.wait_until_ready():
+                error = recorder.startup_error or TimeoutError(
+                    "Trace SQLite initialization did not finish in time"
+                )
+                raise RuntimeError("Trace SQLite storage is unavailable") from error
+        except Exception as error:
+            if recorder is not None:
+                try:
+                    await recorder.close(timeout_seconds=0.0)
+                except Exception:
+                    pass
+            self._trace_recorder = NoOpTraceRecorder()
+            self._trace_storage_available = False
+            self._trace_storage_error = str(error)
+            _logger.warning(
+                "Execution Trace storage is unavailable; using no-op recorder: {}",
+                error,
+            )
+            return
+
+        self._trace_recorder = recorder
+        self._trace_storage_available = True
+        self._trace_storage_error = None
+
+    def request_trace_session_purge(self, workspace_key: str, owner_session_id: str) -> None:
+        """Hide a deleted Session immediately and schedule its physical cleanup."""
+        key = (workspace_key, owner_session_id)
+        self._pending_trace_purges.add(key)
+        try:
+            self._trace_recorder.close_session_scope(*key)
+        except Exception as error:
+            _logger.warning("Could not close Execution Trace Session scope: {}", error)
+        self._trace_maintenance_wakeup.set()
+
+    def mark_trace_restored(
+        self,
+        workspace_key: str,
+        owner_session_id: str,
+        discarded_run_tokens: tuple[str, ...],
+    ) -> None:
+        try:
+            self._trace_recorder.mark_restored(
+                workspace_key,
+                owner_session_id,
+                discarded_run_tokens,
+            )
+        except Exception as error:
+            _logger.warning("Could not mark restored Execution Traces: {}", error)
+
+    async def _trace_maintenance_loop(self) -> None:
+        while True:
+            self._trace_maintenance_wakeup.clear()
+            try:
+                await self._run_trace_maintenance()
+            except Exception:
+                _logger.exception("Execution Trace maintenance failed")
+            interval = (
+                _TRACE_PURGE_RETRY_INTERVAL_SECONDS
+                if self._pending_trace_purges
+                else _TRACE_MAINTENANCE_INTERVAL_SECONDS
+            )
+            try:
+                await asyncio.wait_for(
+                    self._trace_maintenance_wakeup.wait(),
+                    timeout=interval,
+                )
+            except TimeoutError:
+                pass
+
+    async def _run_trace_maintenance(self) -> None:
+        if not self._trace_storage_available:
+            return
+        for key in tuple(self._pending_trace_purges):
+            try:
+                await self._trace_recorder.purge_session(*key)
+            except Exception as error:
+                _logger.warning("Could not purge deleted Session traces: {}", error)
+            else:
+                self._pending_trace_purges.discard(key)
+        try:
+            await self._trace_recorder.purge_expired()
+        except Exception as error:
+            _logger.warning("Could not purge expired Execution Traces: {}", error)
+
+    async def _stop_trace_storage(self) -> None:
+        task = self._trace_maintenance_task
+        self._trace_maintenance_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        try:
+            await self._trace_recorder.close(timeout_seconds=2.0)
+        except Exception as error:
+            _logger.warning("Could not close Execution Trace storage cleanly: {}", error)
+
     @property
     def workspace_resources(self) -> WorkspaceResourceManager:
         return self._workspace_resources
+
+    @property
+    def trace_recorder(self) -> TraceRecorder:
+        """Return the one Agent Home recorder shared by all Workspace runtimes."""
+        return self._trace_recorder
+
+    @property
+    def trace_storage_available(self) -> bool:
+        return self._trace_storage_available
+
+    @property
+    def trace_storage_error(self) -> str | None:
+        return self._trace_storage_error
 
     @property
     def skill_loader(self) -> SkillLoader:
@@ -3737,6 +3869,7 @@ class AgentService:
             await self._configuration_resources.close()
         except Exception as error:
             errors.append(error)
+        await self._stop_trace_storage()
         self._stop_failed = bool(errors)
         self.state = "stopped"
         self._closed.set()

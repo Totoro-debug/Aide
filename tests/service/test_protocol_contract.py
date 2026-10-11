@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from importlib import resources
-from typing import Any, cast
+from typing import Any, NotRequired, cast, get_origin, get_type_hints
 
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
@@ -14,7 +14,9 @@ from aide.management.commands import ManagementCommandResult
 from aide.management.service import RuntimeStatus
 from aide.service.client import _management_result
 from aide.service.runtime.projections import _encode_management_result
+from aide.trace import types as trace_types
 from aide.utils.errors import ErrorInfo
+from tests.fixtures.trace import trace_contract_fixtures
 
 
 def _schema() -> dict[str, Any]:
@@ -458,3 +460,133 @@ def test_session_deletion_recovery_contract_never_contains_history_or_paths() ->
     cleanup.validate(claim)
     with pytest.raises(ValidationError):
         cleanup.validate({**claim, "snapshot": {"messages": []}})
+
+
+def test_execution_trace_wire_fixtures_match_the_protocol_schema() -> None:
+    fixtures = trace_contract_fixtures()
+
+    for record in fixtures.records.values():
+        _validator("trace_record").validate(record)
+    _validator("trace_record_detail").validate(fixtures.detail)
+    _validator("trace_page").validate(fixtures.page)
+    _validator("trace_sessions_response").validate(fixtures.sessions)
+    _validator("trace_stats_response").validate(fixtures.stats)
+    for page in fixtures.raw_pages.values():
+        _validator("trace_raw_page").validate(page)
+
+
+def test_execution_trace_schema_rejects_unknown_status_and_ambiguous_usage() -> None:
+    record = trace_contract_fixtures().records["success"]
+    record_validator = _validator("trace_record")
+
+    with pytest.raises(ValidationError):
+        record_validator.validate({**record, "status": "cancelled"})
+    with pytest.raises(ValidationError):
+        record_validator.validate({**record, "started_at": "2026-10-11T02:00:00+01:00"})
+    with pytest.raises(ValidationError):
+        record_validator.validate({**record, "status": "failed", "error": None})
+    with pytest.raises(ValidationError):
+        _validator("trace_token_usage").validate(
+            {
+                "state": "unknown",
+                "input_tokens": 0,
+                "output_tokens": None,
+                "total_tokens": None,
+                "cached_input_tokens": None,
+                "cache_creation_input_tokens": None,
+            }
+        )
+    detail = trace_contract_fixtures().detail
+    with pytest.raises(ValidationError):
+        _validator("trace_record_detail").validate(
+            {**detail, "capture_issues": [{"state": "complete", "message": "", "source": None}]}
+        )
+    with pytest.raises(ValidationError):
+        _validator("trace_raw_source").validate(
+            {**detail["raw_sources"][0], "layer": "unspecified"}
+        )
+
+
+@pytest.mark.parametrize(
+    ("dto_name", "definition"),
+    [
+        ("TraceUsageDTO", "trace_token_usage"),
+        ("TraceErrorDTO", "trace_error"),
+        ("TraceRecordDTO", "trace_record"),
+        ("TraceRawSourceDTO", "trace_raw_source"),
+        ("TraceCaptureIssueDTO", "trace_capture_issue"),
+        ("TraceContentDTO", "trace_content"),
+        ("TraceRecordDetailDTO", "trace_record_detail"),
+        ("TracePageDTO", "trace_page"),
+        ("TraceSessionSummaryDTO", "trace_session_summary"),
+        ("TraceSessionsResponseDTO", "trace_sessions_response"),
+        ("TraceTokenTotalsDTO", "trace_token_totals"),
+        ("TraceStatsTotalsDTO", "trace_stats_totals"),
+        ("TraceBreakdownDTO", "trace_breakdown"),
+        ("TraceErrorBreakdownDTO", "trace_error_breakdown"),
+        ("TraceTimelinePointDTO", "trace_timeline_point"),
+        ("TraceStatsResponseDTO", "trace_stats_response"),
+        ("TraceRawPageDTO", "trace_raw_page"),
+        ("TraceListQueryDTO", "trace_list_query"),
+        ("TraceStatsQueryDTO", "trace_stats_query"),
+        ("TraceSessionsQueryDTO", "trace_sessions_query"),
+        ("TraceRawQueryDTO", "trace_raw_query"),
+    ],
+)
+def test_execution_trace_python_dto_fields_match_wire_contract(
+    dto_name: str, definition: str
+) -> None:
+    dto = getattr(trace_types, dto_name)
+    annotations = get_type_hints(dto, include_extras=True)
+    wire = _schema()["$defs"][definition]
+
+    assert set(annotations) == set(wire["properties"])
+    required = {
+        name
+        for name, annotation in annotations.items()
+        if dto.__total__ and get_origin(annotation) is not NotRequired
+    }
+    assert required == set(wire.get("required", ()))
+
+
+@pytest.mark.parametrize(
+    ("enum_name", "definition"),
+    [
+        ("TraceOrigin", "trace_origin"),
+        ("TracePurpose", "trace_purpose"),
+        ("TraceKind", "trace_kind"),
+        ("TraceStatus", "trace_status"),
+        ("TraceErrorCategory", "trace_error_category"),
+        ("TraceCaptureState", "trace_capture_state"),
+        ("TraceCaptureLayer", "trace_capture_layer"),
+        ("TraceUsageState", "trace_usage_state"),
+        ("TraceDirection", "trace_direction"),
+        ("TraceReasoningEffort", "reasoning_effort"),
+    ],
+)
+def test_execution_trace_python_enums_match_wire_contract(enum_name: str, definition: str) -> None:
+    values = {item.value for item in getattr(trace_types, enum_name)}
+    assert values == set(_schema()["$defs"][definition]["enum"])
+
+
+def test_execution_trace_query_dtos_pin_filters_and_page_limits() -> None:
+    _validator("trace_list_query").validate(
+        {
+            "workspace_key": "sha256:workspace",
+            "kind": "model",
+            "purpose": "task_framing",
+            "from_at": "2026-10-10T00:00:00Z",
+            "limit": 50,
+        }
+    )
+    _validator("trace_stats_query").validate(
+        {"workspace_key": "sha256:workspace", "purpose": "dream"}
+    )
+    _validator("trace_sessions_query").validate({"cursor": "cursor-1", "limit": 50})
+    _validator("trace_raw_query").validate(
+        {"source": "exec_stdout", "offset": 0, "limit_bytes": 262144}
+    )
+    with pytest.raises(ValidationError):
+        _validator("trace_list_query").validate({"limit": 201})
+    with pytest.raises(ValidationError):
+        _validator("trace_raw_query").validate({"source": "exec_stdout", "limit_bytes": 1048577})

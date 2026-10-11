@@ -819,3 +819,239 @@ export interface ServiceErrorBody {
   request_id: string;
   conversation?: ConversationOpenFailure;
 }
+
+export type TraceOrigin = "foreground" | "subagent" | "schedule" | "auxiliary";
+
+export type TracePurpose =
+  | "agent_run"
+  | "subagent_run"
+  | "schedule_run"
+  | "title_generation"
+  | "task_framing"
+  | "conversation_summary"
+  | "action_summary"
+  | "dream"
+  | "mcp_keywords";
+
+export type TraceKind = "model" | "tool";
+export type TraceStatus = "success" | "failed";
+export type TraceErrorCategory =
+  | "cancelled"
+  | "permission_denied"
+  | "timeout"
+  | "provider_error"
+  | "tool_error"
+  | "validation_error"
+  | "unavailable"
+  | "other";
+export type TraceCaptureState = "complete" | "partial" | "unavailable";
+export type TraceCaptureLayer =
+  | "http_body"
+  | "http_decoded_body"
+  | "json_rpc_message"
+  | "sdk_result"
+  | "process_stream"
+  | "tool_result";
+export type TraceUsageState = "reported" | "unknown" | "not_applicable";
+export type TraceDirection = "request" | "response";
+export type TraceReasoningEffort = ReasoningEffort;
+
+export interface TraceTokenUsageDTO {
+  state: TraceUsageState;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  cached_input_tokens: number | null;
+  cache_creation_input_tokens: number | null;
+}
+
+export interface TraceErrorDTO {
+  category: TraceErrorCategory;
+  code: string | null;
+  message: string;
+}
+
+export interface TraceRecordDTO {
+  record_id: string;
+  root_id: string;
+  workspace_key: string;
+  workspace_path: string;
+  owner_session_id: string | null;
+  subject_session_id: string | null;
+  origin: TraceOrigin;
+  run_id: string | null;
+  schedule_run_id: string | null;
+  restore_run_token: string | null;
+  agent_id: string | null;
+  parent_root_id: string | null;
+  parent_record_id: string | null;
+  tool_call_id: string | null;
+  kind: TraceKind;
+  purpose: TracePurpose;
+  tool_name: string | null;
+  model: string | null;
+  reasoning_effort: ReasoningEffort | null;
+  endpoint: string | null;
+  status: TraceStatus;
+  error: TraceErrorDTO | null;
+  retry_count: number;
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  final_attempt_duration_ms: number | null;
+  usage: TraceTokenUsageDTO;
+  capture_state: TraceCaptureState;
+  restored: boolean;
+}
+
+export interface TraceRawSourceDTO {
+  source: string;
+  direction: TraceDirection;
+  layer: TraceCaptureLayer;
+  content_type: string | null;
+  content_encoding: string | null;
+  total_bytes: number;
+}
+
+export interface TraceContentDTO {
+  request: unknown;
+  result: unknown;
+}
+
+export interface TraceCaptureIssueDTO {
+  state: "partial" | "unavailable";
+  message: string;
+  source: string | null;
+}
+
+export interface TraceRecordDetailDTO {
+  record: TraceRecordDTO;
+  content: TraceContentDTO;
+  raw_sources: TraceRawSourceDTO[];
+  capture_issues: TraceCaptureIssueDTO[];
+}
+
+export interface TracePageDTO {
+  items: TraceRecordDTO[];
+  next_cursor: string | null;
+  snapshot_sequence: number;
+}
+
+export interface TraceSessionSummaryDTO {
+  workspace_key: string;
+  workspace_path: string;
+  owner_session_id: string;
+  subject_session_id: string | null;
+  origin: TraceOrigin;
+  last_finished_at: string;
+  record_count: number;
+}
+
+export interface TraceSessionsResponseDTO {
+  items: TraceSessionSummaryDTO[];
+  next_cursor: string | null;
+}
+
+export interface TraceTokenTotalsDTO {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cached_input_tokens: number;
+  cache_creation_input_tokens: number;
+}
+
+export interface TraceStatsTotalsDTO {
+  model_calls: number;
+  tool_calls: number;
+  success_count: number;
+  failed_count: number;
+  failure_rate: number | null;
+  retry_count: number;
+  retried_calls: number;
+  unknown_usage_count: number;
+  average_duration_ms: number | null;
+}
+
+export interface TraceBreakdownDTO {
+  key: string;
+  calls: number;
+  tokens: TraceTokenTotalsDTO;
+}
+
+export interface TraceErrorBreakdownDTO {
+  category: TraceErrorCategory;
+  calls: number;
+}
+
+export interface TraceTimelinePointDTO {
+  date: string;
+  model_calls: number;
+  tool_calls: number;
+  successful_calls: number;
+  failed_calls: number;
+  tokens: TraceTokenTotalsDTO;
+}
+
+export interface TraceStatsResponseDTO {
+  from_at: string | null;
+  to_at: string | null;
+  workspace_key: string | null;
+  totals: TraceStatsTotalsDTO;
+  tokens: TraceTokenTotalsDTO;
+  by_model: TraceBreakdownDTO[];
+  by_tool: TraceBreakdownDTO[];
+  by_purpose: TraceBreakdownDTO[];
+  by_error_category: TraceErrorBreakdownDTO[];
+  daily: TraceTimelinePointDTO[];
+  methodology: string;
+}
+
+export interface TraceRawPageDTO {
+  source: string;
+  direction: TraceDirection | null;
+  layer: TraceCaptureLayer | null;
+  offset: number;
+  data_base64: string;
+  total_bytes: number;
+  next_offset: number | null;
+  content_type: string | null;
+  content_encoding: string | null;
+}
+
+export interface TraceListQueryDTO {
+  workspace_key?: string;
+  owner_session_id?: string;
+  subject_session_id?: string;
+  root_id?: string;
+  run_id?: string;
+  agent_id?: string;
+  kind?: TraceKind;
+  status?: TraceStatus;
+  purpose?: TracePurpose;
+  tool_name?: string;
+  model?: string;
+  from_at?: string;
+  to_at?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface TraceStatsQueryDTO {
+  from_at?: string;
+  to_at?: string;
+  workspace_key?: string;
+  model?: string;
+  tool_name?: string;
+  purpose?: TracePurpose;
+}
+
+export interface TraceSessionsQueryDTO {
+  cursor?: string;
+  limit?: number;
+}
+
+export interface TraceRawQueryDTO {
+  source: string;
+  offset?: number;
+  limit_bytes?: number;
+}

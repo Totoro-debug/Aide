@@ -1774,6 +1774,1114 @@
         "foreground",
         "background"
       ]
+    },
+    "trace_origin": {
+      "enum": [
+        "foreground",
+        "subagent",
+        "schedule",
+        "auxiliary"
+      ]
+    },
+    "trace_purpose": {
+      "enum": [
+        "agent_run",
+        "subagent_run",
+        "schedule_run",
+        "title_generation",
+        "task_framing",
+        "conversation_summary",
+        "action_summary",
+        "dream",
+        "mcp_keywords"
+      ]
+    },
+    "trace_kind": {
+      "enum": [
+        "model",
+        "tool"
+      ]
+    },
+    "trace_status": {
+      "enum": [
+        "success",
+        "failed"
+      ]
+    },
+    "trace_error_category": {
+      "enum": [
+        "cancelled",
+        "permission_denied",
+        "timeout",
+        "provider_error",
+        "tool_error",
+        "validation_error",
+        "unavailable",
+        "other"
+      ]
+    },
+    "trace_capture_state": {
+      "enum": [
+        "complete",
+        "partial",
+        "unavailable"
+      ]
+    },
+    "trace_usage_state": {
+      "enum": [
+        "reported",
+        "unknown",
+        "not_applicable"
+      ]
+    },
+    "trace_direction": {
+      "enum": [
+        "request",
+        "response"
+      ]
+    },
+    "trace_reasoning_effort": {
+      "$ref": "#/$defs/reasoning_effort"
+    },
+    "trace_token_usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cached_input_tokens",
+        "cache_creation_input_tokens"
+      ],
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/trace_usage_state"
+        },
+        "input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "total_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cached_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cache_creation_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "reported"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "input_tokens": {
+                    "type": "integer"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "output_tokens": {
+                    "type": "integer"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "total_tokens": {
+                    "type": "integer"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "cached_input_tokens": {
+                    "type": "integer"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "cache_creation_input_tokens": {
+                    "type": "integer"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "unknown",
+                  "not_applicable"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "input_tokens": {
+                "type": "null"
+              },
+              "output_tokens": {
+                "type": "null"
+              },
+              "total_tokens": {
+                "type": "null"
+              },
+              "cached_input_tokens": {
+                "type": "null"
+              },
+              "cache_creation_input_tokens": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "trace_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/trace_error_category"
+        },
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "trace_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_id",
+        "root_id",
+        "workspace_key",
+        "workspace_path",
+        "owner_session_id",
+        "subject_session_id",
+        "origin",
+        "run_id",
+        "schedule_run_id",
+        "restore_run_token",
+        "agent_id",
+        "parent_root_id",
+        "parent_record_id",
+        "tool_call_id",
+        "kind",
+        "purpose",
+        "tool_name",
+        "model",
+        "reasoning_effort",
+        "endpoint",
+        "status",
+        "error",
+        "retry_count",
+        "started_at",
+        "finished_at",
+        "duration_ms",
+        "final_attempt_duration_ms",
+        "usage",
+        "capture_state",
+        "restored"
+      ],
+      "properties": {
+        "record_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "root_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "workspace_key": {
+          "$ref": "#/$defs/identifier"
+        },
+        "workspace_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subject_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "$ref": "#/$defs/trace_origin"
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schedule_run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "restore_run_token": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_root_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_record_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_call_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/trace_kind"
+        },
+        "purpose": {
+          "$ref": "#/$defs/trace_purpose"
+        },
+        "tool_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/trace_reasoning_effort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/trace_status"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/trace_error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retry_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "finished_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "final_attempt_duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "usage": {
+          "$ref": "#/$defs/trace_token_usage"
+        },
+        "capture_state": {
+          "$ref": "#/$defs/trace_capture_state"
+        },
+        "restored": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "error": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "error": {
+                "$ref": "#/$defs/trace_error"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "trace_raw_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "direction",
+        "layer",
+        "content_type",
+        "content_encoding",
+        "total_bytes"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/identifier"
+        },
+        "direction": {
+          "$ref": "#/$defs/trace_direction"
+        },
+        "content_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content_encoding": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "total_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "layer": {
+          "$ref": "#/$defs/trace_capture_layer"
+        }
+      }
+    },
+    "trace_content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request",
+        "result"
+      ],
+      "properties": {
+        "request": {},
+        "result": {}
+      }
+    },
+    "trace_record_detail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record",
+        "content",
+        "raw_sources",
+        "capture_issues"
+      ],
+      "properties": {
+        "record": {
+          "$ref": "#/$defs/trace_record"
+        },
+        "content": {
+          "$ref": "#/$defs/trace_content"
+        },
+        "raw_sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trace_raw_source"
+          }
+        },
+        "capture_issues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trace_capture_issue"
+          }
+        }
+      }
+    },
+    "trace_page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "next_cursor",
+        "snapshot_sequence"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trace_record"
+          }
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "snapshot_sequence": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "trace_session_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_key",
+        "workspace_path",
+        "owner_session_id",
+        "subject_session_id",
+        "origin",
+        "last_finished_at",
+        "record_count"
+      ],
+      "properties": {
+        "workspace_key": {
+          "$ref": "#/$defs/identifier"
+        },
+        "workspace_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_session_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "subject_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "$ref": "#/$defs/trace_origin"
+        },
+        "last_finished_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "record_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "trace_sessions_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "next_cursor"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trace_session_summary"
+          }
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "trace_token_totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cached_input_tokens",
+        "cache_creation_input_tokens"
+      ],
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cached_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_creation_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "trace_stats_totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model_calls",
+        "tool_calls",
+        "success_count",
+        "failed_count",
+        "failure_rate",
+        "retry_count",
+        "retried_calls",
+        "unknown_usage_count",
+        "average_duration_ms"
+      ],
+      "properties": {
+        "model_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "success_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failure_rate": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "retry_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retried_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unknown_usage_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "average_duration_ms": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "trace_breakdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "calls",
+        "tokens"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokens": {
+          "$ref": "#/$defs/trace_token_totals"
+        }
+      }
+    },
+    "trace_timeline_point": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "date",
+        "model_calls",
+        "tool_calls",
+        "successful_calls",
+        "failed_calls",
+        "tokens"
+      ],
+      "properties": {
+        "date": {
+          "type": "string",
+          "format": "date"
+        },
+        "model_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "successful_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokens": {
+          "$ref": "#/$defs/trace_token_totals"
+        }
+      }
+    },
+    "trace_error_breakdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "calls"
+      ],
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/trace_error_category"
+        },
+        "calls": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "trace_stats_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from_at",
+        "to_at",
+        "workspace_key",
+        "totals",
+        "tokens",
+        "by_model",
+        "by_tool",
+        "by_purpose",
+        "by_error_category",
+        "daily",
+        "methodology"
+      ],
+      "properties": {
+        "from_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "to_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "workspace_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "totals": {
+          "$ref": "#/$defs/trace_stats_totals"
+        },
+        "tokens": {
+          "$ref": "#/$defs/trace_token_totals"
+        },
+        "by_model": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trace_breakdown"
+          }
+        },
+        "by_tool": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trace_breakdown"
+          }
+        },
+        "by_purpose": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trace_breakdown"
+          }
+        },
+        "by_error_category": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trace_error_breakdown"
+          }
+        },
+        "daily": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trace_timeline_point"
+          }
+        },
+        "methodology": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "trace_raw_page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "direction",
+        "layer",
+        "offset",
+        "data_base64",
+        "total_bytes",
+        "next_offset",
+        "content_type",
+        "content_encoding"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/identifier"
+        },
+        "direction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/trace_direction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "data_base64": {
+          "type": "string",
+          "contentEncoding": "base64"
+        },
+        "total_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "next_offset": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "content_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content_encoding": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/trace_capture_layer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "trace_list_query": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "workspace_key": {
+          "type": "string"
+        },
+        "owner_session_id": {
+          "type": "string"
+        },
+        "subject_session_id": {
+          "type": "string"
+        },
+        "root_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/trace_kind"
+        },
+        "status": {
+          "$ref": "#/$defs/trace_status"
+        },
+        "purpose": {
+          "$ref": "#/$defs/trace_purpose"
+        },
+        "tool_name": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "from_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "to_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        }
+      }
+    },
+    "trace_stats_query": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "from_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "to_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "workspace_key": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "tool_name": {
+          "type": "string"
+        },
+        "purpose": {
+          "$ref": "#/$defs/trace_purpose"
+        }
+      }
+    },
+    "trace_sessions_query": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        }
+      }
+    },
+    "trace_raw_query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/identifier"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        }
+      }
+    },
+    "trace_capture_layer": {
+      "enum": [
+        "http_body",
+        "http_decoded_body",
+        "json_rpc_message",
+        "sdk_result",
+        "process_stream",
+        "tool_result"
+      ]
+    },
+    "trace_capture_issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "message",
+        "source"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "partial",
+            "unavailable"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     }
   }
 }

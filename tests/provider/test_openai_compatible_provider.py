@@ -58,6 +58,39 @@ class FakeOpenAIError(Exception):
         super().__init__("sensitive upstream detail")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("reported", [False, True])
+async def test_usage_distinguishes_missing_from_reported_zero(
+    streaming: bool, reported: bool,
+) -> None:
+    usage = SimpleNamespace(prompt_tokens=0, completion_tokens=0) if reported else None
+    result = FakeOpenAIStream(SimpleNamespace(
+        choices=[SimpleNamespace(
+            delta=SimpleNamespace(content="answer", tool_calls=None), finish_reason="stop",
+        )], usage=usage,
+    )) if streaming else SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(content="answer", tool_calls=[]), finish_reason="stop",
+        )], usage=usage,
+    )
+    provider = OpenAICompatibleProvider(
+        configuration(), client_factory=FakeOpenAIClientFactory(FakeOpenAIClient(result)),
+    )
+    try:
+        if streaming:
+            events = [event async for event in provider.stream(**request())]
+            terminal = events[-1]
+            assert isinstance(terminal, ModelCompleted)
+            response = terminal.response
+        else:
+            response = await provider.complete(**request())
+        assert response.usage.reported is reported
+        assert response.usage.to_dict() == {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    finally:
+        await provider.close()
+
+
 class FakeCompletions:
     def __init__(self, *results: object) -> None:
         self._results = list(results)

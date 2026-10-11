@@ -47,6 +47,10 @@ from aide.agent.workspace_state import WorkspaceState
 from aide.provider.errors import ModelCallError
 from aide.provider.model_router import ModelRouter, RunModelRouter
 from aide.provider.models import ReasoningDelta, SessionModelConfiguration, TextDelta
+from aide.trace.context import TraceRootSource, workspace_key_for
+from aide.trace.recorder import NoOpTraceRecorder, TraceRecorder
+from aide.trace.scope import current_trace_scope, trace_scope
+from aide.trace.types import TraceOrigin, TracePurpose
 from aide.utils.validation import empty_token_usage
 
 _DISALLOWED_TOOL_NAMES = ("spawn_agent", "wait_agent", "schedule")
@@ -94,6 +98,7 @@ class SubAgentRunnerExecutor:
         confirmation_for: SubAgentConfirmationFactory | None = None,
         file_mutation_recorder_for: SubAgentFileMutationRecorderFactory | None = None,
         tool_context_for: Callable[[SubAgentRecord], SubAgentToolContext] | None = None,
+        trace_recorder: TraceRecorder | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(workspace_id, str) or not workspace_id:
@@ -139,6 +144,9 @@ class SubAgentRunnerExecutor:
         self._confirmation_for = confirmation_for
         self._file_mutation_recorder_for = file_mutation_recorder_for
         self._tool_context_for = tool_context_for
+        self._trace_recorder = (
+            NoOpTraceRecorder() if trace_recorder is None else trace_recorder
+        )
         self._now = now or (lambda: datetime.now(UTC))
         self._cancellations: dict[str, _Cancellation] = {}
         self._started_agent_ids: set[str] = set()
@@ -151,6 +159,34 @@ class SubAgentRunnerExecutor:
         return True
 
     async def execute(
+        self,
+        record: SubAgentRecord,
+        *,
+        emit: Callable[[SubAgentEvent], Awaitable[None]],
+    ) -> SubAgentExecutionResult:
+        if not isinstance(record, SubAgentRecord):
+            raise TypeError("SubAgent execution requires a registered record")
+        parent = current_trace_scope()
+        workspace_path = self._workspace_state.workspace_path
+        with trace_scope(
+            self._trace_recorder,
+            TraceRootSource(
+                workspace_key=workspace_key_for(workspace_path),
+                workspace_path=str(workspace_path),
+                origin=TraceOrigin.SUBAGENT,
+                purpose=TracePurpose.SUBAGENT_RUN,
+                owner_session_id=record.session_id,
+                subject_session_id=None,
+                run_id=None if parent is None else parent.context.run_id,
+                restore_run_token=record.source.restore_run_token,
+                agent_id=record.agent_id,
+                parent_root_id=None if parent is None else parent.context.root_id,
+                schedule_run_id=record.source.occurrence_id,
+            ),
+        ):
+            return await self._execute_validated(record, emit=emit)
+
+    async def _execute_validated(
         self,
         record: SubAgentRecord,
         *,

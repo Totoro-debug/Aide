@@ -354,7 +354,10 @@ class AgentService:
                 workspace.workspace_state = state
 
                 configured = await self._configuration_resources.workspace(
-                    workspace.workspace_id, workspace.workspace_path, shared,
+                    workspace.workspace_id,
+                    workspace.workspace_path,
+                    shared,
+                    trace_recorder=self._trace_recorder,
                 )
                 manager = configured.mcp_manager
                 workspace._mcp_manager = manager
@@ -385,6 +388,7 @@ class AgentService:
                     model_router=workspace._router,
                     batch_size=workspace.configuration.memory.batch_size,
                     memory_route_status=workspace._router.route_status("memory"),
+                    trace_recorder=self._trace_recorder,
                     prepare_execution=prepare_dream,
                 )
                 workspace._memory_manager = memory_manager

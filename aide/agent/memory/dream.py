@@ -27,6 +27,10 @@ from aide.provider.errors import ModelCallError, model_context_overflow_error
 from aide.provider.model_router import ModelAttemptGuard, ModelRouteStatus
 from aide.provider.models import ModelMessages, ModelResponse
 from aide.templates import render_template
+from aide.trace.context import TraceRootSource, workspace_key_for
+from aide.trace.recorder import NoOpTraceRecorder, TraceRecorder
+from aide.trace.scope import trace_scope
+from aide.trace.types import TraceOrigin, TracePurpose
 from aide.utils.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.utils.validation import require_nonnegative_int
 
@@ -122,6 +126,7 @@ class Dream:
         model_router: DreamModelRouter,
         batch_size: int,
         memory_route_status: ModelRouteStatus,
+        trace_recorder: TraceRecorder | None = None,
         prepare_execution: Callable[
             [], Awaitable[tuple[DreamModelRouter, ModelRouteStatus, int, Callable[[], None]]]
         ] | None = None,
@@ -135,6 +140,9 @@ class Dream:
         self._model_router = model_router
         self._batch_size = batch_size
         self._memory_route_status = memory_route_status
+        self._trace_recorder = (
+            NoOpTraceRecorder() if trace_recorder is None else trace_recorder
+        )
         self._prepare_execution = prepare_execution
         self._failure_diagnostic: Exception | None = None
         self._memory_updated = False
@@ -154,6 +162,19 @@ class Dream:
         self._aborted = False
 
     async def run(self) -> DreamResult:
+        workspace_path = self._memory_manager.workspace_state.workspace_path
+        with trace_scope(
+            self._trace_recorder,
+            TraceRootSource(
+                workspace_key=workspace_key_for(workspace_path),
+                workspace_path=str(workspace_path),
+                origin=TraceOrigin.AUXILIARY,
+                purpose=TracePurpose.DREAM,
+            ),
+        ):
+            return await self._run_scoped()
+
+    async def _run_scoped(self) -> DreamResult:
         with without_session_log():
             if self._closed or self._aborted:
                 raise RuntimeError("Dream is no longer active")

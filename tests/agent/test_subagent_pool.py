@@ -26,6 +26,10 @@ from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.core.subagents import build_subagent_tools
 from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
 from aide.agent.workspace_state import WorkspaceState
+from aide.trace.context import TraceRootSource, workspace_key_for
+from aide.trace.recorder import NoOpTraceRecorder
+from aide.trace.scope import current_trace_scope, trace_scope
+from aide.trace.types import TraceOrigin, TracePurpose
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 
 _NOW = datetime(2026, 10, 8, 9, 0, tzinfo=UTC)
@@ -239,6 +243,59 @@ async def test_executor_updates_preserve_queued_children_and_release_each_genera
         for executor in (old, new):
             for gate in executor.release.values():
                 gate.set()
+        await pool.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_queued_subagent_retains_its_submitting_trace_context(tmp_path: Path) -> None:
+    from aide.agent.subagents.coordinator import SubAgentPool
+
+    state, session_id = _workspace(tmp_path)
+    repository = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    seen: dict[str, tuple[str | None, str]] = {}
+
+    class Executor(_ControlledExecutor):
+        async def execute(
+            self, record: SubAgentRecord, *,
+            emit: Callable[[SubAgentEvent], Awaitable[None]],
+        ) -> SubAgentExecutionResult:
+            scope = current_trace_scope()
+            assert scope is not None
+            seen[record.agent_id] = (scope.context.run_id, scope.context.root_id)
+            return await super().execute(record, emit=emit)
+
+    executor = Executor()
+    pool = SubAgentPool(repository, executor)
+    source = SubAgentSource(
+        kind=SubAgentSourceKind.FOREGROUND, restore_run_token=_RESTORE_TOKEN,
+    )
+    roots = {}
+    records = []
+    try:
+        for run_id, count in (("run-a", 8), ("run-b", 1)):
+            with trace_scope(NoOpTraceRecorder(), TraceRootSource(
+                workspace_key_for(state.workspace_path), str(state.workspace_path),
+                TraceOrigin.FOREGROUND, TracePurpose.AGENT_RUN,
+                owner_session_id=session_id, run_id=run_id,
+            )) as root:
+                roots[run_id] = root.root_id
+                for _ in range(count):
+                    record = pool.submit(
+                        title=run_id, task=run_id, parent_run_id=_RUN_ID,
+                        source=source, creator_snapshot=_snapshot(),
+                    )
+                    records.append(record)
+                    executor.release[record.agent_id] = asyncio.Event()
+                    executor.cancel_requested[record.agent_id] = asyncio.Event()
+        for _ in range(8):
+            await asyncio.wait_for(executor.started.get(), 2)
+        executor.release[records[0].agent_id].set()
+        assert await asyncio.wait_for(executor.started.get(), 2) == records[-1].agent_id
+        assert seen[records[-1].agent_id] == ("run-b", roots["run-b"])
+        assert all(seen[r.agent_id] == ("run-a", roots["run-a"]) for r in records[:8])
+    finally:
+        for gate in executor.release.values():
+            gate.set()
         await pool.shutdown()
 
 

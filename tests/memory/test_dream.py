@@ -33,6 +33,8 @@ from aide.provider.models import (
     ModelUsage,
 )
 from aide.templates import render_template
+from aide.trace.sqlite_recorder import SQLiteTraceRecorder
+from aide.trace.types import TraceOrigin, TracePurpose
 from aide.utils.errors import ErrorInfo
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import FakeClock, ScriptedFakeProvider, ScriptedFakeRouter
@@ -224,18 +226,23 @@ async def test_dream_uses_the_memory_route_with_static_default_fallback(
         configuration=configuration,
         provider_factory=lambda _configuration: provider,
     )
+    recorder = SQLiteTraceRecorder(agent_home / "traces.sqlite3")
     dream = Dream(
         memory_manager=manager,
         model_router=router,
         batch_size=configuration.memory.batch_size,
         memory_route_status=router.route_status("memory"),
+        trace_recorder=recorder,
     )
 
     try:
         result = await dream.run()
+        await recorder.flush()
+        traced_calls = (await recorder.list_records()).items
     finally:
         await dream.close()
         await router.close()
+        await recorder.close()
 
     assert result == DreamResult(
         status="Processed 1 summary; Long-term Memory unchanged.",
@@ -245,6 +252,12 @@ async def test_dream_uses_the_memory_route_with_static_default_fallback(
     )
     assert await _cursor(manager) == 1
     assert provider.complete_requests[0].model == "claude-model"
+    assert len(traced_calls) == 1
+    assert traced_calls[0].origin is TraceOrigin.AUXILIARY
+    assert traced_calls[0].purpose is TracePurpose.DREAM
+    assert traced_calls[0].owner_session_id is None
+    assert traced_calls[0].subject_session_id is None
+    assert traced_calls[0].run_id is None
 
 
 @pytest.mark.asyncio

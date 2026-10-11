@@ -56,6 +56,10 @@ from aide.provider.models import (
     ModelRoute,
     ModelUsage,
 )
+from aide.trace.context import TraceRootSource, workspace_key_for
+from aide.trace.scope import trace_scope
+from aide.trace.sqlite_recorder import SQLiteTraceRecorder
+from aide.trace.types import TraceOrigin, TracePurpose
 from aide.utils.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
 from tests.fixtures import FakeClock, ScriptedFakeProvider, ScriptedFakeRouter, StreamScript
 from tests.fixtures.session import seed_session_state
@@ -3152,6 +3156,82 @@ async def test_history_at_soft_threshold_skips_candidate_delta_even_when_delta_i
         len(history) if should_compact else 0
     )
     assert session.messages == original
+
+
+@pytest.mark.asyncio
+async def test_compaction_calls_keep_conversation_and_action_summary_purposes(
+    workspace: Path,
+) -> None:
+    session = Session.create(_state(workspace))
+    history = _run_history(
+        "old", size=1, timestamp=NOW.isoformat(), token_usage=_usage(400, 0)
+    )
+    history[-1]["context_usage"] = {
+        **_context_usage(context_window=1000),
+        "anchor_estimated_tokens": 5000,
+        "estimator_version": context_estimator_version_for_model("model"),
+    }
+    seed_session_state(session, messages=history, metadata={}, last_compacted=0)
+    provider = ScriptedFakeProvider(completions=(_response("facts"), _response("action")))
+    base = _router_configuration(
+        chat_context_window=4000,
+        default_context_window=4000,
+        max_output=200,
+    )
+    configuration = replace(
+        base,
+        models=replace(
+            base.models,
+            routes={**base.models.routes, "memory": base.models.routes["chat"]},
+        ),
+    )
+    router = ModelRouter(configuration=configuration, provider_factory=lambda _: provider)
+    controller = ContextController(
+        snapshot=AgentRunContextSnapshot.from_session(session),
+        append_summary=MemoryManager(session.workspace_state).append_summary,
+        now=lambda: NOW,
+        request_router=router.for_run(),
+        requested_route="chat",
+        project_messages=_project_messages,
+        project_tool_results=ContextBuilder.project_tool_results,
+        current_user={"role": "user", "content": "continue"},
+        compact_ratio=0.5,
+    )
+    recorder = SQLiteTraceRecorder(workspace / "traces.sqlite3")
+    source = TraceRootSource(
+        workspace_key=workspace_key_for(workspace),
+        workspace_path=str(workspace),
+        origin=TraceOrigin.FOREGROUND,
+        purpose=TracePurpose.AGENT_RUN,
+        owner_session_id=session.session_id,
+        subject_session_id=session.session_id,
+        run_id="summary-run",
+    )
+
+    try:
+        with trace_scope(recorder, source):
+            await controller._prepare_run_start(
+                route_status=_chat_status(
+                    context_window=1000,
+                    max_output=200,
+                    provider_id="provider",
+                    model="model",
+                ),
+                tools=(),
+                memory_route_status=_memory_status(context_window=4000, max_output=200),
+            )
+        await recorder.flush()
+        traced_calls = (await recorder.list_records()).items
+    finally:
+        await router.close()
+        await recorder.close()
+
+    assert {call.purpose for call in traced_calls} == {
+        TracePurpose.CONVERSATION_SUMMARY,
+        TracePurpose.ACTION_SUMMARY,
+    }
+    assert all(call.origin is TraceOrigin.FOREGROUND for call in traced_calls)
+    assert all(call.run_id == "summary-run" for call in traced_calls)
 
 
 @pytest.mark.asyncio

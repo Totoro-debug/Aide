@@ -38,6 +38,8 @@ from aide.provider.models import (
     ModelResponse,
 )
 from aide.templates import render_template
+from aide.trace.scope import trace_purpose
+from aide.trace.types import TracePurpose
 from aide.utils.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.utils.validation import empty_token_usage
 
@@ -823,12 +825,13 @@ class ContextController:
                 overflow_error = model_context_overflow_error()
                 self._raise_summary_failure(revision, overflow_error)
             try:
-                fact_response = await self._request_router.complete(
-                    "memory",
-                    messages=fact_messages,
-                    tools=(),
-                    guard=agent_run_attempt_guard,
-                )
+                with trace_purpose(TracePurpose.CONVERSATION_SUMMARY):
+                    fact_response = await self._request_router.complete(
+                        "memory",
+                        messages=fact_messages,
+                        tools=(),
+                        guard=agent_run_attempt_guard,
+                    )
             except ModelCallError as provider_error:
                 self._raise_summary_failure(revision, provider_error)
             except Exception as provider_error:
@@ -868,12 +871,13 @@ class ContextController:
             overflow_error = model_context_overflow_error()
             self._raise_summary_failure(revision, overflow_error)
         try:
-            action_response = await self._request_router.complete(
-                "memory",
-                messages=action_messages,
-                tools=(),
-                guard=agent_run_attempt_guard,
-            )
+            with trace_purpose(TracePurpose.ACTION_SUMMARY):
+                action_response = await self._request_router.complete(
+                    "memory",
+                    messages=action_messages,
+                    tools=(),
+                    guard=agent_run_attempt_guard,
+                )
         except ModelCallError as provider_error:
             self._raise_summary_failure(revision, provider_error)
         except Exception as provider_error:

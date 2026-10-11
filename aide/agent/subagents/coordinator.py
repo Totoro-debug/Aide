@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Callable, Sequence
+from contextvars import Context, copy_context
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -62,6 +63,7 @@ class SubAgentPool:
         self._repository = repository
         self._executor = executor
         self._task_executors: dict[str, SubAgentExecutor] = {}
+        self._task_contexts: dict[str, Context] = {}
         self._task_releases: dict[str, Callable[[], None]] = {}
         self._retain_executor: Callable[[], Callable[[], None]] | None = None
         self._now = now or (lambda: datetime.now(UTC))
@@ -96,6 +98,7 @@ class SubAgentPool:
 
     def _release_executor(self, agent_id: str) -> None:
         self._task_executors.pop(agent_id, None)
+        self._task_contexts.pop(agent_id, None)
         if (release := self._task_releases.pop(agent_id, None)) is not None:
             release()
 
@@ -125,6 +128,7 @@ class SubAgentPool:
             creator_snapshot=creator_snapshot,
         )
         self._task_executors[record.agent_id] = self._executor
+        self._task_contexts[record.agent_id] = copy_context()
         if self._retain_executor is not None:
             self._task_releases[record.agent_id] = self._retain_executor()
         self._publish_status(record)
@@ -406,7 +410,9 @@ class SubAgentPool:
     def _start_queued(self, loop: asyncio.AbstractEventLoop) -> None:
         while self._queued and not self._shutdown and len(self._active) < SUBAGENT_POOL_CAPACITY:
             agent_id = self._queued.popleft()
-            execution = loop.create_task(self._run(agent_id))
+            execution = loop.create_task(
+                self._run(agent_id), context=self._task_contexts.pop(agent_id)
+            )
             self._active[agent_id] = execution
 
     async def _run(self, agent_id: str) -> None:

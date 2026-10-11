@@ -21,6 +21,7 @@ from aide.config.config import ConfigLoader
 from aide.provider.model_router import ModelRouter, ProviderFactory
 from aide.service.configuration import ConfigurationSnapshot
 from aide.skills.catalog import SkillLoader
+from aide.trace.recorder import TraceRecorder
 
 
 @dataclass(slots=True, eq=False)
@@ -110,6 +111,8 @@ class ConfigurationResourceManager:
         workspace_id: str,
         workspace_path: Path,
         shared: SharedConfigurationResources,
+        *,
+        trace_recorder: TraceRecorder | None = None,
     ) -> WorkspaceConfigurationResources:
         shared.users += 1
         if shared in self._pending_versions:
@@ -142,7 +145,12 @@ class ConfigurationResourceManager:
             )
             try:
                 report = await mcp.start(shared.snapshot.configuration.mcp)
-                keywords = await preparer.prepare(report.snapshot, shared.snapshot.configuration.mcp)
+                keywords = await preparer.prepare(
+                    report.snapshot,
+                    shared.snapshot.configuration.mcp,
+                    trace_recorder=trace_recorder,
+                    workspace_path=workspace_path,
+                )
             except BaseException:
                 try:
                     await mcp.close()

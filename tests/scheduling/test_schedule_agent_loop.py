@@ -46,6 +46,9 @@ from aide.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
 from aide.schedule.service import ScheduleClock, ScheduleJobExecutionError, ScheduleService
 from aide.schedule.store import WorkspaceScheduleStore
 from aide.templates import render_template
+from aide.trace.recorder import TraceRecorder
+from aide.trace.sqlite_recorder import SQLiteTraceRecorder
+from aide.trace.types import TraceOrigin, TracePurpose
 from tests.configuration.test_config import SCHEDULE_ROUTE, VALID_CONFIG
 from tests.fixtures import (
     FakeClock,
@@ -268,6 +271,7 @@ def _agent_loop(
     *,
     schedule_clock: ScheduleClock,
     config_text: str = VALID_CONFIG + SCHEDULE_ROUTE,
+    trace_recorder: TraceRecorder | None = None,
 ) -> tuple[
     AgentRunExecutor,
     ModelRouter,
@@ -292,6 +296,7 @@ def _agent_loop(
         model_router=router,
         batch_size=configuration.memory.batch_size,
         memory_route_status=router.route_status("memory"),
+        trace_recorder=trace_recorder,
     )
     loop: AgentRunExecutor | None = None
 
@@ -315,6 +320,7 @@ def _agent_loop(
         schedule_service=schedule,
         model_router=TaskFramingRouterAdapter(router),
         memory_manager=memory_manager,
+        trace_recorder=trace_recorder,
         session_id=None,
         now=lambda: NOW,
         new_uuid=lambda: JOB_UUID,
@@ -646,6 +652,7 @@ async def test_schedule_uses_context_builder_complete_context_projection(
         )
     )
     provider = _ScheduleProvider(schedule_responses=(_response("Background result."),))
+    recorder = SQLiteTraceRecorder(agent_home / "traces.sqlite3")
     builder_projections: list[list[dict[str, Any]]] = []
 
     def fail_foreground_context(*args: object, **kwargs: object) -> list[dict[str, object]]:
@@ -659,6 +666,7 @@ async def test_schedule_uses_context_builder_complete_context_projection(
         workspace,
         provider,
         schedule_clock=_BlockingClock(schedule_now),
+        trace_recorder=recorder,
     )
     await loop.start()
     monkeypatch.setattr(ContextBuilder, "build_foreground_messages", fail_foreground_context)
@@ -672,8 +680,11 @@ async def test_schedule_uses_context_builder_complete_context_projection(
                 and schedule.status_snapshot().active_job_count == 0
             )
         )
+        await recorder.flush()
+        traced_calls = (await recorder.list_records()).items
     finally:
         await _close_components(loop, router, schedule, dream)
+        await recorder.close()
 
     assert len(provider.direct_complete_messages) == 1
     messages, tools = provider.direct_complete_messages[0]
@@ -708,6 +719,11 @@ async def test_schedule_uses_context_builder_complete_context_projection(
     assert tuple(definition["function"]["name"] for definition in tools) == (
         RUN_BASELINE_TOOL_NAMES
     )
+    assert traced_calls
+    assert all(call.origin is TraceOrigin.SCHEDULE for call in traced_calls)
+    assert all(call.purpose is TracePurpose.SCHEDULE_RUN for call in traced_calls)
+    assert all(call.owner_session_id == call.subject_session_id for call in traced_calls)
+    assert all(call.run_id == call.schedule_run_id for call in traced_calls)
 
 
 @pytest.mark.asyncio

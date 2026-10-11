@@ -609,6 +609,7 @@ def test_current_architecture_matches_source_ast_contracts() -> None:
         "model_router",
         "batch_size",
         "memory_route_status",
+        "trace_recorder",
         "prepare_execution",
     )
     assert _public_method_names(dream) == {

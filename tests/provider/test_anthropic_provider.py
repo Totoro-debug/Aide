@@ -153,6 +153,39 @@ async def test_provider_counts_cache_reads_and_writes_in_input_usage(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("reported", [False, True])
+async def test_usage_distinguishes_missing_from_reported_zero(
+    streaming: bool, reported: bool,
+) -> None:
+    usage = SimpleNamespace(input_tokens=0, output_tokens=0) if reported else None
+    result = FakeAnthropicStream(
+        SimpleNamespace(type="message_start", message=SimpleNamespace(usage=usage)),
+        SimpleNamespace(type="content_block_start", index=0,
+                        content_block=SimpleNamespace(type="text", text="answer")),
+        SimpleNamespace(type="message_delta", delta=SimpleNamespace(stop_reason="end_turn"),
+                        usage=usage),
+    ) if streaming else SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="answer")], usage=usage, stop_reason="end_turn",
+    )
+    provider = AnthropicProvider(
+        configuration(), client_factory=FakeAnthropicClientFactory(FakeAnthropicClient(result)),
+    )
+    try:
+        if streaming:
+            events = [event async for event in provider.stream(**request())]
+            terminal = events[-1]
+            assert isinstance(terminal, ModelCompleted)
+            response = terminal.response
+        else:
+            response = await provider.complete(**request())
+        assert response.usage.reported is reported
+        assert response.usage.to_dict() == {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_stream_translates_text_and_usage_through_official_sdk_boundary() -> None:
     stream = FakeAnthropicStream(
         SimpleNamespace(

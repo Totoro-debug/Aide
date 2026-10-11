@@ -1,7 +1,7 @@
 """Provider-neutral model response values and direct call contracts."""
 
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal, Protocol
 
 from aide.agent.tools.tool_gateway import ModelToolCall
@@ -46,8 +46,11 @@ class ModelUsage:
     output_tokens: int
     total_tokens: int
     cached_input_tokens: int | None = None
+    reported: bool = field(default=True, compare=False)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.reported, bool):
+            raise ValueError("reported must be a boolean")
         require_nonnegative_int(self.input_tokens, field="input_tokens")
         require_nonnegative_int(self.output_tokens, field="output_tokens")
         require_nonnegative_int(self.total_tokens, field="total_tokens")

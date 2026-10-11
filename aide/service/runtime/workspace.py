@@ -1711,6 +1711,7 @@ class WorkspaceRecord:
                 "schedule_service": schedule_service,
                 "model_router": router,
                 "memory_manager": runtime.memory_manager,
+                "trace_recorder": self.service._trace_recorder,
                 "now": local_now,
                 "new_uuid": uuid4,
                 "monotonic_now": monotonic,

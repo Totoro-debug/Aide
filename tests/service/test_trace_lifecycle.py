@@ -106,6 +106,65 @@ async def test_service_owns_one_agent_home_trace_database_and_closes_it(
 
 
 @pytest.mark.asyncio
+async def test_foreground_run_and_auxiliary_calls_keep_separate_trace_purposes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _prepare_agent_home(tmp_path / "agent-home")
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    provider = _ConcurrentProvider()
+    provider.release_a.set()
+    monkeypatch.setattr(
+        "aide.service.runtime.service.create_provider",
+        lambda _configuration: provider,
+    )
+    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, workspace_path)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
+        claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
+        ack = await service.handle_command(
+            client.client_id,
+            {
+                "workspace_id": workspace.workspace_id,
+                "session_id": session_id,
+                "claim_version": _claim_version(claim),
+                "request_id": "trace-foreground-input",
+                "type": "input",
+                "payload": {"text": "session-a"},
+            },
+        )
+        run_id = cast(str, cast(dict[str, object], ack["result"])["run_id"])
+        await asyncio.wait_for(sink.wait_for("run.completed", run_id), timeout=2)
+        recorder = service.trace_recorder
+        assert isinstance(recorder, SQLiteTraceRecorder)
+        await recorder.flush()
+
+        records = (await service.trace_recorder.list_records()).items
+        by_purpose = {record.purpose: record for record in records}
+        foreground = by_purpose[TracePurpose.AGENT_RUN]
+        framing = by_purpose[TracePurpose.TASK_FRAMING]
+        title = by_purpose[TracePurpose.TITLE_GENERATION]
+        assert len(records) == 3
+        assert foreground.origin is TraceOrigin.FOREGROUND
+        assert framing.origin is TraceOrigin.FOREGROUND
+        assert title.origin is TraceOrigin.AUXILIARY
+        assert foreground.root_id == framing.root_id
+        assert title.parent_root_id == foreground.root_id
+        assert all(record.run_id == run_id for record in records)
+        assert all(record.owner_session_id == session_id for record in records)
+        assert all(record.subject_session_id == session_id for record in records)
+        assert title.restore_run_token == foreground.restore_run_token
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
 async def test_unavailable_trace_database_does_not_block_service_start_or_clear_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

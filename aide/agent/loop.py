@@ -108,6 +108,10 @@ from aide.schedule.service import (
     ScheduleService,
 )
 from aide.skills.catalog import ManualSkillInvocation, SkillLoader
+from aide.trace.context import TraceRootSource, workspace_key_for
+from aide.trace.recorder import NoOpTraceRecorder, TraceRecorder
+from aide.trace.scope import current_trace_scope, trace_purpose, trace_scope
+from aide.trace.types import TraceOrigin, TracePurpose
 from aide.utils.async_tasks import await_task_preserving_cancellation
 from aide.utils.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.utils.text import normalize_title, normalize_title_candidate
@@ -220,6 +224,7 @@ class AgentRunExecutor:
         built_in_catalog: BuiltInToolCatalog | None = None,
         session_run_state: SessionRunState | None = None,
         subagent_model_router: ModelRouter | None = None,
+        trace_recorder: TraceRecorder | None = None,
     ) -> None:
         if workspace_state.workspace_path != workspace_path:
             raise ValueError("Agent Loop Workspace State must belong to the Workspace")
@@ -290,6 +295,9 @@ class AgentRunExecutor:
         self._schedule_service = schedule_service
         self._context_builder = context_builder
         self._memory_manager = memory_manager
+        self._trace_recorder = (
+            NoOpTraceRecorder() if trace_recorder is None else trace_recorder
+        )
         self._now = now
         self._new_uuid = new_uuid
         self._monotonic_now = monotonic_now
@@ -418,6 +426,7 @@ class AgentRunExecutor:
                 record.session_id,
             ),
             now=self._now,
+            trace_recorder=self._trace_recorder,
         )
 
     def _subagent_tool_context_for(self, record: SubAgentRecord) -> SubAgentToolContext:
@@ -774,8 +783,23 @@ class AgentRunExecutor:
         job: ScheduleJob,
         occurrence: ScheduleOccurrence | None = None,
     ) -> None:
-        with self._context_builder.schedule_projection_scope():
-            await self._run_schedule_agent_scoped(session, job, occurrence)
+        workspace_path = self._workspace_state.workspace_path
+        schedule_run_id = None if occurrence is None else str(occurrence.occurrence_id)
+        with trace_scope(
+            self._trace_recorder,
+            TraceRootSource(
+                workspace_key=workspace_key_for(workspace_path),
+                workspace_path=str(workspace_path),
+                origin=TraceOrigin.SCHEDULE,
+                purpose=TracePurpose.SCHEDULE_RUN,
+                owner_session_id=session.session_id,
+                subject_session_id=session.session_id,
+                run_id=schedule_run_id,
+                schedule_run_id=schedule_run_id,
+            ),
+        ):
+            with self._context_builder.schedule_projection_scope():
+                await self._run_schedule_agent_scoped(session, job, occurrence)
 
     async def _run_schedule_agent_scoped(
         self,
@@ -1168,6 +1192,39 @@ class AgentRunExecutor:
             return
         restore_before = active_session.capture_restore_before()
         restore_run_token = self._new_uuid()
+        run_id = inbound.metadata.get("run_id")
+        if not isinstance(run_id, str):
+            run_id = None
+        workspace_path = self._workspace_state.workspace_path
+        with trace_scope(
+            self._trace_recorder,
+            TraceRootSource(
+                workspace_key=workspace_key_for(workspace_path),
+                workspace_path=str(workspace_path),
+                origin=TraceOrigin.FOREGROUND,
+                purpose=TracePurpose.AGENT_RUN,
+                owner_session_id=active_session.session_id,
+                subject_session_id=active_session.session_id,
+                run_id=run_id,
+                restore_run_token=str(restore_run_token),
+            ),
+        ):
+            await self._execute_foreground_scoped(
+                inbound,
+                execution_ready=execution_ready,
+                restore_before=restore_before,
+                restore_run_token=restore_run_token,
+            )
+
+    async def _execute_foreground_scoped(
+        self,
+        inbound: InboundMessage,
+        *,
+        execution_ready: asyncio.Event,
+        restore_before: SessionRestoreBefore,
+        restore_run_token: UUID,
+    ) -> None:
+        active_session = self._session
         if self._captured_foreground is None:
             permission_snapshot = self._permission_control.snapshot(self._exec_host.resolved_shell)
             session_model_configuration = active_session.model_configuration
@@ -1177,9 +1234,31 @@ class AgentRunExecutor:
         skill_state = self._skill_loader.skills
         manual_invocation = self._skill_loader.resolve_manual(inbound.content)
         start_title = not active_session.messages
+
+        async def resolve_title(content: str) -> tuple[str, dict[str, int] | None]:
+            parent = current_trace_scope()
+            if parent is None:
+                return await self._resolve_title(content)
+            context = parent.context
+            with trace_scope(
+                self._trace_recorder,
+                TraceRootSource(
+                    workspace_key=context.workspace_key,
+                    workspace_path=context.workspace_path,
+                    origin=TraceOrigin.AUXILIARY,
+                    purpose=TracePurpose.TITLE_GENERATION,
+                    owner_session_id=active_session.session_id,
+                    subject_session_id=active_session.session_id,
+                    run_id=context.run_id,
+                    restore_run_token=context.restore_run_token,
+                    parent_root_id=context.root_id,
+                ),
+            ):
+                return await self._resolve_title(content)
+
         created_title_work = (
             self._session_run_state.start_title(
-                active_session, inbound.content, self._resolve_title, lambda: self._aborted
+                active_session, inbound.content, resolve_title, lambda: self._aborted
             ) if start_title else None
         )
         title_work = created_title_work or self._session_run_state.title_for(active_session.session_id)
@@ -1297,12 +1376,13 @@ class AgentRunExecutor:
             previous_blackboard = Blackboard.from_dict(active_session.metadata.get("blackboard"))
             last_assistant_content = _latest_assistant_content(active_session)
             try:
-                framing_result = await Blackboard.generate(
-                    self._model_router,
-                    previous=previous_blackboard,
-                    last_assistant_content=last_assistant_content,
-                    current_user_input=inbound.content,
-                )
+                with trace_purpose(TracePurpose.TASK_FRAMING):
+                    framing_result = await Blackboard.generate(
+                        self._model_router,
+                        previous=previous_blackboard,
+                        last_assistant_content=last_assistant_content,
+                        current_user_input=inbound.content,
+                    )
             except asyncio.CancelledError:
                 if not self._cancel_requested:
                     raise

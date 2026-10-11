@@ -174,6 +174,7 @@ class OpenAICompatibleProvider:
         input_tokens = 0
         output_tokens = 0
         cached_input_tokens: int | None = None
+        usage_reported = False
         tool_call_parts: dict[int, _ToolCallParts] = {}
 
         async for chunk in chunks:
@@ -201,6 +202,7 @@ class OpenAICompatibleProvider:
 
             usage = getattr(chunk, "usage", None)
             if usage is not None:
+                usage_reported = True
                 input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
                 output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
                 cached_input_tokens = _cached_input_tokens(usage)
@@ -221,6 +223,7 @@ class OpenAICompatibleProvider:
                     output_tokens=output_tokens,
                     total_tokens=input_tokens + output_tokens,
                     cached_input_tokens=cached_input_tokens,
+                    reported=usage_reported,
                 ),
                 finish_reason=finish_reason,
                 continuation=_continuation_from_reasoning(
@@ -308,6 +311,7 @@ class OpenAICompatibleProvider:
                 output_tokens=output_tokens,
                 total_tokens=input_tokens + output_tokens,
                 cached_input_tokens=_cached_input_tokens(usage),
+                reported=usage is not None,
             ),
             finish_reason=_finish_reason(str(choice.finish_reason or "stop")),
             continuation=_continuation_from_reasoning(

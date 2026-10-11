@@ -368,6 +368,7 @@ def test_agent_loop_constructor_is_the_generation_composition_boundary() -> None
         "built_in_catalog",
         "session_run_state",
         "subagent_model_router",
+        "trace_recorder",
     )
 
 

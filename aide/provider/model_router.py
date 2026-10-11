@@ -3,7 +3,10 @@
 import asyncio
 from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from time import monotonic
 from typing import Any, Protocol, cast
 
 from loguru import logger
@@ -12,6 +15,7 @@ from aide.config.config import ProviderConfiguration, ResolvedModelRoute, UserCo
 from aide.provider.errors import ModelCallError, model_context_overflow_error
 from aide.provider.models import (
     REASONING_EFFORT_LEVELS,
+    ModelCompleted,
     ModelContinuation,
     ModelMessages,
     ModelProvider,
@@ -21,11 +25,311 @@ from aide.provider.models import (
     ReasoningEffort,
 )
 from aide.provider.session_configuration import SessionModelConfiguration
+from aide.trace.scope import TraceExecutionScope, current_trace_scope
+from aide.trace.types import (
+    TraceAttemptHandle,
+    TraceAttemptMetadata,
+    TraceCallMetadata,
+    TraceCaptureHandle,
+    TraceCaptureIssue,
+    TraceCaptureState,
+    TraceErrorCategory,
+    TraceKind,
+    TraceOutcome,
+    TraceReasoningEffort,
+    TraceStatus,
+    TraceTokenUsage,
+    TraceUsageState,
+)
+from aide.utils.errors import ErrorInfo
 
 _MAX_ATTEMPTS = 5
 _RETRYABLE_CODES = frozenset({"provider_rate_limited", "provider_timeout", "provider_unavailable"})
 _FALLBACK_CODES = frozenset({"route_unavailable", "provider_auth_error"})
 _FALLBACK_ROUTES = frozenset({"title", "memory"})
+
+
+class _TraceModelCall:
+    """Best-effort capture for one logical call and its selected provider attempts."""
+
+    def __init__(
+        self,
+        scope: TraceExecutionScope,
+        resolved: ResolvedModelRoute | None,
+        started_at: datetime,
+    ) -> None:
+        self.scope = scope
+        self.handle: TraceCaptureHandle | None = None
+        self.started_at = started_at
+        self.started_monotonic = monotonic()
+        self.attempt_count = 0
+        self.attempt_started: float | None = None
+        self.final_attempt_duration_ms: int | None = None
+        self.failures: list[tuple[TraceErrorCategory, str, str]] = []
+        self.finished = False
+
+        try:
+            self.handle = scope.recorder.begin_call(
+                scope.context,
+                TraceCallMetadata(
+                    kind=TraceKind.MODEL,
+                    purpose=scope.purpose,
+                    started_at=started_at,
+                    model=None if resolved is None else resolved.route.model,
+                    reasoning_effort=(
+                        None
+                        if resolved is None
+                        else _trace_reasoning_effort(resolved.route.reasoning_effort)
+                    ),
+                ),
+            )
+            scope.recorder.report_capture_issue(
+                self.handle,
+                TraceCaptureIssue(
+                    state=TraceCaptureState.PARTIAL,
+                    message="Provider HTTP/SSE capture is not installed for this call.",
+                    source="provider_transport",
+                ),
+            )
+        except Exception:
+            self.handle = None
+            logger.warning("Execution Trace model capture could not be started")
+
+    def begin_attempt(
+        self,
+        resolved: ResolvedModelRoute,
+        *,
+        dispatched: bool = True,
+    ) -> TraceAttemptHandle | None:
+        if dispatched:
+            self.attempt_count += 1
+        self.attempt_started = monotonic()
+        self.final_attempt_duration_ms = None
+        handle = self.handle
+        if handle is None:
+            return None
+        try:
+            return self.scope.recorder.begin_attempt(
+                handle,
+                TraceAttemptMetadata(
+                    started_at=datetime.now(UTC),
+                    model=resolved.route.model,
+                    reasoning_effort=_trace_reasoning_effort(resolved.route.reasoning_effort),
+                    # Only a transport adapter can observe an actual request URL.
+                    endpoint=None,
+                ),
+            )
+        except Exception:
+            logger.warning("Execution Trace model attempt could not be captured")
+            return None
+
+    def set_request(
+        self,
+        attempt: TraceAttemptHandle | None,
+        resolved: ResolvedModelRoute,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        continuation: ModelContinuation | None,
+    ) -> None:
+        if attempt is None:
+            return
+        try:
+            self.scope.recorder.set_request(
+                attempt,
+                {
+                    "messages": deepcopy(list(messages)),
+                    "tools": deepcopy(list(tools)),
+                    "model": resolved.route.model,
+                    "max_output": resolved.route.max_output,
+                    "temperature": resolved.route.temperature,
+                    "reasoning_effort": resolved.route.reasoning_effort,
+                    "timeout": resolved.route.timeout,
+                    "continuation": (
+                        None
+                        if continuation is None
+                        else {
+                            "provider_id": continuation.provider_id,
+                            "payload": deepcopy(continuation.payload),
+                        }
+                    ),
+                },
+            )
+        except Exception:
+            self._report_issue("The logical model request could not be captured.")
+            logger.warning("Execution Trace model request could not be captured")
+
+    def end_attempt(self) -> None:
+        if self.attempt_started is not None:
+            self.final_attempt_duration_ms = _elapsed_ms(self.attempt_started)
+            self.attempt_started = None
+
+    def note_failure(self, error: BaseException) -> None:
+        failure = _trace_failure(error)
+        if not self.failures or self.failures[-1] != failure:
+            self.failures.append(failure)
+
+    def finish_success(self, response: ModelResponse | None) -> None:
+        if response is not None and response.finish_reason == "cancelled":
+            self.finish_failure(asyncio.CancelledError())
+            return
+        try:
+            self._finish_success(response)
+        except Exception:
+            self._report_issue("The logical model response could not be captured.")
+            self._finish_success(None)
+
+    def _report_issue(self, message: str) -> None:
+        if self.handle is None:
+            return
+        try:
+            self.scope.recorder.report_capture_issue(
+                self.handle,
+                TraceCaptureIssue(TraceCaptureState.PARTIAL, message, source="model_router"),
+            )
+        except Exception:
+            logger.warning("Execution Trace capture issue could not be reported")
+
+    def reject_attempt(self, resolved: ResolvedModelRoute, error: BaseException) -> None:
+        self.begin_attempt(resolved, dispatched=False)
+        self.end_attempt()
+        self.note_failure(error)
+
+    def _finish_success(self, response: ModelResponse | None) -> None:
+        if response is None:
+            result = None
+            usage = TraceTokenUsage(TraceUsageState.UNKNOWN)
+        else:
+            result = {
+                "message": response.message.to_dict(),
+                "usage": response.usage.to_dict(),
+                "finish_reason": response.finish_reason,
+                "continuation": (
+                    None
+                    if response.continuation is None
+                    else {
+                        "provider_id": response.continuation.provider_id,
+                        "payload": deepcopy(response.continuation.payload),
+                    }
+                ),
+            }
+            usage = (
+                TraceTokenUsage(
+                    TraceUsageState.REPORTED,
+                    input_tokens=response.usage.input_tokens,
+                    output_tokens=response.usage.output_tokens,
+                    total_tokens=response.usage.total_tokens,
+                    cached_input_tokens=response.usage.cached_input_tokens,
+                )
+                if response.usage.reported
+                else TraceTokenUsage(TraceUsageState.UNKNOWN)
+            )
+        self._finish(
+            TraceOutcome(
+                status=TraceStatus.SUCCESS,
+                finished_at=datetime.now(UTC),
+                duration_ms=_elapsed_ms(self.started_monotonic),
+                final_attempt_duration_ms=self.final_attempt_duration_ms,
+            ),
+            result=result,
+            usage=usage,
+        )
+
+    def finish_failure(self, error: BaseException) -> None:
+        self.end_attempt()
+        self.note_failure(error)
+        category, code, final_message = self.failures[-1]
+        message = "; ".join(
+            f"attempt {index}: {failure_message}"
+            for index, (_, _, failure_message) in enumerate(self.failures, start=1)
+        )
+        self._finish(
+            TraceOutcome(
+                status=TraceStatus.FAILED,
+                finished_at=datetime.now(UTC),
+                duration_ms=_elapsed_ms(self.started_monotonic),
+                final_attempt_duration_ms=self.final_attempt_duration_ms,
+                error_category=category,
+                error_code=code,
+                error_message=message or final_message,
+            ),
+            result=None,
+            usage=TraceTokenUsage(TraceUsageState.UNKNOWN),
+        )
+
+    def _finish(
+        self,
+        outcome: TraceOutcome,
+        *,
+        result: object,
+        usage: TraceTokenUsage,
+    ) -> None:
+        if self.finished:
+            return
+        self.finished = True
+        handle = self.handle
+        if handle is None:
+            return
+        try:
+            self.scope.recorder.finish_call(
+                handle,
+                outcome,
+                result=result,
+                usage=usage,
+                retry_count=max(0, self.attempt_count - 1),
+            )
+        except Exception:
+            logger.warning("Execution Trace model outcome could not be captured")
+
+
+def _start_trace_model_call(
+    scope: TraceExecutionScope | None,
+    resolved: ResolvedModelRoute | None,
+    started_at: datetime,
+) -> _TraceModelCall | None:
+    if scope is None:
+        return None
+    try:
+        return _TraceModelCall(scope, resolved, started_at)
+    except Exception:
+        logger.warning("Execution Trace model call could not be initialized")
+        return None
+
+
+def _trace_reasoning_effort(effort: ReasoningEffort | None) -> TraceReasoningEffort | None:
+    return None if effort is None else TraceReasoningEffort(effort)
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, round((monotonic() - started) * 1000))
+
+
+def _trace_failure(
+    error: BaseException,
+) -> tuple[TraceErrorCategory, str, str]:
+    if isinstance(error, (asyncio.CancelledError, GeneratorExit)):
+        return TraceErrorCategory.CANCELLED, "cancelled", "The model call was cancelled."
+    info = getattr(error, "error", None)
+    code = getattr(info, "code", None)
+    message = getattr(info, "message", None)
+    if not isinstance(code, str) or not code:
+        code = type(error).__name__
+    if not isinstance(message, str) or not message:
+        message = "The model provider call failed."
+    normalized_code = code.casefold()
+    if "cancel" in normalized_code:
+        category = TraceErrorCategory.CANCELLED
+    elif "timeout" in normalized_code:
+        category = TraceErrorCategory.TIMEOUT
+    elif "unavailable" in normalized_code:
+        category = TraceErrorCategory.UNAVAILABLE
+    elif any(
+        term in normalized_code for term in ("overflow", "validation", "invalid", "bad_request")
+    ):
+        category = TraceErrorCategory.VALIDATION_ERROR
+    else:
+        category = TraceErrorCategory.PROVIDER_ERROR
+    return category, code, message
 
 
 class RetryClock(Protocol):
@@ -155,8 +459,12 @@ class RunModelRouter:
     ) -> AsyncIterator[ModelStreamEvent]:
         call_guard = self._guard if guard is None else guard
         events = self._router.stream(
-            route, messages=messages, tools=tools, continuation=continuation,
-            guard=call_guard, **self._selection_kwargs(),
+            route,
+            messages=messages,
+            tools=tools,
+            continuation=continuation,
+            guard=call_guard,
+            **self._selection_kwargs(),
         )
 
         async def observe() -> AsyncIterator[ModelStreamEvent]:
@@ -164,7 +472,12 @@ class RunModelRouter:
                 async for event in events:
                     yield event
             finally:
-                self._remember_call_status(route)
+                try:
+                    close = getattr(events, "aclose", None)
+                    if close is not None:
+                        await close()
+                finally:
+                    self._remember_call_status(route)
 
         return observe()
 
@@ -327,12 +640,20 @@ class ModelRouter:
         subagent_model_configuration: SessionModelConfiguration | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
-        resolved, reasoning_effort = self._begin_call(
-            route,
-            continuation=continuation,
-            session_model_configuration=session_model_configuration,
-            subagent_model_configuration=subagent_model_configuration,
-        )
+        trace_scope_snapshot = current_trace_scope()
+        started_at = datetime.now(UTC)
+        try:
+            resolved, reasoning_effort = self._begin_call(
+                route,
+                continuation=continuation,
+                session_model_configuration=session_model_configuration,
+                subagent_model_configuration=subagent_model_configuration,
+            )
+        except BaseException as error:
+            trace = _start_trace_model_call(trace_scope_snapshot, None, started_at)
+            if trace is not None:
+                trace.finish_failure(error)
+            raise
         return self._stream_direct(
             resolved,
             messages=messages,
@@ -343,6 +664,8 @@ class ModelRouter:
                 session_model_configuration is None and subagent_model_configuration is None
             ),
             guard=guard,
+            trace_scope=trace_scope_snapshot,
+            trace_started_at=started_at,
         )
 
     async def _stream_direct(
@@ -355,47 +678,98 @@ class ModelRouter:
         reasoning_effort: ReasoningEffort | None,
         publish_route_status: bool,
         guard: ModelAttemptGuard | None,
+        trace_scope: TraceExecutionScope | None,
+        trace_started_at: datetime,
     ) -> AsyncIterator[ModelStreamEvent]:
+        trace = _start_trace_model_call(trace_scope, resolved, trace_started_at)
         if continuation is not None and continuation.provider_id != resolved.provider.provider_id:
             continuation = None
 
         guarded_route: ResolvedModelRoute | None = None
-        for attempt in range(1, _MAX_ATTEMPTS + 1):
-            if guarded_route is not resolved:
-                self._check_attempt_guard(resolved, messages=messages, tools=tools, guard=guard)
-                guarded_route = resolved
-            provider = self._provider(resolved.provider)
-            emitted = False
-            try:
-                events = provider.stream(
-                    messages=messages,
-                    tools=tools,
-                    model=resolved.route.model,
-                    max_output=resolved.route.max_output,
-                    temperature=resolved.route.temperature,
-                    reasoning_effort=resolved.route.reasoning_effort,
-                    timeout=resolved.route.timeout,
-                    **(
-                        {"continuation": continuation}
-                        if continuation is not None
-                        and continuation.provider_id == resolved.provider.provider_id
-                        else {}
-                    ),
-                )
-                async for event in events:
-                    emitted = True
-                    yield event
-                return
-            except ModelCallError as failure:
-                if emitted:
+        response: ModelResponse | None = None
+        try:
+            for attempt in range(1, _MAX_ATTEMPTS + 1):
+                if guarded_route is not resolved:
+                    try:
+                        self._check_attempt_guard(
+                            resolved, messages=messages, tools=tools, guard=guard
+                        )
+                    except BaseException as error:
+                        if trace is not None:
+                            trace.reject_attempt(resolved, error)
+                        raise
+                    guarded_route = resolved
+                try:
+                    provider = self._provider(resolved.provider)
+                except BaseException as error:
+                    if trace is not None:
+                        trace.reject_attempt(resolved, error)
                     raise
-                resolved = await self._recover_attempt(
-                    resolved,
-                    failure,
-                    attempt=attempt,
-                    reasoning_effort=reasoning_effort,
-                    publish_route_status=publish_route_status,
-                )
+                trace_attempt = None if trace is None else trace.begin_attempt(resolved)
+                if trace is not None:
+                    trace.set_request(
+                        trace_attempt,
+                        resolved,
+                        messages=messages,
+                        tools=tools,
+                        continuation=(
+                            continuation
+                            if continuation is not None
+                            and continuation.provider_id == resolved.provider.provider_id
+                            else None
+                        ),
+                    )
+                emitted = False
+                try:
+                    events = provider.stream(
+                        messages=messages,
+                        tools=tools,
+                        model=resolved.route.model,
+                        max_output=resolved.route.max_output,
+                        temperature=resolved.route.temperature,
+                        reasoning_effort=resolved.route.reasoning_effort,
+                        timeout=resolved.route.timeout,
+                        **(
+                            {"continuation": continuation}
+                            if continuation is not None
+                            and continuation.provider_id == resolved.provider.provider_id
+                            else {}
+                        ),
+                    )
+                    async for event in events:
+                        emitted = True
+                        if isinstance(event, ModelCompleted):
+                            response = event.response
+                            if trace is not None:
+                                trace.end_attempt()
+                                trace.finish_success(response)
+                        yield event
+                    if trace is not None:
+                        trace.end_attempt()
+                        if response is None:
+                            trace.finish_failure(ModelCallError(ErrorInfo(
+                                "model_failed", "The model stream ended without a completion.",
+                            )))
+                        else:
+                            trace.finish_success(response)
+                    return
+                except ModelCallError as failure:
+                    if trace is not None:
+                        trace.end_attempt()
+                        trace.note_failure(failure)
+                    if emitted:
+                        raise
+                    resolved = await self._recover_attempt(
+                        resolved,
+                        failure,
+                        attempt=attempt,
+                        reasoning_effort=reasoning_effort,
+                        publish_route_status=publish_route_status,
+                    )
+        except BaseException as error:
+            if trace is not None:
+                trace.finish_failure(error)
+            raise
 
     def complete(
         self,
@@ -408,12 +782,21 @@ class ModelRouter:
         subagent_model_configuration: SessionModelConfiguration | None = None,
         guard: ModelAttemptGuard | None = None,
     ) -> Coroutine[Any, Any, ModelResponse]:
-        resolved, reasoning_effort = self._begin_call(
-            route,
-            continuation=continuation,
-            session_model_configuration=session_model_configuration,
-            subagent_model_configuration=subagent_model_configuration,
-        )
+        trace_scope = current_trace_scope()
+        started_at = datetime.now(UTC)
+        try:
+            resolved, reasoning_effort = self._begin_call(
+                route,
+                continuation=continuation,
+                session_model_configuration=session_model_configuration,
+                subagent_model_configuration=subagent_model_configuration,
+            )
+        except BaseException as error:
+            trace = _start_trace_model_call(trace_scope, None, started_at)
+            if trace is not None:
+                trace.finish_failure(error)
+            raise
+        trace = _start_trace_model_call(trace_scope, resolved, started_at)
         return self._complete_direct(
             resolved,
             messages=messages,
@@ -424,6 +807,7 @@ class ModelRouter:
                 session_model_configuration is None and subagent_model_configuration is None
             ),
             guard=guard,
+            trace=trace,
         )
 
     async def _complete_direct(
@@ -436,42 +820,81 @@ class ModelRouter:
         reasoning_effort: ReasoningEffort | None,
         publish_route_status: bool,
         guard: ModelAttemptGuard | None,
+        trace: _TraceModelCall | None,
     ) -> ModelResponse:
         if continuation is not None and continuation.provider_id != resolved.provider.provider_id:
             continuation = None
 
         guarded_route: ResolvedModelRoute | None = None
-        for attempt in range(1, _MAX_ATTEMPTS + 1):
-            if guarded_route is not resolved:
-                self._check_attempt_guard(resolved, messages=messages, tools=tools, guard=guard)
-                guarded_route = resolved
-            provider = self._provider(resolved.provider)
-            try:
-                return await provider.complete(
-                    messages=messages,
-                    tools=tools,
-                    model=resolved.route.model,
-                    max_output=resolved.route.max_output,
-                    temperature=resolved.route.temperature,
-                    reasoning_effort=resolved.route.reasoning_effort,
-                    timeout=resolved.route.timeout,
-                    **(
-                        {"continuation": continuation}
-                        if continuation is not None
-                        and continuation.provider_id == resolved.provider.provider_id
-                        else {}
-                    ),
-                )
-            except ModelCallError as failure:
-                resolved = await self._recover_attempt(
-                    resolved,
-                    failure,
-                    attempt=attempt,
-                    reasoning_effort=reasoning_effort,
-                    publish_route_status=publish_route_status,
-                )
+        try:
+            for attempt in range(1, _MAX_ATTEMPTS + 1):
+                if guarded_route is not resolved:
+                    try:
+                        self._check_attempt_guard(
+                            resolved, messages=messages, tools=tools, guard=guard
+                        )
+                    except BaseException as error:
+                        if trace is not None:
+                            trace.reject_attempt(resolved, error)
+                        raise
+                    guarded_route = resolved
+                try:
+                    provider = self._provider(resolved.provider)
+                except BaseException as error:
+                    if trace is not None:
+                        trace.reject_attempt(resolved, error)
+                    raise
+                trace_attempt = None if trace is None else trace.begin_attempt(resolved)
+                if trace is not None:
+                    trace.set_request(
+                        trace_attempt,
+                        resolved,
+                        messages=messages,
+                        tools=tools,
+                        continuation=(
+                            continuation
+                            if continuation is not None
+                            and continuation.provider_id == resolved.provider.provider_id
+                            else None
+                        ),
+                    )
+                try:
+                    response = await provider.complete(
+                        messages=messages,
+                        tools=tools,
+                        model=resolved.route.model,
+                        max_output=resolved.route.max_output,
+                        temperature=resolved.route.temperature,
+                        reasoning_effort=resolved.route.reasoning_effort,
+                        timeout=resolved.route.timeout,
+                        **(
+                            {"continuation": continuation}
+                            if continuation is not None
+                            and continuation.provider_id == resolved.provider.provider_id
+                            else {}
+                        ),
+                    )
+                    if trace is not None:
+                        trace.end_attempt()
+                        trace.finish_success(response)
+                    return response
+                except ModelCallError as failure:
+                    if trace is not None:
+                        trace.end_attempt()
+                        trace.note_failure(failure)
+                    resolved = await self._recover_attempt(
+                        resolved,
+                        failure,
+                        attempt=attempt,
+                        reasoning_effort=reasoning_effort,
+                        publish_route_status=publish_route_status,
+                    )
 
-        raise AssertionError("Provider attempt budget exhausted without a terminal result")
+            raise AssertionError("Provider attempt budget exhausted without a terminal result")
+        except BaseException as error:
+            if trace is not None:
+                trace.finish_failure(error)
+            raise
 
     def _check_attempt_guard(
         self,

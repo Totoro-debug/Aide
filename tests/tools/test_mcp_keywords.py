@@ -12,11 +12,16 @@ from aide.agent.tools.mcp import MCPTool, MCPToolSpec
 from aide.agent.tools.mcp_keywords import MCPKeywordPreparer
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigLoader, MCPServerConfiguration
+from aide.provider.model_router import ModelRouter
 from aide.provider.models import (
     AssistantModelMessage,
     ModelResponse,
     ModelUsage,
 )
+from aide.trace.sqlite_recorder import SQLiteTraceRecorder
+from aide.trace.types import TraceOrigin, TracePurpose
+from tests.fixtures import ScriptedFakeProvider
+from tests.fixtures.model_configuration import configuration
 
 
 class _UnusedMCPSession:
@@ -101,7 +106,58 @@ def test_preparer_interface_contains_only_production_inputs() -> None:
         parameter.default is inspect.Parameter.empty
         for parameter in tuple(constructor.values())[1:]
     )
-    assert tuple(prepare) == ("self", "tools", "servers")
+    assert tuple(prepare) == (
+        "self",
+        "tools",
+        "servers",
+        "trace_recorder",
+        "workspace_path",
+    )
+
+
+@pytest.mark.asyncio
+async def test_generated_keywords_have_an_auxiliary_trace_root(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[mcp.servers.github]
+enabled = true
+transport = "stdio"
+command = "server"
+""",
+        encoding="utf-8",
+    )
+    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
+    provider = ScriptedFakeProvider(completions=(_response('["issues", "search"]'),))
+    router = ModelRouter(
+        configuration=configuration(),
+        provider_factory=lambda _configuration: provider,
+        jitter=None,
+    )
+    preparer = MCPKeywordPreparer(router, _config_loader(tmp_path))
+
+    try:
+        result = await preparer.prepare(
+            (_tool(),),
+            {"github": _server()},
+            trace_recorder=recorder,
+            workspace_path=workspace,
+        )
+        await recorder.flush()
+
+        records = (await recorder.list_records()).items
+        assert result == {"mcp_github_search_issues": ("issues", "search")}
+        assert len(records) == 1
+        assert records[0].origin is TraceOrigin.AUXILIARY
+        assert records[0].purpose is TracePurpose.MCP_KEYWORDS
+        assert records[0].owner_session_id is None
+        assert records[0].subject_session_id is None
+        assert records[0].run_id is None
+    finally:
+        await router.close()
+        await recorder.close()
 
 
 @pytest.mark.asyncio

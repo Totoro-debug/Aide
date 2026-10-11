@@ -52,6 +52,10 @@ from aide.provider.models import (
     ReasoningEffort,
     TextDelta,
 )
+from aide.trace.context import TraceRootSource, workspace_key_for
+from aide.trace.scope import trace_scope
+from aide.trace.sqlite_recorder import SQLiteTraceRecorder
+from aide.trace.types import TraceOrigin, TracePurpose
 from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from tests.fixtures import ScriptedFakeProvider, StreamScript
@@ -258,15 +262,18 @@ async def test_subagent_runner_uses_frozen_context_and_persists_full_tool_artifa
         permission_context=PermissionContext(workspace_root=state.workspace_path),
         tool_context=_tool_context(state.workspace_path),
     )
+    router = _router(provider)
+    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
     executor = SubAgentRunnerExecutor(
         workspace_id="workspace-id",
         workspace_state=state,
         repository=store,
-        model_router=_router(provider),
+        model_router=router,
         tool_gateway=gateway,
         compact_ratio=0.9,
         max_iterations=50,
         max_tool_result_chars=80,
+        trace_recorder=recorder,
         now=lambda: _NOW,
     )
     events = []
@@ -277,12 +284,34 @@ async def test_subagent_runner_uses_frozen_context_and_persists_full_tool_artifa
         if getattr(event, "kind", None) is SubAgentEventKind.USAGE:
             checkpoint_records.append(store.get(record.agent_id))
 
-    result = await executor.execute(record, emit=emit)
+    parent_source = TraceRootSource(
+        workspace_key=workspace_key_for(state.workspace_path),
+        workspace_path=str(state.workspace_path),
+        origin=TraceOrigin.FOREGROUND,
+        purpose=TracePurpose.AGENT_RUN,
+        owner_session_id=session_id,
+        subject_session_id=session_id,
+        run_id=_RUN_ID,
+        restore_run_token=_RESTORE_TOKEN,
+    )
+    with trace_scope(recorder, parent_source) as parent_context:
+        result = await executor.execute(record, emit=emit)
+    await recorder.flush()
+    traced_calls = (await recorder.list_records()).items
     persisted = store.get(record.agent_id)
 
     assert result.status is SubAgentStatus.COMPLETED
     assert result.result == "child-finished"
     assert len(provider.stream_requests) == 3
+    assert len(traced_calls) == 3
+    assert all(call.origin is TraceOrigin.SUBAGENT for call in traced_calls)
+    assert all(call.purpose is TracePurpose.SUBAGENT_RUN for call in traced_calls)
+    assert all(call.owner_session_id == session_id for call in traced_calls)
+    assert all(call.subject_session_id is None for call in traced_calls)
+    assert all(call.run_id == _RUN_ID for call in traced_calls)
+    assert all(call.restore_run_token == _RESTORE_TOKEN for call in traced_calls)
+    assert all(call.agent_id == record.agent_id for call in traced_calls)
+    assert all(call.parent_root_id == parent_context.root_id for call in traced_calls)
     for index, request in enumerate(provider.stream_requests):
         assert request.messages == [
             {"role": "system", "content": snapshot.system_prompt},
@@ -331,6 +360,8 @@ async def test_subagent_runner_uses_frozen_context_and_persists_full_tool_artifa
         "role": "system",
         "content": snapshot.system_prompt,
     }
+    await router.close()
+    await recorder.close()
 
 
 @pytest.mark.asyncio

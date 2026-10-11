@@ -6,18 +6,30 @@ import asyncio
 import hmac
 import mimetypes
 import secrets
+import sqlite3
 import time
+import zlib
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
 from typing import Literal, cast
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from aiohttp import WSMsgType, web
 
 from ...config.config import ConfigError
+from ...trace.http_dto import (
+    trace_page_dto,
+    trace_raw_page_dto,
+    trace_record_detail_dto,
+    trace_sessions_response_dto,
+    trace_stats_response_dto,
+)
+from ...trace.recorder import TraceRecorder
+from ...trace.types import TraceKind, TracePurpose, TraceRecordFilters, TraceStatus
 from ..directory_picker import DirectoryPicker
 from ..discovery import identity_proof
 from ..errors import ServiceError, service_error
@@ -31,6 +43,10 @@ _WEB_CONTROL_HEADER = "X-Aide-Control"
 _WEB_SESSION_COOKIE = "aide_session"
 _WEB_TICKET_TTL_SECONDS = WEB_TICKET_TTL_SECONDS
 _WEB_SESSION_MAX_AGE_SECONDS = 24 * 60 * 60
+_TRACE_PAGE_DEFAULT = 50
+_TRACE_PAGE_MAX = 200
+_TRACE_RAW_PAGE_DEFAULT = 256 * 1024
+_TRACE_RAW_PAGE_MAX = 1024 * 1024
 _STATIC_CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data:; connect-src 'self' ws:; base-uri 'none'; "
@@ -113,6 +129,11 @@ class AgentServiceTransport:
         )
         app.router.add_post(f"{_API_PREFIX}/conversations/open", self._open_conversation)
         app.router.add_get(f"{_API_PREFIX}/chat/sessions", self._list_chat_sessions)
+        app.router.add_get(f"{_API_PREFIX}/traces/stats", self._trace_stats)
+        app.router.add_get(f"{_API_PREFIX}/traces/sessions", self._trace_sessions)
+        app.router.add_get(f"{_API_PREFIX}/traces", self._trace_records)
+        app.router.add_get(f"{_API_PREFIX}/traces/{{record_id}}/raw", self._trace_raw)
+        app.router.add_get(f"{_API_PREFIX}/traces/{{record_id}}", self._trace_record)
         app.router.add_get(f"{_API_PREFIX}/projects", self._list_projects)
         app.router.add_post(f"{_API_PREFIX}/projects", self._register_project)
         app.router.add_post(f"{_API_PREFIX}/projects/directory-picker", self._pick_project_directory)
@@ -419,6 +440,184 @@ class AgentServiceTransport:
     async def _service_info(self, request: web.Request) -> web.Response:
         self._authenticate(request)
         return web.json_response(self.service.get_service_status())
+
+    async def _trace_stats(self, request: web.Request) -> web.Response:
+        self._authenticate(request, client_required=True)
+        query = _trace_query_values(
+            request,
+            allowed=frozenset(
+                {"from_at", "to_at", "workspace_key", "model", "tool_name", "purpose"}
+            ),
+        )
+        filters = _trace_filters(query)
+        recorder = self._require_trace_recorder()
+        try:
+            stats = await recorder.get_stats(filters)
+        except (OSError, sqlite3.Error, RuntimeError, ValueError) as error:
+            raise _trace_storage_unavailable() from error
+        return web.json_response(trace_stats_response_dto(stats, filters))
+
+    async def _trace_sessions(self, request: web.Request) -> web.Response:
+        self._authenticate(request, client_required=True)
+        query = _trace_query_values(request, allowed=frozenset({"cursor", "limit"}))
+        cursor = _trace_cursor(query.get("cursor"))
+        limit = _trace_integer(
+            query.get("limit"),
+            default=_TRACE_PAGE_DEFAULT,
+            minimum=1,
+            maximum=_TRACE_PAGE_MAX,
+        )
+        recorder = self._require_trace_recorder()
+        try:
+            page = await recorder.list_sessions(cursor=cursor, limit=limit)
+        except (ValueError, OverflowError) as error:
+            raise _trace_bad_request() from error
+        except (OSError, sqlite3.Error, RuntimeError) as error:
+            raise _trace_storage_unavailable() from error
+        return web.json_response(trace_sessions_response_dto(page))
+
+    async def _trace_records(self, request: web.Request) -> web.Response:
+        self._authenticate(request, client_required=True)
+        query = _trace_query_values(
+            request,
+            allowed=frozenset(
+                {
+                    "workspace_key",
+                    "owner_session_id",
+                    "subject_session_id",
+                    "root_id",
+                    "run_id",
+                    "agent_id",
+                    "kind",
+                    "status",
+                    "purpose",
+                    "tool_name",
+                    "model",
+                    "from_at",
+                    "to_at",
+                    "cursor",
+                    "limit",
+                }
+            ),
+        )
+        filters = _trace_filters(query)
+        cursor = _trace_cursor(query.get("cursor"))
+        limit = _trace_integer(
+            query.get("limit"),
+            default=_TRACE_PAGE_DEFAULT,
+            minimum=1,
+            maximum=_TRACE_PAGE_MAX,
+        )
+        recorder = self._require_trace_recorder()
+        try:
+            page = await recorder.list_records(filters, cursor=cursor, limit=limit)
+        except (ValueError, OverflowError) as error:
+            raise _trace_bad_request() from error
+        except (OSError, sqlite3.Error, RuntimeError) as error:
+            raise _trace_storage_unavailable() from error
+        return web.json_response(trace_page_dto(page))
+
+    async def _trace_record(self, request: web.Request) -> web.Response:
+        self._authenticate(request, client_required=True)
+        _trace_query_values(request, allowed=frozenset())
+        recorder = self._require_trace_recorder()
+        record_id = request.match_info["record_id"]
+        try:
+            detail = await recorder.get_record(record_id)
+        except (OSError, sqlite3.Error, RuntimeError, ValueError) as error:
+            raise _trace_storage_unavailable() from error
+        if detail is None:
+            raise _trace_not_found()
+        return web.json_response(trace_record_detail_dto(detail))
+
+    async def _trace_raw(self, request: web.Request) -> web.StreamResponse:
+        self._authenticate(request, client_required=True)
+        query = _trace_query_values(
+            request,
+            allowed=frozenset({"source", "offset", "limit_bytes", "download"}),
+        )
+        source = query.get("source")
+        if not source:
+            raise _trace_bad_request()
+        offset = _trace_integer(
+            query.get("offset"),
+            default=0,
+            minimum=0,
+            maximum=2**63 - 1,
+        )
+        limit_bytes = _trace_integer(
+            query.get("limit_bytes"),
+            default=_TRACE_RAW_PAGE_DEFAULT,
+            minimum=1,
+            maximum=_TRACE_RAW_PAGE_MAX,
+        )
+        download = query.get("download", "false")
+        if download not in {"true", "false"}:
+            raise _trace_bad_request()
+        if download == "true" and (offset != 0 or "limit_bytes" in query):
+            raise _trace_bad_request()
+
+        recorder = self._require_trace_recorder()
+        record_id = request.match_info["record_id"]
+        try:
+            detail = await recorder.get_record(record_id)
+            if detail is None:
+                raise _trace_not_found()
+            if not any(item.source == source for item in detail.raw_sources):
+                raise _trace_not_found()
+            if download == "true":
+                first_page = await recorder.read_raw(
+                    record_id,
+                    source=source,
+                    offset=0,
+                    limit_bytes=_TRACE_RAW_PAGE_DEFAULT,
+                )
+            else:
+                page = await recorder.read_raw(
+                    record_id,
+                    source=source,
+                    offset=offset,
+                    limit_bytes=limit_bytes,
+                )
+        except ServiceError:
+            raise
+        except (OSError, sqlite3.Error, RuntimeError, ValueError, zlib.error) as error:
+            raise _trace_storage_unavailable() from error
+
+        if download == "false":
+            return web.json_response(trace_raw_page_dto(page))
+
+        response = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(source, safe='')}",
+            },
+        )
+        await response.prepare(request)
+        try:
+            await response.write(first_page.data)
+            next_offset = first_page.next_offset
+            while next_offset is not None:
+                chunk = await recorder.read_raw(
+                    record_id,
+                    source=source,
+                    offset=next_offset,
+                    limit_bytes=_TRACE_RAW_PAGE_DEFAULT,
+                )
+                if not chunk.data:
+                    break
+                await response.write(chunk.data)
+                next_offset = chunk.next_offset
+            await response.write_eof()
+        except (OSError, sqlite3.Error, RuntimeError, ValueError, zlib.error):
+            response.force_close()
+        return response
+
+    def _require_trace_recorder(self) -> TraceRecorder:
+        if not self.service.trace_storage_available:
+            raise _trace_storage_unavailable()
+        return self.service.trace_recorder
 
     async def _config(self, request: web.Request) -> web.Response:
         self._authenticate(request, client_required=True)
@@ -1674,6 +1873,108 @@ def _read_web_asset(asset_path: str) -> bytes:
     if not asset.is_file():
         raise FileNotFoundError(asset_path)
     return asset.read_bytes()
+
+
+def _trace_query_values(request: web.Request, *, allowed: frozenset[str]) -> dict[str, str]:
+    names = set(request.query.keys())
+    if names - allowed or any(len(request.query.getall(name)) != 1 for name in names):
+        raise _trace_bad_request()
+    return {name: request.query[name] for name in names}
+
+
+def _trace_filters(query: Mapping[str, str]) -> TraceRecordFilters:
+    def text(name: str) -> str | None:
+        value = query.get(name)
+        if value == "":
+            raise _trace_bad_request()
+        return value
+
+    try:
+        filters = TraceRecordFilters(
+            workspace_key=text("workspace_key"),
+            owner_session_id=text("owner_session_id"),
+            subject_session_id=text("subject_session_id"),
+            root_id=text("root_id"),
+            run_id=text("run_id"),
+            agent_id=text("agent_id"),
+            kind=TraceKind(query["kind"]) if "kind" in query else None,
+            status=TraceStatus(query["status"]) if "status" in query else None,
+            purpose=TracePurpose(query["purpose"]) if "purpose" in query else None,
+            tool_name=text("tool_name"),
+            model=text("model"),
+            from_at=_trace_datetime(text("from_at")),
+            to_at=_trace_datetime(text("to_at")),
+        )
+    except ValueError as error:
+        raise _trace_bad_request() from error
+    if (
+        filters.from_at is not None
+        and filters.to_at is not None
+        and filters.from_at > filters.to_at
+    ):
+        raise _trace_bad_request()
+    return filters
+
+
+def _trace_datetime(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise _trace_bad_request()
+        return parsed.astimezone(UTC)
+    except (ValueError, OverflowError) as error:
+        raise _trace_bad_request() from error
+
+
+def _trace_bad_request() -> ServiceError:
+    return service_error(
+        "validation_error",
+        "Trace query parameters are invalid.",
+        status=400,
+    )
+
+
+def _trace_storage_unavailable() -> ServiceError:
+    return service_error(
+        "unavailable",
+        "Execution Trace storage is unavailable.",
+        status=503,
+        retryable=True,
+    )
+
+
+def _trace_not_found() -> ServiceError:
+    return service_error("not_found", "Execution Trace data was not found.", status=404)
+
+
+def _trace_cursor(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not value or len(value) > 4096:
+        raise _trace_bad_request()
+    return value
+
+
+def _trace_integer(
+    raw: str | None,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if raw is None:
+        return default
+    if not raw.isascii() or not raw.isdecimal():
+        raise _trace_bad_request()
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise _trace_bad_request() from error
+    if not minimum <= value <= maximum:
+        raise _trace_bad_request()
+    return value
 
 
 __all__ = ["AgentServiceTransport", "AgentServiceTransport", "create_app"]

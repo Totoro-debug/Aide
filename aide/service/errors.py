@@ -20,7 +20,7 @@ class ServiceError(Exception):
     ) -> None:
         if not code or not message:
             raise ValueError("service error code and message must be non-empty")
-        if status not in {400, 401, 403, 404, 409, 422, 500}:
+        if status not in {400, 401, 403, 404, 409, 422, 500, 503}:
             raise ValueError("service error status is invalid")
         self.code = code
         self.message = message

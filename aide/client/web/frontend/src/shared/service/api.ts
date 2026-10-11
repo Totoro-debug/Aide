@@ -53,6 +53,15 @@ import type {
   SubAgentDetail,
   SubAgentListResponse,
   SubmitUserInputResult,
+  TraceListQueryDTO,
+  TracePageDTO,
+  TraceRawPageDTO,
+  TraceRawQueryDTO,
+  TraceRecordDetailDTO,
+  TraceSessionsQueryDTO,
+  TraceSessionsResponseDTO,
+  TraceStatsQueryDTO,
+  TraceStatsResponseDTO,
   ToolPermissionLevel,
   WorkspaceSessionsResponse,
 } from "./protocol";
@@ -247,6 +256,44 @@ export function getChatSessions(
   return request<ChatSessionsResponse>(`/chat/sessions${queryString ? `?${queryString}` : ""}`);
 }
 
+export function getTraceStats(query: TraceStatsQueryDTO = {}): Promise<TraceStatsResponseDTO> {
+  return request<TraceStatsResponseDTO>(`/traces/stats${traceQueryString(query)}`);
+}
+
+export function getTraceSessions(
+  query: TraceSessionsQueryDTO = {},
+): Promise<TraceSessionsResponseDTO> {
+  return request<TraceSessionsResponseDTO>(`/traces/sessions${traceQueryString(query)}`);
+}
+
+export function getTraceRecords(query: TraceListQueryDTO = {}): Promise<TracePageDTO> {
+  return request<TracePageDTO>(`/traces${traceQueryString(query)}`);
+}
+
+export function getTraceRecord(recordId: string): Promise<TraceRecordDetailDTO> {
+  return request<TraceRecordDetailDTO>(`/traces/${encodeURIComponent(recordId)}`);
+}
+
+export function getTraceRawPage(
+  recordId: string,
+  query: TraceRawQueryDTO,
+): Promise<TraceRawPageDTO> {
+  return request<TraceRawPageDTO>(
+    `/traces/${encodeURIComponent(recordId)}/raw${traceQueryString(query)}`,
+  );
+}
+
+export function downloadTraceRaw(
+  recordId: string,
+  source: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  return requestBlob(
+    `/traces/${encodeURIComponent(recordId)}/raw${traceQueryString({ source, download: "true" })}`,
+    signal,
+  );
+}
+
 export async function getWorkspaceSessions(
   workspaceId: string,
   options: { title?: string; cursor?: string; limit?: number } = {},
@@ -436,6 +483,34 @@ async function request<T>(
     throw new ApiError(response.status, body);
   }
   return value as T;
+}
+
+async function requestBlob(path: string, signal?: AbortSignal): Promise<Blob> {
+  const headers = new Headers({ Accept: "application/octet-stream" });
+  if (webControlCredential !== null) {
+    headers.set("X-Aide-Control", webControlCredential);
+  }
+  const response = await fetch(`${API_PREFIX}${path}`, {
+    headers,
+    credentials: "include",
+    signal,
+  });
+  if (!response.ok) {
+    const value: unknown = await response.json().catch(() => null);
+    throw new ApiError(response.status, isServiceError(value) ? value : null);
+  }
+  return response.blob();
+}
+
+function traceQueryString(query: object): string {
+  const parameters = new URLSearchParams();
+  for (const [name, value] of Object.entries(query)) {
+    if (typeof value === "string" || typeof value === "number") {
+      parameters.set(name, String(value));
+    }
+  }
+  const encoded = parameters.toString();
+  return encoded ? `?${encoded}` : "";
 }
 
 export async function exchangeTicket(ticket: string): Promise<BrowserTicketExchange> {

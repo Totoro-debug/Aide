@@ -55,7 +55,7 @@ from aide.provider.models import (
 from aide.trace.context import TraceRootSource, workspace_key_for
 from aide.trace.scope import trace_scope
 from aide.trace.sqlite_recorder import SQLiteTraceRecorder
-from aide.trace.types import TraceOrigin, TracePurpose
+from aide.trace.types import TraceKind, TraceOrigin, TracePurpose
 from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from tests.fixtures import ScriptedFakeProvider, StreamScript
@@ -303,7 +303,10 @@ async def test_subagent_runner_uses_frozen_context_and_persists_full_tool_artifa
     assert result.status is SubAgentStatus.COMPLETED
     assert result.result == "child-finished"
     assert len(provider.stream_requests) == 3
-    assert len(traced_calls) == 3
+    model_calls = [call for call in traced_calls if call.kind is TraceKind.MODEL]
+    tool_calls = [call for call in traced_calls if call.kind is TraceKind.TOOL]
+    assert len(model_calls) == 3
+    assert {call.tool_name for call in tool_calls} == {"tool_search", "long_result"}
     assert all(call.origin is TraceOrigin.SUBAGENT for call in traced_calls)
     assert all(call.purpose is TracePurpose.SUBAGENT_RUN for call in traced_calls)
     assert all(call.owner_session_id == session_id for call in traced_calls)

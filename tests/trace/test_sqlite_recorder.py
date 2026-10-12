@@ -8,9 +8,8 @@ from threading import Barrier, Event, Thread
 
 import pytest
 
-from aide.trace import TRACE_MAX_RAW_CHUNK_BYTES, SQLiteTraceRecorder
 from aide.trace.context import TraceContext, TraceRootSource
-from aide.trace.sqlite_recorder import _Event
+from aide.trace.sqlite_recorder import TRACE_MAX_RAW_CHUNK_BYTES, SQLiteTraceRecorder, _Event
 from aide.trace.types import (
     TraceAttemptMetadata,
     TraceCallMetadata,
@@ -320,6 +319,151 @@ async def test_stats_do_not_count_tool_usage_as_model_tokens(tmp_path: Path) -> 
         assert stats.tokens.input_tokens == 7
         assert stats.tokens.output_tokens == 3
         assert stats.tokens.total_tokens == 10
+    finally:
+        await recorder.close()
+
+
+@pytest.mark.asyncio
+async def test_stats_keep_totals_and_breakdowns_consistent_across_dimensions(
+    tmp_path: Path,
+) -> None:
+    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
+    next_day = _NOW + timedelta(days=1)
+
+    def record_call(
+        *,
+        kind: TraceKind,
+        purpose: TracePurpose,
+        started_at: datetime,
+        model: str | None,
+        tool_name: str | None,
+        outcome: TraceOutcome,
+        usage: TraceTokenUsage,
+        retry_count: int,
+    ) -> None:
+        handle = recorder.begin_call(
+            _new_context(recorder),
+            TraceCallMetadata(
+                kind=kind,
+                purpose=purpose,
+                started_at=started_at,
+                model=model,
+                tool_name=tool_name,
+            ),
+        )
+        recorder.finish_call(
+            handle,
+            outcome,
+            result={"ok": True},
+            usage=usage,
+            retry_count=retry_count,
+        )
+
+    try:
+        record_call(
+            kind=TraceKind.MODEL,
+            purpose=TracePurpose.AGENT_RUN,
+            started_at=_NOW,
+            model="provider/a",
+            tool_name=None,
+            outcome=_success(),
+            usage=_usage(),
+            retry_count=0,
+        )
+        record_call(
+            kind=TraceKind.TOOL,
+            purpose=TracePurpose.AGENT_RUN,
+            started_at=_NOW,
+            model="provider/a",
+            tool_name="read_file",
+            outcome=_success(),
+            usage=TraceTokenUsage(state=TraceUsageState.NOT_APPLICABLE),
+            retry_count=0,
+        )
+        record_call(
+            kind=TraceKind.MODEL,
+            purpose=TracePurpose.SUBAGENT_RUN,
+            started_at=next_day,
+            model="provider/b",
+            tool_name=None,
+            outcome=TraceOutcome(
+                status=TraceStatus.FAILED,
+                finished_at=next_day,
+                duration_ms=40,
+                error_category=TraceErrorCategory.PROVIDER_ERROR,
+                error_message="provider unavailable",
+            ),
+            usage=TraceTokenUsage(state=TraceUsageState.UNKNOWN),
+            retry_count=2,
+        )
+        record_call(
+            kind=TraceKind.TOOL,
+            purpose=TracePurpose.SCHEDULE_RUN,
+            started_at=next_day,
+            model="provider/b",
+            tool_name="exec",
+            outcome=TraceOutcome(
+                status=TraceStatus.FAILED,
+                finished_at=next_day,
+                duration_ms=40,
+                error_category=TraceErrorCategory.TOOL_ERROR,
+                error_message="tool failed",
+            ),
+            usage=TraceTokenUsage(state=TraceUsageState.NOT_APPLICABLE),
+            retry_count=1,
+        )
+        await recorder.flush()
+
+        stats = await recorder.get_stats()
+        assert stats.totals.model_calls == 2
+        assert stats.totals.tool_calls == 2
+        assert stats.totals.success_count == 2
+        assert stats.totals.failed_count == 2
+        assert stats.totals.failure_rate == 0.5
+        assert stats.totals.retry_count == 3
+        assert stats.totals.retried_calls == 2
+        assert stats.totals.unknown_usage_count == 1
+        assert stats.totals.average_duration_ms == 26
+        assert stats.tokens.input_tokens == 7
+        assert [(item.key, item.calls, item.tokens.input_tokens) for item in stats.by_model] == [
+            ("provider/a", 2, 7),
+            ("provider/b", 2, 0),
+        ]
+        assert [(item.key, item.calls) for item in stats.by_tool] == [
+            ("exec", 1),
+            ("read_file", 1),
+        ]
+        assert [(item.key, item.calls) for item in stats.by_purpose] == [
+            ("agent_run", 2),
+            ("schedule_run", 1),
+            ("subagent_run", 1),
+        ]
+        assert [(item.category, item.calls) for item in stats.by_error_category] == [
+            (TraceErrorCategory.PROVIDER_ERROR, 1),
+            (TraceErrorCategory.TOOL_ERROR, 1),
+        ]
+        assert [
+            (
+                item.date,
+                item.model_calls,
+                item.tool_calls,
+                item.successful_calls,
+                item.failed_calls,
+                item.tokens.input_tokens,
+            )
+            for item in stats.daily
+        ] == [
+            ("2026-10-11", 1, 1, 2, 0, 7),
+            ("2026-10-12", 1, 1, 0, 2, 0),
+        ]
+
+        filtered = await recorder.get_stats(
+            TraceRecordFilters(from_at=next_day, to_at=next_day)
+        )
+        assert filtered.totals.model_calls == 1
+        assert filtered.totals.tool_calls == 1
+        assert filtered.totals.average_duration_ms == 40
+        assert [item.date for item in filtered.daily] == ["2026-10-12"]
     finally:
         await recorder.close()
 

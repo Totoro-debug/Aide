@@ -4,11 +4,11 @@ status: accepted
 
 # Use File-First Local Persistence
 
-Aide stores inspectable local files instead of a database. One shared service coordinates concurrent clients; atomic replacement alone cannot coordinate independent in-memory runtimes. Runtime ownership is defined in [ADR-0029](0029-host-cli-and-web-through-one-local-service.md).
+Aide stores its existing domain state as inspectable local files. Execution Trace uses SQLite under [ADR-0031](0031-store-execution-trace-in-sqlite.md). One shared service coordinates concurrent clients; atomic replacement alone cannot coordinate independent in-memory runtimes. Runtime ownership is defined in [ADR-0029](0029-host-cli-and-web-through-one-local-service.md).
 
 ## Ownership
 
-Agent Home (`~/.aide/`) owns configuration, user-authored Skills, Project registrations, conversation-directory indexes, and service discovery and locks. Directory catalogs hold references, never copies of Workspace data.
+Agent Home (`~/.aide/`) owns configuration, user-authored Skills, Project registrations, conversation-directory indexes, service discovery and locks, and the global Execution Trace database selected in [ADR-0031](0031-store-execution-trace-in-sqlite.md). Directory catalogs hold references, never copies of Workspace data.
 
 Each Workspace owns its state under `<workspace>/.aide/`:
 

@@ -123,7 +123,15 @@ export default async function browserRecoveryAcceptance({ page: initialPage, con
         await expect(input()).toBeEnabled();
         if (draft) await newProjectConversation(page);
       } else if (draft) {
+        const opened = page.waitForResponse(response => response.url().endsWith("/conversations/open")
+          && response.request().method() === "POST"
+          && response.request().postDataJSON()?.create_new === true
+          && response.request().postDataJSON()?.project_id === undefined);
         await page.locator("#app-sidebar").getByRole("link", { name: "New conversation", exact: true }).click();
+        const response = await opened;
+        assert.equal(response.status(), 200, await response.text());
+        const { session_id } = await response.json();
+        await expect.poll(async () => (await snapshot())?.session_id).toBe(session_id);
       } else {
         const params = new URLSearchParams({ directory: chat.directory, session: chat.id });
         await page.goto(`${origin}/chat?${params}`);

@@ -584,6 +584,7 @@ function ProjectSessionsContent({
   const [recreateBrowserDraft, setRecreateBrowserDraft] = useState(false);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [sessionRefreshError, setSessionRefreshError] = useState<string | null>(null);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameTitle, setRenameTitle] = useState("");
   const [renameBusy, setRenameBusy] = useState(false);
@@ -1302,7 +1303,7 @@ function ProjectSessionsContent({
       setSessionNextCursor(response.next_cursor);
       if (response.sessions.some((item) => item.id === selectedSessionRef.current)) setDraft(false);
       setLoadState("ready");
-      setActionError(restoreError);
+      setSessionRefreshError(restoreError);
     } catch (error) {
       if (!mountedRef.current || requestNumber !== sessionRequestRef.current) return;
       if (error instanceof ApiError && error.body?.code === "not_found"
@@ -1311,7 +1312,7 @@ function ProjectSessionsContent({
         return;
       }
       setLoadState("error");
-      setActionError(sessionErrorKey(error));
+      setSessionRefreshError(sessionErrorKey(error));
     }
   }, [authState, claimDeletion, clearClaimState, clearPendingDeletion, connectionState, getDeletionStatus, initialSessionId, listSessions, onBrowserRecoveryUnavailable, onRestoreConsumed, readBrowserRecoveryForSession, registeredClient, releaseOrphanClaim, rememberPendingDeletion, rememberSession, readClaimSnapshot, sessionScopeId]);
 
@@ -1504,6 +1505,7 @@ function ProjectSessionsContent({
     setBusySessionId(sessionId ?? "new");
     setOccupiedSessionId(null);
     setActionError(null);
+    setSessionRefreshError(null);
     try {
       const response = await readWithEvents(
         () => openConversationForSession(sessionId, sessionId === null),
@@ -1544,7 +1546,7 @@ function ProjectSessionsContent({
       setBusySessionId(null);
     }
   }, [busySessionId, onBrowserRecoveryUnavailable, openConversationForSession, readBrowserRecoveryForSession,
-    readWithEvents, refreshSessions, releaseOrphanClaim, rememberSession, setComposerInputText]);
+    readWithEvents, refreshSessions, releaseOrphanClaim, rememberSession, setActionError, setComposerInputText]);
 
   useEffect(() => {
     if (initialConversation === undefined || adoptedConversationRef.current === initialConversation) return;
@@ -1587,6 +1589,7 @@ function ProjectSessionsContent({
     setBusySessionId("new");
     setOccupiedSessionId(null);
     setActionError(null);
+    setSessionRefreshError(null);
     if (!isChat && !(preserveSettings && window.location.pathname === "/settings")) {
       navigate(`/projects/${encodeURIComponent(sessionScopeId)}`, { replace: true });
     }
@@ -1597,7 +1600,7 @@ function ProjectSessionsContent({
     } finally {
       setBusySessionId(null);
     }
-  }, [busySessionId, isChat, navigate, openSession, sessionScopeId]);
+  }, [busySessionId, isChat, navigate, openSession, sessionScopeId, setActionError]);
 
   useEffect(() => {
     if (projectSessionRequestId == null || loadState !== "ready" || busySessionId !== null
@@ -2233,10 +2236,10 @@ function ProjectSessionsContent({
           {connectionState === "recovering" ? t("sessions.reconnecting") : t("sessions.disconnected")}
         </div>
       ) : null}
-      {actionError !== null ? (
+      {actionError !== null || sessionRefreshError !== null ? (
         <div className={styles.errorBanner} role="alert">
           <CircleAlert size={17} aria-hidden="true" />
-          <span>{t(actionError)}</span>
+          <span>{t(actionError ?? sessionRefreshError ?? "sessions.actionError")}</span>
           {occupiedSessionId !== null ? (
             <TraceSessionEntry
               sessionId={occupiedSessionId}

@@ -913,6 +913,15 @@ async def _run_e2e(provider_base_url: str) -> None:
                     )
                     print(json.dumps(result), flush=True)
                     continue
+                if command.strip() == "trace-run":
+                    PROCESS_RELEASE.set()
+                    result = await project_client.submit_user_input("process cycles")
+                    print(json.dumps({"session_id": project_client.session_id, **result}), flush=True)
+                    continue
+                if command.strip() == "trace-claim":
+                    result = await project_client.open_conversation(session_id=occupied_session_id)
+                    print(json.dumps(result), flush=True)
+                    continue
                 if command.startswith("cli-claim "):
                     if peer_client is None:
                         peer_client = await ServiceClient.connect_or_start(

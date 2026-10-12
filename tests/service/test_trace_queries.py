@@ -17,7 +17,7 @@ from aide.config.config import ConfigLoader
 from aide.service.discovery import create_credential
 from aide.service.runtime import AgentService
 from aide.service.transport import create_app
-from aide.trace import TraceRootSource, workspace_key_for
+from aide.trace.context import TraceRootSource, workspace_key_for
 from aide.trace.sqlite_recorder import SQLiteTraceRecorder
 from aide.trace.types import (
     TraceAttemptMetadata,

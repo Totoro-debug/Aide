@@ -7,7 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from time import monotonic
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, cast, runtime_checkable
 
 from loguru import logger
 
@@ -455,6 +455,11 @@ class ModelRouterDelegate(Protocol):
     ) -> ModelRouteStatus: ...
 
 
+@runtime_checkable
+class _ClosableModelStream(Protocol):
+    async def aclose(self) -> None: ...
+
+
 class RunModelRouter:
     """Bind one guard and final route-status snapshot to an Agent Run."""
 
@@ -497,9 +502,8 @@ class RunModelRouter:
                     yield event
             finally:
                 try:
-                    close = getattr(events, "aclose", None)
-                    if close is not None:
-                        await close()
+                    if isinstance(events, _ClosableModelStream):
+                        await events.aclose()
                 finally:
                     self._remember_call_status(route)
 

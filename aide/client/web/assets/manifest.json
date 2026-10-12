@@ -8,9 +8,9 @@
       "bytes": 104615
     },
     {
-      "path": "assets/index-C8dvGo0Y.js",
-      "sha256": "c4593a33e91d7e6898ae19283d3a595a413cae7a003d6f010d5c1c9afd17f25b",
-      "bytes": 865995
+      "path": "assets/index-DPd9mjDm.js",
+      "sha256": "258002c59cc11f355d51f6433a37f1a151b607a78030b5dee152782305432c55",
+      "bytes": 866095
     },
     {
       "path": "favicon.svg",
@@ -19,7 +19,7 @@
     },
     {
       "path": "index.html",
-      "sha256": "d6743f959415451c0b815896988a78f1f74780528798c73c4e2f67f8631f5d32",
+      "sha256": "028af06a07a7f3702d9c4223ae9621d459128d1b3290d00703cb128ad171ded4",
       "bytes": 483
     }
   ]

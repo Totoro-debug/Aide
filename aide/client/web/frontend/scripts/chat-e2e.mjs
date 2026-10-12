@@ -710,7 +710,8 @@ try {
   await refreshHistoryButton.click();
   const refreshedHistory = await (await historyRefresh).json();
   assert.deepEqual(Object.keys(refreshedHistory).sort(), ["next_cursor", "sessions"]);
-  assert.ok(refreshedHistory.sessions.some(session => session.id === secondConversation.id));
+  assert.ok(refreshedHistory.sessions.some(session => session.id === firstConversation.id));
+  assert.equal(refreshedHistory.sessions.some(session => session.id === secondConversation.id), false);
   await expect(page.getByRole("status").filter({ hasText: unavailableDirectory })).toHaveCount(0);
   await assert.rejects(stat(unavailableDirectory), { code: "ENOENT" });
   await rename(join(control.details.home_root, "unavailable-chat-moved"), unavailableDirectory);

@@ -76,6 +76,10 @@ _Avoid_: Detached mode, daemon mode, persistent background process, one-shot com
 Workspace-owned technical diagnostics associated with one Conversation Session rather than with the whole installation.
 _Avoid_: Runtime Log, Conversation log, chat transcript, audit log, activity feed
 
+**Execution Trace**:
+The recorded model requests and Tool invocations performed by the Personal Agent across foreground, SubAgent, Schedule, and auxiliary work, including their inputs, outcomes, timing, origin, and reported usage when available.
+_Avoid_: Session Log, Conversation Session history, Agent Run Activity Group
+
 **Agent Runner**:
 A reusable, Session-independent engine that performs one bounded model-and-Tool ReAct loop for any request that requires ReAct.
 _Avoid_: Agent Service, Conversation Session, Runtime Lifetime, Provider retry loop, single model call

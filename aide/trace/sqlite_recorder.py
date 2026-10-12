@@ -8,7 +8,7 @@ import json
 import sqlite3
 import threading
 import zlib
-from collections import defaultdict, deque
+from collections import deque
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -72,6 +72,13 @@ _WRITER_RETRY_DELAYS = (0.1, 1.0, 5.0)
 _WRITER_BATCH_SIZE = 128
 _WRITER_BATCH_DELAY = 0.002
 _PURGE_BATCH_SIZE = 500
+_TRACE_TOKEN_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cached_input_tokens",
+    "cache_creation_input_tokens",
+)
 _SCHEMA_VERSION = 1
 _PAGE_LIMIT_MAX = 1000
 _T = TypeVar("_T")
@@ -811,10 +818,31 @@ class SQLiteTraceRecorder(TraceRecorder):
             raise ValueError("Trace clock must return an aware UTC datetime")
         return _utc_text(now - timedelta(days=TRACE_RETENTION_DAYS))
 
-    def _record_visibility_sql(self, alias: str = "r") -> tuple[str, list[object]]:
+    def _record_visibility_sql(
+        self, connection: sqlite3.Connection, alias: str = "r"
+    ) -> tuple[str, list[object]]:
+        with self._condition:
+            closed_sessions = tuple(self._closed_sessions)
+        closed_sql = ""
+        if closed_sessions:
+            connection.execute(
+                "CREATE TEMP TABLE trace_closed_session_scopes ("
+                "workspace_key TEXT NOT NULL, owner_session_id TEXT NOT NULL, "
+                "PRIMARY KEY (workspace_key, owner_session_id)) WITHOUT ROWID"
+            )
+            connection.executemany(
+                "INSERT INTO trace_closed_session_scopes(workspace_key, owner_session_id) "
+                "VALUES (?, ?)",
+                closed_sessions,
+            )
+            closed_sql = (
+                " AND NOT EXISTS (SELECT 1 FROM trace_closed_session_scopes AS c "
+                f"WHERE c.workspace_key = {alias}.workspace_key "
+                f"AND c.owner_session_id = {alias}.owner_session_id)"
+            )
         return (
             f" AND {alias}.finished_at >= ? "
-            f"AND NOT trace_session_closed({alias}.workspace_key, {alias}.owner_session_id)",
+            + closed_sql,
             [self._retention_cutoff()],
         )
 
@@ -937,7 +965,6 @@ class SQLiteTraceRecorder(TraceRecorder):
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
-        connection.create_function("trace_session_closed", 2, self._session_scope_closed)
         if writer:
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.execute("PRAGMA journal_mode = WAL")
@@ -953,10 +980,17 @@ class SQLiteTraceRecorder(TraceRecorder):
             raise RuntimeError(f"No migration path for Trace schema version {version}")
         connection.execute("BEGIN IMMEDIATE")
         try:
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trace_records_sessions "
+                "ON trace_records(workspace_key, owner_session_id, subject_session_id, origin, "
+                "publish_sequence DESC, finished_at DESC, workspace_path) "
+                "WHERE published = 1 AND owner_session_id IS NOT NULL"
+            )
             connection.execute("DELETE FROM trace_records WHERE published = 0")
             connection.execute(
                 "DELETE FROM trace_roots WHERE NOT EXISTS "
-                "(SELECT 1 FROM trace_records WHERE trace_records.root_id = trace_roots.root_id)"
+                "(SELECT 1 FROM trace_records WHERE trace_records.root_id = trace_roots.root_id "
+                "AND trace_records.published = 1)"
             )
             connection.execute("COMMIT")
         except Exception:
@@ -1678,7 +1712,7 @@ class SQLiteTraceRecorder(TraceRecorder):
     ) -> TracePage:
         connection = self._connect()
         try:
-            visibility_sql, visibility_parameters = self._record_visibility_sql()
+            visibility_sql, visibility_parameters = self._record_visibility_sql(connection)
             if cursor is None:
                 snapshot = int(
                     connection.execute(
@@ -1741,7 +1775,7 @@ class SQLiteTraceRecorder(TraceRecorder):
     ) -> TraceSessionPage:
         connection = self._connect()
         try:
-            visibility_sql, visibility_parameters = self._record_visibility_sql()
+            visibility_sql, visibility_parameters = self._record_visibility_sql(connection)
             if cursor is None:
                 snapshot = int(
                     connection.execute(
@@ -1794,7 +1828,7 @@ class SQLiteTraceRecorder(TraceRecorder):
     def _get_record_sync(self, record_id: str) -> TraceRecordDetail | None:
         connection = self._connect()
         try:
-            visibility_sql, visibility_parameters = self._record_visibility_sql()
+            visibility_sql, visibility_parameters = self._record_visibility_sql(connection)
             row = connection.execute(
                 "SELECT r.* FROM trace_records AS r "
                 "WHERE r.record_id = ? AND r.published = 1" + visibility_sql,
@@ -1860,7 +1894,7 @@ class SQLiteTraceRecorder(TraceRecorder):
     ) -> TraceRawPage:
         connection = self._connect()
         try:
-            visibility_sql, visibility_parameters = self._record_visibility_sql()
+            visibility_sql, visibility_parameters = self._record_visibility_sql(connection)
             stream = connection.execute(
                 """SELECT s.stream_id, s.direction, s.layer, s.content_type, s.content_encoding,
                           COALESCE(SUM(c.original_size), 0) AS total_bytes
@@ -1920,82 +1954,109 @@ class SQLiteTraceRecorder(TraceRecorder):
 
     def _get_stats_sync(self, filters: TraceRecordFilters | None) -> TraceStats:
         connection = self._connect()
+        total = model_calls = tool_calls = success_count = failed_count = 0
+        retry_count = retried_calls = unknown_usage_count = 0
+        duration_total = duration_count = 0
+        token_totals = [0] * len(_TRACE_TOKEN_FIELDS)
+        daily_values: dict[str, list[int]] = {}
+        model_values: dict[str, list[int]] = {}
+        tool_values: dict[str, list[int]] = {}
+        purpose_values: dict[str, list[int]] = {}
+        error_values: dict[str, int] = {}
+
+        def add_breakdown(
+            values: dict[str, list[int]], key: str | None, calls: int, tokens: Sequence[int]
+        ) -> None:
+            if key is None:
+                return
+            aggregate = values.setdefault(key, [0] * (len(_TRACE_TOKEN_FIELDS) + 1))
+            aggregate[0] += calls
+            for index, value in enumerate(tokens, start=1):
+                aggregate[index] += value
+
         try:
-            visibility_sql, visibility_parameters = self._record_visibility_sql()
+            connection.execute("PRAGMA temp_store = MEMORY")
+            connection.row_factory = None
+            visibility_sql, visibility_parameters = self._record_visibility_sql(connection)
             filter_sql, filter_parameters = _filter_sql(filters)
-            rows = connection.execute(
-                "SELECT r.* FROM trace_records AS r WHERE r.published = 1"
-                + visibility_sql
-                + filter_sql,
-                (*visibility_parameters, *filter_parameters),
-            ).fetchall()
-        finally:
-            connection.close()
-
-        by_model: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0, 0, 0, 0])
-        by_tool: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0, 0, 0, 0])
-        by_purpose: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0, 0, 0, 0])
-        by_error: dict[TraceErrorCategory, int] = defaultdict(int)
-        daily: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0, 0, 0, 0, 0, 0, 0])
-        model_calls = tool_calls = success_count = failed_count = 0
-        retry_count = retried_calls = unknown_usage_count = duration_total = 0
-        token_totals = [0, 0, 0, 0, 0]
-
-        for row in rows:
-            is_model = row["kind"] == TraceKind.MODEL.value
-            is_tool = row["kind"] == TraceKind.TOOL.value
-            succeeded = row["status"] == TraceStatus.SUCCESS.value
-            model_calls += int(is_model)
-            tool_calls += int(is_tool)
-            success_count += int(succeeded)
-            failed_count += int(not succeeded)
-            row_retry_count = int(row["retry_count"])
-            retry_count += row_retry_count
-            retried_calls += int(row_retry_count > 0)
-            duration_total += int(row["duration_ms"])
-            unknown_usage_count += int(
-                is_model and row["usage_state"] == TraceUsageState.UNKNOWN.value
+            token_sum_sql = ", ".join(
+                "COALESCE(SUM(CASE WHEN r.kind = 'model' AND r.usage_state = 'reported' "
+                f"THEN COALESCE(r.{field}, 0) ELSE 0 END), 0) AS {field}"
+                for field in _TRACE_TOKEN_FIELDS
             )
+            rows = connection.execute(
+                "SELECT substr(r.finished_at, 1, 10) AS date, r.model, r.tool_name, "
+                "r.purpose, r.error_category, COUNT(*) AS calls, "
+                "COALESCE(SUM(CASE WHEN r.status <> 'success' "
+                "AND r.error_category IS NOT NULL THEN 1 ELSE 0 END), 0) AS error_calls, "
+                "COALESCE(SUM(r.kind = 'model'), 0) AS model_calls, "
+                "COALESCE(SUM(r.kind = 'tool'), 0) AS tool_calls, "
+                "COALESCE(SUM(r.status = 'success'), 0) AS successful_calls, "
+                "COALESCE(SUM(r.status <> 'success'), 0) AS failed_calls, "
+                "COALESCE(SUM(r.retry_count), 0) AS retry_count, "
+                "COALESCE(SUM(r.retry_count > 0), 0) AS retried_calls, "
+                "COALESCE(SUM(r.kind = 'model' AND r.usage_state = 'unknown'), 0) "
+                "AS unknown_usage_count, COALESCE(SUM(r.duration_ms), 0) AS duration_total, "
+                "COUNT(r.duration_ms) AS duration_count, "
+                + token_sum_sql
+                + " FROM trace_records AS r WHERE r.published = 1"
+                + visibility_sql
+                + filter_sql
+                + " GROUP BY substr(r.finished_at, 1, 10), r.model, r.tool_name, "
+                "r.purpose, r.error_category",
+                (*visibility_parameters, *filter_parameters),
+            )
+            for row in rows:
+                date = cast(str, row[0])
+                model = cast(str | None, row[1])
+                tool_name = cast(str | None, row[2])
+                purpose = cast(str | None, row[3])
+                category = cast(str | None, row[4])
+                calls = int(row[5])
+                error_calls = int(row[6])
+                row_model_calls = int(row[7])
+                row_tool_calls = int(row[8])
+                row_success_count = int(row[9])
+                row_failed_count = int(row[10])
+                row_retry_count = int(row[11])
+                row_retried_calls = int(row[12])
+                row_unknown_usage_count = int(row[13])
+                row_duration_total = int(row[14])
+                row_duration_count = int(row[15])
+                row_tokens = [int(row[16 + index]) for index in range(len(_TRACE_TOKEN_FIELDS))]
 
-            row_tokens = [0, 0, 0, 0, 0]
-            if is_model and row["usage_state"] == TraceUsageState.REPORTED.value:
-                row_tokens = [
-                    int(row[name] or 0)
-                    for name in (
-                        "input_tokens",
-                        "output_tokens",
-                        "total_tokens",
-                        "cached_input_tokens",
-                        "cache_creation_input_tokens",
-                    )
-                ]
+                total += calls
+                model_calls += row_model_calls
+                tool_calls += row_tool_calls
+                success_count += row_success_count
+                failed_count += row_failed_count
+                retry_count += row_retry_count
+                retried_calls += row_retried_calls
+                unknown_usage_count += row_unknown_usage_count
+                duration_total += row_duration_total
+                duration_count += row_duration_count
                 for index, value in enumerate(row_tokens):
                     token_totals[index] += value
 
-            aggregates = [by_purpose[row["purpose"]]]
-            if row["model"] is not None:
-                aggregates.append(by_model[row["model"]])
-            if row["tool_name"] is not None:
-                aggregates.append(by_tool[row["tool_name"]])
-            for aggregate in aggregates:
-                aggregate[0] += 1
-                for index, value in enumerate(row_tokens, start=1):
-                    aggregate[index] += value
+                day = daily_values.setdefault(date, [0] * (4 + len(_TRACE_TOKEN_FIELDS)))
+                day[0] += row_model_calls
+                day[1] += row_tool_calls
+                day[2] += row_success_count
+                day[3] += row_failed_count
+                for index, value in enumerate(row_tokens, start=4):
+                    day[index] += value
 
-            if not succeeded and row["error_category"] is not None:
-                by_error[TraceErrorCategory(row["error_category"])] += 1
-            day = cast(str, row["finished_at"][:10])
-            point = daily[day]
-            point[0] += int(is_model)
-            point[1] += int(is_tool)
-            point[2] += int(succeeded)
-            point[3] += int(not succeeded)
-            for index, value in enumerate(row_tokens, start=4):
-                point[index] += value
+                add_breakdown(model_values, model, calls, row_tokens)
+                add_breakdown(tool_values, tool_name, calls, row_tokens)
+                add_breakdown(purpose_values, purpose, calls, row_tokens)
+                if category is not None and error_calls:
+                    error_values[category] = error_values.get(category, 0) + error_calls
+        finally:
+            connection.close()
 
-        total = len(rows)
         failure_rate = failed_count / total if total else None
-        average_duration = duration_total / total if total else None
+        average_duration = duration_total / duration_count if duration_count else None
+
         return TraceStats(
             totals=TraceStatsTotals(
                 model_calls=model_calls,
@@ -2009,23 +2070,23 @@ class SQLiteTraceRecorder(TraceRecorder):
                 average_duration_ms=average_duration,
             ),
             tokens=TraceTokenTotals(*token_totals),
-            by_model=self._breakdowns(by_model),
-            by_tool=self._breakdowns(by_tool),
-            by_purpose=self._breakdowns(by_purpose),
+            by_model=self._breakdowns(model_values),
+            by_tool=self._breakdowns(tool_values),
+            by_purpose=self._breakdowns(purpose_values),
             by_error_category=tuple(
-                TraceErrorBreakdown(category=category, calls=count)
-                for category, count in sorted(by_error.items(), key=lambda item: item[0].value)
+                TraceErrorBreakdown(category=TraceErrorCategory(category), calls=calls)
+                for category, calls in sorted(error_values.items())
             ),
             daily=tuple(
                 TraceTimelinePoint(
-                    date=day,
+                    date=date,
                     model_calls=values[0],
                     tool_calls=values[1],
                     successful_calls=values[2],
                     failed_calls=values[3],
                     tokens=TraceTokenTotals(*values[4:]),
                 )
-                for day, values in sorted(daily.items())
+                for date, values in sorted(daily_values.items())
             ),
             methodology=_METHODLOGY,
         )
@@ -2035,10 +2096,10 @@ class SQLiteTraceRecorder(TraceRecorder):
         return tuple(
             TraceBreakdown(
                 key=key,
-                calls=aggregate[0],
-                tokens=TraceTokenTotals(*aggregate[1:]),
+                calls=values[key][0],
+                tokens=TraceTokenTotals(*values[key][1:]),
             )
-            for key, aggregate in sorted(values.items(), key=lambda item: (-item[1][0], item[0]))
+            for key in sorted(values, key=lambda item: (-values[item][0], item))
         )
 
     @staticmethod

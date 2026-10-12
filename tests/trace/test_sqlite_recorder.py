@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import sqlite3
+import zlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Barrier, Event, Thread
@@ -29,6 +31,70 @@ from aide.trace.types import (
 )
 
 _NOW = datetime(2026, 10, 11, 0, 0, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_raw_pages_only_decompress_overlapping_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
+    payload = random.Random(341).randbytes(4 * 1024 * 1024)
+    try:
+        handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
+        recorder.append_raw(handle, source="response", direction=TraceDirection.RESPONSE,
+                            layer=TraceCaptureLayer.TOOL_RESULT, sequence=0, data=payload)
+        recorder.finish_call(handle, _success(), result="ok", usage=_usage(), retry_count=0)
+        await recorder.flush()
+        original_decompress = zlib.decompress
+        sizes: list[int] = []
+
+        def decompress(data: bytes) -> bytes:
+            result = original_decompress(data)
+            sizes.append(len(result))
+            return result
+
+        monkeypatch.setattr(zlib, "decompress", decompress)
+        pages = []
+        for offset in range(0, len(payload), 256 * 1024):
+            page = await recorder.read_raw(handle.record_id, source="response",
+                                           offset=offset, limit_bytes=256 * 1024)
+            pages.append(page.data)
+        assert b"".join(pages) == payload
+        assert len(sizes) == 64
+        assert sum(sizes) == len(payload)
+        for offset, limit in [(0, 1), (65_535, 2), (70_003, 90_009),
+                              (len(payload) - 7, 100), (len(payload), 100),
+                              (len(payload) + 1, 100)]:
+            sizes.clear()
+            page = await recorder.read_raw(handle.record_id, source="response",
+                                           offset=offset, limit_bytes=limit)
+            assert page.data == payload[offset:offset + limit]
+            assert sum(sizes) <= limit + 2 * TRACE_MAX_RAW_CHUNK_BYTES
+    finally:
+        await recorder.close()
+
+
+@pytest.mark.asyncio
+async def test_raw_offsets_follow_remaining_replaced_and_empty_chunks(tmp_path: Path) -> None:
+    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
+    try:
+        handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
+        for sequence, data in [(2, b"discard"), (0, b"old" * 30_000), (1, b""),
+                               (0, b"replacement"), (3, b"last")]:
+            recorder.append_raw(handle, source="response", direction=TraceDirection.RESPONSE,
+                                layer=TraceCaptureLayer.TOOL_RESULT, sequence=sequence, data=data)
+        recorder.finish_call(handle, _success(), result="ok", usage=_usage(), retry_count=0)
+        await recorder.flush()
+        with sqlite3.connect(recorder.path) as connection:
+            connection.execute("DELETE FROM trace_raw_chunks WHERE sequence = 2")
+        expected = b"replacementlast"
+        for offset in range(len(expected) + 2):
+            page = await recorder.read_raw(handle.record_id, source="response",
+                                           offset=offset, limit_bytes=3)
+            assert page.data == expected[offset:offset + 3]
+            assert page.total_bytes == len(expected)
+    finally:
+        await recorder.close()
 
 
 def _new_context(recorder: SQLiteTraceRecorder, *, session_id: str = "session-1") -> TraceContext:

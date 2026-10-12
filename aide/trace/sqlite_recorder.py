@@ -1923,14 +1923,21 @@ class SQLiteTraceRecorder(TraceRecorder):
             position = 0
             if offset < total_bytes:
                 chunks = connection.execute(
-                    """SELECT original_size, compressed_data FROM trace_raw_chunks
+                    """SELECT sequence, part, original_size FROM trace_raw_chunks
                        WHERE stream_id = ? ORDER BY sequence, part""",
                     (stream["stream_id"],),
                 )
                 for chunk in chunks:
-                    data = zlib.decompress(chunk["compressed_data"])
-                    chunk_end = position + len(data)
+                    chunk_end = position + int(chunk["original_size"])
                     if chunk_end > offset and position < end_offset:
+                        body = connection.execute(
+                            """SELECT compressed_data FROM trace_raw_chunks
+                               WHERE stream_id = ? AND sequence = ? AND part = ?""",
+                            (stream["stream_id"], chunk["sequence"], chunk["part"]),
+                        ).fetchone()
+                        if body is None:
+                            break
+                        data = zlib.decompress(body["compressed_data"])
                         start = max(0, offset - position)
                         stop = min(len(data), end_offset - position)
                         output.extend(data[start:stop])

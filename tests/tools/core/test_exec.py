@@ -12,6 +12,7 @@ from aide.agent.tools import base as tool_base_module
 from aide.agent.tools.core.exec import ExecTool
 from aide.agent.tools.core.exec_host import (
     ExecProcessSpec,
+    ExecProcessStream,
     PowerShellExecHost,
     resolve_exec_shell,
 )
@@ -56,8 +57,15 @@ class FakeProcess:
         stderr: bytes = b"",
         returncode: int | None = 0,
     ) -> None:
-        self.stdout = stdout
-        self.stderr = stderr
+        self._stdout_reader = asyncio.StreamReader()
+        self._stderr_reader = asyncio.StreamReader()
+        self._stdout_reader.feed_data(stdout)
+        self._stderr_reader.feed_data(stderr)
+        if returncode is not None:
+            self._stdout_reader.feed_eof()
+            self._stderr_reader.feed_eof()
+        self.stdout: ExecProcessStream = self._stdout_reader
+        self.stderr: ExecProcessStream = self._stderr_reader
         self.returncode = returncode
         self.killed = asyncio.Event()
         self.reaped = asyncio.Event()
@@ -66,12 +74,15 @@ class FakeProcess:
 
     async def communicate(self) -> tuple[bytes, bytes]:
         self.started.set()
-        return self.stdout, self.stderr
+        stdout, stderr = await asyncio.gather(self.stdout.read(), self.stderr.read())
+        return stdout, stderr
 
     def kill(self) -> None:
         self.killed.set()
         self.returncode = -9
         self.released.set()
+        self._stdout_reader.feed_eof()
+        self._stderr_reader.feed_eof()
 
     async def wait(self) -> int:
         self.reaped.set()
@@ -80,12 +91,9 @@ class FakeProcess:
 
 class BlockingProcess(FakeProcess):
     def __init__(self) -> None:
-        super().__init__(returncode=None)
-
-    async def communicate(self) -> tuple[bytes, bytes]:
-        self.started.set()
-        await self.released.wait()
-        return b"partial stdout\n", b"partial stderr\n"
+        super().__init__(
+            stdout=b"partial stdout\n", stderr=b"partial stderr\n", returncode=None
+        )
 
 
 class TimeoutThenSlowReapProcess(FakeProcess):

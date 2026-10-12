@@ -138,8 +138,17 @@ async def test_powershell_inspection_returns_canonical_identity_metadata(
     class Process:
         returncode = 0
 
+        def __init__(self) -> None:
+            self.stdout = asyncio.StreamReader()
+            self.stdout.feed_data(json.dumps(payload).encode("utf-8"))
+            self.stdout.feed_eof()
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_data(b"")
+            self.stderr.feed_eof()
+
         async def communicate(self) -> tuple[bytes, bytes]:
-            return json.dumps(payload).encode("utf-8"), b""
+            stdout, stderr = await asyncio.gather(self.stdout.read(), self.stderr.read())
+            return stdout, stderr
 
         def kill(self) -> None:
             raise AssertionError("a completed parser process should not be killed")
@@ -1419,8 +1428,17 @@ async def test_powershell_inspection_boundaries_fail_closed_without_running_user
     class Process:
         returncode = 0
 
+        def __init__(self) -> None:
+            self.stdout = asyncio.StreamReader()
+            self.stdout.feed_data(b'{"syntax_ok":false,"command_names":["Get-Location"]}')
+            self.stdout.feed_eof()
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_data(b"")
+            self.stderr.feed_eof()
+
         async def communicate(self) -> tuple[bytes, bytes]:
-            return b'{"syntax_ok":false,"command_names":["Get-Location"]}', b""
+            stdout, stderr = await asyncio.gather(self.stdout.read(), self.stderr.read())
+            return stdout, stderr
 
         def kill(self) -> None:
             raise AssertionError("a completed parser process should not be killed")
@@ -1602,8 +1620,17 @@ async def test_incomplete_or_inconsistent_identity_payload_is_typed_uncertainty(
     class Process:
         returncode = 0
 
+        def __init__(self) -> None:
+            self.stdout = asyncio.StreamReader()
+            self.stdout.feed_data(json.dumps(payload).encode("utf-8"))
+            self.stdout.feed_eof()
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_data(b"")
+            self.stderr.feed_eof()
+
         async def communicate(self) -> tuple[bytes, bytes]:
-            return json.dumps(payload).encode("utf-8"), b""
+            stdout, stderr = await asyncio.gather(self.stdout.read(), self.stderr.read())
+            return stdout, stderr
 
         def kill(self) -> None:
             raise AssertionError("a completed inspector process should not be killed")
@@ -1662,9 +1689,16 @@ async def test_git_repository_execution_delegation_requires_confirmation_fact(
     class Process:
         def __init__(self, response: tuple[int, bytes, bytes]) -> None:
             self.returncode, self._stdout, self._stderr = response
+            self.stdout = asyncio.StreamReader()
+            self.stdout.feed_data(self._stdout)
+            self.stdout.feed_eof()
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_data(self._stderr)
+            self.stderr.feed_eof()
 
         async def communicate(self) -> tuple[bytes, bytes]:
-            return self._stdout, self._stderr
+            stdout, stderr = await asyncio.gather(self.stdout.read(), self.stderr.read())
+            return stdout, stderr
 
         def kill(self) -> None:
             raise AssertionError("a completed Git audit should not be killed")
@@ -1735,9 +1769,16 @@ async def test_git_repository_audit_error_is_typed_inspector_failure(
     class Process:
         def __init__(self, response: tuple[int, bytes, bytes]) -> None:
             self.returncode, self._stdout, self._stderr = response
+            self.stdout = asyncio.StreamReader()
+            self.stdout.feed_data(self._stdout)
+            self.stdout.feed_eof()
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_data(self._stderr)
+            self.stderr.feed_eof()
 
         async def communicate(self) -> tuple[bytes, bytes]:
-            return self._stdout, self._stderr
+            stdout, stderr = await asyncio.gather(self.stdout.read(), self.stderr.read())
+            return stdout, stderr
 
         def kill(self) -> None:
             raise AssertionError("a completed Git audit should not be killed")
@@ -1805,9 +1846,16 @@ async def test_git_audit_never_launches_workspace_identity_or_touches_external_t
 
             def __init__(self, response_payload: dict[str, object]) -> None:
                 self._response_payload = response_payload
+                self.stdout = asyncio.StreamReader()
+                self.stdout.feed_data(json.dumps(self._response_payload).encode("utf-8"))
+                self.stdout.feed_eof()
+                self.stderr = asyncio.StreamReader()
+                self.stderr.feed_data(b"")
+                self.stderr.feed_eof()
 
             async def communicate(self) -> tuple[bytes, bytes]:
-                return json.dumps(self._response_payload).encode("utf-8"), b""
+                stdout, stderr = await asyncio.gather(self.stdout.read(), self.stderr.read())
+                return stdout, stderr
 
             def kill(self) -> None:
                 raise AssertionError("a completed inspector should not be killed")
@@ -1860,8 +1908,17 @@ async def test_git_execution_uses_the_assessed_canonical_executable(
     class Process:
         returncode = 0
 
+        def __init__(self) -> None:
+            self.stdout = asyncio.StreamReader()
+            self.stdout.feed_data(b"diff")
+            self.stdout.feed_eof()
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_data(b"")
+            self.stderr.feed_eof()
+
         async def communicate(self) -> tuple[bytes, bytes]:
-            return b"diff", b""
+            stdout, stderr = await asyncio.gather(self.stdout.read(), self.stderr.read())
+            return stdout, stderr
 
         def kill(self) -> None:
             raise AssertionError("a completed Git process should not be killed")

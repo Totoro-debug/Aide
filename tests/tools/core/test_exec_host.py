@@ -303,8 +303,17 @@ async def test_powershell_inspection_uses_static_parser_without_running_source(
     class Process:
         returncode = 0
 
+        def __init__(self) -> None:
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+            self.stdout.feed_data(b'{"syntax_ok":true,"command_names":["Set-Content"]}')
+            self.stderr.feed_data(b"")
+            self.stdout.feed_eof()
+            self.stderr.feed_eof()
+
         async def communicate(self) -> tuple[bytes, bytes]:
-            return b'{"syntax_ok":true,"command_names":["Set-Content"]}', b""
+            stdout, stderr = await asyncio.gather(self.stdout.read(), self.stderr.read())
+            return stdout, stderr
 
         def kill(self) -> None:
             raise AssertionError("parser process should not be killed")
@@ -351,8 +360,17 @@ async def test_powershell_scriptblock_is_parse_only_and_parser_failure_is_uncert
     class Process:
         returncode = 0
 
+        def __init__(self) -> None:
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+            self.stdout.feed_data(b"not-json")
+            self.stderr.feed_data(b"")
+            self.stdout.feed_eof()
+            self.stderr.feed_eof()
+
         async def communicate(self) -> tuple[bytes, bytes]:
-            return b"not-json", b""
+            stdout, stderr = await asyncio.gather(self.stdout.read(), self.stderr.read())
+            return stdout, stderr
 
         def kill(self) -> None:
             raise AssertionError("a completed parser process should not be killed")
@@ -425,9 +443,16 @@ async def test_powershell_inspector_inconsistent_process_result_is_uncertain(
     class Process:
         def __init__(self) -> None:
             self.returncode = returncode
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+            self.stdout.feed_data(b'{"syntax_ok":true,"command_names":["Get-Location"]}')
+            self.stderr.feed_data(stderr)
+            self.stdout.feed_eof()
+            self.stderr.feed_eof()
 
         async def communicate(self) -> tuple[bytes, bytes]:
-            return b'{"syntax_ok":true,"command_names":["Get-Location"]}', stderr
+            stdout, stderr = await asyncio.gather(self.stdout.read(), self.stderr.read())
+            return stdout, stderr
 
         def kill(self) -> None:
             raise AssertionError("a completed parser process should not be killed")
@@ -465,8 +490,17 @@ async def test_pwsh_scriptblock_is_reported_as_dynamic(
     class Process:
         returncode = 0
 
+        def __init__(self) -> None:
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+            self.stdout.feed_data(b'{"syntax_ok":true,"command_names":["Get-Location"]}')
+            self.stderr.feed_data(b"")
+            self.stdout.feed_eof()
+            self.stderr.feed_eof()
+
         async def communicate(self) -> tuple[bytes, bytes]:
-            return b'{"syntax_ok":true,"command_names":["Get-Location"]}', b""
+            stdout, stderr = await asyncio.gather(self.stdout.read(), self.stderr.read())
+            return stdout, stderr
 
         def kill(self) -> None:
             raise AssertionError("a completed parser process should not be killed")
@@ -507,9 +541,16 @@ async def test_powershell_inspection_and_execution_share_process_inputs(
 
         def __init__(self, output: bytes) -> None:
             self.output = output
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+            self.stdout.feed_data(self.output)
+            self.stderr.feed_data(b"")
+            self.stdout.feed_eof()
+            self.stderr.feed_eof()
 
         async def communicate(self) -> tuple[bytes, bytes]:
-            return self.output, b""
+            stdout, stderr = await asyncio.gather(self.stdout.read(), self.stderr.read())
+            return stdout, stderr
 
         def kill(self) -> None:
             raise AssertionError("a completed process should not be killed")

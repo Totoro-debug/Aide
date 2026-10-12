@@ -200,7 +200,14 @@ class ExecCapabilityUnavailable(ExecHostError):
         super().__init__(EXEC_CAPABILITY_ERROR)
 
 
+class ExecProcessStream(Protocol):
+    async def read(self, n: int = -1) -> bytes: ...
+
+
 class ExecProcess(Protocol):
+    stdout: ExecProcessStream
+    stderr: ExecProcessStream
+
     @property
     def returncode(self) -> int | None: ...
 
@@ -999,7 +1006,7 @@ async def _spawn_process(
 class _ObservedProcessStream:
     def __init__(
         self,
-        stream: Any,
+        stream: ExecProcessStream,
         *,
         source: str,
         observer: ExecProcessOutputObserver,
@@ -1017,7 +1024,7 @@ class _ObservedProcessStream:
                 if not block:
                     return b"".join(blocks)
                 blocks.append(block)
-        data = cast(bytes, await self._stream.read(size))
+        data = await self._stream.read(size)
         _observe_exec_process_output(self._observer, self._source, self._sequence, data)
         self._sequence += 1
         return data
@@ -1027,39 +1034,17 @@ async def _communicate_with_output_capture(
     process: ExecProcess,
     observer: ExecProcessOutputObserver,
 ) -> tuple[bytes | None, bytes | None]:
-    stdout_stream = getattr(process, "stdout", None)
-    stderr_stream = getattr(process, "stderr", None)
-    if stdout_stream is None and stderr_stream is None:
-        stdout, stderr = await process.communicate()
-        _observe_exec_process_output(observer, "exec_stdout", 0, _as_bytes(stdout))
-        _observe_exec_process_output(observer, "exec_stderr", 0, _as_bytes(stderr))
-        return stdout, stderr
-
-    capturable_process = cast(Any, process)
+    stdout_stream, stderr_stream = process.stdout, process.stderr
     try:
-        if stdout_stream is not None:
-            capturable_process.stdout = _ObservedProcessStream(
-                stdout_stream,
-                source="exec_stdout",
-                observer=observer,
-            )
-        if stderr_stream is not None:
-            capturable_process.stderr = _ObservedProcessStream(
-                stderr_stream,
-                source="exec_stderr",
-                observer=observer,
-            )
-        stdout, stderr = await process.communicate()
-        if stdout_stream is None:
-            _observe_exec_process_output(observer, "exec_stdout", 0, _as_bytes(stdout))
-        if stderr_stream is None:
-            _observe_exec_process_output(observer, "exec_stderr", 0, _as_bytes(stderr))
-        return stdout, stderr
+        process.stdout = _ObservedProcessStream(
+            stdout_stream, source="exec_stdout", observer=observer
+        )
+        process.stderr = _ObservedProcessStream(
+            stderr_stream, source="exec_stderr", observer=observer
+        )
+        return await process.communicate()
     finally:
-        if stdout_stream is not None:
-            capturable_process.stdout = stdout_stream
-        if stderr_stream is not None:
-            capturable_process.stderr = stderr_stream
+        process.stdout, process.stderr = stdout_stream, stderr_stream
 
 
 def _observe_exec_process_output(
@@ -1080,7 +1065,7 @@ async def _create_process(
     cwd: Path,
     environment: dict[str, str],
 ) -> ExecProcess:
-    return await asyncio.create_subprocess_exec(
+    process = await asyncio.create_subprocess_exec(
         *argv,
         cwd=os.fspath(cwd),
         env=environment,
@@ -1088,6 +1073,9 @@ async def _create_process(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    # Both PIPEs are guaranteed by this creation boundary.
+    assert process.stdout is not None and process.stderr is not None
+    return cast(ExecProcess, process)
 
 
 async def _cleanup_cancelled_spawn(spawning: asyncio.Task[ExecProcess]) -> None:

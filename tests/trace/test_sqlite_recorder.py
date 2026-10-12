@@ -75,7 +75,9 @@ async def test_raw_pages_only_decompress_overlapping_chunks(
 
 
 @pytest.mark.asyncio
-async def test_raw_offsets_follow_remaining_replaced_and_empty_chunks(tmp_path: Path) -> None:
+async def test_raw_offsets_follow_remaining_replaced_and_empty_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
     try:
         handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
@@ -87,6 +89,14 @@ async def test_raw_offsets_follow_remaining_replaced_and_empty_chunks(tmp_path: 
         await recorder.flush()
         with sqlite3.connect(recorder.path) as connection:
             connection.execute("DELETE FROM trace_raw_chunks WHERE sequence = 2")
+        original_decompress = zlib.decompress
+
+        def decompress(data: bytes) -> bytes:
+            result = original_decompress(data)
+            assert result, "Empty blocks cover no requested bytes"
+            return result
+
+        monkeypatch.setattr(zlib, "decompress", decompress)
         expected = b"replacementlast"
         for offset in range(len(expected) + 2):
             page = await recorder.read_raw(handle.record_id, source="response",

@@ -1939,7 +1939,7 @@ class SQLiteTraceRecorder(TraceRecorder):
                 )
                 for chunk in chunks:
                     chunk_end = position + int(chunk["original_size"])
-                    if chunk_end > offset and position < end_offset:
+                    if chunk_end > position and chunk_end > offset and position < end_offset:
                         body = connection.execute(
                             """SELECT compressed_data FROM trace_raw_chunks
                                WHERE stream_id = ? AND sequence = ? AND part = ?""",

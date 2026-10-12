@@ -582,8 +582,10 @@ async def test_default_connection_discovers_provider_safe_names_and_reuses_tools
 
     @asynccontextmanager
     async def transport(
-        configuration: MCPServerConfiguration, workspace: Path
+        configuration: MCPServerConfiguration, workspace: Path,
+        *, protocol_trace: mcp_adapter._MCPProtocolTrace | None = None,
     ) -> AsyncIterator[object]:
+        assert protocol_trace is not None
         lifecycle.append("transport_entered")
         yield ("read", "write")
         lifecycle.append("transport_closed")

@@ -180,11 +180,16 @@ class _BaseToolMeta(ABCMeta):
             resolved_execute_prepared = getattr(tool_type, "execute_prepared", None)
             default_context_execute = getattr(base_tool, "execute_authorized_for_context", None)
             resolved_context_execute = getattr(tool_type, "execute_authorized_for_context", None)
+            default_authorized_execute = getattr(base_tool, "execute_authorized", None)
+            resolved_authorized_execute = getattr(tool_type, "execute_authorized", None)
             has_execution = (
                 callable(resolved_execute) and resolved_execute is not default_execute
             ) or (
                 callable(resolved_execute_prepared)
                 and resolved_execute_prepared is not default_execute_prepared
+            ) or (
+                callable(resolved_authorized_execute)
+                and resolved_authorized_execute is not default_authorized_execute
             ) or (
                 getattr(tool_type, "_contextual", False)
                 and callable(resolved_context_execute)

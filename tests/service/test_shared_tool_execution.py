@@ -97,7 +97,7 @@ async def test_service_foreground_and_schedule_reuse_catalog_with_workspace_and_
         catalog_creations.append(catalog)
 
     monkeypatch.setattr(BuiltInToolCatalog, "__init__", create_catalog)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         cases = [await _session_case(service, tmp_path / f"workspace-{i}") for i in range(2)]
@@ -219,7 +219,7 @@ async def test_service_cancels_only_the_calling_run_on_a_shared_exec_host(
     host = BlockingHost()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
     monkeypatch.setattr(service_runtime, "create_exec_host", lambda _shell: host)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         cases = [await _session_case(service, tmp_path / f"workspace-{i}") for i in range(2)]

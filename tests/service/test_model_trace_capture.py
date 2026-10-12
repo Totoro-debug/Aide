@@ -143,7 +143,7 @@ async def _exercise_sources(
             f"url = {json.dumps(mcp.url)}\n"
         )
         (home.path / "config.toml").write_text(config, encoding="utf-8")
-        service = AgentService(home, ConfigLoader(home).load_for_startup())
+        service = AgentService(home, ConfigLoader(home).load())
         await service.start()
         if not recording:
             await service._stop_trace_storage()
@@ -300,7 +300,7 @@ async def _exercise_retries(
 
     provider = Provider()
     monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     if not recording:
         await service._stop_trace_storage()
@@ -362,7 +362,7 @@ async def _exercise_cancel(
     (home.path / "config.toml").write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
     provider = _ConcurrentProvider(early_a_delta=True)
     monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     if not recording:
         await service._stop_trace_storage()

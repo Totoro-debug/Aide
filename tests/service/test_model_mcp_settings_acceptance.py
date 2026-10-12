@@ -22,6 +22,7 @@ from aide.service.client import ServiceClient
 from aide.service.runtime import AgentService
 from tests.configuration.test_config_editing import FULL_EDITABLE_CONFIG
 from tests.fixtures.mcp_wire import WireServer, wire_result, wire_tool
+from tests.fixtures.service_runtime import workspace_loops
 from tests.service.test_service_concurrency import _client_output, _serve
 
 
@@ -157,7 +158,7 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
     content += '\n[runtime]\npermission_level = "full-access"\n'
     path = home.path / "config.toml"
     path.write_text(content, encoding="utf-8")
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=3600)
     server, port = await _serve(service, home)
     project = tmp_path / "project"
     project.mkdir()
@@ -357,7 +358,7 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
             for item in await workspace.schedule_service.public_snapshot()
             if item.job_id in {job.job_id, new_job.job_id}
         )
-        await workspace.loops[cli.session_id].loop.session.wait_for_pending_persist()
+        await workspace_loops(workspace)[cli.session_id].loop.session.wait_for_pending_persist()
         persisted = Session.load(cast(Any, state), cli.session_id)
         assert all(
             any(message.get("content") == f"{user} finished" for message in persisted.messages)

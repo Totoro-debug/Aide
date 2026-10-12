@@ -142,7 +142,7 @@ args = {json.dumps(list(stdio.args))}
             )
             (home.path / "config.toml").write_text(config, encoding="utf-8")
             service = AgentService(
-                home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600
+                home, ConfigLoader(home).load(), reconnect_timeout=3600
             )
             snapshots: list[dict[str, object]] = []
             initial_tasks = set(asyncio.all_tasks())
@@ -210,8 +210,8 @@ args = {json.dumps(list(stdio.args))}
                     controlled.release_b.set()
                     await asyncio.wait_for(sink.wait_for("run.completed", session), 10)
                 for workspace, session, _, _ in lanes:
-                    await workspace.loops[session].loop.wait_for_restore_idle()
-                    await workspace.loops[session].loop.session.wait_for_pending_persist()
+                    await workspace._loops[session].loop.wait_for_restore_idle()
+                    await workspace._loops[session].loop.session.wait_for_pending_persist()
                 await asyncio.sleep(0)
                 snapshot("idle-after-30-identical-warmups")
                 controlled.release_b.clear()

@@ -20,6 +20,7 @@ from aide.service.execution import SessionExecution
 from aide.service.runtime import AgentService
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
+from tests.fixtures.service_runtime import register_project, workspace_loops
 from tests.service.test_protocol_contract import _validator
 from tests.service.test_service_concurrency import (
     _claim_version,
@@ -55,7 +56,7 @@ async def test_backpressured_run_survives_reconnect_at_29_seconds(
 
     service = AgentService(
         home,
-        ConfigLoader(home).load_for_startup(),
+        ConfigLoader(home).load(),
         reconnect_timeout=30,
         monotonic_now=clock.monotonic,
         sleep=sleep,
@@ -83,7 +84,7 @@ async def test_backpressured_run_survives_reconnect_at_29_seconds(
         await service.attach_workspace(other.client_id, path)
         session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         claimed = await service.claim(client.client_id, workspace.workspace_id, session_id)
-        state = workspace.loops[session_id]
+        state = workspace_loops(workspace)[session_id]
         authority = state.loop.session
         await workspace.input(
             client.client_id, session_id, _claim_version(claimed), "session-a", "run-a"
@@ -163,7 +164,7 @@ async def test_backpressured_client_expiry_preserves_another_active_session(
 
     service = AgentService(
         home,
-        ConfigLoader(home).load_for_startup(),
+        ConfigLoader(home).load(),
         reconnect_timeout=30,
         monotonic_now=clock.monotonic,
         sleep=sleep,
@@ -195,7 +196,7 @@ async def test_backpressured_client_expiry_preserves_another_active_session(
         session_b = await second_workspace.create_draft(second.client_id, creation_scope="chat")
         claim_a = await service.claim(first.client_id, workspace.workspace_id, session_a)
         claim_b = await service.claim(second.client_id, second_workspace.workspace_id, session_b)
-        state_a, state_b = workspace.loops[session_a], second_workspace.loops[session_b]
+        state_a, state_b = workspace_loops(workspace)[session_a], workspace_loops(second_workspace)[session_b]
         authority_b = state_b.loop.session
         await second_workspace.input(
             second.client_id, session_b, _claim_version(claim_b), "session-b", "run-b"
@@ -215,7 +216,7 @@ async def test_backpressured_client_expiry_preserves_another_active_session(
         assert provider.session_a_cancelled.is_set()
         assert not provider.session_b_cancelled.is_set()
         assert state_b.loop.has_active_run
-        assert second_workspace.loops[session_b] is state_b
+        assert workspace_loops(second_workspace)[session_b] is state_b
         assert state_b.loop.session is authority_b
         current_claim = await service.claim(
             second.client_id, second_workspace.workspace_id, session_b
@@ -276,13 +277,13 @@ async def test_agent_service_is_the_runtime_composition_root(tmp_path: Path) -> 
     home = _home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("cli")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
         session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
-        executor = workspace.loops[session_id].loop
+        executor = workspace_loops(workspace)[session_id].loop
 
         assert type(executor) is SessionExecution
         assert not isinstance(executor, AgentRunExecutor)
@@ -297,20 +298,20 @@ async def test_releasing_claim_retains_session_authority(tmp_path: Path) -> None
     home = _home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("cli")
         workspace = await service.attach_workspace(client.client_id, workspace_path)
         session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         first = await service.claim(client.client_id, workspace.workspace_id, session_id)
-        state = workspace.loops[session_id]
+        state = workspace_loops(workspace)[session_id]
         authority = state.loop.session
 
         await workspace.release(client.client_id, session_id)
 
-        assert session_id in workspace.loops
-        assert workspace.loops[session_id] is state
+        assert session_id in workspace_loops(workspace)
+        assert workspace_loops(workspace)[session_id] is state
         assert state.loop.session is authority
         other = await service.register_client("web")
         await service.attach_workspace(other.client_id, workspace_path)
@@ -331,12 +332,12 @@ async def test_open_conversation_returns_snapshot_and_preserves_context_on_occup
     second_path = tmp_path / "second-project"
     first_path.mkdir()
     second_path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         owner = await service.register_client("web")
-        first_record, _, _ = await service.register_project(owner.client_id, first_path)
-        second_record, _, _ = await service.register_project(owner.client_id, second_path)
+        first_record, _, _ = await register_project(service, owner.client_id, first_path)
+        second_record, _, _ = await register_project(service, owner.client_id, second_path)
 
         first = await service.open_conversation(
             owner.client_id, project_id=first_record.project_id, create_new=True
@@ -397,7 +398,7 @@ async def test_open_conversation_request_replay_preserves_one_draft_and_rejects_
     home = _home(tmp_path / "home")
     path = tmp_path / "workspace"
     path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("cli")
@@ -411,7 +412,7 @@ async def test_open_conversation_request_replay_preserves_one_draft_and_rejects_
         )
         assert first == replay
         workspace = service.workspace(first["workspace_id"])
-        assert list(workspace.loops) == [first["session_id"]]
+        assert list(workspace_loops(workspace)) == [first["session_id"]]
         assert not (path / ".aide" / "sessions" / f"{first['session_id']}.jsonl").exists()
         with pytest.raises(ServiceError) as reused:
             await service.open_conversation(
@@ -434,7 +435,7 @@ async def test_failed_new_conversation_discards_only_the_unclaimed_draft(
     home = _home(tmp_path / "home")
     path = tmp_path / "workspace"
     path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("cli")
@@ -460,7 +461,7 @@ async def test_failed_new_conversation_discards_only_the_unclaimed_draft(
         assert rejected.value.code == (
             "persistence_error" if failure_stage == "snapshot_io" else "admission_closed"
         )
-        assert list(workspace.loops) == [first["session_id"]]
+        assert list(workspace_loops(workspace)) == [first["session_id"]]
         assert workspace._draft_clients == {}
         failure = cast(dict[str, Any], rejected.value.to_dict("failed")["conversation"])
         assert failure["current_context"] == first["claim"]
@@ -478,7 +479,7 @@ async def test_takeover_captures_current_client_permission_and_retires_executors
     provider = _ConcurrentProvider()
     provider.release_b.set()
     monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _config: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     observed: list[str] = []
     executors: list[weakref.ReferenceType[AgentRunExecutor]] = []
@@ -505,17 +506,17 @@ async def test_takeover_captures_current_client_permission_and_retires_executors
             await service.attach_workspace(client.client_id, path)
         workspace = next(iter(service._workspaces.values()))
         session_id = await workspace.create_draft(clients[0].client_id, creation_scope="chat")
-        authority = workspace.loops[session_id].loop.session
+        authority = workspace_loops(workspace)[session_id].loop.session
         for index, (client, level) in enumerate(zip(clients, ("full-access", "read-only"), strict=True)):
             service.client_permission(client.client_id).select(cast(Any, level))
             await service.claim(client.client_id, workspace.workspace_id, session_id)
             claim = workspace._claims[session_id]
             await workspace.input(client.client_id, session_id, claim.version, "warmup", str(index))
             await asyncio.wait_for(sink.wait_for("run.completed", str(index)), 5)
-            await workspace.loops[session_id].loop.wait_for_restore_idle()
+            await workspace_loops(workspace)[session_id].loop.wait_for_restore_idle()
             await workspace.release(client.client_id, session_id)
         assert observed == ["full-access", "read-only"]
-        assert workspace.loops[session_id].loop.session is authority
+        assert workspace_loops(workspace)[session_id].loop.session is authority
         assert len(executors) == 2
         gc.collect()
         assert all(reference() is None for reference in executors)
@@ -531,12 +532,12 @@ async def test_shutdown_flushes_remaining_sessions_after_one_failure(
     home = _home(tmp_path / "home")
     path = tmp_path / "workspace"
     path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     client = await service.register_client("cli")
     workspace = await service.attach_workspace(client.client_id, path)
     ids = [await workspace.create_draft(client.client_id, reuse_startup_session=False, creation_scope="chat") for _ in range(2)]
-    first, second = (workspace.loops[session_id].loop for session_id in ids)
+    first, second = (workspace_loops(workspace)[session_id].loop for session_id in ids)
 
     async def fail() -> None:
         raise OSError("injected Session flush failure")
@@ -554,7 +555,7 @@ async def test_workspace_activation_has_one_authority_for_normalized_paths(tmp_p
     home = _home(tmp_path / "home")
     path = tmp_path / "workspace"
     path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         first, second = await asyncio.gather(
@@ -602,7 +603,7 @@ async def test_departure_cancels_blocked_title_and_flushes_retained_history(
     home = _home(tmp_path / "home")
     path = tmp_path / "workspace"
     path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("cli")
@@ -611,7 +612,7 @@ async def test_departure_cancels_blocked_title_and_flushes_retained_history(
         workspace = await service.attach_workspace(client.client_id, path)
         session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         await service.claim(client.client_id, workspace.workspace_id, session_id)
-        authority = workspace.loops[session_id].loop.session
+        authority = workspace_loops(workspace)[session_id].loop.session
         claim = workspace._claims[session_id]
         await workspace.input(client.client_id, session_id, claim.version, "warmup", "run")
         await asyncio.wait_for(title_started.wait(), 5)
@@ -631,7 +632,7 @@ async def test_departure_cancels_blocked_title_and_flushes_retained_history(
         assert len(authority.messages) == 2
         assert authority.metadata["title"] == "warmup"
         if ending == "expiry":
-            assert workspace.loops[session_id].loop.session is authority
+            assert workspace_loops(workspace)[session_id].loop.session is authority
             assert not authority._closed
             assert session_id not in workspace._claims
     finally:

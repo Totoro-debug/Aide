@@ -128,7 +128,6 @@ class RemoteControl(TerminalAgentRunExecutorControl):
         self._run_ids: deque[str] = deque()
         self._completed_before_accept: deque[str] = deque(maxlen=256)
         self._projection = ForegroundConversationProjection("", ())
-        self._confirmation_callback: object | None = None
         self._admitted = True
 
     @property
@@ -142,19 +141,6 @@ class RemoteControl(TerminalAgentRunExecutorControl):
         if not self._run_ids:
             return
         await self.client.cancel_run(self._run_ids[0])
-
-    def bind_confirmation_callback(self, callback: object) -> None:
-        self._confirmation_callback = callback
-
-    def unbind_confirmation_callback(self, callback: object) -> None:
-        if self._confirmation_callback is callback:
-            self._confirmation_callback = None
-
-    def respond_to_confirmation(
-        self, confirmation_id: UUID, decision: ConfirmationDecision
-    ) -> None:
-        del confirmation_id, decision
-        raise ValueError("Remote confirmation decisions are owned by the service presenter")
 
     def project_foreground_conversation(self) -> ForegroundConversationProjection:
         return self._projection
@@ -592,10 +578,6 @@ class ServiceClient:
             else:
                 await client.close()
             raise
-
-    async def get_config(self) -> dict[str, object]:
-        """Read the Service-owned saved and active configuration projection."""
-        return await self._http_request("GET", "/api/v1/config")
 
     async def get_config_text(self) -> dict[str, object]:
         """Read the Service-owned redacted text view for the CLI command."""
@@ -1143,18 +1125,6 @@ class ServiceClient:
             payload={"request_id": str(uuid4())},
             mutation=True,
         )
-
-    async def release_session(self) -> None:
-        """Release the current idle Session Claim through the event channel."""
-        await self._http_request(
-            "POST",
-            f"/api/v1/workspaces/{self.workspace_id}/sessions/{self.session_id}/release",
-            payload={"request_id": str(uuid4()), "claim_version": self.claim_version},
-            mutation=True,
-            extra_headers={"X-Aide-Claim": self.claim_credential},
-        )
-        self.claim_version = 0
-        self.claim_credential = ""
 
     async def cancel_run(self, run_id: str) -> None:
         await self._command(

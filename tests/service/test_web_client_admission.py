@@ -34,7 +34,7 @@ async def admission_service(
         await timer.wait()
 
     service = AgentService(
-        home, ConfigLoader(home).load_for_startup(), monotonic_now=clock.monotonic, sleep=sleep
+        home, ConfigLoader(home).load(), monotonic_now=clock.monotonic, sleep=sleep
     )
     await service.start()
     try:

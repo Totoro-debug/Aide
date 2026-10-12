@@ -14,9 +14,7 @@ from textual.containers import Center, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
-from aide.agent.loop import (
-    ConfirmationRequestView,
-)
+from aide.agent.confirmation import ConfirmationEnvelope
 
 type ConfirmationDecision = Literal["approved", "declined"]
 
@@ -202,20 +200,20 @@ class _ToolConfirmationScreen(ModalScreen[ConfirmationDecision]):
         Binding("right,down", "focus_approve", "Approve", show=False),
     ]
 
-    def __init__(self, request: ConfirmationRequestView) -> None:
+    def __init__(self, request: ConfirmationEnvelope) -> None:
         super().__init__(id=f"confirmation-{request.confirmation_id.hex}")
         self._request = request
 
     def compose(self) -> ComposeResult:
-        is_background = getattr(self._request, "origin", "foreground") == "background"
+        is_background = self._request.origin == "background"
         heading = "Background Tool Confirmation" if is_background else "Tool Confirmation"
         with Center():
             with Vertical(id="confirmation-panel"):
                 yield Static(heading, id="confirmation-heading", markup=False)
                 with VerticalScroll(id="confirmation-details-scroll"):
                     if is_background:
-                        job_id = getattr(self._request, "job_id", "")
-                        title = getattr(self._request, "title", "")
+                        job_id = self._request.job_id
+                        title = self._request.title
                         yield Static(
                             f"Source: {job_id} + {title}",
                             id="confirmation-source",
@@ -362,7 +360,7 @@ def _safe_confirmation_url(value: object) -> object:
     return rendered
 
 
-def _confirmation_detail_lines(request: ConfirmationRequestView) -> tuple[str, ...]:
+def _confirmation_detail_lines(request: ConfirmationEnvelope) -> tuple[str, ...]:
     details = request.details
     if request.mcp_identity is not None:
         identity = request.mcp_identity

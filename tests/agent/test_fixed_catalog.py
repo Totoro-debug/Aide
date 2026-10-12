@@ -13,7 +13,6 @@ import pytest
 from loguru import logger
 from mcp.types import CallToolResult
 
-from aide.agent.loop import ConfirmationRequestView
 from aide.agent.memory.manager import MemoryManager
 from aide.agent.message_bus import MessageBus
 from aide.agent.permission import RuntimePermissionControl
@@ -23,7 +22,7 @@ from aide.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
 from aide.agent.tools.core.web_fetch import AioHttpWebFetchClient, HTTPResponseBoundary
 from aide.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
 from aide.agent.tools.mcp import MCPTool, MCPToolSpec
-from aide.agent.tools.tool_gateway import ModelToolCall
+from aide.agent.tools.tool_gateway import ConfirmationRequest, ModelToolCall
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigLoader
@@ -265,7 +264,7 @@ async def test_agent_loop_uses_fixed_catalog_for_provider_confirmation_and_persi
         )
     )
     loop, router, schedule, bus = _agent_loop(agent_home, workspace, provider)
-    confirmations: list[ConfirmationRequestView] = []
+    confirmations: list[ConfirmationRequest] = []
     loop.control.bind_confirmation_callback(confirmations.append)
     try:
         await loop.start()
@@ -461,9 +460,9 @@ async def test_agent_loop_reads_known_skill_path_with_model_file_confirmation(
         )
     )
     loop, router, schedule, bus = _agent_loop(agent_home, workspace, provider)
-    confirmations: list[ConfirmationRequestView] = []
+    confirmations: list[ConfirmationRequest] = []
 
-    def approve(request: ConfirmationRequestView) -> None:
+    def approve(request: ConfirmationRequest) -> None:
         confirmations.append(request)
         loop.control.respond_to_confirmation(request.confirmation_id, "approved")
 
@@ -531,9 +530,9 @@ async def test_agent_loop_advertises_and_persists_multiple_autonomous_skill_read
         agent_home, workspace, provider, config_text=config_text
     )
     session_id = loop.session.session_id
-    confirmations: list[ConfirmationRequestView] = []
+    confirmations: list[ConfirmationRequest] = []
 
-    def approve(request: ConfirmationRequestView) -> None:
+    def approve(request: ConfirmationRequest) -> None:
         confirmations.append(request)
         loop.control.respond_to_confirmation(request.confirmation_id, "approved")
 

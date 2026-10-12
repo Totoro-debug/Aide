@@ -84,7 +84,7 @@ def test_valid_projection_uses_original_optional_defaults(tmp_path: Path) -> Non
     content = MINIMAL_VALID_CONFIG
     loader = _loader(tmp_path, content.encode())
     assert loader.web_snapshot().state == "active"
-    assert loader.web_snapshot().configuration == loader.load_for_startup()
+    assert loader.web_snapshot().configuration == loader.load()
 
 
 def test_repair_preserves_valid_default_chat_workspace(tmp_path: Path) -> None:

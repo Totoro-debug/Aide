@@ -478,6 +478,31 @@ def test_tool_without_a_declaration_or_execution_remains_abstract() -> None:
     assert inspect.isabstract(IncompleteTool)
 
 
+@pytest.mark.asyncio
+async def test_authorized_execution_implementation_is_a_concrete_tool(tmp_path: Path) -> None:
+    from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
+
+    class AuthorizedTool(BaseTool):
+        name = "authorized_fixture"
+        description = "Require the gateway authorization boundary."
+        value: str
+        required = ("value",)
+
+        async def execute_authorized(
+            self, arguments: dict[str, Any], authorization: ToolAuthorizationSession,
+        ) -> str:
+            assert authorization.initial_decision() == "direct"
+            return str(arguments["value"])
+
+    assert not inspect.isabstract(AuthorizedTool)
+    tool = AuthorizedTool()
+    assert tool.to_schema()["function"]["parameters"]["required"] == ["value"]
+    gateway = ToolGateway._for_memory((tool,), tool_context=ToolRunContext(workspace=tmp_path))
+    result = await gateway.call(ModelToolCall("authorized", tool.name, '{"value":"payload"}'))
+    assert result.status == "success"
+    assert result.content == "payload"
+
+
 def test_tool_with_parameters_but_without_execution_remains_abstract() -> None:
     class ParametersOnlyTool(BaseTool):
         name = "parameters_only"

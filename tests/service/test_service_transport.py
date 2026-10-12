@@ -56,6 +56,8 @@ from aide.service.runtime import AgentService
 from aide.service.runtime.projections import _project_job_summary
 from aide.service.transport import create_app
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
+from tests.fixtures.service_client import release_session
+from tests.fixtures.service_runtime import register_project
 
 
 def test_project_job_review_uses_controlled_time_for_at_every_and_cron(
@@ -156,7 +158,7 @@ async def test_all_foreground_creation_entries_record_explicit_scope(
     home = _prepare_agent_home(tmp_path / "agent-home")
     directory = tmp_path / "workspace"
     directory.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     if registered:
         service.projects.register(directory)
     await service.start()
@@ -200,7 +202,7 @@ async def test_chat_draft_does_not_reuse_or_reclassify_restored_project_history(
         content="Old history",
         creation_scope="project",
     )
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     service.projects.register(shared)
     service.conversation_workspaces.remember(shared)
     await service.start()
@@ -230,7 +232,7 @@ async def test_connected_web_chat_enters_schedule_admission(tmp_path: Path) -> N
         MINIMAL_VALID_CONFIG + f'\n[web]\ndefault_chat_workspace = "{chat.as_posix()}"\n',
         encoding="utf-8",
     )
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("web")
@@ -259,7 +261,7 @@ async def test_web_can_enter_the_default_conversation_workspace_under_agent_home
         MINIMAL_VALID_CONFIG + f'\n[web]\ndefault_chat_workspace = "{chat.as_posix()}"\n',
         encoding="utf-8",
     )
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     token = create_credential(home)
     server = TestServer(create_app(service))
     await service.start()
@@ -343,7 +345,7 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
     old_chat = tmp_path / "old-chat"
     shared.mkdir()
     old_chat.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     project_id = service.projects.register(shared).project_id
     service.conversation_workspaces.remember(shared)
     service.conversation_workspaces.remember(old_chat)
@@ -495,7 +497,7 @@ async def test_chat_history_skips_unavailable_workspace_without_recreating_it(
     home = _prepare_agent_home(tmp_path / "agent-home")
     unavailable_chat = tmp_path / "unavailable-chat"
     unavailable_chat.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     service.conversation_workspaces.remember(unavailable_chat)
     await _persist_session(
         unavailable_chat,
@@ -1190,13 +1192,13 @@ async def test_session_page_limit_preserves_optional_and_validation_contract(
             content="Private history",
             creation_scope="project",
         )
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     token = create_credential(home)
     server = TestServer(create_app(service))
     await service.start()
     try:
         client = await service.register_client("web")
-        record, workspace, _jobs = await service.register_project(client.client_id, directory)
+        record, workspace, _jobs = await register_project(service, client.client_id, directory)
         identity = workspace.workspace_id if scope == "workspaces" else record.project_id
         await server.start_server()
         async with aiohttp.ClientSession() as http:
@@ -1475,7 +1477,7 @@ async def test_workspace_session_rename_requires_claim_and_persists_metadata_ver
             ) as response:
                 assert response.status == 409
                 assert (await response.json())["code"] == "session_not_persisted"
-            await client.release_session()
+            await release_session(client)
             assert not (WorkspaceState(workspace).sessions_directory / f"{draft_id}.jsonl").exists()
         await client.close()
         client = None
@@ -1712,7 +1714,7 @@ async def test_web_draft_stays_empty_when_workspace_has_startup_restore(
         content="Old history",
     )
     record = ProjectCatalog(home).register(project)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("web")
@@ -1834,18 +1836,17 @@ async def test_cli_entry_binds_terminal_to_service_adapters(
             *,
             bus: RemoteMessageBus,
             control: RemoteControl,
+            confirmation_coordinator: RemoteConfirmationCoordinator,
             management_dispatcher: RemoteManagementCommandDispatcher,
             skill_metadata: tuple[object, ...],
             management_command_tokens: tuple[str, ...],
         ) -> None:
             assert isinstance(bus, RemoteMessageBus)
             assert isinstance(control, RemoteControl)
+            assert isinstance(confirmation_coordinator, RemoteConfirmationCoordinator)
             assert skill_metadata == ()
             assert "/status" in management_command_tokens
             self.management = management_dispatcher
-
-        def bind_confirmation_coordinator(self, coordinator: RemoteConfirmationCoordinator) -> None:
-            assert isinstance(coordinator, RemoteConfirmationCoordinator)
 
         async def run_async(self) -> None:
             status = await self.management.submit_user_input("/status")
@@ -1883,12 +1884,11 @@ async def test_terminal_displays_session_projection_from_service(tmp_path: Path)
     client: ServiceClient | None = None
     try:
         client = await ServiceClient.connect_or_start(home, workspace, port=port)
-        app = TerminalConversationApp(
+        app = TerminalConversationApp(confirmation_coordinator=client.confirmation,
             bus=client.bus,
             control=client.control,
             management_dispatcher=cast(ManagementCommandDispatcher, client.management_dispatcher),
         )
-        app.bind_confirmation_coordinator(client.confirmation)
         async with app.run_test(size=(80, 24)) as pilot:
             await app._resume_selected_session(
                 session.session_id, app.query_one("#conversation-input", _ConversationInput)

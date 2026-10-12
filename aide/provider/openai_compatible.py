@@ -109,7 +109,7 @@ class OpenAICompatibleProvider:
             factory(**client_arguments),
         )
 
-    def stream(
+    async def stream(
         self,
         *,
         messages: ModelMessages,
@@ -121,140 +121,93 @@ class OpenAICompatibleProvider:
         timeout: int,
         continuation: ModelContinuation | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
-        return self._stream_with_arguments(
-            messages=messages,
-            tools=tools,
-            model=model,
-            max_output=max_output,
-            temperature=temperature,
-            reasoning_effort=reasoning_effort,
-            timeout=timeout,
-            continuation=continuation,
-        )
-
-    async def _stream_with_arguments(
-        self,
-        *,
-        messages: ModelMessages,
-        tools: Sequence[dict[str, Any]],
-        model: str,
-        max_output: int,
-        temperature: float,
-        reasoning_effort: ReasoningEffort | None,
-        timeout: int,
-        continuation: ModelContinuation | None,
-    ) -> AsyncIterator[ModelStreamEvent]:
         try:
-            async for event in self._stream_once(
-                messages=messages,
-                tools=tools,
-                model=model,
-                max_output=max_output,
-                temperature=temperature,
-                reasoning_effort=reasoning_effort,
-                timeout=timeout,
-                continuation=continuation,
-            ):
-                yield event
+            result = await self._client.chat.completions.create(
+                **cast(
+                    Any,
+                    _request_arguments(
+                        messages=messages,
+                        tools=tools,
+                        model=model,
+                        max_output=max_output,
+                        temperature=temperature,
+                        reasoning_effort=reasoning_effort,
+                        timeout=timeout,
+                        stream=True,
+                        provider_id=self._provider_id,
+                        continuation=continuation,
+                    ),
+                )
+            )
+            chunks = cast(AsyncIterator[object], result)
+            content_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            finish_reason: FinishReason = "stop"
+            input_tokens = 0
+            output_tokens = 0
+            cached_input_tokens: int | None = None
+            usage_reported = False
+            tool_call_parts: dict[int, _ToolCallParts] = {}
+
+            async for chunk in chunks:
+                choices = cast(list[object], getattr(chunk, "choices", []))
+                for choice in choices:
+                    delta = getattr(choice, "delta", None)
+                    reasoning_content = getattr(delta, "reasoning_content", None)
+                    if isinstance(reasoning_content, str) and reasoning_content:
+                        reasoning_parts.append(reasoning_content)
+                        yield ReasoningDelta(delta=reasoning_content)
+                    content = getattr(delta, "content", None)
+                    if isinstance(content, str) and content:
+                        content_parts.append(content)
+                        yield TextDelta(delta=content)
+                    for tool_call_delta in getattr(delta, "tool_calls", None) or ():
+                        index = int(getattr(tool_call_delta, "index", 0))
+                        parts = tool_call_parts.setdefault(index, _ToolCallParts())
+                        _append_string(parts.id, getattr(tool_call_delta, "id", None))
+                        function = getattr(tool_call_delta, "function", None)
+                        _append_string(parts.name, getattr(function, "name", None))
+                        _append_string(parts.arguments, getattr(function, "arguments", None))
+                    observed_finish = getattr(choice, "finish_reason", None)
+                    if observed_finish is not None:
+                        finish_reason = _finish_reason(str(observed_finish))
+
+                usage = getattr(chunk, "usage", None)
+                if usage is not None:
+                    usage_reported = True
+                    input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+                    output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+                    cached_input_tokens = _cached_input_tokens(usage)
+
+            content = "".join(content_parts)
+            tool_calls = tuple(
+                _model_tool_call(tool_call_parts[index]) for index in sorted(tool_call_parts)
+            )
+
+            yield ModelCompleted(
+                response=ModelResponse(
+                    message=AssistantModelMessage(
+                        content=content,
+                        tool_calls=tool_calls,
+                    ),
+                    usage=ModelUsage(
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        total_tokens=input_tokens + output_tokens,
+                        cached_input_tokens=cached_input_tokens,
+                        reported=usage_reported,
+                    ),
+                    finish_reason=finish_reason,
+                    continuation=_continuation_from_reasoning(
+                        provider_id=self._provider_id,
+                        reasoning="".join(reasoning_parts),
+                    ),
+                )
+            )
         except ModelCallError:
             raise
         except Exception as failure:
             raise _model_call_error(failure) from failure
-
-    async def _stream_once(
-        self,
-        *,
-        messages: ModelMessages,
-        tools: Sequence[dict[str, Any]],
-        model: str,
-        max_output: int,
-        temperature: float,
-        reasoning_effort: ReasoningEffort | None,
-        timeout: int,
-        continuation: ModelContinuation | None,
-    ) -> AsyncIterator[ModelStreamEvent]:
-        result = await self._client.chat.completions.create(
-            **cast(
-                Any,
-                _request_arguments(
-                    messages=messages,
-                    tools=tools,
-                    model=model,
-                    max_output=max_output,
-                    temperature=temperature,
-                    reasoning_effort=reasoning_effort,
-                    timeout=timeout,
-                    stream=True,
-                    provider_id=self._provider_id,
-                    continuation=continuation,
-                ),
-            )
-        )
-        chunks = cast(AsyncIterator[object], result)
-        content_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        finish_reason: FinishReason = "stop"
-        input_tokens = 0
-        output_tokens = 0
-        cached_input_tokens: int | None = None
-        usage_reported = False
-        tool_call_parts: dict[int, _ToolCallParts] = {}
-
-        async for chunk in chunks:
-            choices = cast(list[object], getattr(chunk, "choices", []))
-            for choice in choices:
-                delta = getattr(choice, "delta", None)
-                reasoning_content = getattr(delta, "reasoning_content", None)
-                if isinstance(reasoning_content, str) and reasoning_content:
-                    reasoning_parts.append(reasoning_content)
-                    yield ReasoningDelta(delta=reasoning_content)
-                content = getattr(delta, "content", None)
-                if isinstance(content, str) and content:
-                    content_parts.append(content)
-                    yield TextDelta(delta=content)
-                for tool_call_delta in getattr(delta, "tool_calls", None) or ():
-                    index = int(getattr(tool_call_delta, "index", 0))
-                    parts = tool_call_parts.setdefault(index, _ToolCallParts())
-                    _append_string(parts.id, getattr(tool_call_delta, "id", None))
-                    function = getattr(tool_call_delta, "function", None)
-                    _append_string(parts.name, getattr(function, "name", None))
-                    _append_string(parts.arguments, getattr(function, "arguments", None))
-                observed_finish = getattr(choice, "finish_reason", None)
-                if observed_finish is not None:
-                    finish_reason = _finish_reason(str(observed_finish))
-
-            usage = getattr(chunk, "usage", None)
-            if usage is not None:
-                usage_reported = True
-                input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-                output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-                cached_input_tokens = _cached_input_tokens(usage)
-
-        content = "".join(content_parts)
-        tool_calls = tuple(
-            _model_tool_call(tool_call_parts[index]) for index in sorted(tool_call_parts)
-        )
-
-        yield ModelCompleted(
-            response=ModelResponse(
-                message=AssistantModelMessage(
-                    content=content,
-                    tool_calls=tool_calls,
-                ),
-                usage=ModelUsage(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    total_tokens=input_tokens + output_tokens,
-                    cached_input_tokens=cached_input_tokens,
-                    reported=usage_reported,
-                ),
-                finish_reason=finish_reason,
-                continuation=_continuation_from_reasoning(
-                    provider_id=self._provider_id,
-                    reasoning="".join(reasoning_parts),
-                ),
-            )
-        )
 
     async def complete(
         self,
@@ -269,79 +222,56 @@ class OpenAICompatibleProvider:
         continuation: ModelContinuation | None = None,
     ) -> ModelResponse:
         try:
-            return await self._complete_once(
-                messages=messages,
-                tools=tools,
-                model=model,
-                max_output=max_output,
-                temperature=temperature,
-                reasoning_effort=reasoning_effort,
-                timeout=timeout,
-                continuation=continuation,
+            result = await self._client.chat.completions.create(
+                **cast(
+                    Any,
+                    _request_arguments(
+                        messages=messages,
+                        tools=tools,
+                        model=model,
+                        max_output=max_output,
+                        temperature=temperature,
+                        reasoning_effort=reasoning_effort,
+                        timeout=timeout,
+                        stream=False,
+                        provider_id=self._provider_id,
+                        continuation=continuation,
+                    ),
+                )
+            )
+            choices = cast(list[object], getattr(result, "choices", []))
+            if not choices:
+                raise _empty_response_error()
+            choice = cast("Choice", choices[0])
+            message = choice.message
+            content = message.content
+            usage = getattr(result, "usage", None)
+            input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+            output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            return ModelResponse(
+                message=AssistantModelMessage(
+                    content=content if isinstance(content, str) else "",
+                    tool_calls=tuple(
+                        _complete_tool_call(tool_call) for tool_call in (message.tool_calls or ())
+                    ),
+                ),
+                usage=ModelUsage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    total_tokens=input_tokens + output_tokens,
+                    cached_input_tokens=_cached_input_tokens(usage),
+                    reported=usage is not None,
+                ),
+                finish_reason=_finish_reason(str(choice.finish_reason or "stop")),
+                continuation=_continuation_from_reasoning(
+                    provider_id=self._provider_id,
+                    reasoning=getattr(message, "reasoning_content", ""),
+                ),
             )
         except ModelCallError:
             raise
         except Exception as failure:
             raise _model_call_error(failure) from failure
-
-    async def _complete_once(
-        self,
-        *,
-        messages: ModelMessages,
-        tools: Sequence[dict[str, Any]],
-        model: str,
-        max_output: int,
-        temperature: float,
-        reasoning_effort: ReasoningEffort | None,
-        timeout: int,
-        continuation: ModelContinuation | None,
-    ) -> ModelResponse:
-        result = await self._client.chat.completions.create(
-            **cast(
-                Any,
-                _request_arguments(
-                    messages=messages,
-                    tools=tools,
-                    model=model,
-                    max_output=max_output,
-                    temperature=temperature,
-                    reasoning_effort=reasoning_effort,
-                    timeout=timeout,
-                    stream=False,
-                    provider_id=self._provider_id,
-                    continuation=continuation,
-                ),
-            )
-        )
-        choices = cast(list[object], getattr(result, "choices", []))
-        if not choices:
-            raise _empty_response_error()
-        choice = cast("Choice", choices[0])
-        message = choice.message
-        content = message.content
-        usage = getattr(result, "usage", None)
-        input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-        output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-        return ModelResponse(
-            message=AssistantModelMessage(
-                content=content if isinstance(content, str) else "",
-                tool_calls=tuple(
-                    _complete_tool_call(tool_call) for tool_call in (message.tool_calls or ())
-                ),
-            ),
-            usage=ModelUsage(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                total_tokens=input_tokens + output_tokens,
-                cached_input_tokens=_cached_input_tokens(usage),
-                reported=usage is not None,
-            ),
-            finish_reason=_finish_reason(str(choice.finish_reason or "stop")),
-            continuation=_continuation_from_reasoning(
-                provider_id=self._provider_id,
-                reasoning=getattr(message, "reasoning_content", ""),
-            ),
-        )
 
     async def close(self) -> None:
         await self._client.close()

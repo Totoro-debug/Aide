@@ -40,6 +40,7 @@ from tests.agent.test_loop import _response, _Router, _runtime, _terminals
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures.agent_loop import DrivenExecutor
 from tests.fixtures.project_removal import wait_for_project_removal
+from tests.fixtures.service_runtime import register_project
 from tests.service.test_service_concurrency import _CollectingSink
 
 
@@ -193,7 +194,7 @@ async def test_service_shares_one_skill_loader_and_model_router_across_workspace
         original_load(loader, validate=validate)
 
     monkeypatch.setattr(SkillLoader, "load", record_load)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         cases = [
@@ -257,12 +258,12 @@ async def test_terminal_store_failure_blocks_project_removal_without_stopping_ot
     monkeypatch.setattr(
         service_runtime, "create_provider", lambda _configuration: _CountingProvider()
     )
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         first = await _session_case(service, tmp_path / "workspace-a")
         second = await _session_case(service, tmp_path / "workspace-b")
-        record, _, _ = await service.register_project(
+        record, _, _ = await register_project(service,
             first.client_id, first.workspace.workspace_path
         )
         failing = first.workspace.schedule_service
@@ -357,7 +358,7 @@ model = "small-model"
         return provider
 
     monkeypatch.setattr(service_runtime, "create_provider", create_provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         case = await _session_case(service, tmp_path / "workspace")
@@ -395,8 +396,8 @@ async def test_independent_services_do_not_share_workspace_runtime_registry(
     home = _home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    first = AgentService(home, ConfigLoader(home).load_for_startup())
-    second = AgentService(home, ConfigLoader(home).load_for_startup())
+    first = AgentService(home, ConfigLoader(home).load())
+    second = AgentService(home, ConfigLoader(home).load())
     await first.start()
     await second.start()
     first_client = await first.register_client("cli")
@@ -458,7 +459,7 @@ async def test_global_reload_keeps_active_run_snapshot_and_updates_other_workspa
     _skill(home, "planner", "OLD_SKILL_BODY")
     provider = _ReloadProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         first = await _session_case(service, tmp_path / "workspace-a")
@@ -507,7 +508,7 @@ async def test_global_reload_publishes_candidate_that_exceeds_another_workspace_
     _skill(home, "planner", "old body", always=True)
     provider = _CountingProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         first = await _session_case(service, tmp_path / "workspace-a")
@@ -530,7 +531,7 @@ async def test_service_owns_workspace_memory_dream_and_one_schedule_dispatcher(
     tmp_path: Path,
 ) -> None:
     home = _home(tmp_path / "agent-home")
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         first = await _session_case(service, tmp_path / "workspace-a")

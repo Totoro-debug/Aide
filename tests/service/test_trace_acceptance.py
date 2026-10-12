@@ -119,7 +119,7 @@ async def _replay(root: Path, fault: str, monkeypatch: pytest.MonkeyPatch) -> di
             (home.path / "traces.sqlite3").write_bytes(b"not a SQLite database")
         provider = _ReplayProvider()
         patches.setattr("aide.service.runtime.service.create_provider", lambda _: provider)
-        service = AgentService(home, ConfigLoader(home).load_for_startup())
+        service = AgentService(home, ConfigLoader(home).load())
         await service.start()
         service.model_router._clock = FakeClock(datetime.now(UTC))
         if fault == "noop":

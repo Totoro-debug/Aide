@@ -301,7 +301,7 @@ def test_larger_model_capacity_allows_larger_output(tmp_path: Path) -> None:
     result = loader.patch_editable_fields(snapshot.revision, {"models": models})
     resolved = result.configuration.resolve_route("chat").route
     assert (resolved.context_window, resolved.max_output) == (65536, 16384)
-    assert loader.load_for_startup().resolve_route("chat").route == resolved
+    assert loader.load().resolve_route("chat").route == resolved
     assert cast(Mapping[str, object], result.fields["models"]["routes"])["chat"] == {"provider_id": "primary", "model": "small-model"}
 
 

@@ -51,7 +51,7 @@ async def connected_client(
         workspace, home=home, title="Recovery", created_at=datetime.now(UTC), content="saved history",
     )
     monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda *_args: _ConcurrentProvider())
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     async with AsyncExitStack() as stack:
         stack.push_async_callback(service.stop)
@@ -139,7 +139,7 @@ async def test_client_recovers_connection_and_never_reuses_expired_claim(
     await _wait_until(lambda: not service.client(original_client).connected)
     if recovery == "instance":
         await service.stop()
-        replacement = AgentService(service.agent_home, ConfigLoader(service.agent_home).load_for_startup())
+        replacement = AgentService(service.agent_home, ConfigLoader(service.agent_home).load())
         await replacement.start()
         stack.push_async_callback(replacement.stop)
         server = await stack.enter_async_context(TestServer(create_app(replacement), host="127.0.0.1"))
@@ -219,7 +219,7 @@ async def test_textual_recovers_active_run_and_keeps_unsent_draft(
         return emit()
 
     monkeypatch.setattr(_ConcurrentProvider, "stream", blocked_stream)
-    app = TerminalConversationApp(
+    app = TerminalConversationApp(confirmation_coordinator=client.confirmation,
         bus=client.bus, control=client.control,
         management_dispatcher=cast(Any, client.management_dispatcher),
     )
@@ -497,7 +497,7 @@ async def test_textual_resume_then_recovery_preserves_draft_and_accepts_one_inpu
         created_at=datetime.now(UTC), content="journey selected history",
     )
     original_client = client.client_id
-    app = TerminalConversationApp(bus=client.bus, control=client.control,
+    app = TerminalConversationApp(confirmation_coordinator=client.confirmation, bus=client.bus, control=client.control,
                                   management_dispatcher=cast(Any, client.management_dispatcher))
     async with app.run_test(size=(100, 30)) as pilot:
         input_area = app.query_one("#conversation-input", _ConversationInput)
@@ -514,7 +514,7 @@ async def test_textual_resume_then_recovery_preserves_draft_and_accepts_one_inpu
         active = service
         if recovery == "instance":
             await service.stop()
-            active = AgentService(service.agent_home, ConfigLoader(service.agent_home).load_for_startup())
+            active = AgentService(service.agent_home, ConfigLoader(service.agent_home).load())
             await active.start()
             stack.push_async_callback(active.stop)
             server = await stack.enter_async_context(TestServer(create_app(active), host="127.0.0.1"))
@@ -558,7 +558,7 @@ async def test_textual_recovery_refusal_offers_retry_and_new_session(
     client, service, stack = connected_client
     directory = service.workspace(client.workspace_id).workspace_path
     target = client.session_id
-    app = TerminalConversationApp(bus=client.bus, control=client.control,
+    app = TerminalConversationApp(confirmation_coordinator=client.confirmation, bus=client.bus, control=client.control,
                                   management_dispatcher=cast(Any, client.management_dispatcher))
     async with app.run_test(size=(100, 30)) as pilot:
         input_area = app.query_one("#conversation-input", _ConversationInput)
@@ -571,7 +571,7 @@ async def test_textual_recovery_refusal_offers_retry_and_new_session(
         if refusal == "configuration":
             (service.agent_home.path / "config.toml").write_text("[broken", encoding="utf-8")
         active = AgentService(service.agent_home, None if refusal == "configuration"
-                              else ConfigLoader(service.agent_home).load_for_startup())
+                              else ConfigLoader(service.agent_home).load())
         await active.start()
         stack.push_async_callback(active.stop)
         owner = await active.register_client("cli")
@@ -680,7 +680,7 @@ async def test_pending_recovery_is_cancelled_or_discards_the_old_response(
                        for task in asyncio.all_tasks())
         return
     await service.stop()
-    replacement = AgentService(service.agent_home, ConfigLoader(service.agent_home).load_for_startup())
+    replacement = AgentService(service.agent_home, ConfigLoader(service.agent_home).load())
     await replacement.start()
     stack.push_async_callback(replacement.stop)
     server = await stack.enter_async_context(TestServer(create_app(replacement), host="127.0.0.1"))

@@ -14,7 +14,6 @@ from aide.agent.session.restore import RestoreMode, RestorePlan, RestoreResult
 from aide.config.config import ConfigView
 from aide.logging.session import without_session_log
 from aide.management.service import (
-    FatalManagementError,
     ManagementError,
     RestoreListingReport,
     ResumeResult,
@@ -427,8 +426,6 @@ class ManagementCommandDispatcher:
         with without_session_log():
             try:
                 result = await self._management.resume(session_id, force=force)
-            except FatalManagementError:
-                raise
             except ManagementError as management_error:
                 return ManagementCommandResult(
                     handled=True,
@@ -470,8 +467,6 @@ class ManagementCommandDispatcher:
         with without_session_log():
             try:
                 result = await self._management.restore_commit(anchor_id, mode)
-            except FatalManagementError:
-                raise
             except ManagementError as management_error:
                 return ManagementCommandResult(
                     handled=True,

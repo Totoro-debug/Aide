@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 from textual.widgets import Input, OptionList, Static
 
+from aide.agent.confirmation import ToolConfirmationCoordinator
 from aide.agent.loop import ForegroundConversationProjection
 from aide.agent.message_bus import MessageBus
 from aide.agent.session.execution_state import SessionRunState
@@ -137,7 +138,7 @@ async def test_terminal_rejects_ordinary_input_while_restore_barrier_is_held() -
             return ForegroundConversationProjection(session_id=SESSION_ID, messages=())
 
     bus = MessageBus()
-    app = TerminalConversationApp(
+    app = TerminalConversationApp(confirmation_coordinator=ToolConfirmationCoordinator(),
         bus=bus,
         control=Control(),
         management_dispatcher=ManagementCommandDispatcher(cast(ManagementPort, object())),
@@ -201,7 +202,7 @@ async def test_restore_anchor_picker_shows_local_preview_and_cancels_without_mut
             return ForegroundConversationProjection(session_id=SESSION_ID, messages=())
 
     bus = MessageBus()
-    app = TerminalConversationApp(
+    app = TerminalConversationApp(confirmation_coordinator=ToolConfirmationCoordinator(),
         bus=bus,
         control=Control(),
         management_dispatcher=ManagementCommandDispatcher(cast(ManagementPort, Management())),

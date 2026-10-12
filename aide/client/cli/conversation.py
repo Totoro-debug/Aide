@@ -36,7 +36,6 @@ from aide.agent.confirmation import (
     ConfirmationUnavailable,
 )
 from aide.agent.loop import (
-    ConfirmationRequestView,
     ForegroundConversationProjection,
     TerminalAgentRunExecutorControl,
 )
@@ -100,7 +99,7 @@ from aide.management.commands import (
     ManagementCommandDispatcher,
     ManagementCommandResult,
 )
-from aide.management.service import FatalManagementError, RuntimeStatus, SessionListingEntry
+from aide.management.service import RuntimeStatus, SessionListingEntry
 from aide.provider.models import ReasoningEffort
 from aide.skills.catalog import SkillMetadata
 
@@ -166,19 +165,6 @@ class TerminalConversationApp(App[None]):
             self.envelope = envelope
             self.token = token
             self.respond = respond
-
-    class ConfirmationRequested(Message):
-        def __init__(
-            self,
-            request: ConfirmationRequestView,
-            *,
-            control: TerminalAgentRunExecutorControl,
-            bus: MessageBus,
-        ) -> None:
-            super().__init__()
-            self.request = request
-            self.bound_control = control
-            self.bound_bus = bus
 
     class InboundSnapshotChanged(Message):
         def __init__(
@@ -422,6 +408,7 @@ class TerminalConversationApp(App[None]):
         bus: MessageBus,
         control: TerminalAgentRunExecutorControl,
         management_dispatcher: ManagementCommandDispatcher,
+        confirmation_coordinator: ConfirmationPresentationCoordinator,
         monotonic: Callable[[], float] = monotonic_now,
         skill_metadata: tuple[SkillMetadata, ...] = (),
         management_command_tokens: tuple[str, ...] | None = None,
@@ -437,7 +424,7 @@ class TerminalConversationApp(App[None]):
         self._control = control
         self._management_dispatcher = management_dispatcher
         self._monotonic = monotonic
-        self._confirmation_coordinator: ConfirmationPresentationCoordinator | None = None
+        self._confirmation_coordinator = confirmation_coordinator
         self._conversation_display: _ConversationDisplay | None = None
         self._conversation_input: _ConversationInput | None = None
         self._size_insufficient = False
@@ -456,7 +443,6 @@ class TerminalConversationApp(App[None]):
         self._restore_plan: RestorePlan | None = None
         self._cancel_requested_turn: object | None = None
         self._active_run_projection: _MessageBusRunProjection | None = None
-        self._active_confirmation_id: UUID | None = None
         self._active_confirmation_token: object | None = None
         self._dismissed_confirmation_tokens: set[object] = set()
         self._confirmation_result: asyncio.Future[ConfirmationDecision | None] | None = None
@@ -477,21 +463,7 @@ class TerminalConversationApp(App[None]):
         self._presentation_quiesced = False
         self._bus_callback: Callable[[tuple[InboundMessage, ...]], None] | None = None
         self._bus_callback_bus: MessageBus | None = None
-        self._confirmation_callback: Callable[[ConfirmationRequestView], None] | None = None
-        self._confirmation_control: TerminalAgentRunExecutorControl | None = None
         self._application_error: Exception | None = None
-        self._fatal_management_error: FatalManagementError | None = None
-
-    def bind_confirmation_coordinator(
-        self,
-        coordinator: ConfirmationPresentationCoordinator,
-    ) -> None:
-        """Bind the Runtime Lifetime coordinator without changing the app constructor contract."""
-        if self._confirmation_coordinator is not None and self._confirmation_coordinator is not coordinator:
-            raise RuntimeError("a different confirmation coordinator is already bound")
-        self._confirmation_coordinator = coordinator
-        if self._conversation_display is not None:
-            coordinator.bind_presenter(self)
 
     def present_confirmation(
         self,
@@ -520,10 +492,6 @@ class TerminalConversationApp(App[None]):
         if self._application_error is None:
             self._application_error = error
         super()._handle_exception(error)
-
-    @property
-    def fatal_management_error(self) -> FatalManagementError | None:
-        return self._fatal_management_error
 
     def _build_driver(
         self,
@@ -651,10 +619,7 @@ class TerminalConversationApp(App[None]):
         self._conversation_input = self.query_one("#conversation-input", _ConversationInput)
         self._bind_bus_callback(self._bus)
         self._bus_snapshot = await self._bus.inbound_snapshot()
-        if self._confirmation_coordinator is None:
-            self._bind_confirmation_callback(self._control, self._bus)
-        else:
-            self._confirmation_coordinator.bind_presenter(self)
+        self._confirmation_coordinator.bind_presenter(self)
         self._outbound_worker = self.run_worker(
             self._consume_outbound(),
             name="conversation-outbound",
@@ -685,10 +650,7 @@ class TerminalConversationApp(App[None]):
         session_switch_result = self._session_switch_result
         if session_switch_result is not None and not session_switch_result.done():
             session_switch_result.cancel()
-        if self._confirmation_coordinator is None:
-            self._unbind_confirmation_callback(self._control)
-        else:
-            await self._confirmation_coordinator.unbind_presenter(self)
+        await self._confirmation_coordinator.unbind_presenter(self)
         self._unbind_bus_callback(self._bus)
         projection = self._active_run_projection
         self._active_run_projection = None
@@ -722,7 +684,6 @@ class TerminalConversationApp(App[None]):
         self._bus_snapshot = ()
         self._run_ready = Event()
         self._cancel_requested_turn = None
-        self._active_confirmation_id = None
         self._confirmation_result = None
         self._active_confirmation_token = None
         self._dismissed_confirmation_tokens.clear()
@@ -791,34 +752,6 @@ class TerminalConversationApp(App[None]):
         bus.unbind_inbound_changed_callback(callback)
         self._bus_callback = None
         self._bus_callback_bus = None
-
-    def _bind_confirmation_callback(
-        self,
-        control: TerminalAgentRunExecutorControl,
-        bus: MessageBus,
-    ) -> None:
-        def on_confirmation(request: ConfirmationRequestView) -> None:
-            self.post_message(
-                self.ConfirmationRequested(
-                    request,
-                    control=control,
-                    bus=bus,
-                )
-            )
-
-        self._confirmation_callback = on_confirmation
-        self._confirmation_control = control
-        control.bind_confirmation_callback(on_confirmation)
-
-    def _unbind_confirmation_callback(self, control: TerminalAgentRunExecutorControl) -> None:
-        callback = self._confirmation_callback
-        if callback is None or self._confirmation_control is not control:
-            return
-        unbind = getattr(control, "unbind_confirmation_callback", None)
-        if callable(unbind):
-            unbind(callback)
-        self._confirmation_callback = None
-        self._confirmation_control = None
 
     @property
     def command_completion_visible(self) -> bool:
@@ -1677,20 +1610,6 @@ class TerminalConversationApp(App[None]):
             with suppress(Exception):
                 input_area.focus()
 
-    @on(ConfirmationRequested)
-    def _confirmation_requested(self, message: ConfirmationRequested) -> None:
-        self.run_worker(
-            self._request_confirmation(
-                message.request,
-                message.bound_control,
-                message.bound_bus,
-            ),
-            name="tool-confirmation",
-            group="tool-confirmation",
-            exclusive=True,
-            exit_on_error=False,
-        )
-
     @on(CoordinatorConfirmationRequested)
     def _coordinator_confirmation_requested(
         self,
@@ -1718,8 +1637,6 @@ class TerminalConversationApp(App[None]):
         respond: Callable[[object, CoordinatorConfirmationDecision], bool],
     ) -> None:
         coordinator = self._confirmation_coordinator
-        if coordinator is None:
-            return
         if token in self._dismissed_confirmation_tokens:
             self._dismissed_confirmation_tokens.discard(token)
             return
@@ -1778,88 +1695,6 @@ class TerminalConversationApp(App[None]):
             if not self._closing and not self._presentation_quiesced:
                 with suppress(Exception):
                     input_area.focus()
-
-    async def _request_confirmation(
-        self,
-        request: ConfirmationRequestView,
-        control: TerminalAgentRunExecutorControl,
-        bus: MessageBus,
-    ) -> None:
-        if (
-            self._closing
-            or self._presentation_quiesced
-            or control is not self._control
-            or bus is not self._bus
-        ):
-            return
-        if self._active_confirmation_id is not None:
-            self._respond_to_confirmation_if_pending(
-                request.confirmation_id,
-                "declined",
-                control=control,
-            )
-            return
-        self._active_confirmation_id = request.confirmation_id
-        input_area = self._conversation_input
-        if input_area is None:
-            input_area = self.query_one("#conversation-input", _ConversationInput)
-        input_was_read_only = input_area.read_only
-        input_area.read_only = True
-        result: asyncio.Future[ConfirmationDecision | None] | None = None
-        try:
-            await self._viable_size.wait()
-            result = asyncio.get_running_loop().create_future()
-            self._confirmation_result = result
-
-            def on_dismissed(value: ConfirmationDecision | None) -> None:
-                if not result.done():
-                    result.set_result(value)
-
-            await self.push_screen(
-                _ToolConfirmationScreen(request),
-                callback=on_dismissed,
-            )
-            decision = await result
-            if decision not in {"approved", "declined"}:
-                decision = "declined"
-        except BaseException:
-            if not self._closing and not self._presentation_quiesced:
-                with suppress(Exception):
-                    self._respond_to_confirmation_if_pending(
-                        request.confirmation_id,
-                        "declined",
-                        control=control,
-                    )
-            raise
-        else:
-            self._respond_to_confirmation_if_pending(
-                request.confirmation_id,
-                decision,
-                control=control,
-            )
-        finally:
-            input_area.read_only = input_was_read_only
-            if result is not None and self._confirmation_result is result:
-                self._confirmation_result = None
-            if bus is self._bus:
-                self._bus_snapshot = await bus.inbound_snapshot()
-            self._refresh_pending_queue()
-            if self._active_confirmation_id == request.confirmation_id:
-                self._active_confirmation_id = None
-
-    def _respond_to_confirmation_if_pending(
-        self,
-        confirmation_id: UUID,
-        decision: ConfirmationDecision,
-        *,
-        control: TerminalAgentRunExecutorControl | None = None,
-    ) -> bool:
-        try:
-            target_control = self._control if control is None else control
-            target_control.respond_to_confirmation(confirmation_id, decision)
-        except ValueError:
-            return False
-        return True
 
     async def _mount_user_message(
         self,
@@ -2390,10 +2225,6 @@ class TerminalConversationApp(App[None]):
             )
             if result.failure_notification_pending:
                 await self._show_restore_failure_notification(result)
-        except FatalManagementError as fatal_error:
-            self._fatal_management_error = fatal_error
-            if not self._closing:
-                self.exit(return_code=1)
         except CancelledError:
             if not committed:
                 with suppress(Exception):
@@ -2489,10 +2320,6 @@ class TerminalConversationApp(App[None]):
                 force = True
             try:
                 result = await dispatcher.resume(session_id, force=force)
-            except FatalManagementError as fatal_error:
-                self._fatal_management_error = fatal_error
-                self.exit(return_code=1)
-                return
             except Exception as error:
                 await self._mount_management_rows(
                     _RESUME_MANAGEMENT_COMMAND_TOKEN,

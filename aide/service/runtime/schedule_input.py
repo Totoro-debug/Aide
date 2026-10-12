@@ -59,23 +59,13 @@ def _schedule_job_input(payload: Mapping[str, object]) -> tuple[str, str, JobSch
         if not normalized_title:
             field_errors["title"] = "must not be empty"
 
-    nested_schedule = payload.get("schedule")
-    if nested_schedule is not None and not isinstance(nested_schedule, Mapping):
-        field_errors["schedule"] = "must be an object"
-        nested: Mapping[str, object] = {}
-    else:
-        nested = nested_schedule if isinstance(nested_schedule, Mapping) else {}
-
-    def schedule_value(name: str) -> object:
-        if name in payload:
-            return payload[name]
-        return nested.get(name)
-
-    kind_value = payload.get("kind", nested.get("kind"))
-    at_time = schedule_value("at_time")
-    every_seconds = schedule_value("every_seconds")
-    cron_expr = schedule_value("cron_expr")
-    timezone = schedule_value("timezone")
+    if "schedule" in payload:
+        field_errors["schedule"] = "use top-level timing fields"
+    kind_value = payload.get("kind")
+    at_time = payload.get("at_time")
+    every_seconds = payload.get("every_seconds")
+    cron_expr = payload.get("cron_expr")
+    timezone = payload.get("timezone")
     selected = [
         name
         for name, value in (

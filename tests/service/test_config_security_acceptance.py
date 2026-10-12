@@ -29,7 +29,7 @@ async def security_http(tmp_path: Path) -> AsyncIterator[SecurityHttp]:
     home = AgentHome(tmp_path / "home")
     home.initialize()
     (home.path / "config.toml").write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=3600)
     await service.start()
     token = create_credential(home)
     headers = []

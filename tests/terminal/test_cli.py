@@ -11,16 +11,12 @@ import pytest
 from typer.testing import CliRunner
 
 import aide.client.cli.cli as cli
-from aide.agent.loop import ModelContextOverflowError
 from aide.agent.workspace_state import WorkspaceStateError
 from aide.config.agent_home import AgentHome
-from aide.management.service import (
-    FatalManagementError,
-)
 from aide.service.client import ServiceClient, ServiceStartupError
 from aide.service.errors import ServiceError
 from aide.skills.catalog import SkillMetadata
-from aide.utils.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
+from aide.utils.errors import ErrorInfo
 from tests.configuration.test_config import (
     EXPECTED_DEFAULT_CONFIG,
     EXPECTED_REDACTED_CONFIG,
@@ -86,7 +82,7 @@ def test_web_service_errors_are_reported_without_a_runtime_error_code_conversion
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure_stage", [None, "constructor", "binding", "terminal"])
+@pytest.mark.parametrize("failure_stage", [None, "constructor", "terminal"])
 async def test_cli_service_adapter_binds_terminal_and_closes_client_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str | None
 ) -> None:
@@ -134,18 +130,13 @@ async def test_cli_service_adapter_binds_terminal_and_closes_client_once(
             assert kwargs == {
                 "bus": client.bus,
                 "control": client.control,
+                "confirmation_coordinator": client.confirmation,
                 "management_dispatcher": client.management_dispatcher,
                 "skill_metadata": skill_metadata,
                 "management_command_tokens": management_commands,
             }
             events.append("terminal_init")
             if failure_stage == "constructor":
-                raise failure
-
-        def bind_confirmation_coordinator(self, coordinator: object) -> None:
-            assert coordinator is client.confirmation
-            events.append("bind")
-            if failure_stage == "binding":
                 raise failure
 
         async def run_async(self) -> None:
@@ -164,7 +155,6 @@ async def test_cli_service_adapter_binds_terminal_and_closes_client_once(
             "attach_workspace",
             "get_input_capabilities",
             "terminal_init",
-            "bind",
             "run",
             "client_close",
         ]
@@ -269,8 +259,6 @@ def test_cli_reports_unexpected_startup_failure_without_raw_exception_output(
 
     failures = (
         ErrorCarryingFailure(),
-        ModelContextOverflowError(ErrorInfo("model_context_overflow", secret)),
-        FatalManagementError(ErrorInfo("persistence_error", secret)),
     )
     for failure in failures:
 
@@ -318,7 +306,7 @@ def test_cli_workspace_state_failure_outputs_one_safe_error_without_path(
     assert "Traceback" not in result.output
 
 
-def test_cli_reports_fatal_replacement_failure_once_without_raw_exception_output(
+def test_cli_reports_service_failure_once_without_raw_exception_output(
     agent_home: Path,
     workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -332,9 +320,7 @@ def test_cli_reports_fatal_replacement_failure_once_without_raw_exception_output
 
     async def fail_replacement(**kwargs: object) -> None:
         del kwargs
-        raise FatalManagementError(
-            ErrorInfo("persistence_error", "Runtime Session replacement could not be completed.")
-        )
+        raise ServiceError("persistence_error", "Runtime Session replacement could not be completed.", status=500)
 
     monkeypatch.setattr(cli, "_run_service_cli_conversation", fail_replacement)
     monkeypatch.chdir(workspace)
@@ -345,53 +331,6 @@ def test_cli_reports_fatal_replacement_failure_once_without_raw_exception_output
     assert result.output.count("persistence_error:") == 1
     assert secret not in result.output
     assert "Traceback" not in result.output
-
-
-@pytest.mark.parametrize(
-    ("failure", "expected_code", "secret"),
-    (
-        (
-            ModelContextOverflowError(
-                ErrorInfo(
-                    "model_context_overflow",
-                    MODEL_CONTEXT_OVERFLOW_MESSAGE,
-                )
-            ),
-            "model_context_overflow",
-            "C:\\sensitive\\skill\\SKILL.md",
-        ),
-    ),
-)
-def test_cli_reports_runtime_context_startup_failures_without_starting_conversation(
-    agent_home: Path,
-    workspace: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    failure: Exception,
-    expected_code: str,
-    secret: str,
-) -> None:
-    home = AgentHome(agent_home)
-    home.initialize()
-    (agent_home / "config.toml").write_text(VALID_CONFIG, encoding="utf-8")
-    monkeypatch.setattr(AgentHome, "production", lambda: home)
-    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
-    conversation_calls: list[object] = []
-
-    async def fail_startup(*args: object, **kwargs: object) -> object:
-        del args, kwargs
-        raise failure
-
-    monkeypatch.setattr(cli, "_run_service_cli_conversation", fail_startup)
-    monkeypatch.chdir(workspace)
-
-    result = CliRunner().invoke(cli.app, [])
-
-    assert result.exit_code == 1
-    assert result.output.count(f"{expected_code}:") == 1
-    assert result.output.count(str(failure)) == 1
-    assert secret not in result.output
-    assert "Traceback" not in result.output
-    assert conversation_calls == []
 
 
 def run_installed_aide(

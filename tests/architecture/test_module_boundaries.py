@@ -742,8 +742,6 @@ def test_agent_loop_control_interface_is_consolidated() -> None:
         "has_active_run",
         "foreground_input_admitted",
         "cancel_active_run",
-        "bind_confirmation_callback",
-        "respond_to_confirmation",
         "project_foreground_conversation",
     }
 
@@ -1027,9 +1025,10 @@ def test_service_runtime_exclusively_owns_the_confirmation_coordinator() -> None
     bind = next(
         node
         for node in terminal_app.body
-        if isinstance(node, ast.FunctionDef) and node.name == "bind_confirmation_coordinator"
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__"
     )
-    coordinator_parameter = bind.args.args[1]
+    coordinator_parameter = next(arg for arg in bind.args.kwonlyargs
+                                 if arg.arg == "confirmation_coordinator")
     assert isinstance(coordinator_parameter.annotation, ast.Name)
     assert coordinator_parameter.annotation.id == "ConfirmationPresentationCoordinator"
 

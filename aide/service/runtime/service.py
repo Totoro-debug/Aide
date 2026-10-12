@@ -179,7 +179,6 @@ class AgentService:
         self._workspace_resources = WorkspaceResourceManager()
         self._trace_recorder: TraceRecorder = NoOpTraceRecorder()
         self._trace_storage_available = False
-        self._trace_storage_error: str | None = None
         self._trace_maintenance_task: asyncio.Task[None] | None = None
         self._trace_maintenance_wakeup = asyncio.Event()
         self._pending_trace_purges: set[tuple[str, str]] = set()
@@ -533,7 +532,6 @@ class AgentService:
                     pass
             self._trace_recorder = NoOpTraceRecorder()
             self._trace_storage_available = False
-            self._trace_storage_error = str(error)
             _logger.warning(
                 "Execution Trace storage is unavailable; using no-op recorder: {}",
                 error,
@@ -542,7 +540,6 @@ class AgentService:
 
         self._trace_recorder = recorder
         self._trace_storage_available = True
-        self._trace_storage_error = None
 
     def request_trace_session_purge(self, workspace_key: str, owner_session_id: str) -> None:
         """Hide a deleted Session immediately and schedule its physical cleanup."""
@@ -630,10 +627,6 @@ class AgentService:
     @property
     def trace_storage_available(self) -> bool:
         return self._trace_storage_available
-
-    @property
-    def trace_storage_error(self) -> str | None:
-        return self._trace_storage_error
 
     @property
     def skill_loader(self) -> SkillLoader:
@@ -1216,9 +1209,7 @@ class AgentService:
                 else:
                     await workspace.pause_schedule_admission()
 
-    async def register_project(
-        self, client_id: str, path: Path
-    ) -> tuple[ProjectRecord, WorkspaceRecord, tuple[ScheduleJob, ...]]:
+    async def register_project_entry(self, client_id: str, path: Path) -> ProjectRegistrationDTO:
         async with self._project_lifecycle_lock:
             self._require_client(client_id)
             if self.configuration is None or not self._configuration_editor.ready:
@@ -1253,10 +1244,6 @@ class AgentService:
             if not jobs and record.schedule_state == "awaiting_resume":
                 record = self.projects.set_schedule_state(record.project_id, "available")
                 await self._reconcile_schedule_admission()
-            return record, workspace, jobs
-
-    async def register_project_entry(self, client_id: str, path: Path) -> ProjectRegistrationDTO:
-        record, workspace, jobs = await self.register_project(client_id, path)
         return {
             "project_id": record.project_id,
             "workspace_id": workspace.workspace_id,

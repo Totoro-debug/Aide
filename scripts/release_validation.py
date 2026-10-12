@@ -1954,7 +1954,7 @@ with TemporaryDirectory(prefix="aide-wheel-config-") as temporary:
     for key in ("batch_size", "schedule"):
         del missing["memory"][key]
     loader.path.write_text(tomlkit.dumps(missing), encoding="utf-8")
-    configuration = loader.load_for_startup()
+    configuration = loader.load()
     assert configuration.runtime.max_tool_result_chars == 4096
     assert configuration.runtime.max_iterations == 50
     assert configuration.runtime.enable_skill_always_load is False
@@ -1969,7 +1969,7 @@ with TemporaryDirectory(prefix="aide-wheel-config-") as temporary:
     fallback = tomlkit.parse(source)
     fallback["runtime"]["permission_level"] = "wheel-secret"
     loader.path.write_text(tomlkit.dumps(fallback), encoding="utf-8")
-    configuration = loader.load_for_startup()
+    configuration = loader.load()
     assert configuration.runtime.permission_level == "workspace-write"
     assert len(loader.diagnostics) == 1
     assert loader.diagnostics[0].field == "runtime.permission_level"

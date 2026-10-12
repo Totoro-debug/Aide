@@ -175,10 +175,6 @@ class WorkspaceRecord:
     def dream(self) -> Dream:
         return self.resources.dream
 
-    @property
-    def loops(self) -> Mapping[str, _LoopState]:
-        return self._loops
-
     def subagent_repository(self, session_id: str) -> SubAgentRecordRepository:
         """Return the Workspace-owned record repository for one Session."""
         repository = self._subagent_repositories.get(session_id)

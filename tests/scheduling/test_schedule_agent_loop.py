@@ -17,7 +17,6 @@ import pytest
 import aide.agent.context.builder as context
 import aide.agent.context.run_context as compactor_module
 from aide.agent.context.builder import ContextBuilder
-from aide.agent.loop import ConfirmationRequestView
 from aide.agent.memory.dream import Dream
 from aide.agent.memory.manager import MemoryManager
 from aide.agent.message_bus import MessageBus
@@ -26,7 +25,7 @@ from aide.agent.runner import AgentRunner, AgentRunnerResult
 from aide.agent.session.session import Session, SessionStoragePartition
 from aide.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
 from aide.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
-from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
+from aide.agent.tools.tool_gateway import ConfirmationRequest, ModelToolCall, ToolGateway
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigLoader
@@ -554,9 +553,9 @@ async def test_foreground_schedule_add_uses_configured_level_and_current_overrid
         schedule_clock=_BlockingClock(NOW),
     )
     loop._permission_control.select("read-only")
-    confirmations: list[ConfirmationRequestView] = []
+    confirmations: list[ConfirmationRequest] = []
 
-    def approve(request: ConfirmationRequestView) -> None:
+    def approve(request: ConfirmationRequest) -> None:
         confirmations.append(request)
         loop.control.respond_to_confirmation(request.confirmation_id, "approved")
 

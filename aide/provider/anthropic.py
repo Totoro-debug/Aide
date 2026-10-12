@@ -133,7 +133,7 @@ class AnthropicProvider:
                 max_retries=0,
             )
 
-    def stream(
+    async def stream(
         self,
         *,
         messages: ModelMessages,
@@ -145,204 +145,157 @@ class AnthropicProvider:
         timeout: int,
         continuation: ModelContinuation | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
-        return self._stream_with_arguments(
-            messages=messages,
-            tools=tools,
-            model=model,
-            max_output=max_output,
-            temperature=temperature,
-            reasoning_effort=reasoning_effort,
-            timeout=timeout,
-            continuation=continuation,
-        )
-
-    async def _stream_with_arguments(
-        self,
-        *,
-        messages: ModelMessages,
-        tools: Sequence[dict[str, Any]],
-        model: str,
-        max_output: int,
-        temperature: float,
-        reasoning_effort: ReasoningEffort | None,
-        timeout: int,
-        continuation: ModelContinuation | None,
-    ) -> AsyncIterator[ModelStreamEvent]:
         try:
-            async for event in self._stream_once(
-                messages=messages,
-                tools=tools,
-                model=model,
-                max_output=max_output,
-                temperature=temperature,
-                reasoning_effort=reasoning_effort,
-                timeout=timeout,
+            sdk_stream = await self._client.messages.create(
+                **_request_arguments(
+                    messages=messages,
+                    tools=tools,
+                    model=model,
+                    max_output=max_output,
+                    temperature=temperature,
+                    reasoning_effort=reasoning_effort,
+                    timeout=timeout,
+                    stream=True,
+                    provider_id=self._provider_id,
+                    continuation=continuation,
+                )
+            )
+            if not hasattr(sdk_stream, "__aiter__"):
+                msg = "Anthropic streaming response is not asynchronously iterable"
+                raise TypeError(msg)
+
+            text_parts: list[str] = []
+            usage_values: dict[str, int] = {}
+            input_usage_reported = False
+            output_usage_reported = False
+            stop_reason: str | None = None
+            tool_uses: dict[int, _StreamingToolUse] = {}
+            content_blocks: dict[int, dict[str, object]] = {}
+            async for event in cast(AsyncIterator[object], sdk_stream):
+                event_type = _string_field(event, "type")
+                if event_type in {"message_start", "message_delta"}:
+                    usage = _field(
+                        _field(event, "message") if event_type == "message_start" else event,
+                        "usage",
+                    )
+                    for name in (
+                        "input_tokens", "output_tokens", "cache_read_input_tokens",
+                        "cache_creation_input_tokens",
+                    ):
+                        value = _field(usage, name)
+                        if type(value) is int and value >= 0:
+                            usage_values[name] = value
+                if event_type == "message_start":
+                    input_usage_reported = usage is not None
+                elif event_type == "content_block_delta":
+                    delta = _field(event, "delta")
+                    delta_type = _string_field(delta, "type")
+                    if delta_type == "text_delta":
+                        text = _string_field(delta, "text")
+                        if text:
+                            text_parts.append(text)
+                            block = content_blocks.setdefault(
+                                _integer_field(event, "index"),
+                                {"type": "text", "text": ""},
+                            )
+                            block["text"] = f"{_string_field(block, 'text') or ''}{text}"
+                            yield TextDelta(delta=text)
+                    elif delta_type == "thinking_delta":
+                        thinking = _string_field(delta, "thinking")
+                        if thinking:
+                            index = _integer_field(event, "index")
+                            block = content_blocks.setdefault(
+                                index,
+                                {"type": "thinking", "thinking": "", "signature": ""},
+                            )
+                            block["thinking"] = f"{_string_field(block, 'thinking') or ''}{thinking}"
+                            yield ReasoningDelta(delta=thinking)
+                    elif delta_type == "signature_delta":
+                        signature = _string_field(delta, "signature")
+                        if signature:
+                            index = _integer_field(event, "index")
+                            block = content_blocks.setdefault(
+                                index,
+                                {"type": "thinking", "thinking": "", "signature": ""},
+                            )
+                            block["signature"] = f"{_string_field(block, 'signature') or ''}{signature}"
+                    elif delta_type == "input_json_delta":
+                        index = _integer_field(event, "index")
+                        partial_json = _string_field(delta, "partial_json")
+                        if index in tool_uses and partial_json:
+                            tool_uses[index].json_parts.append(partial_json)
+                elif event_type == "content_block_start":
+                    content_block = _field(event, "content_block")
+                    index = _integer_field(event, "index")
+                    block_type = _string_field(content_block, "type")
+                    if block_type == "text":
+                        text = _string_field(content_block, "text") or ""
+                        content_blocks[index] = {"type": "text", "text": text}
+                        if text:
+                            text_parts.append(text)
+                            yield TextDelta(delta=text)
+                    elif block_type == "thinking":
+                        thinking = _string_field(content_block, "thinking") or ""
+                        content_blocks[index] = {
+                            "type": "thinking",
+                            "thinking": thinking,
+                            "signature": _string_field(content_block, "signature") or "",
+                        }
+                        if thinking:
+                            yield ReasoningDelta(delta=thinking)
+                    elif block_type == "redacted_thinking":
+                        content_blocks[index] = {
+                            "type": "redacted_thinking",
+                            "data": _string_field(content_block, "data") or "",
+                        }
+                    elif block_type == "tool_use":
+                        tool_uses[index] = _StreamingToolUse(
+                            id=_string_field(content_block, "id") or "",
+                            name=_string_field(content_block, "name") or "",
+                            initial_input=_field(content_block, "input"),
+                        )
+                        content_blocks[index] = {
+                            "type": "tool_use",
+                            "id": _string_field(content_block, "id") or "",
+                            "name": _string_field(content_block, "name") or "",
+                            "input": _field(content_block, "input"),
+                        }
+                elif event_type == "message_delta":
+                    stop_reason = _string_field(_field(event, "delta"), "stop_reason")
+                    output_usage_reported = output_usage_reported or usage is not None
+
+            input_tokens, cached_input_tokens, cache_creation_input_tokens = _input_usage(usage_values)
+            output_tokens = usage_values.get("output_tokens", 0)
+            continuation = _stream_continuation(
+                content_blocks,
+                tool_uses,
+                provider_id=self._provider_id,
+            )
+            response = ModelResponse(
+                message=AssistantModelMessage(
+                    content="".join(text_parts),
+                    tool_calls=tuple(
+                        tool_uses[index].to_model_tool_call() for index in sorted(tool_uses)
+                    ),
+                ),
+                usage=ModelUsage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    total_tokens=input_tokens + output_tokens,
+                    cached_input_tokens=cached_input_tokens,
+                    cache_creation_input_tokens=cache_creation_input_tokens,
+                    reported=input_usage_reported and output_usage_reported,
+                ),
+                finish_reason=_finish_reason(stop_reason),
                 continuation=continuation,
-            ):
-                yield event
+            )
+            yield ModelCompleted(response=response)
         except EmptyModelResponseError as error:
             raise _empty_response_error() from error
         except APIError as error:
             raise _normalized_error(error) from error
         except (TypeError, ValueError) as error:
             raise _model_failed_error() from error
-
-    async def _stream_once(
-        self,
-        *,
-        messages: ModelMessages,
-        tools: Sequence[dict[str, Any]],
-        model: str,
-        max_output: int,
-        temperature: float,
-        reasoning_effort: ReasoningEffort | None,
-        timeout: int,
-        continuation: ModelContinuation | None,
-    ) -> AsyncIterator[ModelStreamEvent]:
-        sdk_stream = await self._client.messages.create(
-            **_request_arguments(
-                messages=messages,
-                tools=tools,
-                model=model,
-                max_output=max_output,
-                temperature=temperature,
-                reasoning_effort=reasoning_effort,
-                timeout=timeout,
-                stream=True,
-                provider_id=self._provider_id,
-                continuation=continuation,
-            )
-        )
-        if not hasattr(sdk_stream, "__aiter__"):
-            msg = "Anthropic streaming response is not asynchronously iterable"
-            raise TypeError(msg)
-
-        text_parts: list[str] = []
-        usage_values: dict[str, int] = {}
-        input_usage_reported = False
-        output_usage_reported = False
-        stop_reason: str | None = None
-        tool_uses: dict[int, _StreamingToolUse] = {}
-        content_blocks: dict[int, dict[str, object]] = {}
-        async for event in cast(AsyncIterator[object], sdk_stream):
-            event_type = _string_field(event, "type")
-            if event_type in {"message_start", "message_delta"}:
-                usage = _field(
-                    _field(event, "message") if event_type == "message_start" else event,
-                    "usage",
-                )
-                for name in (
-                    "input_tokens", "output_tokens", "cache_read_input_tokens",
-                    "cache_creation_input_tokens",
-                ):
-                    value = _field(usage, name)
-                    if type(value) is int and value >= 0:
-                        usage_values[name] = value
-            if event_type == "message_start":
-                input_usage_reported = usage is not None
-            elif event_type == "content_block_delta":
-                delta = _field(event, "delta")
-                delta_type = _string_field(delta, "type")
-                if delta_type == "text_delta":
-                    text = _string_field(delta, "text")
-                    if text:
-                        text_parts.append(text)
-                        block = content_blocks.setdefault(
-                            _integer_field(event, "index"),
-                            {"type": "text", "text": ""},
-                        )
-                        block["text"] = f"{_string_field(block, 'text') or ''}{text}"
-                        yield TextDelta(delta=text)
-                elif delta_type == "thinking_delta":
-                    thinking = _string_field(delta, "thinking")
-                    if thinking:
-                        index = _integer_field(event, "index")
-                        block = content_blocks.setdefault(
-                            index,
-                            {"type": "thinking", "thinking": "", "signature": ""},
-                        )
-                        block["thinking"] = f"{_string_field(block, 'thinking') or ''}{thinking}"
-                        yield ReasoningDelta(delta=thinking)
-                elif delta_type == "signature_delta":
-                    signature = _string_field(delta, "signature")
-                    if signature:
-                        index = _integer_field(event, "index")
-                        block = content_blocks.setdefault(
-                            index,
-                            {"type": "thinking", "thinking": "", "signature": ""},
-                        )
-                        block["signature"] = f"{_string_field(block, 'signature') or ''}{signature}"
-                elif delta_type == "input_json_delta":
-                    index = _integer_field(event, "index")
-                    partial_json = _string_field(delta, "partial_json")
-                    if index in tool_uses and partial_json:
-                        tool_uses[index].json_parts.append(partial_json)
-            elif event_type == "content_block_start":
-                content_block = _field(event, "content_block")
-                index = _integer_field(event, "index")
-                block_type = _string_field(content_block, "type")
-                if block_type == "text":
-                    text = _string_field(content_block, "text") or ""
-                    content_blocks[index] = {"type": "text", "text": text}
-                    if text:
-                        text_parts.append(text)
-                        yield TextDelta(delta=text)
-                elif block_type == "thinking":
-                    thinking = _string_field(content_block, "thinking") or ""
-                    content_blocks[index] = {
-                        "type": "thinking",
-                        "thinking": thinking,
-                        "signature": _string_field(content_block, "signature") or "",
-                    }
-                    if thinking:
-                        yield ReasoningDelta(delta=thinking)
-                elif block_type == "redacted_thinking":
-                    content_blocks[index] = {
-                        "type": "redacted_thinking",
-                        "data": _string_field(content_block, "data") or "",
-                    }
-                elif block_type == "tool_use":
-                    tool_uses[index] = _StreamingToolUse(
-                        id=_string_field(content_block, "id") or "",
-                        name=_string_field(content_block, "name") or "",
-                        initial_input=_field(content_block, "input"),
-                    )
-                    content_blocks[index] = {
-                        "type": "tool_use",
-                        "id": _string_field(content_block, "id") or "",
-                        "name": _string_field(content_block, "name") or "",
-                        "input": _field(content_block, "input"),
-                    }
-            elif event_type == "message_delta":
-                stop_reason = _string_field(_field(event, "delta"), "stop_reason")
-                output_usage_reported = output_usage_reported or usage is not None
-
-        input_tokens, cached_input_tokens, cache_creation_input_tokens = _input_usage(usage_values)
-        output_tokens = usage_values.get("output_tokens", 0)
-        continuation = _stream_continuation(
-            content_blocks,
-            tool_uses,
-            provider_id=self._provider_id,
-        )
-        response = ModelResponse(
-            message=AssistantModelMessage(
-                content="".join(text_parts),
-                tool_calls=tuple(
-                    tool_uses[index].to_model_tool_call() for index in sorted(tool_uses)
-                ),
-            ),
-            usage=ModelUsage(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                total_tokens=input_tokens + output_tokens,
-                cached_input_tokens=cached_input_tokens,
-                cache_creation_input_tokens=cache_creation_input_tokens,
-                reported=input_usage_reported and output_usage_reported,
-            ),
-            finish_reason=_finish_reason(stop_reason),
-            continuation=continuation,
-        )
-        yield ModelCompleted(response=response)
 
     async def complete(
         self,

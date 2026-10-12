@@ -35,31 +35,21 @@ class WorkspaceJsonlSummaryStore:
 
     async def append(self, content: str, timestamp: datetime) -> SummaryEntry:
         async with self._lock:
-            next_index = len(self._entries()) + 1
-            entry = SummaryEntry(index=next_index, timestamp=timestamp, content=content)
-            self._append_exact(entry)
+            entries, existing = self._read_entries()
+            entry = SummaryEntry(index=len(entries) + 1, timestamp=timestamp, content=content)
+            self._replace_bytes(self.path, existing + entry.to_json_line().encode("utf-8"))
+            HOST_FILESYSTEM.require_owned_regular_file(self.path, within=self._state_root)
             return entry
 
     async def after(self, cursor: int, limit: int) -> tuple[SummaryEntry, ...]:
         async with self._lock:
-            return self._entries()[cursor : cursor + limit]
+            entries, _ = self._read_entries()
+            return entries[cursor : cursor + limit]
 
-    def _append_exact(self, entry: SummaryEntry) -> None:
-        entries = self._entries()
-        if entry.index <= len(entries):
-            if entries[entry.index - 1].to_dict() != entry.to_dict():
-                raise ValueError("summary index already contains a different record")
-            return
-        if entry.index != len(entries) + 1:
-            raise ValueError("summary index must be contiguous")
-        existing = self.path.read_bytes() if self.path.exists() else b""
-        self._replace_bytes(self.path, existing + entry.to_json_line().encode("utf-8"))
-        HOST_FILESYSTEM.require_owned_regular_file(self.path, within=self._state_root)
-
-    def _entries(self) -> tuple[SummaryEntry, ...]:
+    def _read_entries(self) -> tuple[tuple[SummaryEntry, ...], bytes]:
         self._require_memory_directory()
         if not self.path.exists() and not self.path.is_symlink():
-            return ()
+            return (), b""
         HOST_FILESYSTEM.require_owned_regular_file(self.path, within=self._state_root)
         content = self.path.read_bytes()
         if content and not content.endswith(b"\n"):
@@ -94,7 +84,7 @@ class WorkspaceJsonlSummaryStore:
                     content=summary_content,
                 )
             )
-        return tuple(entries)
+        return tuple(entries), content
 
     def _require_memory_directory(self) -> Path:
         return HOST_FILESYSTEM.require_owned_directory(

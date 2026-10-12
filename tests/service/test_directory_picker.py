@@ -29,7 +29,7 @@ async def picker_http(tmp_path: Path) -> AsyncIterator[TestClient[Any, Any]]:
     home.initialize()
     (home.path / "config.toml").write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
     token = create_credential(home)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     transport = AgentServiceTransport(service)
     client = await service.register_client("web")

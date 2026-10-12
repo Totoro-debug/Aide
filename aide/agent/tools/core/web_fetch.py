@@ -25,7 +25,6 @@ from aide.agent.tools.base import (
     is_public_ip,
     truncate_text,
 )
-from aide.agent.tools.core.exec_policy import ExecAssessment
 from aide.agent.tools.network_safety import (
     DNSResolver,
     SocketDNSResolver,
@@ -288,28 +287,6 @@ class WebFetchTool(BaseTool):
             or not isinstance(max_chars, int)
         ):
             raise ToolError("Web Fetch arguments are invalid.")
-        return await self._execute_fetch(
-            url,
-            output_format,
-            max_chars,
-            authorization,
-        )
-
-    async def execute(self, *, url: str, format: str, maxChars: int) -> str:
-        return await self._execute_fetch(
-            url,
-            format,
-            maxChars,
-            _DirectNetworkAuthorization(),
-        )
-
-    async def _execute_fetch(
-        self,
-        url: str,
-        output_format: str,
-        max_chars: int,
-        authorization: ToolAuthorizationSession,
-    ) -> str:
         evaluation = self._evaluate_target(url)
         resolution = await self._resolve_target(evaluation.target)
         await authorization.authorize_network_target(
@@ -466,23 +443,6 @@ class WebFetchTool(BaseTool):
                 )
             finally:
                 await response.close()
-
-
-class _DirectNetworkAuthorization:
-    exec_assessment: ExecAssessment | None = None
-
-    def initial_decision(self) -> Literal["direct"]:
-        return "direct"
-
-    def confirmation_reason(self) -> str:
-        return "Tool confirmation is required."
-
-    async def authorize_network_target(
-        self,
-        target: NormalizedNetworkTarget,
-        resolved_addresses: tuple[str, ...],
-    ) -> None:
-        del target, resolved_addresses
 
 
 async def _close_session(session: ClientSession) -> None:

@@ -15,7 +15,7 @@ from aide.service.transport import create_app
 
 @asynccontextmanager
 async def cli_service(home: AgentHome) -> AsyncIterator[AgentService]:
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=3600)
     server = TestServer(create_app(service), host="127.0.0.1")
     create_credential(home)
     try:

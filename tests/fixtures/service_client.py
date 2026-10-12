@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Mapping
 from contextlib import suppress
+from uuid import uuid4
 
 import aiohttp
 
@@ -51,3 +52,16 @@ class ObservedServiceClient(ServiceClient):
         ):
             raise ServiceStartupError("service_protocol_error", "Skill response is invalid.")
         return response
+
+
+async def release_session(client: ServiceClient) -> None:
+    """Release the current idle claim through the existing HTTP endpoint."""
+    await client._http_request(
+        "POST",
+        f"/api/v1/workspaces/{client.workspace_id}/sessions/{client.session_id}/release",
+        payload={"request_id": str(uuid4()), "claim_version": client.claim_version},
+        mutation=True,
+        extra_headers={"X-Aide-Claim": client.claim_credential},
+    )
+    client.claim_version = 0
+    client.claim_credential = ""

@@ -83,7 +83,7 @@ model = "small-model"
     monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda *_args: provider)
     service = AgentService(
         home,
-        ConfigLoader(home).load_for_startup(),
+        ConfigLoader(home).load(),
         reconnect_timeout=30,
         monotonic_now=clock.monotonic,
         sleep=wait_for_timer,
@@ -456,7 +456,7 @@ async def test_effort_is_global_runtime_control_with_shared_cli_and_persistence_
     ] == "high"
     cli = case.workspace.management_dispatcher(case.second.client_id, case.other_claim.session_id)
     assert (await cli.dispatch("/effort")).effort_selection == "high"
-    saved = ConfigLoader(case.service.agent_home).load_for_startup()
+    saved = ConfigLoader(case.service.agent_home).load()
     assert saved.models.routes["chat"].reasoning_effort == "high"
 
     path = tmp_path / "new-runtime"
@@ -513,7 +513,7 @@ async def test_concurrent_client_effort_updates_keep_last_runtime_and_persisted_
     assert second["published_effort"] == "xhigh"
     assert set(published) == {"low", "xhigh"}
     final = published[-1]
-    saved = ConfigLoader(case.service.agent_home).load_for_startup()
+    saved = ConfigLoader(case.service.agent_home).load()
     assert saved.models.routes["chat"].reasoning_effort == final
     assert "# Preserve this configuration comment." in config_path.read_text(encoding="utf-8")
     assert (await _status(case))["chat_reasoning_effort"] == final

@@ -21,7 +21,6 @@ import aide.agent.context.run_context as compactor_module
 import aide.agent.loop as loop_module
 from aide.agent.blackboard import Blackboard
 from aide.agent.context.tokenizer import context_estimator_version_for_model
-from aide.agent.loop import ConfirmationRequestView
 from aide.agent.memory.manager import MemoryManager
 from aide.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
 from aide.agent.permission import PermissionSnapshot, RuntimePermissionControl
@@ -33,7 +32,7 @@ from aide.agent.session.session import Session
 from aide.agent.tools.base import BaseTool
 from aide.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
 from aide.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
-from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
+from aide.agent.tools.tool_gateway import ConfirmationRequest, ModelToolCall, ToolGateway
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigError, ConfigLoader
@@ -2498,10 +2497,10 @@ async def test_loop_confirmation_uses_one_direct_pending_future_and_cancels_it(
         )
     )
     loop, _session, _bus = _runtime(tmp_path, router)
-    requests: list[ConfirmationRequestView] = []
+    requests: list[ConfirmationRequest] = []
     requested = asyncio.Event()
 
-    def on_confirmation(request: ConfirmationRequestView) -> None:
+    def on_confirmation(request: ConfirmationRequest) -> None:
         requests.append(request)
         requested.set()
 
@@ -2551,9 +2550,9 @@ async def test_permission_upgrade_does_not_approve_an_active_run_confirmation(
     )
     loop, _session, bus = _runtime(tmp_path, router)
     requested = asyncio.Event()
-    requests: list[ConfirmationRequestView] = []
+    requests: list[ConfirmationRequest] = []
 
-    def on_confirmation(request: ConfirmationRequestView) -> None:
+    def on_confirmation(request: ConfirmationRequest) -> None:
         requests.append(request)
         requested.set()
 
@@ -2622,7 +2621,7 @@ async def test_permission_downgrade_does_not_revoke_the_admitted_full_access_run
         )
     )
     loop, _session, bus = _runtime(tmp_path, router)
-    requests: list[ConfirmationRequestView] = []
+    requests: list[ConfirmationRequest] = []
     loop.control.bind_confirmation_callback(requests.append)
     loop._permission_control.select("full-access")
     await loop.start()

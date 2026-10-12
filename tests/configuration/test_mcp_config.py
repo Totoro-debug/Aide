@@ -685,7 +685,7 @@ command = "uvx"
 """,
     )
 
-    configuration = loader.load_for_startup()
+    configuration = loader.load()
 
     assert set(configuration.mcp) == {"invalid", "valid"}
     assert loader.diagnostics == ()

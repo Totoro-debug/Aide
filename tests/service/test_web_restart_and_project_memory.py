@@ -14,6 +14,7 @@ from aide.service.discovery import read_credential, read_discovery
 from aide.service.errors import ServiceError
 from aide.service.process import serve_service
 from aide.service.runtime import AgentService
+from tests.fixtures.service_runtime import register_project, workspace_loops
 from tests.service.test_protocol_contract import _validator
 from tests.service.test_service_concurrency import _ConcurrentProvider
 from tests.service.test_service_transport import _prepare_agent_home
@@ -33,7 +34,7 @@ async def test_project_memory_is_scoped_and_does_not_create_sessions(
         for name in ("one", "two"):
             path = tmp_path / name
             path.mkdir()
-            record, workspace, _ = await service.register_project(client.client_id, path)
+            record, workspace, _ = await register_project(service, client.client_id, path)
             workspace.memory_manager.long_term_path.write_text(name, encoding="utf-8")
             records.append((record, workspace))
         for record, workspace in records:
@@ -42,7 +43,7 @@ async def test_project_memory_is_scoped_and_does_not_create_sessions(
             )
             _validator("memory_view_response").validate(result)
             assert result["content"] == record.path.name
-            assert not workspace.loops
+            assert not workspace_loops(workspace)
             assert client.current_session_id is None
         calls = 0
 
@@ -62,7 +63,7 @@ async def test_project_memory_is_scoped_and_does_not_create_sessions(
         with pytest.raises(ServiceError) as missing:
             await service.project_memory_operation(client.client_id, "missing", "missing", "read")
         assert missing.value.code == "not_found"
-        assert all(not workspace.loops for _, workspace in records)
+        assert all(not workspace_loops(workspace) for _, workspace in records)
     finally:
         await service.stop()
 

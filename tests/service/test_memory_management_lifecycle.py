@@ -232,7 +232,7 @@ async def test_http_dream_shutdown_waits_for_cancel_cleanup_and_releases_workspa
 
     monkeypatch.setattr(case.provider, "complete", successful)
     replacement = AgentService(
-        case.service.agent_home, ConfigLoader(case.service.agent_home).load_for_startup()
+        case.service.agent_home, ConfigLoader(case.service.agent_home).load()
     )
     await replacement.start()
     try:

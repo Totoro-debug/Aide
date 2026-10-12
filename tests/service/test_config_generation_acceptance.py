@@ -33,6 +33,7 @@ from aide.provider.models import (
 from aide.schedule.model import JobSchedule, ScheduleJob
 from aide.service.client import ServiceClient
 from aide.service.runtime import AgentService
+from tests.fixtures.service_runtime import workspace_loops
 from tests.service.test_restore_management import _restore_request
 from tests.service.test_service_concurrency import (
     _client_output,
@@ -262,7 +263,7 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
         return provider
 
     monkeypatch.setattr(service_runtime, "create_provider", provider_factory)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=3600)
     server, port = await _serve(service, home)
     cli: ServiceClient | None = None
     browser = await service.register_client("web")
@@ -291,7 +292,7 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
         )
         await workspace.schedule_service.add_user_job(job)
         await asyncio.wait_for(old_provider.schedule_started.wait(), 5)
-        assert workspace.loops[cli.session_id].loop.has_active_run
+        assert workspace_loops(workspace)[cli.session_id].loop.has_active_run
         assert workspace.schedule_service.status_snapshot().to_dict()["active_job_count"] == 1
         revision = service.config_view()["revision"]
         headers = {
@@ -356,7 +357,7 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
         assert service.client_permission(cli.client_id).current() == "read-only"
         assert service.client_permission(cli.client_id).configured() == "full-access"
         assert (
-            workspace.loops[
+            workspace_loops(workspace)[
                 cli.session_id
             ].loop._create_executor()._tool_gateway._permission_context.configured_schedule_level
             == "full-access"
@@ -407,7 +408,7 @@ async def test_save_preserves_dream_and_subsequent_dream_uses_new_settings(
         return provider
 
     monkeypatch.setattr(service_runtime, "create_provider", provider_factory)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=3600)
     server, port = await _serve(service, home)
     cli: ServiceClient | None = None
     other: ServiceClient | None = None
@@ -478,7 +479,7 @@ async def test_save_preserves_auto_title_after_foreground_run_has_finished(
         return provider
 
     monkeypatch.setattr(service_runtime, "create_provider", provider_factory)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=3600)
     server, port = await _serve(service, home)
     cli: ServiceClient | None = None
     title_idle: asyncio.Task[None] | None = None
@@ -494,7 +495,7 @@ async def test_save_preserves_auto_title_after_foreground_run_has_finished(
         old_provider = providers[0]
         await asyncio.wait_for(old_provider.title_started.wait(), 5)
         assert "answer from session B" in await _client_output(cli)
-        old_loop = workspace.loops[cli.session_id].loop
+        old_loop = workspace_loops(workspace)[cli.session_id].loop
         async with asyncio.timeout(5):
             while old_loop.has_active_run:
                 await asyncio.sleep(0)
@@ -520,7 +521,7 @@ async def test_save_preserves_auto_title_after_foreground_run_has_finished(
         await asyncio.wait_for(asyncio.shield(title_idle), 5)
         assert _application(service)["status"] == "next-run-required"
         assert not old_provider.background_cancelled.is_set() and not old_provider.closed
-        current = workspace.loops[cli.session_id].loop.session
+        current = workspace_loops(workspace)[cli.session_id].loop.session
         assert current.metadata["title"] == "Completed background title"
         assert current.updated_at == run_updated_at
         await workspace.release(cli.client_id, cli.session_id)
@@ -567,7 +568,7 @@ async def test_save_preserves_real_restore_transaction(
     monkeypatch.setattr(
         service_runtime, "create_provider", lambda _configuration: _GenerationProvider()
     )
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=3600)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=3600)
     await service.start()
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -626,7 +627,7 @@ async def test_save_preserves_real_restore_transaction(
         assert target.read_bytes() == b"before restore"
         assert not RestoreManager(state, session.session_id).has_pending_transaction()
         assert workspace.configuration.runtime.max_iterations == 86
-        assert workspace.loops[session.session_id].loop is claim.loop
+        assert workspace_loops(workspace)[session.session_id].loop is claim.loop
         assert claim.loop.session.session_id == session.session_id
     finally:
         release.set()

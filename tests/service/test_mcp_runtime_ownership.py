@@ -23,6 +23,7 @@ from tests.fixtures.mcp_wire import (
     stdio_wire_configuration,
 )
 from tests.fixtures.project_removal import complete_project_removal
+from tests.fixtures.service_runtime import workspace_loops
 from tests.service.test_service_concurrency import _CollectingSink
 
 
@@ -64,7 +65,7 @@ async def test_concurrent_service_activation_initializes_http_once(
         return connection
 
     monkeypatch.setattr(mcp_runtime, "_default_connection_factory", factory)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     first = asyncio.create_task(service.start())
     second: asyncio.Task[None] | None = None
     try:
@@ -136,7 +137,7 @@ async def test_service_owns_http_and_workspace_owns_stdio_connections(
             'tool_keywords = {echo = ["echo"]}\n'
         )
         (home.path / "config.toml").write_text(config, encoding="utf-8")
-        service = AgentService(home, ConfigLoader(home).load_for_startup())
+        service = AgentService(home, ConfigLoader(home).load())
         await service.start()
         try:
             assert [request["method"] for request in http_server.requests].count("initialize") == 1
@@ -170,7 +171,7 @@ async def test_service_owns_http_and_workspace_owns_stdio_connections(
             for workspace in (first_workspace, second_workspace):
                 for _ in range(10):
                     session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
-                    loop = workspace.loops[session_id].loop
+                    loop = workspace_loops(workspace)[session_id].loop
                     gateway = loop._create_executor()._tool_gateway.for_run(
                         exposed_names=(first_http.name,),
                         permission_context=PermissionContext(

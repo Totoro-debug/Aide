@@ -37,10 +37,10 @@ from aide.agent.confirmation import (
     BackgroundConfirmationOwner,
     ConfirmationAborted,
     ConfirmationEnvelope,
+    ForegroundConfirmationOwner,
     ToolConfirmationCoordinator,
 )
 from aide.agent.loop import (
-    ConfirmationRequestView,
     ForegroundConversationProjection,
 )
 from aide.agent.memory.dream import DreamResult
@@ -75,7 +75,6 @@ from aide.management.commands import (
     ManagementCommandResult,
 )
 from aide.management.service import (
-    FatalManagementError,
     ManagementError,
     RestoreListingReport,
     RuntimeStatus,
@@ -597,10 +596,8 @@ class _ScriptedControl:
     def __init__(self, source: _ScriptedSource) -> None:
         self._source = source
         self._active = False
-        self._pending_confirmation: UUID | None = None
-        self._callback: Callable[[ConfirmationRequestView], None] | None = None
+        self.confirmation_coordinator = ToolConfirmationCoordinator()
         self._seen_confirmation_ids: set[UUID] = set()
-        self._confirmation_released: asyncio.Event | None = None
         self._bridge: asyncio.Task[None] | None = None
 
     @property
@@ -609,11 +606,6 @@ class _ScriptedControl:
 
     def foreground_input_admitted(self) -> bool:
         return True
-
-    def bind_confirmation_callback(
-        self, callback: Callable[[ConfirmationRequestView], None]
-    ) -> None:
-        self._callback = callback
 
     async def cancel_active_run(self) -> None:
         handled = await self._source.cancel_active_turn()
@@ -627,23 +619,6 @@ class _ScriptedControl:
     def project_foreground_conversation(self) -> ForegroundConversationProjection:
         return ForegroundConversationProjection(session_id="test-session", messages=())
 
-    def respond_to_confirmation(
-        self, confirmation_id: UUID, decision: ConfirmationDecision
-    ) -> None:
-        try:
-            respond = getattr(self._source, "respond_to_confirmation", None)
-            if callable(respond):
-                cast(Callable[[UUID, ConfirmationDecision], None], respond)(
-                    confirmation_id, decision
-                )
-        finally:
-            if self._pending_confirmation == confirmation_id:
-                self._pending_confirmation = None
-                released = self._confirmation_released
-                self._confirmation_released = None
-                if released is not None:
-                    released.set()
-
     async def publish(
         self,
         item: _ScriptItem,
@@ -653,14 +628,17 @@ class _ScriptedControl:
             if item.confirmation_id in self._seen_confirmation_ids:
                 return False
             self._seen_confirmation_ids.add(item.confirmation_id)
-            self._pending_confirmation = item.confirmation_id
-            released = asyncio.Event()
-            self._confirmation_released = released
-            callback = self._callback
-            if callback is None:
-                raise AssertionError("confirmation callback was not bound")
-            callback(item)
-            await released.wait()
+            decision = await self.confirmation_coordinator.request(
+                ConfirmationEnvelope(
+                    request=item, origin="foreground",
+                    owner=ForegroundConfirmationOwner(uuid4(), uuid4()),
+                )
+            )
+            respond = getattr(self._source, "respond_to_confirmation", None)
+            if callable(respond):
+                cast(Callable[[UUID, ConfirmationDecision], None], respond)(
+                    item.confirmation_id, decision
+                )
             return False
         if isinstance(item, _ResponseSegmentScript):
             raise TypeError("response segment scripts must be expanded by a run source")
@@ -770,11 +748,6 @@ class FakeTerminalBackend:
         self.start_calls += 1
         self._bridge = asyncio.create_task(self._consume_inbound())
 
-    def bind_confirmation_callback(
-        self, callback: Callable[[ConfirmationRequestView], None]
-    ) -> None:
-        self.control.bind_confirmation_callback(callback)
-
     async def close(self) -> None:
         self.close_calls += 1
         self._closing = True
@@ -860,9 +833,6 @@ class _TerminalTestDriver:
 class _DirectControl:
     """Minimal public AgentRunExecutor control seam for direct MessageBus UI tests."""
 
-    def __init__(self) -> None:
-        self.confirmation_callback: Callable[[ConfirmationRequestView], None] | None = None
-
     @property
     def has_active_run(self) -> bool:
         return False
@@ -875,21 +845,6 @@ class _DirectControl:
 
     def project_foreground_conversation(self) -> ForegroundConversationProjection:
         return ForegroundConversationProjection(session_id="direct-test", messages=())
-
-    def bind_confirmation_callback(
-        self,
-        callback: Callable[[ConfirmationRequestView], None],
-    ) -> None:
-        self.confirmation_callback = callback
-
-    def respond_to_confirmation(
-        self,
-        confirmation_id: UUID,
-        decision: ConfirmationDecision,
-    ) -> None:
-        del confirmation_id, decision
-        raise ValueError("Confirmation response is late or unknown")
-
 
 class KeyboardLifecycleDriver(Driver):
     operations: ClassVar[list[tuple[str, str]]] = []
@@ -981,19 +936,21 @@ def _terminal_app(
         if management_dispatcher is None
         else management_dispatcher
     )
+    coordinator = confirmation_coordinator or getattr(
+        runtime.control, "confirmation_coordinator", None
+    ) or ToolConfirmationCoordinator()
+    if isinstance(runtime, AgentRunExecutor) and runtime._confirmation_requester is None:
+        runtime.bind_confirmation_requester(coordinator.request)
     kwargs: dict[str, object] = {
         "bus": runtime.bus if bus is None else bus,
         "control": runtime.control,
         "management_dispatcher": dispatcher,
+        "confirmation_coordinator": coordinator,
         "skill_metadata": skill_metadata,
     }
     if monotonic is not None:
         kwargs["monotonic"] = monotonic
     app = app_type(**kwargs)  # type: ignore[arg-type]
-    if confirmation_coordinator is not None:
-        bind_confirmation_coordinator = getattr(app, "bind_confirmation_coordinator", None)
-        assert callable(bind_confirmation_coordinator)
-        bind_confirmation_coordinator(confirmation_coordinator)
     test_cleanup = cleanup or getattr(runtime, "_terminal_test_cleanup", None)
     return cast(TerminalConversationApp, _TerminalTestDriver(app, runtime, test_cleanup))
 
@@ -1279,7 +1236,7 @@ def test_terminal_constructor_does_not_expose_runtime_lifecycle_parameters() -> 
 
 @pytest.mark.asyncio
 async def test_terminal_unmount_clears_ui_owned_generation_state() -> None:
-    app = TerminalConversationApp(
+    app = TerminalConversationApp(confirmation_coordinator=ToolConfirmationCoordinator(),
         bus=MessageBus(),
         control=_DirectControl(),
         management_dispatcher=_management_dispatcher(),
@@ -1289,7 +1246,7 @@ async def test_terminal_unmount_clears_ui_owned_generation_state() -> None:
         app._pending_inputs.append("stale input")
         app._bus_snapshot = (InboundMessage(content="stale inbound"),)
         app._cancel_requested_turn = object()
-        app._active_confirmation_id = uuid4()
+        app._active_confirmation_token = object()
         app._completion_dismissed_text = "stale completion"
         app._run_ready.clear()
         app.exit()
@@ -1297,7 +1254,7 @@ async def test_terminal_unmount_clears_ui_owned_generation_state() -> None:
     assert not app._pending_inputs
     assert not app._bus_snapshot
     assert app._cancel_requested_turn is None
-    assert app._active_confirmation_id is None
+    assert app._active_confirmation_token is None
     assert app._completion_dismissed_text is None
     assert app._run_ready.is_set() is False
     assert app._outbound_worker is None
@@ -1516,12 +1473,6 @@ async def test_restore_workflow_refills_selected_anchor_after_partial_file_failu
         def foreground_input_admitted(self) -> bool:
             return True
 
-        def bind_confirmation_callback(self, _callback: object) -> None:
-            return None
-
-        def unbind_confirmation_callback(self, _callback: object) -> None:
-            return None
-
         async def cancel_active_run(self) -> None:
             return None
 
@@ -1532,7 +1483,7 @@ async def test_restore_workflow_refills_selected_anchor_after_partial_file_failu
             return projection
 
     bus = MessageBus()
-    app = TerminalConversationApp(
+    app = TerminalConversationApp(confirmation_coordinator=ToolConfirmationCoordinator(),
         bus=bus,
         control=Control(),
         management_dispatcher=ManagementCommandDispatcher(cast(Any, Management())),
@@ -1704,12 +1655,6 @@ async def test_restore_workflow_cancellation_branches_do_not_refill_draft(
         def foreground_input_admitted(self) -> bool:
             return cancel_calls > 0
 
-        def bind_confirmation_callback(self, _callback: object) -> None:
-            return None
-
-        def unbind_confirmation_callback(self, _callback: object) -> None:
-            return None
-
         async def cancel_active_run(self) -> None:
             return None
 
@@ -1719,7 +1664,7 @@ async def test_restore_workflow_cancellation_branches_do_not_refill_draft(
         def project_foreground_conversation(self) -> ForegroundConversationProjection:
             return projection
 
-    app = TerminalConversationApp(
+    app = TerminalConversationApp(confirmation_coordinator=ToolConfirmationCoordinator(),
         bus=MessageBus(),
         control=Control(),
         management_dispatcher=ManagementCommandDispatcher(cast(Any, Management())),
@@ -1817,7 +1762,7 @@ async def test_restore_workflow_conversation_only_refills_unsubmitted_draft(
             return None
 
     bus = MessageBus()
-    app = TerminalConversationApp(
+    app = TerminalConversationApp(confirmation_coordinator=ToolConfirmationCoordinator(),
         bus=bus,
         control=_DirectControl(),
         management_dispatcher=ManagementCommandDispatcher(cast(Any, Management())),
@@ -1927,7 +1872,7 @@ async def test_restore_workflow_identity_and_failure_guards_do_not_refill_draft(
         async def restore_result(self) -> RestoreResult | None:
             return None
 
-    app = TerminalConversationApp(
+    app = TerminalConversationApp(confirmation_coordinator=ToolConfirmationCoordinator(),
         bus=MessageBus(),
         control=_DirectControl(),
         management_dispatcher=ManagementCommandDispatcher(cast(Any, Management())),
@@ -2060,12 +2005,6 @@ async def test_restore_waiting_barrier_can_be_cancelled_before_inspection_finish
         def foreground_input_admitted(self) -> bool:
             return cancel_calls > 0
 
-        def bind_confirmation_callback(self, _callback: object) -> None:
-            return None
-
-        def unbind_confirmation_callback(self, _callback: object) -> None:
-            return None
-
         async def cancel_active_run(self) -> None:
             return None
 
@@ -2075,7 +2014,7 @@ async def test_restore_waiting_barrier_can_be_cancelled_before_inspection_finish
         def project_foreground_conversation(self) -> ForegroundConversationProjection:
             return ForegroundConversationProjection(session_id=session_id, messages=())
 
-    app = TerminalConversationApp(
+    app = TerminalConversationApp(confirmation_coordinator=ToolConfirmationCoordinator(),
         bus=MessageBus(),
         control=Control(),
         management_dispatcher=ManagementCommandDispatcher(cast(Any, Management())),
@@ -2126,7 +2065,7 @@ async def test_restore_inspection_failure_dismisses_waiting_screen() -> None:
             nonlocal cancel_calls
             cancel_calls += 1
 
-    app = TerminalConversationApp(
+    app = TerminalConversationApp(confirmation_coordinator=ToolConfirmationCoordinator(),
         bus=MessageBus(),
         control=_DirectControl(),
         management_dispatcher=ManagementCommandDispatcher(cast(Any, Management())),
@@ -3148,7 +3087,7 @@ async def test_resume_stale_selection_preserves_current_display_and_interaction(
 
 
 @pytest.mark.asyncio
-async def test_fatal_resume_failure_exits_without_rendering_private_error(
+async def test_resume_failure_keeps_terminal_usable_without_rendering_private_error(
     agent_home: Path,
     workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3160,7 +3099,7 @@ async def test_fatal_resume_failure_exits_without_rendering_private_error(
         _dispatcher: RemoteManagementCommandDispatcher, _session_id: str, *, force: bool = False
     ) -> ManagementCommandResult:
         del force
-        raise FatalManagementError(
+        raise ManagementError(
             ErrorInfo("persistence_error", "Runtime Session replacement could not be completed.")
         ) from RuntimeError(private_error)
 
@@ -3198,22 +3137,19 @@ async def test_fatal_resume_failure_exits_without_rendering_private_error(
         await _wait_for_session_picker(app, pilot)
         await pilot.press("enter")
         async with asyncio.timeout(3):
-            while app.is_running:
+            while "Session resume failed." not in _visible_screen_text(app):
                 await pilot.pause()
         visible_after_failure = _visible_screen_text(app)
-        assert isinstance(app.fatal_management_error, FatalManagementError)
+        assert app.is_running
+        assert not app.query_one("#conversation-input", TextArea).read_only
 
     monkeypatch.setattr(RemoteManagementCommandDispatcher, "resume", fail_resume)
-    with pytest.raises(FatalManagementError) as raised:
-        await _run_cli_terminal_case(
-            agent_home=agent_home,
-            workspace=workspace,
-            monkeypatch=monkeypatch,
-            scenario=scenario,
-        )
-
-    assert raised.value.error.code == "persistence_error"
-    assert private_error not in str(raised.value)
+    await _run_cli_terminal_case(
+        agent_home=agent_home,
+        workspace=workspace,
+        monkeypatch=monkeypatch,
+        scenario=scenario,
+    )
     assert private_error not in visible_after_failure
     assert "Must not be rendered after fatal replacement failure." not in visible_after_failure
 
@@ -3253,7 +3189,7 @@ async def test_up_drain_keeps_an_inbound_consumed_during_the_atomic_drain() -> N
     bus = CoordinatedDrainBus()
     control = _DirectControl()
 
-    app = TerminalConversationApp(
+    app = TerminalConversationApp(confirmation_coordinator=ToolConfirmationCoordinator(),
         bus=bus,
         control=control,
         management_dispatcher=_management_dispatcher(),
@@ -3302,7 +3238,7 @@ async def test_sparse_protocol_errors_and_duplicate_terminal_do_not_poison_next_
     bus = MessageBus()
     control = _DirectControl()
 
-    app = TerminalConversationApp(
+    app = TerminalConversationApp(confirmation_coordinator=ToolConfirmationCoordinator(),
         bus=bus,
         control=control,
         management_dispatcher=_management_dispatcher(),

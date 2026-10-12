@@ -72,7 +72,7 @@ from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.core.exec_host import ExecHost
 from aide.agent.tools.core.subagents import build_subagent_tools
 from aide.agent.tools.deferred import build_agent_run_gateway
-from aide.agent.tools.permission import MCPToolIdentity, PermissionContext
+from aide.agent.tools.permission import PermissionContext
 from aide.agent.tools.tool_gateway import (
     BuiltInToolCatalog,
     ConfirmationDecision,
@@ -115,42 +115,7 @@ from aide.trace.types import TraceOrigin, TracePurpose
 from aide.utils.async_tasks import await_task_preserving_cancellation
 from aide.utils.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.utils.text import normalize_title, normalize_title_candidate
-
-
-class ModelContextOverflowError(Exception):
-    """The complete Model request exceeds the chat input budget."""
-
-    def __init__(self, error: ErrorInfo) -> None:
-        self.error = error
-        super().__init__(error.message)
-
-
-class ConfirmationRequestView(Protocol):
-    """Stable confirmation data exposed to a foreground control consumer."""
-
-    @property
-    def confirmation_id(self) -> UUID: ...
-
-    @property
-    def tool_call_id(self) -> str: ...
-
-    @property
-    def tool_name(self) -> str: ...
-
-    @property
-    def reason(self) -> str: ...
-
-    @property
-    def summary(self) -> str: ...
-
-    @property
-    def details(self) -> dict[str, Any]: ...
-
-    @property
-    def warnings(self) -> tuple[str, ...]: ...
-
-    @property
-    def mcp_identity(self) -> MCPToolIdentity | None: ...
+from aide.utils.validation import empty_token_usage
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,18 +136,9 @@ class TerminalAgentRunExecutorControl(Protocol):
 
     async def cancel_active_run(self) -> None: ...
 
-    def bind_confirmation_callback(self, callback: ConfirmationCallback) -> None: ...
-
-    def respond_to_confirmation(
-        self,
-        confirmation_id: UUID,
-        decision: ConfirmationDecision,
-    ) -> None: ...
-
     def project_foreground_conversation(self) -> ForegroundConversationProjection: ...
 
 
-type ConfirmationCallback = Callable[[ConfirmationRequestView], None]
 type RuntimeConfirmationRequester = Callable[
     [ConfirmationEnvelope], Awaitable[ConfirmationDecision]
 ]
@@ -2000,9 +1956,6 @@ def session_runtime_status_input(
 
 __all__ = [
     "AgentRunExecutor",
-    "ConfirmationCallback",
-    "ConfirmationRequestView",
-    "ModelContextOverflowError",
 ]
 
 
@@ -2044,12 +1997,7 @@ def _merge_usage_deltas(
     first: Mapping[str, int] | None,
     second: Mapping[str, int] | None,
 ) -> dict[str, int]:
-    result = {
-        "model_calls": 0,
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
-    }
+    result = empty_token_usage()
     for delta in (first, second):
         if delta is None:
             continue

@@ -253,10 +253,6 @@ class ManagementError(Exception):
         super().__init__(error.message)
 
 
-class FatalManagementError(ManagementError):
-    """A safe Management error that must terminate the owning application."""
-
-
 class ManagementViewService:
     """Expose global configuration and runtime-owned Management views and actions."""
 

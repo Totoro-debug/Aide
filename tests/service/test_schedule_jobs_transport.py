@@ -72,7 +72,7 @@ async def schedule_http(
     home = _prepare_agent_home(tmp_path / "agent-home")
     path = tmp_path / "workspace"
     path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     server = TestServer(create_app(service))
     await service.start()
     client = await service.register_client("web")
@@ -459,7 +459,7 @@ async def test_schedule_job_http_delete_cancels_a_running_job_and_keeps_deleted_
     workspace_path.mkdir()
     other_workspace_path = tmp_path / "other-workspace"
     other_workspace_path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=30)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=30)
     server = TestServer(create_app(service))
     release = asyncio.Event()
     started = asyncio.Event()
@@ -569,6 +569,10 @@ async def test_schedule_job_http_delete_cancels_a_running_job_and_keeps_deleted_
         ({"kind": False, "every_seconds": 60}, {"kind"}),
         ({"kind": "at", "every_seconds": 60}, {"schedule"}),
         ({"schedule": "invalid", "every_seconds": 60}, {"schedule"}),
+        ({"schedule": {"kind": "every", "every_seconds": 60}}, {"schedule"}),
+        ({"schedule": {"kind": "every", "every_seconds": 60}, "every_seconds": 60},
+         {"schedule"}),
+        ({"schedule": None, "every_seconds": 60}, {"schedule"}),
     ],
 )
 async def test_schedule_field_errors_leave_disk_unchanged(
@@ -704,7 +708,7 @@ async def test_schedule_http_delete_drains_real_tool_and_preserves_session_termi
     path = tmp_path / "workspace"
     path.mkdir()
     (path / "task.txt").write_text("user data", encoding="utf-8")
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     server = TestServer(create_app(service))
     await service.start()
     client = await service.register_client("web")

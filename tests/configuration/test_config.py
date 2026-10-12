@@ -7,6 +7,7 @@ import pytest
 
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigError, ConfigLoader
+from aide.service.configuration import ConfigurationEditor
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 
 EXPECTED_DEFAULT_CONFIG = """[runtime]
@@ -427,7 +428,7 @@ def test_configuration_projects_current_fields(agent_home: Path) -> None:
     loader.ensure_default()
     loader.path.write_text(PROJECTED_CONFIG, encoding="utf-8")
 
-    configuration = loader.load_for_startup()
+    configuration = loader.load()
 
     assert set(configuration.models.routes) == {"chat"}
     assert set(configuration.models.providers) == {"primary"}
@@ -478,7 +479,8 @@ def test_unknown_configuration_projection_is_accepted_by_startup_and_config_view
     loader.path.write_text(content, encoding="utf-8")
 
     if operation == "startup":
-        configuration = loader.load_for_startup()
+        configuration = ConfigurationEditor(loader).start()
+        assert configuration is not None
 
         assert loader.diagnostics == ()
         assert set(configuration.models.routes) == {"chat"}
@@ -509,7 +511,7 @@ def test_compact_ratio_is_loaded_or_falls_back_with_a_diagnostic(
     loader.path.write_text(content, encoding="utf-8")
 
     if operation == "startup":
-        configuration = loader.load_for_startup()
+        configuration = loader.load()
 
         expected = 0.5 if value == "0.5" else 0.9
         assert configuration.runtime.compact_ratio == expected
@@ -569,9 +571,15 @@ def test_startup_and_config_view_preserve_configuration_failures(
     loader.path.write_text(content, encoding="utf-8")
 
     if operation == "startup":
+        editor = ConfigurationEditor(loader)
+        assert editor.start() is None
+        projection = editor.view()["configuration"]
+        assert isinstance(projection, dict)
+        error_view = projection["error"]
+        assert isinstance(error_view, dict)
+        assert error_view["code"] == error_code
         with pytest.raises(ConfigError) as raised:
-            loader.load_for_startup()
-
+            loader.load()
         error = raised.value.error
     else:
         view = loader.view()
@@ -583,13 +591,13 @@ def test_startup_and_config_view_preserve_configuration_failures(
         assert field in error.message
 
 
-def test_startup_gate_does_not_resolve_provider_or_model_usability(agent_home: Path) -> None:
+def test_configuration_parse_does_not_resolve_provider_usability(agent_home: Path) -> None:
     loader = ConfigLoader(AgentHome(agent_home))
     loader.ensure_default()
     content = VALID_CONFIG.replace('protocol = "anthropic"', 'protocol = "future-protocol"')
     loader.path.write_text(content, encoding="utf-8")
 
-    configuration = loader.load_for_startup()
+    configuration = loader.load()
 
     assert configuration.models.routes["chat"].provider_id == "anthropic-default"
 
@@ -669,7 +677,7 @@ model = "{model}"
             loader.load()
         assert "models.routes.chat.model" in raised.value.field_errors
         return
-    configuration = loader.load_for_startup() if purpose != "chat" or availability == "configured" else loader.load()
+    configuration = loader.load()
     if availability != "configured" and purpose in {"chat", "schedule", "subagent"}:
         with pytest.raises(ConfigError) as raised:
             configuration.resolve_route(purpose)
@@ -692,7 +700,7 @@ def test_unknown_route_is_rejected_without_rewriting(agent_home: Path) -> None:
     invalid = VALID_CONFIG.replace("[models.routes.chat]", "[models.routes.unknown]")
     loader.path.write_text(invalid, encoding="utf-8")
     with pytest.raises(ConfigError) as raised:
-        loader.load_for_startup()
+        loader.load()
     assert "models.routes.unknown" in raised.value.field_errors
     assert loader.web_snapshot().state == "invalid"
     assert loader.path.read_text(encoding="utf-8") == invalid
@@ -707,12 +715,12 @@ def test_unknown_route_is_rejected_even_with_chat(agent_home: Path) -> None:
     )
     before = loader.path.read_bytes()
     with pytest.raises(ConfigError) as raised:
-        loader.load_for_startup()
+        loader.load()
     assert "models.routes.unknown" in raised.value.field_errors
     assert loader.path.read_bytes() == before
 
 
-def test_failed_startup_generation_leaves_no_partial_configuration(
+def test_failed_default_generation_leaves_no_partial_configuration(
     agent_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     loader = ConfigLoader(AgentHome(agent_home))
@@ -722,10 +730,9 @@ def test_failed_startup_generation_leaves_no_partial_configuration(
 
     monkeypatch.setattr(os, "link", fail_publish)
 
-    with pytest.raises(ConfigError) as raised:
-        loader.load_for_startup()
+    with pytest.raises(OSError, match="injected publication failure"):
+        loader.ensure_default()
 
-    assert raised.value.error.code == "persistence_error"
     assert not loader.path.exists()
     assert not tuple(agent_home.glob(".config.toml.*.tmp"))
 
@@ -808,7 +815,7 @@ def test_unsupported_model_reasoning_effort_is_rejected_without_rewriting(agent_
     )
     before = loader.path.read_bytes()
     with pytest.raises(ConfigError) as raised:
-        loader.load_for_startup()
+        loader.load()
     assert "models.providers.anthropic-default.models.claude-model.reasoning_effort" in raised.value.field_errors
     assert loader.web_snapshot().state == "invalid"
     assert loader.path.read_bytes() == before
@@ -1284,9 +1291,15 @@ def test_missing_default_model_route_names_the_required_configuration_table(
     content_without_routes = VALID_CONFIG.partition("\n[models.routes.chat]")[0] + "\n"
     loader.path.write_text(content_without_routes, encoding="utf-8")
 
+    editor = ConfigurationEditor(loader)
+    assert editor.start() is None
+    projection = editor.view()["configuration"]
+    assert isinstance(projection, dict)
+    error = projection["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "config_invalid"
     with pytest.raises(ConfigError) as raised:
-        loader.load_for_startup()
-
+        loader.load().resolve_route("chat")
     assert raised.value.error.code == "route_unavailable"
     assert raised.value.error.message == (
         "Chat Model Route is missing. Add [models.routes.chat] to User Configuration."
@@ -1408,7 +1421,7 @@ def test_update_reasoning_effort_keeps_external_edits_and_inherited_chat_absent(
     assert "[models.routes.title]" not in updated
     assert "# Added by an external editor." in updated
     assert 'reasoning_effort = "max"' in updated
-    restarted = ConfigLoader(AgentHome(agent_home)).load_for_startup()
+    restarted = ConfigLoader(AgentHome(agent_home)).load()
     assert restarted.models.routes["chat"].reasoning_effort == "max"
     assert restarted.models.routes["chat"].max_output == 2048
 

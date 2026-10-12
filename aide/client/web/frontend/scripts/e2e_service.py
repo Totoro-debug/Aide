@@ -43,6 +43,18 @@ MODEL_MCP_RELEASE = asyncio.Event()
 PROVIDER_OBSERVATION_PATH: Path | None = None
 
 
+async def _release_session(client: ServiceClient) -> None:
+    await client._http_request(
+        "POST",
+        f"/api/v1/workspaces/{client.workspace_id}/sessions/{client.session_id}/release",
+        payload={"request_id": str(uuid4()), "claim_version": client.claim_version},
+        mutation=True,
+        extra_headers={"X-Aide-Claim": client.claim_credential},
+    )
+    client.claim_version = 0
+    client.claim_credential = ""
+
+
 def _config(
     base_url: str,
     *,
@@ -897,13 +909,13 @@ async def _run_e2e(provider_base_url: str) -> None:
                     MODEL_MCP_RELEASE.set()
                     break
                 if command.strip() == "config-read":
-                    print(json.dumps(await client.get_config()), flush=True)
+                    print(json.dumps(await client._http_request("GET", "/api/v1/config")), flush=True)
                     continue
                 if command.strip() == "web-ticket":
                     print(json.dumps({"url": await client.create_web_ticket()}), flush=True)
                     continue
                 if command.startswith("config-patch "):
-                    current = await client.get_config()
+                    current = await client._http_request("GET", "/api/v1/config")
                     result = await client._http_request(
                         "PATCH", "/api/v1/config", mutation=True,
                         payload={
@@ -937,7 +949,7 @@ async def _run_e2e(provider_base_url: str) -> None:
                     continue
                 if command.strip() == "cli-release":
                     assert peer_client is not None
-                    await peer_client.release_session()
+                    await _release_session(peer_client)
                     print(json.dumps({"released": True}), flush=True)
                     continue
                 if command.startswith("effort "):

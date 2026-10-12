@@ -703,6 +703,7 @@ def test_composition_and_store_signatures_match_current_contracts() -> None:
         "bus",
         "control",
         "management_dispatcher",
+        "confirmation_coordinator",
         "monotonic",
         "skill_metadata",
         "management_command_tokens",
@@ -711,6 +712,10 @@ def test_composition_and_store_signatures_match_current_contracts() -> None:
         "management_dispatcher"
     )
     assert terminal_init.args.kw_defaults[management_index] is None
+    coordinator_index = tuple(argument.arg for argument in terminal_init.args.kwonlyargs).index(
+        "confirmation_coordinator"
+    )
+    assert terminal_init.args.kw_defaults[coordinator_index] is None
     command_tokens_index = tuple(argument.arg for argument in terminal_init.args.kwonlyargs).index(
         "management_command_tokens"
     )

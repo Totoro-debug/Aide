@@ -66,7 +66,7 @@ def editable_models(loader: ConfigLoader) -> dict[str, Any]:
 
 def test_model_defaults_drive_routes_session_selection_and_available_models(tmp_path: Path) -> None:
     loader = model_loader(tmp_path)
-    configuration = loader.load_for_startup()
+    configuration = loader.load()
     for purpose in ("memory", "schedule"):
         route = configuration.resolve_route(purpose).route
         assert (route.context_window, route.max_output, route.temperature, route.timeout) == (
@@ -265,7 +265,7 @@ def test_partial_route_update_preserves_omitted_targets(tmp_path: Path, stale: b
     loader.patch_editable_fields(snapshot.revision, {
         "models": {"routes": {"chat": {"model": "vendor/small.v1"}}},
     }, baseline=snapshot.fields)
-    configuration = loader.load_for_startup()
+    configuration = loader.load()
     assert configuration.models.routes["chat"].model == "vendor/small.v1"
     assert configuration.models.routes["title"].model == ("vendor/small.v1" if stale else "large")
     assert configuration.models.routes["memory"].model == "vendor/small.v1"

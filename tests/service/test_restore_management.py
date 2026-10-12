@@ -38,6 +38,7 @@ from aide.trace.types import (
     TraceTokenUsage,
     TraceUsageState,
 )
+from tests.fixtures.service_runtime import workspace_loops
 from tests.fixtures.trace import wait_for_trace_writer
 from tests.service.test_protocol_contract import _validator
 from tests.service.test_service_concurrency import _CollectingSink, _ConcurrentProvider
@@ -78,7 +79,7 @@ async def restore_case(
     target.write_bytes(b"current branch")
     store.after_write(ticket)
     await session.wait_for_pending_persist()
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         owner = await service.register_client("web")
@@ -584,7 +585,7 @@ async def test_failed_restore_result_and_ack_survive_new_client_and_restart(
     assert fetched["restore_result"] == result
     await service.stop()
     restarted = AgentService(
-        service.agent_home, ConfigLoader(service.agent_home).load_for_startup()
+        service.agent_home, ConfigLoader(service.agent_home).load()
     )
     await restarted.start()
     try:
@@ -661,7 +662,7 @@ async def test_restore_management_requires_claim_is_idempotent_and_preserves_oth
         content="Other private conversation",
     )
 
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         owner = await service.register_client("web")
@@ -774,7 +775,7 @@ async def test_restore_management_http_requires_csrf_and_claim_headers(tmp_path:
     store.after_write(ticket)
     await session.wait_for_pending_persist()
 
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     server = TestServer(create_app(service), host="127.0.0.1")
     try:
@@ -841,7 +842,7 @@ async def test_restore_listing_rejects_selected_active_and_queued_input(
     queued: bool,
 ) -> None:
     service, workspace, owner, claim, target = restore_case
-    state = workspace.loops[claim.session_id]
+    state = workspace_loops(workspace)[claim.session_id]
     if queued:
         await state.bus.pause_inbound_delivery()
     await workspace.input(owner, claim.session_id, claim.version, "session-b", "restore-busy")

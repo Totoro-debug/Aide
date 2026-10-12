@@ -25,6 +25,7 @@ from aide.trace.types import (
     TraceTokenUsage,
     TraceUsageState,
 )
+from tests.fixtures.service_runtime import workspace_loops
 from tests.fixtures.trace import trace_queue_load, wait_for_trace_writer
 from tests.service.test_service_concurrency import (
     _claim_version,
@@ -71,7 +72,7 @@ async def test_service_owns_one_agent_home_trace_database_and_closes_it(
     tmp_path: Path,
 ) -> None:
     home = _prepare_agent_home(tmp_path / "agent-home")
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     recorder = service.trace_recorder
     assert isinstance(recorder, SQLiteTraceRecorder)
@@ -92,7 +93,7 @@ async def test_service_owns_one_agent_home_trace_database_and_closes_it(
         await service.stop()
     assert trace_queue_load(recorder)[0] == 0
 
-    restarted = AgentService(home, ConfigLoader(home).load_for_startup())
+    restarted = AgentService(home, ConfigLoader(home).load())
     await restarted.start()
     try:
         client = await restarted.register_client("cli")
@@ -120,7 +121,7 @@ async def test_foreground_run_and_auxiliary_calls_keep_separate_trace_purposes(
         "aide.service.runtime.service.create_provider",
         lambda _configuration: provider,
     )
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("cli")
@@ -180,7 +181,7 @@ async def test_unavailable_trace_database_does_not_block_service_start_or_clear_
     finally:
         connection.close()
 
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         assert service.state == "ready"
@@ -215,7 +216,7 @@ async def test_unavailable_trace_database_does_not_block_service_start_or_clear_
         assert provider.user_inputs == ["trace outage"]
         assert any(
             message.get("role") == "assistant" and message.get("content") == "answer from session B"
-            for message in workspace.loops[session_id].loop.session.messages
+            for message in workspace_loops(workspace)[session_id].loop.session.messages
         )
     finally:
         await service.stop()

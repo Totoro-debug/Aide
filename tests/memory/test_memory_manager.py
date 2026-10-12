@@ -1,4 +1,5 @@
 import ast
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -79,6 +80,40 @@ async def test_manager_appends_and_claims_summaries_with_cursor_preadvance(
         SummaryEntry(index=2, timestamp=NOW, content="A second durable preference."),
     )
     assert (state.memory_directory / ".cursor").read_bytes() == b"2\n"
+
+
+@pytest.mark.asyncio
+async def test_summary_append_reads_and_parses_existing_records_once(
+    agent_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = AgentHome(agent_home)
+    home.initialize()
+    store = WorkspaceJsonlSummaryStore(_state(agent_home))
+    assert (await store.append("First summary.", NOW)).index == 1
+    original_loads = json.loads
+    original_read = Path.read_bytes
+    parsed_records: list[str] = []
+    reads: list[Path] = []
+
+    def parse_record(content: str) -> object:
+        parsed_records.append(content)
+        return original_loads(content)
+
+    def read_bytes(path: Path) -> bytes:
+        if path == store.path:
+            reads.append(path)
+        return original_read(path)
+
+    monkeypatch.setattr(json, "loads", parse_record)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    assert (await store.append("Second summary.", NOW)).index == 2
+    assert len(parsed_records) == 1
+    assert reads == [store.path]
+    parsed_records.clear()
+    reads.clear()
+    assert (await store.append("Third summary.", NOW)).index == 3
+    assert len(parsed_records) == 2
+    assert reads == [store.path]
 
 
 @pytest.mark.asyncio

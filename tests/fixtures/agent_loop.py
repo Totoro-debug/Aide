@@ -8,12 +8,11 @@ from uuid import UUID
 from aide.agent.confirmation import ConfirmationEnvelope
 from aide.agent.loop import (
     AgentRunExecutor,
-    ConfirmationCallback,
     ForegroundConversationProjection,
     session_runtime_status_input,
 )
 from aide.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
-from aide.agent.tools.tool_gateway import ConfirmationDecision
+from aide.agent.tools.tool_gateway import ConfirmationDecision, ConfirmationRequest
 from aide.config.agent_home import AgentHome
 from aide.config.config import UserConfiguration
 from aide.management.commands import MANAGEMENT_COMMANDS
@@ -57,17 +56,6 @@ class CallbackConfirmationRequester:
         ):
             raise ValueError("Confirmation response is late or unknown")
         future.set_result(decision)
-
-    def cancel(self) -> None:
-        future = self._future
-        if future is not None and not future.done():
-            future.cancel()
-
-    def unbind(self, callback: Callable[[Any], None]) -> None:
-        if self._callback is callback:
-            self._callback = lambda _request: None
-            self.cancel()
-
 
 def loaded_skill_loader(home: AgentHome, configuration: UserConfiguration) -> SkillLoader:
     """Create the injected Skill snapshot at a test composition point."""
@@ -206,7 +194,7 @@ class ExecutorControl:
     def project_foreground_conversation(self) -> ForegroundConversationProjection:
         return self._executor.execution.project_foreground_conversation()
 
-    def bind_confirmation_callback(self, callback: ConfirmationCallback) -> None:
+    def bind_confirmation_callback(self, callback: Callable[[ConfirmationRequest], None]) -> None:
         self._requester = CallbackConfirmationRequester(callback)
         self._executor.bind_confirmation_requester(self._request)
 

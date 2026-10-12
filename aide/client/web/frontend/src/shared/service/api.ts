@@ -58,8 +58,6 @@ import type {
   TraceRawPageDTO,
   TraceRawQueryDTO,
   TraceRecordDetailDTO,
-  TraceSessionsQueryDTO,
-  TraceSessionsResponseDTO,
   TraceStatsQueryDTO,
   TraceStatsResponseDTO,
   ToolPermissionLevel,
@@ -258,12 +256,6 @@ export function getChatSessions(
 
 export function getTraceStats(query: TraceStatsQueryDTO = {}): Promise<TraceStatsResponseDTO> {
   return request<TraceStatsResponseDTO>(`/traces/stats${traceQueryString(query)}`);
-}
-
-export function getTraceSessions(
-  query: TraceSessionsQueryDTO = {},
-): Promise<TraceSessionsResponseDTO> {
-  return request<TraceSessionsResponseDTO>(`/traces/sessions${traceQueryString(query)}`);
 }
 
 export function getTraceRecords(query: TraceListQueryDTO = {}): Promise<TracePageDTO> {

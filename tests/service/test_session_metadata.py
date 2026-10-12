@@ -21,6 +21,7 @@ from aide.service.discovery import create_credential
 from aide.service.errors import ServiceError
 from aide.service.runtime import AgentService, ClientState, SessionClaim, WorkspaceRecord
 from aide.service.transport import create_app
+from tests.fixtures.service_runtime import register_project
 from tests.service.test_service_transport import _persist_session, _prepare_agent_home
 
 
@@ -81,7 +82,7 @@ async def _metadata_service(
         content="Private conversation body",
     )
     token = create_credential(home)
-    active_configuration = ConfigLoader(home).load_for_startup()
+    active_configuration = ConfigLoader(home).load()
     service = AgentService(home, active_configuration, reconnect_timeout=30)
     await service.start()
     server = TestServer(create_app(service), host="127.0.0.1")
@@ -477,7 +478,7 @@ async def test_wrong_project_or_workspace_cannot_rename_another_sessions_metadat
     async with _metadata_service(tmp_path) as harness:
         other_directory = tmp_path / "other-project"
         other_directory.mkdir()
-        record, other_workspace, _jobs = await harness.service.register_project(
+        record, other_workspace, _jobs = await register_project(harness.service,
             harness.client.client_id, other_directory
         )
         before_raw = harness.path.read_bytes()

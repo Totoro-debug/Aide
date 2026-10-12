@@ -44,7 +44,7 @@ async def trace_http(tmp_path: Path) -> AsyncIterator[TraceHttp]:
     home = AgentHome(tmp_path / "agent-home")
     home.initialize()
     (home.path / "config.toml").write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     create_credential(home)
     client = await service.register_client("web")

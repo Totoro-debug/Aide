@@ -102,7 +102,7 @@ async def test_service_model_run_exposes_http_trace_through_recorder_queries(
     home = AgentHome(tmp_path / "home")
     home.initialize()
     (home.path / "config.toml").write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
@@ -330,7 +330,7 @@ reasoning_effort = "mid"
 timeout = 30
 """
     (home.path / "config.toml").write_text(config, encoding="utf-8")
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()

@@ -1506,13 +1506,6 @@ def _require_editable_value(table: Mapping[str, object], name: str, field: str) 
     return table[name]
 
 
-def _editable_string_array(value: object, field: str) -> list[str]:
-    parsed = _parse_string_array(value, field)
-    if len(set(parsed)) != len(parsed):
-        _invalid(field, "must contain unique string values")
-    return list(parsed)
-
-
 def _validate_provider_fields(provider_id: str, value: object) -> dict[str, object]:
     field = f"models.providers.{provider_id}"
     if not _PROVIDER_ID_PATTERN.fullmatch(provider_id):
@@ -1767,25 +1760,6 @@ def _set_toml_table_value(table: MutableMapping[str, object], key: str, value: o
         table[key] = nested
     else:
         table[key] = value
-
-
-def _merge_toml_table_value(
-    table: MutableMapping[str, object], key: str, values: Mapping[str, object]
-) -> None:
-    if not values:
-        table.pop(key, None)
-        return
-    existing = table.get(key)
-    if isinstance(existing, MutableMapping):
-        nested = cast(MutableMapping[str, object], existing)
-    else:
-        nested = tomlkit.table()
-        table[key] = nested
-    for existing_key in tuple(nested):
-        if existing_key not in values:
-            del nested[existing_key]
-    for nested_key, nested_value in values.items():
-        nested[nested_key] = nested_value
 
 
 def _apply_model_fields(
@@ -2834,28 +2808,6 @@ class ConfigLoader:
         configuration = _parse_configuration(document, diagnostics=diagnostics)
         self._diagnostics = tuple(diagnostics)
         return configuration
-
-    def load_for_startup(self) -> UserConfiguration:
-        """Generate missing configuration or return a startup-usable configuration."""
-        try:
-            if self.ensure_default():
-                raise ConfigError(
-                    ErrorInfo(
-                        "config_missing",
-                        "A default User Configuration was created; edit it before starting Aide.",
-                    )
-                )
-            configuration = self.load()
-            if "chat" not in configuration.models.routes:
-                raise _missing_chat_route_error()
-            return configuration
-        except OSError as error:
-            raise ConfigError(
-                ErrorInfo(
-                    "persistence_error",
-                    "User Configuration could not be read or written.",
-                )
-            ) from error
 
     def update_reasoning_effort(self, effort: ReasoningEffort) -> None:
         """Persist a Runtime-Lifetime Reasoning Effort in the latest configuration."""

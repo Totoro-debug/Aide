@@ -42,6 +42,7 @@ from aide.service.transport import create_app
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
 from tests.fixtures.project_removal import complete_project_removal
+from tests.fixtures.service_runtime import workspace_loops
 from tests.service.test_protocol_contract import _validator
 
 
@@ -342,7 +343,7 @@ async def test_two_cli_clients_complete_distinct_sessions_through_transport(
     workspace_path.mkdir()
     provider = _ConcurrentProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     server, port = await _serve(service, home)
     first: ServiceClient | None = None
     second: ServiceClient | None = None
@@ -389,7 +390,7 @@ async def test_cli_switch_does_not_display_background_session_output(
     workspace_path.mkdir()
     provider = _ConcurrentProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     server, port = await _serve(service, home)
     client: ServiceClient | None = None
     other: ServiceClient | None = None
@@ -444,7 +445,7 @@ async def test_claim_race_denies_loser_content_over_http_events_and_reconnect(
     workspace_path.mkdir()
     provider = _ConcurrentProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     server, port = await _serve(service, home)
     first: ServiceClient | None = None
     second: ServiceClient | None = None
@@ -541,7 +542,7 @@ async def test_distinct_sessions_run_in_parallel_and_cancel_is_scoped(
         return provider
 
     monkeypatch.setattr(service_runtime, "create_provider", provider_factory)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     await service.start()
     first_sink = _CollectingSink()
     second_sink = _CollectingSink()
@@ -586,8 +587,8 @@ async def test_distinct_sessions_run_in_parallel_and_cancel_is_scoped(
         assert set(content_a).isdisjoint(content_b)
 
         for _ in range(100):
-            state_a = workspace.loops[session_a]
-            state_b = second_workspace.loops[session_b]
+            state_a = workspace_loops(workspace)[session_a]
+            state_b = workspace_loops(second_workspace)[session_b]
             if (
                 state_a.processor_task is None
                 and state_a.output_task is None
@@ -596,12 +597,12 @@ async def test_distinct_sessions_run_in_parallel_and_cancel_is_scoped(
             ):
                 break
             await asyncio.sleep(0)
-        assert workspace.loops[session_a].processor_task is None
-        assert workspace.loops[session_a].output_task is None
-        assert second_workspace.loops[session_b].processor_task is None
-        assert second_workspace.loops[session_b].output_task is None
-        assert workspace.loops[session_a].loop._active is None
-        assert second_workspace.loops[session_b].loop._active is None
+        assert workspace_loops(workspace)[session_a].processor_task is None
+        assert workspace_loops(workspace)[session_a].output_task is None
+        assert workspace_loops(second_workspace)[session_b].processor_task is None
+        assert workspace_loops(second_workspace)[session_b].output_task is None
+        assert workspace_loops(workspace)[session_a].loop._active is None
+        assert workspace_loops(second_workspace)[session_b].loop._active is None
     finally:
         await service.stop()
 
@@ -615,7 +616,7 @@ async def test_cancel_returns_without_waiting_for_the_next_queued_run(
     workspace_path.mkdir()
     provider = _ConcurrentProvider(block_b=True)
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     await service.start()
     sink = _CollectingSink()
     try:
@@ -658,7 +659,7 @@ async def test_closing_session_drains_its_processor_and_run_tasks(
     workspace_path.mkdir()
     provider = _ConcurrentProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     await service.start()
     try:
         client = await service.register_client("cli")
@@ -670,7 +671,7 @@ async def test_closing_session_drains_its_processor_and_run_tasks(
             client.client_id, session_id, _claim_version(claim), "session-a", "closing-run"
         )
         await asyncio.wait_for(provider.session_a_started.wait(), timeout=5)
-        state = workspace.loops[session_id]
+        state = workspace_loops(workspace)[session_id]
         processor = state.processor_task
         assert state.loop._active is not None
         execution = state.loop._active._execution_task
@@ -681,7 +682,7 @@ async def test_closing_session_drains_its_processor_and_run_tasks(
         assert processor.done() and execution.done() and output.done()
         assert state.processor_task is None
         assert state.output_task is None
-        assert session_id not in workspace.loops
+        assert session_id not in workspace_loops(workspace)
     finally:
         provider.release_a.set()
         await service.stop()
@@ -696,7 +697,7 @@ async def test_input_during_processor_retirement_is_not_stranded(
     workspace_path.mkdir()
     provider = _ConcurrentProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     await service.start()
     sink = _CollectingSink()
     try:
@@ -706,7 +707,7 @@ async def test_input_during_processor_retirement_is_not_stranded(
         session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
         claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
         version = _claim_version(claim)
-        state = workspace.loops[session_id]
+        state = workspace_loops(workspace)[session_id]
         snapshot = state.bus.inbound_snapshot
         empty_observed = asyncio.Event()
         retire = asyncio.Event()
@@ -749,7 +750,7 @@ async def test_session_processor_preserves_fifo_and_retires_when_idle(
     workspace_path.mkdir()
     provider = _ConcurrentProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     await service.start()
     sink = _CollectingSink()
     try:
@@ -760,7 +761,7 @@ async def test_session_processor_preserves_fifo_and_retires_when_idle(
         claim = await service.claim(client.client_id, workspace.workspace_id, session_id)
         version = _claim_version(claim)
         run_ids = [f"fifo-{index}" for index in range(20)]
-        loop = workspace.loops[session_id].loop
+        loop = workspace_loops(workspace)[session_id].loop
         run_foreground = loop.run_foreground
         active_runs = 0
         peak_runs = 0
@@ -806,11 +807,11 @@ async def test_session_processor_preserves_fifo_and_retires_when_idle(
         assert peak_runs == 1
 
         for _ in range(100):
-            state = workspace.loops[session_id]
+            state = workspace_loops(workspace)[session_id]
             if state.processor_task is None and state.output_task is None:
                 break
             await asyncio.sleep(0)
-        state = workspace.loops[session_id]
+        state = workspace_loops(workspace)[session_id]
         assert state.processor_task is None
         assert state.output_task is None
         assert state.loop._active is None
@@ -833,7 +834,7 @@ async def test_loaded_sessions_leave_no_on_demand_processor_when_idle(
     workspace_path.mkdir()
     provider = _ConcurrentProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     await service.start()
     sink = _CollectingSink()
     try:
@@ -871,7 +872,7 @@ async def test_loaded_sessions_leave_no_on_demand_processor_when_idle(
         }
         assert completed >= {run_id for _, _, _, run_id in sessions}
         for _, session_id, _, _ in sessions:
-            state = workspace.loops[session_id]
+            state = workspace_loops(workspace)[session_id]
             await state.loop.wait_for_restore_idle()
             assert state.processor_task is None
             assert state.output_task is None
@@ -902,7 +903,7 @@ async def test_session_deletion_entries_preserve_status_and_claim_contracts(
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("web")
@@ -987,7 +988,7 @@ async def test_session_deletion_entries_preserve_status_and_claim_contracts(
             assert session_id not in workspace._deletion_claims
         else:
             assert claim["claim_version"] == previous_version + 1
-            assert session_id not in workspace.loops
+            assert session_id not in workspace_loops(workspace)
         if scenario == "repeat_claim":
             repeated = await asyncio.gather(
                 claim_deletion(client.client_id, target_id, session_id),
@@ -1013,7 +1014,7 @@ async def test_pending_delete_after_restart_claims_cleanup_without_reopening_ses
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
     record = ProjectCatalog(home).register(workspace_path)
-    configuration = ConfigLoader(home).load_for_startup()
+    configuration = ConfigLoader(home).load()
     service = AgentService(home, configuration)
     await service.start()
     try:
@@ -1063,7 +1064,7 @@ async def test_pending_delete_after_restart_claims_cleanup_without_reopening_ses
         )
         cleanup_claim = cast(dict[str, object], cleanup["claim"])
         workspace = restarted.workspace(cast(str, cleanup["workspace_id"]))
-        assert session_id not in workspace.loops
+        assert session_id not in workspace_loops(workspace)
         with pytest.raises(ServiceError) as reopen:
             await restarted.claim_project_session(
                 replacement.client_id, record.project_id, session_id
@@ -1101,7 +1102,7 @@ async def test_pending_delete_after_restart_claims_cleanup_without_reopening_ses
             )
         )["state"] == "deleted"
         assert external.read_text(encoding="utf-8") == "keep user file"
-        assert session_id not in workspace.loops
+        assert session_id not in workspace_loops(workspace)
     finally:
         await restarted.stop()
 
@@ -1113,7 +1114,7 @@ async def test_cancelled_delete_preserves_writer_fence_and_retry(
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("web")
@@ -1149,7 +1150,7 @@ async def test_cancelled_delete_preserves_writer_fence_and_retry(
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert session_id in workspace.loops
+        assert session_id in workspace_loops(workspace)
         with pytest.raises(ServiceError) as fenced:
             await workspace.input(
                 client.client_id, session_id, claim.version, "late input", "late-run"
@@ -1167,7 +1168,7 @@ async def test_cancelled_delete_preserves_writer_fence_and_retry(
         session.persist()
         await session.wait_for_pending_persist()
         assert not (workspace.workspace_state.sessions_directory / f"{session_id}.jsonl").exists()
-        assert session_id not in workspace.loops
+        assert session_id not in workspace_loops(workspace)
         assert session_id not in workspace._claims
     finally:
         await service.stop()
@@ -1180,7 +1181,7 @@ async def test_completed_restore_result_does_not_block_session_deletion(tmp_path
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("web")
@@ -1230,7 +1231,7 @@ async def test_session_delete_rejects_active_work_and_restore_barriers(
     workspace_path.mkdir()
     provider = _ConcurrentProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     sink = _CollectingSink()
     try:
         await service.start()
@@ -1327,7 +1328,7 @@ async def test_switch_keeps_active_claim_until_run_terminates_then_releases_it(
         return provider
 
     monkeypatch.setattr(service_runtime, "create_provider", provider_factory)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     await service.start()
     first_sink = _CollectingSink()
     second_sink = _CollectingSink()
@@ -1404,7 +1405,7 @@ async def test_queued_session_output_flows_while_next_run_is_blocked(
     workspace_path.mkdir()
     provider = _ConcurrentProvider(early_a_delta=True)
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     await service.start()
     sink = _CollectingSink()
     try:
@@ -1434,7 +1435,7 @@ async def test_duplicate_command_request_id_does_not_start_a_second_run(
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     await service.start()
     try:
         client = await service.register_client("cli")
@@ -1479,7 +1480,7 @@ async def test_duplicate_command_request_id_does_not_start_a_second_run(
         first_ack, second_ack = await asyncio.gather(first, second)
         assert first_ack == second_ack
         assert call_count == 1
-        assert len(workspace.loops[session_id].run_ids) == 1
+        assert len(workspace_loops(workspace)[session_id].run_ids) == 1
     finally:
         await service.stop()
 
@@ -1489,7 +1490,7 @@ async def test_stale_release_command_cannot_release_a_newer_claim(tmp_path: Path
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     await service.start()
     try:
         client = await service.register_client("cli")
@@ -1533,7 +1534,7 @@ async def test_workspace_schedule_and_memory_are_shared_across_clients(
         return provider
 
     monkeypatch.setattr(service_runtime, "create_provider", provider_factory)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     server, port = await _serve(service, home)
     first: ServiceClient | None = None
     second: ServiceClient | None = None
@@ -1605,7 +1606,7 @@ async def test_project_removal_cancels_foreground_and_schedule_runs(
     record = ProjectCatalog(home).register(workspace_path)
     provider = _RemovalProvider(block_schedule_preparation=block_schedule_preparation)
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     server, port = await _serve(service, home)
     first: ServiceClient | None = None
     second: ServiceClient | None = None
@@ -1630,7 +1631,7 @@ async def test_project_removal_cancels_foreground_and_schedule_runs(
         )
         await workspace.schedule_service.add_user_job(job)
         await asyncio.wait_for(provider.schedule_started.wait(), timeout=2)
-        assert len(workspace.loops) == 3
+        assert len(workspace_loops(workspace)) == 3
         assert len(workspace._schedule_loops) == 1
         assert workspace.schedule_service.status_snapshot().to_dict()["active_job_count"] == 1
 
@@ -1658,7 +1659,7 @@ async def test_project_removal_cancels_foreground_and_schedule_runs(
                 and message["error"].get("code") == "turn_cancelled"
                 for message in persisted.messages
             ), persisted.messages
-        assert not workspace.loops
+        assert not workspace_loops(workspace)
         assert not workspace._schedule_loops
         assert workspace.schedule_service.status_snapshot().to_dict()["active_job_count"] == 0
         assert not workspace._claims
@@ -1713,7 +1714,7 @@ async def test_due_job_runs_once_in_unselected_registered_project(
 
     provider = _ScheduleProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     server, port = await _serve(service, home)
     client: ServiceClient | None = None
     try:
@@ -1782,7 +1783,7 @@ async def test_client_expiry_keeps_claim_until_cancelled_run_cleanup_finishes(
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
     service = AgentService(
         home,
-        ConfigLoader(home).load_for_startup(),
+        ConfigLoader(home).load(),
         reconnect_timeout=30,
         monotonic_now=clock.monotonic,
         sleep=wait_for_timer,
@@ -1912,7 +1913,7 @@ async def test_expiry_discards_backpressured_output_before_resident_session_take
 
     service = AgentService(
         home,
-        ConfigLoader(home).load_for_startup(),
+        ConfigLoader(home).load(),
         reconnect_timeout=30,
         monotonic_now=clock.monotonic,
         sleep=sleep,
@@ -1939,7 +1940,7 @@ async def test_expiry_discards_backpressured_output_before_resident_session_take
         session_id = await workspace.create_draft(first.client_id, creation_scope="chat")
         old_claim = await service.claim(first.client_id, workspace.workspace_id, session_id)
         old_version = _claim_version(old_claim)
-        state = workspace.loops[session_id]
+        state = workspace_loops(workspace)[session_id]
         authority = state.loop.session
         await workspace.input(first.client_id, session_id, old_version, "session-a", "old-run")
         await workspace.input(first.client_id, session_id, old_version, "old queued", "old-queued")
@@ -1967,7 +1968,7 @@ async def test_expiry_discards_backpressured_output_before_resident_session_take
         release_flush.set()
         await asyncio.wait_for(expiry, 3)
         assert session_id not in workspace._claims
-        assert workspace.loops[session_id] is state
+        assert workspace_loops(workspace)[session_id] is state
         assert state.loop.session is authority
         assert len(inputs) == 1
         assert "session-a" in inputs[0]
@@ -2061,7 +2062,7 @@ async def test_event_reconnect_replays_once_and_cache_overflow_requires_snapshot
     home = _configured_home(tmp_path / "agent-home")
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     first_sink = _CollectingSink()
     try:
         await service.start()
@@ -2167,7 +2168,7 @@ async def test_event_reconnect_replays_once_and_cache_overflow_requires_snapshot
 @pytest.mark.asyncio
 async def test_replay_holds_live_events_until_cached_events_are_sent(tmp_path: Path) -> None:
     home = _configured_home(tmp_path / "agent-home")
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     first_sink = _CollectingSink()
     try:
         await service.start()
@@ -2240,7 +2241,7 @@ async def test_snapshot_resync_includes_selected_and_switched_away_claims(
     workspace_path.mkdir()
     provider = _ConcurrentProvider(block_b=True)
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
     initial_sink = _CollectingSink()
     try:
         await service.start()
@@ -2272,13 +2273,13 @@ async def test_snapshot_resync_includes_selected_and_switched_away_claims(
             if any(
                 message.get("role") == "assistant"
                 and message.get("content") == "answer from session B"
-                for message in workspace.loops[second_session].loop.session.messages
+                for message in workspace_loops(workspace)[second_session].loop.session.messages
             ):
                 break
             await asyncio.sleep(0.01)
         else:
             pytest.fail("Selected Session did not complete while its Client was offline")
-        await workspace.loops[second_session].loop.session.wait_for_pending_persist()
+        await workspace_loops(workspace)[second_session].loop.session.wait_for_pending_persist()
         for marker in range(257):
             await service.emit(
                 "test.event",
@@ -2326,7 +2327,7 @@ async def test_snapshot_resync_includes_selected_and_switched_away_claims(
         assert expected.count(("assistant", "answer from session B")) == 1
         background_messages = cast(list[dict[str, object]], recovered[first_session]["messages"])
         # Active turns stage their messages until terminal commit; snapshots expose committed history.
-        assert background_messages == workspace.loops[first_session].loop.session.messages
+        assert background_messages == workspace_loops(workspace)[first_session].loop.session.messages
         provider.release_a.set()
         completed = await asyncio.wait_for(
             replay_sink.wait_for("run.completed", "run-a"), timeout=2
@@ -2365,7 +2366,7 @@ async def test_snapshot_resync_includes_selected_and_switched_away_claims(
 @pytest.mark.asyncio
 async def test_slow_consumer_reconnect_requires_snapshot(tmp_path: Path) -> None:
     home = _configured_home(tmp_path / "agent-home")
-    service = AgentService(home, ConfigLoader(home).load_for_startup(), reconnect_timeout=5)
+    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=5)
 
     class StalledSink:
         async def send_event(self, _event: dict[str, object]) -> None:
@@ -2411,7 +2412,7 @@ async def test_snapshot_recovers_accepted_input_and_live_output_without_executio
     path.mkdir()
     provider = _ConcurrentProvider(early_a_delta=streaming)
     monkeypatch.setattr(service_runtime, "create_provider", lambda _config: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("web")
@@ -2473,7 +2474,7 @@ async def test_snapshot_and_output_share_cursor_and_do_not_duplicate_committed_h
                 await release.wait()
             await super().send_event(event)
 
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("web")
@@ -2484,7 +2485,7 @@ async def test_snapshot_and_output_share_cursor_and_do_not_duplicate_committed_h
         claim = await service.claim(client.client_id, workspace.workspace_id, session)
         previous_messages = []
         if existing_history:
-            persisted = workspace.loops[session].loop.session
+            persisted = workspace_loops(workspace)[session].loop.session
             persisted.commit_agent_run(
                 [{"role": "user", "content": "existing input"}],
                 pending_last_compacted=0, pending_action_summary="",
@@ -2499,7 +2500,7 @@ async def test_snapshot_and_output_share_cursor_and_do_not_duplicate_committed_h
         # The terminal commit may complete while an earlier output is still being delivered.
         provider.release_a.set()
         async with asyncio.timeout(2):
-            while len(workspace.loops[session].loop.session.messages) <= len(previous_messages):
+            while len(workspace_loops(workspace)[session].loop.session.messages) <= len(previous_messages):
                 await asyncio.sleep(0)
         snapshot = cast(dict[str, Any], workspace.session_snapshot(session))
         assert snapshot["messages"] == previous_messages
@@ -2525,7 +2526,7 @@ async def test_same_text_inputs_keep_distinct_request_ids_and_only_current_run_i
     path.mkdir()
     provider = _ConcurrentProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _config: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("web")
@@ -2562,7 +2563,7 @@ async def test_submit_user_input_routes_management_and_unknown_slash_as_service_
     path.mkdir()
     provider = _ConcurrentProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _config: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("cli")
@@ -2637,7 +2638,7 @@ async def test_raw_management_inputs_never_enter_foreground_fifo(
     path.mkdir()
     provider = _ConcurrentProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _config: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("web")
@@ -2660,8 +2661,8 @@ async def test_raw_management_inputs_never_enter_foreground_fifo(
         result = cast(dict[str, Any], ack["result"])
         assert result["kind"] == "management"
         assert cast(dict[str, Any], result["management_result"])["handled"] is True
-        assert not await workspace.loops[session].bus.inbound_snapshot()
-        assert not workspace.loops[session].live_runs
+        assert not await workspace_loops(workspace)[session].bus.inbound_snapshot()
+        assert not workspace_loops(workspace)[session].live_runs
         assert not provider.user_inputs
         assert not any(event["type"] == "input.accepted" for event in sink.events)
         if command == "/effort":
@@ -2684,7 +2685,7 @@ async def test_recall_queued_inputs_is_atomic_fifo_and_idempotent(
     path.mkdir()
     provider = _ConcurrentProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _config: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("web")
@@ -2736,7 +2737,7 @@ async def test_recall_queued_inputs_is_atomic_fifo_and_idempotent(
 
         run_d = await submit("input-d", "queued d")
         assert await service.handle_command(client.client_id, recall_command) == recalled
-        inbound = await workspace.loops[session].bus.inbound_snapshot()
+        inbound = await workspace_loops(workspace)[session].bus.inbound_snapshot()
         assert [(item.metadata["run_id"], item.content) for item in inbound] == [
             (run_d, "queued d")
         ]
@@ -2770,7 +2771,7 @@ async def test_recall_racing_with_next_run_start_never_executes_and_recalls_same
     path.mkdir()
     provider = _ConcurrentProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _config: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("web")
@@ -2852,7 +2853,7 @@ async def test_expiring_unregistered_workspace_drains_running_schedule_or_resume
     async def sleep(_seconds: float) -> None:
         await wake.wait()
         wake.clear()
-    service = AgentService(home, ConfigLoader(home).load_for_startup(),
+    service = AgentService(home, ConfigLoader(home).load(),
         monotonic_now=clock.monotonic, sleep=sleep)
     await service.start()
     try:
@@ -2884,7 +2885,7 @@ async def test_expiring_unregistered_workspace_drains_running_schedule_or_resume
             await asyncio.wait_for(cast(asyncio.Task[None], expiry_client.disconnect_task), 3)
             assert provider.schedule_cancelled.is_set()
             assert service._workspaces[workspace.workspace_id] is workspace
-            assert session in workspace.loops
+            assert session in workspace_loops(workspace)
             assert workspace.schedule_status()["active_job_count"] == 0
             persisted = Session.load(workspace.workspace_state, job.session_id)
             assert any(message.get("role") == "user" for message in persisted.messages)

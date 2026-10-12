@@ -25,6 +25,7 @@ from aide.utils.json import json_validation_issue
 from aide.utils.text import normalize_title as _normalize_title
 from aide.utils.time import format_rfc3339_milliseconds, local_now
 from aide.utils.validation import (
+    empty_token_usage,
     require_aware_datetime,
     require_nonnegative_int,
     require_uuid4,
@@ -948,12 +949,7 @@ def _make_id(created_at: datetime, session_uuid: UUID) -> str:
 def _initial_metadata() -> dict[str, Any]:
     return {
         "title": "Untitled session",
-        "token_usage": {
-            "model_calls": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
-        },
+        "token_usage": empty_token_usage(),
         "summary": "",
     }
 

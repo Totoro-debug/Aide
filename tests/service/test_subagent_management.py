@@ -70,6 +70,7 @@ from aide.trace.types import (
 )
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from tests.fixtures.project_removal import complete_project_removal
+from tests.fixtures.service_runtime import register_project, workspace_loops
 from tests.fixtures.trace import wait_for_trace_writer
 from tests.service.test_service_concurrency import _CollectingSink, _ConcurrentProvider
 from tests.service.test_service_transport import _persist_session, _prepare_agent_home
@@ -625,7 +626,7 @@ async def management_case(
     monkeypatch.setattr(
         "aide.service.runtime.service.create_provider", lambda *_args: _ConcurrentProvider()
     )
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("cli")
@@ -678,7 +679,7 @@ async def test_first_draft_run_allows_subagent_queries_and_cancellation_before_p
 ) -> None:
     service, workspace, client_id, _session_id, other_session_id = management_case
     if scope == "project":
-        await service.register_project(client_id, workspace.workspace_path)
+        await register_project(service, client_id, workspace.workspace_path)
     provider = _FirstDraftProvider()
     service.model_router._provider_factory = lambda _configuration: provider
     service.model_router._providers.clear()
@@ -765,7 +766,7 @@ async def test_first_draft_run_allows_subagent_queries_and_cancellation_before_p
         provider.allow_parent.set()
         await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=5)
         await claim.loop.wait_for_restore_idle()
-        output_task = workspace.loops[session_id].output_task
+        output_task = workspace_loops(workspace)[session_id].output_task
         if output_task is not None:
             await asyncio.wait_for(output_task, timeout=5)
         await workspace.release(client_id, session_id)
@@ -1025,7 +1026,7 @@ async def test_missing_subagent_route_keeps_main_runs_and_existing_task_queries(
     workspace_path.mkdir()
     provider = _ConcurrentProvider()
     monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda *_args: provider)
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     observed: list[tuple[str, ToolGateway]] = []
     original_run = AgentRunner.run
 
@@ -2083,7 +2084,7 @@ async def test_cleanup_fences_all_pools_before_draining_and_respects_workspace_s
     scope: str,
 ) -> None:
     service, workspace, client_id, session_id, other_session_id = management_case
-    project, selected_workspace, _jobs = await service.register_project(
+    project, selected_workspace, _jobs = await register_project(service,
         client_id, workspace.workspace_path
     )
     assert selected_workspace is workspace
@@ -2389,7 +2390,7 @@ async def test_workspace_startup_interrupts_persisted_subagent_tasks(
     monkeypatch.setattr(
         "aide.service.runtime.service.create_provider", lambda *_args: _ConcurrentProvider()
     )
-    service = AgentService(home, ConfigLoader(home).load_for_startup())
+    service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
         client = await service.register_client("cli")

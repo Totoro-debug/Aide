@@ -30,9 +30,13 @@ function statsFixture(query) {
   const empty = statsMode === "empty";
   const workspaceBeta = query.get("workspace_key") === "workspace-b";
   const visibleRevision = Date.parse(query.get("to_at")) >= Date.parse(newRecordTime) ? refreshRevision : 0;
-  const modelCalls = empty ? 0 : workspaceBeta ? 1 + visibleRevision : 4 + visibleRevision;
-  const toolCalls = empty ? 0 : workspaceBeta ? 1 : 2;
-  const failedCount = empty ? 0 : 1;
+  const modelCalls = empty ? 0 : statsMode === "failures" ? 4 : workspaceBeta ? 1 + visibleRevision : 4 + visibleRevision;
+  const toolCalls = empty ? 0 : statsMode === "failures" ? 2 : workspaceBeta ? 1 : 2;
+  const failedCount = empty || statsMode === "no-failures" ? 0
+    : statsMode === "failures" ? 6 : workspaceBeta ? 1 + visibleRevision : 1;
+  const errorCategories = failedCount === 0 ? [] : statsMode === "failures"
+    ? [{ category: "cancelled", calls: 2 }, { category: "timeout", calls: 3 }, { category: "tool_error", calls: 1 }]
+    : [{ category: workspaceBeta ? "timeout" : "cancelled", calls: failedCount }];
   const successCount = modelCalls + toolCalls - failedCount;
   const filteredTokens = workspaceBeta ? {
     input_tokens: 30,
@@ -61,7 +65,7 @@ function statsFixture(query) {
     by_model: empty ? [] : [{ key: "model-gpt", calls: modelCalls, tokens: filteredTokens }],
     by_tool: empty ? [] : [{ key: "exec", calls: toolCalls, tokens: filteredTokens }],
     by_purpose: empty ? [] : [{ key: "agent_run", calls: modelCalls + toolCalls, tokens: filteredTokens }],
-    by_error_category: empty ? [] : [{ category: "cancelled", calls: 1 }],
+    by_error_category: errorCategories,
     daily: empty ? [] : [{
       date: "2026-10-12",
       model_calls: modelCalls,
@@ -260,6 +264,8 @@ try {
   assert.match(metricText, /Unknown usage calls\s+1/);
   assert.match(metricText, /Cached input tokens\s+20\s+5 cache creation tokens/);
   assert.match(metricText, /Average duration\s+850 ms/);
+  const failures = page.getByRole("region", { name: "Failure reasons", exact: true });
+  await expect(failures.getByRole("listitem")).toHaveText(["Cancelled1"]);
   await expect(page.getByRole("button", { name: "model-gpt, 4 calls", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "exec, 2 calls", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Agent Run, 6 calls", exact: true })).toBeVisible();
@@ -285,6 +291,7 @@ try {
   await expect.poll(() => requests.filter((request) => request.path.endsWith("/stats")).length).toBe(2);
   assert.equal(requests.filter((request) => request.path.endsWith("/stats")).at(-1).query.get("workspace_key"), "workspace-b");
   await expect(metrics.locator("dd").first()).toHaveText("1");
+  await expect(failures.getByRole("listitem")).toHaveText(["Timed out1"]);
   await expect(page.getByRole("link", { name: /session-b/ })).toHaveAttribute(
     "href", "/traces/sessions/workspace-b/session-b",
   );
@@ -335,6 +342,7 @@ try {
   assert.equal(requests.length, beforeRefreshRequests, "New records remain hidden until manual refresh");
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await expect(metrics.locator("dd").first()).toHaveText("2");
+  await expect(failures.getByRole("listitem")).toHaveText(["Timed out2"]);
 
   // Replacing the query while a page is in flight must leave the new page usable.
   holdNextPage = true;
@@ -364,6 +372,14 @@ try {
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
   assert.equal(requests.filter((request) => request.path.endsWith("/stats")).at(-1).query.get("to_at"), "2026-10-12T23:59:59.999Z", "Refreshing a custom range preserves its boundary");
 
+  statsMode = "failures";
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(failures.getByRole("listitem")).toHaveText(["Cancelled2", "Timed out3", "Tool error1"]);
+  assert.match(await metrics.innerText(), /Failed\s+6/);
+  statsMode = "no-failures";
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(failures.getByRole("listitem")).toHaveCount(0);
+  await expect(failures.getByText("-", { exact: true })).toBeVisible();
   statsMode = "empty";
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await expect(page.getByText("No trace records for this range.", { exact: true })).toBeVisible();
@@ -385,6 +401,8 @@ try {
   await page.getByRole("button", { name: "今天", exact: true }).click();
   await page.getByLabel("工作区", { exact: true }).selectOption("");
   await expect(page.getByRole("region", { name: "执行指标" }).locator("dd").first()).toHaveText("5");
+  await expect(page.getByRole("region", { name: "失败原因", exact: true }).getByRole("listitem"))
+    .toHaveText(["已取消1"]);
   const mobileLayout = await page.evaluate(() => ({
     documentWidth: document.documentElement.scrollWidth,
     viewportWidth: window.innerWidth,

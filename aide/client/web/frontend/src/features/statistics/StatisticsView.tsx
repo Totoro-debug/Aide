@@ -463,6 +463,23 @@ export function StatisticsView({ authState }: StatisticsViewProps) {
                     labelFor={(key) => t(`statistics.purpose.${key}`, { defaultValue: key })}
                     callsLabel={t("statistics.callsCount")}
                   />
+                  <section className={styles.breakdown} aria-labelledby="statistics-errors-heading">
+                    <h3 id="statistics-errors-heading">{t("statistics.failureReasons")}</h3>
+                    {statistics.by_error_category.length === 0 ? (
+                      <p className={styles.emptySessions}>-</p>
+                    ) : (
+                      <ul>
+                        {statistics.by_error_category.map((item) => (
+                          <li className={styles.errorCategory} key={item.category}>
+                            <span className={styles.breakdownName}>
+                              {t(`traces.errorCategory.${item.category}`, { defaultValue: item.category })}
+                            </span>
+                            <span className={styles.breakdownCount}>{numberFormat.format(item.calls)}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </section>
                 </div>
               </section>
             </>

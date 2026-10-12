@@ -69,6 +69,70 @@ from tests.tools.test_subagent_tools import _harness
 _RAW_RESULT = "raw-result-" * 6_000
 
 
+class _BrokenEndpointRecorder(NoOpTraceRecorder):
+    def set_endpoint(self, handle: TraceRawHandle, endpoint: str) -> None:
+        raise RuntimeError("endpoint capture failed")
+
+
+@pytest.mark.asyncio
+async def test_http_mcp_timeout_keeps_attempted_endpoint_and_noop_behavior(tmp_path: Path) -> None:
+    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
+    results = []
+    try:
+        async with http_wire_server({
+            "redirect_calls": True, "response_delay_ms_by_value": {"timeout": 1500},
+        }) as (_, configuration):
+            configuration = replace(configuration, call_timeout=1)
+            manager = MCPRuntimeManager(None, transport="streamable-http")
+            try:
+                await manager.start({"remote": configuration})
+                tool = manager.snapshot[0]
+                gateway = ToolGateway._for_memory((tool,))
+                for active in (NoOpTraceRecorder(), _BrokenEndpointRecorder(), recorder):
+                    with trace_scope(active, TraceRootSource(
+                        workspace_key=workspace_key_for(tmp_path), workspace_path=str(tmp_path),
+                        origin=TraceOrigin.FOREGROUND, purpose=TracePurpose.AGENT_RUN,
+                    )):
+                        results.append(await gateway.call(ModelToolCall(
+                            "http-timeout", tool.name, '{"value":"timeout"}',
+                        )))
+                assert results[0] == results[1] == results[2]
+                assert results[2].status == "error"
+                await recorder.flush()
+                (record,) = (await recorder.list_records()).items
+                assert record.endpoint == f"{configuration.url}/timeout?view=trace"
+                assert record.error_category is TraceErrorCategory.TIMEOUT
+                assert record.status.value == "failed"
+            finally:
+                await manager.close()
+    finally:
+        await recorder.close()
+
+
+@pytest.mark.asyncio
+async def test_fetch_endpoint_capture_failure_keeps_response_and_closes_resource(
+    tmp_path: Path,
+) -> None:
+    results = []
+    for active in (NoOpTraceRecorder(), _BrokenEndpointRecorder()):
+        response = FakeResponse(headers={"content-type": "text/plain"}, chunks=(b"page",))
+        tool = WebFetchTool(
+            resolver=FakeResolver(("93.184.216.34",)),
+            http_client=FakeHTTPClient((cast(HTTPResponseBoundary, response),)),
+        )
+        gateway = ToolGateway._for_memory((tool,))
+        with trace_scope(active, TraceRootSource(
+            workspace_key=workspace_key_for(tmp_path), workspace_path=str(tmp_path),
+            origin=TraceOrigin.FOREGROUND, purpose=TracePurpose.AGENT_RUN,
+        )):
+            results.append(await gateway.call(ModelToolCall(
+                "fetch", tool.name, '{"url":"https://public.example/page"}',
+            )))
+        assert response.closed
+    assert results[0] == results[1]
+    assert results[1].status == "success"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("via_runner", [False, True])
 async def test_mcp_timeout_category_survives_final_result_publication(
@@ -602,6 +666,7 @@ async def test_mcp_runtime_trace_correlates_wire_messages_by_request_id(
         "result_fields": {"vendorResult": {"revision": 2, "opaque": ["kept"]}},
         "response_delay_ms_by_value": {"slow": 50},
         "ping_before_result": True,
+        "redirect_calls": True,
     }
     recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
     try:
@@ -676,6 +741,12 @@ async def test_mcp_runtime_trace_correlates_wire_messages_by_request_id(
                 assert len(records) == 3
                 by_call_id = {record.tool_call_id: record for record in records}
                 assert set(by_call_id) == {"call-slow", "call-fast", "call-failed"}
+                for call_id, value in (("call-slow", "slow"), ("call-fast", "fast"),
+                                       ("call-failed", "call")):
+                    expected_endpoint = (
+                        f"{configuration.url}/{value}?view=trace" if transport == "http" else None
+                    )
+                    assert by_call_id[call_id].endpoint == expected_endpoint
 
                 prefix = "mcp_http" if transport == "http" else "mcp_stdio"
                 for call_id, value in (("call-slow", "slow"), ("call-fast", "fast")):

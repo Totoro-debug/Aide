@@ -371,6 +371,9 @@ class WebFetchTool(BaseTool):
     ) -> str:
         redirects_followed = 0
         while True:
+            trace_call = current_trace_tool_call()
+            if trace_call is not None:
+                trace_call.set_endpoint(target.url)
             response = await self._http_client.get(
                 target.url,
                 resolved_addresses=resolution.addresses,

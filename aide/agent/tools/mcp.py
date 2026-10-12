@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Protocol, cast
 
 import anyio
+import httpx2
 import mcp.types as types
 from loguru import logger
 from mcp import ClientSession
@@ -389,7 +390,7 @@ class MCPServerConnection:
             raise TypeError("MCP Server connection requires a Path workspace")
         self.configuration = configuration
         self.workspace = workspace
-        self._transport_factory = transport_factory or _transport_for
+        self._transport_factory = transport_factory
         self._session_factory = session_factory
         self._model_name_for = model_name_for
         self._lifecycle_task: asyncio.Task[None] | None = None
@@ -468,10 +469,14 @@ class MCPServerConnection:
 
         try:
             async with asyncio.timeout(float(self.configuration.connect_timeout)):
-                transport = self._transport_factory(self.configuration, self.workspace)
+                protocol_trace = _MCPProtocolTrace(self.configuration.transport)
+                transport = (
+                    self._transport_factory(self.configuration, self.workspace)
+                    if self._transport_factory is not None else
+                    _transport_for(self.configuration, self.workspace, protocol_trace=protocol_trace)
+                )
                 streams = await stack.enter_async_context(transport)
                 read_stream, write_stream = _transport_streams(streams)
-                protocol_trace = _MCPProtocolTrace(self.configuration.transport)
                 read_stream = _MCPTraceReadStream(read_stream, protocol_trace)
                 write_stream = _MCPTraceWriteStream(write_stream, protocol_trace)
                 session = (
@@ -544,6 +549,8 @@ async def stdio_transport(
 async def streamable_http_transport(
     configuration: MCPServerConfiguration,
     workspace: Path,
+    *,
+    protocol_trace: _MCPProtocolTrace | None = None,
 ) -> AsyncIterator[object]:
     """Create the SDK Streamable HTTP transport with configured static headers."""
     del workspace
@@ -552,6 +559,12 @@ async def streamable_http_transport(
         raise ValueError("streamable-http MCP Server requires a URL")
     http_client = create_mcp_http_client(headers=dict(configuration.headers))
     try:
+        if protocol_trace is not None:
+            try:
+                http_client.event_hooks["request"].append(protocol_trace.http_request)
+                http_client.event_hooks["response"].append(protocol_trace.http_response)
+            except Exception:
+                logger.warning("Execution Trace MCP HTTP hooks could not be installed")
         async with streamable_http_client(url, http_client=http_client) as streams:
             yield streams
     finally:
@@ -561,11 +574,13 @@ async def streamable_http_transport(
 def _transport_for(
     configuration: MCPServerConfiguration,
     workspace: Path,
+    *,
+    protocol_trace: _MCPProtocolTrace | None = None,
 ) -> AbstractAsyncContextManager[object]:
     if configuration.transport == "stdio":
         return stdio_transport(configuration, workspace)
     if configuration.transport == "streamable-http":
-        return streamable_http_transport(configuration, workspace)
+        return streamable_http_transport(configuration, workspace, protocol_trace=protocol_trace)
     raise ValueError(f"Unsupported MCP transport: {configuration.transport}")
 
 
@@ -583,6 +598,34 @@ class _MCPProtocolTrace:
         self._source_prefix = "mcp_http" if transport == "streamable-http" else "mcp_stdio"
         self._pending: dict[int | str, _MCPTraceCall] = {}
         self._calls: dict[str, _MCPTraceCall] = {}
+
+    async def http_request(self, request: httpx2.Request) -> None:
+        try:
+            request_id = request.extensions.get("aide.mcp_request_id")
+            if request_id is None:
+                if request.method != "POST" or not request.content:
+                    return
+                message = json.loads(request.content)
+                if not isinstance(message, dict) or message.get("method") != "tools/call":
+                    return
+                request_id = message.get("id")
+            if isinstance(request_id, bool) or not isinstance(request_id, (int, str)):
+                return
+            call = self._pending.get(request_id)
+            if call is not None:
+                # Request extensions follow redirects, including redirects that drop the body.
+                request.extensions["aide.mcp_request_id"] = request_id
+                call.scope.set_endpoint(str(request.url))
+        except Exception:
+            logger.warning("Execution Trace MCP HTTP request endpoint could not be captured")
+
+    async def http_response(self, response: httpx2.Response) -> None:
+        request_id = response.request.extensions.get("aide.mcp_request_id")
+        if isinstance(request_id, bool) or not isinstance(request_id, (int, str)):
+            return
+        call = self._pending.get(request_id)
+        if call is not None:
+            call.scope.set_endpoint(str(response.request.url))
 
     def begin(self, scope: TraceToolCallScope | None) -> None:
         if scope is not None:

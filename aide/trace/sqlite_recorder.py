@@ -551,34 +551,38 @@ class SQLiteTraceRecorder(TraceRecorder):
         )
         return attempt
 
-    def set_endpoint(self, handle: TraceAttemptHandle, endpoint: str) -> None:
+    def set_endpoint(self, handle: TraceRawHandle, endpoint: str) -> None:
+        attempt_id = handle.attempt_id if isinstance(handle, TraceAttemptHandle) else None
         if not isinstance(endpoint, str) or not endpoint:
             self._note_loss(
                 handle.record_id,
-                handle.attempt_id,
+                attempt_id,
                 "endpoint",
-                "Provider endpoint metadata was invalid.",
+                "Call endpoint metadata was invalid.",
             )
             return
         with self._condition:
             state = self._states.get(handle.record_id)
             if state is None or state.finished:
                 return
-            attempt = state.attempts.get(handle.attempt_id)
-            if attempt is None:
-                return
-            ordinal, metadata = attempt
-            state.attempts[handle.attempt_id] = (ordinal, replace(metadata, endpoint=endpoint))
+            if attempt_id is None:
+                state.metadata = replace(state.metadata, endpoint=endpoint)
+            else:
+                attempt = state.attempts.get(attempt_id)
+                if attempt is None:
+                    return
+                ordinal, metadata = attempt
+                state.attempts[attempt_id] = (ordinal, replace(metadata, endpoint=endpoint))
         issue = TraceCaptureIssue(
             state=TraceCaptureState.PARTIAL,
-            message="Provider endpoint metadata could not be queued.",
-            source="provider_transport",
+            message="Call endpoint metadata could not be queued.",
+            source="provider_transport" if attempt_id is not None else "tool_endpoint",
         )
         self._enqueue(
-            "attempt_endpoint",
+            "attempt_endpoint" if attempt_id is not None else "call_endpoint",
             handle.record_id,
-            {"attempt_id": handle.attempt_id, "endpoint": endpoint},
-            attempt_id=handle.attempt_id,
+            {"attempt_id": attempt_id, "endpoint": endpoint},
+            attempt_id=attempt_id,
             source="endpoint",
             dropped_issue=issue,
         )
@@ -1194,6 +1198,12 @@ class SQLiteTraceRecorder(TraceRecorder):
             )
         elif event.kind == "request":
             self._write_request(connection, event.record_id, event.payload)
+        elif event.kind == "call_endpoint":
+            self._ensure_call_record(connection, event.record_id)
+            connection.execute(
+                "UPDATE trace_records SET endpoint = ? WHERE record_id = ? AND published = 0",
+                (cast(str, event.payload["endpoint"]), event.record_id),
+            )
         elif event.kind == "issue":
             self._write_issue_event(connection, event.record_id, event.payload)
         elif event.kind == "raw":

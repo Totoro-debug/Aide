@@ -12,6 +12,7 @@ from uuid import uuid4
 from loguru import logger
 
 from aide.trace.context import TraceContext, TraceRootSource
+from aide.trace.sanitization import sanitize_trace_url
 from aide.trace.types import (
     TraceAttemptHandle,
     TraceCaptureHandle,
@@ -39,6 +40,13 @@ class TraceToolCallScope:
     recorder: TraceRecorder
     handle: TraceCaptureHandle
     captured_sources: set[str] = field(default_factory=set, compare=False, hash=False)
+
+    def set_endpoint(self, endpoint: str) -> None:
+        try:
+            self.recorder.set_endpoint(self.handle, sanitize_trace_url(endpoint))
+        except Exception:
+            self.report_capture_issue("Tool endpoint metadata could not be captured.",
+                                      source="tool_endpoint")
 
     def append_raw(
         self,

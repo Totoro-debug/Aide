@@ -109,6 +109,12 @@ class WireServer:
             self.close_sse.set()
             return web.Response(status=200)
         message = await request.json()
+        if (self.scenario.get("redirect_calls") and request.path == "/mcp"
+                and message.get("method") == "tools/call"):
+            value = ((message.get("params") or {}).get("arguments") or {}).get("value", "call")
+            raise web.HTTPTemporaryRedirect(
+                location=f"/mcp/{value}?token=redirect-secret&view=trace"
+            )
         response_data = self.respond(message)
         if response_data is None:
             return web.Response(status=202)
@@ -136,6 +142,7 @@ async def http_wire_server(
     server = WireServer(scenario)
     app = web.Application()
     app.router.add_route("*", "/mcp", server.http)
+    app.router.add_route("*", "/mcp/{value}", server.http)
     runner = web.AppRunner(app)
     await runner.setup()
     try:

@@ -59,6 +59,24 @@ def _fetch_gateway(
 
 
 @pytest.mark.asyncio
+async def test_fetch_denied_before_network_has_no_endpoint(
+    recorder: SQLiteTraceRecorder, source: TraceRootSource,
+) -> None:
+    http = FakeHTTPClient(())
+    gateway = SingleToolGateway((WebFetchTool(
+        resolver=FakeResolver(("10.0.0.7",)), http_client=http,
+    ),), permission_context=PermissionContext(level="read-only"))
+    with trace_scope(recorder, source):
+        result = await gateway.call(ModelToolCall("denied", "web_fetch",
+                                                 '{"url":"http://private.example/page"}'))
+    assert result.status == "refused"
+    assert not http.calls
+    await recorder.flush()
+    (record,) = (await recorder.list_records()).items
+    assert record.endpoint is None
+
+
+@pytest.mark.asyncio
 async def test_fetch_metadata_encoding_failure_keeps_business_result(
     recorder: SQLiteTraceRecorder, source: TraceRootSource
 ) -> None:
@@ -76,6 +94,7 @@ async def test_fetch_metadata_encoding_failure_keeps_business_result(
     await recorder.flush()
     (record,) = (await recorder.list_records()).items
     assert record.capture_state.value == "partial"
+    assert record.endpoint == "https://public.example/page"
     raw = await recorder.read_raw(
         record.record_id, source="web_fetch_response", offset=0, limit_bytes=1000
     )
@@ -282,6 +301,7 @@ async def test_fetch_retains_consumed_bytes_when_interrupted(
     assert record.error_category is (
         TraceErrorCategory.TIMEOUT if failure is TimeoutError else TraceErrorCategory.CANCELLED
     )
+    assert record.endpoint == "https://public.example/page"
     raw = await recorder.read_raw(
         record.record_id, source="web_fetch_response", offset=0, limit_bytes=1000
     )
@@ -379,6 +399,10 @@ async def test_fetch_redirect_authorization_matches_noop_and_hides_credentials(
     assert detail is not None
     assert "redirect-secret" not in json.dumps(detail.request)
     assert "redirect-secret" not in json.dumps(detail.result)
+    assert record.endpoint == (
+        "http://private.example/admin?view=full" if decision == "approved"
+        else "https://public.example/start"
+    )
 
 
 @pytest.mark.asyncio

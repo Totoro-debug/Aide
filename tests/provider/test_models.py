@@ -37,13 +37,20 @@ def test_last_assistant_message_index_requires_an_assistant() -> None:
 
 
 def test_model_usage_serializes_to_the_exact_contract_shape() -> None:
-    usage = ModelUsage(input_tokens=120, output_tokens=24, total_tokens=144)
+    usage = ModelUsage(input_tokens=120, output_tokens=24, total_tokens=144,
+                       cache_creation_input_tokens=30)
 
     assert usage.to_dict() == {
         "input_tokens": 120,
         "output_tokens": 24,
         "total_tokens": 144,
     }
+
+
+@pytest.mark.parametrize("created", [-1, True, 121])
+def test_model_usage_rejects_invalid_cache_creation_counts(created: int) -> None:
+    with pytest.raises(ValueError, match="cache_creation_input_tokens"):
+        ModelUsage(120, 24, 144, cache_creation_input_tokens=created)
 
 
 @pytest.mark.parametrize(

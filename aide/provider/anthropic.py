@@ -218,9 +218,7 @@ class AnthropicProvider:
             raise TypeError(msg)
 
         text_parts: list[str] = []
-        input_tokens = 0
-        output_tokens = 0
-        cached_input_tokens: int | None = None
+        usage_values: dict[str, int] = {}
         input_usage_reported = False
         output_usage_reported = False
         stop_reason: str | None = None
@@ -228,10 +226,20 @@ class AnthropicProvider:
         content_blocks: dict[int, dict[str, object]] = {}
         async for event in cast(AsyncIterator[object], sdk_stream):
             event_type = _string_field(event, "type")
+            if event_type in {"message_start", "message_delta"}:
+                usage = _field(
+                    _field(event, "message") if event_type == "message_start" else event,
+                    "usage",
+                )
+                for name in (
+                    "input_tokens", "output_tokens", "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                ):
+                    value = _field(usage, name)
+                    if type(value) is int and value >= 0:
+                        usage_values[name] = value
             if event_type == "message_start":
-                usage = _field(_field(event, "message"), "usage")
                 input_usage_reported = usage is not None
-                input_tokens, cached_input_tokens = _input_usage(usage)
             elif event_type == "content_block_delta":
                 delta = _field(event, "delta")
                 delta_type = _string_field(delta, "type")
@@ -307,9 +315,10 @@ class AnthropicProvider:
                     }
             elif event_type == "message_delta":
                 stop_reason = _string_field(_field(event, "delta"), "stop_reason")
-                output_tokens = _integer_field(_field(event, "usage"), "output_tokens")
-                output_usage_reported = _field(event, "usage") is not None
+                output_usage_reported = output_usage_reported or usage is not None
 
+        input_tokens, cached_input_tokens, cache_creation_input_tokens = _input_usage(usage_values)
+        output_tokens = usage_values.get("output_tokens", 0)
         continuation = _stream_continuation(
             content_blocks,
             tool_uses,
@@ -327,6 +336,7 @@ class AnthropicProvider:
                 output_tokens=output_tokens,
                 total_tokens=input_tokens + output_tokens,
                 cached_input_tokens=cached_input_tokens,
+                cache_creation_input_tokens=cache_creation_input_tokens,
                 reported=input_usage_reported and output_usage_reported,
             ),
             finish_reason=_finish_reason(stop_reason),
@@ -529,7 +539,7 @@ def _response_from_message(message: object, *, provider_id: str) -> ModelRespons
                     )
                 )
     usage = _field(message, "usage")
-    input_tokens, cached_input_tokens = _input_usage(usage)
+    input_tokens, cached_input_tokens, cache_creation_input_tokens = _input_usage(usage)
     output_tokens = _integer_field(usage, "output_tokens")
     return ModelResponse(
         message=AssistantModelMessage(content="".join(text_parts), tool_calls=tuple(tool_calls)),
@@ -538,6 +548,7 @@ def _response_from_message(message: object, *, provider_id: str) -> ModelRespons
             output_tokens=output_tokens,
             total_tokens=input_tokens + output_tokens,
             cached_input_tokens=cached_input_tokens,
+            cache_creation_input_tokens=cache_creation_input_tokens,
             reported=usage is not None,
         ),
         finish_reason=_finish_reason(_string_field(message, "stop_reason")),
@@ -549,15 +560,17 @@ def _response_from_message(message: object, *, provider_id: str) -> ModelRespons
     )
 
 
-def _input_usage(usage: object) -> tuple[int, int | None]:
+def _input_usage(usage: object) -> tuple[int, int | None, int | None]:
     cached = _field(usage, "cache_read_input_tokens")
     cached_input_tokens = cached if type(cached) is int and cached >= 0 else None
+    created = _field(usage, "cache_creation_input_tokens")
+    cache_creation_input_tokens = created if type(created) is int and created >= 0 else None
     input_tokens = (
         _integer_field(usage, "input_tokens")
-        + _integer_field(usage, "cache_creation_input_tokens")
+        + (cache_creation_input_tokens or 0)
         + (cached_input_tokens or 0)
     )
-    return input_tokens, cached_input_tokens
+    return input_tokens, cached_input_tokens, cache_creation_input_tokens
 
 
 def _stream_continuation(

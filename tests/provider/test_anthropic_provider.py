@@ -121,11 +121,14 @@ def request(*, stream: bool = True) -> dict[str, Any]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [True, False])
 @pytest.mark.parametrize("cached", [None, 0, 5])
+@pytest.mark.parametrize("created", [None, 0, 300])
 async def test_provider_counts_cache_reads_and_writes_in_input_usage(
-    streaming: bool, cached: int | None,
+    streaming: bool, cached: int | None, created: int | None,
 ) -> None:
     cache_fields = {} if cached is None else {"cache_read_input_tokens": cached}
-    usage = SimpleNamespace(input_tokens=7, cache_creation_input_tokens=3, **cache_fields)
+    if created is not None:
+        cache_fields["cache_creation_input_tokens"] = created
+    usage = SimpleNamespace(input_tokens=10, **cache_fields)
     result = FakeAnthropicStream(
         SimpleNamespace(type="message_start", message=SimpleNamespace(usage=usage)),
         SimpleNamespace(type="content_block_start", index=0,
@@ -148,8 +151,37 @@ async def test_provider_counts_cache_reads_and_writes_in_input_usage(
     else:
         response = await provider.complete(**request())
     assert response.usage.cached_input_tokens == cached
-    assert response.usage.input_tokens == 10 + (cached or 0)
-    assert response.usage.total_tokens == 12 + (cached or 0)
+    assert response.usage.cache_creation_input_tokens == created
+    assert response.usage.input_tokens == 10 + (cached or 0) + (created or 0)
+    assert response.usage.total_tokens == 12 + (cached or 0) + (created or 0)
+
+
+@pytest.mark.asyncio
+async def test_stream_usage_updates_only_reported_fields() -> None:
+    stream = FakeAnthropicStream(
+        {"type": "message_start", "message": {"usage": {
+            "input_tokens": 10, "cache_read_input_tokens": 200,
+            "cache_creation_input_tokens": 100,
+        }}},
+        {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "done"}},
+        {"type": "message_delta", "usage": {"cache_creation_input_tokens": 300,
+                                             "output_tokens": 4}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+         "usage": {"cache_creation_input_tokens": None}},
+    )
+    provider = AnthropicProvider(
+        configuration(), client_factory=FakeAnthropicClientFactory(FakeAnthropicClient(stream)),
+    )
+    try:
+        events = [event async for event in provider.stream(**request())]
+        completed = events[-1]
+        assert isinstance(completed, ModelCompleted)
+        usage = completed.response.usage
+        assert usage.to_dict() == {"input_tokens": 510, "output_tokens": 4, "total_tokens": 514}
+        assert usage.cached_input_tokens == 200
+        assert usage.cache_creation_input_tokens == 300
+    finally:
+        await provider.close()
 
 
 @pytest.mark.asyncio

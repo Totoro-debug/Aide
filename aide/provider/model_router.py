@@ -239,6 +239,7 @@ class _TraceModelCall:
                     output_tokens=response.usage.output_tokens,
                     total_tokens=response.usage.total_tokens,
                     cached_input_tokens=response.usage.cached_input_tokens,
+                    cache_creation_input_tokens=response.usage.cache_creation_input_tokens,
                 )
                 if response.usage.reported
                 else TraceTokenUsage(TraceUsageState.UNKNOWN)

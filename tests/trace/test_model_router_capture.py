@@ -60,7 +60,8 @@ def _permanent_auth_failure() -> ModelCallError:
 def _response(content: str) -> ModelResponse:
     return ModelResponse(
         message=AssistantModelMessage(content=content),
-        usage=ModelUsage(input_tokens=4, output_tokens=1, total_tokens=5),
+        usage=ModelUsage(input_tokens=510, output_tokens=4, total_tokens=514,
+                         cached_input_tokens=200, cache_creation_input_tokens=300),
         finish_reason="stop",
     )
 
@@ -110,6 +111,8 @@ async def test_model_router_publishes_a_completed_call_through_trace_queries(
         assert record.status.value == "success"
         assert record.retry_count == 0
         assert record.usage.state is TraceUsageState.REPORTED
+        assert record.usage.cache_creation_input_tokens == 300
+        assert (await recorder.get_stats()).tokens.cache_creation_input_tokens == 300
         detail = await recorder.get_record(record.record_id)
         assert detail is not None
         assert cast(dict[str, Any], detail.result)["message"]["content"] == "Traced response"
@@ -155,6 +158,8 @@ async def test_router_publishes_only_the_final_success_after_retries(
         assert len(records) == 1
         assert records[0].retry_count == retry_count
         assert records[0].status.value == "success"
+        assert records[0].usage.cache_creation_input_tokens == 300
+        assert (await recorder.get_stats()).tokens.cache_creation_input_tokens == 300
         detail = await recorder.get_record(records[0].record_id)
         assert detail is not None
         assert cast(dict[str, Any], detail.request)["messages"][0]["content"] == "retry this call"
@@ -236,6 +241,8 @@ async def test_router_records_fallback_metadata_from_the_successful_provider(
         assert actual == _response("fallback result")
         assert len(records) == 1
         assert records[0].retry_count == 1
+        assert records[0].usage.cache_creation_input_tokens == 300
+        assert (await recorder.get_stats()).tokens.cache_creation_input_tokens == 300
         assert records[0].model == "default-model"
         assert records[0].endpoint is None  # The fake Provider sends no HTTP request.
         assert records[0].reasoning_effort is not None

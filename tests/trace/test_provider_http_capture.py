@@ -190,7 +190,7 @@ async def test_openai_complete_captures_wire_bytes_and_redacts_authentication(
         assert sent["max_tokens"] == 8192
         assert sent["temperature"] == 0.1
         assert sent["stream"] is False
-        assert record.endpoint == "https://chat.example/v1?region=west%2Fchat%2Fcompletions"
+        assert record.endpoint == "https://chat.example/v1?region=west/chat/completions"
         assert request_metadata["url"] == record.endpoint
         assert "authorization" not in request_metadata["headers"]
         assert "url-secret" not in json.dumps(request_metadata)

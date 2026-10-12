@@ -31,7 +31,7 @@ def is_sensitive_trace_name(name: str) -> bool:
         "signature",
     )
     return (
-        normalized in {"key", "sig"}
+        normalized in {"key", "sig", "tokenid"}
         or normalized.endswith("auth")
         or normalized.endswith(sensitive_parts)
     )
@@ -44,7 +44,7 @@ def sanitize_trace_url(url: str) -> str:
     before_fragment, fragment_marker, fragment = url.partition("#")
     base, query_marker, query = before_fragment.partition("?")
     if "@" in parts.netloc:
-        authority_start = base.index("://") + 3
+        authority_start = base.index("//") + 2
         authority_end = base.find("/", authority_start)
         if authority_end == -1:
             authority_end = len(base)

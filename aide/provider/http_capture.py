@@ -7,10 +7,11 @@ import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import cast
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urldefrag
 
 import httpx
 
+from aide.trace.sanitization import is_sensitive_trace_name, sanitize_trace_url
 from aide.trace.scope import TraceProviderAttempt, current_trace_provider_attempt
 from aide.trace.types import TraceCaptureLayer, TraceDirection
 
@@ -35,7 +36,7 @@ async def capture_http_request(request: httpx.Request) -> None:
         request.extensions[_EXCHANGE_EXTENSION] = _TraceHTTPExchange(attempt, exchange)
         request_source = _exchange_source("http_request", exchange)
         request_metadata_source = _exchange_source("http_request_metadata", exchange)
-        endpoint = _sanitized_url(request.url)
+        endpoint = urldefrag(sanitize_trace_url(str(request.url)))[0]
         attempt.set_endpoint(endpoint)
         try:
             request_body = request.content
@@ -178,54 +179,25 @@ def _exchange_source(source: str, exchange: int) -> str:
     return source if exchange == 0 else f"{source}_{exchange + 1}"
 
 
-def _sanitized_url(url: httpx.URL | str) -> str:
-    parts = urlsplit(str(url))
-    safe_netloc = parts.netloc.rsplit("@", 1)[-1]
-    safe_query = urlencode(
-        [
-            (name, value)
-            for name, value in parse_qsl(parts.query, keep_blank_values=True)
-            if not _is_sensitive_name(name)
-        ]
-    )
-    return urlunsplit((parts.scheme, safe_netloc, parts.path, safe_query, ""))
-
-
 def _safe_headers(headers: httpx.Headers) -> dict[str, object]:
     values: dict[str, list[str]] = {}
     for name, value in headers.multi_items():
         normalized = name.casefold()
-        if _is_sensitive_name(normalized):
+        if is_sensitive_trace_name(normalized):
             continue
         if normalized in {"location", "content-location", "referer"}:
-            value = _sanitized_url(value)
+            value = urldefrag(sanitize_trace_url(value))[0]
         elif normalized == "link":
-            value = re.sub(r"<([^<>]+)>", lambda match: f"<{_sanitized_url(match[1])}>", value)
+            value = re.sub(
+                r"<([^<>]+)>",
+                lambda match: f"<{urldefrag(sanitize_trace_url(match[1]))[0]}>",
+                value,
+            )
         values.setdefault(normalized, []).append(value)
     return {
         name: items[0] if len(items) == 1 else items
         for name, items in values.items()
     }
-
-
-def _is_sensitive_name(name: str) -> bool:
-    normalized = "".join(character for character in name.casefold() if character.isalnum())
-    sensitive_parts = (
-        "authorization",
-        "auth",
-        "apikey",
-        "token",
-        "secret",
-        "credential",
-        "cookie",
-        "password",
-        "signature",
-    )
-    return (
-        normalized == "sig"
-        or normalized.endswith("key")
-        or any(part in normalized for part in sensitive_parts)
-    )
 
 
 __all__ = ["capture_http_request", "capture_http_response"]

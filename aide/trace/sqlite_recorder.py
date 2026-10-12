@@ -60,7 +60,6 @@ __all__ = [
     "TRACE_MAX_RAW_CHUNK_BYTES",
     "TRACE_RETENTION_DAYS",
     "SQLiteTraceRecorder",
-    "TraceRecorderDiagnostics",
 ]
 
 TRACE_DATABASE_FILENAME = "traces.sqlite3"
@@ -219,19 +218,6 @@ CREATE INDEX IF NOT EXISTS idx_trace_records_root
     ON trace_records(root_id, publish_sequence DESC) WHERE published = 1;
 PRAGMA user_version = 1;
 """
-
-
-@dataclass(frozen=True, slots=True)
-class TraceRecorderDiagnostics:
-    queued_events: int
-    queued_payload_bytes: int
-    queue_event_limit: int
-    queue_payload_byte_limit: int
-    queue_dropped_events: int
-    queue_dropped_payload_bytes: int
-    writer_failed_events: int
-    writer_retries: int
-    published_records: int
 
 
 @dataclass(slots=True)
@@ -471,32 +457,12 @@ class SQLiteTraceRecorder(TraceRecorder):
         self._startup_error: Exception | None = None
         self._states: dict[str, _CaptureState] = {}
         self._closed_sessions: set[tuple[str, str]] = set()
-        self._queue_dropped_events = 0
-        self._queue_dropped_payload_bytes = 0
-        self._writer_failed_events = 0
-        self._writer_retries = 0
-        self._published_records = 0
         self._worker = threading.Thread(
             target=self._run_writer,
             name="aide-trace-sqlite-writer",
             daemon=True,
         )
         self._worker.start()
-
-    @property
-    def diagnostics(self) -> TraceRecorderDiagnostics:
-        with self._condition:
-            return TraceRecorderDiagnostics(
-                queued_events=len(self._queue) + self._inflight_events,
-                queued_payload_bytes=self._queue_bytes + self._inflight_bytes,
-                queue_event_limit=self._max_queue_events,
-                queue_payload_byte_limit=self._max_queue_payload_bytes,
-                queue_dropped_events=self._queue_dropped_events,
-                queue_dropped_payload_bytes=self._queue_dropped_payload_bytes,
-                writer_failed_events=self._writer_failed_events,
-                writer_retries=self._writer_retries,
-                published_records=self._published_records,
-            )
 
     @property
     def startup_error(self) -> Exception | None:
@@ -741,12 +707,6 @@ class SQLiteTraceRecorder(TraceRecorder):
             },
         )
 
-    async def flush(self) -> None:
-        """Wait until all capture events accepted before this call have been processed."""
-        with self._condition:
-            ticket = self._next_ticket
-        await self._wait_for_ticket_async(ticket)
-
     async def list_sessions(
         self,
         filters: TraceRecordFilters | None = None,
@@ -886,8 +846,6 @@ class SQLiteTraceRecorder(TraceRecorder):
                 or self._queue_bytes + self._inflight_bytes + payload_bytes
                 > self._max_queue_payload_bytes
             ):
-                self._queue_dropped_events += 1
-                self._queue_dropped_payload_bytes += payload_bytes
                 if state is not None:
                     issue = dropped_issue or TraceCaptureIssue(
                         state=TraceCaptureState.PARTIAL,
@@ -935,9 +893,6 @@ class SQLiteTraceRecorder(TraceRecorder):
             state = self._states.get(record_id)
             if state is not None:
                 state.add_issue(attempt_id, issue)
-
-    async def _wait_for_ticket_async(self, ticket: int) -> None:
-        await asyncio.to_thread(self._wait_for_ticket, ticket)
 
     def _wait_for_ticket(self, ticket: int, *, ordered: bool = True) -> None:
         self._ready.wait()
@@ -1011,7 +966,6 @@ class SQLiteTraceRecorder(TraceRecorder):
             self._ready.set()
             with self._condition:
                 for event in self._queue:
-                    self._writer_failed_events += 1
                     self._complete_ticket(event.ticket)
                     if event.kind == "finish":
                         self._states.pop(event.record_id, None)
@@ -1081,29 +1035,18 @@ class SQLiteTraceRecorder(TraceRecorder):
     def _process_event_with_retries(
         self, connection: sqlite3.Connection, event: _Event, *, initial_failed: bool = False
     ) -> None:
-        retries = 0
         delays = _WRITER_RETRY_DELAYS if initial_failed else (0.0, *_WRITER_RETRY_DELAYS)
         for delay in delays:
             if self._stop_writer.wait(delay):
                 self._mark_writer_failure(event)
                 return
-            if delay:
-                retries += 1
             try:
-                published = self._apply_events_transaction(connection, (event,))
+                self._apply_events_transaction(connection, (event,))
             except Exception:
                 if delay == _WRITER_RETRY_DELAYS[-1]:
-                    with self._condition:
-                        self._writer_retries += retries
                     self._mark_writer_failure(event)
                     return
             else:
-                if retries:
-                    with self._condition:
-                        self._writer_retries += retries
-                if published:
-                    with self._condition:
-                        self._published_records += published
                 return
 
     def _process_events_with_retries(
@@ -1119,20 +1062,16 @@ class SQLiteTraceRecorder(TraceRecorder):
             self._process_event_with_retries(connection, events[0])
             return
         try:
-            published = self._apply_events_transaction(connection, events)
+            self._apply_events_transaction(connection, events)
         except Exception:
             # Isolate a failed batch so one bad event cannot discard unrelated calls.
             for event in events:
                 self._process_event_with_retries(connection, event, initial_failed=True)
-        else:
-            with self._condition:
-                self._published_records += published
 
     def _mark_writer_failure(self, event: _Event) -> None:
         with self._condition:
             if event.kind in ("purge", "expire"):
                 event.payload["error"] = RuntimeError("Trace maintenance failed in the writer")
-            self._writer_failed_events += 1
             state = self._states.get(event.record_id)
             if state is not None and event.kind != "finish":
                 state.add_issue(
@@ -1158,21 +1097,19 @@ class SQLiteTraceRecorder(TraceRecorder):
         self,
         connection: sqlite3.Connection,
         events: Sequence[_Event],
-    ) -> int:
+    ) -> None:
         connection.execute("BEGIN IMMEDIATE")
         try:
-            published = 0
             for event in events:
-                published += self._apply_event(connection, event)
+                self._apply_event(connection, event)
             if self._stop_writer.is_set():
                 raise RuntimeError("Trace drain deadline expired")
             connection.execute("COMMIT")
-            return published
         except Exception:
             connection.execute("ROLLBACK")
             raise
 
-    def _apply_event(self, connection: sqlite3.Connection, event: _Event) -> int:
+    def _apply_event(self, connection: sqlite3.Connection, event: _Event) -> None:
         if self._stop_writer.is_set():
             raise RuntimeError("Trace drain deadline expired")
         if event.record_id:
@@ -1182,7 +1119,7 @@ class SQLiteTraceRecorder(TraceRecorder):
                     state.context.workspace_key,
                     state.context.owner_session_id,
                 ):
-                    return 0
+                    return
         if event.kind == "begin":
             self._write_begin(connection, event.record_id, event.payload)
         elif event.kind == "attempt":
@@ -1209,7 +1146,7 @@ class SQLiteTraceRecorder(TraceRecorder):
         elif event.kind == "raw":
             self._write_raw(connection, event.record_id, event.payload)
         elif event.kind == "finish":
-            return int(self._write_finish(connection, event.record_id, event.payload))
+            self._write_finish(connection, event.record_id, event.payload)
         elif event.kind == "restore":
             self._write_restore(connection, event.payload)
         elif event.kind == "purge":
@@ -1218,7 +1155,6 @@ class SQLiteTraceRecorder(TraceRecorder):
             event.payload["deleted"] = self._write_expired(connection, event.payload)
         else:
             raise ValueError(f"Unknown Trace writer event {event.kind}")
-        return 0
 
     @staticmethod
     def _write_begin(

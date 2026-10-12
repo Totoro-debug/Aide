@@ -34,6 +34,7 @@ from aide.trace.types import (
 from aide.utils.errors import ErrorInfo
 from tests.fixtures import FakeClock, ScriptedFakeProvider, StreamScript
 from tests.fixtures.model_configuration import configuration, routed_configuration
+from tests.fixtures.trace import wait_for_trace_writer
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
 
@@ -97,7 +98,7 @@ async def test_model_router_publishes_a_completed_call_through_trace_queries(
                 messages=[{"role": "user", "content": "trace this call"}],
                 tools=(),
             )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         page = await recorder.list_records()
         assert actual == _response("Traced response")
@@ -151,7 +152,7 @@ async def test_router_publishes_only_the_final_success_after_retries(
                 messages=[{"role": "user", "content": "retry this call"}],
                 tools=(),
             )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         records = (await recorder.list_records()).items
         assert actual == _response("final result")
@@ -192,7 +193,7 @@ async def test_router_publishes_one_failure_without_failed_attempt_payloads(
                     messages=[{"role": "user", "content": "do not retain this"}],
                     tools=(),
                 )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         records = (await recorder.list_records()).items
         assert len(records) == 1
@@ -235,7 +236,7 @@ async def test_router_records_fallback_metadata_from_the_successful_provider(
                 tools=(),
                 continuation=ModelContinuation("chat-provider", {"state": "primary only"}),
             )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         records = (await recorder.list_records()).items
         assert actual == _response("fallback result")
@@ -283,7 +284,7 @@ async def test_router_records_stream_retry_and_preserves_event_order(tmp_path: P
                     tools=(),
                 )
             ]
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         assert events == [TextDelta(delta="answer"), ModelCompleted(_response("answer"))]
         records = (await recorder.list_records()).items
@@ -328,7 +329,7 @@ async def test_stream_cancellation_after_partial_output_is_failed(tmp_path: Path
             assert await anext(stream) == TextDelta(delta="partial")
             with pytest.raises(asyncio.CancelledError):
                 await stream.athrow(asyncio.CancelledError())
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         records = (await recorder.list_records()).items
         assert len(records) == 1
@@ -370,7 +371,7 @@ async def test_stream_closed_before_first_iteration_does_not_leave_an_open_trace
                 ),
             )
             await events.aclose()
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         assert (await recorder.list_records()).items == ()
         assert provider.stream_requests == []
@@ -401,7 +402,7 @@ async def test_guard_rejection_is_failed_without_an_endpoint(tmp_path: Path) -> 
                     tools=(),
                     guard=lambda _status, _messages, _tools: False,
                 )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         records = (await recorder.list_records()).items
         assert len(records) == 1
@@ -435,7 +436,7 @@ async def test_shared_router_keeps_concurrent_session_scopes_separate(tmp_path: 
 
     try:
         await asyncio.gather(run("session-one"), run("session-two"))
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         records = (await recorder.list_records()).items
         assert {record.owner_session_id for record in records} == {
@@ -490,7 +491,7 @@ async def test_response_snapshot_failure_preserves_business_success(
             else:
                 assert await router.complete("chat", messages=(), tools=()) is response
         if isinstance(recorder, SQLiteTraceRecorder):
-            await recorder.flush()
+            await wait_for_trace_writer(recorder)
             (record,) = (await recorder.list_records()).items
             assert record.status.value == "success"
             detail = await recorder.get_record(record.record_id)
@@ -518,7 +519,7 @@ async def test_run_router_close_records_cancellation_immediately(tmp_path: Path)
             )
             assert await anext(events) == TextDelta("partial")
             await events.aclose()
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         (record,) = (await recorder.list_records()).items
         assert record.status.value == "failed"
         assert record.error_category is TraceErrorCategory.CANCELLED
@@ -536,7 +537,7 @@ async def test_unreported_usage_remains_unknown_in_trace(tmp_path: Path) -> None
     try:
         with trace_scope(recorder, _source(tmp_path)):
             assert await router.complete("chat", messages=(), tools=()) is response
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         (record,) = (await recorder.list_records()).items
         assert record.usage == TraceTokenUsage(TraceUsageState.UNKNOWN)
         assert record.endpoint is None
@@ -563,7 +564,7 @@ async def test_incomplete_and_cancelled_streams_never_publish_success(
         with trace_scope(recorder, _source(tmp_path)):
             actual = [event async for event in router.stream("chat", messages=(), tools=())]
         assert actual == list(events)
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         (record,) = (await recorder.list_records()).items
         assert record.status.value == "failed"
         assert record.error_category is (

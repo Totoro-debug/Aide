@@ -29,6 +29,7 @@ from aide.trace.types import (
     TraceTokenUsage,
     TraceUsageState,
 )
+from tests.fixtures.trace import measure_trace_writer, trace_queue_load, wait_for_trace_writer
 
 _NOW = datetime(2026, 10, 11, 0, 0, tzinfo=UTC)
 
@@ -44,7 +45,7 @@ async def test_raw_pages_only_decompress_overlapping_chunks(
         recorder.append_raw(handle, source="response", direction=TraceDirection.RESPONSE,
                             layer=TraceCaptureLayer.TOOL_RESULT, sequence=0, data=payload)
         recorder.finish_call(handle, _success(), result="ok", usage=_usage(), retry_count=0)
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         original_decompress = zlib.decompress
         sizes: list[int] = []
 
@@ -86,7 +87,7 @@ async def test_raw_offsets_follow_remaining_replaced_and_empty_chunks(
             recorder.append_raw(handle, source="response", direction=TraceDirection.RESPONSE,
                                 layer=TraceCaptureLayer.TOOL_RESULT, sequence=sequence, data=data)
         recorder.finish_call(handle, _success(), result="ok", usage=_usage(), retry_count=0)
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         with sqlite3.connect(recorder.path) as connection:
             connection.execute("DELETE FROM trace_raw_chunks WHERE sequence = 2")
         original_decompress = zlib.decompress
@@ -202,7 +203,7 @@ async def test_unpublished_model_candidates_are_invisible_and_success_publishes_
             content_type="application/octet-stream",
         )
 
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         assert (await recorder.list_records()).items == ()
         assert await recorder.get_record(handle.record_id) is None
 
@@ -213,7 +214,7 @@ async def test_unpublished_model_candidates_are_invisible_and_success_publishes_
             usage=_usage(),
             retry_count=1,
         )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         detail = await recorder.get_record(handle.record_id)
         assert detail is not None
@@ -287,7 +288,7 @@ async def test_failed_model_publishes_error_without_request_or_raw_candidates(
             usage=TraceTokenUsage(state=TraceUsageState.UNKNOWN),
             retry_count=2,
         )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         detail = await recorder.get_record(handle.record_id)
         assert detail is not None
@@ -346,7 +347,7 @@ async def test_finish_is_idempotent_and_concurrent_sessions_do_not_cross_records
             usage=TraceTokenUsage(state=TraceUsageState.NOT_APPLICABLE),
             retry_count=0,
         )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         for session_id, index, handle in handles:
             detail = await recorder.get_record(handle.record_id)
@@ -387,7 +388,7 @@ async def test_stats_do_not_count_tool_usage_as_model_tokens(tmp_path: Path) -> 
                 usage=_usage(),
                 retry_count=0,
             )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         stats = await recorder.get_stats()
         assert stats.totals.model_calls == 1
@@ -488,7 +489,7 @@ async def test_stats_keep_totals_and_breakdowns_consistent_across_dimensions(
             usage=TraceTokenUsage(state=TraceUsageState.NOT_APPLICABLE),
             retry_count=1,
         )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         stats = await recorder.get_stats()
         assert stats.totals.model_calls == 2
@@ -563,7 +564,7 @@ async def test_ten_thousand_finished_records_survive_bounded_batch_writes_and_pa
                     retry_count=0,
                 )
                 expected_ids.add(handle.record_id)
-            await recorder.flush()
+            await wait_for_trace_writer(recorder)
 
         actual_ids: list[str] = []
         cursor = None
@@ -594,7 +595,7 @@ async def test_trace_database_uses_wal_and_foreign_keys_and_restarts_clean_stagi
     context = _new_context(recorder)
     handle = recorder.begin_call(context, _tool_metadata())
     recorder.set_request(handle, {"pending": True})
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     assert await recorder.get_record(handle.record_id) is None
     await recorder.close()
 
@@ -610,7 +611,7 @@ async def test_trace_database_uses_wal_and_foreign_keys_and_restarts_clean_stagi
 
     restarted = SQLiteTraceRecorder(database)
     try:
-        await restarted.flush()
+        await wait_for_trace_writer(restarted)
         assert await restarted.get_record(handle.record_id) is None
         connection = restarted._connect()
         try:
@@ -640,28 +641,27 @@ async def test_queue_payload_limit_marks_capture_incomplete_without_business_exc
         max_queue_payload_bytes=2048,
     )
     try:
-        context = _new_context(recorder)
-        handle = recorder.begin_call(context, _tool_metadata())
-        await recorder.flush()
-        recorder.set_request(handle, {"large": "x" * 4096})
-        recorder.finish_call(
-            handle,
-            _success(),
-            result={"ok": True},
-            usage=TraceTokenUsage(state=TraceUsageState.NOT_APPLICABLE),
-            retry_count=0,
-        )
-        await recorder.flush()
+        with measure_trace_writer(recorder) as measurements:
+            context = _new_context(recorder)
+            handle = recorder.begin_call(context, _tool_metadata())
+            await wait_for_trace_writer(recorder)
+            recorder.set_request(handle, {"large": "x" * 4096})
+            recorder.finish_call(
+                handle,
+                _success(),
+                result={"ok": True},
+                usage=TraceTokenUsage(state=TraceUsageState.NOT_APPLICABLE),
+                retry_count=0,
+            )
+            await wait_for_trace_writer(recorder)
 
-        detail = await recorder.get_record(handle.record_id)
-        assert detail is not None
-        assert detail.record.capture_state.value in {"partial", "unavailable"}
-        assert detail.capture_issues
-        diagnostics = recorder.diagnostics
-        assert diagnostics.queue_dropped_events > 0
-        assert diagnostics.queue_dropped_payload_bytes > 0
-        assert diagnostics.queued_events <= 1
-        assert diagnostics.queued_payload_bytes <= 2048
+            detail = await recorder.get_record(handle.record_id)
+            assert detail is not None
+            assert detail.record.capture_state.value in {"partial", "unavailable"}
+            assert detail.capture_issues
+            assert measurements["rejected_events"] > 0
+            assert trace_queue_load(recorder)[0] <= 1
+            assert trace_queue_load(recorder)[1] <= 2048
     finally:
         await recorder.close()
 
@@ -680,36 +680,72 @@ async def test_queue_event_limit_drops_raw_capture_without_exceeding_budget(
         max_queue_payload_bytes=1024 * 1024,
     )
     try:
-        handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
-        recorder.set_request(handle, {"path": "file.txt"})
-        recorder.append_raw(
-            handle,
-            source="tool-output",
-            direction=TraceDirection.RESPONSE,
-            layer=TraceCaptureLayer.TOOL_RESULT,
-            sequence=0,
-            data=b"tool result",
-        )
-        await recorder.flush()
-        recorder.finish_call(
-            handle,
-            _success(),
-            result={"ok": True},
-            usage=TraceTokenUsage(state=TraceUsageState.NOT_APPLICABLE),
-            retry_count=0,
-        )
-        await recorder.flush()
+        with measure_trace_writer(recorder) as measurements:
+            handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
+            recorder.set_request(handle, {"path": "file.txt"})
+            recorder.append_raw(
+                handle,
+                source="tool-output",
+                direction=TraceDirection.RESPONSE,
+                layer=TraceCaptureLayer.TOOL_RESULT,
+                sequence=0,
+                data=b"tool result",
+            )
+            await wait_for_trace_writer(recorder)
+            recorder.finish_call(
+                handle,
+                _success(),
+                result={"ok": True},
+                usage=TraceTokenUsage(state=TraceUsageState.NOT_APPLICABLE),
+                retry_count=0,
+            )
+            await wait_for_trace_writer(recorder)
 
+            detail = await recorder.get_record(handle.record_id)
+            assert detail is not None
+            assert detail.raw_sources == ()
+            assert detail.record.capture_state.value == "partial"
+            assert detail.capture_issues
+            assert measurements["rejected_events"] >= 1
+            assert any(issue.source == "tool-output" for issue in detail.capture_issues)
+            assert trace_queue_load(recorder)[0] <= recorder._max_queue_events
+            assert trace_queue_load(recorder)[1] <= recorder._max_queue_payload_bytes
+    finally:
+        await recorder.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("budget", ["events", "payload"])
+async def test_default_queue_budgets_bound_retained_capture(tmp_path: Path, budget: str) -> None:
+    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
+    try:
+        handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
+        await wait_for_trace_writer(recorder)
+        with measure_trace_writer(recorder) as measurements, recorder._condition:
+            block = b"x" if budget == "events" else b"x" * (64 * 1024)
+            count = 4097 if budget == "events" else 1025
+            for sequence in range(count):
+                recorder.append_raw(
+                    handle,
+                    source="tool-output",
+                    direction=TraceDirection.RESPONSE,
+                    layer=TraceCaptureLayer.TOOL_RESULT,
+                    sequence=sequence,
+                    data=block,
+                )
+            events, payload_bytes = trace_queue_load(recorder)
+            assert events <= 4096
+            assert payload_bytes <= 64 * 1024 * 1024
+            assert measurements["rejected_events"] > 0
+            if budget == "events":
+                assert events == 4096
+            else:
+                assert payload_bytes > 63 * 1024 * 1024
+        await wait_for_trace_writer(recorder)
+        recorder.finish_call(handle, _success(), result="ok", usage=_usage(), retry_count=0)
+        await wait_for_trace_writer(recorder)
         detail = await recorder.get_record(handle.record_id)
-        assert detail is not None
-        assert detail.raw_sources == ()
-        assert detail.record.capture_state.value == "partial"
-        assert detail.capture_issues
-        diagnostics = recorder.diagnostics
-        assert diagnostics.queue_dropped_events >= 1
-        assert any(issue.source == "tool-output" for issue in detail.capture_issues)
-        assert diagnostics.queued_events <= diagnostics.queue_event_limit
-        assert diagnostics.queued_payload_bytes <= diagnostics.queue_payload_byte_limit
+        assert detail is not None and detail.capture_issues
     finally:
         await recorder.close()
 
@@ -728,46 +764,46 @@ async def test_writer_retries_three_times_then_publishes_partial_capture(
     monkeypatch.setattr(sqlite_module, "_WRITER_BATCH_SIZE", batch_size)
     recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
     try:
-        original_apply = recorder._apply_event
-        raw_attempts = 0
+        with measure_trace_writer(recorder) as measurements:
+            original_apply = recorder._apply_event
+            raw_attempts = 0
 
-        def fail_raw_for_all_retries(connection: sqlite3.Connection, event: _Event) -> int:
-            nonlocal raw_attempts
-            if event.kind == "raw":
-                raw_attempts += 1
-                raise sqlite3.OperationalError("controlled write failure")
-            return original_apply(connection, event)
+            def fail_raw_for_all_retries(connection: sqlite3.Connection, event: _Event) -> None:
+                nonlocal raw_attempts
+                if event.kind == "raw":
+                    raw_attempts += 1
+                    raise sqlite3.OperationalError("controlled write failure")
+                return original_apply(connection, event)
 
-        monkeypatch.setattr(recorder, "_apply_event", fail_raw_for_all_retries)
-        with recorder._condition:
-            handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
-            recorder.set_request(handle, {"path": "file.txt"})
-            recorder.append_raw(
-                handle,
-                source="tool-output",
-                direction=TraceDirection.RESPONSE,
-                layer=TraceCaptureLayer.TOOL_RESULT,
-                sequence=0,
-                data=b"output",
-            )
-            recorder.finish_call(
-                handle,
-                _success(),
-                result={"text": "output"},
-                usage=TraceTokenUsage(state=TraceUsageState.NOT_APPLICABLE),
-                retry_count=0,
-            )
-        await recorder.flush()
+            monkeypatch.setattr(recorder, "_apply_event", fail_raw_for_all_retries)
+            with recorder._condition:
+                handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
+                recorder.set_request(handle, {"path": "file.txt"})
+                recorder.append_raw(
+                    handle,
+                    source="tool-output",
+                    direction=TraceDirection.RESPONSE,
+                    layer=TraceCaptureLayer.TOOL_RESULT,
+                    sequence=0,
+                    data=b"output",
+                )
+                recorder.finish_call(
+                    handle,
+                    _success(),
+                    result={"text": "output"},
+                    usage=TraceTokenUsage(state=TraceUsageState.NOT_APPLICABLE),
+                    retry_count=0,
+                )
+            await wait_for_trace_writer(recorder)
 
-        detail = await recorder.get_record(handle.record_id)
-        assert detail is not None
-        assert detail.request == {"path": "file.txt"}
-        assert detail.raw_sources == ()
-        assert detail.record.capture_state.value == "partial"
-        assert detail.capture_issues
-        assert raw_attempts == 4
-        assert recorder.diagnostics.writer_failed_events == 1
-        assert recorder.diagnostics.writer_retries == (3 if batch_size == 1 else 6)
+            detail = await recorder.get_record(handle.record_id)
+            assert detail is not None
+            assert detail.request == {"path": "file.txt"}
+            assert detail.raw_sources == ()
+            assert detail.record.capture_state.value == "partial"
+            assert detail.capture_issues
+            assert raw_attempts == 4
+            assert measurements["writer_failed_events"] == 1
     finally:
         await recorder.close()
 
@@ -786,7 +822,7 @@ async def test_read_queries_run_without_blocking_the_event_loop(
             usage=TraceTokenUsage(state=TraceUsageState.NOT_APPLICABLE),
             retry_count=0,
         )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         started = Event()
         release = Event()
@@ -826,16 +862,17 @@ async def test_unserializable_content_degrades_capture_without_escaping(
 ) -> None:
     recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
     try:
-        handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
-        recorder.set_request(handle, {"content": content})
-        recorder.finish_call(handle, _success(), result=content, usage=_usage(), retry_count=0)
-        await recorder.flush()
-        detail = await recorder.get_record(handle.record_id)
-        assert detail is not None
-        assert detail.record.status is TraceStatus.SUCCESS
-        assert detail.record.capture_state.value == "unavailable"
-        assert {issue.source for issue in detail.capture_issues} == {"request", "result"}
-        assert recorder.diagnostics.writer_failed_events == 0
+        with measure_trace_writer(recorder) as measurements:
+            handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
+            recorder.set_request(handle, {"content": content})
+            recorder.finish_call(handle, _success(), result=content, usage=_usage(), retry_count=0)
+            await wait_for_trace_writer(recorder)
+            detail = await recorder.get_record(handle.record_id)
+            assert detail is not None
+            assert detail.record.status is TraceStatus.SUCCESS
+            assert detail.record.capture_state.value == "unavailable"
+            assert {issue.source for issue in detail.capture_issues} == {"request", "result"}
+            assert measurements["writer_failed_events"] == 0
     finally:
         await recorder.close()
 
@@ -848,39 +885,40 @@ async def test_queue_budget_includes_attempt_raw_and_error_metadata(
 ) -> None:
     recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3", max_queue_payload_bytes=2048)
     try:
-        handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
-        await recorder.flush()
-        with recorder._condition:
-            if event_kind == "attempt":
-                recorder.begin_attempt(
-                    handle, TraceAttemptMetadata(started_at=_NOW, model="x" * 16384)
-                )
-            elif event_kind == "raw":
-                recorder.append_raw(
-                    handle,
-                    source="x" * 16384,
-                    direction=TraceDirection.RESPONSE,
-                    layer=TraceCaptureLayer.TOOL_RESULT,
-                    sequence=0,
-                    data=b"x",
-                )
-            else:
-                recorder.finish_call(
-                    handle,
-                    TraceOutcome(
-                        status=TraceStatus.FAILED,
-                        finished_at=_NOW,
-                        duration_ms=1,
-                        error_category=TraceErrorCategory.TOOL_ERROR,
-                        error_message="x" * 16384,
-                    ),
-                    result=None,
-                    usage=_usage(),
-                    retry_count=0,
-                )
-            assert recorder.diagnostics.queued_events == 0
-            assert recorder.diagnostics.queued_payload_bytes == 0
-            assert recorder.diagnostics.queue_dropped_events == 1
+        with measure_trace_writer(recorder) as measurements:
+            handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
+            await wait_for_trace_writer(recorder)
+            with recorder._condition:
+                if event_kind == "attempt":
+                    recorder.begin_attempt(
+                        handle, TraceAttemptMetadata(started_at=_NOW, model="x" * 16384)
+                    )
+                elif event_kind == "raw":
+                    recorder.append_raw(
+                        handle,
+                        source="x" * 16384,
+                        direction=TraceDirection.RESPONSE,
+                        layer=TraceCaptureLayer.TOOL_RESULT,
+                        sequence=0,
+                        data=b"x",
+                    )
+                else:
+                    recorder.finish_call(
+                        handle,
+                        TraceOutcome(
+                            status=TraceStatus.FAILED,
+                            finished_at=_NOW,
+                            duration_ms=1,
+                            error_category=TraceErrorCategory.TOOL_ERROR,
+                            error_message="x" * 16384,
+                        ),
+                        result=None,
+                        usage=_usage(),
+                        retry_count=0,
+                    )
+                assert trace_queue_load(recorder)[0] == 0
+                assert trace_queue_load(recorder)[1] == 0
+                assert measurements["rejected_events"] == 1
     finally:
         await recorder.close()
 
@@ -891,15 +929,16 @@ async def test_dropped_finishes_release_call_state_without_new_writer_failures(
 ) -> None:
     recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3", max_queue_events=1)
     try:
-        with recorder._condition:
-            for index in range(100):
-                handle = recorder.begin_call(_new_context(recorder), _tool_metadata(index))
-                recorder.finish_call(handle, _success(), result=None, usage=_usage(), retry_count=0)
-        await recorder.flush()
-        assert not recorder._states
-        assert recorder.diagnostics.queue_dropped_events >= 100
-        assert recorder.diagnostics.writer_failed_events == 0
-        assert not (await recorder.list_records()).items
+        with measure_trace_writer(recorder) as measurements:
+            with recorder._condition:
+                for index in range(100):
+                    handle = recorder.begin_call(_new_context(recorder), _tool_metadata(index))
+                    recorder.finish_call(handle, _success(), result=None, usage=_usage(), retry_count=0)
+            await wait_for_trace_writer(recorder)
+            assert not recorder._states
+            assert measurements["rejected_events"] >= 100
+            assert measurements["writer_failed_events"] == 0
+            assert not (await recorder.list_records()).items
     finally:
         await recorder.close()
 
@@ -943,7 +982,7 @@ async def test_final_model_metadata_replaces_initial_route_even_when_values_are_
             usage=_usage(),
             retry_count=1,
         )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         detail = await recorder.get_record(handle.record_id)
         assert detail is not None
         assert detail.record.model == "final"
@@ -960,30 +999,32 @@ async def test_finish_freezes_content_and_late_events_do_not_change_published_re
 ) -> None:
     recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
     try:
-        with recorder._condition:
-            handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
-            recorder.set_request(handle, {"original": True})
-            recorder.finish_call(
-                handle, _success(), result="original", usage=_usage(), retry_count=0
-            )
-            recorder.set_request(handle, {"late": True})
-            recorder.append_raw(
-                handle,
-                source="late",
-                direction=TraceDirection.RESPONSE,
-                layer=TraceCaptureLayer.TOOL_RESULT,
-                sequence=0,
-                data=b"late",
-            )
-            recorder.finish_call(handle, _success(), result="late", usage=_usage(), retry_count=0)
-        await recorder.flush()
-        detail = await recorder.get_record(handle.record_id)
-        assert detail is not None
-        assert detail.request == {"original": True}
-        assert detail.result == "original"
-        assert detail.raw_sources == ()
-        assert recorder.diagnostics.published_records == 1
-        assert recorder.diagnostics.writer_failed_events == 0
+        with measure_trace_writer(recorder) as measurements:
+            with recorder._condition:
+                handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
+                recorder.set_request(handle, {"original": True})
+                recorder.finish_call(
+                    handle, _success(), result="original", usage=_usage(), retry_count=0
+                )
+                recorder.set_request(handle, {"late": True})
+                recorder.append_raw(
+                    handle,
+                    source="late",
+                    direction=TraceDirection.RESPONSE,
+                    layer=TraceCaptureLayer.TOOL_RESULT,
+                    sequence=0,
+                    data=b"late",
+                )
+                recorder.finish_call(handle, _success(), result="late", usage=_usage(), retry_count=0)
+            await wait_for_trace_writer(recorder)
+            detail = await recorder.get_record(handle.record_id)
+            assert detail is not None
+            assert detail.request == {"original": True}
+            assert detail.result == "original"
+            assert detail.raw_sources == ()
+            assert len((await recorder.list_records()).items) == 1
+            assert measurements["writer_failed_events"] == 0
+            assert measurements["rejected_events"] == 0
     finally:
         await recorder.close()
 
@@ -1005,11 +1046,11 @@ async def test_record_pages_order_by_completion_and_preserve_publication_snapsho
                 retry_count=0,
             )
             handles.append((hours, handle.record_id))
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         first = await recorder.list_records(limit=1)
         late = recorder.begin_call(_new_context(recorder), _tool_metadata())
         recorder.finish_call(late, _success(), result=None, usage=_usage(), retry_count=0)
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         ids = [item.record_id for item in first.items]
         cursor = first.next_cursor
         while cursor:
@@ -1082,7 +1123,7 @@ async def test_model_attempts_and_tools_from_two_sessions_remain_isolated(tmp_pa
             asyncio.to_thread(capture, "session-a"),
             asyncio.to_thread(capture, "session-b"),
         )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         for session_id, record_ids in zip(("session-a", "session-b"), results, strict=True):
             for record_id in record_ids:
                 detail = await recorder.get_record(record_id)
@@ -1109,7 +1150,7 @@ async def test_record_listing_does_not_read_request_or_result_body_columns(
         handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
         recorder.set_request(handle, {"body": "request"})
         recorder.finish_call(handle, _success(), result="result", usage=_usage(), retry_count=0)
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         original_connect = recorder._connect
 
         def authorize(
@@ -1180,7 +1221,7 @@ async def test_large_json_encoding_uses_writer_thread_and_does_not_block_event_l
         return original_encode(value)
 
     try:
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         monkeypatch.setattr(sqlite_module, "_encode_json", delayed_encode)
         handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
         recorder.set_request(handle, {"content": "x" * 100_000})
@@ -1188,7 +1229,7 @@ async def test_large_json_encoding_uses_writer_thread_and_does_not_block_event_l
         await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
         release.set()
         recorder.finish_call(handle, _success(), result="done", usage=_usage(), retry_count=0)
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         detail = await recorder.get_record(handle.record_id)
         assert detail is not None
         assert detail.request == {"content": "x" * 100_000}

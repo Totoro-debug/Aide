@@ -23,6 +23,7 @@ from aide.trace.sqlite_recorder import SQLiteTraceRecorder
 from aide.trace.types import TraceErrorCategory, TraceOrigin, TracePurpose
 from tests.fixtures import FakeClock
 from tests.fixtures.model_configuration import routed_configuration
+from tests.fixtures.trace import wait_for_trace_writer
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
 ProviderProtocol = Literal["openai-compatible", "anthropic"]
@@ -162,7 +163,7 @@ async def test_openai_complete_captures_wire_bytes_and_redacts_authentication(
                 tools=tools,
                 continuation=continuation,
             )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         assert response.message.content == "wire answer"
         assert len(transport.requests) == 1
@@ -251,7 +252,7 @@ async def test_openai_stream_capture_does_not_prefetch_response_chunks(tmp_path:
             assert first == TextDelta(delta="first")
             assert response_stream.consumed == 1
             remaining = [event async for event in events]
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         assert remaining[0] == TextDelta(delta="second")
         assert isinstance(remaining[-1], ModelCompleted)
@@ -313,7 +314,7 @@ async def test_http_retries_keep_only_final_attempt_and_isolate_sessions(
             "retry answer",
             "other answer",
         )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         records = {record.owner_session_id: record for record in (await recorder.list_records()).items}
         assert records["session-retry"].retry_count == 1
@@ -475,7 +476,7 @@ async def test_anthropic_wire_conversion_and_consumption_match_noop(
             assert sent["output_config"] == {"effort": "high"}
             assert sent["stream"] is streaming
             if isinstance(recorder, SQLiteTraceRecorder):
-                await recorder.flush()
+                await wait_for_trace_writer(recorder)
                 (record,) = (await recorder.list_records()).items
                 detail = await recorder.get_record(record.record_id)
                 assert detail is not None and not detail.capture_issues
@@ -579,7 +580,7 @@ async def test_http_retry_exhaustion_discards_all_request_and_response_candidate
         assert len(transport.requests) == 5
         if not isinstance(recorder, SQLiteTraceRecorder):
             return
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         (record,) = (await recorder.list_records()).items
         assert record.status.value == "failed"
         assert record.retry_count == 4
@@ -648,7 +649,7 @@ async def test_http_stream_failure_preserves_partial_output_and_original_excepti
         assert len(transport.requests) == 1  # Output already emitted, so retry is forbidden.
         if not isinstance(recorder, SQLiteTraceRecorder):
             return
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         (record,) = (await recorder.list_records()).items
         assert record.status.value == "failed"
         assert record.retry_count == 0
@@ -687,7 +688,7 @@ async def test_http_capture_failure_keeps_success_and_marks_missing_data(
         with trace_scope(recorder, _source(tmp_path)):
             response = await router.complete("title", messages=(), tools=())
         assert response.message.content == "capture failure isolated"
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         (record,) = (await recorder.list_records()).items
         assert record.status.value == "success"
         assert record.capture_state.value == "partial"

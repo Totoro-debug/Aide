@@ -33,6 +33,7 @@ from aide.utils.errors import ErrorInfo
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock, ScriptedFakeProvider, StreamScript
 from tests.fixtures.mcp_wire import http_wire_server
+from tests.fixtures.trace import wait_for_trace_writer
 from tests.service.test_service_concurrency import (
     _claim_version,
     _CollectingSink,
@@ -225,7 +226,7 @@ async def _exercise_sources(
             if recording:
                 recorder = service.trace_recorder
                 assert isinstance(recorder, SQLiteTraceRecorder)
-                await recorder.flush()
+                await wait_for_trace_writer(recorder)
                 records = (await recorder.list_records(limit=200)).items
                 assert {record.purpose for record in records} == set(TracePurpose)
                 assert all(record.endpoint is None for record in records)
@@ -321,7 +322,7 @@ async def _exercise_retries(
         if recording:
             recorder = service.trace_recorder
             assert isinstance(recorder, SQLiteTraceRecorder)
-            await recorder.flush()
+            await wait_for_trace_writer(recorder)
             (record,) = (
                 r
                 for r in (await recorder.list_records()).items
@@ -385,7 +386,7 @@ async def _exercise_cancel(
         if recording:
             recorder = service.trace_recorder
             assert isinstance(recorder, SQLiteTraceRecorder)
-            await recorder.flush()
+            await wait_for_trace_writer(recorder)
             (record,) = (
                 r
                 for r in (await recorder.list_records()).items

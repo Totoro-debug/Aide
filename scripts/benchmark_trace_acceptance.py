@@ -45,6 +45,7 @@ from aide.trace.types import (
     TraceStatus,
     TraceUsageState,
 )
+from tests.fixtures.trace import measure_trace_writer, wait_for_trace_writer
 
 RECORD_COUNT = 100_000
 RECORDS_PER_SESSION = 10
@@ -307,25 +308,26 @@ async def _benchmark_streams(database: Path, workspace: Path) -> dict[str, objec
     sqlite_outcomes: list[tuple[tuple[object, ...], ...]] = []
 
     try:
-        await _replay_batch(no_op_router, no_op, source, STREAM_WARMUPS)
-        await _replay_batch(sqlite_router, sqlite, source, STREAM_WARMUPS)
-        await sqlite.flush()
-        for sample in range(STREAM_SAMPLES):
-            order = (
-                ((no_op_router, no_op, no_op_samples, no_op_outcomes),
-                 (sqlite_router, sqlite, sqlite_samples, sqlite_outcomes))
-                if sample % 2 == 0
-                else ((sqlite_router, sqlite, sqlite_samples, sqlite_outcomes),
-                      (no_op_router, no_op, no_op_samples, no_op_outcomes))
-            )
-            for router, recorder, durations, outcomes in order:
-                elapsed, result = await _replay_batch(
-                    router, recorder, source, STREAM_REPLAYS_PER_SAMPLE
+        with measure_trace_writer(sqlite) as measurements:
+            await _replay_batch(no_op_router, no_op, source, STREAM_WARMUPS)
+            await _replay_batch(sqlite_router, sqlite, source, STREAM_WARMUPS)
+            await wait_for_trace_writer(sqlite)
+            for sample in range(STREAM_SAMPLES):
+                order = (
+                    ((no_op_router, no_op, no_op_samples, no_op_outcomes),
+                     (sqlite_router, sqlite, sqlite_samples, sqlite_outcomes))
+                    if sample % 2 == 0
+                    else ((sqlite_router, sqlite, sqlite_samples, sqlite_outcomes),
+                          (no_op_router, no_op, no_op_samples, no_op_outcomes))
                 )
-                durations.append(elapsed)
-                outcomes.append(result)
-                if isinstance(recorder, SQLiteTraceRecorder):
-                    await recorder.flush()
+                for router, recorder, durations, outcomes in order:
+                    elapsed, result = await _replay_batch(
+                        router, recorder, source, STREAM_REPLAYS_PER_SAMPLE
+                    )
+                    durations.append(elapsed)
+                    outcomes.append(result)
+                    if isinstance(recorder, SQLiteTraceRecorder):
+                        await wait_for_trace_writer(recorder)
     finally:
         await no_op_router.close()
         await sqlite_router.close()
@@ -335,14 +337,17 @@ async def _benchmark_streams(database: Path, workspace: Path) -> dict[str, objec
     if no_op_outcomes != sqlite_outcomes:
         raise AssertionError("NoOp and SQLite stream replay results differ.")
     expected_records = STREAM_WARMUPS + STREAM_SAMPLES * STREAM_REPLAYS_PER_SAMPLE
-    if sqlite.diagnostics.published_records != expected_records:
-        raise AssertionError("The SQLite stream replay did not publish every measured call.")
     no_op_total = sum(no_op_samples)
     sqlite_total = sum(sqlite_samples)
-    with closing(sqlite3.connect(database)) as connection:
+    with closing(sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)) as connection:
+        published_records = connection.execute(
+            "SELECT COUNT(*) FROM trace_records WHERE published = 1"
+        ).fetchone()[0]
         raw_bytes = connection.execute(
             "SELECT COALESCE(SUM(original_size), 0) FROM trace_raw_chunks"
         ).fetchone()[0]
+    if published_records != expected_records:
+        raise AssertionError("The SQLite stream replay did not publish every measured call.")
     return {
         "samples": STREAM_SAMPLES,
         "replays_per_sample": STREAM_REPLAYS_PER_SAMPLE,
@@ -358,9 +363,9 @@ async def _benchmark_streams(database: Path, workspace: Path) -> dict[str, objec
         "sqlite_p95_ms": round(_percentile_95(sqlite_samples), 3),
         "total_increment_percent": round((sqlite_total / no_op_total - 1) * 100, 3),
         "same_business_events": True,
-        "published_records": sqlite.diagnostics.published_records,
-        "writer_dropped_events": sqlite.diagnostics.queue_dropped_events,
-        "writer_failed_events": sqlite.diagnostics.writer_failed_events,
+        "published_records": published_records,
+        "writer_dropped_events": measurements["rejected_events"],
+        "writer_failed_events": measurements["writer_failed_events"],
     }
 
 

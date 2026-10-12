@@ -60,6 +60,7 @@ from tests.fixtures.agent_loop import DrivenExecutor as AgentRunExecutor
 from tests.fixtures.agent_loop import loaded_skill_loader
 from tests.fixtures.diagnostic_capture import capture_diagnostics
 from tests.fixtures.session import seed_session_state
+from tests.fixtures.trace import wait_for_trace_writer
 from tests.management.factories import management_service
 
 NOW = datetime(2026, 8, 7, 12, 0, 0, 123000, tzinfo=timezone(timedelta(hours=8)))
@@ -680,7 +681,7 @@ async def test_schedule_uses_context_builder_complete_context_projection(
                 and schedule.status_snapshot().active_job_count == 0
             )
         )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         traced_calls = (await recorder.list_records()).items
     finally:
         await _close_components(loop, router, schedule, dream)

@@ -22,6 +22,7 @@ from aide.trace.sqlite_recorder import SQLiteTraceRecorder
 from aide.trace.types import TraceOrigin, TracePurpose
 from tests.fixtures import ScriptedFakeProvider
 from tests.fixtures.model_configuration import configuration
+from tests.fixtures.trace import wait_for_trace_writer
 
 
 class _UnusedMCPSession:
@@ -145,7 +146,7 @@ command = "server"
             trace_recorder=recorder,
             workspace_path=workspace,
         )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         records = (await recorder.list_records()).items
         assert result == {"mcp_github_search_issues": ("issues", "search")}

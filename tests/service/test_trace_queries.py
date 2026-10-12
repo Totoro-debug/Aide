@@ -35,6 +35,7 @@ from aide.trace.types import (
     TraceUsageState,
 )
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
+from tests.fixtures.trace import wait_for_trace_writer
 
 TraceHttp = tuple[AgentService, BaseTestServer, str, str]
 
@@ -132,7 +133,7 @@ async def _seed_model_trace(
         ),
         retry_count=2,
     )
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     return handle.record_id, source.workspace_key
 
 
@@ -176,7 +177,7 @@ async def _seed_failed_model_trace(service: AgentService, workspace: Path) -> No
         usage=TraceTokenUsage(state=TraceUsageState.UNKNOWN),
         retry_count=0,
     )
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
 
 
 async def _seed_tool_trace(service: AgentService, workspace: Path) -> None:
@@ -213,7 +214,7 @@ async def _seed_tool_trace(service: AgentService, workspace: Path) -> None:
         usage=TraceTokenUsage(state=TraceUsageState.NOT_APPLICABLE),
         retry_count=0,
     )
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
 
 
 async def _seed_unpublished_trace(
@@ -242,7 +243,7 @@ async def _seed_unpublished_trace(
         ),
     )
     recorder.set_request(handle, {"messages": [{"role": "user", "content": "pending"}]})
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     return handle.record_id
 
 

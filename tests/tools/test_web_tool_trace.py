@@ -23,6 +23,7 @@ from aide.trace.scope import trace_scope
 from aide.trace.sqlite_recorder import SQLiteTraceRecorder
 from aide.trace.types import TraceCaptureLayer, TraceErrorCategory, TraceOrigin, TracePurpose
 from tests.fixtures import SingleToolGateway
+from tests.fixtures.trace import wait_for_trace_writer
 from tests.tools.core.test_web_fetch import FakeHTTPClient, FakeResolver, FakeResponse
 from tests.tools.core.test_web_search import FakeDDGS
 
@@ -98,7 +99,7 @@ async def test_fetch_dns_timeout_keeps_authorization_priority_and_noop_behavior(
         assert len(confirmations) == 1
         assert not http.calls
     assert results[0] == results[1]
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     (record,) = (await recorder.list_records()).items
     assert record.endpoint is None
     assert record.status.value == "failed"
@@ -121,7 +122,7 @@ async def test_fetch_denied_before_network_has_no_endpoint(
                                                  '{"url":"http://private.example/page"}'))
     assert result.status == "refused"
     assert not http.calls
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     (record,) = (await recorder.list_records()).items
     assert record.endpoint is None
 
@@ -141,7 +142,7 @@ async def test_fetch_metadata_encoding_failure_keeps_business_result(
         assert len(http.calls) == 1
     assert results[0] == results[1]
     assert (results[1].status, results[1].content) == ("success", "page")
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     (record,) = (await recorder.list_records()).items
     assert record.capture_state.value == "partial"
     assert record.endpoint == "https://public.example/page"
@@ -180,7 +181,7 @@ async def test_search_preserves_all_noncredential_fields_and_url_spelling(
         result = await gateway.call(call)
     assert result == baseline
     assert FakeDDGS.calls == [("trace", {"max_results": 1, "backend": "duckduckgo"})] * 2
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     (record,) = (await recorder.list_records()).items
     raw = await recorder.read_raw(
         record.record_id, source="web_search_ddgs", offset=0, limit_bytes=100_000
@@ -214,7 +215,7 @@ async def test_search_excludes_credentials_from_every_saved_result_channel(
     assert result == baseline
     assert url in result.content
     assert fixture[0]["href"] == url
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     (record,) = (await recorder.list_records()).items
     detail = await recorder.get_record(record.record_id)
     assert detail is not None
@@ -255,7 +256,7 @@ async def test_fetch_raw_survives_conversion_truncation_and_multiple_chunks(
         assert response.closed
     assert results[0] == results[1]
     assert len(results[1].content) == 20
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     (record,) = (await recorder.list_records()).items
     first = await recorder.read_raw(
         record.record_id, source="web_fetch_response", offset=0, limit_bytes=80_000
@@ -296,7 +297,7 @@ async def test_fetch_does_not_consume_skipped_response_bodies(
         assert skipped.closed
         assert len(http.calls) == (2 if case == "redirect" else 1)
     assert results[0] == results[1]
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     (record,) = (await recorder.list_records()).items
     detail = await recorder.get_record(record.record_id)
     assert detail is not None
@@ -345,7 +346,7 @@ async def test_fetch_retains_consumed_bytes_when_interrupted(
     if results:
         assert results[0] == results[1]
         assert results[1].content == "Web Fetch timed out after 30 seconds."
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     (record,) = (await recorder.list_records()).items
     assert record.status.value == "failed"
     assert record.error_category is (
@@ -383,7 +384,7 @@ async def test_search_failures_keep_noop_behavior(
         assert results[0] == results[1]
         assert results[1].status == "error"
     assert len(FakeDDGS.calls) == 2
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     (record,) = (await recorder.list_records()).items
     assert record.status.value == "failed"
     assert record.error_category is {
@@ -443,7 +444,7 @@ async def test_fetch_redirect_authorization_matches_noop_and_hides_credentials(
     assert results[0] == results[1]
     assert approvals[0] == approvals[1]
     assert len(approvals[1]) == 1
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     (record,) = (await recorder.list_records()).items
     detail = await recorder.get_record(record.record_id)
     assert detail is not None
@@ -471,7 +472,7 @@ async def test_search_unserializable_extra_field_does_not_change_result(
         result = await gateway.call(call)
     assert result == baseline
     assert result.status == "success"
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     (record,) = (await recorder.list_records()).items
     assert record.capture_state.value == "partial"
     detail = await recorder.get_record(record.record_id)

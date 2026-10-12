@@ -39,6 +39,7 @@ from aide.utils.errors import ErrorInfo
 from tests.configuration.test_config import VALID_CONFIG
 from tests.fixtures import FakeClock, ScriptedFakeProvider, ScriptedFakeRouter
 from tests.fixtures.diagnostic_capture import capture_diagnostics
+from tests.fixtures.trace import wait_for_trace_writer
 
 NOW = datetime(2026, 8, 27, 10, 0, tzinfo=timezone(timedelta(hours=8)))
 _FAKE_MEMORY_ROUTE_STATUS = ModelRouteStatus(
@@ -237,7 +238,7 @@ async def test_dream_uses_the_memory_route_with_static_default_fallback(
 
     try:
         result = await dream.run()
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         traced_calls = (await recorder.list_records()).items
     finally:
         await dream.close()

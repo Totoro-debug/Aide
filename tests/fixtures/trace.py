@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 from base64 import b64encode
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
+from threading import local
 from typing import Any
+from unittest.mock import patch
 
+from aide.trace.sqlite_recorder import SQLiteTraceRecorder, _CaptureState, _Event
 from aide.trace.types import (
+    TraceCaptureIssue,
     TraceErrorCategory,
     TraceOrigin,
     TracePurpose,
@@ -26,6 +33,57 @@ TRACE_PURPOSE_COVERAGE = {
     TracePurpose.DREAM: TraceOrigin.AUXILIARY,
     TracePurpose.MCP_KEYWORDS: TraceOrigin.AUXILIARY,
 }
+
+
+async def wait_for_trace_writer(recorder: SQLiteTraceRecorder) -> None:
+    """Wait for all events accepted before this call, including maintenance backlog."""
+    with recorder._condition:
+        ticket = recorder._next_ticket
+    await asyncio.to_thread(recorder._wait_for_ticket, ticket)
+
+
+def trace_queue_load(recorder: SQLiteTraceRecorder) -> tuple[int, int]:
+    with recorder._condition:
+        return (
+            len(recorder._queue) + recorder._inflight_events,
+            recorder._queue_bytes + recorder._inflight_bytes,
+        )
+
+
+@contextmanager
+def measure_trace_writer(recorder: SQLiteTraceRecorder) -> Iterator[Counter[str]]:
+    """Measure actual rejections and terminal failures at existing writer boundaries."""
+    measurements: Counter[str] = Counter()
+    enqueue = recorder._enqueue
+    mark_failure = recorder._mark_writer_failure
+    add_issue = _CaptureState.add_issue
+    capture_thread = local()
+
+    def measured_enqueue(*args: Any, **kwargs: Any) -> int | None:
+        capture_thread.enqueuing = True
+        try:
+            return enqueue(*args, **kwargs)
+        finally:
+            capture_thread.enqueuing = False
+
+    def measured_issue(
+        state: _CaptureState, attempt_id: str | None, issue: TraceCaptureIssue
+    ) -> None:
+        # Ignored late events also return None; only queue loss reports an issue here.
+        if getattr(capture_thread, "enqueuing", False):
+            measurements["rejected_events"] += 1
+        add_issue(state, attempt_id, issue)
+
+    def measured_failure(event: _Event) -> None:
+        measurements["writer_failed_events"] += 1
+        mark_failure(event)
+
+    with (
+        patch.object(recorder, "_enqueue", measured_enqueue),
+        patch.object(recorder, "_mark_writer_failure", measured_failure),
+        patch.object(_CaptureState, "add_issue", measured_issue),
+    ):
+        yield measurements
 
 TRACE_SCENARIO_NAMES = frozenset(
     {
@@ -349,5 +407,8 @@ __all__ = [
     "TRACE_SCENARIO_NAMES",
     "TRACE_TOOL_COVERAGE",
     "TraceContractFixtures",
+    "measure_trace_writer",
     "trace_contract_fixtures",
+    "trace_queue_load",
+    "wait_for_trace_writer",
 ]

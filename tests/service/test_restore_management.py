@@ -38,6 +38,7 @@ from aide.trace.types import (
     TraceTokenUsage,
     TraceUsageState,
 )
+from tests.fixtures.trace import wait_for_trace_writer
 from tests.service.test_protocol_contract import _validator
 from tests.service.test_service_concurrency import _CollectingSink, _ConcurrentProvider
 from tests.service.test_service_transport import _persist_session, _prepare_agent_home
@@ -248,7 +249,7 @@ async def test_named_restore_commit_returns_rotated_claim_and_new_snapshot(
         usage=TraceTokenUsage(TraceUsageState.NOT_APPLICABLE),
         retry_count=0,
     )
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     inspected = await service.inspect_restore(
         owner,
         workspace.workspace_id,
@@ -271,7 +272,7 @@ async def test_named_restore_commit_returns_rotated_claim_and_new_snapshot(
         1,
         RestoreMode.CONVERSATION_ONLY.value,
     )
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
 
     next_claim = cast(dict[str, Any], committed["claim"])
     _validator("management_result").validate(committed)

@@ -25,6 +25,7 @@ from aide.trace.types import (
     TraceTokenUsage,
     TraceUsageState,
 )
+from tests.fixtures.trace import trace_queue_load, wait_for_trace_writer
 
 _NOW = datetime(2026, 10, 11, tzinfo=UTC)
 _WORKSPACE_KEY = "sha256:test-workspace"
@@ -105,7 +106,7 @@ async def test_retention_filters_all_queries_and_purges_at_365_day_boundary(
     )
 
     try:
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         page = await recorder.list_records()
         assert {record.record_id for record in page.items} == {boundary_id, recent_id}
@@ -193,7 +194,7 @@ async def test_closed_session_is_hidden_before_async_purge_and_stale_events_cann
     )
 
     try:
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         recorder.close_session_scope(_WORKSPACE_KEY, "deleted-session")
 
         assert {record.record_id for record in (await recorder.list_records()).items} == {
@@ -212,7 +213,7 @@ async def test_closed_session_is_hidden_before_async_purge_and_stale_events_cann
             usage=TraceTokenUsage(state=TraceUsageState.NOT_APPLICABLE),
             retry_count=0,
         )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         await recorder.purge_session(_WORKSPACE_KEY, "deleted-session")
         late_handle = recorder.begin_call(
             stale_context,
@@ -233,7 +234,7 @@ async def test_closed_session_is_hidden_before_async_purge_and_stale_events_cann
             usage=TraceTokenUsage(TraceUsageState.NOT_APPLICABLE),
             retry_count=0,
         )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         with sqlite3.connect(recorder.path) as connection:
             assert connection.execute("SELECT COUNT(*) FROM trace_records").fetchone()[0] == 1
@@ -265,9 +266,9 @@ async def test_restore_marks_only_discarded_run_tokens(tmp_path: Path) -> None:
         restore_run_token="retained-run",
     )
     try:
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         recorder.mark_restored(_WORKSPACE_KEY, "session-1", ("discarded-run",))
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         records = await recorder.list_records(TraceRecordFilters(owner_session_id="session-1"))
         restored = {record.record_id: record.restored for record in records.items}
@@ -282,7 +283,7 @@ async def test_queries_remain_available_after_many_session_deletions(tmp_path: P
     retained_id = _publish(recorder, owner_session_id="retained", finished_at=_NOW)
     deleted_id = _publish(recorder, owner_session_id="deleted", finished_at=_NOW)
     try:
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         for index in range(10_100):
             recorder.close_session_scope(_WORKSPACE_KEY, f"deleted-{index}")
         recorder.close_session_scope(_WORKSPACE_KEY, "deleted")
@@ -323,7 +324,7 @@ async def test_expiry_maintenance_cleans_multiple_batches_and_keeps_recent_data(
         _publish(recorder, owner_session_id=f"expired-{index}", finished_at=expired_at)
     retained_id = _publish(recorder, owner_session_id="retained", finished_at=_NOW)
     try:
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         await recorder.purge_expired()
         with sqlite3.connect(recorder.path) as connection:
             assert connection.execute("SELECT COUNT(*) FROM trace_records").fetchone()[0] == 1
@@ -363,7 +364,7 @@ async def test_close_deadline_discards_remaining_events(
         release.set()
         await asyncio.to_thread(recorder._worker.join, 1)
     assert not recorder._worker.is_alive()
-    assert recorder.diagnostics.queued_events == 0
+    assert trace_queue_load(recorder)[0] == 0
     assert await recorder.get_record(first_id) is None
     assert await recorder.get_record(second_id) is None
 
@@ -375,14 +376,14 @@ async def test_session_purge_precedes_backlog_without_finishing_flush_early(
 ) -> None:
     recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3", now=lambda: _NOW)
     _publish(recorder, owner_session_id="deleted", finished_at=_NOW)
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     entered, release, control_queued = Event(), Event(), Event()
     backlog_entered, backlog_release = Event(), Event()
     apply_transaction = recorder._apply_events_transaction
     enqueue_control = recorder._enqueue_control
     backlog_id = ""
 
-    def hold_writer(connection: sqlite3.Connection, events: Sequence[_Event]) -> int:
+    def hold_writer(connection: sqlite3.Connection, events: Sequence[_Event]) -> None:
         entered.set()
         assert release.wait(2)
         if any(event.record_id == backlog_id for event in events):
@@ -403,7 +404,7 @@ async def test_session_purge_precedes_backlog_without_finishing_flush_early(
         backlog_id = _publish(recorder, owner_session_id="backlog", finished_at=_NOW)
         purge = asyncio.create_task(recorder.purge_session(_WORKSPACE_KEY, "deleted"))
         assert await asyncio.to_thread(control_queued.wait, 1)
-        flush = asyncio.create_task(recorder.flush())
+        flush = asyncio.create_task(wait_for_trace_writer(recorder))
         await asyncio.sleep(0)
         release.set()
         await asyncio.wait_for(purge, timeout=1)

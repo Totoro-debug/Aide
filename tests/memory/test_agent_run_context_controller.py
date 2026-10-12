@@ -63,6 +63,7 @@ from aide.trace.types import TraceOrigin, TracePurpose
 from aide.utils.errors import MODEL_CONTEXT_OVERFLOW_MESSAGE, ErrorInfo
 from tests.fixtures import FakeClock, ScriptedFakeProvider, ScriptedFakeRouter, StreamScript
 from tests.fixtures.session import seed_session_state
+from tests.fixtures.trace import wait_for_trace_writer
 
 LOCAL_OFFSET = timezone(timedelta(hours=8))
 NOW = datetime(2026, 8, 4, 16, 0, 0, tzinfo=LOCAL_OFFSET)
@@ -3220,7 +3221,7 @@ async def test_compaction_calls_keep_conversation_and_action_summary_purposes(
                 tools=(),
                 memory_route_status=_memory_status(context_window=4000, max_output=200),
             )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         traced_calls = (await recorder.list_records()).items
     finally:
         await router.close()

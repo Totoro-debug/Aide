@@ -60,6 +60,7 @@ from tests.fixtures import (
 )
 from tests.fixtures.mcp_wire import http_wire_server, stdio_requests, stdio_wire_configuration
 from tests.fixtures.model_configuration import configuration
+from tests.fixtures.trace import wait_for_trace_writer
 from tests.memory.test_dream import _FAKE_MEMORY_ROUTE_STATUS, _manager, _response
 from tests.tools.core.test_web_fetch import FakeHTTPClient, FakeResolver, FakeResponse
 from tests.tools.test_mcp import _Session
@@ -98,7 +99,7 @@ async def test_http_mcp_timeout_keeps_attempted_endpoint_and_noop_behavior(tmp_p
                         )))
                 assert results[0] == results[1] == results[2]
                 assert results[2].status == "error"
-                await recorder.flush()
+                await wait_for_trace_writer(recorder)
                 (record,) = (await recorder.list_records()).items
                 assert record.endpoint == f"{configuration.url}/timeout?view=trace"
                 assert record.error_category is TraceErrorCategory.TIMEOUT
@@ -189,7 +190,7 @@ async def test_mcp_timeout_category_survives_final_result_publication(
         assert results[0] == results[1]
         assert results[1] == ("error", "MCP Tool call timed out after 60 seconds.")
         assert not tool.unavailable
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         (record,) = [r for r in (await recorder.list_records()).items if r.kind is TraceKind.TOOL]
         assert record.status.value == "failed"
         assert record.error_category is TraceErrorCategory.TIMEOUT
@@ -368,7 +369,7 @@ async def test_exec_trace_preserves_large_raw_process_streams_and_tool_result(
                 ModelToolCall("exec-traced", "exec", arguments),
                 confirmation=_approve_exec_confirmation,
             )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         (record,) = (await recorder.list_records()).items
         detail = await recorder.get_record(record.record_id)
@@ -427,7 +428,7 @@ async def test_exec_trace_keeps_output_read_before_timeout(
             )
             await asyncio.wait_for(output_ready.wait(), timeout=5)
             timed_out = await asyncio.wait_for(execution, timeout=5)
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         (record,) = (await recorder.list_records()).items
         detail = await recorder.get_record(record.record_id)
@@ -507,7 +508,7 @@ async def test_exec_trace_keeps_output_read_before_cancellation(
             execution.cancel("cancelled after output handshake")
             with pytest.raises(asyncio.CancelledError, match="cancelled after output handshake"):
                 await execution
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         (record,) = (await recorder.list_records()).items
         detail = await recorder.get_record(record.record_id)
@@ -594,7 +595,7 @@ async def test_exec_trace_excludes_authorization_inspection_output(
                 ),
                 confirmation=confirm,
             )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         (record,) = (await recorder.list_records()).items
         detail = await recorder.get_record(record.record_id)
         assert detail is not None
@@ -640,7 +641,7 @@ async def test_successful_mcp_uses_one_logical_record_and_marks_transport_gap(
     try:
         with trace_scope(recorder, source):
             result = await gateway.call(ModelToolCall("mcp", tool.name, '{"value":"payload"}'))
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         assert (result.status, result.content) == ("success", "ok")
         assert session.calls == [("echo", {"value": "payload"})]
         (record,) = (await recorder.list_records()).items
@@ -735,7 +736,7 @@ async def test_mcp_runtime_trace_correlates_wire_messages_by_request_id(
                 assert (slow_result.status, slow_result.content) == ("success", "slow")
                 assert (fast_result.status, fast_result.content) == ("success", "fast")
                 assert failed_result.status == "error"
-                await recorder.flush()
+                await wait_for_trace_writer(recorder)
 
                 records = (await recorder.list_records()).items
                 assert len(records) == 3
@@ -875,7 +876,7 @@ async def test_dream_edit_variant_records_arguments_and_actual_result(tmp_path: 
         outcome = await dream.run()
         assert outcome.memory_updated
         assert "Concise reports." in manager.memory_snapshot()
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         (record,) = (await recorder.list_records()).items
         assert record.purpose is TracePurpose.DREAM
         assert record.owner_session_id is None
@@ -972,7 +973,7 @@ async def test_real_builtin_gateway_arguments_and_results(
         with trace_scope(recorder, source):
             result = await gateway.call(call, confirmation=approve)
         assert result.status == "success", result.content
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         (record,) = (await recorder.list_records()).items
         assert (record.tool_name, record.owner_session_id, record.run_id) == (
             name,
@@ -1072,7 +1073,7 @@ async def test_subagent_builtin_tools_share_the_gateway_trace_boundary(tmp_path:
                     ModelToolCall("wait", "wait_agent", json.dumps({"agent_ids": [agent_id]}))
                 )
             )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         records = (await recorder.list_records()).items
         assert len(records) == 3
         assert {r.tool_name for r in records} == {"spawn_agent", "list_agents", "wait_agent"}
@@ -1116,7 +1117,7 @@ async def test_stream_consumed_in_another_session_does_not_bind_its_parent(tmp_p
             async for _ in events:
                 pass
             await gateway.call(ModelToolCall("echo", "echo", '{"value":"payload"}'))
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         records = (await recorder.list_records()).items
         model = next(r for r in records if r.kind is TraceKind.MODEL)
         tool = next(r for r in records if r.kind is TraceKind.TOOL)
@@ -1244,7 +1245,7 @@ async def test_gateway_records_model_tool_call_and_unformatted_result(tmp_path: 
                 tools=(),
             )
             result = await gateway.call(model_response.message.tool_calls[0])
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         records = (await recorder.list_records()).items
         model_record = next(record for record in records if record.kind is TraceKind.MODEL)
@@ -1357,7 +1358,7 @@ async def test_runner_trace_keeps_raw_and_final_artifact_result(
                 cancel_requested=None,
                 max_iterations=50,
             )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         (record,) = [r for r in (await recorder.list_records()).items if r.kind is TraceKind.TOOL]
         detail = await recorder.get_record(record.record_id)
         assert detail is not None
@@ -1425,7 +1426,7 @@ async def test_runner_publishes_cancelled_tool_when_its_result_task_cancels_itse
                     cancel_requested=None,
                     max_iterations=50,
                 )
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         (record,) = [r for r in (await recorder.list_records()).items if r.kind is TraceKind.TOOL]
         assert record.status.value == "failed"
         assert record.error_category is TraceErrorCategory.CANCELLED
@@ -1473,7 +1474,7 @@ async def test_confirmation_lifecycle_abort_is_traced_as_cancellation(tmp_path: 
                     confirmation=cancel,
                 )
         assert raised.value is abort
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         (record,) = (await recorder.list_records()).items
         assert record.status.value == "failed"
         assert record.error_category is TraceErrorCategory.CANCELLED
@@ -1509,7 +1510,7 @@ async def test_gateway_records_failed_refused_and_cancelled_calls(tmp_path: Path
             refused = await gateway.call(refused_call)
             with pytest.raises(asyncio.CancelledError):
                 await gateway.call(cancelled_call)
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         assert invalid.status == "error"
         assert refused.status == "refused"
@@ -1587,7 +1588,7 @@ async def test_gateway_records_declined_authorization_without_executing_mcp_tool
     try:
         with trace_scope(recorder, source):
             result = await gateway.call(call, confirmation=decline)
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         assert result.status == "refused"
         assert session.called is False
@@ -1671,7 +1672,7 @@ async def test_gateway_marks_specialized_raw_capture_gaps(
     try:
         with trace_scope(recorder, source):
             result = await gateway.call(ModelToolCall(f"call-{tool_name}", tool_name, "{}"))
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         assert (result.status, result.content) == ("success", "formatted result")
         (record,) = (await recorder.list_records()).items
@@ -1709,7 +1710,7 @@ async def test_gateway_marks_specialized_capture_gap_when_execution_fails(tmp_pa
     try:
         with trace_scope(recorder, source):
             result = await gateway.call(ModelToolCall("call-exec-failed", "exec", "{}"))
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         assert (result.status, result.content) == ("error", "process failed")
         (record,) = (await recorder.list_records()).items
@@ -1769,7 +1770,7 @@ async def test_shared_gateway_keeps_concurrent_session_traces_separate(tmp_path:
 
     try:
         await asyncio.gather(run("session-one"), run("session-two"))
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         records = (await recorder.list_records()).items
         assert len(records) == 4

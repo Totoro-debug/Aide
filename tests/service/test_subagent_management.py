@@ -70,6 +70,7 @@ from aide.trace.types import (
 )
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from tests.fixtures.project_removal import complete_project_removal
+from tests.fixtures.trace import wait_for_trace_writer
 from tests.service.test_service_concurrency import _CollectingSink, _ConcurrentProvider
 from tests.service.test_service_transport import _persist_session, _prepare_agent_home
 
@@ -1481,7 +1482,7 @@ async def test_session_delete_is_fenced_by_active_subagents_then_removes_them(
     owner_record = record_call(session_id, session_id)
     child_record = record_call(session_id, "subagent-session")
     other_record = record_call(_other_session_id, _other_session_id)
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     repository = SubAgentRecordStore(workspace.workspace_state, session_id, now=lambda: _NOW)
     executor = _HoldingExecutor()
     pool = SubAgentPool(repository, executor, now=lambda: _NOW)

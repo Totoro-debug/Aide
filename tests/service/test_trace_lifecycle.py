@@ -25,6 +25,7 @@ from aide.trace.types import (
     TraceTokenUsage,
     TraceUsageState,
 )
+from tests.fixtures.trace import trace_queue_load, wait_for_trace_writer
 from tests.service.test_service_concurrency import (
     _claim_version,
     _CollectingSink,
@@ -85,11 +86,11 @@ async def test_service_owns_one_agent_home_trace_database_and_closes_it(
         second = await service.attach_workspace(client.client_id, second_path)
         assert first.service.trace_recorder is second.service.trace_recorder is recorder
         record_id = _publish_expired_record(recorder, first_path, datetime.now(UTC))
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         old_workspace_id = first.workspace_id
     finally:
         await service.stop()
-    assert recorder.diagnostics.queued_events == 0
+    assert trace_queue_load(recorder)[0] == 0
 
     restarted = AgentService(home, ConfigLoader(home).load_for_startup())
     await restarted.start()
@@ -143,7 +144,7 @@ async def test_foreground_run_and_auxiliary_calls_keep_separate_trace_purposes(
         await asyncio.wait_for(sink.wait_for("run.completed", run_id), timeout=2)
         recorder = service.trace_recorder
         assert isinstance(recorder, SQLiteTraceRecorder)
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
 
         records = (await service.trace_recorder.list_records()).items
         by_purpose = {record.purpose: record for record in records}
@@ -233,7 +234,7 @@ async def test_service_start_sweeps_expired_history_in_the_background(
     finished_at = datetime.now(UTC) - timedelta(days=366)
     seed = SQLiteTraceRecorder(database, now=lambda: finished_at)
     expired_id = _publish_expired_record(seed, workspace_path, finished_at)
-    await seed.flush()
+    await wait_for_trace_writer(seed)
     await seed.close()
 
     maintenance_finished = asyncio.Event()
@@ -277,7 +278,7 @@ async def test_failed_session_cleanup_is_retried_after_storage_recovers(
     workspace_path = tmp_path / "workspace"
     workspace_key = workspace_key_for(workspace_path)
     record_id = _publish_expired_record(recorder, workspace_path, datetime.now(UTC))
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     healthy = Event()
     failed, finished = asyncio.Event(), asyncio.Event()
     write_purge = recorder._write_purge

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from collections.abc import AsyncIterator
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
@@ -31,6 +32,7 @@ from aide.trace.types import TraceCaptureLayer, TraceDirection, TraceRecordFilte
 from aide.utils.errors import ErrorInfo
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
+from tests.fixtures.trace import measure_trace_writer, wait_for_trace_writer
 from tests.service.test_model_trace_capture import _response
 from tests.service.test_service_concurrency import _CollectingSink, _ConcurrentProvider
 
@@ -108,7 +110,7 @@ async def test_service_business_replay_matches_noop_under_trace_faults(
 
 
 async def _replay(root: Path, fault: str, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
-    with monkeypatch.context() as patches:
+    with monkeypatch.context() as patches, ExitStack() as observations:
         patches.setattr("aide.trace.sqlite_recorder._WRITER_RETRY_DELAYS", (0.001,) * 3)
         home = AgentHome(root / "home")
         home.initialize()
@@ -125,10 +127,15 @@ async def _replay(root: Path, fault: str, monkeypatch: pytest.MonkeyPatch) -> di
             service._trace_recorder = NoOpTraceRecorder()
         recorder = service.trace_recorder
         fault_hits = 0
+        measurements = (
+            observations.enter_context(measure_trace_writer(recorder))
+            if isinstance(recorder, SQLiteTraceRecorder)
+            else {}
+        )
         if isinstance(recorder, SQLiteTraceRecorder):
             apply_event = recorder._apply_event
 
-            def apply_with_fault(connection: sqlite3.Connection, event: _Event) -> int:
+            def apply_with_fault(connection: sqlite3.Connection, event: _Event) -> None:
                 nonlocal fault_hits
                 if fault == "readonly":
                     connection.execute("PRAGMA query_only = ON")
@@ -214,15 +221,15 @@ async def _replay(root: Path, fault: str, monkeypatch: pytest.MonkeyPatch) -> di
             }
 
             if isinstance(recorder, SQLiteTraceRecorder):
-                await recorder.flush()
+                await wait_for_trace_writer(recorder)
                 if fault == "queue_full":
-                    assert recorder.diagnostics.queue_dropped_events > 0
+                    assert measurements["rejected_events"] > 0
                 elif fault == "readonly":
-                    assert recorder.diagnostics.writer_failed_events > 0
+                    assert measurements["writer_failed_events"] > 0
                 elif fault in {"writer", "serialization", "partial_chunk"}:
                     assert fault_hits > 0
                     if fault != "serialization":
-                        assert recorder.diagnostics.writer_failed_events > 0
+                        assert measurements["writer_failed_events"] > 0
                     records = (await recorder.list_records()).items
                     assert any(r.capture_state.value == "partial" for r in records)
                     for record in records:
@@ -268,7 +275,7 @@ async def _replay(root: Path, fault: str, monkeypatch: pytest.MonkeyPatch) -> di
             )
             assert cast(dict[str, Any], restored["snapshot"])["messages"] == []
             if isinstance(recorder, SQLiteTraceRecorder) and fault == "healthy":
-                await recorder.flush()
+                await wait_for_trace_writer(recorder)
                 assert all(
                     r.restored
                     for r in (

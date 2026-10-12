@@ -18,6 +18,7 @@ from aide.service.runtime import AgentService
 from aide.trace.sqlite_recorder import SQLiteTraceRecorder
 from aide.trace.types import TraceCaptureLayer, TracePurpose
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
+from tests.fixtures.trace import wait_for_trace_writer
 from tests.service.test_service_concurrency import _claim_version, _CollectingSink
 
 
@@ -126,7 +127,7 @@ async def test_service_model_run_exposes_http_trace_through_recorder_queries(
         assert terminal["content"] == "Service answer"
         recorder = service.trace_recorder
         assert isinstance(recorder, SQLiteTraceRecorder)
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         records = [
             record
             for record in (await recorder.list_records()).items
@@ -408,7 +409,7 @@ timeout = 30
         assert all(started.is_set() for started in streams_started.values())
         recorder = service.trace_recorder
         assert isinstance(recorder, SQLiteTraceRecorder)
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         all_records = (await recorder.list_records(limit=100)).items
         anthropic_retry_counts: list[int] = []
 

@@ -60,6 +60,7 @@ from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from tests.fixtures import ScriptedFakeProvider, StreamScript
 from tests.fixtures.model_configuration import configuration, routed_configuration
+from tests.fixtures.trace import wait_for_trace_writer
 
 _NOW = datetime(2026, 10, 8, 9, 0, tzinfo=UTC)
 _RUN_ID = "123e4567-e89b-42d3-a456-426614174000"
@@ -296,7 +297,7 @@ async def test_subagent_runner_uses_frozen_context_and_persists_full_tool_artifa
     )
     with trace_scope(recorder, parent_source) as parent_context:
         result = await executor.execute(record, emit=emit)
-    await recorder.flush()
+    await wait_for_trace_writer(recorder)
     traced_calls = (await recorder.list_records()).items
     persisted = store.get(record.agent_id)
 

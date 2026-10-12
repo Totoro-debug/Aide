@@ -26,6 +26,7 @@ from aide.service.runtime import AgentService
 from aide.trace.context import workspace_key_for
 from aide.trace.sqlite_recorder import SQLiteTraceRecorder
 from aide.trace.types import TraceErrorCategory, TraceKind
+from tests.fixtures.trace import wait_for_trace_writer
 from tests.service.test_shared_resources import _CountingProvider, _home, _session_case
 from tests.tools.test_shared_tool_context import _RecordingExecHost
 
@@ -158,7 +159,7 @@ async def test_service_foreground_and_schedule_reuse_catalog_with_workspace_and_
         )
         recorder = service.trace_recorder
         assert isinstance(recorder, SQLiteTraceRecorder)
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         records = (await recorder.list_records(limit=200)).items
         for i, foreground in enumerate(cases):
             tools = [r for r in records if r.kind is TraceKind.TOOL and r.run_id == f"run-{i}"]
@@ -244,7 +245,7 @@ async def test_service_cancels_only_the_calling_run_on_a_shared_exec_host(
         assert cast(dict[str, object], cancelled_event["payload"])["finish_reason"] == "cancelled"
         recorder = service.trace_recorder
         assert isinstance(recorder, SQLiteTraceRecorder)
-        await recorder.flush()
+        await wait_for_trace_writer(recorder)
         records = (await recorder.list_records(limit=200)).items
         cancelled = next(
             r

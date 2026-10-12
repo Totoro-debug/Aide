@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal, TypedDict
 
+from aide.provider.session_configuration import ReasoningEffort
+
 
 class TraceOrigin(StrEnum):
     FOREGROUND = "foreground"
@@ -75,14 +77,6 @@ class TraceDirection(StrEnum):
     RESPONSE = "response"
 
 
-class TraceReasoningEffort(StrEnum):
-    LOW = "low"
-    MID = "mid"
-    HIGH = "high"
-    XHIGH = "xhigh"
-    MAX = "max"
-
-
 def _require_utc(value: datetime, field: str) -> None:
     if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
         raise ValueError(f"{field} must be an aware UTC datetime")
@@ -127,7 +121,7 @@ class TraceCallMetadata:
     purpose: TracePurpose
     started_at: datetime
     model: str | None = None
-    reasoning_effort: TraceReasoningEffort | None = None
+    reasoning_effort: ReasoningEffort | None = None
     endpoint: str | None = None
     tool_name: str | None = None
     parent_record_id: str | None = None
@@ -141,7 +135,7 @@ class TraceCallMetadata:
 class TraceAttemptMetadata:
     started_at: datetime
     model: str | None = None
-    reasoning_effort: TraceReasoningEffort | None = None
+    reasoning_effort: ReasoningEffort | None = None
     endpoint: str | None = None
 
     def __post_init__(self) -> None:
@@ -255,7 +249,7 @@ class TraceRecordSummary:
     tool_call_id: str | None = None
     tool_name: str | None = None
     model: str | None = None
-    reasoning_effort: TraceReasoningEffort | None = None
+    reasoning_effort: ReasoningEffort | None = None
     endpoint: str | None = None
     final_attempt_duration_ms: int | None = None
     error_category: TraceErrorCategory | None = None
@@ -411,7 +405,7 @@ class TraceRecordDTO(TypedDict):
     purpose: TracePurpose
     tool_name: str | None
     model: str | None
-    reasoning_effort: TraceReasoningEffort | None
+    reasoning_effort: ReasoningEffort | None
     endpoint: str | None
     status: TraceStatus
     error: TraceErrorDTO | None
@@ -566,7 +560,6 @@ __all__ = [
     "TraceRawPageDTO",
     "TraceRawSource",
     "TraceRawSourceDTO",
-    "TraceReasoningEffort",
     "TraceRecordDTO",
     "TraceRecordDetail",
     "TraceRecordDetailDTO",

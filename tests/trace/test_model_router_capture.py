@@ -247,7 +247,7 @@ async def test_router_records_fallback_metadata_from_the_successful_provider(
         assert records[0].model == "default-model"
         assert records[0].endpoint is None  # The fake Provider sends no HTTP request.
         assert records[0].reasoning_effort is not None
-        assert records[0].reasoning_effort.value == "mid"
+        assert records[0].reasoning_effort == "mid"
         detail = await recorder.get_record(records[0].record_id)
         assert detail is not None
         assert cast(dict[str, Any], detail.request)["continuation"] is None

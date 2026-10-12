@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TypeVar, cast
 from uuid import uuid4
 
+from aide.provider.session_configuration import REASONING_EFFORT_LEVELS, ReasoningEffort
 from aide.trace.context import TraceContext, TraceRootSource
 from aide.trace.recorder import TraceRecorder
 from aide.trace.types import (
@@ -38,7 +39,6 @@ from aide.trace.types import (
     TraceRawHandle,
     TraceRawPage,
     TraceRawSource,
-    TraceReasoningEffort,
     TraceRecordDetail,
     TraceRecordFilters,
     TraceRecordSummary,
@@ -1213,7 +1213,7 @@ class SQLiteTraceRecorder(TraceRecorder):
                 metadata.purpose.value,
                 metadata.tool_name,
                 metadata.model,
-                _enum_value(metadata.reasoning_effort),
+                metadata.reasoning_effort,
                 metadata.endpoint,
                 _utc_text(metadata.started_at),
             ),
@@ -1237,7 +1237,7 @@ class SQLiteTraceRecorder(TraceRecorder):
                 cast(int, payload["ordinal"]),
                 _utc_text(metadata.started_at),
                 metadata.model,
-                _enum_value(metadata.reasoning_effort),
+                metadata.reasoning_effort,
                 metadata.endpoint,
             ),
         )
@@ -1434,7 +1434,7 @@ class SQLiteTraceRecorder(TraceRecorder):
                     attempt_ordinal,
                     _utc_text(final_attempt.started_at),
                     final_attempt.model,
-                    _enum_value(final_attempt.reasoning_effort),
+                    final_attempt.reasoning_effort,
                     final_attempt.endpoint,
                 ),
             )
@@ -1581,7 +1581,7 @@ class SQLiteTraceRecorder(TraceRecorder):
                WHERE record_id = ? AND published = 0""",
             (
                 selected_metadata.model,
-                _enum_value(selected_metadata.reasoning_effort),
+                selected_metadata.reasoning_effort,
                 selected_metadata.endpoint,
                 outcome.status.value,
                 _utc_text(outcome.finished_at),
@@ -2057,6 +2057,9 @@ class SQLiteTraceRecorder(TraceRecorder):
 
     @staticmethod
     def _summary_from_row(row: sqlite3.Row) -> TraceRecordSummary:
+        effort = row["reasoning_effort"]
+        if effort is not None and effort not in REASONING_EFFORT_LEVELS:
+            raise ValueError("Trace reasoning_effort is unsupported")
         return TraceRecordSummary(
             record_id=row["record_id"],
             root_id=row["root_id"],
@@ -2090,11 +2093,7 @@ class SQLiteTraceRecorder(TraceRecorder):
             tool_call_id=row["tool_call_id"],
             tool_name=row["tool_name"],
             model=row["model"],
-            reasoning_effort=(
-                TraceReasoningEffort(row["reasoning_effort"])
-                if row["reasoning_effort"] is not None
-                else None
-            ),
+            reasoning_effort=cast(ReasoningEffort | None, effort),
             endpoint=row["endpoint"],
             final_attempt_duration_ms=row["final_attempt_duration_ms"],
             error_category=(

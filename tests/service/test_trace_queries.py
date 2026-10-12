@@ -29,7 +29,6 @@ from aide.trace.types import (
     TraceOrigin,
     TraceOutcome,
     TracePurpose,
-    TraceReasoningEffort,
     TraceStatus,
     TraceTokenUsage,
     TraceUsageState,
@@ -94,7 +93,7 @@ async def _seed_model_trace(
             purpose=TracePurpose.AGENT_RUN,
             started_at=started_at,
             model="fixture-model",
-            reasoning_effort=TraceReasoningEffort.MID,
+            reasoning_effort="mid",
         ),
     )
     attempt = recorder.begin_attempt(
@@ -102,7 +101,7 @@ async def _seed_model_trace(
         TraceAttemptMetadata(
             started_at=started_at,
             model="fixture-model",
-            reasoning_effort=TraceReasoningEffort.MID,
+            reasoning_effort="mid",
         ),
     )
     recorder.set_request(attempt, {"messages": [{"role": "user", "content": "fixture"}]})

@@ -23,7 +23,6 @@ from aide.trace.types import (
     TraceOrigin,
     TraceOutcome,
     TracePurpose,
-    TraceReasoningEffort,
     TraceStatus,
     TraceTokenUsage,
     TraceUsageState,
@@ -156,7 +155,7 @@ def test_noop_recorder_keeps_business_failure_and_cancellation_unchanged(
         purpose=TracePurpose.AGENT_RUN,
         started_at=_NOW,
         model="provider/model",
-        reasoning_effort=TraceReasoningEffort.HIGH,
+        reasoning_effort="high",
         endpoint="https://provider.invalid/v1",
     )
     handle = recorder.begin_call(context, metadata)
@@ -165,7 +164,7 @@ def test_noop_recorder_keeps_business_failure_and_cancellation_unchanged(
         TraceAttemptMetadata(
             started_at=_NOW,
             model="provider/fallback",
-            reasoning_effort=TraceReasoningEffort.MAX,
+            reasoning_effort="max",
             endpoint="https://fallback.invalid/v1",
         ),
     )

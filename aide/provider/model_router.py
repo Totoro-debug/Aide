@@ -41,7 +41,6 @@ from aide.trace.types import (
     TraceErrorCategory,
     TraceKind,
     TraceOutcome,
-    TraceReasoningEffort,
     TraceStatus,
     TraceTokenUsage,
     TraceUsageState,
@@ -86,7 +85,7 @@ class _TraceModelCall:
                     reasoning_effort=(
                         None
                         if resolved is None
-                        else _trace_reasoning_effort(resolved.route.reasoning_effort)
+                        else resolved.route.reasoning_effort
                     ),
                 ),
             )
@@ -114,7 +113,7 @@ class _TraceModelCall:
                 TraceAttemptMetadata(
                     started_at=datetime.now(UTC),
                     model=resolved.route.model,
-                    reasoning_effort=_trace_reasoning_effort(resolved.route.reasoning_effort),
+                    reasoning_effort=resolved.route.reasoning_effort,
                     # Only a transport adapter can observe an actual request URL.
                     endpoint=None,
                 ),
@@ -319,10 +318,6 @@ def _start_trace_model_call(
     except Exception:
         logger.warning("Execution Trace model call could not be initialized")
         return None
-
-
-def _trace_reasoning_effort(effort: ReasoningEffort | None) -> TraceReasoningEffort | None:
-    return None if effort is None else TraceReasoningEffort(effort)
 
 
 def _elapsed_ms(started: float) -> int:

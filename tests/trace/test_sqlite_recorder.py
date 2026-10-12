@@ -10,6 +10,7 @@ from threading import Barrier, Event, Thread
 
 import pytest
 
+from aide.provider.session_configuration import REASONING_EFFORT_LEVELS, ReasoningEffort
 from aide.trace.context import TraceContext, TraceRootSource
 from aide.trace.sqlite_recorder import TRACE_MAX_RAW_CHUNK_BYTES, SQLiteTraceRecorder, _Event
 from aide.trace.types import (
@@ -23,7 +24,6 @@ from aide.trace.types import (
     TraceOutcome,
     TracePage,
     TracePurpose,
-    TraceReasoningEffort,
     TraceRecordFilters,
     TraceStatus,
     TraceTokenUsage,
@@ -944,6 +944,44 @@ async def test_dropped_finishes_release_call_state_without_new_writer_failures(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("effort", [*REASONING_EFFORT_LEVELS, None])
+async def test_reasoning_effort_round_trips(
+    tmp_path: Path, effort: ReasoningEffort | None
+) -> None:
+    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
+    try:
+        handle = recorder.begin_call(
+            _new_context(recorder),
+            TraceCallMetadata(
+                kind=TraceKind.MODEL,
+                purpose=TracePurpose.AGENT_RUN,
+                started_at=_NOW,
+                reasoning_effort=effort,
+            ),
+        )
+        recorder.finish_call(handle, _success(), result="answer", usage=_usage(), retry_count=0)
+        await wait_for_trace_writer(recorder)
+        detail = await recorder.get_record(handle.record_id)
+        assert detail is not None and detail.record.reasoning_effort == effort
+        assert (await recorder.list_records()).items[0].reasoning_effort == effort
+        with sqlite3.connect(recorder.path) as connection:
+            assert connection.execute(
+                "SELECT reasoning_effort FROM trace_records WHERE record_id = ?",
+                (handle.record_id,),
+            ).fetchone()[0] == effort
+            connection.execute(
+                "UPDATE trace_records SET reasoning_effort = 'invalid' WHERE record_id = ?",
+                (handle.record_id,),
+            )
+        with pytest.raises(ValueError, match="reasoning_effort"):
+            await recorder.get_record(handle.record_id)
+        with pytest.raises(ValueError, match="reasoning_effort"):
+            await recorder.list_records()
+    finally:
+        await recorder.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", [TraceStatus.SUCCESS, TraceStatus.FAILED])
 async def test_final_model_metadata_replaces_initial_route_even_when_values_are_null(
     tmp_path: Path,
@@ -959,7 +997,7 @@ async def test_final_model_metadata_replaces_initial_route_even_when_values_are_
                 started_at=_NOW,
                 model="initial",
                 endpoint="https://initial.invalid",
-                reasoning_effort=TraceReasoningEffort.HIGH,
+                reasoning_effort="high",
             ),
         )
         attempt = recorder.begin_attempt(

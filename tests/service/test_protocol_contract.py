@@ -12,6 +12,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from aide.agent.memory.dream import DreamResult
 from aide.management.commands import ManagementCommandResult
 from aide.management.service import RuntimeStatus
+from aide.provider.session_configuration import REASONING_EFFORT_LEVELS
 from aide.service.client import _management_result
 from aide.service.runtime.projections import _encode_management_result
 from aide.trace import types as trace_types
@@ -557,7 +558,6 @@ def test_execution_trace_python_dto_fields_match_wire_contract(
         ("TraceCaptureLayer", "trace_capture_layer"),
         ("TraceUsageState", "trace_usage_state"),
         ("TraceDirection", "trace_direction"),
-        ("TraceReasoningEffort", "reasoning_effort"),
     ],
 )
 def test_execution_trace_python_enums_match_wire_contract(enum_name: str, definition: str) -> None:
@@ -586,3 +586,7 @@ def test_execution_trace_query_dtos_pin_filters_and_page_limits() -> None:
         _validator("trace_list_query").validate({"limit": 201})
     with pytest.raises(ValidationError):
         _validator("trace_raw_query").validate({"source": "exec_stdout", "limit_bytes": 1048577})
+
+
+def test_reasoning_effort_levels_match_wire_contract() -> None:
+    assert set(REASONING_EFFORT_LEVELS) == set(_schema()["$defs"]["reasoning_effort"]["enum"])

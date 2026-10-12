@@ -6,6 +6,7 @@ import { ApiError, getTraceRecord } from "../../shared/service/api";
 import type { TraceRecordDetailDTO } from "../../shared/service/protocol";
 import type { AuthState } from "../../shared/service/types";
 import commonStyles from "../../shared/styles/controls.module.css";
+import { traceLoadErrorState } from "./presentation";
 import moduleStyles from "./TraceSessionView.module.css";
 import { TraceRecordDetailView } from "./TraceRecordDetailView";
 
@@ -37,9 +38,8 @@ export function TraceRecordView({ authState }: { authState: AuthState }) {
     }).catch((error: unknown) => {
       if (version !== requestVersion.current) return;
       setState(error instanceof ApiError
-        ? error.status === 404 ? "not-found" : error.status === 503 ? "unavailable"
-          : error.status === 401 ? "unauthorized" : "error"
-        : "error");
+        ? error.status === 404 ? "not-found" : error.status === 401 ? "unauthorized" : traceLoadErrorState(error)
+        : traceLoadErrorState(error));
     });
     return () => { requestVersion.current += 1; };
   }, [authState, recordId, refreshVersion]);

@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
 import { traceRecordRoute, traceSessionRoute } from "../traces/routing";
-import { ApiError, getTraceRecords, getTraceStats } from "../../shared/service/api";
+import { getTraceRecords, getTraceStats } from "../../shared/service/api";
 import type {
   TraceBreakdownDTO,
   TraceListQueryDTO,
@@ -16,6 +16,7 @@ import type {
 } from "../../shared/service/protocol";
 import type { AuthState } from "../../shared/service/types.ts";
 import commonStyles from "../../shared/styles/controls.module.css";
+import { formatDuration, mergeTraceRecords, traceLoadErrorState } from "../traces/presentation";
 import moduleStyles from "./StatisticsView.module.css";
 
 const styles = { ...commonStyles, ...moduleStyles };
@@ -88,14 +89,14 @@ export function StatisticsView({ authState }: StatisticsViewProps) {
       setStatistics(statsResult.value);
       setStatisticsState("ready");
     } else {
-      setStatisticsState(errorLoadState(statsResult.reason));
+      setStatisticsState(traceLoadErrorState(statsResult.reason));
     }
     if (recordsResult.status === "fulfilled") {
       setRecords(recordsResult.value.items);
       setRecordCursor(recordsResult.value.next_cursor);
       setRecordsState("ready");
     } else {
-      setRecordsState(errorLoadState(recordsResult.reason));
+      setRecordsState(traceLoadErrorState(recordsResult.reason));
     }
   }, []);
 
@@ -223,11 +224,11 @@ export function StatisticsView({ authState }: StatisticsViewProps) {
       };
       const response = await getTraceRecords(nextQuery);
       if (requestVersion !== requestVersionRef.current) return;
-      setRecords((current) => mergeRecords(current, response.items));
+      setRecords((current) => mergeTraceRecords(current, response.items));
       setRecordCursor(response.next_cursor);
       setRecordsState("ready");
     } catch (error) {
-      if (requestVersion === requestVersionRef.current) setRecordsState(errorLoadState(error));
+      if (requestVersion === requestVersionRef.current) setRecordsState(traceLoadErrorState(error));
     } finally {
       if (requestVersion === requestVersionRef.current) setLoadingMoreRecords(false);
     }
@@ -705,22 +706,12 @@ function toDateInput(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
-function errorLoadState(error: unknown): LoadState {
-  return error instanceof ApiError && error.status === 503 ? "unavailable" : "error";
-}
-
 function mergeWorkspaces(current: WorkspaceOption[], next: TraceRecordDTO[]) {
   const byKey = new Map(current.map((workspace) => [workspace.workspaceKey, workspace]));
   for (const record of next) {
     byKey.set(record.workspace_key, { workspaceKey: record.workspace_key, workspacePath: record.workspace_path });
   }
   return Array.from(byKey.values());
-}
-
-function mergeRecords(current: TraceRecordDTO[], next: TraceRecordDTO[]) {
-  const byId = new Map(current.map((record) => [record.record_id, record]));
-  for (const record of next) byId.set(record.record_id, record);
-  return Array.from(byId.values());
 }
 
 function collectSessionLinks(records: TraceRecordDTO[]) {
@@ -768,11 +759,6 @@ function selectedDimension(query: TraceStatsQueryDTO): { field: Dimension; key: 
   if (query.tool_name !== undefined) return { field: "tool_name", key: query.tool_name, label: query.tool_name };
   if (query.purpose !== undefined) return { field: "purpose", key: query.purpose, label: query.purpose };
   return null;
-}
-
-function formatDuration(milliseconds: number, language: string): string {
-  if (milliseconds >= 1000) return `${(milliseconds / 1000).toLocaleString(language, { maximumFractionDigits: 1 })} s`;
-  return `${Math.round(milliseconds).toLocaleString(language)} ms`;
 }
 
 function formatDate(value: string, language: string): string {

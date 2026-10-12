@@ -448,7 +448,12 @@ try {
   await page.goto(`${control.details.url}/statistics`);
   await expect(page.getByRole("heading", { name: "Statistics", exact: true })).toBeVisible();
   await setInterfaceLanguage(page, "zh-CN");
+  const finalFixtureStats = page.waitForResponse((response) => {
+    const url = new globalThis.URL(response.url());
+    return url.pathname === "/api/v1/traces/stats" && url.searchParams.get("workspace_key") === "workspace-a";
+  });
   await page.getByLabel("工作区", { exact: true }).selectOption("workspace-a");
+  await (await finalFixtureStats).finished();
 
   // Exercise the authenticated T11 API as well as the fixed browser fixtures.
   await page.unrouteAll({ behavior: "wait" });

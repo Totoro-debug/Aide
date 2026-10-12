@@ -20,7 +20,7 @@ import type { AuthState } from "../../shared/service/types.ts";
 import commonStyles from "../../shared/styles/controls.module.css";
 import moduleStyles from "./TraceSessionView.module.css";
 import { TraceRecordDetailView } from "./TraceRecordDetailView";
-import { formatDateTime, formatDuration, usageLabel } from "./presentation";
+import { formatDateTime, formatDuration, mergeTraceRecords, traceLoadErrorState, usageLabel } from "./presentation";
 
 const styles = { ...commonStyles, ...moduleStyles };
 const RECORD_PAGE_SIZE = 50;
@@ -93,7 +93,7 @@ export function TraceSessionView({ authState }: TraceSessionViewProps) {
       setCursor(response.next_cursor);
       setListState("ready");
     } catch (error) {
-      if (requestVersion === listRequestVersion.current) setListState(loadStateFor(error));
+      if (requestVersion === listRequestVersion.current) setListState(traceLoadErrorState(error));
     }
   }, [query]);
 
@@ -126,7 +126,7 @@ export function TraceSessionView({ authState }: TraceSessionViewProps) {
       setDetailState("ready");
     }).catch((error: unknown) => {
       if (requestVersion === detailRequestVersion.current) {
-        setDetailState(error instanceof ApiError && error.status === 404 ? "not-found" : loadStateFor(error));
+        setDetailState(error instanceof ApiError && error.status === 404 ? "not-found" : traceLoadErrorState(error));
       }
     });
     return () => {
@@ -156,11 +156,11 @@ export function TraceSessionView({ authState }: TraceSessionViewProps) {
     try {
       const response = await getTraceRecords({ ...query, cursor });
       if (requestVersion !== listRequestVersion.current) return;
-      setRecords((current) => mergeRecords(current, response.items));
+      setRecords((current) => mergeTraceRecords(current, response.items));
       setCursor(response.next_cursor);
       setListState("ready");
     } catch (error) {
-      if (requestVersion === listRequestVersion.current) setListState(loadStateFor(error));
+      if (requestVersion === listRequestVersion.current) setListState(traceLoadErrorState(error));
     } finally {
       if (requestVersion === listRequestVersion.current) setLoadingMore(false);
     }
@@ -432,16 +432,6 @@ function RecordGroup({
       ))}
     </section>
   );
-}
-
-function loadStateFor(error: unknown): LoadState {
-  return error instanceof ApiError && error.status === 503 ? "unavailable" : "error";
-}
-
-function mergeRecords(current: TraceRecordDTO[], incoming: TraceRecordDTO[]): TraceRecordDTO[] {
-  const byId = new Map(current.map((record) => [record.record_id, record]));
-  for (const record of incoming) byId.set(record.record_id, record);
-  return Array.from(byId.values());
 }
 
 function uniqueValues(values: Array<string | null>): string[] {

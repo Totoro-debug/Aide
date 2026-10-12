@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Literal, NotRequired, TypedDict
+from typing import Literal, TypedDict
 
 
 class TraceOrigin(StrEnum):
@@ -539,44 +539,6 @@ class TraceRawPageDTO(TypedDict):
     content_encoding: str | None
 
 
-class TraceListQueryDTO(TypedDict, total=False):
-    workspace_key: str
-    owner_session_id: str
-    subject_session_id: str
-    root_id: str
-    run_id: str
-    agent_id: str
-    kind: TraceKind
-    status: TraceStatus
-    purpose: TracePurpose
-    tool_name: str
-    model: str
-    from_at: str
-    to_at: str
-    cursor: str
-    limit: int
-
-
-class TraceStatsQueryDTO(TypedDict, total=False):
-    from_at: str
-    to_at: str
-    workspace_key: str
-    model: str
-    tool_name: str
-    purpose: TracePurpose
-
-
-class TraceSessionsQueryDTO(TypedDict, total=False):
-    cursor: str
-    limit: int
-
-
-class TraceRawQueryDTO(TypedDict):
-    source: str
-    offset: NotRequired[int]
-    limit_bytes: NotRequired[int]
-
-
 __all__ = [
     "TraceAttemptHandle",
     "TraceAttemptMetadata",
@@ -594,7 +556,6 @@ __all__ = [
     "TraceErrorCategory",
     "TraceErrorDTO",
     "TraceKind",
-    "TraceListQueryDTO",
     "TraceOrigin",
     "TraceOutcome",
     "TracePage",
@@ -603,7 +564,6 @@ __all__ = [
     "TraceRawHandle",
     "TraceRawPage",
     "TraceRawPageDTO",
-    "TraceRawQueryDTO",
     "TraceRawSource",
     "TraceRawSourceDTO",
     "TraceReasoningEffort",
@@ -615,10 +575,8 @@ __all__ = [
     "TraceSessionPage",
     "TraceSessionSummary",
     "TraceSessionSummaryDTO",
-    "TraceSessionsQueryDTO",
     "TraceSessionsResponseDTO",
     "TraceStats",
-    "TraceStatsQueryDTO",
     "TraceStatsResponseDTO",
     "TraceStatsTotals",
     "TraceStatsTotalsDTO",

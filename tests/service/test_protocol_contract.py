@@ -527,10 +527,6 @@ def test_execution_trace_schema_rejects_unknown_status_and_ambiguous_usage() -> 
         ("TraceTimelinePointDTO", "trace_timeline_point"),
         ("TraceStatsResponseDTO", "trace_stats_response"),
         ("TraceRawPageDTO", "trace_raw_page"),
-        ("TraceListQueryDTO", "trace_list_query"),
-        ("TraceStatsQueryDTO", "trace_stats_query"),
-        ("TraceSessionsQueryDTO", "trace_sessions_query"),
-        ("TraceRawQueryDTO", "trace_raw_query"),
     ],
 )
 def test_execution_trace_python_dto_fields_match_wire_contract(

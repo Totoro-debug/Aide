@@ -21,7 +21,7 @@ from aide.trace.context import TraceRootSource, workspace_key_for
 from aide.trace.recorder import NoOpTraceRecorder
 from aide.trace.scope import trace_scope
 from aide.trace.sqlite_recorder import SQLiteTraceRecorder
-from aide.trace.types import TraceCaptureLayer, TraceOrigin, TracePurpose
+from aide.trace.types import TraceCaptureLayer, TraceErrorCategory, TraceOrigin, TracePurpose
 from tests.fixtures import SingleToolGateway
 from tests.tools.core.test_web_fetch import FakeHTTPClient, FakeResolver, FakeResponse
 from tests.tools.core.test_web_search import FakeDDGS
@@ -279,6 +279,9 @@ async def test_fetch_retains_consumed_bytes_when_interrupted(
     await recorder.flush()
     (record,) = (await recorder.list_records()).items
     assert record.status.value == "failed"
+    assert record.error_category is (
+        TraceErrorCategory.TIMEOUT if failure is TimeoutError else TraceErrorCategory.CANCELLED
+    )
     raw = await recorder.read_raw(
         record.record_id, source="web_fetch_response", offset=0, limit_bytes=1000
     )
@@ -313,6 +316,11 @@ async def test_search_failures_keep_noop_behavior(
     await recorder.flush()
     (record,) = (await recorder.list_records()).items
     assert record.status.value == "failed"
+    assert record.error_category is {
+        TimeoutError: TraceErrorCategory.TIMEOUT,
+        asyncio.CancelledError: TraceErrorCategory.CANCELLED,
+        RuntimeError: TraceErrorCategory.TOOL_ERROR,
+    }[failure]
 
 
 @pytest.mark.asyncio

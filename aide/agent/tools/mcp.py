@@ -167,7 +167,9 @@ class MCPTool(BaseTool):
         except asyncio.CancelledError:
             raise
         except TimeoutError as error:
-            raise ToolError(_TIMEOUT_TEMPLATE.format(timeout=self._call_timeout)) from error
+            raise ToolError(
+                _TIMEOUT_TEMPLATE.format(timeout=self._call_timeout), timed_out=True,
+            ) from error
         except Exception as error:
             if isinstance(error, MCPError) and error.code == types.CONNECTION_CLOSED:
                 self._mark_unavailable()

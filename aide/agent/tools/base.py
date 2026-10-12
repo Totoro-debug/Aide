@@ -50,8 +50,9 @@ _ARTIFACT_WRITE_FAILURE_MARKER = "\n\n...[artifact write failed; full result was
 class ToolError(Exception):
     """An expected Tool failure whose message is safe to return to the model."""
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, *, timed_out: bool = False) -> None:
         self.message = message
+        self.timed_out = timed_out
         super().__init__(message)
 
 

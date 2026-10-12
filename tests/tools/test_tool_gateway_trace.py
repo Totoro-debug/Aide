@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from mcp import types
 
 from aide.agent.confirmation import ConfirmationAborted
 from aide.agent.memory.dream import Dream
@@ -66,6 +67,71 @@ from tests.tools.test_shared_tool_context import _RecordingExecHost, _schedule_s
 from tests.tools.test_subagent_tools import _harness
 
 _RAW_RESULT = "raw-result-" * 6_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via_runner", [False, True])
+async def test_mcp_timeout_category_survives_final_result_publication(
+    tmp_path: Path, via_runner: bool,
+) -> None:
+    class TimeoutSession(_Session):
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
+            raise TimeoutError("transport deadline")
+
+    tool = MCPTool(
+        MCPToolSpec("remote", "echo", "mcp_remote_echo", "Echo", {"type": "object"}),
+        TimeoutSession(),
+    )
+    gateway = ToolGateway._for_memory((tool,))
+    call = ModelToolCall("timeout", tool.name, "{}")
+    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
+    source = TraceRootSource(
+        workspace_key=workspace_key_for(tmp_path), workspace_path=str(tmp_path),
+        origin=TraceOrigin.FOREGROUND, purpose=TracePurpose.AGENT_RUN,
+    )
+    results = []
+    try:
+        for active in (NoOpTraceRecorder(), recorder):
+            provider = ScriptedFakeProvider(streams=(
+                StreamScript((ModelCompleted(ModelResponse(
+                    AssistantModelMessage("", (call,)), ModelUsage(1, 1, 2), "tool_calls",
+                )),)),
+                StreamScript((ModelCompleted(ModelResponse(
+                    AssistantModelMessage("done"), ModelUsage(1, 1, 2), "stop",
+                )),)),
+            ))
+            def factory(
+                _: object, selected: ScriptedFakeProvider = provider,
+            ) -> ScriptedFakeProvider:
+                return selected
+
+            router = ModelRouter(configuration=configuration(), provider_factory=factory)
+            try:
+                with trace_scope(active, source):
+                    if via_runner:
+                        initial = [{"role": "user", "content": "call"}]
+                        outcome = await AgentRunner(router, DetachedRequestPreparer(initial)).run(
+                            initial, model="chat", tool_gateway=gateway, on_output=None,
+                            confirmation=None, externalize_result=None, cancel_requested=None,
+                            max_iterations=50,
+                        )
+                        message = next(m for m in outcome.messages if m["role"] == "tool")
+                        results.append((message["status"], message["content"]))
+                    else:
+                        result = await gateway.call(call)
+                        results.append((result.status, result.content))
+            finally:
+                await router.close()
+        assert results[0] == results[1]
+        assert results[1] == ("error", "MCP Tool call timed out after 60 seconds.")
+        assert not tool.unavailable
+        await recorder.flush()
+        (record,) = [r for r in (await recorder.list_records()).items if r.kind is TraceKind.TOOL]
+        assert record.status.value == "failed"
+        assert record.error_category is TraceErrorCategory.TIMEOUT
+        assert (await recorder.get_stats()).totals.failed_count == 1
+    finally:
+        await recorder.close()
 
 
 class _TraceExecHost(PowerShellExecHost):
@@ -305,7 +371,7 @@ async def test_exec_trace_keeps_output_read_before_timeout(
         assert timed_out.status == "error"
         assert "Exec timed out after 1 seconds." in timed_out.content
         assert record.status.value == "failed"
-        assert record.error_category is TraceErrorCategory.TOOL_ERROR
+        assert record.error_category is TraceErrorCategory.TIMEOUT
         assert record.error_message == timed_out.content
         assert record.capture_state.value == "complete"
         assert await _read_trace_raw(recorder, record.record_id, "exec_stdout") == (

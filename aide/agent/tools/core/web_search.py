@@ -45,7 +45,7 @@ class WebSearchTool(BaseTool):
             )
         except TimeoutError as error:
             raise ToolError(
-                f"Web Search timed out after {_SEARCH_TIMEOUT_SECONDS:g} seconds."
+                f"Web Search timed out after {_SEARCH_TIMEOUT_SECONDS:g} seconds.", timed_out=True,
             ) from error
 
         _capture_ddgs_results(raw_results)

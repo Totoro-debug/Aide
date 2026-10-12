@@ -152,7 +152,8 @@ class ExecTool(BaseTool):
                     heading=f"Exec timed out after {timeout} seconds.",
                     stdout=outcome.stdout,
                     stderr=outcome.stderr,
-                )
+                ),
+                timed_out=True,
             )
         return _format_streams(
             heading=f"Exit code: {outcome.exit_code}",

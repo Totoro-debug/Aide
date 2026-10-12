@@ -330,7 +330,7 @@ class WebFetchTool(BaseTool):
             raise
         except TimeoutError as error:
             raise ToolError(
-                f"Web Fetch timed out after {TOTAL_TIMEOUT_SECONDS:g} seconds."
+                f"Web Fetch timed out after {TOTAL_TIMEOUT_SECONDS:g} seconds.", timed_out=True,
             ) from error
 
     def _evaluate_target(self, url: str) -> _TargetEvaluation:

@@ -238,6 +238,7 @@ class _ToolTraceCapture:
     tool_resolved: bool = False
     finished: bool = False
     process_streams_captured: bool = False
+    timed_out: bool = False
     captured_raw_sources: set[str] = field(default_factory=set, repr=False)
 
     def set_request(self) -> None:
@@ -291,6 +292,8 @@ class _ToolTraceCapture:
             category = TraceErrorCategory.VALIDATION_ERROR
         elif not self.tool_resolved:
             category = TraceErrorCategory.UNAVAILABLE
+        elif self.timed_out:
+            category = TraceErrorCategory.TIMEOUT
         else:
             category = TraceErrorCategory.TOOL_ERROR
         self._finish(
@@ -1120,6 +1123,8 @@ class ToolGateway:
         except ToolError as error:
             if self._failure_observer is not None:
                 self._failure_observer(error)
+            if trace_capture is not None:
+                trace_capture.timed_out = error.timed_out
             return _result(
                 tool_call,
                 "error",

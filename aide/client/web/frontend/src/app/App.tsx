@@ -28,6 +28,7 @@ import type { WorkspaceMemoryTarget } from "../features/runtime/WorkspaceMemoryD
 import WorkspaceMemoryDialog from "../features/runtime/WorkspaceMemoryDialog";
 import { StatisticsView } from "../features/statistics/StatisticsView.tsx";
 import { TraceSessionView } from "../features/traces/TraceSessionView.tsx";
+import { TraceRecordView } from "../features/traces/TraceRecordView.tsx";
 import { ScheduleJobHistoryView, ScheduleJobsView } from "../features/schedules/SchedulesView.tsx";
 import type { SettingsNavigationState, SettingsReturnLocation } from "../features/settings/navigation.ts";
 import { SettingsView } from "../features/settings/SettingsView.tsx";
@@ -708,6 +709,7 @@ function AppShell() {
                 }
               />
               <Route path="/statistics" element={<StatisticsView authState={authState} />} />
+              <Route path="/traces/records/:recordId" element={<TraceRecordView authState={authState} />} />
               <Route
                 path="/traces/sessions/:workspaceKey/:sessionId"
                 element={<TraceSessionView authState={authState} />}

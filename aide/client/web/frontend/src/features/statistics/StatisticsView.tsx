@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
-import { traceSessionRoute } from "../traces/routing";
+import { traceRecordRoute, traceSessionRoute } from "../traces/routing";
 import { ApiError, getTraceRecords, getTraceStats } from "../../shared/service/api";
 import type {
   TraceBreakdownDTO,
@@ -480,6 +480,18 @@ export function StatisticsView({ authState }: StatisticsViewProps) {
                   <span className={styles.sessionTitle}>{t(`statistics.purpose.${source.purpose}`)}</span>
                   <span className={styles.sessionPath}>{source.workspacePath}</span>
                 </div>
+                <ul className={styles.sessionList}>
+                  {source.records.map((record) => (
+                    <li key={record.record_id}>
+                      <Link to={traceRecordRoute(record.record_id)}>
+                        <span className={styles.sessionTitle}>
+                          {record.kind === "model" ? record.model : record.tool_name}
+                        </span>
+                        <span className={styles.sessionPath}>{record.record_id}</span>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
               </li>
             ))}
           </ul>
@@ -716,14 +728,20 @@ function collectSessionLinks(records: TraceRecordDTO[]) {
 }
 
 function collectAuxiliarySources(records: TraceRecordDTO[]) {
-  const sources = new Map<string, { workspaceKey: string; workspacePath: string; purpose: TracePurpose }>();
+  const sources = new Map<string, {
+    workspaceKey: string; workspacePath: string; purpose: TracePurpose; records: TraceRecordDTO[];
+  }>();
   for (const record of records) {
     if (record.owner_session_id !== null) continue;
-    sources.set(`${record.workspace_key}:${record.purpose}`, {
+    const key = `${record.workspace_key}:${record.purpose}`;
+    const source = sources.get(key) ?? {
       workspaceKey: record.workspace_key,
       workspacePath: record.workspace_path,
       purpose: record.purpose,
-    });
+      records: [],
+    };
+    source.records.push(record);
+    sources.set(key, source);
   }
   return Array.from(sources.values());
 }

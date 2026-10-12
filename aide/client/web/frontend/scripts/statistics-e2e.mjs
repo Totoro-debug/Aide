@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { chromium, expect } from "@playwright/test";
 import setup from "./e2e-setup.mjs";
 import { setInterfaceLanguage } from "./settings-e2e.mjs";
 
 const control = await setup();
 const requests = [];
+const workspaceMutations = [];
 let browser;
 let statsMode = "populated";
 let refreshRevision = 0;
@@ -13,6 +15,8 @@ const newRecordTime = "2026-10-12T04:30:00.000Z";
 let holdNextPage = false;
 let releaseNextPage;
 let failNextPage = false;
+let recordMode = "ready";
+const rawBytes = Buffer.concat([Buffer.alloc(262143, 120), Buffer.from("汉字\nend")]);
 
 const tokens = {
   input_tokens: 120,
@@ -112,13 +116,41 @@ function traceRecord(workspaceKey, workspacePath, sessionId, recordId) {
   };
 }
 
+function auxiliaryRecords() {
+  return ["record-dream", "record-dream-2", "record-dream-tool", "record-keywords"].map((id) => ({
+    ...traceRecord("workspace-dream", "D:\\Projects\\Dream", null, id),
+    origin: "auxiliary", purpose: id === "record-keywords" ? "mcp_keywords" : "dream",
+    kind: id === "record-dream-tool" ? "tool" : "model",
+    tool_name: id === "record-dream-tool" ? "edit_file" : null,
+  }));
+}
+
 try {
   browser = await chromium.launch({ channel: process.env.AIDE_E2E_BROWSER_CHANNEL ?? "msedge" });
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 }, timezoneId: "Asia/Shanghai" });
   await page.clock.setFixedTime(new Date(initialTime));
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
-  await page.addInitScript(() => window.localStorage.setItem("aide.language", "en"));
+  page.on("request", (request) => {
+    const path = new globalThis.URL(request.url()).pathname;
+    if (request.method() === "POST" && (path.endsWith("/workspaces/enter") || path.endsWith("/sessions"))) {
+      workspaceMutations.push(path);
+    }
+  });
+  await page.addInitScript(() => {
+    window.localStorage.setItem("aide.language", "en");
+    const Original = window.WebSocket;
+    window.WebSocket = class extends Original {
+      send(data) {
+        const command = JSON.parse(data);
+        if (command.type === "claim") {
+          const count = Number(window.sessionStorage.getItem("aide.statistics-claims") ?? "0");
+          window.sessionStorage.setItem("aide.statistics-claims", String(count + 1));
+        }
+        super.send(data);
+      }
+    };
+  });
   await page.route((url) => url.pathname.startsWith("/api/v1/traces"), async (route) => {
     const url = new globalThis.URL(route.request().url());
     requests.push({ method: route.request().method(), path: url.pathname, query: url.searchParams });
@@ -168,12 +200,39 @@ try {
         json: {
           items: statsMode === "empty" ? [] : cursor !== null
             ? [traceRecord(record.workspace_key, record.workspace_path, "session-next", "record-next")]
-            : [record, { ...traceRecord("workspace-dream", "D:\\Projects\\Dream", null, "record-dream"),
-              origin: "auxiliary", purpose: "dream" }],
+            : [record, ...auxiliaryRecords()],
           next_cursor: statsMode === "empty" || cursor !== null ? null : "next-page",
           snapshot_sequence: 12,
         },
       });
+      return;
+    }
+    const rawPath = url.pathname.match(/^\/api\/v1\/traces\/([^/]+)\/raw$/);
+    if (rawPath !== null) {
+      if (url.searchParams.get("download") === "true") {
+        await route.fulfill({ status: 200, contentType: "application/octet-stream", body: rawBytes });
+      } else {
+        const offset = Number(url.searchParams.get("offset"));
+        const end = Math.min(rawBytes.length, offset + Number(url.searchParams.get("limit_bytes")));
+        await route.fulfill({ status: 200, json: {
+          source: "response", direction: "response", layer: "tool_result", offset,
+          data_base64: rawBytes.subarray(offset, end).toString("base64"), total_bytes: rawBytes.length,
+          next_offset: end < rawBytes.length ? end : null,
+          content_type: "text/plain; charset=utf-8", content_encoding: null,
+        } });
+      }
+      return;
+    }
+    const recordPath = url.pathname.match(/^\/api\/v1\/traces\/([^/]+)$/);
+    if (recordPath !== null) {
+      const found = auxiliaryRecords().find((record) => record.record_id === recordPath[1]);
+      const status = recordMode === "ready" ? (found === undefined ? 404 : 200) : Number(recordMode);
+      await route.fulfill({ status, json: status !== 200 ? { code: "trace_error", message: "Failed" } : {
+        record: found, content: { request: { input: found.record_id }, result: "done" },
+        capture_issues: [], raw_sources: [{ source: "response", direction: "response",
+          layer: "tool_result", total_bytes: rawBytes.length,
+          content_type: "text/plain; charset=utf-8", content_encoding: null }],
+      } });
       return;
     }
     await route.fallback();
@@ -216,7 +275,7 @@ try {
     .toHaveText("D:\\Projects\\Dream");
   const auxiliarySources = page.getByRole("region", { name: "Work without a Session" });
   await expect(auxiliarySources.getByText("Dream", { exact: true })).toBeVisible();
-  await expect(auxiliarySources.getByText("D:\\Projects\\Dream", { exact: true })).toBeVisible();
+  await expect(auxiliarySources.getByText("D:\\Projects\\Dream", { exact: true })).toHaveCount(2);
 
   const idleRequestCount = requests.length;
   await page.waitForTimeout(500);
@@ -333,6 +392,45 @@ try {
   }));
   assert.ok(mobileLayout.documentWidth <= mobileLayout.viewportWidth, JSON.stringify(mobileLayout));
   assert.ok(mobileLayout.headingVisible > 0);
+
+  await setInterfaceLanguage(page, "en");
+  const claimsBeforeDetails = await page.evaluate(() => window.sessionStorage.getItem("aide.statistics-claims"));
+  const mutationsBeforeDetails = workspaceMutations.length;
+  for (const record of auxiliaryRecords()) {
+    const link = page.getByRole("region", { name: "Work without a Session" })
+      .getByRole("link", { name: new RegExp(record.record_id + "$") });
+    await expect(link).toHaveAttribute("href", `/traces/records/${record.record_id}`);
+    await link.click();
+    await expect(page.getByRole("heading", { name: "Call details", exact: true })).toBeVisible();
+    await expect(page.locator("main code").filter({ hasText: new RegExp(`^${record.record_id}$`) })).toBeVisible();
+    await page.reload();
+    await expect(page.locator("main code").filter({ hasText: new RegExp(`^${record.record_id}$`) })).toBeVisible();
+    await page.goto(`${control.details.url}/statistics`);
+    await expect(page.getByRole("heading", { name: "Statistics", exact: true })).toBeVisible();
+  }
+  await page.setViewportSize({ width: 1440, height: 960 });
+  await page.goto(`${control.details.url}/traces/records/record-dream`);
+  await page.getByRole("button", { name: "Load more raw content", exact: true }).click();
+  await expect(page.locator("main pre").last()).toHaveText(rawBytes.toString("utf8"));
+  const downloadEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download raw data", exact: true }).click();
+  const download = await downloadEvent;
+  const downloadedChunks = [];
+  for await (const chunk of await download.createReadStream()) downloadedChunks.push(chunk);
+  assert.deepEqual(Buffer.concat(downloadedChunks), rawBytes);
+  for (const [mode, text] of [["404", "This call is no longer available. It may have expired or its Session may have been deleted."],
+    ["503", "Trace storage is unavailable."], ["401", "Connect to the local service to view Traces."]]) {
+    recordMode = mode;
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect(page.getByText(text, { exact: true })).toBeVisible();
+  }
+  recordMode = "ready";
+  assert.equal(await page.evaluate(() => window.sessionStorage.getItem("aide.statistics-claims")), claimsBeforeDetails);
+  assert.equal(workspaceMutations.length, mutationsBeforeDetails);
+  await page.goto(`${control.details.url}/statistics`);
+  await expect(page.getByRole("heading", { name: "Statistics", exact: true })).toBeVisible();
+  await setInterfaceLanguage(page, "zh-CN");
+  await page.getByLabel("工作区", { exact: true }).selectOption("workspace-a");
 
   // Exercise the authenticated T11 API as well as the fixed browser fixtures.
   await page.unrouteAll({ behavior: "wait" });

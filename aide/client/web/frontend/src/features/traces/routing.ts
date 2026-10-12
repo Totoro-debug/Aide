@@ -37,3 +37,7 @@ function normalizePathSegments(path: string, separator: string): string[] {
 export function traceSessionRoute(workspaceKey: string, sessionId: string): string {
   return `/traces/sessions/${encodeURIComponent(workspaceKey)}/${encodeURIComponent(sessionId)}`;
 }
+
+export function traceRecordRoute(recordId: string): string {
+  return `/traces/records/${encodeURIComponent(recordId)}`;
+}

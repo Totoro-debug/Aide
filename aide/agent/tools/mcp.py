@@ -34,9 +34,7 @@ from aide.agent.tools.permission import MCPToolIdentity, ToolInvocationFacts
 from aide.config.config import MCPServerConfiguration
 from aide.trace.scope import TraceToolCallScope, current_trace_tool_call
 from aide.trace.types import (
-    TraceCaptureIssue,
     TraceCaptureLayer,
-    TraceCaptureState,
     TraceDirection,
 )
 from aide.utils.async_tasks import await_task_preserving_cancellation
@@ -636,7 +634,9 @@ class _MCPProtocolTrace:
             return
         call = self._calls.pop(scope.handle.record_id, None)
         if call is None or not call.request_seen or not call.response_seen:
-            self._report_issue(scope, "MCP JSON-RPC request or response capture was incomplete.")
+            scope.report_capture_issue(
+                "MCP JSON-RPC request or response capture was incomplete.", source="mcp_transport"
+            )
         for request_id, pending in tuple(self._pending.items()):
             if pending.scope.handle == scope.handle:
                 self._pending.pop(request_id, None)
@@ -704,14 +704,17 @@ class _MCPProtocolTrace:
                 .encode("utf-8")
             )
         except Exception:
-            self._report_issue(scope, f"MCP protocol source {source} could not be serialized.")
+            scope.report_capture_issue(
+                f"MCP protocol source {source} could not be serialized.", source="mcp_transport"
+            )
             return
-        self._append_raw(
-            scope,
+        scope.append_raw(
             source=source,
             direction=direction,
             layer=TraceCaptureLayer.JSON_RPC_MESSAGE,
+            sequence=0,
             data=data,
+            content_type="application/json",
         )
 
     def _append_value(
@@ -726,35 +729,15 @@ class _MCPProtocolTrace:
         try:
             data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         except (TypeError, ValueError):
-            self._report_issue(scope, f"MCP result source {source} could not be serialized.")
-            return
-        self._append_raw(scope, source=source, direction=direction, layer=layer, data=data)
-
-    @staticmethod
-    def _append_raw(
-        scope: TraceToolCallScope,
-        *,
-        source: str,
-        direction: TraceDirection,
-        layer: TraceCaptureLayer,
-        data: bytes,
-    ) -> None:
-        try:
-            scope.recorder.append_raw(
-                scope.handle,
-                source=source,
-                direction=direction,
-                layer=layer,
-                sequence=0,
-                data=data,
-                content_type="application/json",
+            scope.report_capture_issue(
+                f"MCP result source {source} could not be serialized.", source="mcp_transport"
             )
-        except Exception:
-            _report_mcp_capture_issue(scope, f"MCP source {source} could not be captured.")
+            return
+        scope.append_raw(
+            source=source, direction=direction, layer=layer, sequence=0,
+            data=data, content_type="application/json",
+        )
 
-    @staticmethod
-    def _report_issue(scope: TraceToolCallScope, message: str) -> None:
-        _report_mcp_capture_issue(scope, message)
 
 
 class _MCPTraceReadStream:
@@ -813,20 +796,6 @@ class _MCPTraceWriteStream:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._stream, name)
-
-
-def _report_mcp_capture_issue(scope: TraceToolCallScope, message: str) -> None:
-    try:
-        scope.recorder.report_capture_issue(
-            scope.handle,
-            TraceCaptureIssue(
-                state=TraceCaptureState.PARTIAL,
-                message=message,
-                source="mcp_transport",
-            ),
-        )
-    except Exception:
-        logger.warning("Execution Trace MCP capture issue could not be reported")
 
 
 class _MCPClientSession(ClientSession):

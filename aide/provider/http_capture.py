@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from typing import cast
 from urllib.parse import urldefrag
 
@@ -14,13 +13,6 @@ import httpx
 from aide.trace.sanitization import is_sensitive_trace_name, sanitize_trace_url
 from aide.trace.scope import TraceProviderAttempt, current_trace_provider_attempt
 from aide.trace.types import TraceCaptureLayer, TraceDirection
-
-
-@dataclass(frozen=True, slots=True)
-class _TraceHTTPExchange:
-    attempt: TraceProviderAttempt
-    index: int
-
 
 _EXCHANGE_EXTENSION = "aide.trace_http_exchange"
 
@@ -33,7 +25,7 @@ async def capture_http_request(request: httpx.Request) -> None:
         return
     try:
         exchange = attempt.begin_http_exchange()
-        request.extensions[_EXCHANGE_EXTENSION] = _TraceHTTPExchange(attempt, exchange)
+        request.extensions[_EXCHANGE_EXTENSION] = (attempt, exchange)
         request_source = _exchange_source("http_request", exchange)
         request_metadata_source = _exchange_source("http_request_metadata", exchange)
         endpoint = urldefrag(sanitize_trace_url(str(request.url)))[0]
@@ -74,13 +66,13 @@ async def capture_http_request(request: httpx.Request) -> None:
 async def capture_http_response(response: httpx.Response) -> None:
     """Wrap raw response consumption without reading ahead of the SDK."""
     exchange = response.request.extensions.get(_EXCHANGE_EXTENSION)
-    if not isinstance(exchange, _TraceHTTPExchange):
+    if exchange is None:
         return
-    attempt = exchange.attempt
+    attempt, exchange_index = exchange
     try:
         response_metadata_captured = _append_json(
             attempt,
-            source=_exchange_source("http_response_metadata", exchange.index),
+            source=_exchange_source("http_response_metadata", exchange_index),
             direction=TraceDirection.RESPONSE,
             data={
                 "status_code": response.status_code,
@@ -91,7 +83,7 @@ async def capture_http_response(response: httpx.Response) -> None:
         response.stream = _TraceCaptureByteStream(
             cast(httpx.AsyncByteStream, response.stream),
             attempt,
-            source=_exchange_source("http_response", exchange.index),
+            source=_exchange_source("http_response", exchange_index),
             content_type=response.headers.get("content-type"),
             content_encoding=response.headers.get("content-encoding"),
             metadata_captured=response_metadata_captured,

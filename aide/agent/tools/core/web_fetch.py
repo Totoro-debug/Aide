@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from email.message import Message
 from html import unescape
@@ -40,7 +40,7 @@ from aide.agent.tools.permission import (
     ToolInvocationFacts,
 )
 from aide.trace.sanitization import sanitize_trace_url
-from aide.trace.scope import TraceToolCallScope, current_trace_tool_call
+from aide.trace.scope import current_trace_tool_call
 from aide.trace.types import TraceCaptureLayer, TraceDirection
 
 CONNECT_TIMEOUT_SECONDS = 10.0
@@ -436,27 +436,30 @@ class WebFetchTool(BaseTool):
                 if not _is_textual_media_type(_media_type(content_type)):
                     raise ToolError("Web Fetch response media type is unsupported.")
 
-                def capture_chunk(
-                    sequence: int,
-                    chunk: bytes,
-                    *,
-                    scope: TraceToolCallScope | None = capture_scope,
-                    response_content_type: str | None = capture_content_type,
-                ) -> None:
-                    if scope is not None:
-                        scope.append_raw(
+                chunks: list[bytes] = []
+                sequence = 0
+                async for chunk in response.iter_bytes():
+                    if capture_scope is not None:
+                        capture_scope.append_raw(
                             source="web_fetch_response",
                             direction=TraceDirection.RESPONSE,
                             layer=TraceCaptureLayer.HTTP_DECODED_BODY,
                             sequence=sequence,
                             data=chunk,
-                            content_type=response_content_type,
+                            content_type=capture_content_type,
                         )
-
-                body = await _read_body(
-                    response,
-                    on_chunk=None if capture_scope is None else capture_chunk,
-                )
+                    chunks.append(chunk)
+                    sequence += 1
+                if sequence == 0 and capture_scope is not None:
+                    capture_scope.append_raw(
+                        source="web_fetch_response",
+                        direction=TraceDirection.RESPONSE,
+                        layer=TraceCaptureLayer.HTTP_DECODED_BODY,
+                        sequence=0,
+                        data=b"",
+                        content_type=capture_content_type,
+                    )
+                body = b"".join(chunks)
                 return _decode_response(
                     body,
                     content_type=content_type,
@@ -480,23 +483,6 @@ class _DirectNetworkAuthorization:
         resolved_addresses: tuple[str, ...],
     ) -> None:
         del target, resolved_addresses
-
-
-async def _read_body(
-    response: HTTPResponseBoundary,
-    *,
-    on_chunk: Callable[[int, bytes], None] | None = None,
-) -> bytes:
-    chunks: list[bytes] = []
-    sequence = 0
-    async for chunk in response.iter_bytes():
-        if on_chunk is not None:
-            on_chunk(sequence, chunk)
-        chunks.append(chunk)
-        sequence += 1
-    if sequence == 0 and on_chunk is not None:
-        on_chunk(0, b"")
-    return b"".join(chunks)
 
 
 async def _close_session(session: ClientSession) -> None:

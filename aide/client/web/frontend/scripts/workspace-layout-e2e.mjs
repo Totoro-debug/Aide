@@ -41,20 +41,22 @@ try {
     heading => heading.getBoundingClientRect().height), 1);
   await expect(page.getByLabel("Search by title", { exact: true })).toHaveCount(0);
   const usageSummary = page.getByLabel("Context and Token usage", { exact: true });
-  await expect(usageSummary).toContainText("Historical input 0");
-  await expect(usageSummary).toContainText("Input —");
-  await expect(usageSummary).toContainText("Cache hit — Tokens");
-  let cachedFixture = 12000;
+  await expect(usageSummary).toContainText("Input 0");
+  await expect(usageSummary).toContainText("Cache hit 0");
+  await expect(usageSummary).toContainText("Output 0");
+  let usageFixture = { context: 1000000, input: 1200000, cached: 1100000, output: 80000 };
   await page.route("**/runtime/status", async route => {
     const response = await route.fetch();
     const body = await response.json();
-    body.status.projected_next_request_tokens = 14559;
-    body.status.context_window = 1000000;
-    body.status.cumulative_usage.input_tokens = 80000;
-    body.status.last_request_usage = { input_tokens: 14000, cached_input_tokens: cachedFixture };
+    body.status.projected_next_request_tokens = 18835;
+    body.status.context_window = usageFixture.context;
+    body.status.historical_usage = { input_tokens: usageFixture.input,
+      cached_input_tokens: usageFixture.cached, output_tokens: usageFixture.output };
+    body.status.cumulative_usage.input_tokens = 9000000;
+    body.status.last_request_usage = { input_tokens: 14000, cached_input_tokens: 12000 };
     await route.fulfill({ response, json: body });
   });
-  await expect(usageSummary).toContainText("Cache hit 12,000 Tokens");
+  await expect(usageSummary).toHaveText("Context 18k/1MInput 1.2MCache hit 1.1MOutput 80k");
   for (const language of ["en", "zh-CN"]) {
     await setInterfaceLanguage(page, language);
     for (const theme of ["light", "dark"]) {
@@ -65,11 +67,13 @@ try {
         await expect.poll(() => page.locator("textarea").evaluate(input => input.getBoundingClientRect().width)).toBeGreaterThan(0);
         const tokenUsage = page.getByLabel(language === "en" ? "Context and Token usage" : "上下文与 Token 用量", { exact: true });
         await expect(tokenUsage).toBeVisible();
-        await expect(tokenUsage.locator(":scope > span")).toHaveCount(5);
+        await expect(tokenUsage.locator(":scope > span")).toHaveCount(4);
         await expect(tokenUsage.getByRole("button")).toHaveCount(0);
-        for (const value of ["14,559", "1,000,000", "80,000", "14,000", "12,000"]) {
-          await expect(tokenUsage).toContainText(value);
-        }
+        await expect(tokenUsage).toHaveText(language === "en"
+          ? "Context 18k/1MInput 1.2MCache hit 1.1MOutput 80k"
+          : "上下文 18k/1M输入 1.2M缓存命中 1.1M输出 80k");
+        assert.equal(await tokenUsage.locator(":scope > span").first().evaluate(
+          element => globalThis.getComputedStyle(element, "::after").content), '"·"');
         const layout = await page.locator("textarea").evaluate(input => {
           const box = input.parentElement.getBoundingClientRect();
           const main = document.getElementById("main-content").getBoundingClientRect();
@@ -98,10 +102,18 @@ try {
   await page.setViewportSize({ width: 1440, height: 900 });
   await setInterfaceLanguage(page, "en");
   await setInterfaceTheme(page, "light");
-  cachedFixture = 0;
-  await expect(usageSummary).toContainText("Cache hit 0 Tokens");
-  cachedFixture = null;
-  await expect(usageSummary).toContainText("Cache hit — Tokens");
+  usageFixture = { context: 500000, input: 88107, cached: 80000, output: 5000 };
+  await setInterfaceLanguage(page, "zh-CN");
+  const chineseUsage = page.getByLabel("上下文与 Token 用量", { exact: true });
+  await expect(chineseUsage).toHaveText("上下文 18k/500k输入 88k缓存命中 80k输出 5k");
+  await page.screenshot({ path: resolve(output, "usage-thousands-zh-CN.png") });
+  await setInterfaceLanguage(page, "en");
+  usageFixture.cached = 0;
+  await expect(usageSummary).toContainText("Cache hit 0");
+  usageFixture.cached = null;
+  await expect(usageSummary).toContainText("Cache hit —");
+  usageFixture = { context: 1000000, input: 999, cached: 1, output: 0 };
+  await expect(usageSummary).toHaveText("Context 18k/1MInput 999Cache hit 1Output 0");
   await page.unroute("**/runtime/status");
   const project = await registerProjectFromSidebar(page, control.details.first_project);
   const item = projectItemByPath(page, control.details.first_project);

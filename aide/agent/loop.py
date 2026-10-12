@@ -1901,19 +1901,35 @@ def session_runtime_status_input(
     if any(isinstance(value, bool) or not isinstance(value, int) for _, value in usage):
         raise ValueError("Active Session token usage is malformed")
     usage_anchor = latest_main_agent_usage_anchor(messages)
+    request_messages = [
+        message
+        for message in messages
+        if message.get("role") == "assistant"
+        and message.get("status") == "completed"
+        and message["token_usage"]["model_calls"] == 1
+    ]
     last_request_usage = next(
         (
             {
                 "input_tokens": message["token_usage"]["input_tokens"],
                 "cached_input_tokens": message.get("cached_input_tokens"),
             }
-            for message in reversed(messages)
-            if message.get("role") == "assistant"
-            and message.get("status") == "completed"
-            and message["token_usage"]["model_calls"] == 1
+            for message in reversed(request_messages)
         ),
         None,
     )
+    cached_tokens = [
+        message["cached_input_tokens"]
+        for message in request_messages
+        if "cached_input_tokens" in message
+    ]
+    historical_usage: dict[str, int | None] = {
+        "input_tokens": sum(message["token_usage"]["input_tokens"] for message in request_messages),
+        "output_tokens": sum(message["token_usage"]["output_tokens"] for message in request_messages),
+        "cached_input_tokens": (
+            sum(cached_tokens) if len(cached_tokens) == len(request_messages) else None
+        ),
+    }
     latest_usage_context: ContextUsageSnapshot | None = None
     latest_reported_usage: tuple[tuple[str, int], ...] = ()
     if usage_anchor is not None:
@@ -1951,6 +1967,7 @@ def session_runtime_status_input(
         status_input,
         model_configuration_available=model_configuration_available,
         last_request_usage=last_request_usage,
+        historical_usage=historical_usage,
     )
 
 

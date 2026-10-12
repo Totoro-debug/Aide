@@ -191,13 +191,7 @@
   white-space: nowrap;
 }
 
-.runtimeStatusSummary > span:nth-child(-n + 2)::after {
+.runtimeStatusSummary > span:first-child::after {
   content: "·";
-  margin-inline-start: 8px;
-}
-
-.runtimeStatusSummary > span:nth-child(3)::after,
-.runtimeStatusSummary > span:nth-child(4)::after {
-  content: "/";
   margin-inline-start: 8px;
 }

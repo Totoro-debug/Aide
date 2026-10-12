@@ -356,6 +356,11 @@ export interface RuntimeStatus {
     input_tokens: number;
     cached_input_tokens: number | null;
   } | null;
+  historical_usage?: {
+    input_tokens: number;
+    cached_input_tokens: number | null;
+    output_tokens: number;
+  } | null;
   configured_permission_level: ToolPermissionLevel;
   current_permission_level: ToolPermissionLevel;
   schedule?: {

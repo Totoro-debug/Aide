@@ -138,6 +138,7 @@ class RuntimeStatusInput:
     latest_reported_usage: tuple[tuple[str, int], ...] = ()
     generation_started_at: float | None = None
     last_request_usage: dict[str, int | None] | None = None
+    historical_usage: dict[str, int | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +166,7 @@ class RuntimeStatus:
     active_model_configuration: SessionModelConfiguration | None = None
     model_configuration_available: bool = True
     last_request_usage: dict[str, int | None] | None = None
+    historical_usage: dict[str, int | None] | None = None
 
     def __post_init__(self) -> None:
         require_nonnegative_int(self.uptime_seconds, field="uptime_seconds")
@@ -203,6 +205,27 @@ class RuntimeStatus:
                 require_nonnegative_int(cached, field="last_request_usage.cached_input_tokens")
                 if cached > input_tokens:
                     raise ValueError("cached_input_tokens must not exceed input_tokens")
+        if self.historical_usage is not None:
+            if set(self.historical_usage) != {
+                "input_tokens",
+                "cached_input_tokens",
+                "output_tokens",
+            }:
+                raise ValueError("historical_usage fields are invalid")
+            for field in ("input_tokens", "output_tokens"):
+                value = self.historical_usage[field]
+                if value is None:
+                    raise ValueError(f"historical_usage.{field} must be an integer")
+                require_nonnegative_int(value, field=f"historical_usage.{field}")
+            cached = self.historical_usage["cached_input_tokens"]
+            if cached is not None:
+                require_nonnegative_int(cached, field="historical_usage.cached_input_tokens")
+                input_tokens = self.historical_usage["input_tokens"]
+                assert input_tokens is not None
+                if cached > input_tokens:
+                    raise ValueError(
+                        "historical_usage.cached_input_tokens must not exceed input_tokens"
+                    )
 
     def to_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -232,6 +255,8 @@ class RuntimeStatus:
             result["model_configuration_available"] = False
         if self.last_request_usage is not None:
             result["last_request_usage"] = dict(self.last_request_usage)
+        if self.historical_usage is not None:
+            result["historical_usage"] = dict(self.historical_usage)
         return result
 
 
@@ -475,6 +500,7 @@ class ManagementViewService:
                 last_compacted=projection.last_compacted,
                 cumulative_usage=dict(projection.cumulative_usage),
                 last_request_usage=projection.last_request_usage,
+                historical_usage=projection.historical_usage,
                 configured_permission_level=self._permission_control.configured(),
                 current_permission_level=self._permission_control.current(),
                 schedule=schedule_status,

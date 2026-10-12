@@ -86,6 +86,20 @@ def test_runtime_status_rejects_negative_or_boolean_counters() -> None:
         replace(status, uptime_seconds=-1)
     with pytest.raises(ValueError, match="session_message_count"):
         replace(status, session_message_count=True)
+    invalid_usages: tuple[dict[str, int | None], ...] = (
+        {"input_tokens": -1, "cached_input_tokens": 0, "output_tokens": 0},
+        {"input_tokens": None, "cached_input_tokens": 0, "output_tokens": 0},
+        {"input_tokens": True, "cached_input_tokens": 0, "output_tokens": 0},
+        {"input_tokens": 10, "cached_input_tokens": -1, "output_tokens": 0},
+        {"input_tokens": 10, "cached_input_tokens": True, "output_tokens": 0},
+        {"input_tokens": 10, "cached_input_tokens": 11, "output_tokens": 0},
+        {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": -1},
+        {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": None},
+        {"input_tokens": 10, "cached_input_tokens": 0},
+    )
+    for invalid in invalid_usages:
+        with pytest.raises(ValueError, match="historical_usage"):
+            replace(status, historical_usage=invalid)
 
 
 def test_session_summary_exposes_only_picker_fields_and_validates_message_count() -> None:

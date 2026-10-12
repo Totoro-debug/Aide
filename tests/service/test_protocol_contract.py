@@ -133,7 +133,10 @@ def test_web_memory_dream_and_skill_requests_are_typed_and_claim_scoped(
         validator.validate({key: value for key, value in request.items() if key != "claim_version"})
 
 
-def test_runtime_management_wire_results_validate_and_remote_decode_nullable_selections() -> None:
+@pytest.mark.parametrize("cached", [None, 0, 250])
+def test_runtime_management_wire_results_validate_and_remote_decode_nullable_selections(
+    cached: int | None,
+) -> None:
     status = RuntimeStatus(
         version="test",
         chat_model="primary/small-model",
@@ -150,6 +153,7 @@ def test_runtime_management_wire_results_validate_and_remote_decode_nullable_sel
         session_message_count=4,
         last_compacted=0,
         cumulative_usage={"input_tokens": 300, "output_tokens": 10},
+        historical_usage={"input_tokens": 300, "cached_input_tokens": cached, "output_tokens": 10},
         current_permission_level="read-only",
         schedule={"status": "available", "active_job_count": 1},
     )

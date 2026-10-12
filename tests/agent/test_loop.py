@@ -771,23 +771,33 @@ def test_agent_loop_preflight_uses_the_deferred_baseline_without_unused_tool_sch
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cached", [None, 0, 8])
-async def test_last_request_usage_survives_failure_and_session_reload(
-    tmp_path: Path, cached: int | None,
+@pytest.mark.parametrize("cached", [None, 0, 80])
+@pytest.mark.parametrize("first_cached", [None, 0, 60])
+async def test_historical_and_last_request_usage_survive_failure_reload_and_restore(
+    tmp_path: Path, cached: int | None, first_cached: int | None,
 ) -> None:
+    first_response = ModelResponse(
+        message=AssistantModelMessage(content="First answer"),
+        usage=ModelUsage(input_tokens=100, output_tokens=20, total_tokens=120,
+                         cached_input_tokens=first_cached),
+        finish_reason="stop",
+    )
     response = ModelResponse(
         message=AssistantModelMessage(content="Second answer"),
-        usage=ModelUsage(input_tokens=10, output_tokens=2, total_tokens=12,
+        usage=ModelUsage(input_tokens=200, output_tokens=30, total_tokens=230,
                          cached_input_tokens=cached),
         finish_reason="stop",
     )
     loop, session, bus = _runtime(
         tmp_path,
-        _Router((_response("First answer", input_tokens=5), response,
+        _Router((first_response, response,
                  ModelCallError(ErrorInfo("model_failed", "Failed request")))),
         task_framing_outcomes=None,
     )
     assert loop.execution.runtime_status_input().last_request_usage is None
+    assert loop.execution.runtime_status_input().historical_usage == {
+        "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0,
+    }
     await loop.start()
     try:
         for prompt in ("First question", "Second question", "Failing question"):
@@ -795,9 +805,16 @@ async def test_last_request_usage_survives_failure_and_session_reload(
             await _terminals(bus, 1)
         projection = loop.execution.runtime_status_input()
         assert projection.last_request_usage == {
-            "input_tokens": 10, "cached_input_tokens": cached,
+            "input_tokens": 200, "cached_input_tokens": cached,
         }
-        assert dict(projection.cumulative_usage)["input_tokens"] == 15
+        assert projection.historical_usage == {
+            "input_tokens": 300,
+            "cached_input_tokens": (
+                None if first_cached is None or cached is None else first_cached + cached
+            ),
+            "output_tokens": 50,
+        }
+        assert dict(projection.cumulative_usage)["input_tokens"] == 300
         restored = Session.load(WorkspaceState(tmp_path / "workspace"), session.session_id)
         reloaded = loop_module.session_runtime_status_input(
             restored, configuration=loop._configuration,
@@ -806,7 +823,24 @@ async def test_last_request_usage_survives_failure_and_session_reload(
         )
         assert reloaded.last_request_usage == projection.last_request_usage
         assert reloaded.cumulative_usage == projection.cumulative_usage
+        assert reloaded.historical_usage == projection.historical_usage
         assert restored.messages == session.messages
+        restored.last_compacted = len(restored.messages)
+        compacted = loop_module.session_runtime_status_input(
+            restored, configuration=loop._configuration,
+            context_builder=loop._context_builder, tool_schemas=loop.tool_schemas,
+            generation_started_at=None,
+        )
+        assert compacted.historical_usage == projection.historical_usage
+        restored.restore_before_durably(2)
+        rolled_back = loop_module.session_runtime_status_input(
+            restored, configuration=loop._configuration,
+            context_builder=loop._context_builder, tool_schemas=loop.tool_schemas,
+            generation_started_at=None,
+        )
+        assert rolled_back.historical_usage == {
+            "input_tokens": 100, "cached_input_tokens": first_cached, "output_tokens": 20,
+        }
     finally:
         await loop.close()
 

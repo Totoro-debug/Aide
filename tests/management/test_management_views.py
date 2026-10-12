@@ -562,7 +562,7 @@ async def test_status_preserves_safe_tokenizer_failures_for_protocol_clients(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cached", [None, 0, 8])
-async def test_status_exposes_last_request_usage_separately_from_cumulative_usage(
+async def test_status_exposes_historical_and_last_request_usage_separately_from_cumulative_usage(
     agent_home: Path, cached: int | None,
 ) -> None:
     home = AgentHome(agent_home)
@@ -571,12 +571,14 @@ async def test_status_exposes_last_request_usage_separately_from_cumulative_usag
         context_window=200000,
         cumulative_usage=(("input_tokens", 150),),
         last_request_usage={"input_tokens": 10, "cached_input_tokens": cached},
+        historical_usage={"input_tokens": 100, "cached_input_tokens": cached, "output_tokens": 20},
     )
     service = management_service(
         home, current_agent_loop=lambda: _StatusProjectionLoop(projection),
     )
     status = await service.status()
     assert status.to_dict()["last_request_usage"] == projection.last_request_usage
+    assert status.to_dict()["historical_usage"] == projection.historical_usage
     assert status.cumulative_usage == {"input_tokens": 150}
 
 

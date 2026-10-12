@@ -171,7 +171,7 @@ export function ConversationRuntimeStatus({ claim, connectionState, refreshVersi
   refreshVersion: number;
   activeRuns: LiveRun[];
 }) {
-  const { i18n, t } = useTranslation();
+  const { t } = useTranslation();
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const [failed, setFailed] = useState(false);
   const activeCount = activeRuns.filter(isLiveRunActive).length;
@@ -201,14 +201,18 @@ export function ConversationRuntimeStatus({ claim, connectionState, refreshVersi
     return () => { active = false; window.clearInterval(timer); };
   }, [claim.workspace_id, claim.session_id, claim.claim_version, claim.reconnect_credential,
     connectionState, refreshVersion, activeCount]);
-  const formatTokens = (value: number | null | undefined) => value == null ? "—" : value.toLocaleString(i18n.language);
+  const formatTokens = (value: number | null | undefined) => {
+    if (value == null) return "—";
+    if (value >= 1_000_000) return `${Math.floor(value / 100_000) / 10}M`;
+    if (value >= 1_000) return `${Math.floor(value / 1_000)}k`;
+    return String(value);
+  };
   return (
     <div className={styles.runtimeStatusSummary} aria-label={t("management.tokenUsage")}>
-      <span>{t("management.contextUsed")} {formatTokens(status?.projected_next_request_tokens)}</span>
-      <span>{t("management.contextWindow")} {formatTokens(status?.context_window)}</span>
-      <span>{t("management.historicalInput")} {formatTokens(status?.cumulative_usage.input_tokens)}</span>
-      <span>{t("management.inputTokens")} {formatTokens(status?.last_request_usage?.input_tokens)}</span>
-      <span>{t("management.cachedInput", { tokens: formatTokens(status?.last_request_usage?.cached_input_tokens) })}</span>
+      <span>{t("management.contextLabel")} {formatTokens(status?.projected_next_request_tokens)}/{formatTokens(status?.context_window)}</span>
+      <span>{t("management.inputTokens")} {formatTokens(status?.historical_usage?.input_tokens)}</span>
+      <span>{t("management.cacheHit")} {formatTokens(status?.historical_usage?.cached_input_tokens)}</span>
+      <span>{t("management.outputTokens")} {formatTokens(status?.historical_usage?.output_tokens)}</span>
       {failed ? <span role="status">{t("management.actionError")}</span> : null}
     </div>
   );

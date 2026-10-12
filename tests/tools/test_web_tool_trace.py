@@ -59,6 +59,56 @@ def _fetch_gateway(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["resolver_timeout", "dns_deadline", "ordinary"])
+@pytest.mark.parametrize("decision", ["approved", "declined"])
+async def test_fetch_dns_timeout_keeps_authorization_priority_and_noop_behavior(
+    recorder: SQLiteTraceRecorder, source: TraceRootSource, monkeypatch: pytest.MonkeyPatch,
+    failure: str, decision: ConfirmationDecision,
+) -> None:
+    class SlowResolver(FakeResolver):
+        async def resolve(self, hostname: str, port: int) -> tuple[str, ...]:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    monkeypatch.setattr("aide.agent.tools.core.web_fetch.CONNECT_TIMEOUT_SECONDS", 0.01)
+    results = []
+    for active in (NoOpTraceRecorder(), recorder):
+        resolver = SlowResolver(()) if failure == "dns_deadline" else FakeResolver(())
+        if failure != "dns_deadline":
+            resolver.failure = (
+                TimeoutError("resolver deadline") if failure == "resolver_timeout"
+                else OSError("ordinary failure with timeout wording")
+            )
+        http = FakeHTTPClient(())
+        confirmations: list[str] = []
+
+        async def confirm(
+            request: ConfirmationRequest, request_log: list[str] = confirmations,
+        ) -> ConfirmationDecision:
+            request_log.append(request.reason)
+            return decision
+
+        gateway = SingleToolGateway((WebFetchTool(resolver=resolver, http_client=http),),
+                                    confirmation=confirm,
+                                    permission_context=PermissionContext(level="workspace-write"))
+        with trace_scope(active, source):
+            result = await gateway.call(ModelToolCall("dns", "web_fetch",
+                                                     '{"url":"https://public.example/page"}'))
+        results.append((result.status, result.content))
+        assert len(confirmations) == 1
+        assert not http.calls
+    assert results[0] == results[1]
+    await recorder.flush()
+    (record,) = (await recorder.list_records()).items
+    assert record.endpoint is None
+    assert record.status.value == "failed"
+    assert record.error_category is (
+        TraceErrorCategory.PERMISSION_DENIED if decision == "declined" else
+        TraceErrorCategory.TOOL_ERROR if failure == "ordinary" else TraceErrorCategory.TIMEOUT
+    )
+
+
+@pytest.mark.asyncio
 async def test_fetch_denied_before_network_has_no_endpoint(
     recorder: SQLiteTraceRecorder, source: TraceRootSource,
 ) -> None:

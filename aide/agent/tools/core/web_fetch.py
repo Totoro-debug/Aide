@@ -361,6 +361,7 @@ class WebFetchTool(BaseTool):
                 addresses=(),
                 risk="dns_failure",
                 error_message="DNS resolution timed out.",
+                timed_out=True,
             )
 
     async def _fetch_direct(
@@ -631,7 +632,9 @@ def _raise_resolution_error(
 ) -> None:
     if resolution.risk == "dns_failure":
         detail = resolution.error_message or "DNS resolution failed."
-        raise ToolError(f"Web Fetch DNS resolution failed: {detail}")
+        raise ToolError(
+            f"Web Fetch DNS resolution failed: {detail}", timed_out=resolution.timed_out,
+        )
     if resolution.risk == "dns_empty":
         raise ToolError(
             f"Web Fetch DNS resolution returned no addresses for {target.host}."

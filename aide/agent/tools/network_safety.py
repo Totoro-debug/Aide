@@ -39,6 +39,7 @@ class TargetResolution:
     addresses: tuple[str, ...]
     risk: NetworkTargetRisk | None = None
     error_message: str | None = None
+    timed_out: bool = False
 
 
 async def resolve_target(
@@ -58,6 +59,7 @@ async def resolve_target(
                 addresses=(),
                 risk="dns_failure",
                 error_message=message,
+                timed_out=isinstance(error, TimeoutError),
             )
         addresses = tuple(dict.fromkeys(answers))
         if not addresses:

@@ -1,9 +1,11 @@
 """Command-line entry point for Aide."""
 
+from __future__ import annotations
+
 import asyncio
 import webbrowser
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import typer
 from rich.console import Console
@@ -11,16 +13,14 @@ from rich.console import Console
 from aide.agent.workspace_state import (
     WorkspaceStateError,
 )
-from aide.client.cli.conversation import (
-    TerminalConversationApp,
-    is_interactive_terminal,
-)
 from aide.config.agent_home import AgentHome
-from aide.management.commands import ManagementCommandDispatcher
 from aide.service.client import ServiceClient, ServiceStartupError
 from aide.service.errors import ServiceError
-from aide.skills.catalog import SkillMetadata
 from aide.utils.errors import ErrorInfo
+
+if TYPE_CHECKING:
+    from aide.management.commands import ManagementCommandDispatcher
+    from aide.skills.catalog import SkillMetadata
 
 app = typer.Typer(
     add_completion=False,
@@ -55,6 +55,8 @@ async def _run_service_cli_conversation(
     workspace: Path,
 ) -> None:
     """Run the terminal as a client of the shared local service."""
+    from aide.client.cli.conversation import TerminalConversationApp, is_interactive_terminal
+
     client = await ServiceClient.connect_or_start(agent_home, workspace, attach_workspace=False)
     try:
         config = await client.get_startup_config()
@@ -88,8 +90,8 @@ async def _run_service_cli_conversation(
             bus=client.bus,
             control=client.control,
             confirmation_coordinator=client.confirmation,
-            management_dispatcher=cast(ManagementCommandDispatcher, client.management_dispatcher),
-            skill_metadata=cast(tuple[SkillMetadata, ...], capabilities["skill_metadata"]),
+            management_dispatcher=cast("ManagementCommandDispatcher", client.management_dispatcher),
+            skill_metadata=cast("tuple[SkillMetadata, ...]", capabilities["skill_metadata"]),
             management_command_tokens=cast(
                 tuple[str, ...], capabilities["management_commands"]
             ),

@@ -11,6 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 import aide.client.cli.cli as cli
+import aide.client.cli.conversation as conversation
 from aide.agent.workspace_state import WorkspaceStateError
 from aide.config.agent_home import AgentHome
 from aide.service.client import ServiceClient, ServiceStartupError
@@ -145,8 +146,8 @@ async def test_cli_service_adapter_binds_terminal_and_closes_client_once(
                 raise failure
 
     monkeypatch.setattr(ServiceClient, "connect_or_start", connect)
-    monkeypatch.setattr(cli, "TerminalConversationApp", App)
-    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(conversation, "TerminalConversationApp", App)
+    monkeypatch.setattr(conversation, "is_interactive_terminal", lambda: True)
     if failure_stage is None:
         await cli._run_service_cli_conversation(agent_home=home, workspace=tmp_path)
         assert events == [
@@ -183,7 +184,7 @@ async def test_cli_connection_failure_never_constructs_terminal(
         pytest.fail("Terminal must wait for a successful service connection")
 
     monkeypatch.setattr(ServiceClient, "connect_or_start", connect)
-    monkeypatch.setattr(cli, "TerminalConversationApp", terminal)
+    monkeypatch.setattr(conversation, "TerminalConversationApp", terminal)
     with pytest.raises(ServiceStartupError) as raised:
         await cli._run_service_cli_conversation(agent_home=AgentHome(tmp_path), workspace=tmp_path)
     assert raised.value is failure
@@ -247,7 +248,7 @@ def test_cli_reports_unexpected_startup_failure_without_raw_exception_output(
     home.initialize()
     (agent_home / "config.toml").write_text(VALID_CONFIG, encoding="utf-8")
     monkeypatch.setattr(AgentHome, "production", lambda: home)
-    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(conversation, "is_interactive_terminal", lambda: True)
     secret = "sk-startup-secret C:\\sensitive\\skill\\SKILL.md"
 
     monkeypatch.chdir(workspace)
@@ -287,7 +288,7 @@ def test_cli_workspace_state_failure_outputs_one_safe_error_without_path(
     home.initialize()
     (agent_home / "config.toml").write_text(VALID_CONFIG, encoding="utf-8")
     monkeypatch.setattr(AgentHome, "production", lambda: home)
-    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(conversation, "is_interactive_terminal", lambda: True)
     secret_path = workspace / "private-state-location"
 
     async def fail_workspace(**kwargs: object) -> None:
@@ -315,7 +316,7 @@ def test_cli_reports_service_failure_once_without_raw_exception_output(
     home.initialize()
     (agent_home / "config.toml").write_text(VALID_CONFIG, encoding="utf-8")
     monkeypatch.setattr(AgentHome, "production", lambda: home)
-    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(conversation, "is_interactive_terminal", lambda: True)
     secret = "reset secret C:\\sensitive\\bus"
 
     async def fail_replacement(**kwargs: object) -> None:

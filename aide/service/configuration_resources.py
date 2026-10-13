@@ -18,6 +18,7 @@ from aide.agent.tools.mcp_runtime import (
 from aide.agent.tools.tool_gateway import BUILT_IN_TOOL_NAMES, BuiltInToolCatalog
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigLoader
+from aide.provider.factory import prepare_provider_adapters
 from aide.provider.model_router import ModelRouter, ProviderFactory
 from aide.service.configuration import ConfigurationSnapshot
 from aide.skills.catalog import SkillLoader
@@ -76,6 +77,9 @@ class ConfigurationResourceManager:
                 return cached
             if previous is not None and previous.snapshot == snapshot:
                 return previous
+            prepare_provider_adapters(
+                provider.protocol for provider in snapshot.configuration.models.providers.values()
+            )
             router = (
                 previous.router.fork(snapshot.configuration) if previous is not None else
                 ModelRouter(configuration=snapshot.configuration, provider_factory=self._provider_factory)

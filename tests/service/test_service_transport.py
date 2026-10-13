@@ -21,6 +21,7 @@ from aiohttp.test_utils import TestServer
 from yarl import URL
 
 import aide.client.cli.cli as cli
+import aide.client.cli.conversation as conversation
 import aide.service.runtime.projections as service_runtime
 from aide.agent.session.restore import RestoreMode
 from aide.agent.session.session import Session
@@ -1854,8 +1855,8 @@ async def test_cli_entry_binds_terminal_to_service_adapters(
             assert status.status_view is not None
 
     monkeypatch.setattr(ServiceClient, "connect_or_start", classmethod(connect))
-    monkeypatch.setattr(cli, "TerminalConversationApp", FakeTerminalApp)
-    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(conversation, "TerminalConversationApp", FakeTerminalApp)
+    monkeypatch.setattr(conversation, "is_interactive_terminal", lambda: True)
     try:
         await cli._run_service_cli_conversation(agent_home=home, workspace=workspace)
         assert len(connected) == 1

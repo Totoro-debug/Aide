@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
@@ -31,7 +31,10 @@ from aide.agent.confirmation import (
     ForegroundConfirmationOwner,
     SubAgentConfirmationOwner,
 )
-from aide.agent.loop import ForegroundConversationProjection, TerminalAgentRunExecutorControl
+from aide.agent.conversation_contracts import (
+    ForegroundConversationProjection,
+    TerminalAgentRunExecutorControl,
+)
 from aide.agent.message_bus import InboundMessage, MessageBus, OutboundMessage
 from aide.agent.permission import ToolPermissionLevel
 from aide.agent.session.backup_store import BackupGap, BackupIntegrityIssue
@@ -44,7 +47,6 @@ from aide.agent.session.restore import (
     RestoreTarget,
 )
 from aide.agent.session.session import RestoreAnchor, SessionRestoreResult
-from aide.agent.tools.tool_gateway import ConfirmationRequest
 from aide.config.agent_home import AgentHome
 from aide.service.discovery import (
     DEFAULT_SERVICE_HOST,
@@ -55,6 +57,9 @@ from aide.service.discovery import (
     read_discovery,
 )
 from aide.service.errors import ServiceError
+
+if TYPE_CHECKING:
+    from aide.agent.tools.tool_gateway import ConfirmationRequest
 
 
 class ServiceStartupError(RuntimeError):
@@ -1541,6 +1546,8 @@ def _projection(snapshot: Mapping[str, object]) -> ForegroundConversationProject
 
 
 def _confirmation_request(value: Mapping[str, object]) -> ConfirmationRequest:
+    from aide.agent.tools.tool_gateway import ConfirmationRequest
+
     details_value = value.get("details")
     warnings_value = value.get("warnings")
     reason_value = value.get("reason")

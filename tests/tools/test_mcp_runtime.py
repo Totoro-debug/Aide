@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import mcp.types as types
 import pytest
@@ -30,6 +30,9 @@ from tests.fixtures.mcp_wire import (
     stdio_wire_configuration,
     wire_result,
 )
+
+if TYPE_CHECKING:
+    from aide.agent.tools._mcp_sdk import _MCPProtocolTrace
 
 
 @pytest.mark.parametrize(
@@ -583,7 +586,7 @@ async def test_default_connection_discovers_provider_safe_names_and_reuses_tools
     @asynccontextmanager
     async def transport(
         configuration: MCPServerConfiguration, workspace: Path,
-        *, protocol_trace: mcp_adapter._MCPProtocolTrace | None = None,
+        *, protocol_trace: _MCPProtocolTrace | None = None,
     ) -> AsyncIterator[object]:
         assert protocol_trace is not None
         lifecycle.append("transport_entered")

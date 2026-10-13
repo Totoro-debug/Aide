@@ -18,6 +18,7 @@ from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, ImageContent, TextContent, Tool
 from pydantic import ValidationError
 
+import aide.agent.tools._mcp_sdk as mcp_sdk
 import aide.agent.tools.mcp as mcp_adapter
 from aide.agent.tools.base import ToolError
 from aide.agent.tools.mcp import (
@@ -1362,7 +1363,7 @@ async def test_stdio_transport_resolves_cwd_and_inherits_environment(
         captured["parameters"] = parameters
         yield ("read", "write")
 
-    monkeypatch.setattr(mcp_adapter, "stdio_client", fake_stdio)
+    monkeypatch.setattr(mcp_sdk, "stdio_client", fake_stdio)
     workspace = Path("C:/workspace")
     configuration = _server_configuration(
         args=("-c", "pass"),
@@ -1404,8 +1405,8 @@ async def test_http_transport_passes_headers_and_closes_created_client(
         captured["client"] = http_client
         yield ("read", "write")
 
-    monkeypatch.setattr(mcp_adapter, "create_mcp_http_client", fake_create)
-    monkeypatch.setattr(mcp_adapter, "streamable_http_client", fake_http)
+    monkeypatch.setattr(mcp_sdk, "create_mcp_http_client", fake_create)
+    monkeypatch.setattr(mcp_sdk, "streamable_http_client", fake_http)
     configuration = _server_configuration(
         transport="streamable-http",
         url="http://127.0.0.1:8765/mcp",

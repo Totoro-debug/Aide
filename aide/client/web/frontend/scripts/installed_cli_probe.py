@@ -19,7 +19,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import aide
-import aide.client.cli.cli as cli
+import aide.client.cli.conversation as conversation
 from aide.agent.message_bus import InboundMessage
 from aide.agent.workspace_state import WorkspaceState
 from aide.client.cli.conversation import TerminalConversationApp
@@ -780,7 +780,7 @@ console_entry = next(iter(entry_points(group="console_scripts", name="aide")))
 entry = console_entry
 sys.argv = ["aide"]
 with (
-    patch.object(cli, "is_interactive_terminal", return_value=True),
+    patch.object(conversation, "is_interactive_terminal", return_value=True),
     patch.object(TerminalConversationApp, "run_async", headless_terminal),
 ):
     try:

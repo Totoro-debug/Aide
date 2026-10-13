@@ -8,7 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, NoReturn, Protocol, cast
+from typing import Any, Literal, NoReturn, cast
 from uuid import UUID
 
 from loguru import logger
@@ -29,6 +29,12 @@ from aide.agent.context.run_context import (
     CompactionProjection,
     ContextController,
     latest_main_agent_usage_anchor,
+)
+from aide.agent.conversation_contracts import (
+    ForegroundConversationProjection as ForegroundConversationProjection,
+)
+from aide.agent.conversation_contracts import (
+    TerminalAgentRunExecutorControl as TerminalAgentRunExecutorControl,
 )
 from aide.agent.memory.manager import MemoryManager
 from aide.agent.message_bus import (
@@ -116,28 +122,6 @@ from aide.utils.async_tasks import await_task_preserving_cancellation
 from aide.utils.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.utils.text import normalize_title, normalize_title_candidate
 from aide.utils.validation import empty_token_usage
-
-
-@dataclass(frozen=True, slots=True)
-class ForegroundConversationProjection:
-    """Presentation-safe snapshot of the active foreground conversation."""
-
-    session_id: str
-    messages: tuple[dict[str, Any], ...]
-
-
-class TerminalAgentRunExecutorControl(Protocol):
-    """Foreground control surface including Terminal history projection."""
-
-    @property
-    def has_active_run(self) -> bool: ...
-
-    def foreground_input_admitted(self) -> bool: ...
-
-    async def cancel_active_run(self) -> None: ...
-
-    def project_foreground_conversation(self) -> ForegroundConversationProjection: ...
-
 
 type RuntimeConfirmationRequester = Callable[
     [ConfirmationEnvelope], Awaitable[ConfirmationDecision]

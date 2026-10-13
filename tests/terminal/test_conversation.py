@@ -33,6 +33,7 @@ from textual.widget import Widget
 from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
 
 import aide.client.cli.cli as cli
+import aide.client.cli.conversation as conversation
 from aide.agent.confirmation import (
     BackgroundConfirmationOwner,
     ConfirmationAborted,
@@ -983,8 +984,8 @@ async def _run_cli_terminal_case(
                 await scenario(self, pilot)
 
     monkeypatch.setattr("aide.service.runtime.workspace.AgentRunExecutor", DeterministicExecutor)
-    monkeypatch.setattr(cli, "TerminalConversationApp", ScenarioApp)
-    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(conversation, "TerminalConversationApp", ScenarioApp)
+    monkeypatch.setattr(conversation, "is_interactive_terminal", lambda: True)
     monkeypatch.setattr(
         "aide.service.runtime.service.create_provider", lambda _configuration: selected_provider
     )

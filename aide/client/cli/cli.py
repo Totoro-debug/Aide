@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import webbrowser
+from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -19,6 +21,7 @@ from aide.service.errors import ServiceError
 from aide.utils.errors import ErrorInfo
 
 if TYPE_CHECKING:
+    from aide.client.cli.conversation import TerminalConversationApp
     from aide.management.commands import ManagementCommandDispatcher
     from aide.skills.catalog import SkillMetadata
 
@@ -49,16 +52,23 @@ def _print_error_info(error: ErrorInfo | ServiceStartupError | ServiceError) -> 
     )
 
 
+def _load_terminal_conversation() -> tuple[type[TerminalConversationApp], Callable[[], bool]]:
+    from aide.client.cli.conversation import TerminalConversationApp, is_interactive_terminal
+
+    return TerminalConversationApp, is_interactive_terminal
+
+
 async def _run_service_cli_conversation(
     *,
     agent_home: AgentHome,
     workspace: Path,
 ) -> None:
     """Run the terminal as a client of the shared local service."""
-    from aide.client.cli.conversation import TerminalConversationApp, is_interactive_terminal
-
-    client = await ServiceClient.connect_or_start(agent_home, workspace, attach_workspace=False)
+    terminal_preparation = asyncio.create_task(asyncio.to_thread(_load_terminal_conversation))
+    client: ServiceClient | None = None
     try:
+        client = await ServiceClient.connect_or_start(agent_home, workspace, attach_workspace=False)
+        TerminalConversationApp, is_interactive_terminal = await asyncio.shield(terminal_preparation)
         config = await client.get_startup_config()
         startup = config.get("startup")
         if not isinstance(startup, dict) or not isinstance(startup.get("available"), bool):
@@ -98,7 +108,13 @@ async def _run_service_cli_conversation(
         )
         await terminal_app.run_async()
     finally:
-        await client.close()
+        try:
+            # Shield the import: cancelling its Future cannot stop the worker thread.
+            with suppress(Exception):
+                await asyncio.shield(terminal_preparation)
+        finally:
+            if client is not None:
+                await client.close()
 
 
 async def _create_web_launch_url() -> str:

@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, Protocol
 
 from loguru import logger
 
 from aide.agent.context.budget import request_fits_model_context
+from aide.agent.memory.contracts import DreamResult as DreamResult
 from aide.agent.memory.manager import (
     MemoryEditMismatchError,
     MemoryEditReadError,
@@ -35,23 +35,6 @@ from aide.utils.errors import TURN_CANCELLED_MESSAGE, ErrorInfo
 from aide.utils.validation import require_nonnegative_int
 
 _MEMORY_JSON_TRANSLATION = str.maketrans({"`": r"\u0060"})
-
-
-@dataclass(frozen=True, slots=True)
-class DreamResult:
-    """Observable summary returned by one Dream execution."""
-
-    status: str
-    processed_count: int
-    memory_updated: bool
-    cursor: int
-    error: ErrorInfo | None = None
-
-    def __post_init__(self) -> None:
-        require_nonnegative_int(self.processed_count, field="processed_count")
-        require_nonnegative_int(self.cursor, field="cursor")
-        if not isinstance(self.memory_updated, bool):
-            raise ValueError("memory_updated must be a boolean")
 
 
 class DreamEditFileTool(BaseTool):

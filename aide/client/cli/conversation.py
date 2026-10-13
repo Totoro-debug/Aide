@@ -35,7 +35,7 @@ from aide.agent.confirmation import (
     ConfirmationPresentationCoordinator,
     ConfirmationUnavailable,
 )
-from aide.agent.loop import (
+from aide.agent.conversation_contracts import (
     ForegroundConversationProjection,
     TerminalAgentRunExecutorControl,
 )
@@ -100,7 +100,7 @@ from aide.management.commands import (
     ManagementCommandResult,
 )
 from aide.management.service import RuntimeStatus, SessionListingEntry
-from aide.provider.models import ReasoningEffort
+from aide.provider.session_configuration import ReasoningEffort
 from aide.skills.catalog import SkillMetadata
 
 _RELOAD_SKILL_MANAGEMENT_COMMAND_TOKEN = RELOAD_SKILL_MANAGEMENT_COMMAND.token

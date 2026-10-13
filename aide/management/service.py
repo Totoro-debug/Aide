@@ -14,9 +14,8 @@ from aide.agent.context.budget import (
     ContextUsageSnapshot,
     ProjectionSource,
 )
-from aide.agent.context.run_context import ContextController
 from aide.agent.context.tokenizer import ContextTokenizerError
-from aide.agent.memory.dream import DreamResult
+from aide.agent.memory.contracts import DreamResult
 from aide.agent.permission import (
     RuntimePermissionControl,
     ToolPermissionLevel,
@@ -31,8 +30,11 @@ from aide.agent.session.session import (
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigLoader, ConfigView
-from aide.provider.models import REASONING_EFFORT_LEVELS, ReasoningEffort
-from aide.provider.session_configuration import SessionModelConfiguration
+from aide.provider.session_configuration import (
+    REASONING_EFFORT_LEVELS,
+    ReasoningEffort,
+    SessionModelConfiguration,
+)
 from aide.skills.catalog import SkillMetadata
 from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
@@ -443,6 +445,8 @@ class ManagementViewService:
 
     async def status(self) -> RuntimeStatus:
         """Return all required runtime and current-session status fields."""
+        from aide.agent.context.run_context import ContextController
+
         try:
             projection = self._current_agent_loop().runtime_status_input()
             chat_reasoning_effort = (

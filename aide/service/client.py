@@ -1637,7 +1637,7 @@ def _management_result(value: Mapping[str, object]) -> Any:
 
 
 def _dream_result(value: object) -> Any:
-    from aide.agent.memory.dream import DreamResult
+    from aide.agent.memory.contracts import DreamResult
 
     if not isinstance(value, dict):
         return None

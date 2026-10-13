@@ -12,7 +12,7 @@ from textual.message import Message
 from textual.widgets import Static
 
 from aide.agent.permission import PERMISSION_LEVELS, ToolPermissionLevel
-from aide.provider.models import REASONING_EFFORT_LEVELS, ReasoningEffort
+from aide.provider.session_configuration import REASONING_EFFORT_LEVELS, ReasoningEffort
 
 _PERMISSION_LABELS: Final[tuple[str, ...]] = (
     "Read-Only",

@@ -8,7 +8,7 @@ from typing import Protocol
 
 from loguru import logger
 
-from aide.agent.memory.dream import DreamResult
+from aide.agent.memory.contracts import DreamResult
 from aide.agent.permission import ToolPermissionLevel
 from aide.agent.session.restore import RestoreMode, RestorePlan, RestoreResult
 from aide.config.config import ConfigView
@@ -21,7 +21,7 @@ from aide.management.service import (
     SessionListingEntry,
     SessionListingReport,
 )
-from aide.provider.models import ReasoningEffort
+from aide.provider.session_configuration import ReasoningEffort
 from aide.skills.catalog import SkillMetadata
 from aide.utils.errors import ErrorInfo
 from aide.utils.time import format_rfc3339_milliseconds

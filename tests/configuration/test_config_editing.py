@@ -183,6 +183,38 @@ def test_valid_patch_preserves_comments_and_unknown_toml(tmp_path: Path) -> None
     assert "minimal-secret" in after
 
 
+def test_settings_save_filters_bad_keyword_items_and_persists_normalized_values(
+    tmp_path: Path,
+) -> None:
+    loader = _loader(tmp_path, FULL_EDITABLE_CONFIG)
+    values = [
+        None,
+        1,
+        True,
+        "中文",
+        "123search",
+        "a" * 129,
+        " Pull Request ",
+        "PULL REQUEST",
+        "a" * 128,
+        "GitHub",
+        "code review",
+        "repository",
+        "extra",
+    ]
+
+    result = loader.patch_editable_fields(
+        loader.revision(),
+        {"mcp": {"http": {"tool_keywords": {"search": values}}, "stdio": {}}},
+    )
+
+    expected = ("pull request", "a" * 128, "github", "code review", "repository")
+    assert result.configuration.mcp["http"].tool_keywords == {"search": expected}
+    assert loader.load().mcp["http"].tool_keywords == {"search": expected}
+    assert "PULL REQUEST" not in loader.path.read_text(encoding="utf-8")
+    assert loader.diagnostics == ()
+
+
 def test_invalid_patch_does_not_change_bytes(tmp_path: Path) -> None:
     loader = _loader(tmp_path)
     before = loader.path.read_bytes()
@@ -593,7 +625,7 @@ def test_partial_mcp_patch_cannot_ignore_incompatible_fields(
         ("mcp", "http", "headers", {"X-Key": {"configured": 1}}),
         ("mcp", "http", "connect_timeout", 0),
         ("mcp", "http", "call_timeout", True),
-        ("mcp", "http", "tool_keywords", {"echo": ["中文"]}),
+        ("mcp", "http", "tool_keywords", {"echo": "invalid-array"}),
         ("mcp", "stdio", "command", ""),
         ("mcp", "stdio", "args", [False]),
         ("mcp", "stdio", "cwd", " "),

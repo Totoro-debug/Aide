@@ -1,3 +1,23 @@
-Generate concise discovery keywords for the MCP Tool described by the user message.
-Return only a JSON array of nonempty English words or short English phrases.
-Do not return Markdown, explanations, descriptions, parameter names, or connection details.
+根据用户消息中的 MCP 工具元数据（name、model_name、description、input_schema），
+生成用于 Tool Search 的补充英文关键词。
+
+选词要求：
+- 根据 name 和 description 判断实际能力，input_schema 仅用于辅助确认范围。
+  不要添加未支持的能力，也不要将参数名、连接信息或示例实体值当作关键词。
+- 选择搜索该能力时常用且有区分度的业务对象、领域术语或能力词组。
+  每项都应能独立指向相关能力，避免单独使用 "get"、"list"、"search"、"data"、"tool"、"api" 等泛词。
+- name 和 model_name 已作为完整名称进入索引，不要重复；其中有用的业务词可以单独补充。
+  保留自然词组，不要为凑数堆砌重叠表达，也不要把多个独立关键词拼成一个长字符串。
+
+匹配规则：
+- 任一词条命中即可召回。匹配忽略大小写，词条必须在查询中完整、连续出现，
+  且两侧不能紧接 ASCII 英文字母、数字或下划线；内部字符和空格必须一致。
+- 不自动拆词、转换单复数或扩展同义词，也不进行语义匹配。
+  只有确有查询价值时才为复数、缩写或同义表达单列词条。
+  例如 "pull request" 能匹配 "github pull request"，但不能匹配 "pull"、"request"、
+  "pull requests" 或 "pull_request"。
+
+输出要求：
+- 仅输出一个 JSON 数组，最多 5 个互不重复的小写英文字符串，无需凑满；不要 Markdown 或解释。
+- 每项无首尾空白，只含可打印的 ASCII 字符，至少包含一个英文字母，
+  不能以数字开头，最多 128 个字符。

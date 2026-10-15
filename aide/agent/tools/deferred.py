@@ -14,6 +14,7 @@ from aide.agent.tools.search import (
     ToolSearchIndex,
 )
 from aide.agent.tools.tool_gateway import ToolGateway
+from aide.config.config import normalize_mcp_tool_keywords
 
 RUN_BASELINE_TOOL_NAMES: tuple[str, ...] = (
     "read_file",
@@ -108,12 +109,13 @@ def _document_for_tool(
 
     builtin_keywords = BUILTIN_TOOL_SEARCH_KEYWORDS.get(tool.name, ())
     configured_keywords = mcp_keywords.get(tool.name, ())
-    if isinstance(configured_keywords, (str, bytes)):
-        raise TypeError("Agent Run MCP keywords must contain string sequences")
-    keyword_terms = tuple(configured_keywords)
-    if keyword_terms == (original_name,):
-        keyword_terms = ()
-    terms = (original_name, *builtin_keywords, *keyword_terms)
+    keyword_terms = normalize_mcp_tool_keywords(configured_keywords)
+    terms = tuple(
+        dict.fromkeys(
+            term.strip().lower()
+            for term in (original_name, tool.name, *builtin_keywords, *keyword_terms)
+        )
+    )
     return ToolSearchDocument(
         name=tool.name,
         terms=terms,

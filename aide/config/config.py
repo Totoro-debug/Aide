@@ -195,25 +195,27 @@ class ResolvedModelRoute:
 
 
 def normalize_mcp_tool_keywords(value: object) -> tuple[str, ...]:
-    """Validate and canonicalize one MCP Tool keyword sequence."""
+    """Filter one MCP Tool's supplementary keywords, retaining at most five."""
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise TypeError("MCP Tool keywords must be an array of strings")
     normalized: list[str] = []
     for item in value:
         if not isinstance(item, str):
-            raise TypeError("MCP Tool keywords must be an array of strings")
-        keyword = item.strip()
+            continue
+        keyword = item.strip().lower()
         if not keyword:
             continue
         if (
             not keyword.isascii()
+            or keyword[0].isdigit()
+            or len(keyword) > 128
             or re.search(r"[A-Za-z]", keyword) is None
             or any(ord(character) < 0x20 or ord(character) == 0x7F for character in keyword)
         ):
-            raise ValueError("MCP Tool keywords must contain English terms")
+            continue
         if keyword not in normalized:
             normalized.append(keyword)
-    return tuple(normalized)
+    return tuple(normalized[:5])
 
 
 @dataclass(frozen=True, slots=True)

@@ -332,9 +332,7 @@
           "type": "object",
           "additionalProperties": {
             "type": "array",
-            "items": {
-              "type": "string"
-            }
+            "items": {}
           }
         },
         "name": {
@@ -374,9 +372,7 @@
               },
               "keywords": {
                 "type": "array",
-                "items": {
-                  "type": "string"
-                }
+                "items": {}
               }
             }
           }

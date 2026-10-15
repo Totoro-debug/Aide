@@ -8,16 +8,19 @@ from typing import Any, cast
 import pytest
 
 import aide.config.config as config_module
+from aide.agent.tools.deferred import build_agent_run_gateway
 from aide.agent.tools.mcp import MCPTool, MCPToolSpec
 from aide.agent.tools.mcp_keywords import MCPKeywordPreparer
+from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
 from aide.config.agent_home import AgentHome
-from aide.config.config import ConfigLoader, MCPServerConfiguration
+from aide.config.config import ConfigLoader, MCPServerConfiguration, normalize_mcp_tool_keywords
 from aide.provider.model_router import ModelRouter
 from aide.provider.models import (
     AssistantModelMessage,
     ModelResponse,
     ModelUsage,
 )
+from aide.templates import render_template
 from aide.trace.sqlite_recorder import SQLiteTraceRecorder
 from aide.trace.types import TraceOrigin, TracePurpose
 from tests.fixtures import ScriptedFakeProvider
@@ -208,6 +211,11 @@ command = "server"
     assert "search_issues" in serialized
     assert "Search GitHub issues." in serialized
     assert "input_schema" in serialized
+    assert "mcp_github_search_issues" in serialized
+    assert messages[0] == {
+        "role": "system",
+        "content": render_template("mcp-keyword-system-prompt.md"),
+    }
 
     saved = config_path.read_text(encoding="utf-8")
     assert "tool_keywords" in saved
@@ -275,7 +283,7 @@ enabled = true
 transport = "stdio"
 command = "server"
 [mcp.servers.github.tool_keywords]
-search_issues = ["user", "configured"]
+search_issues = [1, "搜索", "123search", " User ", "USER", "configured"]
 """,
                 encoding="utf-8",
             )
@@ -294,7 +302,7 @@ search_issues = ["user", "configured"]
 
 
 @pytest.mark.asyncio
-async def test_preparer_falls_back_to_remote_name_without_persisting_and_caches_it(
+async def test_preparer_caches_failure_without_persisting_identity_fallback(
     tmp_path: Path,
 ) -> None:
     tool = _tool()
@@ -314,9 +322,139 @@ command = "server"
     first = await preparer.prepare((tool,), {"github": _server()})
     second = await preparer.prepare((tool,), {"github": _server()})
 
-    assert first == second == {"mcp_github_search_issues": ("search_issues",)}
+    assert first == second == {"mcp_github_search_issues": ()}
     assert len(router.calls) == 1
     assert "tool_keywords" not in config_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ("configured", "generated", "cached"))
+async def test_preparer_applies_one_filter_to_all_keyword_sources(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    candidates = [
+        "123search",
+        "搜索",
+        "a" * 129,
+        " Pull Request ",
+        "PULL REQUEST",
+        "a" * 128,
+        " GitHub ",
+        "code review",
+        "repository",
+        "extra",
+    ]
+    expected = normalize_mcp_tool_keywords(candidates)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[mcp.servers.github]\nenabled = true\ntransport = "stdio"\ncommand = "server"\n',
+        encoding="utf-8",
+    )
+    router = FakeRouter([json.dumps([None, 1, *candidates])])
+    preparer = MCPKeywordPreparer(router, _config_loader(tmp_path))
+    server = (
+        _server(keywords={"search_issues": candidates}) if source == "configured" else _server()
+    )
+    if source == "cached":
+        await preparer.prepare((_tool(),), {"github": server})
+        preparer._cache = dict.fromkeys(preparer._cache, tuple(candidates))
+
+    result = await preparer.prepare((_tool(),), {"github": server})
+
+    assert result == {"mcp_github_search_issues": expected}
+    assert len(router.calls) == (0 if source == "configured" else 1)
+    if source != "configured":
+        saved = _config_loader(tmp_path).load().mcp["github"].tool_keywords
+        assert saved == {"search_issues": expected}
+
+
+@pytest.mark.asyncio
+async def test_preparer_generates_when_configured_keywords_all_filter_out(tmp_path: Path) -> None:
+    router = FakeRouter(['["github", "pull request"]'])
+    preparer = MCPKeywordPreparer(router, _config_loader(tmp_path))
+
+    result = await preparer.prepare(
+        (_tool(),),
+        {"github": _server(keywords={"search_issues": ["123search", "搜索", " "]})},
+    )
+
+    assert result == {"mcp_github_search_issues": ("github", "pull request")}
+    assert len(router.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_preparer_regenerates_unusable_legacy_cache_but_caches_numeric_name_failure(
+    tmp_path: Path,
+) -> None:
+    router = FakeRouter(['["initial"]', '["github"]', "not-json"])
+    preparer = MCPKeywordPreparer(router, _config_loader(tmp_path))
+    await preparer.prepare((_tool(),), {"github": _server()})
+    preparer._cache = dict.fromkeys(preparer._cache, ("123invalid", "搜索"))
+
+    assert await preparer.prepare((_tool(),), {"github": _server()}) == {
+        "mcp_github_search_issues": ("github",),
+    }
+    numeric_tool = _tool(remote_name="123search", model_name="mcp_github_123search")
+    first = await preparer.prepare((numeric_tool,), {"github": _server()})
+    second = await preparer.for_router(router).prepare((numeric_tool,), {"github": _server()})
+
+    assert first == second == {"mcp_github_123search": ()}
+    assert len(router.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_preparer_does_not_recreate_server_removed_during_generation(tmp_path: Path) -> None:
+    loader = _config_loader(tmp_path)
+    loader.path.write_text(
+        '[mcp.servers.github]\nenabled = true\ntransport = "stdio"\ncommand = "server"\n',
+        encoding="utf-8",
+    )
+
+    class RemovingRouter(FakeRouter):
+        async def complete(
+            self,
+            route: str,
+            *,
+            messages: Sequence[dict[str, Any]],
+            tools: Sequence[dict[str, Any]],
+        ) -> ModelResponse:
+            response = await super().complete(route, messages=messages, tools=tools)
+            loader.path.write_text("# Server removed by user.\n", encoding="utf-8")
+            return response
+
+    router = RemovingRouter(['["github"]'])
+    result = await MCPKeywordPreparer(router, loader).prepare((_tool(),), {"github": _server()})
+
+    assert result == {"mcp_github_search_issues": ("github",)}
+    assert loader.path.read_text(encoding="utf-8") == "# Server removed by user.\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", ('["Pull Request", 1, "PULL REQUEST", "123bad"]', "not-json"))
+async def test_preparation_integrates_with_run_search_without_additional_generation(
+    tmp_path: Path,
+    response: str,
+) -> None:
+    tool = _tool(remote_name="123lookup", model_name="mcp_github_123lookup")
+    router = FakeRouter([response])
+    preparer = MCPKeywordPreparer(router, _config_loader(tmp_path))
+    keywords = await preparer.prepare((tool,), {"github": _server()})
+    base = ToolGateway(workspace=tmp_path, additional_tools=(tool,))
+    queries = (tool.remote_name, tool.name, "pull request")
+
+    for query in queries:
+        run = build_agent_run_gateway(base, mcp_keywords=keywords)
+        result = await run.call(
+            ModelToolCall(id="search", name="tool_search", arguments=json.dumps({"query": query})),
+        )
+        expected = [tool.name] if query != "pull request" or response != "not-json" else []
+        assert result.status == "success"
+        assert json.loads(result.content) == expected
+        assert (tool.name in run.exposed_names) == bool(expected)
+
+    assert len(router.calls) == 1
+    assert tool.name not in build_agent_run_gateway(base, mcp_keywords=keywords).exposed_names
 
 
 @pytest.mark.asyncio
@@ -328,10 +466,10 @@ command = "server"
         "[]",
         '["搜索"]',
         '["123"]',
-        '["search", 1]',
+        "[1, false, null]",
     ],
 )
-async def test_preparer_uses_only_the_remote_name_for_invalid_generated_output(
+async def test_preparer_leaves_identity_fallback_to_index_for_invalid_generated_output(
     content: str,
     tmp_path: Path,
 ) -> None:
@@ -340,7 +478,7 @@ async def test_preparer_uses_only_the_remote_name_for_invalid_generated_output(
 
     result = await preparer.prepare((_tool(),), {"github": _server()})
 
-    assert result == {"mcp_github_search_issues": ("search_issues",)}
+    assert result == {"mcp_github_search_issues": ()}
 
 
 @pytest.mark.asyncio
@@ -430,7 +568,7 @@ async def test_preparer_keeps_other_results_when_one_generation_fails(tmp_path: 
     )
 
     assert result == {
-        "mcp_github_broken": ("broken",),
+        "mcp_github_broken": (),
         "mcp_github_working": ("working",),
     }
     assert len(router.calls) == 2

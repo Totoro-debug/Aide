@@ -16,25 +16,11 @@ MAX_TOOL_SEARCH_RESULTS: Final[int] = 3
 
 BUILTIN_TOOL_SEARCH_KEYWORDS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
     {
-        "web_search": ("web", "search", "internet", "lookup"),
-        "web_fetch": ("web", "fetch", "url", "http", "page", "content"),
+        "web_search": ("web search", "web", "internet", "internet search", "search engine"),
+        "web_fetch": ("web fetch", "web", "internet", "http", "https", "url", "webpage"),
         "schedule": ("schedule", "job", "reminder", "cron", "timer"),
     }
 )
-
-_ASCII_TOKEN = re.compile(r"[A-Za-z0-9]+")
-_UPPERCASE_WORD_BOUNDARY = re.compile(r"([A-Z]+)([A-Z][a-z])")
-_LOWERCASE_WORD_BOUNDARY = re.compile(r"([a-z0-9])([A-Z])")
-
-
-def tokenize_tool_search_text(text: str) -> tuple[str, ...]:
-    """Split English search text into lowercase ASCII alphanumeric terms."""
-    if not isinstance(text, str):
-        raise TypeError("Tool Search text must be a string")
-
-    separated = _UPPERCASE_WORD_BOUNDARY.sub(r"\1 \2", text)
-    separated = _LOWERCASE_WORD_BOUNDARY.sub(r"\1 \2", separated)
-    return tuple(token.lower() for token in _ASCII_TOKEN.findall(separated))
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +45,8 @@ class ToolSearchDocument:
         for term in self.terms:
             if not isinstance(term, str):
                 raise TypeError("Tool Search document terms must contain only strings")
-            normalized_terms.extend(tokenize_tool_search_text(term))
+            if normalized_term := term.strip().lower():
+                normalized_terms.append(normalized_term)
         normalized = tuple(normalized_terms)
         object.__setattr__(self, "terms", normalized)
 
@@ -100,6 +87,10 @@ class ToolSearchIndex:
         self._postings: Mapping[str, tuple[_Posting, ...]] = MappingProxyType(
             {term: tuple(entries) for term, entries in postings.items()}
         )
+        self._term_matchers = tuple(
+            (term, re.compile(r"(?<![a-z0-9_])" + re.escape(term) + r"(?![a-z0-9_])"))
+            for term in postings
+        )
         self._inverse_document_frequency: Mapping[str, float] = MappingProxyType(
             {
                 term: log(1 + (document_count - frequency + 0.5) / (frequency + 0.5))
@@ -113,7 +104,12 @@ class ToolSearchIndex:
         excluded_names: Collection[str] = (),
     ) -> tuple[str, ...]:
         """Return up to three eligible model names ranked by BM25 score."""
-        query_terms = tuple(dict.fromkeys(tokenize_tool_search_text(query)))
+        if not isinstance(query, str):
+            raise TypeError("Tool Search text must be a string")
+        normalized_query = query.lower()
+        query_terms = tuple(
+            term for term, matcher in self._term_matchers if matcher.search(normalized_query)
+        )
         if not query_terms:
             return ()
 

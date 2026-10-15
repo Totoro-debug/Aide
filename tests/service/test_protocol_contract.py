@@ -31,6 +31,24 @@ def _validator(definition: str) -> Draft202012Validator:
     return Draft202012Validator(schema)
 
 
+@pytest.mark.parametrize("field", ("tool_keywords", "tool_keyword_rows"))
+def test_keyword_patch_contract_accepts_mixed_items_but_requires_arrays(field: str) -> None:
+    validator = _validator("config_patch_mcp_fields")
+    mixed: list[object] = [None, 1, True, {}, "搜索", " Pull Request "]
+    value = (
+        {"search": mixed} if field == "tool_keywords" else [{"name": "search", "keywords": mixed}]
+    )
+
+    validator.validate({field: value})
+    invalid = (
+        {"search": "not-array"}
+        if field == "tool_keywords"
+        else [{"name": "search", "keywords": "not-array"}]
+    )
+    with pytest.raises(ValidationError):
+        validator.validate({field: invalid})
+
+
 @pytest.mark.parametrize(
     ("definition", "value"),
     [

@@ -216,6 +216,63 @@ async def test_available_models_excludes_unusable_providers(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("use_rows", (False, True))
+async def test_config_http_save_filters_keyword_items_without_repairing_server(
+    config_http: ConfigHttp,
+    use_rows: bool,
+) -> None:
+    service, server, client_id, control = config_http
+    loader = ConfigLoader(service.agent_home)
+    token = create_credential(service.agent_home)
+    candidates = [
+        None,
+        1,
+        True,
+        "搜索",
+        "123search",
+        "a" * 129,
+        " Pull Request ",
+        "PULL REQUEST",
+        "GitHub",
+    ]
+    keyword_fields = (
+        {"tool_keyword_rows": [{"name": "search", "keywords": candidates}]}
+        if use_rows
+        else {"tool_keywords": {"search": candidates}}
+    )
+    async with aiohttp.ClientSession() as http:
+        response = await http.patch(
+            server.make_url("/api/v1/config"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Aide-CSRF": token,
+                "X-Aide-Client": client_id,
+                "X-Aide-Control": control,
+            },
+            json={
+                "request_id": "filter-keywords",
+                "revision": loader.revision(),
+                "fields": {
+                    "mcp": {
+                        "fixture": {
+                            "enabled": False,
+                            "transport": "stdio",
+                            "command": "fixture",
+                            **keyword_fields,
+                        }
+                    }
+                },
+                "secrets": {},
+            },
+        )
+        body = await response.json()
+
+    assert response.status == 200, body
+    assert loader.load().mcp["fixture"].tool_keywords == {"search": ("pull request", "github")}
+    assert loader.diagnostics == ()
+
+
+@pytest.mark.asyncio
 async def test_config_patch_rejects_invalid_values_without_writing(
     config_http: ConfigHttp,
 ) -> None:

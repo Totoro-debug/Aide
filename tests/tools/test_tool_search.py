@@ -19,37 +19,26 @@ from aide.agent.tools.search import (
     MAX_TOOL_SEARCH_RESULTS,
     ToolSearchDocument,
     ToolSearchIndex,
-    tokenize_tool_search_text,
 )
 
 
 def _document(name: str, text: str, catalog_order: int) -> ToolSearchDocument:
     return ToolSearchDocument(
         name=name,
-        terms=tokenize_tool_search_text(text),
+        terms=tuple(text.split()),
         catalog_order=catalog_order,
-    )
-
-
-def test_tokenization_splits_case_separators_and_keeps_ascii_alphanumeric_terms() -> None:
-    assert tokenize_tool_search_text("MCPTool search_issues-v2") == (
-        "mcp",
-        "tool",
-        "search",
-        "issues",
-        "v2",
     )
 
 
 def test_document_normalizes_terms_and_remains_immutable() -> None:
     document = ToolSearchDocument(
         name="model_name",
-        terms=("Original_Name", "original-name"),
+        terms=(" Original_Name ", "original-name", "Pull Request", "", "  "),
         catalog_order=4,
     )
 
     assert document.name == "model_name"
-    assert document.terms == ("original", "name", "original", "name")
+    assert document.terms == ("original_name", "original-name", "pull request")
     with pytest.raises(FrozenInstanceError):
         document.name = "changed"  # type: ignore[misc]
 
@@ -78,7 +67,7 @@ def test_empty_corpora_are_safe_and_repeated_construction_is_deterministic() -> 
 def test_search_normalizes_queries_and_returns_the_exact_model_name() -> None:
     index = ToolSearchIndex((_document("mcp_github_search", "search issues", 0),))
 
-    assert index.search("ISSUE-search") == ("mcp_github_search",)
+    assert index.search("ISSUES-search") == ("mcp_github_search",)
 
 
 def test_bm25_hand_calculated_match_is_finite_and_deterministic() -> None:
@@ -131,13 +120,16 @@ def test_exclusions_are_applied_before_the_top_three_cap() -> None:
         tuple(_document(f"tool_{number}", "shared capability", number) for number in range(5))
     )
 
-    assert index.search("shared") == ("tool_0", "tool_1", "tool_2")
-    assert index.search("shared", excluded_names={"tool_0", "tool_1"}) == (
+    assert index.search("shared capability") == ("tool_0", "tool_1", "tool_2")
+    assert index.search("shared capability", excluded_names={"tool_0", "tool_1"}) == (
         "tool_2",
         "tool_3",
         "tool_4",
     )
-    assert index.search("shared", excluded_names={f"tool_{number}" for number in range(5)}) == ()
+    assert (
+        index.search("shared capability", excluded_names={f"tool_{number}" for number in range(5)})
+        == ()
+    )
 
 
 def test_repeated_searches_keep_fixed_statistics_and_progress_to_next_names() -> None:
@@ -162,6 +154,124 @@ def test_builtin_keyword_constants_cover_only_deferred_builtin_tools() -> None:
     assert all(keywords for keywords in BUILTIN_TOOL_SEARCH_KEYWORDS.values())
     with pytest.raises(TypeError):
         BUILTIN_TOOL_SEARCH_KEYWORDS["web_search"] = ("changed",)  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "pull request",
+        "Pull Request",
+        "github pull request",
+        "(PULL REQUEST)",
+        "拉取 pull request。",
+    ),
+)
+def test_complete_phrase_matches_at_ascii_word_boundaries(query: str) -> None:
+    index = ToolSearchIndex((ToolSearchDocument("opaque", ("Pull Request",), 0),))
+
+    assert index.search(query) == ("opaque",)
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "request",
+        "pull",
+        "request pull",
+        "pull requests",
+        "pull requested",
+        "get_pull request",
+        "pull request_id",
+        "repull request",
+        "pull request2",
+        "pull-request",
+        "pull_request",
+        "pull  request",
+        "pull\trequest",
+    ),
+)
+def test_partial_phrases_and_word_substrings_do_not_match(query: str) -> None:
+    index = ToolSearchIndex((ToolSearchDocument("opaque", ("pull request",), 0),))
+
+    assert index.search(query) == ()
+
+
+@pytest.mark.parametrize("term", ("c++", "a.b", "lookup(foo)", "[entry]", "a|b"))
+def test_keywords_are_literals_and_are_not_interpreted_as_regex(term: str) -> None:
+    index = ToolSearchIndex((ToolSearchDocument("opaque", (term,), 0),))
+
+    assert index.search(f"use {term.upper()} now") == ("opaque",)
+    assert index.search("aaaa axb lookupfoo entry a b") == ()
+
+
+def _mixed_catalog_documents() -> tuple[ToolSearchDocument, ...]:
+    builtin_documents = tuple(
+        ToolSearchDocument(name, (name, *keywords), order)
+        for order, (name, keywords) in enumerate(BUILTIN_TOOL_SEARCH_KEYWORDS.items())
+    )
+    mcp_rows = (
+        ("gh_lookup", "mcp_github_gh_lookup", ("github", "pull request", "code review")),
+        ("slack_history", "mcp_slack_slack_history", ("slack", "channel history", "conversation")),
+        ("fs_entries", "mcp_files_fs_entries", ("filesystem", "directory", "file listing")),
+        *(
+            (f"db_{i}", f"mcp_database_db_{i}", (f"database table {i}", "database", "sql"))
+            for i in range(97)
+        ),
+    )
+    return (
+        *builtin_documents,
+        *(
+            ToolSearchDocument(model, (remote, model, *keywords), order + 3)
+            for order, (remote, model, keywords) in enumerate(mcp_rows)
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    (
+        ("internet lookup", "web_search"),
+        ("fetch url page content", "web_fetch"),
+        ("schedule reminder", "schedule"),
+        ("github pull request", "mcp_github_gh_lookup"),
+        ("slack channel history", "mcp_slack_slack_history"),
+        ("filesystem directory", "mcp_files_fs_entries"),
+        ("gh_lookup", "mcp_github_gh_lookup"),
+        ("mcp_github_gh_lookup", "mcp_github_gh_lookup"),
+    ),
+)
+def test_mixed_catalog_intent_queries_rank_target_first_ignoring_case(
+    query: str,
+    expected: str,
+) -> None:
+    documents = _mixed_catalog_documents()
+    assert len(documents) == 103
+    index = ToolSearchIndex(documents)
+
+    result = index.search(query)
+
+    assert result[0] == expected
+    assert len(result) <= 3
+    assert index.search(query.upper()) == index.search(query.title()) == result
+
+
+@pytest.mark.parametrize(
+    "query",
+    ("pull", "request", "pull requests", "history", "listing", "gh", "lookup"),
+)
+def test_mixed_catalog_does_not_discover_mcp_tools_through_partial_expressions(query: str) -> None:
+    index = ToolSearchIndex(_mixed_catalog_documents())
+
+    assert all(not name.startswith("mcp_") for name in index.search(query))
+
+
+def test_builtin_expressions_do_not_inherit_mcp_count_or_length_limits() -> None:
+    terms = ("web", "fetch", "url", "http", "page", "content", "long " + "a" * 129)
+    index = ToolSearchIndex((ToolSearchDocument("web_fetch", terms, 0),))
+
+    assert len(terms) == 7
+    for term in terms:
+        assert index.search(term) == ("web_fetch",)
 
 
 @pytest.mark.asyncio

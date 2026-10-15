@@ -12,6 +12,7 @@ from aide.config.config import (
     ConfigLoader,
     ConfigurationDiagnostic,
     MCPServerConfiguration,
+    normalize_mcp_tool_keywords,
 )
 from aide.management.commands import ManagementCommandDispatcher
 from aide.utils.host_filesystem import HOST_FILESYSTEM
@@ -100,19 +101,84 @@ search_issues = [" issue ", "", "issue", "github"]
     assert direct.tool_keywords == {"search_issues": ("issue", "github")}
 
 
+def test_keyword_filtering_keeps_valid_items_then_deduplicates_and_caps_at_five() -> None:
+    candidates: list[object] = [
+        None,
+        7,
+        True,
+        {},
+        [],
+        "",
+        "  ",
+        "搜索",
+        "123search",
+        "123",
+        "bad\x01term",
+        "bad\x7fterm",
+        "bad\tterm",
+        "a" * 129,
+        " Pull Request ",
+        "PULL REQUEST",
+        "a" * 128,
+        " GitHub ",
+        " code review ",
+        "repository",
+        "extra",
+    ]
+
+    assert normalize_mcp_tool_keywords(candidates) == (
+        "pull request",
+        "a" * 128,
+        "github",
+        "code review",
+        "repository",
+    )
+    assert normalize_mcp_tool_keywords(["_lookup", "c++", "multiple words in one phrase"]) == (
+        "_lookup",
+        "c++",
+        "multiple words in one phrase",
+    )
+
+
+@pytest.mark.parametrize("value", (None, "search", b"search", 7, {"search": []}, {"search"}))
+def test_keyword_field_must_be_an_array(value: object) -> None:
+    with pytest.raises(TypeError, match="array"):
+        normalize_mcp_tool_keywords(value)
+
+
+def test_mixed_keyword_config_keeps_server_without_rewriting_on_read(agent_home: Path) -> None:
+    loader = _loader_with_mcp(
+        agent_home,
+        """
+[mcp.servers.github]
+enabled = true
+transport = "stdio"
+command = "server"
+[mcp.servers.github.tool_keywords]
+search = [1, "搜索", "123search", " Pull Request ", "PULL REQUEST", "GitHub"]
+""",
+    )
+    original = loader.path.read_bytes()
+
+    server = loader.load().mcp["github"]
+
+    assert server.tool_keywords == {"search": ("pull request", "github")}
+    assert loader.diagnostics == ()
+    assert loader.path.read_bytes() == original
+
+
 @pytest.mark.parametrize(
-    ("keyword_literal", "unsafe_value"),
+    "keyword_literal",
     [
-        ('"搜索"', "搜索"),
-        ('"123"', "123"),
-        (r'"search\u0001"', "search\x01"),
+        '"搜索"',
+        '"123"',
+        r'"search\u0001"',
     ],
     ids=("non-ascii", "digits-only", "control-character"),
 )
-def test_non_english_mcp_tool_keywords_are_isolated_with_one_safe_diagnostic(
+def test_invalid_keyword_items_are_filtered_without_isolating_server(
     agent_home: Path,
     keyword_literal: str,
-    unsafe_value: str,
 ) -> None:
     loader = _loader_with_mcp(
         agent_home,
@@ -135,23 +201,19 @@ search = [" issues ", "issues", "github"]
 
     configuration = loader.load()
 
-    assert set(configuration.mcp) == {"valid"}
+    assert set(configuration.mcp) == {"invalid", "valid"}
+    assert configuration.mcp["invalid"].tool_keywords == {"search": ()}
     assert configuration.mcp["valid"].tool_keywords == {"search": ("issues", "github")}
-    assert len(loader.diagnostics) == 1
-    diagnostic = loader.diagnostics[0]
-    assert isinstance(diagnostic, ConfigurationDiagnostic)
-    assert diagnostic.mcp_name == "invalid"
-    assert "tool_keywords.search" in diagnostic.message
-    assert unsafe_value not in diagnostic.message
+    assert loader.diagnostics == ()
 
 
 @pytest.mark.parametrize(
     "invalid_keywords",
     [
         'tool_keywords = "search"',
-        "[mcp.servers.invalid.tool_keywords]\nsearch = [1]",
+        '[mcp.servers.invalid.tool_keywords]\nsearch = "search"',
     ],
-    ids=("not-table", "non-string-item"),
+    ids=("not-table", "not-array"),
 )
 def test_invalid_mcp_tool_keywords_are_isolated_per_server(
     agent_home: Path,
@@ -1111,7 +1173,7 @@ enabled = true
 transport = "stdio"
 command = "uvx"
 [mcp.servers.valid.tool_keywords]
-"{encoded_field}" = [1]
+"{encoded_field}" = "invalid-array"
 """,
     )
 

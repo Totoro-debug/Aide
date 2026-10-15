@@ -253,7 +253,7 @@ The Agent Run-scoped selection of a deferred Tool for exposure in subsequent mod
 _Avoid_: MCP Server enablement, Tool Confirmation, execution permission, persistent Session capability, Tool execution
 
 **Tool Search Keywords**:
-The English terms associated with a Tool for capability discovery through Tool Search.
+The English words, phrases, or Tool names associated with a Tool as complete expressions for capability discovery through Tool Search. For MCP Tools, keywords retained in User Configuration have the same meaning whether supplied by the user or previously generated.
 _Avoid_: Tool description, invocation parameters, user instruction, Skill metadata
 
 **Tool Search**:
@@ -279,6 +279,14 @@ _Avoid_: Tool Gateway, MCP registry, Workspace Runtime
 **MCP Tool**:
 A Tool capability discovered from an MCP Server and included in a Tool Catalog with the same invocation semantics as a Built-in Tool, while retaining its external origin.
 _Avoid_: Built-in Tool, Plugin Tool, direct MCP call
+
+**MCP Tool Remote Name**:
+The name assigned by an MCP Server to one MCP Tool and used to invoke it on that Server.
+_Avoid_: MCP Tool Model Name, MCP Server name
+
+**MCP Tool Model Name**:
+The name by which the model and Tool Gateway identify an MCP Tool within the available Tool Catalog.
+_Avoid_: MCP Tool Remote Name, MCP Server name
 
 **MCP Tool Snapshot**:
 The immutable ordered set of successfully discovered MCP Tools published together.

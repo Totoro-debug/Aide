@@ -80,7 +80,7 @@ class MCPKeywordPreparer:
         trace_recorder: TraceRecorder | None = None,
         workspace_path: Path | None = None,
     ) -> Mapping[str, tuple[str, ...]]:
-        """Return prepared keywords keyed by each Tool's model-facing name."""
+        """Return supplementary keywords; the Run index adds both identity names."""
         candidates: list[tuple[str, str, str, str, dict[str, Any]]] = []
         for tool in tools:
             candidates.append(
@@ -104,7 +104,9 @@ class MCPKeywordPreparer:
                 server_name, remote_name, model_name, description, parameters = metadata
                 identity = (server_name, remote_name)
                 server = servers.get(server_name)
-                configured = () if server is None else server.tool_keywords.get(remote_name, ())
+                configured = normalize_mcp_tool_keywords(
+                    () if server is None else server.tool_keywords.get(remote_name, ())
+                )
                 if configured:
                     return _PreparedKeywords(identity, model_name, configured, generated=False)
 
@@ -116,12 +118,16 @@ class MCPKeywordPreparer:
                 )
                 cached = self._cache.get(cache_key)
                 if cached is not None:
-                    return _PreparedKeywords(identity, model_name, cached, generated=False)
+                    keywords = normalize_mcp_tool_keywords(cached)
+                    # An empty cache entry records a generation failure for this fingerprint.
+                    if keywords or not cached:
+                        return _PreparedKeywords(identity, model_name, keywords, generated=False)
 
                 try:
                     if trace_recorder is None or workspace_path is None:
                         generated = await self._generate(
                             remote_name=remote_name,
+                            model_name=model_name,
                             description=description,
                             parameters=parameters,
                         )
@@ -137,13 +143,14 @@ class MCPKeywordPreparer:
                         ):
                             generated = await self._generate(
                                 remote_name=remote_name,
+                                model_name=model_name,
                                 description=description,
                                 parameters=parameters,
                             )
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    generated = (remote_name,)
+                    generated = ()
                     persist = False
                 else:
                     persist = True
@@ -169,7 +176,9 @@ class MCPKeywordPreparer:
 
         result: dict[str, tuple[str, ...]] = {}
         for metadata, item in zip(candidates, prepared, strict=True):
-            effective = effective_values.get(item.identity, item.keywords)
+            effective = normalize_mcp_tool_keywords(
+                effective_values.get(item.identity, item.keywords)
+            )
             result[item.model_name] = effective
             if item.generated:
                 server_name, remote_name, _model_name, description, parameters = metadata
@@ -187,12 +196,14 @@ class MCPKeywordPreparer:
         self,
         *,
         remote_name: str,
+        model_name: str,
         description: str,
         parameters: dict[str, Any],
     ) -> tuple[str, ...]:
         payload = json.dumps(
             {
                 "name": remote_name,
+                "model_name": model_name,
                 "description": description,
                 "input_schema": deepcopy(parameters),
             },

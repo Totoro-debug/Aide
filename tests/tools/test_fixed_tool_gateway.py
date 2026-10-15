@@ -11,7 +11,11 @@ import pytest
 from mcp.types import CallToolResult
 
 from aide.agent.tools.base import BaseTool
-from aide.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES, build_agent_run_gateway
+from aide.agent.tools.deferred import (
+    RUN_BASELINE_TOOL_NAMES,
+    _document_for_tool,
+    build_agent_run_gateway,
+)
 from aide.agent.tools.mcp import MCPTool, MCPToolSpec
 from aide.agent.tools.mcp_runtime import MCPRuntimeManager, allocate_mcp_tool_name
 from aide.agent.tools.permission import PermissionContext
@@ -274,7 +278,7 @@ def test_mcp_catalog_exposure_activation_and_search_ignore_permission_level(
 
 
 @pytest.mark.asyncio
-async def test_agent_run_gateway_indexes_remote_mcp_name_and_keywords_not_allocated_name(
+async def test_agent_run_gateway_indexes_complete_mcp_names_and_keywords(
     workspace: Path,
     agent_home: Path,
 ) -> None:
@@ -350,7 +354,7 @@ async def test_agent_run_gateway_does_not_boost_exact_remote_name_fallback(
         ModelToolCall(
             id="search-calendar",
             name="tool_search",
-            arguments=json.dumps({"query": "calendar"}),
+            arguments=json.dumps({"query": "calendar_events"}),
         )
     )
 
@@ -359,6 +363,102 @@ async def test_agent_run_gateway_does_not_boost_exact_remote_name_fallback(
         "mcp_alpha_calendar_events",
         "mcp_zulu_calendar_events",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query", "matches"),
+    (
+        ("123SEARCH", True),
+        ("use MCP_ALPHA_123SEARCH now", True),
+        ("github pull request", True),
+        ("PULL REQUEST", True),
+        ("pull requests", False),
+        ("request pull", False),
+        ("request", False),
+        ("pull", False),
+        ("search", False),
+        ("123", False),
+        ("alpha", False),
+        ("mcp", False),
+        ("get_pull request", False),
+    ),
+)
+async def test_run_search_keeps_numeric_names_and_phrases_complete_and_activates_only_matches(
+    workspace: Path,
+    agent_home: Path,
+    query: str,
+    matches: bool,
+) -> None:
+    session = _MCPCallSession()
+    tool = MCPTool(
+        MCPToolSpec(
+            server_name="alpha",
+            remote_name="123search",
+            model_name="mcp_alpha_123search",
+            description="Search pull requests.",
+            parameters={"type": "object"},
+        ),
+        session,
+    )
+    run_gateway = build_agent_run_gateway(
+        _gateway(workspace, agent_home, additional_tools=(tool,)),
+        allowed_names=("tool_search", tool.name),
+        mcp_keywords={tool.name: ("pull request",)},
+    )
+
+    result = await run_gateway.call(
+        ModelToolCall(id="search", name="tool_search", arguments=json.dumps({"query": query})),
+    )
+
+    assert result.status == "success"
+    expected = [tool.name] if matches else []
+    assert json.loads(result.content) == expected
+    assert (tool.name in run_gateway.exposed_names) is matches
+    assert session.calls == []
+    repeated = await run_gateway.call(
+        ModelToolCall(id="again", name="tool_search", arguments=json.dumps({"query": query})),
+    )
+    assert json.loads(repeated.content) == []
+
+
+def test_run_index_projects_two_identity_names_and_at_most_five_supplements() -> None:
+    tool = MCPTool(
+        MCPToolSpec(
+            server_name="alpha",
+            remote_name="123search",
+            model_name="mcp_alpha_123search",
+            description="Search pull requests.",
+            parameters={"type": "object"},
+        ),
+        _MCPCallSession(),
+    )
+
+    document = _document_for_tool(
+        tool,
+        catalog_order=0,
+        mcp_keywords={
+            tool.name: ("Pull Request", "github", "review", "repository", "issue", "extra")
+        },
+    )
+    deduplicated = _document_for_tool(
+        tool,
+        catalog_order=0,
+        mcp_keywords={tool.name: ("123search", "MCP_ALPHA_123SEARCH", "github", "GITHUB")},
+    )
+    fallback = _document_for_tool(tool, catalog_order=0, mcp_keywords={tool.name: ()})
+
+    assert document.terms == (
+        "123search",
+        "mcp_alpha_123search",
+        "pull request",
+        "github",
+        "review",
+        "repository",
+        "issue",
+    )
+    assert deduplicated.terms == ("123search", "mcp_alpha_123search", "github")
+    assert fallback.terms == ("123search", "mcp_alpha_123search")
 
 
 @pytest.mark.asyncio

@@ -239,7 +239,7 @@ class _SearchOverlapRouter(_ScheduleRouter):
             return _tool_response(
                 call_id="schedule-search-calendar",
                 name="tool_search",
-                arguments={"query": "calendar"},
+                arguments={"query": "calendar_events"},
             )
         self.schedule_after_search.set()
         return self._response()

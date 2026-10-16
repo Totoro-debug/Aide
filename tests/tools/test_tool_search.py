@@ -150,7 +150,14 @@ def test_repeated_searches_keep_fixed_statistics_and_progress_to_next_names() ->
 
 def test_builtin_keyword_constants_cover_only_deferred_builtin_tools() -> None:
     assert MAX_TOOL_SEARCH_RESULTS == 3
-    assert set(BUILTIN_TOOL_SEARCH_KEYWORDS) == {"web_search", "web_fetch", "schedule"}
+    assert set(BUILTIN_TOOL_SEARCH_KEYWORDS) == {
+        "web_search",
+        "web_fetch",
+        "schedule",
+        "spawn_agent",
+        "wait_agent",
+        "list_agents",
+    }
     assert all(keywords for keywords in BUILTIN_TOOL_SEARCH_KEYWORDS.values())
     with pytest.raises(TypeError):
         BUILTIN_TOOL_SEARCH_KEYWORDS["web_search"] = ("changed",)  # type: ignore[index]
@@ -221,7 +228,7 @@ def _mixed_catalog_documents() -> tuple[ToolSearchDocument, ...]:
     return (
         *builtin_documents,
         *(
-            ToolSearchDocument(model, (remote, model, *keywords), order + 3)
+            ToolSearchDocument(model, (remote, model, *keywords), order + len(builtin_documents))
             for order, (remote, model, keywords) in enumerate(mcp_rows)
         ),
     )
@@ -233,6 +240,9 @@ def _mixed_catalog_documents() -> tuple[ToolSearchDocument, ...]:
         ("internet lookup", "web_search"),
         ("fetch url page content", "web_fetch"),
         ("schedule reminder", "schedule"),
+        ("delegate task to subagent", "spawn_agent"),
+        ("wait for subagent results", "wait_agent"),
+        ("list subagents", "list_agents"),
         ("github pull request", "mcp_github_gh_lookup"),
         ("slack channel history", "mcp_slack_slack_history"),
         ("filesystem directory", "mcp_files_fs_entries"),
@@ -245,7 +255,7 @@ def test_mixed_catalog_intent_queries_rank_target_first_ignoring_case(
     expected: str,
 ) -> None:
     documents = _mixed_catalog_documents()
-    assert len(documents) == 103
+    assert len(documents) == 106
     index = ToolSearchIndex(documents)
 
     result = index.search(query)

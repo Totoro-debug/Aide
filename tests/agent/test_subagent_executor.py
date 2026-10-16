@@ -194,9 +194,13 @@ def _router(provider: ScriptedFakeProvider) -> ModelRouter:
 def _subagent_configuration(base: UserConfiguration) -> UserConfiguration:
     return replace(
         base,
-        models=replace(base.models, routes={
-            **base.models.routes, "subagent": base.models.routes["chat"],
-        }),
+        models=replace(
+            base.models,
+            routes={
+                **base.models.routes,
+                "subagent": base.models.routes["chat"],
+            },
+        ),
     )
 
 
@@ -208,13 +212,22 @@ def _compaction_configuration() -> UserConfiguration:
         base,
         models=replace(
             base.models,
-            providers={provider.provider_id: replace(provider, models={
-                "default-model": replace(parameters, context_window=4000, max_output=500),
-                "memory-model": parameters,
-            })},
-            routes={**base.models.routes, "memory": replace(
-                base.models.routes["chat"], model="memory-model",
-            )},
+            providers={
+                provider.provider_id: replace(
+                    provider,
+                    models={
+                        "default-model": replace(parameters, context_window=4000, max_output=500),
+                        "memory-model": parameters,
+                    },
+                )
+            },
+            routes={
+                **base.models.routes,
+                "memory": replace(
+                    base.models.routes["chat"],
+                    model="memory-model",
+                ),
+            },
         ),
     )
 
@@ -400,18 +413,27 @@ async def test_subagent_gateway_limits_catalog_and_search_to_creator_snapshot(
     assert added.status == "error"
 
     assert {schema["function"]["name"] for schema in child.schemas} == {"tool_search"}
+    partial_search = await child.call(
+        ModelToolCall(
+            id="partial-search-call",
+            name="tool_search",
+            arguments=json.dumps({"query": "marker"}),
+        )
+    )
+    assert partial_search.status == "success" and json.loads(partial_search.content) == []
+    assert {schema["function"]["name"] for schema in child.schemas} == {"tool_search"}
     search = await child.call(
         ModelToolCall(
             id="search-call",
             name="tool_search",
-            arguments=json.dumps({"query": "marker"}),
+            arguments=json.dumps({"query": "marker_tool"}),
         )
     )
     forbidden = await child.call(
         ModelToolCall(id="forbidden-call", name="spawn_agent", arguments="{}")
     )
 
-    assert json.loads(search.content) == ["marker_tool"]
+    assert search.status == "success" and json.loads(search.content) == ["marker_tool"]
     assert forbidden.status == "error"
     assert "spawn_agent" not in child.exposed_names
     assert parent.exposed_names == parent_exposure
@@ -654,7 +676,8 @@ async def test_compaction_summaries_are_persisted_in_child_context_state(
         workspace_state=state,
         repository=store,
         model_router=ModelRouter(
-            configuration=_subagent_configuration(config), provider_factory=lambda _: provider,
+            configuration=_subagent_configuration(config),
+            provider_factory=lambda _: provider,
         ),
         tool_gateway=gateway,
         compact_ratio=0.5,
@@ -1340,7 +1363,8 @@ async def test_compaction_keeps_earlier_model_output_in_the_persisted_conversati
         workspace_state=state,
         repository=store,
         model_router=ModelRouter(
-            configuration=_subagent_configuration(config), provider_factory=lambda _: provider,
+            configuration=_subagent_configuration(config),
+            provider_factory=lambda _: provider,
         ),
         tool_gateway=ToolGateway(
             workspace=state.workspace_path,
@@ -1389,7 +1413,8 @@ async def test_failed_child_summary_save_keeps_its_consumed_memory_usage(tmp_pat
         workspace_state=state,
         repository=store,
         model_router=ModelRouter(
-            configuration=_subagent_configuration(config), provider_factory=lambda _: provider,
+            configuration=_subagent_configuration(config),
+            provider_factory=lambda _: provider,
         ),
         tool_gateway=ToolGateway(
             workspace=state.workspace_path, tool_context=_tool_context(state.workspace_path)
@@ -1469,7 +1494,8 @@ async def test_concurrent_compaction_keeps_summaries_and_raw_activity_in_each_ch
         workspace_state=state,
         repository=store,
         model_router=ModelRouter(
-            configuration=_subagent_configuration(config), provider_factory=lambda _: provider,
+            configuration=_subagent_configuration(config),
+            provider_factory=lambda _: provider,
         ),
         tool_gateway=ToolGateway._for_memory(
             (_MarkerTool(),),

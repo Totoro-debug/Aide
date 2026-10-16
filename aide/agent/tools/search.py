@@ -19,6 +19,31 @@ BUILTIN_TOOL_SEARCH_KEYWORDS: Final[Mapping[str, tuple[str, ...]]] = MappingProx
         "web_search": ("web search", "web", "internet", "internet search", "search engine"),
         "web_fetch": ("web fetch", "web", "internet", "http", "https", "url", "webpage"),
         "schedule": ("schedule", "job", "reminder", "cron", "timer"),
+        "spawn_agent": (
+            "subagent",
+            "subagents",
+            "spawn agent",
+            "spawn subagent",
+            "delegate",
+            "delegation",
+            "parallel task",
+        ),
+        "wait_agent": (
+            "subagent",
+            "subagents",
+            "wait agent",
+            "wait",
+            "agent results",
+            "task results",
+        ),
+        "list_agents": (
+            "subagent",
+            "subagents",
+            "list agents",
+            "list subagents",
+            "agent status",
+            "task status",
+        ),
     }
 )
 

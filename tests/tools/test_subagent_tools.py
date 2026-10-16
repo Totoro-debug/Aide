@@ -25,6 +25,7 @@ from aide.agent.subagents.store import SubAgentRecordStore
 from aide.agent.tools.base import BaseTool
 from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.core.subagents import build_subagent_tools
+from aide.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES, build_agent_run_gateway
 from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
 from aide.agent.workspace_state import WorkspaceState
 from aide.utils.host_filesystem import HOST_FILESYSTEM
@@ -105,6 +106,92 @@ def _harness(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    (
+        ("spawn_agent", "spawn_agent"),
+        ("spawn agent", "spawn_agent"),
+        ("delegate task to subagent", "spawn_agent"),
+        ("parallel task", "spawn_agent"),
+        ("wait_agent", "wait_agent"),
+        ("wait agent", "wait_agent"),
+        ("wait for subagent results", "wait_agent"),
+        ("agent results", "wait_agent"),
+        ("list_agents", "list_agents"),
+        ("list agents", "list_agents"),
+        ("list subagents", "list_agents"),
+        ("agent status", "list_agents"),
+    ),
+)
+async def test_subagent_tools_are_deferred_and_discovered_by_capability(
+    tmp_path: Path, query: str, expected: str
+) -> None:
+    _, repository, _, _, gateway = _harness(tmp_path)
+    run = build_agent_run_gateway(gateway)
+    other_run = build_agent_run_gateway(gateway)
+    assert run.exposed_names == RUN_BASELINE_TOOL_NAMES
+
+    search = await run.call(
+        ModelToolCall(id="search", name="tool_search", arguments=json.dumps({"query": query}))
+    )
+
+    assert search.status == "success"
+    names = json.loads(search.content)
+    assert names and names[0] == expected
+    assert set(names) <= {"spawn_agent", "wait_agent", "list_agents"}
+    assert {schema["function"]["name"] for schema in run.schemas} == {
+        *RUN_BASELINE_TOOL_NAMES,
+        *names,
+    }
+    assert other_run.exposed_names == RUN_BASELINE_TOOL_NAMES
+    assert build_agent_run_gateway(gateway).exposed_names == RUN_BASELINE_TOOL_NAMES
+    assert repository.list().items == ()
+    repeated = await run.call(
+        ModelToolCall(id="again", name="tool_search", arguments=json.dumps({"query": query}))
+    )
+    assert repeated.status == "success" and json.loads(repeated.content) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "excluded_names",
+    (
+        (),
+        ("schedule",),
+        ("spawn_agent", "wait_agent", "schedule"),
+        ("spawn_agent", "wait_agent", "list_agents"),
+    ),
+    ids=("foreground", "schedule", "subagent", "ineligible"),
+)
+async def test_subagent_search_respects_the_run_catalog(
+    tmp_path: Path, excluded_names: tuple[str, ...]
+) -> None:
+    _, repository, _, _, gateway = _harness(tmp_path)
+    run = build_agent_run_gateway(gateway, excluded_names=excluded_names)
+    expected = {"spawn_agent", "wait_agent", "list_agents"} - set(excluded_names)
+    assert not expected.intersection(run.exposed_names)
+    assert not set(excluded_names).intersection(tool.name for tool in run.catalog)
+
+    search = await run.call(
+        ModelToolCall(id="search", name="tool_search", arguments='{"query":"SUBAGENT"}')
+    )
+
+    assert search.status == "success"
+    assert set(json.loads(search.content)) == expected
+    assert {schema["function"]["name"] for schema in run.schemas} == {
+        *RUN_BASELINE_TOOL_NAMES,
+        *expected,
+    }
+    for name in excluded_names:
+        direct = await run.call(ModelToolCall(id=f"forbidden-{name}", name=name, arguments="{}"))
+        assert direct.status == "error"
+    if "list_agents" in expected:
+        listed = await run.call(ModelToolCall(id="list", name="list_agents", arguments="{}"))
+        assert listed.status == "success" and json.loads(listed.content)["items"] == []
+    assert repository.list().items == ()
+
+
+@pytest.mark.asyncio
 async def test_spawn_without_creator_snapshot_does_not_register_a_task(tmp_path: Path) -> None:
     _, repository, _, _, gateway = _harness(tmp_path)
     context = gateway.tool_context
@@ -114,11 +201,13 @@ async def test_spawn_without_creator_snapshot_does_not_register_a_task(tmp_path:
         additional_tools=build_subagent_tools(),
         tool_context=replace(context, subagent=replace(context.subagent, creator_snapshot=None)),
     )
-    result = await unavailable_gateway.call(ModelToolCall(
-        id="spawn",
-        name="spawn_agent",
-        arguments=json.dumps({"title": "Inspect tests", "task": "Find focused tests."}),
-    ))
+    result = await unavailable_gateway.call(
+        ModelToolCall(
+            id="spawn",
+            name="spawn_agent",
+            arguments=json.dumps({"title": "Inspect tests", "task": "Find focused tests."}),
+        )
+    )
     assert result.status == "error"
     assert "SubAgent Model Route is unavailable" in result.content
     assert repository.list().items == ()

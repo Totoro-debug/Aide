@@ -251,7 +251,9 @@ async def _exercise_sources(
                     detail = await recorder.get_record(record.record_id)
                     assert detail is not None
                     if record.kind is TraceKind.MODEL:
-                        assert detail.capture_issues
+                        assert not detail.capture_issues
+                        assert detail.request is None and detail.result is not None
+                        assert record.protocol is not None
                     else:
                         assert detail.request is not None and detail.result is not None
                         assert record.capture_state.value == "complete"
@@ -395,6 +397,10 @@ async def _exercise_cancel(
             assert record.status.value == "failed"
             assert record.error_category is TraceErrorCategory.CANCELLED
             assert record.retry_count == 0
+            detail = await recorder.get_record(record.record_id)
+            assert detail is not None
+            assert cast(dict[str, Any], detail.result)["text"] == "early from session A"
+            assert not record.output_complete
         return terminal["content"], terminal["status"]
     finally:
         provider.release_a.set()

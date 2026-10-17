@@ -186,9 +186,19 @@ async def _benchmark_queries(database: Path, workspace: Path) -> dict[str, objec
                 print(f"Statistics query: {elapsed_ms:.1f} ms.", flush=True)
             return elapsed_ms
 
+        async def sample_records() -> float:
+            started = perf_counter()
+            page = await recorder.list_records(limit=50)
+            elapsed_ms = (perf_counter() - started) * 1_000
+            if len(page.items) != 50 or page.next_cursor is None:
+                raise AssertionError("The benchmark record page did not contain 50 rows.")
+            return elapsed_ms
+
         for _ in range(QUERY_WARMUPS):
             await sample_sessions()
+            await sample_records()
             await sample_stats()
+        record_samples = [await sample_records() for _ in range(QUERY_SAMPLES)]
         session_samples = []
         for index in range(QUERY_SAMPLES):
             session_samples.append(await sample_sessions())
@@ -206,12 +216,14 @@ async def _benchmark_queries(database: Path, workspace: Path) -> dict[str, objec
     return {
         "records": RECORD_COUNT,
         "sessions": RECORD_COUNT // RECORDS_PER_SESSION,
-        "raw_bytes": 0,
+        "semantic_bytes": 0,
         "database_bytes_including_wal": database_bytes,
         "samples": QUERY_SAMPLES,
         "session_list_samples_ms": [round(value, 3) for value in session_samples],
+        "record_list_samples_ms": [round(value, 3) for value in record_samples],
         "statistics_samples_ms": [round(value, 3) for value in stats_samples],
         "session_list_p95_ms": round(_percentile_95(session_samples), 3),
+        "record_list_p95_ms": round(_percentile_95(record_samples), 3),
         "statistics_p95_ms": round(_percentile_95(stats_samples), 3),
     }
 
@@ -343,8 +355,8 @@ async def _benchmark_streams(database: Path, workspace: Path) -> dict[str, objec
         published_records = connection.execute(
             "SELECT COUNT(*) FROM trace_records WHERE published = 1"
         ).fetchone()[0]
-        raw_bytes = connection.execute(
-            "SELECT COALESCE(SUM(original_size), 0) FROM trace_raw_chunks"
+        semantic_bytes = connection.execute(
+            "SELECT COALESCE(SUM(LENGTH(CAST(request_json AS BLOB))), 0) + COALESCE(SUM(LENGTH(CAST(result_json AS BLOB))), 0) FROM trace_records"
         ).fetchone()[0]
     if published_records != expected_records:
         raise AssertionError("The SQLite stream replay did not publish every measured call.")
@@ -357,7 +369,7 @@ async def _benchmark_streams(database: Path, workspace: Path) -> dict[str, objec
         "sqlite_total_ms": round(sqlite_total, 3),
         "no_op_samples_ms": [round(value, 3) for value in no_op_samples],
         "sqlite_samples_ms": [round(value, 3) for value in sqlite_samples],
-        "raw_bytes": raw_bytes,
+        "semantic_bytes": semantic_bytes,
         "database_bytes": database.stat().st_size,
         "no_op_p95_ms": round(_percentile_95(no_op_samples), 3),
         "sqlite_p95_ms": round(_percentile_95(sqlite_samples), 3),

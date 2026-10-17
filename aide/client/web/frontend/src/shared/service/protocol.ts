@@ -850,16 +850,7 @@ export type TraceErrorCategory =
   | "unavailable"
   | "other";
 export type TraceCaptureState = "complete" | "partial" | "unavailable";
-export type TraceCaptureLayer =
-  | "http_body"
-  | "http_metadata"
-  | "http_decoded_body"
-  | "json_rpc_message"
-  | "sdk_result"
-  | "process_stream"
-  | "tool_result";
 export type TraceUsageState = "reported" | "unknown" | "not_applicable";
-export type TraceDirection = "request" | "response";
 export type TraceReasoningEffort = ReasoningEffort;
 
 export interface TraceTokenUsageDTO {
@@ -898,6 +889,8 @@ export interface TraceRecordDTO {
   model: string | null;
   reasoning_effort: ReasoningEffort | null;
   endpoint: string | null;
+  protocol: string | null;
+  output_complete: boolean;
   status: TraceStatus;
   error: TraceErrorDTO | null;
   retry_count: number;
@@ -910,18 +903,11 @@ export interface TraceRecordDTO {
   restored: boolean;
 }
 
-export interface TraceRawSourceDTO {
-  source: string;
-  direction: TraceDirection;
-  layer: TraceCaptureLayer;
-  content_type: string | null;
-  content_encoding: string | null;
-  total_bytes: number;
-}
 
 export interface TraceContentDTO {
-  request: unknown;
-  result: unknown;
+  output?: unknown;
+  arguments?: unknown;
+  result?: unknown;
 }
 
 export interface TraceCaptureIssueDTO {
@@ -930,10 +916,17 @@ export interface TraceCaptureIssueDTO {
   source: string | null;
 }
 
+export interface TraceToolLinkDTO {
+  record_id: string;
+  tool_call_id: string | null;
+  tool_name: string | null;
+  status: TraceStatus;
+}
+
 export interface TraceRecordDetailDTO {
   record: TraceRecordDTO;
   content: TraceContentDTO;
-  raw_sources: TraceRawSourceDTO[];
+  related_tools: TraceToolLinkDTO[];
   capture_issues: TraceCaptureIssueDTO[];
 }
 
@@ -1012,17 +1005,6 @@ export interface TraceStatsResponseDTO {
   methodology: string;
 }
 
-export interface TraceRawPageDTO {
-  source: string;
-  direction: TraceDirection | null;
-  layer: TraceCaptureLayer | null;
-  offset: number;
-  data_base64: string;
-  total_bytes: number;
-  next_offset: number | null;
-  content_type: string | null;
-  content_encoding: string | null;
-}
 
 export interface TraceListQueryDTO {
   workspace_key?: string;
@@ -1054,10 +1036,4 @@ export interface TraceStatsQueryDTO {
 export interface TraceSessionsQueryDTO {
   cursor?: string;
   limit?: number;
-}
-
-export interface TraceRawQueryDTO {
-  source: string;
-  offset?: number;
-  limit_bytes?: number;
 }

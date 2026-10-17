@@ -18,6 +18,7 @@ from aide.provider.models import (
     ModelResponse,
     ModelStreamEvent,
     ModelUsage,
+    ReasoningDelta,
     TextDelta,
 )
 from aide.trace.context import TraceRootSource, workspace_key_for
@@ -37,6 +38,88 @@ from tests.fixtures.model_configuration import configuration, routed_configurati
 from tests.fixtures.trace import wait_for_trace_writer
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("protocol", ["openai-compatible", "anthropic"])
+async def test_readable_reasoning_is_saved_without_opaque_continuation(
+    tmp_path: Path, streaming: bool, protocol: str,
+) -> None:
+    config = routed_configuration() if protocol == "openai-compatible" else configuration()
+    payload: object = "readable reasoning" if protocol == "openai-compatible" else (
+        {"type": "thinking", "thinking": "readable reasoning", "signature": "secret-signature"},
+        {"type": "redacted_thinking", "data": "secret-redacted"},
+        {"type": "tool_use", "input": {"secret": "secret-input"}},
+    )
+    response = replace(_response("answer"), continuation=ModelContinuation("provider", payload))
+    provider = ScriptedFakeProvider(
+        completions=(response,),
+        streams=(StreamScript((ReasoningDelta("readable reasoning"), TextDelta("answer"),
+                               ModelCompleted(response))),),
+    )
+    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
+    router = ModelRouter(configuration=config, provider_factory=lambda _: provider)
+    try:
+        with trace_scope(recorder, _source(tmp_path)):
+            if streaming:
+                events = [event async for event in router.stream("title" if protocol == "openai-compatible" else "chat", messages=(), tools=())]
+                assert events[-1] == ModelCompleted(response)
+            else:
+                assert await router.complete("title" if protocol == "openai-compatible" else "chat", messages=(), tools=()) is response
+        await wait_for_trace_writer(recorder)
+        (record,) = (await recorder.list_records()).items
+        detail = await recorder.get_record(record.record_id)
+        assert detail is not None and detail.request is None
+        assert detail.result == {"text": "answer", "reasoning": "readable reasoning", "tool_calls": []}
+        assert record.protocol == protocol
+        assert record.output_complete
+        assert "secret-" not in str(detail)
+    finally:
+        await router.close()
+        await recorder.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("termination", ["error", "timeout", "cancel", "close", "incomplete"])
+async def test_interrupted_stream_saves_delivered_text_and_reasoning_once(
+    tmp_path: Path, termination: str,
+) -> None:
+    failure = _retryable_timeout() if termination == "timeout" else ModelCallError(ErrorInfo("provider_unavailable", "Disconnected"))
+    provider = ScriptedFakeProvider(streams=(StreamScript(
+        (ReasoningDelta("thought"), TextDelta("partial")),
+        error=failure if termination in {"error", "timeout"} else None,
+    ),))
+    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
+    router = ModelRouter(configuration=configuration(), provider_factory=lambda _: provider)
+    try:
+        with trace_scope(recorder, _source(tmp_path)):
+            stream = cast(AsyncGenerator[ModelStreamEvent], router.stream("chat", messages=(), tools=()))
+            assert await anext(stream) == ReasoningDelta("thought")
+            assert await anext(stream) == TextDelta("partial")
+            if termination == "close":
+                await stream.aclose()
+            elif termination == "cancel":
+                with pytest.raises(asyncio.CancelledError):
+                    await stream.athrow(asyncio.CancelledError())
+            elif termination == "incomplete":
+                with pytest.raises(StopAsyncIteration):
+                    await anext(stream)
+            else:
+                with pytest.raises(ModelCallError) as caught:
+                    await anext(stream)
+                assert caught.value is failure
+        await wait_for_trace_writer(recorder)
+        (record,) = (await recorder.list_records()).items
+        detail = await recorder.get_record(record.record_id)
+        assert detail is not None
+        assert detail.result == {"text": "partial", "reasoning": "thought", "tool_calls": []}
+        assert record.status.value == "failed" and not record.output_complete
+        assert record.retry_count == 0 and record.usage.state is TraceUsageState.UNKNOWN
+        assert not detail.capture_issues
+    finally:
+        await router.close()
+        await recorder.close()
 
 
 def _retryable_timeout() -> ModelCallError:
@@ -116,7 +199,7 @@ async def test_model_router_publishes_a_completed_call_through_trace_queries(
         assert (await recorder.get_stats()).tokens.cache_creation_input_tokens == 300
         detail = await recorder.get_record(record.record_id)
         assert detail is not None
-        assert cast(dict[str, Any], detail.result)["message"]["content"] == "Traced response"
+        assert cast(dict[str, Any], detail.result)["text"] == "Traced response"
     finally:
         await router.close()
         await recorder.close()
@@ -163,8 +246,8 @@ async def test_router_publishes_only_the_final_success_after_retries(
         assert (await recorder.get_stats()).tokens.cache_creation_input_tokens == 300
         detail = await recorder.get_record(records[0].record_id)
         assert detail is not None
-        assert cast(dict[str, Any], detail.request)["messages"][0]["content"] == "retry this call"
-        assert cast(dict[str, Any], detail.result)["message"]["content"] == "final result"
+        assert detail.request is None
+        assert cast(dict[str, Any], detail.result)["text"] == "final result"
     finally:
         await router.close()
         await recorder.close()
@@ -205,7 +288,7 @@ async def test_router_publishes_one_failure_without_failed_attempt_payloads(
         assert detail.request is None
         assert detail.result is None
         assert "do not retain this" not in str(detail)
-        assert any(issue.source == "provider_transport" for issue in detail.capture_issues)
+        assert not detail.capture_issues
     finally:
         await router.close()
         await recorder.close()
@@ -250,7 +333,7 @@ async def test_router_records_fallback_metadata_from_the_successful_provider(
         assert records[0].reasoning_effort == "mid"
         detail = await recorder.get_record(records[0].record_id)
         assert detail is not None
-        assert cast(dict[str, Any], detail.request)["continuation"] is None
+        assert detail.request is None
     finally:
         await router.close()
         await recorder.close()
@@ -292,7 +375,7 @@ async def test_router_records_stream_retry_and_preserves_event_order(tmp_path: P
         assert records[0].retry_count == 1
         detail = await recorder.get_record(records[0].record_id)
         assert detail is not None
-        assert cast(dict[str, Any], detail.result)["message"]["content"] == "answer"
+        assert cast(dict[str, Any], detail.result)["text"] == "answer"
     finally:
         await router.close()
         await recorder.close()
@@ -338,7 +421,8 @@ async def test_stream_cancellation_after_partial_output_is_failed(tmp_path: Path
         detail = await recorder.get_record(records[0].record_id)
         assert detail is not None
         assert detail.request is None
-        assert detail.result is None
+        assert detail.result == {"text": "partial", "reasoning": "", "tool_calls": []}
+        assert not detail.record.output_complete
     finally:
         if stream is not None:
             await stream.aclose()
@@ -496,7 +580,8 @@ async def test_response_snapshot_failure_preserves_business_success(
             assert record.status.value == "success"
             detail = await recorder.get_record(record.record_id)
             assert detail is not None
-            assert any(issue.source == "model_router" for issue in detail.capture_issues)
+            assert not detail.capture_issues
+            assert cast(dict[str, Any], detail.result)["text"] == "valid answer"
     finally:
         await router.close()
         await recorder.close()
@@ -572,6 +657,10 @@ async def test_incomplete_and_cancelled_streams_never_publish_success(
             if cancelled_response
             else TraceErrorCategory.PROVIDER_ERROR
         )
+        detail = await recorder.get_record(record.record_id)
+        assert detail is not None and detail.result == {"text": "partial", "reasoning": "", "tool_calls": []}
+        assert not record.output_complete
+        assert record.usage.state is (TraceUsageState.REPORTED if cancelled_response else TraceUsageState.UNKNOWN)
     finally:
         await router.close()
         await recorder.close()

@@ -20,7 +20,7 @@ import type { AuthState } from "../../shared/service/types.ts";
 import commonStyles from "../../shared/styles/controls.module.css";
 import moduleStyles from "./TraceSessionView.module.css";
 import { TraceRecordDetailView } from "./TraceRecordDetailView";
-import { formatDateTime, formatDuration, mergeTraceRecords, traceLoadErrorState, usageLabel } from "./presentation";
+import { formatDateTime, formatDuration, mergeTraceRecords, traceLoadErrorState } from "./presentation";
 
 const styles = { ...commonStyles, ...moduleStyles };
 const RECORD_PAGE_SIZE = 50;
@@ -64,7 +64,6 @@ export function TraceSessionView({ authState }: TraceSessionViewProps) {
   const [mobilePane, setMobilePane] = useState<"records" | "details">(() => (
     new URLSearchParams(window.location.search).has("recordId") ? "details" : "records"
   ));
-  const [rawSourceName, setRawSourceName] = useState("");
   const [refreshVersion, setRefreshVersion] = useState(0);
   const listRequestVersion = useRef(0);
   const detailRequestVersion = useRef(0);
@@ -308,8 +307,6 @@ export function TraceSessionView({ authState }: TraceSessionViewProps) {
                   key={`${detail.record.record_id}:${refreshVersion}`}
                   detail={detail}
                   language={i18n.language}
-                  rawSourceName={rawSourceName}
-                  onRawSourceChange={setRawSourceName}
                   t={t}
                 />
               )}
@@ -407,14 +404,13 @@ function RecordGroup({
                 </span>
               </span>
               <span className={styles.recordSecondary}>
-                <span>{formatDateTime(record.finished_at, language)}</span>
-                <span>{t(`traces.purposeValue.${record.purpose}`, { defaultValue: record.purpose })}</span>
-              </span>
-              <span className={styles.recordSecondary}>
+                <span>{formatDateTime(record.started_at, language)}</span>
                 <span>{formatDuration(record.duration_ms, language)}</span>
-                <span>{t("traces.retryCount", { count: record.retry_count })}</span>
-                <span>{usageLabel(record, t, language)}</span>
               </span>
+              {record.kind === "model" ? <span className={styles.recordSecondary}>
+                <span>{t("traces.inputTokens")}: {record.usage.input_tokens?.toLocaleString(language) ?? t("traces.usageUnknown")}</span>
+                <span>{t("traces.outputTokens")}: {record.usage.output_tokens?.toLocaleString(language) ?? t("traces.usageUnknown")}</span>
+              </span> : null}
             </button>
           </li>
         ))}
@@ -437,4 +433,3 @@ function RecordGroup({
 function uniqueValues(values: Array<string | null>): string[] {
   return Array.from(new Set(values.filter((value): value is string => value !== null))).sort((left, right) => left.localeCompare(right));
 }
-

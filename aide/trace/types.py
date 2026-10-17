@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from aide.provider.session_configuration import ReasoningEffort
 
@@ -56,25 +56,10 @@ class TraceCaptureState(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
-class TraceCaptureLayer(StrEnum):
-    HTTP_BODY = "http_body"
-    HTTP_METADATA = "http_metadata"
-    HTTP_DECODED_BODY = "http_decoded_body"
-    JSON_RPC_MESSAGE = "json_rpc_message"
-    SDK_RESULT = "sdk_result"
-    PROCESS_STREAM = "process_stream"
-    TOOL_RESULT = "tool_result"
-
-
 class TraceUsageState(StrEnum):
     REPORTED = "reported"
     UNKNOWN = "unknown"
     NOT_APPLICABLE = "not_applicable"
-
-
-class TraceDirection(StrEnum):
-    REQUEST = "request"
-    RESPONSE = "response"
 
 
 def _require_utc(value: datetime, field: str) -> None:
@@ -123,6 +108,7 @@ class TraceCallMetadata:
     model: str | None = None
     reasoning_effort: ReasoningEffort | None = None
     endpoint: str | None = None
+    protocol: str | None = None
     tool_name: str | None = None
     parent_record_id: str | None = None
     tool_call_id: str | None = None
@@ -137,6 +123,7 @@ class TraceAttemptMetadata:
     model: str | None = None
     reasoning_effort: ReasoningEffort | None = None
     endpoint: str | None = None
+    protocol: str | None = None
 
     def __post_init__(self) -> None:
         _require_utc(self.started_at, "started_at")
@@ -154,7 +141,7 @@ class TraceAttemptHandle:
     attempt_id: str
 
 
-TraceRawHandle = TraceCaptureHandle | TraceAttemptHandle
+TraceMetadataHandle = TraceCaptureHandle | TraceAttemptHandle
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +164,7 @@ class TraceOutcome:
     error_category: TraceErrorCategory | None = None
     error_code: str | None = None
     error_message: str | None = None
+    output_complete: bool = True
 
     def __post_init__(self) -> None:
         _require_utc(self.finished_at, "finished_at")
@@ -251,21 +239,21 @@ class TraceRecordSummary:
     model: str | None = None
     reasoning_effort: ReasoningEffort | None = None
     endpoint: str | None = None
+    protocol: str | None = None
     final_attempt_duration_ms: int | None = None
     error_category: TraceErrorCategory | None = None
     error_code: str | None = None
     error_message: str | None = None
     restored: bool = False
+    output_complete: bool = True
 
 
 @dataclass(frozen=True, slots=True)
-class TraceRawSource:
-    source: str
-    direction: TraceDirection
-    layer: TraceCaptureLayer
-    content_type: str | None
-    content_encoding: str | None
-    total_bytes: int
+class TraceToolLink:
+    record_id: str
+    tool_call_id: str | None
+    tool_name: str | None
+    status: TraceStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,7 +261,7 @@ class TraceRecordDetail:
     record: TraceRecordSummary
     request: object
     result: object
-    raw_sources: tuple[TraceRawSource, ...]
+    related_tools: tuple[TraceToolLink, ...] = ()
     capture_issues: tuple[TraceCaptureIssue, ...] = ()
 
 
@@ -282,19 +270,6 @@ class TracePage:
     items: tuple[TraceRecordSummary, ...] = ()
     next_cursor: str | None = None
     snapshot_sequence: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class TraceRawPage:
-    source: str
-    direction: TraceDirection | None
-    layer: TraceCaptureLayer | None
-    offset: int
-    data: bytes
-    total_bytes: int
-    next_offset: int | None
-    content_type: str | None = None
-    content_encoding: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,6 +382,8 @@ class TraceRecordDTO(TypedDict):
     model: str | None
     reasoning_effort: ReasoningEffort | None
     endpoint: str | None
+    protocol: str | None
+    output_complete: bool
     status: TraceStatus
     error: TraceErrorDTO | None
     retry_count: int
@@ -419,18 +396,10 @@ class TraceRecordDTO(TypedDict):
     restored: bool
 
 
-class TraceRawSourceDTO(TypedDict):
-    source: str
-    direction: TraceDirection
-    layer: TraceCaptureLayer
-    content_type: str | None
-    content_encoding: str | None
-    total_bytes: int
-
-
 class TraceContentDTO(TypedDict):
-    request: object
-    result: object
+    output: NotRequired[object]
+    arguments: NotRequired[object]
+    result: NotRequired[object]
 
 
 class TraceCaptureIssueDTO(TypedDict):
@@ -439,10 +408,17 @@ class TraceCaptureIssueDTO(TypedDict):
     source: str | None
 
 
+class TraceToolLinkDTO(TypedDict):
+    record_id: str
+    tool_call_id: str | None
+    tool_name: str | None
+    status: TraceStatus
+
+
 class TraceRecordDetailDTO(TypedDict):
     record: TraceRecordDTO
     content: TraceContentDTO
-    raw_sources: list[TraceRawSourceDTO]
+    related_tools: list[TraceToolLinkDTO]
     capture_issues: list[TraceCaptureIssueDTO]
 
 
@@ -521,18 +497,6 @@ class TraceStatsResponseDTO(TypedDict):
     methodology: str
 
 
-class TraceRawPageDTO(TypedDict):
-    source: str
-    direction: TraceDirection | None
-    layer: TraceCaptureLayer | None
-    offset: int
-    data_base64: str
-    total_bytes: int
-    next_offset: int | None
-    content_type: str | None
-    content_encoding: str | None
-
-
 __all__ = [
     "TraceAttemptHandle",
     "TraceAttemptMetadata",
@@ -541,25 +505,19 @@ __all__ = [
     "TraceCaptureHandle",
     "TraceCaptureIssue",
     "TraceCaptureIssueDTO",
-    "TraceCaptureLayer",
     "TraceCaptureState",
     "TraceContentDTO",
-    "TraceDirection",
     "TraceErrorBreakdown",
     "TraceErrorBreakdownDTO",
     "TraceErrorCategory",
     "TraceErrorDTO",
     "TraceKind",
+    "TraceMetadataHandle",
     "TraceOrigin",
     "TraceOutcome",
     "TracePage",
     "TracePageDTO",
     "TracePurpose",
-    "TraceRawHandle",
-    "TraceRawPage",
-    "TraceRawPageDTO",
-    "TraceRawSource",
-    "TraceRawSourceDTO",
     "TraceRecordDTO",
     "TraceRecordDetail",
     "TraceRecordDetailDTO",
@@ -579,6 +537,8 @@ __all__ = [
     "TraceTokenTotals",
     "TraceTokenTotalsDTO",
     "TraceTokenUsage",
+    "TraceToolLink",
+    "TraceToolLinkDTO",
     "TraceUsageDTO",
     "TraceUsageState",
 ]

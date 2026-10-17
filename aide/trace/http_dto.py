@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from base64 import b64encode
 from datetime import datetime
 from typing import Literal, cast
 
 from aide.trace.types import (
     TraceCaptureIssueDTO,
     TraceCaptureState,
+    TraceContentDTO,
     TraceErrorDTO,
+    TraceKind,
     TracePage,
     TracePageDTO,
-    TraceRawPage,
-    TraceRawPageDTO,
     TraceRecordDetail,
     TraceRecordDetailDTO,
     TraceRecordDTO,
@@ -125,6 +124,8 @@ def trace_record_dto(record: TraceRecordSummary) -> TraceRecordDTO:
         "model": record.model,
         "reasoning_effort": record.reasoning_effort,
         "endpoint": record.endpoint,
+        "protocol": record.protocol,
+        "output_complete": record.output_complete,
         "status": record.status,
         "error": error,
         "retry_count": record.retry_count,
@@ -183,33 +184,17 @@ def trace_record_detail_dto(detail: TraceRecordDetail) -> TraceRecordDetailDTO:
         }
         for item in detail.capture_issues
     ]
+    content: TraceContentDTO = (
+        {"output": detail.result} if detail.record.kind is TraceKind.MODEL
+        else {"arguments": detail.request, "result": detail.result}
+    )
     return {
         "record": trace_record_dto(detail.record),
-        "content": {"request": detail.request, "result": detail.result},
-        "raw_sources": [
-            {
-                "source": item.source,
-                "direction": item.direction,
-                "layer": item.layer,
-                "content_type": item.content_type,
-                "content_encoding": item.content_encoding,
-                "total_bytes": item.total_bytes,
-            }
-            for item in detail.raw_sources
+        "content": content,
+        "related_tools": [
+            {"record_id": tool.record_id, "tool_call_id": tool.tool_call_id,
+             "tool_name": tool.tool_name, "status": tool.status}
+            for tool in detail.related_tools
         ],
         "capture_issues": capture_issues,
-    }
-
-
-def trace_raw_page_dto(page: TraceRawPage) -> TraceRawPageDTO:
-    return {
-        "source": page.source,
-        "direction": page.direction,
-        "layer": page.layer,
-        "offset": page.offset,
-        "data_base64": b64encode(page.data).decode("ascii"),
-        "total_bytes": page.total_bytes,
-        "next_offset": page.next_offset,
-        "content_type": page.content_type,
-        "content_encoding": page.content_encoding,
     }

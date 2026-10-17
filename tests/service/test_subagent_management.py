@@ -58,8 +58,6 @@ from aide.trace.context import TraceRootSource, workspace_key_for
 from aide.trace.sqlite_recorder import SQLiteTraceRecorder
 from aide.trace.types import (
     TraceCallMetadata,
-    TraceCaptureLayer,
-    TraceDirection,
     TraceKind,
     TraceOrigin,
     TraceOutcome,
@@ -1462,14 +1460,6 @@ async def test_session_delete_is_fenced_by_active_subagents_then_removes_them(
                 started_at=_NOW,
                 tool_name="read_file",
             ),
-        )
-        recorder.append_raw(
-            handle,
-            source="tool_result",
-            direction=TraceDirection.RESPONSE,
-            layer=TraceCaptureLayer.TOOL_RESULT,
-            sequence=0,
-            data=b"captured",
         )
         recorder.finish_call(
             handle,

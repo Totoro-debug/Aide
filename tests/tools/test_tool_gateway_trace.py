@@ -42,14 +42,12 @@ from aide.trace.sqlite_recorder import SQLiteTraceRecorder
 from aide.trace.types import (
     TraceCaptureHandle,
     TraceCaptureIssue,
-    TraceCaptureLayer,
-    TraceDirection,
     TraceErrorCategory,
     TraceKind,
+    TraceMetadataHandle,
     TraceOrigin,
     TraceOutcome,
     TracePurpose,
-    TraceRawHandle,
     TraceTokenUsage,
 )
 from tests.fixtures import (
@@ -71,7 +69,7 @@ _RAW_RESULT = "raw-result-" * 6_000
 
 
 class _BrokenEndpointRecorder(NoOpTraceRecorder):
-    def set_endpoint(self, handle: TraceRawHandle, endpoint: str) -> None:
+    def set_endpoint(self, handle: TraceMetadataHandle, endpoint: str) -> None:
         raise RuntimeError("endpoint capture failed")
 
 
@@ -261,27 +259,6 @@ def _patch_python_process(
     return processes
 
 
-async def _read_trace_raw(
-    recorder: SQLiteTraceRecorder,
-    record_id: str,
-    source: str,
-) -> bytes:
-    chunks: list[bytes] = []
-    offset = 0
-    while True:
-        page = await recorder.read_raw(
-            record_id,
-            source=source,
-            offset=offset,
-            limit_bytes=256 * 1024,
-        )
-        chunks.append(page.data)
-        if page.next_offset is None:
-            return b"".join(chunks)
-        assert page.next_offset > offset
-        offset = page.next_offset
-
-
 async def _exec_output_handshake_server() -> tuple[asyncio.AbstractServer, asyncio.Event, int]:
     ready = asyncio.Event()
 
@@ -319,15 +296,13 @@ def _exec_output_handshake_script(port: int) -> str:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("exit_code", [0, 23])
-async def test_exec_trace_preserves_large_raw_process_streams_and_tool_result(
+async def test_exec_trace_retains_only_the_final_tool_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     exit_code: int,
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    stdout = bytes(range(256)) * 4096
-    stderr = bytes(reversed(range(256))) * 4096
     script = "\n".join(
         (
             "import sys",
@@ -377,26 +352,19 @@ async def test_exec_trace_preserves_large_raw_process_streams_and_tool_result(
         assert record.tool_call_id == "exec-traced"
         assert record.status.value == "success"
         assert record.capture_state.value == "complete"
-        assert detail.result == traced.to_dict()
+        assert detail.result == {"content": traced.content, "artifact": None if traced.artifact is None else traced.artifact.to_dict()}
         assert (traced.status, traced.content) == (baseline.status, baseline.content)
         assert (traced.status, traced.content) == (untraced.status, untraced.content)
         assert (traced.status, traced.content) == (broken_capture.status, broken_capture.content)
         assert traced.content.startswith(f"Exit code: {exit_code}\nstdout:\n")
         assert len(traced.content) <= 4000
         assert "\ufffd" in traced.content
-        assert {raw.source: (raw.direction, raw.layer) for raw in detail.raw_sources} == {
-            "exec_stdout": (TraceDirection.RESPONSE, TraceCaptureLayer.PROCESS_STREAM),
-            "exec_stderr": (TraceDirection.RESPONSE, TraceCaptureLayer.PROCESS_STREAM),
-            "tool_result": (TraceDirection.RESPONSE, TraceCaptureLayer.TOOL_RESULT),
-        }
-        assert await _read_trace_raw(recorder, record.record_id, "exec_stdout") == stdout
-        assert await _read_trace_raw(recorder, record.record_id, "exec_stderr") == stderr
     finally:
         await recorder.close()
 
 
 @pytest.mark.asyncio
-async def test_exec_trace_keeps_output_read_before_timeout(
+async def test_exec_trace_records_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -439,12 +407,6 @@ async def test_exec_trace_keeps_output_read_before_timeout(
         assert record.error_category is TraceErrorCategory.TIMEOUT
         assert record.error_message == timed_out.content
         assert record.capture_state.value == "complete"
-        assert await _read_trace_raw(recorder, record.record_id, "exec_stdout") == (
-            bytes(range(256)) * 1024
-        )
-        assert await _read_trace_raw(recorder, record.record_id, "exec_stderr") == (
-            bytes(reversed(range(256))) * 1024
-        )
     finally:
         server.close()
         await server.wait_closed()
@@ -456,7 +418,7 @@ async def test_exec_trace_keeps_output_read_before_timeout(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stalled_cleanup", [False, True])
-async def test_exec_trace_keeps_output_read_before_cancellation(
+async def test_exec_trace_records_cancellation_after_process_handshake(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stalled_cleanup: bool,
@@ -474,18 +436,6 @@ async def test_exec_trace_keeps_output_read_before_cancellation(
         purpose=TracePurpose.AGENT_RUN,
     )
     execution: asyncio.Task[ToolResult] | None = None
-    output_captured = asyncio.Event()
-    captured_bytes = {"exec_stdout": 0, "exec_stderr": 0}
-    append_raw = recorder.append_raw
-
-    def capture_raw(handle: TraceCaptureHandle, *, source: str, data: bytes, **kwargs: Any) -> None:
-        append_raw(handle, source=source, data=data, **kwargs)
-        if source in captured_bytes:
-            captured_bytes[source] += len(data)
-            if all(size == 256 * 1024 for size in captured_bytes.values()):
-                output_captured.set()
-
-    monkeypatch.setattr(recorder, "append_raw", capture_raw)
 
     try:
         with trace_scope(recorder, source):
@@ -500,8 +450,6 @@ async def test_exec_trace_keeps_output_read_before_cancellation(
                 )
             )
             await asyncio.wait_for(output_ready.wait(), timeout=5)
-            # Both streams must reach capture while the process is still alive and has no EOF.
-            await asyncio.wait_for(output_captured.wait(), timeout=5)
             if stalled_cleanup:
                 monkeypatch.setattr(processes[0], "kill", lambda: None)
                 monkeypatch.setattr("aide.agent.tools.core.exec_host._PROCESS_REAP_TIMEOUT", 0.1)
@@ -518,12 +466,6 @@ async def test_exec_trace_keeps_output_read_before_cancellation(
         assert record.error_message == "cancelled after output handshake"
         assert record.capture_state.value == "complete"
         assert detail.result is None
-        assert await _read_trace_raw(recorder, record.record_id, "exec_stdout") == (
-            bytes(range(256)) * 1024
-        )
-        assert await _read_trace_raw(recorder, record.record_id, "exec_stderr") == (
-            bytes(reversed(range(256))) * 1024
-        )
     finally:
         server.close()
         await server.wait_closed()
@@ -602,19 +544,15 @@ async def test_exec_trace_excludes_authorization_inspection_output(
         if decision == "approved":
             assert result.status == "success"
             assert process_count == 2
-            assert await _read_trace_raw(recorder, record.record_id, "exec_stdout") == (
-                b"command-output"
-            )
         else:
             assert result.status == "refused"
             assert process_count == 1
-            assert detail.raw_sources == ()
     finally:
         await recorder.close()
 
 
 @pytest.mark.asyncio
-async def test_successful_mcp_uses_one_logical_record_and_marks_transport_gap(
+async def test_successful_mcp_uses_one_complete_logical_record(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -647,10 +585,10 @@ async def test_successful_mcp_uses_one_logical_record_and_marks_transport_gap(
         (record,) = (await recorder.list_records()).items
         detail = await recorder.get_record(record.record_id)
         assert detail is not None
-        assert detail.result == result.to_dict()
-        assert cast(dict[str, Any], detail.request)["arguments"] == {"value": "payload"}
-        assert record.capture_state.value == "partial"
-        assert detail.capture_issues[0].source == "mcp_transport"
+        assert detail.result == {"content": result.content, "artifact": None if result.artifact is None else result.artifact.to_dict()}
+        assert cast(dict[str, Any], detail.request) == {"value": "payload"}
+        assert record.capture_state.value == "complete"
+        assert not detail.capture_issues
     finally:
         await recorder.close()
 
@@ -749,79 +687,20 @@ async def test_mcp_runtime_trace_correlates_wire_messages_by_request_id(
                     )
                     assert by_call_id[call_id].endpoint == expected_endpoint
 
-                prefix = "mcp_http" if transport == "http" else "mcp_stdio"
                 for call_id, value in (("call-slow", "slow"), ("call-fast", "fast")):
                     record = by_call_id[call_id]
                     assert record.owner_session_id == call_id
                     assert record.run_id == f"run-{call_id}"
                     detail = await recorder.get_record(record.record_id)
                     assert detail is not None
-                    assert cast(dict[str, Any], detail.request)["arguments"]["value"] == value
-                    sources = {item.source: item for item in detail.raw_sources}
-                    request_source = sources[f"{prefix}_request"]
-                    response_source = sources[f"{prefix}_response"]
-                    result_source = sources[f"{prefix}_result"]
-                    assert (request_source.direction, request_source.layer) == (
-                        TraceDirection.REQUEST,
-                        TraceCaptureLayer.JSON_RPC_MESSAGE,
-                    )
-                    assert (response_source.direction, response_source.layer) == (
-                        TraceDirection.RESPONSE,
-                        TraceCaptureLayer.JSON_RPC_MESSAGE,
-                    )
-                    assert result_source.layer is TraceCaptureLayer.SDK_RESULT
+                    assert cast(dict[str, Any], detail.request)["value"] == value
 
-                    request_bytes = (
-                        await recorder.read_raw(
-                            record.record_id,
-                            source=f"{prefix}_request",
-                            offset=0,
-                            limit_bytes=4096,
-                        )
-                    ).data
-                    assert b"trace-secret" not in request_bytes
-                    request_message = json.loads(request_bytes)
-                    response_message = json.loads(
-                        (
-                            await recorder.read_raw(
-                                record.record_id,
-                                source=f"{prefix}_response",
-                                offset=0,
-                                limit_bytes=4096,
-                            )
-                        ).data
-                    )
-                    raw_result = json.loads(
-                        (
-                            await recorder.read_raw(
-                                record.record_id,
-                                source=f"{prefix}_result",
-                                offset=0,
-                                limit_bytes=4096,
-                            )
-                        ).data
-                    )
-                    assert request_message["id"] == response_message["id"]
-                    assert request_message["params"]["arguments"]["value"] == value
-                    assert response_message["result"]["content"][0]["text"] == value
-                    assert raw_result["vendorResult"] == {"revision": 2, "opaque": ["kept"]}
                     assert record.capture_state.value == "complete"
                 assert by_call_id["call-slow"].root_id != by_call_id["call-fast"].root_id
 
                 failed_record = by_call_id["call-failed"]
                 failed_detail = await recorder.get_record(failed_record.record_id)
                 assert failed_detail is not None
-                failed_response = json.loads(
-                    (
-                        await recorder.read_raw(
-                            failed_record.record_id,
-                            source=f"{prefix}_response",
-                            offset=0,
-                            limit_bytes=4096,
-                        )
-                    ).data
-                )
-                assert failed_response["error"]["message"] == "fixture error"
                 assert failed_record.status.value == "failed"
                 assert failed_detail.capture_issues == ()
 
@@ -882,7 +761,7 @@ async def test_dream_edit_variant_records_arguments_and_actual_result(tmp_path: 
         assert record.owner_session_id is None
         detail = await recorder.get_record(record.record_id)
         assert detail is not None
-        assert cast(dict[str, Any], detail.request)["arguments"] == arguments
+        assert cast(dict[str, Any], detail.request) == arguments
         assert cast(dict[str, Any], detail.result)["content"] == "Long-term Memory updated."
     finally:
         await dream.close()
@@ -986,59 +865,15 @@ async def test_real_builtin_gateway_arguments_and_results(
         if name == "web_fetch":
             expected_arguments["url"] = "https://public.example/page?display=full"
             assert "fetch-secret" not in json.dumps(detail.request)
-        assert cast(dict[str, Any], detail.request)["arguments"] == expected_arguments
-        assert detail.result == result.to_dict()
-        raw = await recorder.read_raw(
-            record.record_id, source="tool_result", offset=0, limit_bytes=100_000
-        )
-        assert raw.data.decode() == result.content
-        assert record.capture_state.value == ("partial" if name == "exec" else "complete")
+        assert cast(dict[str, Any], detail.request) == expected_arguments
+        assert detail.result == {"content": result.content, "artifact": None if result.artifact is None else result.artifact.to_dict()}
+        assert record.capture_state.value == "complete"
         if name == "web_fetch":
             assert result.content == "fetc\n\n...[truncated]"
-            response_capture = await recorder.read_raw(
-                record.record_id,
-                source="web_fetch_response",
-                offset=0,
-                limit_bytes=100_000,
-            )
-            assert response_capture.data == response_body
-            assert response_capture.layer is TraceCaptureLayer.HTTP_DECODED_BODY
-            metadata_capture = await recorder.read_raw(
-                record.record_id,
-                source="web_fetch_response_metadata",
-                offset=0,
-                limit_bytes=100_000,
-            )
-            assert json.loads(metadata_capture.data) == {
-                "endpoint": "https://public.example/page?display=full",
-                "status_code": 207,
-                "content_type": "text/html; charset=utf-8",
-                "content_encoding": "gzip",
-                "content_decoding": "http_content_decoded",
-            }
-            assert metadata_capture.layer is TraceCaptureLayer.HTTP_METADATA
         elif name == "web_search":
             assert result.content == (
                 "1. Title: trace\n   URL: https://public.example/?lang=en\n   Snippet: found"
             )
-            search_capture = await recorder.read_raw(
-                record.record_id,
-                source="web_search_ddgs",
-                offset=0,
-                limit_bytes=100_000,
-            )
-            assert json.loads(search_capture.data) == [
-                {
-                    "title": "trace",
-                    "href": "https://public.example/?lang=en",
-                    "body": "found",
-                    "published": "2025-01-02",
-                    "canonical": "https://public.example/article?lang=en",
-                    "metadata": {"rank": 3},
-                },
-                {"title": "second", "url": "https://second.example/result", "body": "more"},
-            ]
-            assert search_capture.layer is TraceCaptureLayer.SDK_RESULT
     finally:
         await recorder.close()
 
@@ -1082,7 +917,7 @@ async def test_subagent_builtin_tools_share_the_gateway_trace_boundary(tmp_path:
             record = next(r for r in records if r.tool_call_id == result.tool_call_id)
             detail = await recorder.get_record(record.record_id)
             assert detail is not None and detail.request is not None
-            assert detail.result == result.to_dict()
+            assert detail.result == {"content": result.content, "artifact": None if result.artifact is None else result.artifact.to_dict()}
             assert record.owner_session_id == "subagent-owner"
     finally:
         executor.release.set()
@@ -1165,28 +1000,14 @@ class _CancelledTool(BaseTool):
 
 
 class _BrokenCaptureRecorder(NoOpTraceRecorder):
-    def set_request(self, handle: TraceRawHandle, request: object) -> None:
+    def set_request(self, handle: TraceMetadataHandle, request: object) -> None:
         del handle, request
         raise RuntimeError("request capture failed")
 
-    def report_capture_issue(self, handle: TraceRawHandle, issue: TraceCaptureIssue) -> None:
+    def report_capture_issue(self, handle: TraceMetadataHandle, issue: TraceCaptureIssue) -> None:
         del handle, issue
         raise RuntimeError("issue capture failed")
 
-    def append_raw(
-        self,
-        handle: TraceRawHandle,
-        *,
-        source: str,
-        direction: TraceDirection,
-        layer: TraceCaptureLayer,
-        sequence: int,
-        data: bytes,
-        content_type: str | None = None,
-        content_encoding: str | None = None,
-    ) -> None:
-        del handle, source, direction, layer, sequence, data, content_type, content_encoding
-        raise RuntimeError("raw capture failed")
 
     def finish_call(
         self,
@@ -1260,32 +1081,11 @@ async def test_gateway_records_model_tool_call_and_unformatted_result(tmp_path: 
         assert tool_record.run_id == "trace-run"
         assert echo.trace_record_ids == [tool_record.record_id]
         assert current_trace_tool_call() is None
-        assert detail.request == {
-            "tool_call_id": call.id,
-            "tool_name": call.name,
-            "arguments": {"value": "payload"},
-            "arguments_raw": call.arguments,
-            "normalized_arguments": {"value": "payload"},
-            "execution_arguments": {"value": "payload"},
-        }
-        assert detail.result == {
-            "tool_call_id": call.id,
-            "name": call.name,
-            "status": "success",
-            "content": _RAW_RESULT,
-            "artifact": None,
-        }
-        assert len(detail.raw_sources) == 1
-        assert detail.raw_sources[0].source == "tool_result"
-        assert detail.raw_sources[0].layer is TraceCaptureLayer.TOOL_RESULT
-        raw = await recorder.read_raw(
-            tool_record.record_id,
-            source="tool_result",
-            offset=0,
-            limit_bytes=100_000,
-        )
-        assert raw.direction is TraceDirection.RESPONSE
-        assert raw.data.decode("utf-8") == _RAW_RESULT
+        assert detail.request == {"value": "payload"}
+        assert detail.result == {"content": _RAW_RESULT, "artifact": None}
+        model_detail = await recorder.get_record(model_record.record_id)
+        assert model_detail is not None
+        assert [tool.record_id for tool in model_detail.related_tools] == [tool_record.record_id]
     finally:
         await router.close()
         await recorder.close()
@@ -1293,7 +1093,7 @@ async def test_gateway_records_model_tool_call_and_unformatted_result(tmp_path: 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("artifact_fails", [False, True])
-async def test_runner_trace_keeps_raw_and_final_artifact_result(
+async def test_runner_trace_keeps_only_final_artifact_result(
     tmp_path: Path, artifact_fails: bool
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -1365,11 +1165,7 @@ async def test_runner_trace_keeps_raw_and_final_artifact_result(
         final_message = next(m for m in outcome.messages if m["role"] == "tool")
         returned = cast(dict[str, Any], detail.result)
         assert returned["content"] == final_message["content"]
-        assert returned["status"] == final_message["status"]
-        raw = await recorder.read_raw(
-            record.record_id, source="tool_result", offset=0, limit_bytes=100_000
-        )
-        assert raw.data.decode() == _RAW_RESULT
+        assert record.status.value == ("success" if final_message["status"] == "success" else "failed")
         if artifact_fails:
             assert record.status.value == "failed"
             assert returned["artifact"] is None
@@ -1432,10 +1228,6 @@ async def test_runner_publishes_cancelled_tool_when_its_result_task_cancels_itse
         assert record.error_category is TraceErrorCategory.CANCELLED
         detail = await recorder.get_record(record.record_id)
         assert detail is not None and detail.result is None
-        raw = await recorder.read_raw(
-            record.record_id, source="tool_result", offset=0, limit_bytes=100_000
-        )
-        assert raw.data.decode() == _RAW_RESULT
     finally:
         await router.close()
         await recorder.close()
@@ -1530,13 +1322,11 @@ async def test_gateway_records_failed_refused_and_cancelled_calls(tmp_path: Path
         for record, returned in ((invalid_record, invalid), (refused_record, refused)):
             detail = await recorder.get_record(record.record_id)
             assert detail is not None
-            assert detail.result == returned.to_dict()
-            assert detail.raw_sources == ()
+            assert detail.result == {"content": returned.content, "artifact": None if returned.artifact is None else returned.artifact.to_dict()}
         for record in (cancelled_record,):
             detail = await recorder.get_record(record.record_id)
             assert detail is not None
             assert detail.result is None
-            assert detail.raw_sources == ()
     finally:
         await recorder.close()
 
@@ -1598,12 +1388,9 @@ async def test_gateway_records_declined_authorization_without_executing_mcp_tool
         assert record.error_category is TraceErrorCategory.PERMISSION_DENIED
         detail = await recorder.get_record(record.record_id)
         assert detail is not None
-        assert detail.result == result.to_dict()
-        request = cast(dict[str, Any], detail.request)
-        confirmation = cast(dict[str, Any], request["confirmation"])
-        confirmation_request = cast(dict[str, Any], confirmation["request"])
-        assert confirmation["decision"] == "declined"
-        assert confirmation_request["tool_name"] == call.name
+        assert detail.result == {"content": result.content, "artifact": None if result.artifact is None else result.artifact.to_dict()}
+        assert detail.request == {"value": "payload"}
+        assert result.confirmation is not None and result.confirmation.decision == "declined"
     finally:
         await recorder.close()
 
@@ -1637,17 +1424,16 @@ async def test_gateway_capture_failures_do_not_change_the_tool_result(tmp_path: 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("tool_name", "gap_source"),
+    "tool_name",
     [
-        ("exec", "exec_process_stream"),
-        ("web_fetch", "web_fetch_response"),
-        ("web_search", "web_search_ddgs"),
+        "exec",
+        "web_fetch",
+        "web_search",
     ],
 )
-async def test_gateway_marks_specialized_raw_capture_gaps(
+async def test_gateway_specialized_tools_need_only_final_results(
     tmp_path: Path,
     tool_name: str,
-    gap_source: str,
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1676,17 +1462,16 @@ async def test_gateway_marks_specialized_raw_capture_gaps(
 
         assert (result.status, result.content) == ("success", "formatted result")
         (record,) = (await recorder.list_records()).items
-        assert record.capture_state.value == "partial"
+        assert record.capture_state.value == "complete"
         detail = await recorder.get_record(record.record_id)
         assert detail is not None
-        assert detail.raw_sources[0].layer is TraceCaptureLayer.TOOL_RESULT
-        assert detail.capture_issues[0].source == gap_source
+        assert not detail.capture_issues
     finally:
         await recorder.close()
 
 
 @pytest.mark.asyncio
-async def test_gateway_marks_specialized_capture_gap_when_execution_fails(tmp_path: Path) -> None:
+async def test_gateway_keeps_failed_specialized_result_without_capture_gap(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
@@ -1715,11 +1500,11 @@ async def test_gateway_marks_specialized_capture_gap_when_execution_fails(tmp_pa
         assert (result.status, result.content) == ("error", "process failed")
         (record,) = (await recorder.list_records()).items
         assert record.status.value == "failed"
-        assert record.capture_state.value == "partial"
+        assert record.capture_state.value == "complete"
         detail = await recorder.get_record(record.record_id)
         assert detail is not None
-        assert detail.result == result.to_dict()
-        assert detail.capture_issues[0].source == "exec_process_stream"
+        assert detail.result == {"content": result.content, "artifact": None if result.artifact is None else result.artifact.to_dict()}
+        assert not detail.capture_issues
     finally:
         await recorder.close()
 

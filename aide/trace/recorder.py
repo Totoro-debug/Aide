@@ -13,12 +13,9 @@ from aide.trace.types import (
     TraceCallMetadata,
     TraceCaptureHandle,
     TraceCaptureIssue,
-    TraceCaptureLayer,
-    TraceDirection,
+    TraceMetadataHandle,
     TraceOutcome,
     TracePage,
-    TraceRawHandle,
-    TraceRawPage,
     TraceRecordDetail,
     TraceRecordFilters,
     TraceSessionPage,
@@ -28,26 +25,11 @@ from aide.trace.types import (
 
 
 class TraceRecorder(Protocol):
-    """Capture never waits for disk or replaces business outcomes; reads/cleanup are async.
+    """Best-effort semantic outcomes; writes never wait for disk.
 
-    Requests and issues bind to a Tool call or a specific model attempt. The
-    adapter supplies detached JSON-compatible request/result snapshots; the recorder
-    does not interpret adapter payloads. Only the successful final model attempt's
-    request, raw sources and issues are published. Ultimately failed model calls
-    discard request/response candidates and retain errors and metadata.
-    Failed Tools retain their arguments and the output already captured.
-
-    A source names a stream within a record; its layer states the capture boundary:
-    HTTP body before/after content decoding, JSON-RPC message, SDK result (DDGS),
-    process stream (Exec), or Tool result before formatting. Issues degrade capture
-    completeness independently of execution status; writer losses can also add
-    issues. An unavailable source alongside other captured sources makes the
-    record partial; unavailable at record level means no capture is available.
-    A lack of retained model payloads by policy is not a capture failure.
-
-    Query DTOs encode datetimes as UTC Z strings, error_* fields as one error
-    object, detail request/result as content, and raw data as data_base64. Sources,
-    layers, capture issues and other metadata retain their names and meanings.
+    Only Tool arguments use set_request. Model inputs and protocol payloads are
+    never captured. Attempts select final routing metadata and issues; partial
+    model output survives failure independently of capture completeness.
     """
 
     def new_root(self, source: TraceRootSource) -> TraceContext: ...
@@ -60,24 +42,14 @@ class TraceRecorder(Protocol):
         self, handle: TraceCaptureHandle, metadata: TraceAttemptMetadata
     ) -> TraceAttemptHandle: ...
 
-    def set_endpoint(self, handle: TraceRawHandle, endpoint: str) -> None: ...
+    def set_endpoint(self, handle: TraceMetadataHandle, endpoint: str) -> None: ...
 
-    def set_request(self, handle: TraceRawHandle, request: object) -> None: ...
+    def set_protocol(self, handle: TraceMetadataHandle, protocol: str) -> None: ...
 
-    def report_capture_issue(self, handle: TraceRawHandle, issue: TraceCaptureIssue) -> None: ...
+    def set_request(self, handle: TraceMetadataHandle, request: object) -> None: ...
 
-    def append_raw(
-        self,
-        handle: TraceRawHandle,
-        *,
-        source: str,
-        direction: TraceDirection,
-        layer: TraceCaptureLayer,
-        sequence: int,
-        data: bytes,
-        content_type: str | None = None,
-        content_encoding: str | None = None,
-    ) -> None: ...
+    def report_capture_issue(self, handle: TraceMetadataHandle, issue: TraceCaptureIssue) -> None: ...
+
 
     def finish_call(
         self,
@@ -120,14 +92,6 @@ class TraceRecorder(Protocol):
 
     async def get_record(self, record_id: str) -> TraceRecordDetail | None: ...
 
-    async def read_raw(
-        self,
-        record_id: str,
-        *,
-        source: str,
-        offset: int,
-        limit_bytes: int,
-    ) -> TraceRawPage: ...
 
     async def get_stats(self, filters: TraceRecordFilters | None = None) -> TraceStats: ...
 
@@ -150,28 +114,18 @@ class NoOpTraceRecorder:
         del metadata
         return TraceAttemptHandle(record_id=handle.record_id, attempt_id=str(uuid4()))
 
-    def set_endpoint(self, handle: TraceRawHandle, endpoint: str) -> None:
+    def set_endpoint(self, handle: TraceMetadataHandle, endpoint: str) -> None:
         del handle, endpoint
 
-    def set_request(self, handle: TraceRawHandle, request: object) -> None:
+    def set_protocol(self, handle: TraceMetadataHandle, protocol: str) -> None:
+        del handle, protocol
+
+    def set_request(self, handle: TraceMetadataHandle, request: object) -> None:
         del handle, request
 
-    def report_capture_issue(self, handle: TraceRawHandle, issue: TraceCaptureIssue) -> None:
+    def report_capture_issue(self, handle: TraceMetadataHandle, issue: TraceCaptureIssue) -> None:
         del handle, issue
 
-    def append_raw(
-        self,
-        handle: TraceRawHandle,
-        *,
-        source: str,
-        direction: TraceDirection,
-        layer: TraceCaptureLayer,
-        sequence: int,
-        data: bytes,
-        content_type: str | None = None,
-        content_encoding: str | None = None,
-    ) -> None:
-        del handle, source, direction, layer, sequence, data, content_type, content_encoding
 
     def finish_call(
         self,
@@ -225,24 +179,6 @@ class NoOpTraceRecorder:
         del record_id
         return None
 
-    async def read_raw(
-        self,
-        record_id: str,
-        *,
-        source: str,
-        offset: int,
-        limit_bytes: int,
-    ) -> TraceRawPage:
-        del record_id, limit_bytes
-        return TraceRawPage(
-            source=source,
-            direction=None,
-            layer=None,
-            offset=offset,
-            data=b"",
-            total_bytes=0,
-            next_offset=None,
-        )
 
     async def get_stats(self, filters: TraceRecordFilters | None = None) -> TraceStats:
         del filters

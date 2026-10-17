@@ -1844,12 +1844,6 @@
         "not_applicable"
       ]
     },
-    "trace_direction": {
-      "enum": [
-        "request",
-        "response"
-      ]
-    },
     "trace_reasoning_effort": {
       "$ref": "#/$defs/reasoning_effort"
     },
@@ -2049,7 +2043,9 @@
         "final_attempt_duration_ms",
         "usage",
         "capture_state",
-        "restored"
+        "restored",
+        "protocol",
+        "output_complete"
       ],
       "properties": {
         "record_id": {
@@ -2202,6 +2198,15 @@
         },
         "restored": {
           "type": "boolean"
+        },
+        "protocol": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_complete": {
+          "type": "boolean"
         }
       },
       "allOf": [
@@ -2245,54 +2250,13 @@
         }
       ]
     },
-    "trace_raw_source": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "source",
-        "direction",
-        "layer",
-        "content_type",
-        "content_encoding",
-        "total_bytes"
-      ],
-      "properties": {
-        "source": {
-          "$ref": "#/$defs/identifier"
-        },
-        "direction": {
-          "$ref": "#/$defs/trace_direction"
-        },
-        "content_type": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "content_encoding": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "total_bytes": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "layer": {
-          "$ref": "#/$defs/trace_capture_layer"
-        }
-      }
-    },
     "trace_content": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "request",
-        "result"
-      ],
+      "required": [],
       "properties": {
-        "request": {},
+        "output": {},
+        "arguments": {},
         "result": {}
       }
     },
@@ -2302,8 +2266,8 @@
       "required": [
         "record",
         "content",
-        "raw_sources",
-        "capture_issues"
+        "capture_issues",
+        "related_tools"
       ],
       "properties": {
         "record": {
@@ -2312,16 +2276,16 @@
         "content": {
           "$ref": "#/$defs/trace_content"
         },
-        "raw_sources": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/trace_raw_source"
-          }
-        },
         "capture_issues": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/trace_capture_issue"
+          }
+        },
+        "related_tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/trace_tool_link"
           }
         }
       }
@@ -2667,77 +2631,6 @@
         }
       }
     },
-    "trace_raw_page": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "source",
-        "direction",
-        "layer",
-        "offset",
-        "data_base64",
-        "total_bytes",
-        "next_offset",
-        "content_type",
-        "content_encoding"
-      ],
-      "properties": {
-        "source": {
-          "$ref": "#/$defs/identifier"
-        },
-        "direction": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/trace_direction"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "offset": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "data_base64": {
-          "type": "string",
-          "contentEncoding": "base64"
-        },
-        "total_bytes": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "next_offset": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "minimum": 0
-        },
-        "content_type": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "content_encoding": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "layer": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/trace_capture_layer"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      }
-    },
     "trace_list_query": {
       "type": "object",
       "additionalProperties": false,
@@ -2835,38 +2728,6 @@
         }
       }
     },
-    "trace_raw_query": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "source"
-      ],
-      "properties": {
-        "source": {
-          "$ref": "#/$defs/identifier"
-        },
-        "offset": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "limit_bytes": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 1048576
-        }
-      }
-    },
-    "trace_capture_layer": {
-      "enum": [
-        "http_body",
-        "http_metadata",
-        "http_decoded_body",
-        "json_rpc_message",
-        "sdk_result",
-        "process_stream",
-        "tool_result"
-      ]
-    },
     "trace_capture_issue": {
       "type": "object",
       "additionalProperties": false,
@@ -2893,6 +2754,36 @@
           ]
         }
       }
+    },
+    "trace_tool_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "record_id": {
+          "type": "string"
+        },
+        "tool_call_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/trace_status"
+        }
+      },
+      "required": [
+        "record_id",
+        "tool_call_id",
+        "tool_name",
+        "status"
+      ]
     }
   }
 }

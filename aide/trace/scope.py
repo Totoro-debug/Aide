@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -17,9 +17,7 @@ from aide.trace.types import (
     TraceAttemptHandle,
     TraceCaptureHandle,
     TraceCaptureIssue,
-    TraceCaptureLayer,
     TraceCaptureState,
-    TraceDirection,
     TracePurpose,
 )
 
@@ -39,7 +37,12 @@ class TraceExecutionScope:
 class TraceToolCallScope:
     recorder: TraceRecorder
     handle: TraceCaptureHandle
-    captured_sources: set[str] = field(default_factory=set, compare=False, hash=False)
+
+    def set_protocol(self, protocol: str) -> None:
+        try:
+            self.recorder.set_protocol(self.handle, protocol)
+        except Exception:
+            self.report_capture_issue("Tool protocol metadata could not be captured.", source="protocol")
 
     def set_endpoint(self, endpoint: str) -> None:
         try:
@@ -48,36 +51,6 @@ class TraceToolCallScope:
             self.report_capture_issue("Tool endpoint metadata could not be captured.",
                                       source="tool_endpoint")
 
-    def append_raw(
-        self,
-        *,
-        source: str,
-        direction: TraceDirection,
-        layer: TraceCaptureLayer,
-        sequence: int,
-        data: bytes,
-        content_type: str | None = None,
-        content_encoding: str | None = None,
-    ) -> bool:
-        try:
-            self.recorder.append_raw(
-                self.handle,
-                source=source,
-                direction=direction,
-                layer=layer,
-                sequence=sequence,
-                data=data,
-                content_type=content_type,
-                content_encoding=content_encoding,
-            )
-        except Exception:
-            self.report_capture_issue(
-                f"Tool {source} could not be captured.",
-                source=source,
-            )
-            return False
-        self.captured_sources.add(source)
-        return True
 
     def report_capture_issue(self, message: str, *, source: str) -> None:
         try:
@@ -97,21 +70,7 @@ class TraceToolCallScope:
 class TraceProviderAttempt:
     recorder: TraceRecorder
     handle: TraceAttemptHandle
-    capture_expected: bool = True
-    request_captured: bool = False
-    response_captured: bool = False
-    response_metadata_captured: bool = False
-    response_body_started: bool = False
-    http_exchange_count: int = 0
 
-    def begin_http_exchange(self) -> int:
-        index = self.http_exchange_count
-        self.http_exchange_count += 1
-        self.request_captured = False
-        self.response_captured = False
-        self.response_metadata_captured = False
-        self.response_body_started = False
-        return index
 
     def set_endpoint(self, endpoint: str) -> None:
         try:
@@ -119,32 +78,6 @@ class TraceProviderAttempt:
         except Exception:
             self.report_capture_issue("Provider endpoint metadata could not be captured.")
 
-    def append_raw(
-        self,
-        *,
-        source: str,
-        direction: TraceDirection,
-        layer: TraceCaptureLayer,
-        sequence: int,
-        data: bytes,
-        content_type: str | None = None,
-        content_encoding: str | None = None,
-    ) -> bool:
-        try:
-            self.recorder.append_raw(
-                self.handle,
-                source=source,
-                direction=direction,
-                layer=layer,
-                sequence=sequence,
-                data=data,
-                content_type=content_type,
-                content_encoding=content_encoding,
-            )
-        except Exception:
-            self.report_capture_issue(f"Provider {source} could not be captured.")
-            return False
-        return True
 
     def report_capture_issue(self, message: str) -> None:
         try:
@@ -158,14 +91,6 @@ class TraceProviderAttempt:
             )
         except Exception:
             logger.warning("Execution Trace provider capture issue could not be reported")
-
-    def report_incomplete(self) -> bool:
-        if not self.capture_expected:
-            return False
-        if not self.request_captured or not self.response_captured:
-            self.report_capture_issue("Provider HTTP request or response capture was incomplete.")
-            return True
-        return False
 
 
 _ACTIVE_TRACE_SCOPE: ContextVar[TraceExecutionScope | None] = ContextVar(

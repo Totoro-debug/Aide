@@ -494,8 +494,6 @@ def test_execution_trace_wire_fixtures_match_the_protocol_schema() -> None:
     _validator("trace_page").validate(fixtures.page)
     _validator("trace_sessions_response").validate(fixtures.sessions)
     _validator("trace_stats_response").validate(fixtures.stats)
-    for page in fixtures.raw_pages.values():
-        _validator("trace_raw_page").validate(page)
 
 
 def test_execution_trace_schema_rejects_unknown_status_and_ambiguous_usage() -> None:
@@ -524,10 +522,6 @@ def test_execution_trace_schema_rejects_unknown_status_and_ambiguous_usage() -> 
         _validator("trace_record_detail").validate(
             {**detail, "capture_issues": [{"state": "complete", "message": "", "source": None}]}
         )
-    with pytest.raises(ValidationError):
-        _validator("trace_raw_source").validate(
-            {**detail["raw_sources"][0], "layer": "unspecified"}
-        )
 
 
 @pytest.mark.parametrize(
@@ -536,7 +530,7 @@ def test_execution_trace_schema_rejects_unknown_status_and_ambiguous_usage() -> 
         ("TraceUsageDTO", "trace_token_usage"),
         ("TraceErrorDTO", "trace_error"),
         ("TraceRecordDTO", "trace_record"),
-        ("TraceRawSourceDTO", "trace_raw_source"),
+        ("TraceToolLinkDTO", "trace_tool_link"),
         ("TraceCaptureIssueDTO", "trace_capture_issue"),
         ("TraceContentDTO", "trace_content"),
         ("TraceRecordDetailDTO", "trace_record_detail"),
@@ -549,7 +543,6 @@ def test_execution_trace_schema_rejects_unknown_status_and_ambiguous_usage() -> 
         ("TraceErrorBreakdownDTO", "trace_error_breakdown"),
         ("TraceTimelinePointDTO", "trace_timeline_point"),
         ("TraceStatsResponseDTO", "trace_stats_response"),
-        ("TraceRawPageDTO", "trace_raw_page"),
     ],
 )
 def test_execution_trace_python_dto_fields_match_wire_contract(
@@ -577,9 +570,7 @@ def test_execution_trace_python_dto_fields_match_wire_contract(
         ("TraceStatus", "trace_status"),
         ("TraceErrorCategory", "trace_error_category"),
         ("TraceCaptureState", "trace_capture_state"),
-        ("TraceCaptureLayer", "trace_capture_layer"),
         ("TraceUsageState", "trace_usage_state"),
-        ("TraceDirection", "trace_direction"),
     ],
 )
 def test_execution_trace_python_enums_match_wire_contract(enum_name: str, definition: str) -> None:
@@ -601,13 +592,8 @@ def test_execution_trace_query_dtos_pin_filters_and_page_limits() -> None:
         {"workspace_key": "sha256:workspace", "purpose": "dream"}
     )
     _validator("trace_sessions_query").validate({"cursor": "cursor-1", "limit": 50})
-    _validator("trace_raw_query").validate(
-        {"source": "exec_stdout", "offset": 0, "limit_bytes": 262144}
-    )
     with pytest.raises(ValidationError):
         _validator("trace_list_query").validate({"limit": 201})
-    with pytest.raises(ValidationError):
-        _validator("trace_raw_query").validate({"source": "exec_stdout", "limit_bytes": 1048577})
 
 
 def test_reasoning_effort_levels_match_wire_contract() -> None:

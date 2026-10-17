@@ -178,7 +178,7 @@ async def test_service_foreground_and_schedule_reuse_catalog_with_workspace_and_
                 )
                 detail = await recorder.get_record(record.record_id)
                 assert detail is not None and detail.request is not None
-                assert detail.result is not None and detail.raw_sources
+                assert detail.result is not None
         scheduled = [
             r for r in records if r.kind is TraceKind.TOOL and r.owner_session_id == job.session_id
         ]

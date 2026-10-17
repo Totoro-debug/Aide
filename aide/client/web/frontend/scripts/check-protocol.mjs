@@ -111,16 +111,14 @@ const referenceTypes = {
   trace_status: "TraceStatus",
   trace_error_category: "TraceErrorCategory",
   trace_capture_state: "TraceCaptureState",
-  trace_capture_layer: "TraceCaptureLayer",
   trace_capture_issue: "TraceCaptureIssueDTO",
   trace_usage_state: "TraceUsageState",
-  trace_direction: "TraceDirection",
   trace_reasoning_effort: "ReasoningEffort",
   trace_token_usage: "TraceTokenUsageDTO",
   trace_error: "TraceErrorDTO",
   trace_record: "TraceRecordDTO",
-  trace_raw_source: "TraceRawSourceDTO",
   trace_content: "TraceContentDTO",
+  trace_tool_link: "TraceToolLinkDTO",
   trace_record_detail: "TraceRecordDetailDTO",
   trace_page: "TracePageDTO",
   trace_session_summary: "TraceSessionSummaryDTO",
@@ -131,11 +129,9 @@ const referenceTypes = {
   trace_error_breakdown: "TraceErrorBreakdownDTO",
   trace_timeline_point: "TraceTimelinePointDTO",
   trace_stats_response: "TraceStatsResponseDTO",
-  trace_raw_page: "TraceRawPageDTO",
   trace_list_query: "TraceListQueryDTO",
   trace_stats_query: "TraceStatsQueryDTO",
   trace_sessions_query: "TraceSessionsQueryDTO",
-  trace_raw_query: "TraceRawQueryDTO",
 };
 
 function schemaType(definition) {
@@ -211,9 +207,7 @@ for (const [name, definition] of [
   ["TraceStatus", "trace_status"],
   ["TraceErrorCategory", "trace_error_category"],
   ["TraceCaptureState", "trace_capture_state"],
-  ["TraceCaptureLayer", "trace_capture_layer"],
   ["TraceUsageState", "trace_usage_state"],
-  ["TraceDirection", "trace_direction"],
   ["TraceReasoningEffort", "trace_reasoning_effort"],
 ]) {
   const declaration = protocolSource.statements.find(
@@ -261,7 +255,6 @@ for (const [name, definitionName] of [
   ["TraceTokenUsageDTO", "trace_token_usage"],
   ["TraceErrorDTO", "trace_error"],
   ["TraceRecordDTO", "trace_record"],
-  ["TraceRawSourceDTO", "trace_raw_source"],
   ["TraceCaptureIssueDTO", "trace_capture_issue"],
   ["TraceContentDTO", "trace_content"],
   ["TraceRecordDetailDTO", "trace_record_detail"],
@@ -274,11 +267,9 @@ for (const [name, definitionName] of [
   ["TraceErrorBreakdownDTO", "trace_error_breakdown"],
   ["TraceTimelinePointDTO", "trace_timeline_point"],
   ["TraceStatsResponseDTO", "trace_stats_response"],
-  ["TraceRawPageDTO", "trace_raw_page"],
   ["TraceListQueryDTO", "trace_list_query"],
   ["TraceStatsQueryDTO", "trace_stats_query"],
   ["TraceSessionsQueryDTO", "trace_sessions_query"],
-  ["TraceRawQueryDTO", "trace_raw_query"],
 ]) {
   checkMembers(name, interfaceDeclaration(name).members, definitions[definitionName]);
 }

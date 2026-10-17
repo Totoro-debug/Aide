@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { Buffer } from "node:buffer";
 import { chromium, expect } from "@playwright/test";
 import setup from "./e2e-setup.mjs";
 import { setInterfaceLanguage } from "./settings-e2e.mjs";
@@ -16,7 +15,6 @@ let holdNextPage = false;
 let releaseNextPage;
 let failNextPage = false;
 let recordMode = "ready";
-const rawBytes = Buffer.concat([Buffer.alloc(262143, 120), Buffer.from("汉字\nend")]);
 
 const tokens = {
   input_tokens: 120,
@@ -117,6 +115,7 @@ function traceRecord(workspaceKey, workspacePath, sessionId, recordId) {
     },
     capture_state: "complete",
     restored: false,
+    protocol: "openai-compatible", output_complete: true,
   };
 }
 
@@ -211,31 +210,15 @@ try {
       });
       return;
     }
-    const rawPath = url.pathname.match(/^\/api\/v1\/traces\/([^/]+)\/raw$/);
-    if (rawPath !== null) {
-      if (url.searchParams.get("download") === "true") {
-        await route.fulfill({ status: 200, contentType: "application/octet-stream", body: rawBytes });
-      } else {
-        const offset = Number(url.searchParams.get("offset"));
-        const end = Math.min(rawBytes.length, offset + Number(url.searchParams.get("limit_bytes")));
-        await route.fulfill({ status: 200, json: {
-          source: "response", direction: "response", layer: "tool_result", offset,
-          data_base64: rawBytes.subarray(offset, end).toString("base64"), total_bytes: rawBytes.length,
-          next_offset: end < rawBytes.length ? end : null,
-          content_type: "text/plain; charset=utf-8", content_encoding: null,
-        } });
-      }
-      return;
-    }
     const recordPath = url.pathname.match(/^\/api\/v1\/traces\/([^/]+)$/);
     if (recordPath !== null) {
       const found = auxiliaryRecords().find((record) => record.record_id === recordPath[1]);
       const status = recordMode === "ready" ? (found === undefined ? 404 : 200) : Number(recordMode);
       await route.fulfill({ status, json: status !== 200 ? { code: "trace_error", message: "Failed" } : {
-        record: found, content: { request: { input: found.record_id }, result: "done" },
-        capture_issues: [], raw_sources: [{ source: "response", direction: "response",
-          layer: "tool_result", total_bytes: rawBytes.length,
-          content_type: "text/plain; charset=utf-8", content_encoding: null }],
+        record: found, content: found.kind === "model"
+          ? { output: { text: "done", reasoning: "", tool_calls: [] } }
+          : { arguments: { query: "keywords" }, result: { content: "done", artifact: null } },
+        capture_issues: [], related_tools: [],
       } });
       return;
     }
@@ -420,22 +403,15 @@ try {
     await expect(link).toHaveAttribute("href", `/traces/records/${record.record_id}`);
     await link.click();
     await expect(page.getByRole("heading", { name: "Call details", exact: true })).toBeVisible();
-    await expect(page.locator("main code").filter({ hasText: new RegExp(`^${record.record_id}$`) })).toBeVisible();
+    await expect(page.locator("main pre").filter({ hasText: /^done$/ })).toBeVisible();
     await page.reload();
-    await expect(page.locator("main code").filter({ hasText: new RegExp(`^${record.record_id}$`) })).toBeVisible();
+    await expect(page.locator("main pre").filter({ hasText: /^done$/ })).toBeVisible();
     await page.goto(`${control.details.url}/statistics`);
     await expect(page.getByRole("heading", { name: "Statistics", exact: true })).toBeVisible();
   }
   await page.setViewportSize({ width: 1440, height: 960 });
   await page.goto(`${control.details.url}/traces/records/record-dream`);
-  await page.getByRole("button", { name: "Load more raw content", exact: true }).click();
-  await expect(page.locator("main pre").last()).toHaveText(rawBytes.toString("utf8"));
-  const downloadEvent = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Download raw data", exact: true }).click();
-  const download = await downloadEvent;
-  const downloadedChunks = [];
-  for await (const chunk of await download.createReadStream()) downloadedChunks.push(chunk);
-  assert.deepEqual(Buffer.concat(downloadedChunks), rawBytes);
+  await expect(page.locator("main pre").filter({ hasText: /^done$/ })).toBeVisible();
   for (const [mode, text] of [["404", "This call is no longer available. It may have expired or its Session may have been deleted."],
     ["503", "Trace storage is unavailable."], ["401", "Connect to the local service to view Traces."]]) {
     recordMode = mode;

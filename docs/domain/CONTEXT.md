@@ -77,7 +77,7 @@ Workspace-owned technical diagnostics associated with one Conversation Session r
 _Avoid_: Runtime Log, Conversation log, chat transcript, audit log, activity feed
 
 **Execution Trace**:
-The recorded model requests and Tool invocations performed by the Personal Agent across foreground, SubAgent, Schedule, and auxiliary work, including their inputs, outcomes, timing, origin, and reported usage when available.
+The recorded model outputs and Tool invocations performed by the Personal Agent across foreground, SubAgent, Schedule, and auxiliary work, including their outcomes, timing, origin, reported usage when available, and the relationship between a model call and the Tool invocations it requests.
 _Avoid_: Session Log, Conversation Session history, Agent Run Activity Group
 
 **Agent Runner**:

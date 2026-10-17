@@ -19,7 +19,6 @@ export function TraceRecordView({ authState }: { authState: AuthState }) {
   const [detail, setDetail] = useState<TraceRecordDetailDTO | null>(null);
   const [state, setState] = useState<LoadState>("loading");
   const [refreshVersion, setRefreshVersion] = useState(0);
-  const [rawSourceName, setRawSourceName] = useState("");
   const requestVersion = useRef(0);
 
   useEffect(() => {
@@ -72,8 +71,8 @@ export function TraceRecordView({ authState }: { authState: AuthState }) {
           </div>
         ) : (
           <TraceRecordDetailView key={`${recordId}:${refreshVersion}`} detail={detail}
-            language={i18n.language} rawSourceName={rawSourceName}
-            onRawSourceChange={setRawSourceName} t={t} />
+            language={i18n.language}
+            t={t} />
         )}
       </section>
     </div>

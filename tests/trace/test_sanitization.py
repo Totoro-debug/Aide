@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import httpx
 import pytest
 
-from aide.provider.http_capture import _safe_headers
 from aide.trace.sanitization import (
     is_sensitive_trace_name,
     sanitize_trace_url,
@@ -36,7 +34,6 @@ def test_provider_and_tool_metadata_share_sensitive_name_rules(name: str, sensit
     assert is_sensitive_trace_name(name) is sensitive
     expected = {} if sensitive else {name: "value"}
     assert sanitize_trace_value({name: "value"}) == expected
-    assert _safe_headers(httpx.Headers({name: "value"})) == expected
 
 
 @pytest.mark.parametrize(
@@ -54,27 +51,3 @@ def test_provider_and_tool_metadata_share_sensitive_name_rules(name: str, sensit
 )
 def test_url_sanitization_preserves_public_query_segments(url: str, expected: str) -> None:
     assert sanitize_trace_url(url) == expected
-
-
-def test_provider_sanitizes_each_header_url_and_preserves_repeated_headers() -> None:
-    headers = httpx.Headers(
-        [
-            ("location", "/next?token_id=secret&q=a%20b&q=a+b#part"),
-            ("content-location", "//user:password@example.test/p?auth=secret&empty=#part"),
-            ("referer", "https://example.test/?sig=secret&flag#part"),
-            (
-                "link",
-                '<https://example.test/p?api_key=secret&q=%2f#part>; rel="next", '
-                '</p?token=secret&page=1#part>; rel="prev"',
-            ),
-            ("x-request-id", "first"),
-            ("x-request-id", "second"),
-        ]
-    )
-    assert _safe_headers(headers) == {
-        "location": "/next?q=a%20b&q=a+b",
-        "content-location": "//example.test/p?empty=",
-        "referer": "https://example.test/?flag",
-        "link": '<https://example.test/p?q=%2f>; rel="next", </p?page=1>; rel="prev"',
-        "x-request-id": ["first", "second"],
-    }

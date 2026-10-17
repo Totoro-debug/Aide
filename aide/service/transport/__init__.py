@@ -8,7 +8,6 @@ import mimetypes
 import secrets
 import sqlite3
 import time
-import zlib
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -16,14 +15,13 @@ from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
 from typing import Literal, cast
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 
 from aiohttp import WSMsgType, web
 
 from ...config.config import ConfigError
 from ...trace.http_dto import (
     trace_page_dto,
-    trace_raw_page_dto,
     trace_record_detail_dto,
     trace_sessions_response_dto,
     trace_stats_response_dto,
@@ -45,8 +43,6 @@ _WEB_TICKET_TTL_SECONDS = WEB_TICKET_TTL_SECONDS
 _WEB_SESSION_MAX_AGE_SECONDS = 24 * 60 * 60
 _TRACE_PAGE_DEFAULT = 50
 _TRACE_PAGE_MAX = 200
-_TRACE_RAW_PAGE_DEFAULT = 256 * 1024
-_TRACE_RAW_PAGE_MAX = 1024 * 1024
 _STATIC_CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data:; connect-src 'self' ws:; base-uri 'none'; "
@@ -132,7 +128,6 @@ class AgentServiceTransport:
         app.router.add_get(f"{_API_PREFIX}/traces/stats", self._trace_stats)
         app.router.add_get(f"{_API_PREFIX}/traces/sessions", self._trace_sessions)
         app.router.add_get(f"{_API_PREFIX}/traces", self._trace_records)
-        app.router.add_get(f"{_API_PREFIX}/traces/{{record_id}}/raw", self._trace_raw)
         app.router.add_get(f"{_API_PREFIX}/traces/{{record_id}}", self._trace_record)
         app.router.add_get(f"{_API_PREFIX}/projects", self._list_projects)
         app.router.add_post(f"{_API_PREFIX}/projects", self._register_project)
@@ -530,89 +525,6 @@ class AgentServiceTransport:
             raise _trace_not_found()
         return web.json_response(trace_record_detail_dto(detail))
 
-    async def _trace_raw(self, request: web.Request) -> web.StreamResponse:
-        self._authenticate(request, client_required=True)
-        query = _trace_query_values(
-            request,
-            allowed=frozenset({"source", "offset", "limit_bytes", "download"}),
-        )
-        source = query.get("source")
-        if not source:
-            raise _trace_bad_request()
-        offset = _trace_integer(
-            query.get("offset"),
-            default=0,
-            minimum=0,
-            maximum=2**63 - 1,
-        )
-        limit_bytes = _trace_integer(
-            query.get("limit_bytes"),
-            default=_TRACE_RAW_PAGE_DEFAULT,
-            minimum=1,
-            maximum=_TRACE_RAW_PAGE_MAX,
-        )
-        download = query.get("download", "false")
-        if download not in {"true", "false"}:
-            raise _trace_bad_request()
-        if download == "true" and (offset != 0 or "limit_bytes" in query):
-            raise _trace_bad_request()
-
-        recorder = self._require_trace_recorder()
-        record_id = request.match_info["record_id"]
-        try:
-            detail = await recorder.get_record(record_id)
-            if detail is None:
-                raise _trace_not_found()
-            if not any(item.source == source for item in detail.raw_sources):
-                raise _trace_not_found()
-            if download == "true":
-                first_page = await recorder.read_raw(
-                    record_id,
-                    source=source,
-                    offset=0,
-                    limit_bytes=_TRACE_RAW_PAGE_DEFAULT,
-                )
-            else:
-                page = await recorder.read_raw(
-                    record_id,
-                    source=source,
-                    offset=offset,
-                    limit_bytes=limit_bytes,
-                )
-        except ServiceError:
-            raise
-        except (OSError, sqlite3.Error, RuntimeError, ValueError, zlib.error) as error:
-            raise _trace_storage_unavailable() from error
-
-        if download == "false":
-            return web.json_response(trace_raw_page_dto(page))
-
-        response = web.StreamResponse(
-            status=200,
-            headers={
-                "Content-Type": "application/octet-stream",
-                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(source, safe='')}",
-            },
-        )
-        await response.prepare(request)
-        try:
-            await response.write(first_page.data)
-            next_offset = first_page.next_offset
-            while next_offset is not None:
-                chunk = await recorder.read_raw(
-                    record_id,
-                    source=source,
-                    offset=next_offset,
-                    limit_bytes=_TRACE_RAW_PAGE_DEFAULT,
-                )
-                if not chunk.data:
-                    break
-                await response.write(chunk.data)
-                next_offset = chunk.next_offset
-            await response.write_eof()
-        except (OSError, sqlite3.Error, RuntimeError, ValueError, zlib.error):
-            response.force_close()
-        return response
 
     def _require_trace_recorder(self) -> TraceRecorder:
         if not self.service.trace_storage_available:

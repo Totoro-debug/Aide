@@ -175,11 +175,8 @@ async def test_unavailable_trace_database_does_not_block_service_start_or_clear_
     provider = _ConcurrentProvider()
     monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _config: provider)
     database = home.path / "traces.sqlite3"
-    connection = sqlite3.connect(database)
-    try:
-        connection.execute("PRAGMA user_version = 99")
-    finally:
-        connection.close()
+    damaged_content = b"unavailable SQLite storage"
+    database.write_bytes(damaged_content)
 
     service = AgentService(home, ConfigLoader(home).load())
     await service.start()
@@ -187,11 +184,7 @@ async def test_unavailable_trace_database_does_not_block_service_start_or_clear_
         assert service.state == "ready"
         assert isinstance(service.trace_recorder, NoOpTraceRecorder)
         assert service.trace_storage_available is False
-        connection = sqlite3.connect(database)
-        try:
-            assert connection.execute("PRAGMA user_version").fetchone()[0] == 99
-        finally:
-            connection.close()
+        assert database.read_bytes() == damaged_content
         workspace_path = tmp_path / "workspace"
         workspace_path.mkdir()
         client = await service.register_client("cli")
@@ -232,7 +225,7 @@ async def test_service_start_sweeps_expired_history_in_the_background(
     workspace_path.mkdir()
     home.initialize()
     database = home.path / "traces.sqlite3"
-    finished_at = datetime.now(UTC) - timedelta(days=366)
+    finished_at = datetime.now(UTC) - timedelta(days=31)
     seed = SQLiteTraceRecorder(database, now=lambda: finished_at)
     expired_id = _publish_expired_record(seed, workspace_path, finished_at)
     await wait_for_trace_writer(seed)
@@ -258,7 +251,7 @@ async def test_service_start_sweeps_expired_history_in_the_background(
     finally:
         await service.stop()
 
-    reopened = SQLiteTraceRecorder(database, now=lambda: finished_at + timedelta(days=365))
+    reopened = SQLiteTraceRecorder(database, now=lambda: finished_at + timedelta(days=30))
     try:
         assert await reopened.get_record(expired_id) is None
     finally:

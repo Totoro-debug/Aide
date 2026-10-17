@@ -22,8 +22,6 @@ from aide.trace.sqlite_recorder import SQLiteTraceRecorder
 from aide.trace.types import (
     TraceAttemptMetadata,
     TraceCallMetadata,
-    TraceCaptureLayer,
-    TraceDirection,
     TraceErrorCategory,
     TraceKind,
     TraceOrigin,
@@ -71,7 +69,6 @@ async def _seed_model_trace(
     *,
     owner_session_id: str = "fixture-session",
     finished_at: datetime | None = None,
-    raw_data: bytes = b"\x00trace-data\xff",
 ) -> tuple[str, str]:
     finished_at = finished_at or datetime.now(UTC).replace(microsecond=0)
     started_at = finished_at - timedelta(milliseconds=120)
@@ -105,15 +102,6 @@ async def _seed_model_trace(
         ),
     )
     recorder.set_request(attempt, {"messages": [{"role": "user", "content": "fixture"}]})
-    recorder.append_raw(
-        handle,
-        source="fixture_blob",
-        direction=TraceDirection.RESPONSE,
-        layer=TraceCaptureLayer.HTTP_BODY,
-        sequence=0,
-        data=raw_data,
-        content_type="application/octet-stream",
-    )
     recorder.finish_call(
         handle,
         TraceOutcome(
@@ -122,7 +110,7 @@ async def _seed_model_trace(
             duration_ms=120,
             final_attempt_duration_ms=120,
         ),
-        result={"content": "fixture result"},
+        result={"text": "fixture result", "reasoning": "", "tool_calls": []},
         usage=TraceTokenUsage(
             state=TraceUsageState.REPORTED,
             input_tokens=9,
@@ -306,15 +294,14 @@ async def test_trace_stats_api_returns_authenticated_seed_aggregates(
 
 
 @pytest.mark.asyncio
-async def test_trace_session_list_detail_and_raw_apis_use_stable_dto_pages(
+async def test_trace_session_list_detail_apis_use_stable_dto_pages(
     trace_http: TraceHttp,
     tmp_path: Path,
 ) -> None:
     service, server, client_id, control = trace_http
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    raw_data = b"\x00trace-data\xff" + b"x" * (256 * 1024)
-    first_id, workspace_key = await _seed_model_trace(service, workspace, raw_data=raw_data)
+    first_id, workspace_key = await _seed_model_trace(service, workspace)
     second_id, _ = await _seed_model_trace(service, workspace)
     headers = _auth_headers(service, client_id, control)
 
@@ -348,34 +335,9 @@ async def test_trace_session_list_detail_and_raw_apis_use_stable_dto_pages(
             headers=headers,
         )
         detail = await detail_response.json()
-        raw_response = await http.get(
-            server.make_url(f"/api/v1/traces/{first_id}/raw"),
-            headers=headers,
-            params={"source": "fixture_blob", "offset": "2", "limit_bytes": "4"},
+        removed_raw = await http.get(
+            server.make_url(f"/api/v1/traces/{first_id}/raw"), headers=headers,
         )
-        raw = await raw_response.json()
-        default_raw_response = await http.get(
-            server.make_url(f"/api/v1/traces/{first_id}/raw"),
-            headers=headers,
-            params={"source": "fixture_blob"},
-        )
-        default_raw = await default_raw_response.json()
-        final_raw_response = await http.get(
-            server.make_url(f"/api/v1/traces/{first_id}/raw"),
-            headers=headers,
-            params={
-                "source": "fixture_blob",
-                "offset": str(default_raw["next_offset"]),
-                "limit_bytes": "1048576",
-            },
-        )
-        final_raw = await final_raw_response.json()
-        download_response = await http.get(
-            server.make_url(f"/api/v1/traces/{first_id}/raw"),
-            headers=headers,
-            params={"source": "fixture_blob", "download": "true"},
-        )
-        downloaded = await download_response.read()
 
     assert sessions_response.status == 200
     assert len(sessions["items"]) == 1
@@ -405,29 +367,10 @@ async def test_trace_session_list_detail_and_raw_apis_use_stable_dto_pages(
     assert "result" not in first_page["items"][0]
     assert detail_response.status == 200
     assert detail["record"]["record_id"] == first_id
-    assert detail["content"] == {
-        "request": {"messages": [{"role": "user", "content": "fixture"}]},
-        "result": {"content": "fixture result"},
-    }
-    assert detail["raw_sources"][0]["source"] == "fixture_blob"
+    assert detail["content"] == {"output": {"text": "fixture result", "reasoning": "", "tool_calls": []}}
+    assert detail["related_tools"] == []
     assert detail["capture_issues"] == []
-    assert raw_response.status == 200
-    assert raw["offset"] == 2
-    assert raw["total_bytes"] == len(raw_data)
-    assert raw["data_base64"] == base64.b64encode(b"race").decode("ascii")
-    assert raw["next_offset"] == 6
-    assert default_raw_response.status == 200
-    assert len(base64.b64decode(default_raw["data_base64"])) == 256 * 1024
-    assert default_raw["next_offset"] == 256 * 1024
-    assert final_raw_response.status == 200
-    assert final_raw["next_offset"] is None
-    assert (
-        base64.b64decode(default_raw["data_base64"]) + base64.b64decode(final_raw["data_base64"])
-        == raw_data
-    )
-    assert download_response.status == 200
-    assert download_response.headers["Content-Type"] == "application/octet-stream"
-    assert downloaded == raw_data
+    assert removed_raw.status == 404
 
 
 @pytest.mark.asyncio
@@ -511,7 +454,7 @@ async def test_trace_http_auth_validation_missing_data_and_unavailable_storage(
     assert oversized_page.status == 400
     assert invalid_filter.status == 400
     assert missing_record.status == 404
-    assert invalid_raw.status == 400
+    assert invalid_raw.status == 404
     assert unavailable.status == 503
 
 
@@ -602,7 +545,7 @@ async def test_trace_queries_hide_unpublished_expired_and_closed_records(
         service,
         workspace,
         owner_session_id="expired-session",
-        finished_at=datetime.now(UTC) - timedelta(days=366),
+        finished_at=datetime.now(UTC) - timedelta(days=31),
     )
     closed_id, workspace_key = await _seed_model_trace(
         service,

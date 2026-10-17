@@ -1,9 +1,8 @@
-"""Reusable wire and byte fixtures for Execution Trace contract consumers."""
+"""Reusable wire fixtures for Execution Trace contract consumers."""
 
 from __future__ import annotations
 
 import asyncio
-from base64 import b64encode
 from collections import Counter
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -94,8 +93,8 @@ TRACE_SCENARIO_NAMES = frozenset(
         "cancelled",
         "subagent",
         "no_session",
-        "binary",
-        "sse",
+        "tool_result",
+        "streamed_output",
         "unknown_usage",
         "partial_capture",
     }
@@ -103,11 +102,11 @@ TRACE_SCENARIO_NAMES = frozenset(
 
 TRACE_TOOL_COVERAGE = {
     "builtin_gateway": ("T07", "authorization", "arguments", "result"),
-    "mcp_http": ("T08", "wire_request", "wire_result"),
-    "mcp_stdio": ("T08", "wire_request", "wire_result"),
-    "exec": ("T09", "stdout", "stderr", "cancellation"),
-    "web_fetch": ("T10", "consumed_response"),
-    "web_search": ("T10", "ddgs_result"),
+    "mcp_http": ("T08", "arguments", "result", "protocol", "endpoint"),
+    "mcp_stdio": ("T08", "arguments", "result", "protocol", "endpoint"),
+    "exec": ("T09", "result", "cancellation"),
+    "web_fetch": ("T10", "converted_result", "endpoint"),
+    "web_search": ("T10", "formatted_result"),
 }
 
 _REPORTED_USAGE = {
@@ -178,22 +177,11 @@ def _record(
         "usage": deepcopy(_REPORTED_USAGE if usage is None else usage),
         "capture_state": "complete",
         "restored": False,
+        "protocol": "openai-compatible",
+        "output_complete": True,
     }
     record.update(overrides)
     return record
-
-
-def _raw_source(
-    source: str, direction: str, content_type: str, total_bytes: int, layer: str
-) -> dict[str, object]:
-    return {
-        "source": source,
-        "direction": direction,
-        "layer": layer,
-        "content_type": content_type,
-        "content_encoding": None,
-        "total_bytes": total_bytes,
-    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,14 +193,10 @@ class TraceContractFixtures:
     page: dict[str, Any]
     sessions: dict[str, Any]
     stats: dict[str, Any]
-    raw_pages: dict[str, dict[str, object]]
-    raw_content: dict[str, bytes]
 
 
 def trace_contract_fixtures() -> TraceContractFixtures:
     """Return detached fixtures so consumers can safely mutate a scenario."""
-    binary = b"\x00\xff\x80A"
-    sse = b'data: {"choices":[]}\n\ndata: [DONE]\n\n'
     records = {
         "success": _record("success"),
         "retry_success": _record(
@@ -270,13 +254,13 @@ def trace_contract_fixtures() -> TraceContractFixtures:
             schedule_run_id=None,
             restore_run_token=None,
         ),
-        "binary": _record(
-            "binary",
+        "tool_result": _record(
+            "tool_result",
             kind="tool",
             usage=_NOT_APPLICABLE_USAGE,
             tool_name="exec",
         ),
-        "sse": _record("sse"),
+        "streamed_output": _record("streamed_output"),
         "unknown_usage": _record(
             "unknown_usage",
             origin=TraceOrigin.AUXILIARY.value,
@@ -287,16 +271,10 @@ def trace_contract_fixtures() -> TraceContractFixtures:
     }
     detail = {
         "record": deepcopy(records["partial_capture"]),
-        "content": {
-            "request": {"messages": [{"role": "user", "content": "Summarize this."}]},
-            "result": {"text": "Summary complete."},
-        },
-        "raw_sources": [
-            _raw_source("provider_request", "request", "application/json", 88, "http_body"),
-            _raw_source("provider_sse", "response", "text/event-stream", len(sse), "http_body"),
-        ],
+        "content": {"output": {"text": "Summary complete.", "reasoning": "", "tool_calls": []}},
+        "related_tools": [],
         "capture_issues": [
-            {"state": "partial", "source": "provider_sse", "message": "A chunk was dropped."}
+            {"state": "partial", "source": "model_router", "message": "An output fragment was dropped."}
         ],
     }
     page = {
@@ -365,30 +343,6 @@ def trace_contract_fixtures() -> TraceContractFixtures:
         ],
         "methodology": "Finalized retained records; unreported model usage is counted as unknown.",
     }
-    raw_pages = {
-        "binary": {
-            "source": "exec_stdout",
-            "direction": "response",
-            "layer": "process_stream",
-            "offset": 0,
-            "data_base64": b64encode(binary).decode("ascii"),
-            "total_bytes": len(binary),
-            "next_offset": None,
-            "content_type": "application/octet-stream",
-            "content_encoding": None,
-        },
-        "sse": {
-            "source": "provider_sse",
-            "direction": "response",
-            "layer": "http_body",
-            "offset": 0,
-            "data_base64": b64encode(sse).decode("ascii"),
-            "total_bytes": len(sse),
-            "next_offset": None,
-            "content_type": "text/event-stream",
-            "content_encoding": None,
-        },
-    }
     return TraceContractFixtures(
         records=deepcopy(records),
         purpose_matrix=dict(TRACE_PURPOSE_COVERAGE),
@@ -397,8 +351,6 @@ def trace_contract_fixtures() -> TraceContractFixtures:
         page=page,
         sessions=sessions,
         stats=stats,
-        raw_pages=raw_pages,
-        raw_content={"binary": binary, "sse": sse},
     )
 
 

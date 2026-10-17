@@ -4,6 +4,8 @@ status: accepted
 
 # Store Execution Trace in SQLite
 
+Payload retention and the expiry period below are superseded by [ADR-0033](0033-retain-execution-outcomes-without-protocol-payloads.md); the global SQLite ownership and read boundary remain in effect.
+
 Execution Trace uses SQLite for persisted records and raw captured data, supporting global statistics and detailed Session inspection. This is a deliberate exception to [file-first local persistence](0001-file-first-local-persistence.md): keeping JSONL authoritative while maintaining a separate query index would require coordinating two representations of the same captured work.
 
 The Agent Service owns one global database at `~/.aide/traces.sqlite3`, with each record associated with its originating Workspace and Session when applicable. A global store supports historical statistics without relying on directory discovery: the current persistent directory catalogs do not enumerate every Workspace used by CLI Clients. This gives Trace an Agent Home lifetime rather than making it travel with a Workspace directory.

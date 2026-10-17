@@ -14,8 +14,6 @@ from aide.trace.sqlite_recorder import SQLiteTraceRecorder, _Event
 from aide.trace.types import (
     TraceAttemptMetadata,
     TraceCallMetadata,
-    TraceCaptureLayer,
-    TraceDirection,
     TraceKind,
     TraceOrigin,
     TraceOutcome,
@@ -60,14 +58,6 @@ def _publish(
             tool_name="read_file",
         ),
     )
-    recorder.append_raw(
-        handle,
-        source="tool_result",
-        direction=TraceDirection.RESPONSE,
-        layer=TraceCaptureLayer.TOOL_RESULT,
-        sequence=0,
-        data=b"captured result",
-    )
     recorder.finish_call(
         handle,
         TraceOutcome(
@@ -83,16 +73,16 @@ def _publish(
 
 
 @pytest.mark.asyncio
-async def test_retention_filters_all_queries_and_purges_at_365_day_boundary(
+async def test_retention_filters_all_queries_and_purges_at_30_day_boundary(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "traces.sqlite3"
     recorder = SQLiteTraceRecorder(path, now=lambda: _NOW)
-    cutoff = _NOW - timedelta(days=365)
+    cutoff = _NOW - timedelta(days=30)
     expired_id = _publish(
         recorder,
         owner_session_id="expired-session",
-        finished_at=cutoff - timedelta(seconds=1),
+        finished_at=cutoff - timedelta(microseconds=1),
     )
     boundary_id = _publish(
         recorder,
@@ -102,7 +92,7 @@ async def test_retention_filters_all_queries_and_purges_at_365_day_boundary(
     recent_id = _publish(
         recorder,
         owner_session_id="recent-session",
-        finished_at=_NOW,
+        finished_at=cutoff + timedelta(microseconds=1),
     )
 
     try:
@@ -111,14 +101,6 @@ async def test_retention_filters_all_queries_and_purges_at_365_day_boundary(
         page = await recorder.list_records()
         assert {record.record_id for record in page.items} == {boundary_id, recent_id}
         assert await recorder.get_record(expired_id) is None
-        raw = await recorder.read_raw(
-            expired_id,
-            source="tool_result",
-            offset=0,
-            limit_bytes=100,
-        )
-        assert raw.data == b""
-        assert raw.total_bytes == 0
         sessions = await recorder.list_sessions()
         assert {session.owner_session_id for session in sessions.items} == {
             "boundary-session",
@@ -133,7 +115,7 @@ async def test_retention_filters_all_queries_and_purges_at_365_day_boundary(
 
     reopened = SQLiteTraceRecorder(
         path,
-        now=lambda: cutoff - timedelta(seconds=1) + timedelta(days=365),
+        now=lambda: cutoff - timedelta(seconds=1) + timedelta(days=30),
     )
     try:
         assert await reopened.get_record(expired_id) is None
@@ -183,15 +165,7 @@ async def test_closed_session_is_hidden_before_async_purge_and_stale_events_cann
             tool_name="read_file",
         ),
     )
-    stale_attempt = recorder.begin_attempt(stale_handle, TraceAttemptMetadata(started_at=_NOW))
-    recorder.append_raw(
-        stale_attempt,
-        source="response",
-        direction=TraceDirection.RESPONSE,
-        layer=TraceCaptureLayer.HTTP_BODY,
-        sequence=0,
-        data=b"pending candidate",
-    )
+    recorder.begin_attempt(stale_handle, TraceAttemptMetadata(started_at=_NOW))
 
     try:
         await wait_for_trace_writer(recorder)
@@ -219,14 +193,6 @@ async def test_closed_session_is_hidden_before_async_purge_and_stale_events_cann
             stale_context,
             TraceCallMetadata(kind=TraceKind.TOOL, purpose=TracePurpose.AGENT_RUN, started_at=_NOW),
         )
-        recorder.append_raw(
-            stale_attempt,
-            source="response",
-            direction=TraceDirection.RESPONSE,
-            layer=TraceCaptureLayer.HTTP_BODY,
-            sequence=1,
-            data=b"late candidate",
-        )
         recorder.finish_call(
             late_handle,
             TraceOutcome(TraceStatus.SUCCESS, _NOW, 1),
@@ -239,8 +205,6 @@ async def test_closed_session_is_hidden_before_async_purge_and_stale_events_cann
         with sqlite3.connect(recorder.path) as connection:
             assert connection.execute("SELECT COUNT(*) FROM trace_records").fetchone()[0] == 1
             assert connection.execute("SELECT COUNT(*) FROM trace_roots").fetchone()[0] == 1
-            assert connection.execute("SELECT COUNT(*) FROM trace_attempts").fetchone()[0] == 0
-            assert connection.execute("SELECT COUNT(*) FROM trace_raw_chunks").fetchone()[0] == 1
 
         remaining = await recorder.list_records()
         assert {record.record_id for record in remaining.items} == {unrelated_record}
@@ -293,22 +257,6 @@ async def test_queries_remain_available_after_many_session_deletions(tmp_path: P
         assert len((await recorder.list_sessions()).items) == 1
         assert await recorder.get_record(retained_id) is not None
         assert await recorder.get_record(deleted_id) is None
-        assert (
-            await recorder.read_raw(
-                retained_id,
-                source="tool_result",
-                offset=0,
-                limit_bytes=100,
-            )
-        ).data == b"captured result"
-        assert (
-            await recorder.read_raw(
-                deleted_id,
-                source="tool_result",
-                offset=0,
-                limit_bytes=100,
-            )
-        ).data == b""
         assert (await recorder.get_stats()).totals.tool_calls == 1
     finally:
         await recorder.close()
@@ -319,7 +267,7 @@ async def test_expiry_maintenance_cleans_multiple_batches_and_keeps_recent_data(
     tmp_path: Path,
 ) -> None:
     recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3", now=lambda: _NOW)
-    expired_at = _NOW - timedelta(days=366)
+    expired_at = _NOW - timedelta(days=31)
     for index in range(501):
         _publish(recorder, owner_session_id=f"expired-{index}", finished_at=expired_at)
     retained_id = _publish(recorder, owner_session_id="retained", finished_at=_NOW)
@@ -329,7 +277,6 @@ async def test_expiry_maintenance_cleans_multiple_batches_and_keeps_recent_data(
         with sqlite3.connect(recorder.path) as connection:
             assert connection.execute("SELECT COUNT(*) FROM trace_records").fetchone()[0] == 1
             assert connection.execute("SELECT COUNT(*) FROM trace_roots").fetchone()[0] == 1
-            assert connection.execute("SELECT COUNT(*) FROM trace_raw_chunks").fetchone()[0] == 1
         assert await recorder.get_record(retained_id) is not None
     finally:
         await recorder.close()

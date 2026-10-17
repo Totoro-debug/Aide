@@ -15,9 +15,7 @@ from aide.trace.types import (
     TraceAttemptMetadata,
     TraceCallMetadata,
     TraceCaptureIssue,
-    TraceCaptureLayer,
     TraceCaptureState,
-    TraceDirection,
     TraceErrorCategory,
     TraceKind,
     TraceOrigin,
@@ -168,14 +166,6 @@ def test_noop_recorder_keeps_business_failure_and_cancellation_unchanged(
             endpoint="https://fallback.invalid/v1",
         ),
     )
-    recorder.append_raw(
-        attempt,
-        source="provider_sse",
-        direction=TraceDirection.RESPONSE,
-        layer=TraceCaptureLayer.HTTP_BODY,
-        sequence=0,
-        data=b"data: [DONE]\n\n",
-    )
     request = {"messages": [{"role": "user", "content": "Original request"}]}
     recorder.set_request(attempt, request)
     recorder.report_capture_issue(
@@ -241,7 +231,6 @@ async def test_noop_recorder_exposes_empty_queries_and_lifecycle(
     sessions = await recorder.list_sessions()
     records = await recorder.list_records()
     detail = await recorder.get_record("missing")
-    raw = await recorder.read_raw("missing", source="exec_stdout", offset=42, limit_bytes=256)
     stats = await recorder.get_stats()
     await recorder.close(timeout_seconds=0.1)
 
@@ -249,10 +238,6 @@ async def test_noop_recorder_exposes_empty_queries_and_lifecycle(
     assert records.items == ()
     assert records.next_cursor is None
     assert detail is None
-    assert raw.data == b""
-    assert raw.offset == 42
-    assert raw.next_offset is None
-    assert raw.layer is None
     assert stats.totals.model_calls == 0
     assert stats.totals.tool_calls == 0
     assert list(tmp_path.iterdir()) == []
@@ -273,7 +258,4 @@ def test_reusable_trace_fixtures_cover_the_approved_scenarios_and_purposes() -> 
     assert fixtures.records["no_session"]["subject_session_id"] is None
     assert fixtures.detail["record"]["status"] == "success"
     assert fixtures.detail["record"]["capture_state"] == "partial"
-    assert fixtures.detail["capture_issues"][0]["source"] == "provider_sse"
-    assert fixtures.raw_pages["binary"]["layer"] == "process_stream"
-    assert fixtures.raw_content["binary"] == b"\x00\xff\x80A"
-    assert fixtures.raw_content["sse"].startswith(b"data: ")
+    assert fixtures.detail["capture_issues"][0]["source"] == "model_router"

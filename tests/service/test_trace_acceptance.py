@@ -26,9 +26,8 @@ from aide.service.discovery import create_credential
 from aide.service.runtime import AgentService
 from aide.service.transport import create_app
 from aide.trace.recorder import NoOpTraceRecorder
-from aide.trace.scope import current_trace_provider_attempt
 from aide.trace.sqlite_recorder import SQLiteTraceRecorder, _Event
-from aide.trace.types import TraceCaptureLayer, TraceDirection, TraceRecordFilters
+from aide.trace.types import TraceRecordFilters
 from aide.utils.errors import ErrorInfo
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
@@ -51,17 +50,6 @@ class _ReplayProvider(_ConcurrentProvider):
             return super().stream(**kwargs)
 
         async def emit() -> AsyncIterator[ModelStreamEvent]:
-            attempt = current_trace_provider_attempt()
-            if attempt is not None:
-                attempt.capture_expected = False
-                for sequence, data in enumerate((b"first block", b"second block")):
-                    attempt.append_raw(
-                        source="replay_sdk_result",
-                        direction=TraceDirection.RESPONSE,
-                        layer=TraceCaptureLayer.SDK_RESULT,
-                        sequence=sequence,
-                        data=data,
-                    )
             if "replay failure" in user:
                 self.failure_attempts += 1
                 raise ModelCallError(
@@ -95,7 +83,6 @@ class _ReplayProvider(_ConcurrentProvider):
         "initialization",
         "writer",
         "serialization",
-        "partial_chunk",
         "close_timeout",
     ],
 )
@@ -139,16 +126,9 @@ async def _replay(root: Path, fault: str, monkeypatch: pytest.MonkeyPatch) -> di
                 nonlocal fault_hits
                 if fault == "readonly":
                     connection.execute("PRAGMA query_only = ON")
-                if fault == "writer" and event.kind == "raw":
+                if fault == "writer" and event.kind == "request":
                     fault_hits += 1
                     raise RuntimeError("Injected writer failure")
-                if (
-                    fault == "partial_chunk"
-                    and event.kind == "raw"
-                    and event.payload["sequence"] == 1
-                ):
-                    fault_hits += 1
-                    raise sqlite3.OperationalError("Injected lost block")
                 if fault == "serialization" and event.kind == "request":
                     # Exercise the real writer JSON encoder with an unsupported value.
                     fault_hits += 1
@@ -226,7 +206,7 @@ async def _replay(root: Path, fault: str, monkeypatch: pytest.MonkeyPatch) -> di
                     assert measurements["rejected_events"] > 0
                 elif fault == "readonly":
                     assert measurements["writer_failed_events"] > 0
-                elif fault in {"writer", "serialization", "partial_chunk"}:
+                elif fault in {"writer", "serialization"}:
                     assert fault_hits > 0
                     if fault != "serialization":
                         assert measurements["writer_failed_events"] > 0
@@ -236,17 +216,6 @@ async def _replay(root: Path, fault: str, monkeypatch: pytest.MonkeyPatch) -> di
                         if record.capture_state.value == "partial":
                             detail = await recorder.get_record(record.record_id)
                             assert detail is not None and detail.capture_issues
-                    if fault == "partial_chunk":
-                        successful = next(
-                            r for r in records if r.run_id == "success" and r.kind.value == "model"
-                        )
-                        raw = await recorder.read_raw(
-                            successful.record_id,
-                            source="replay_sdk_result",
-                            offset=0,
-                            limit_bytes=1024,
-                        )
-                        assert raw.data == b"first block"
                 elif fault == "healthy":
                     await _assert_authenticated_execution(service, sid)
             elif fault == "initialization":

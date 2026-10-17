@@ -16,7 +16,7 @@ from aide.provider.models import ModelProvider
 from aide.provider.openai_compatible import OpenAICompatibleProvider
 from aide.service.runtime import AgentService
 from aide.trace.sqlite_recorder import SQLiteTraceRecorder
-from aide.trace.types import TraceCaptureLayer, TracePurpose
+from aide.trace.types import TracePurpose
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures.trace import wait_for_trace_writer
 from tests.service.test_service_concurrency import _claim_version, _CollectingSink
@@ -139,43 +139,13 @@ async def test_service_model_run_exposes_http_trace_through_recorder_queries(
         assert detail is not None
         assert not detail.capture_issues
 
-        request_raw = await recorder.read_raw(
-            record.record_id,
-            source="http_request",
-            offset=0,
-            limit_bytes=100_000,
-        )
-        response_raw = await recorder.read_raw(
-            record.record_id,
-            source="http_response",
-            offset=0,
-            limit_bytes=100_000,
-        )
-        request_metadata = await recorder.read_raw(
-            record.record_id,
-            source="http_request_metadata",
-            offset=0,
-            limit_bytes=100_000,
-        )
         assert len(transports) == 1
         streamed_requests = [
             request
             for request in transports[0].requests
             if json.loads(request.content).get("stream") is True
         ]
-        matching_requests = [request for request in streamed_requests if request.content == request_raw.data]
         assert len(streamed_requests) == 2
-        assert len(matching_requests) == 1
-        assert response_raw.data == b"".join(response_chunks)
-        assert json.loads(request_metadata.data)["url"] == record.endpoint
-        assert json.loads(request_metadata.data)["url"] == "https://models.example/v1/chat/completions"
-        assert {
-            (source.source, source.layer) for source in detail.raw_sources
-        } >= {
-            ("http_request", TraceCaptureLayer.HTTP_BODY),
-            ("http_response", TraceCaptureLayer.HTTP_BODY),
-            ("http_request_metadata", TraceCaptureLayer.HTTP_METADATA),
-        }
     finally:
         await service.stop()
 
@@ -438,71 +408,17 @@ timeout = 30
                 assert detail is not None
                 assert not detail.capture_issues
 
-                request_raw = await recorder.read_raw(
-                    record.record_id,
-                    source="http_request",
-                    offset=0,
-                    limit_bytes=100_000,
-                )
-                response_raw = await recorder.read_raw(
-                    record.record_id,
-                    source="http_response",
-                    offset=0,
-                    limit_bytes=100_000,
-                )
-                request_metadata = await recorder.read_raw(
-                    record.record_id,
-                    source="http_request_metadata",
-                    offset=0,
-                    limit_bytes=100_000,
-                )
-                response_metadata = await recorder.read_raw(
-                    record.record_id,
-                    source="http_response_metadata",
-                    offset=0,
-                    limit_bytes=100_000,
-                )
-                payload: dict[str, Any] = json.loads(request_raw.data)
-                payloads.append(payload)
-                if anthropic and expected_prompt in json.dumps(payload):
+                assert detail.request is None
+                assert record.protocol == ("anthropic" if anthropic else "openai-compatible")
+                assert record.model == expected_model
+                assert detail.result is not None
+                if anthropic:
                     anthropic_retry_counts.append(record.retry_count)
-                    if record.retry_count == 1:
-                        request_body_sources = [
-                            source.source
-                            for source in detail.raw_sources
-                            if source.direction.value == "request"
-                            and source.layer is TraceCaptureLayer.HTTP_BODY
-                        ]
-                        assert request_body_sources == ["http_request"]
-                assert any(
-                    request.content == request_raw.data
-                    for transport in expected_transports
-                    for request in transport.requests
-                )
-                assert payload["model"] == expected_model
                 assert record.endpoint == expected_endpoint
-                assert json.loads(request_metadata.data)["url"] == record.endpoint
-                request_headers = json.loads(request_metadata.data)["headers"]
-                assert "x-api-key" not in request_headers
-                assert "authorization" not in request_headers
-                assert json.loads(response_metadata.data)["status_code"] == 200
-                assert expected_prompt in json.dumps(payload)
-                assert ("minimal-secret" if anthropic else "openai-secret") not in (
-                    request_raw.data.decode("utf-8")
-                )
-                assert response_raw.data == (
-                    expected_stream if payload.get("stream") is True else expected_complete
-                )
-                assert {(source.source, source.layer) for source in detail.raw_sources} >= {
-                    ("http_request", TraceCaptureLayer.HTTP_BODY),
-                    ("http_response", TraceCaptureLayer.HTTP_BODY),
-                    ("http_request_metadata", TraceCaptureLayer.HTTP_METADATA),
-                    ("http_response_metadata", TraceCaptureLayer.HTTP_METADATA),
-                }
 
             return payloads
 
-        anthropic_payloads = await assert_session_trace(
+        await assert_session_trace(
             run_id="anthropic-http-trace-run",
             session_id=anthropic_session_id,
             expected_model="small-model",
@@ -513,7 +429,7 @@ timeout = 30
             expected_complete=response_body,
             anthropic=True,
         )
-        openai_payloads = await assert_session_trace(
+        await assert_session_trace(
             run_id="openai-http-trace-run",
             session_id=openai_session_id,
             expected_model="openai-model",
@@ -523,16 +439,6 @@ timeout = 30
             expected_stream=b"".join(openai_response_chunks),
             expected_complete=openai_response_body,
             anthropic=False,
-        )
-        assert {payload.get("stream") for payload in anthropic_payloads} >= {True, False}
-        assert any(payload.get("system") for payload in anthropic_payloads)
-        assert any(
-            any(tool["name"] == "read_file" for tool in payload.get("tools", []))
-            for payload in anthropic_payloads
-        )
-        assert any(
-            any(message.get("role") == "system" for message in payload.get("messages", []))
-            for payload in openai_payloads
         )
         assert 1 in anthropic_retry_counts
     finally:

@@ -111,10 +111,6 @@ class MCPTool(BaseTool):
         """Whether a closed MCP session was observed during a Tool call."""
         return self._unavailable
 
-    @property
-    def transport_trace_available(self) -> bool:
-        return self._protocol_trace is not None
-
     async def prepare_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Forward the complete argument object without local schema processing."""
         if self._unavailable:

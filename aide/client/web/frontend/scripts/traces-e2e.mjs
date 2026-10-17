@@ -33,12 +33,7 @@ const requests = [];
 const unauthenticatedTraceRequests = [];
 let webControlCredential = null;
 const sessionPaths = new Map();
-const htmlResponse = Buffer.concat([
-  Buffer.from("<html><body>Trace response<script>window.__traceExecuted = true</script>", "utf8"),
-  Buffer.alloc(256 * 1024, 32),
-  Buffer.from("</body></html>", "utf8"),
-]);
-const binaryResponse = Buffer.from([0, 255, 34, 0, 128, 65]);
+const htmlResponse = '<html><body>Trace response<script>window.__traceExecuted = true</script></body></html>';
 let traceMode = "populated";
 let lastSessionId = null;
 
@@ -70,6 +65,8 @@ function record(sessionId, workspaceKey, workspacePath, overrides = {}) {
     model: "model-main",
     reasoning_effort: "high",
     endpoint: "https://provider.example/v1/responses",
+    protocol: "openai-compatible",
+    output_complete: true,
     status: "success",
     error: null,
     retry_count: 2,
@@ -105,6 +102,7 @@ function recordsFor(sessionId, workspaceKey, workspacePath) {
       kind: "model",
       purpose: "subagent_run",
       model: "model-child",
+      usage: { state: "unknown", input_tokens: null, output_tokens: null, total_tokens: null, cached_input_tokens: null, cache_creation_input_tokens: null },
     }),
     record(sessionId, workspaceKey, workspacePath, {
       record_id: "record-cancelled",
@@ -112,6 +110,8 @@ function recordsFor(sessionId, workspaceKey, workspacePath) {
       kind: "tool",
       purpose: "agent_run",
       tool_name: "exec",
+      parent_record_id: "record-main",
+      tool_call_id: "call-exec",
       model: null,
       reasoning_effort: null,
       status: "failed",
@@ -140,6 +140,7 @@ function recordsFor(sessionId, workspaceKey, workspacePath) {
       root_id: "root-main",
       restored: true,
       capture_state: "partial",
+      output_complete: false,
     }),
     record(sessionId, workspaceKey, workspacePath, {
       record_id: "record-archive",
@@ -158,33 +159,16 @@ function recordsFor(sessionId, workspaceKey, workspacePath) {
 }
 
 function detailFor(selectedRecord) {
-  const rawSources = selectedRecord.record_id === "record-main" ? [
-    {
-      source: "html-response", direction: "response", layer: "http_body",
-      content_type: "text/html; charset=utf-8", content_encoding: null, total_bytes: htmlResponse.length,
-    },
-    {
-      source: "binary-output", direction: "response", layer: "process_stream",
-      content_type: "application/octet-stream", content_encoding: null, total_bytes: binaryResponse.length,
-    },
-  ] : selectedRecord.record_id === "record-cancelled" ? [
-    {
-      source: "binary-output", direction: "response", layer: "process_stream",
-      content_type: "application/octet-stream", content_encoding: null, total_bytes: binaryResponse.length,
-    },
-  ] : [];
+  const main = selectedRecord.record_id === "record-main";
   return {
     record: selectedRecord,
-    content: {
-      request: selectedRecord.kind === "model"
-        ? { messages: [{ role: "user", content: "Trace fixture input." }] }
-        : { tool: selectedRecord.tool_name, arguments: { path: "fixture.txt" } },
-      result: selectedRecord.status === "failed" ? null : "Trace fixture result.",
-    },
-    raw_sources: rawSources,
+    content: selectedRecord.kind === "model" ? {
+      output: { text: main ? htmlResponse : "Trace fixture result.", reasoning: "Semantic reasoning.",
+        tool_calls: main ? [{ id: "call-exec", name: "exec" }, { id: "missing", name: "missing-tool" }] : [] },
+    } : { arguments: { path: "fixture.txt" }, result: { content: "Trace fixture result.", artifact: null } },
+    related_tools: main ? [{ record_id: "record-cancelled", tool_call_id: "call-exec", tool_name: "exec", status: "failed" }] : [],
     capture_issues: selectedRecord.record_id === "record-restored"
-      ? [{ state: "partial", message: "One raw chunk could not be saved.", source: "response" }]
-      : [],
+      ? [{ state: "partial", message: "An output fragment could not be saved.", source: "model_router" }] : [],
   };
 }
 
@@ -270,29 +254,6 @@ try {
       });
       return;
     }
-    const rawPath = url.pathname.match(/^\/api\/v1\/traces\/([^/]+)\/raw$/);
-    if (rawPath !== null) {
-      if (url.searchParams.get("download") === "true") {
-        await route.fulfill({ status: 200, contentType: "application/octet-stream", body: binaryResponse });
-        return;
-      }
-      const source = url.searchParams.get("source");
-      const bytes = source === "html-response" ? htmlResponse : binaryResponse;
-      const offset = Number(url.searchParams.get("offset") ?? "0");
-      const end = Math.min(bytes.length, offset + Number(url.searchParams.get("limit_bytes") ?? "262144"));
-      const chunk = bytes.subarray(offset, end);
-      await route.fulfill({
-        status: 200,
-        json: {
-          source, direction: "response", layer: source === "html-response" ? "http_body" : "process_stream",
-          offset, data_base64: chunk.toString("base64"), total_bytes: bytes.length,
-          next_offset: end < bytes.length ? end : null,
-          content_type: source === "html-response" ? "text/html; charset=utf-8" : "application/octet-stream",
-          content_encoding: null,
-        },
-      });
-      return;
-    }
     const recordPath = url.pathname.match(/^\/api\/v1\/traces\/([^/]+)$/);
     if (recordPath !== null) {
       const recordId = decodeURIComponent(recordPath[1]);
@@ -345,36 +306,40 @@ try {
   await expect(page.getByRole("button", { name: "Open record-archive", exact: true })).toBeVisible();
 
   await expect(page.getByRole("heading", { name: "model-main", exact: true })).toBeVisible();
+  await expect(page.getByText("https://provider.example/v1/responses", { exact: true })).not.toBeVisible();
+  await expect(page.getByText("Input tokens", { exact: true }).locator("..")).toContainText("120");
+  await expect(page.getByText("Output tokens", { exact: true }).locator("..")).toContainText("60");
+  await page.getByText("More information", { exact: true }).click();
   await expect(page.getByText("https://provider.example/v1/responses", { exact: true })).toBeVisible();
-  await expect(page.getByText("Total tokens", { exact: true }).locator("..")).toContainText("180");
   await expect(page.getByText("Cached input tokens", { exact: true }).locator("..")).toContainText("20");
   await expect(page.getByText("Cache creation input tokens", { exact: true }).locator("..")).toContainText("5");
   await expect(page.getByText("Retry count", { exact: true }).locator("..")).toContainText("2");
-  await page.getByLabel("Raw source", { exact: true }).selectOption("html-response");
-  await expect.poll(() => page.locator("pre").filter({ hasText: "window.__traceExecuted = true" }).count()).toBe(1);
-  assert.equal(await page.evaluate(() => window.__traceExecuted === true), false, "HTML trace content must render as text");
-  await page.getByRole("button", { name: "Load more raw content", exact: true }).click();
-  await expect.poll(() => page.locator("pre").filter({ hasText: "window.__traceExecuted = true" }).first()
-    .evaluate((element) => element.textContent.length)).toBe(htmlResponse.length);
-  await page.getByLabel("Raw source", { exact: true }).selectOption("binary-output");
-  const downloadPromise = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Download raw data", exact: true }).click();
-  const download = await downloadPromise;
-  assert.deepEqual(await readFile(await download.path()), binaryResponse);
+  await expect(page.locator("pre").filter({ hasText: "window.__traceExecuted = true" })).toHaveText(htmlResponse);
+  assert.equal(await page.evaluate(() => window.__traceExecuted === true), false, "Model output must render as text");
+  await expect(page.getByText("missing-tool · Trace unavailable", { exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "exec · Failed", exact: true }).click();
+  await expect(page).toHaveURL(/traces\/records\/record-cancelled/);
+  await expect(page.getByRole("heading", { name: "exec", exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "View initiating model call", exact: true }).click();
+  await expect(page).toHaveURL(/traces\/records\/record-main/);
+  await expect(page.getByRole("heading", { name: "model-main", exact: true })).toBeVisible();
+  await page.goto(`${control.details.url}/traces/sessions/${encodeURIComponent(routeKey)}/${conversation.session_id}?recordId=record-main`);
 
   await page.getByRole("button", { name: "Open record-subagent", exact: true }).click();
   await expect(page).toHaveURL(/recordId=record-subagent/);
   await expect(page.getByRole("heading", { name: "model-child", exact: true })).toBeVisible();
+  await expect(page.getByText("Input tokens", { exact: true }).locator("..")).toContainText("Unknown");
   await page.getByRole("button", { name: "Open record-cancelled", exact: true }).click();
   await expect(page.getByText("Process cancelled by user.", { exact: true })).toBeVisible();
   for (const label of ["Input tokens", "Output tokens", "Total tokens", "Cached input tokens", "Cache creation input tokens"]) {
-    await expect(page.getByText(label, { exact: true }).locator("..")).toContainText("Not applicable");
+    await expect(page.getByText(label, { exact: true }).locator("..")).toHaveCount(0);
   }
   await page.getByRole("button", { name: "Open record-rejected", exact: true }).click();
   await expect(page.getByText("The Tool was denied.", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Open record-restored", exact: true }).click();
   await expect(page.getByText("Restored", { exact: true })).toBeVisible();
-  await expect(page.getByText("One raw chunk could not be saved.", { exact: true })).toBeVisible();
+  await expect(page.getByText("An output fragment could not be saved.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Output is incomplete", { exact: true })).toBeVisible();
 
   for (const [label, value, queryName] of [
     ["Kind", "tool", "kind"],
@@ -422,9 +387,10 @@ try {
   recordUrl.searchParams.set("recordId", "record-main");
   await page.goto(recordUrl.href);
   await expect(page.getByRole("heading", { name: "model-main", exact: true })).toBeVisible();
-  const rawRequestsBeforeRefresh = requests.filter((item) => item.path.endsWith("/raw")).length;
+  const detailsBeforeRefresh = requests.filter((item) => item.path.endsWith("/record-main")).length;
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
-  await expect.poll(() => requests.filter((item) => item.path.endsWith("/raw")).length).toBeGreaterThan(rawRequestsBeforeRefresh);
+  await expect.poll(() => requests.filter((item) => item.path.endsWith("/record-main")).length).toBeGreaterThan(detailsBeforeRefresh);
+  assert.equal(requests.filter((item) => item.path.endsWith("/raw")).length, 0);
   traceMode = "empty";
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await expect(page.getByText("This call is no longer available. It may have expired or its Session may have been deleted.", { exact: true })).toBeVisible();

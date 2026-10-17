@@ -25,10 +25,9 @@ from mcp.shared.jsonrpc_dispatcher import JSONRPCDispatcher
 from mcp_types.methods import validate_server_result
 from pydantic import ValidationError
 
-from aide.agent.tools.mcp import _MISSING, MCPClientSession, _field
+from aide.agent.tools.mcp import MCPClientSession, _field
 from aide.config.config import MCPServerConfiguration
 from aide.trace.scope import TraceToolCallScope, current_trace_tool_call
-from aide.trace.types import TraceCaptureLayer, TraceDirection
 
 
 @asynccontextmanager
@@ -79,12 +78,10 @@ async def streamable_http_transport(
 @dataclass(slots=True)
 class _MCPTraceCall:
     scope: TraceToolCallScope
-    request_seen: bool = False
-    response_seen: bool = False
 
 
 class _MCPProtocolTrace:
-    """Capture one Tool's JSON-RPC messages before SDK result validation."""
+    """Associate actual HTTP endpoints with Tool calls by JSON-RPC identity."""
 
     def __init__(self, transport: str) -> None:
         self._source_prefix = "mcp_http" if transport == "streamable-http" else "mcp_stdio"
@@ -121,16 +118,13 @@ class _MCPProtocolTrace:
 
     def begin(self, scope: TraceToolCallScope | None) -> None:
         if scope is not None:
+            scope.set_protocol(self._source_prefix)
             self._calls[scope.handle.record_id] = _MCPTraceCall(scope)
 
     def finish(self, scope: TraceToolCallScope | None) -> None:
         if scope is None:
             return
-        call = self._calls.pop(scope.handle.record_id, None)
-        if call is None or not call.request_seen or not call.response_seen:
-            scope.report_capture_issue(
-                "MCP JSON-RPC request or response capture was incomplete.", source="mcp_transport"
-            )
+        self._calls.pop(scope.handle.record_id, None)
         for request_id, pending in tuple(self._pending.items()):
             if pending.scope.handle == scope.handle:
                 self._pending.pop(request_id, None)
@@ -144,14 +138,7 @@ class _MCPProtocolTrace:
         if scope is None or isinstance(request_id, bool) or not isinstance(request_id, (int, str)):
             return
         call = self._calls.setdefault(scope.handle.record_id, _MCPTraceCall(scope))
-        call.request_seen = True
         self._pending[request_id] = call
-        self._append_message(
-            scope,
-            source=f"{self._source_prefix}_request",
-            direction=TraceDirection.REQUEST,
-            message=message,
-        )
 
     def received(self, item: object) -> None:
         message = _field(item, "message")
@@ -160,77 +147,7 @@ class _MCPProtocolTrace:
         request_id = _field(message, "id")
         if isinstance(request_id, bool) or not isinstance(request_id, (int, str)):
             return
-        call = self._pending.pop(request_id, None)
-        if call is None:
-            return
-        call.response_seen = True
-        self._append_message(
-            call.scope,
-            source=f"{self._source_prefix}_response",
-            direction=TraceDirection.RESPONSE,
-            message=message,
-        )
-        result = _field(message, "result")
-        if result is not _MISSING:
-            self._append_value(
-                call.scope,
-                source=f"{self._source_prefix}_result",
-                direction=TraceDirection.RESPONSE,
-                layer=TraceCaptureLayer.SDK_RESULT,
-                value=result,
-            )
-
-    def _append_message(
-        self,
-        scope: TraceToolCallScope,
-        *,
-        source: str,
-        direction: TraceDirection,
-        message: object,
-    ) -> None:
-        try:
-            data = (
-                cast(Any, message)
-                .model_dump_json(
-                    by_alias=True,
-                    exclude_unset=True,
-                )
-                .encode("utf-8")
-            )
-        except Exception:
-            scope.report_capture_issue(
-                f"MCP protocol source {source} could not be serialized.", source="mcp_transport"
-            )
-            return
-        scope.append_raw(
-            source=source,
-            direction=direction,
-            layer=TraceCaptureLayer.JSON_RPC_MESSAGE,
-            sequence=0,
-            data=data,
-            content_type="application/json",
-        )
-
-    def _append_value(
-        self,
-        scope: TraceToolCallScope,
-        *,
-        source: str,
-        direction: TraceDirection,
-        layer: TraceCaptureLayer,
-        value: object,
-    ) -> None:
-        try:
-            data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        except (TypeError, ValueError):
-            scope.report_capture_issue(
-                f"MCP result source {source} could not be serialized.", source="mcp_transport"
-            )
-            return
-        scope.append_raw(
-            source=source, direction=direction, layer=layer, sequence=0,
-            data=data, content_type="application/json",
-        )
+        self._pending.pop(request_id, None)
 
 
 class _MCPTraceReadStream:

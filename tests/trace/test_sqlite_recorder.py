@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import random
 import sqlite3
-import zlib
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Barrier, Event, Thread
@@ -12,12 +11,10 @@ import pytest
 
 from aide.provider.session_configuration import REASONING_EFFORT_LEVELS, ReasoningEffort
 from aide.trace.context import TraceContext, TraceRootSource
-from aide.trace.sqlite_recorder import TRACE_MAX_RAW_CHUNK_BYTES, SQLiteTraceRecorder, _Event
+from aide.trace.sqlite_recorder import SQLiteTraceRecorder, _Event
 from aide.trace.types import (
     TraceAttemptMetadata,
     TraceCallMetadata,
-    TraceCaptureLayer,
-    TraceDirection,
     TraceErrorCategory,
     TraceKind,
     TraceOrigin,
@@ -35,75 +32,48 @@ _NOW = datetime(2026, 10, 11, 0, 0, tzinfo=UTC)
 
 
 @pytest.mark.asyncio
-async def test_raw_pages_only_decompress_overlapping_chunks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
-    payload = random.Random(341).randbytes(4 * 1024 * 1024)
-    try:
-        handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
-        recorder.append_raw(handle, source="response", direction=TraceDirection.RESPONSE,
-                            layer=TraceCaptureLayer.TOOL_RESULT, sequence=0, data=payload)
-        recorder.finish_call(handle, _success(), result="ok", usage=_usage(), retry_count=0)
-        await wait_for_trace_writer(recorder)
-        original_decompress = zlib.decompress
-        sizes: list[int] = []
-
-        def decompress(data: bytes) -> bytes:
-            result = original_decompress(data)
-            sizes.append(len(result))
-            return result
-
-        monkeypatch.setattr(zlib, "decompress", decompress)
-        pages = []
-        for offset in range(0, len(payload), 256 * 1024):
-            page = await recorder.read_raw(handle.record_id, source="response",
-                                           offset=offset, limit_bytes=256 * 1024)
-            pages.append(page.data)
-        assert b"".join(pages) == payload
-        assert len(sizes) == 64
-        assert sum(sizes) == len(payload)
-        for offset, limit in [(0, 1), (65_535, 2), (70_003, 90_009),
-                              (len(payload) - 7, 100), (len(payload), 100),
-                              (len(payload) + 1, 100)]:
-            sizes.clear()
-            page = await recorder.read_raw(handle.record_id, source="response",
-                                           offset=offset, limit_bytes=limit)
-            assert page.data == payload[offset:offset + limit]
-            assert sum(sizes) <= limit + 2 * TRACE_MAX_RAW_CHUNK_BYTES
-    finally:
-        await recorder.close()
-
-
-@pytest.mark.asyncio
-async def test_raw_offsets_follow_remaining_replaced_and_empty_chunks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_related_tools_are_independent_of_list_paging_and_session_filters(tmp_path: Path) -> None:
     recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
     try:
-        handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
-        for sequence, data in [(2, b"discard"), (0, b"old" * 30_000), (1, b""),
-                               (0, b"replacement"), (3, b"last")]:
-            recorder.append_raw(handle, source="response", direction=TraceDirection.RESPONSE,
-                                layer=TraceCaptureLayer.TOOL_RESULT, sequence=sequence, data=data)
-        recorder.finish_call(handle, _success(), result="ok", usage=_usage(), retry_count=0)
+        parents = []
+        expected: dict[str, set[str]] = {}
+        for session in ("one", "two"):
+            context = _new_context(recorder, session_id=session)
+            model = recorder.begin_call(context, TraceCallMetadata(
+                kind=TraceKind.MODEL, purpose=TracePurpose.AGENT_RUN, started_at=_NOW,
+                protocol="anthropic",
+            ))
+            # Model input is excluded even if a recorder caller supplies it.
+            recorder.set_request(model, {"messages": "private history", "tools": "definitions"})
+            recorder.finish_call(model, _success(), result={"text": "answer"}, usage=_usage(), retry_count=0)
+            parents.append(model)
+            expected[model.record_id] = set()
+            for index in range(3):
+                tool = recorder.begin_call(context, replace(
+                    _tool_metadata(index), parent_record_id=model.record_id,
+                ))
+                recorder.set_request(tool, {"path": f"{session}-{index}"})
+                recorder.finish_call(tool, _success(), result={"content": "done"}, usage=_usage(), retry_count=0)
+                expected[model.record_id].add(tool.record_id)
+        # A mismatched owner cannot inject an association even with a parent ID.
+        alien = recorder.begin_call(_new_context(recorder, session_id="alien"), replace(
+            _tool_metadata(), parent_record_id=parents[0].record_id,
+        ))
+        recorder.finish_call(alien, _success(), result="alien", usage=_usage(), retry_count=0)
         await wait_for_trace_writer(recorder)
+        assert len((await recorder.list_records(TraceRecordFilters(kind=TraceKind.MODEL), limit=1)).items) == 1
+        for parent in parents:
+            detail = await recorder.get_record(parent.record_id)
+            assert detail is not None and detail.request is None
+            assert {tool.record_id for tool in detail.related_tools} == expected[parent.record_id]
+            for link in detail.related_tools:
+                tool_detail = await recorder.get_record(link.record_id)
+                assert tool_detail is not None and tool_detail.record.parent_record_id == parent.record_id
         with sqlite3.connect(recorder.path) as connection:
-            connection.execute("DELETE FROM trace_raw_chunks WHERE sequence = 2")
-        original_decompress = zlib.decompress
-
-        def decompress(data: bytes) -> bytes:
-            result = original_decompress(data)
-            assert result, "Empty blocks cover no requested bytes"
-            return result
-
-        monkeypatch.setattr(zlib, "decompress", decompress)
-        expected = b"replacementlast"
-        for offset in range(len(expected) + 2):
-            page = await recorder.read_raw(handle.record_id, source="response",
-                                           offset=offset, limit_bytes=3)
-            assert page.data == expected[offset:offset + 3]
-            assert page.total_bytes == len(expected)
+            tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            assert "trace_raw_chunks" not in tables and "trace_attempts" not in tables
+            assert connection.execute("SELECT COUNT(*) FROM trace_records WHERE kind='model' AND request_json IS NOT NULL").fetchone()[0] == 0
+            assert "private history" not in str(connection.execute("SELECT request_json, result_json FROM trace_records").fetchall())
     finally:
         await recorder.close()
 
@@ -174,14 +144,6 @@ async def test_unpublished_model_candidates_are_invisible_and_success_publishes_
             ),
         )
         recorder.set_request(first, {"prompt": "discarded candidate"})
-        recorder.append_raw(
-            first,
-            source="response",
-            direction=TraceDirection.RESPONSE,
-            layer=TraceCaptureLayer.HTTP_BODY,
-            sequence=0,
-            data=b"discarded bytes",
-        )
 
         final = recorder.begin_attempt(
             handle,
@@ -192,16 +154,6 @@ async def test_unpublished_model_candidates_are_invisible_and_success_publishes_
             ),
         )
         recorder.set_request(final, {"prompt": "published candidate"})
-        response = bytes(range(256)) * 700
-        recorder.append_raw(
-            final,
-            source="response",
-            direction=TraceDirection.RESPONSE,
-            layer=TraceCaptureLayer.HTTP_BODY,
-            sequence=0,
-            data=response,
-            content_type="application/octet-stream",
-        )
 
         await wait_for_trace_writer(recorder)
         assert (await recorder.list_records()).items == ()
@@ -218,39 +170,18 @@ async def test_unpublished_model_candidates_are_invisible_and_success_publishes_
 
         detail = await recorder.get_record(handle.record_id)
         assert detail is not None
-        assert detail.request == {"prompt": "published candidate"}
+        assert detail.request is None
         assert detail.result == {"answer": "ok"}
         assert detail.record.model == "provider/fallback"
         assert detail.record.endpoint == "https://fallback.invalid/v1"
         assert detail.record.capture_state.value == "complete"
-        assert len(detail.raw_sources) == 1
-        assert detail.raw_sources[0].total_bytes == len(response)
 
-        chunks = []
-        offset = 0
-        while True:
-            page = await recorder.read_raw(
-                handle.record_id,
-                source="response",
-                offset=offset,
-                limit_bytes=31_337,
-            )
-            chunks.append(page.data)
-            if page.next_offset is None:
-                break
-            offset = page.next_offset
-        assert b"".join(chunks) == response
-        with sqlite3.connect(recorder.path) as connection:
-            largest_chunk = connection.execute(
-                "SELECT MAX(original_size) FROM trace_raw_chunks"
-            ).fetchone()[0]
-        assert largest_chunk <= TRACE_MAX_RAW_CHUNK_BYTES
     finally:
         await recorder.close()
 
 
 @pytest.mark.asyncio
-async def test_failed_model_publishes_error_without_request_or_raw_candidates(
+async def test_failed_model_publishes_error_without_model_input(
     tmp_path: Path,
 ) -> None:
     recorder = SQLiteTraceRecorder(tmp_path / "traces.sqlite3")
@@ -267,14 +198,6 @@ async def test_failed_model_publishes_error_without_request_or_raw_candidates(
         )
         attempt = recorder.begin_attempt(handle, TraceAttemptMetadata(started_at=_NOW))
         recorder.set_request(attempt, {"secret": "discard on failure"})
-        recorder.append_raw(
-            attempt,
-            source="response",
-            direction=TraceDirection.RESPONSE,
-            layer=TraceCaptureLayer.HTTP_BODY,
-            sequence=0,
-            data=b"partial response",
-        )
         recorder.finish_call(
             handle,
             TraceOutcome(
@@ -294,7 +217,6 @@ async def test_failed_model_publishes_error_without_request_or_raw_candidates(
         assert detail is not None
         assert detail.request is None
         assert detail.result is None
-        assert detail.raw_sources == ()
         assert detail.record.error_message == "provider unavailable"
         assert detail.record.status is TraceStatus.FAILED
     finally:
@@ -607,7 +529,7 @@ async def test_trace_database_uses_wal_and_foreign_keys_and_restarts_clean_stagi
             ]
             == 1
         )
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
 
     restarted = SQLiteTraceRecorder(database)
     try:
@@ -667,7 +589,7 @@ async def test_queue_payload_limit_marks_capture_incomplete_without_business_exc
 
 
 @pytest.mark.asyncio
-async def test_queue_event_limit_drops_raw_capture_without_exceeding_budget(
+async def test_queue_event_limit_drops_arguments_without_exceeding_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -683,14 +605,7 @@ async def test_queue_event_limit_drops_raw_capture_without_exceeding_budget(
         with measure_trace_writer(recorder) as measurements:
             handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
             recorder.set_request(handle, {"path": "file.txt"})
-            recorder.append_raw(
-                handle,
-                source="tool-output",
-                direction=TraceDirection.RESPONSE,
-                layer=TraceCaptureLayer.TOOL_RESULT,
-                sequence=0,
-                data=b"tool result",
-            )
+            recorder.set_request(handle, b'tool result'.decode())
             await wait_for_trace_writer(recorder)
             recorder.finish_call(
                 handle,
@@ -703,11 +618,10 @@ async def test_queue_event_limit_drops_raw_capture_without_exceeding_budget(
 
             detail = await recorder.get_record(handle.record_id)
             assert detail is not None
-            assert detail.raw_sources == ()
             assert detail.record.capture_state.value == "partial"
             assert detail.capture_issues
             assert measurements["rejected_events"] >= 1
-            assert any(issue.source == "tool-output" for issue in detail.capture_issues)
+            assert any(issue.source == "request" for issue in detail.capture_issues)
             assert trace_queue_load(recorder)[0] <= recorder._max_queue_events
             assert trace_queue_load(recorder)[1] <= recorder._max_queue_payload_bytes
     finally:
@@ -724,15 +638,8 @@ async def test_default_queue_budgets_bound_retained_capture(tmp_path: Path, budg
         with measure_trace_writer(recorder) as measurements, recorder._condition:
             block = b"x" if budget == "events" else b"x" * (64 * 1024)
             count = 4097 if budget == "events" else 1025
-            for sequence in range(count):
-                recorder.append_raw(
-                    handle,
-                    source="tool-output",
-                    direction=TraceDirection.RESPONSE,
-                    layer=TraceCaptureLayer.TOOL_RESULT,
-                    sequence=sequence,
-                    data=block,
-                )
+            for _ in range(count):
+                recorder.set_request(handle, block.decode())
             events, payload_bytes = trace_queue_load(recorder)
             assert events <= 4096
             assert payload_bytes <= 64 * 1024 * 1024
@@ -766,27 +673,19 @@ async def test_writer_retries_three_times_then_publishes_partial_capture(
     try:
         with measure_trace_writer(recorder) as measurements:
             original_apply = recorder._apply_event
-            raw_attempts = 0
+            request_attempts = 0
 
-            def fail_raw_for_all_retries(connection: sqlite3.Connection, event: _Event) -> None:
-                nonlocal raw_attempts
-                if event.kind == "raw":
-                    raw_attempts += 1
+            def fail_request_for_all_retries(connection: sqlite3.Connection, event: _Event) -> None:
+                nonlocal request_attempts
+                if event.kind == "request":
+                    request_attempts += 1
                     raise sqlite3.OperationalError("controlled write failure")
                 return original_apply(connection, event)
 
-            monkeypatch.setattr(recorder, "_apply_event", fail_raw_for_all_retries)
+            monkeypatch.setattr(recorder, "_apply_event", fail_request_for_all_retries)
             with recorder._condition:
                 handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
                 recorder.set_request(handle, {"path": "file.txt"})
-                recorder.append_raw(
-                    handle,
-                    source="tool-output",
-                    direction=TraceDirection.RESPONSE,
-                    layer=TraceCaptureLayer.TOOL_RESULT,
-                    sequence=0,
-                    data=b"output",
-                )
                 recorder.finish_call(
                     handle,
                     _success(),
@@ -798,11 +697,10 @@ async def test_writer_retries_three_times_then_publishes_partial_capture(
 
             detail = await recorder.get_record(handle.record_id)
             assert detail is not None
-            assert detail.request == {"path": "file.txt"}
-            assert detail.raw_sources == ()
+            assert detail.request is None
             assert detail.record.capture_state.value == "partial"
             assert detail.capture_issues
-            assert raw_attempts == 4
+            assert request_attempts == 4
             assert measurements["writer_failed_events"] == 1
     finally:
         await recorder.close()
@@ -878,8 +776,8 @@ async def test_unserializable_content_degrades_capture_without_escaping(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("event_kind", ["attempt", "raw", "finish"])
-async def test_queue_budget_includes_attempt_raw_and_error_metadata(
+@pytest.mark.parametrize("event_kind", ["request", "finish"])
+async def test_queue_budget_includes_arguments_and_error_metadata(
     tmp_path: Path,
     event_kind: str,
 ) -> None:
@@ -889,19 +787,8 @@ async def test_queue_budget_includes_attempt_raw_and_error_metadata(
             handle = recorder.begin_call(_new_context(recorder), _tool_metadata())
             await wait_for_trace_writer(recorder)
             with recorder._condition:
-                if event_kind == "attempt":
-                    recorder.begin_attempt(
-                        handle, TraceAttemptMetadata(started_at=_NOW, model="x" * 16384)
-                    )
-                elif event_kind == "raw":
-                    recorder.append_raw(
-                        handle,
-                        source="x" * 16384,
-                        direction=TraceDirection.RESPONSE,
-                        layer=TraceCaptureLayer.TOOL_RESULT,
-                        sequence=0,
-                        data=b"x",
-                    )
+                if event_kind == "request":
+                    recorder.set_request(handle, 'x' * 16384)
                 else:
                     recorder.finish_call(
                         handle,
@@ -1045,21 +932,12 @@ async def test_finish_freezes_content_and_late_events_do_not_change_published_re
                     handle, _success(), result="original", usage=_usage(), retry_count=0
                 )
                 recorder.set_request(handle, {"late": True})
-                recorder.append_raw(
-                    handle,
-                    source="late",
-                    direction=TraceDirection.RESPONSE,
-                    layer=TraceCaptureLayer.TOOL_RESULT,
-                    sequence=0,
-                    data=b"late",
-                )
                 recorder.finish_call(handle, _success(), result="late", usage=_usage(), retry_count=0)
             await wait_for_trace_writer(recorder)
             detail = await recorder.get_record(handle.record_id)
             assert detail is not None
             assert detail.request == {"original": True}
             assert detail.result == "original"
-            assert detail.raw_sources == ()
             assert len((await recorder.list_records()).items) == 1
             assert measurements["writer_failed_events"] == 0
             assert measurements["rejected_events"] == 0
@@ -1120,37 +998,13 @@ async def test_model_attempts_and_tools_from_two_sessions_remain_isolated(tmp_pa
                 model, TraceAttemptMetadata(started_at=_NOW, model="discard")
             )
             recorder.set_request(first, {"session": "discard"})
-            recorder.append_raw(
-                first,
-                source="response",
-                direction=TraceDirection.RESPONSE,
-                layer=TraceCaptureLayer.HTTP_BODY,
-                sequence=0,
-                data=b"discard",
-            )
             barrier.wait(timeout=5)
             final = recorder.begin_attempt(
                 model, TraceAttemptMetadata(started_at=_NOW, model=session_id)
             )
             recorder.set_request(final, {"session": session_id})
-            recorder.append_raw(
-                final,
-                source="response",
-                direction=TraceDirection.RESPONSE,
-                layer=TraceCaptureLayer.HTTP_BODY,
-                sequence=0,
-                data=session_id.encode(),
-            )
             tool = recorder.begin_call(context, _tool_metadata())
             recorder.set_request(tool, {"session": session_id})
-            recorder.append_raw(
-                tool,
-                source="response",
-                direction=TraceDirection.RESPONSE,
-                layer=TraceCaptureLayer.TOOL_RESULT,
-                sequence=0,
-                data=session_id.encode(),
-            )
             recorder.finish_call(
                 model, _success(), result=session_id, usage=_usage(), retry_count=1
             )
@@ -1167,12 +1021,8 @@ async def test_model_attempts_and_tools_from_two_sessions_remain_isolated(tmp_pa
                 detail = await recorder.get_record(record_id)
                 assert detail is not None
                 assert detail.record.owner_session_id == session_id
-                assert detail.request == {"session": session_id}
+                assert detail.request == ({"session": session_id} if detail.record.kind is TraceKind.TOOL else None)
                 assert detail.result == session_id
-                raw = await recorder.read_raw(
-                    record_id, source="response", offset=0, limit_bytes=100
-                )
-                assert raw.data == session_id.encode()
         assert len((await recorder.list_records()).items) == 4
     finally:
         await recorder.close()
@@ -1230,14 +1080,6 @@ async def test_initialization_failure_isolated_from_capture_and_reported_by_quer
         recorder.finish_call(handle, _success(), result="safe", usage=_usage(), retry_count=0)
         with pytest.raises(RuntimeError, match="unavailable"):
             await recorder.list_records()
-        recorder.append_raw(
-            handle,
-            source="response",
-            direction=TraceDirection.RESPONSE,
-            layer=TraceCaptureLayer.TOOL_RESULT,
-            sequence=0,
-            data=b"safe",
-        )
     finally:
         await recorder.close()
 

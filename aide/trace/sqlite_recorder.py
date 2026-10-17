@@ -7,7 +7,6 @@ import base64
 import json
 import sqlite3
 import threading
-import zlib
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass, replace
@@ -26,19 +25,15 @@ from aide.trace.types import (
     TraceCallMetadata,
     TraceCaptureHandle,
     TraceCaptureIssue,
-    TraceCaptureLayer,
     TraceCaptureState,
-    TraceDirection,
     TraceErrorBreakdown,
     TraceErrorCategory,
     TraceKind,
+    TraceMetadataHandle,
     TraceOrigin,
     TraceOutcome,
     TracePage,
     TracePurpose,
-    TraceRawHandle,
-    TraceRawPage,
-    TraceRawSource,
     TraceRecordDetail,
     TraceRecordFilters,
     TraceRecordSummary,
@@ -50,6 +45,7 @@ from aide.trace.types import (
     TraceTimelinePoint,
     TraceTokenTotals,
     TraceTokenUsage,
+    TraceToolLink,
     TraceUsageState,
 )
 
@@ -57,7 +53,6 @@ __all__ = [
     "TRACE_DATABASE_FILENAME",
     "TRACE_MAX_QUEUE_EVENTS",
     "TRACE_MAX_QUEUE_PAYLOAD_BYTES",
-    "TRACE_MAX_RAW_CHUNK_BYTES",
     "TRACE_RETENTION_DAYS",
     "SQLiteTraceRecorder",
 ]
@@ -65,8 +60,7 @@ __all__ = [
 TRACE_DATABASE_FILENAME = "traces.sqlite3"
 TRACE_MAX_QUEUE_PAYLOAD_BYTES = 64 * 1024 * 1024
 TRACE_MAX_QUEUE_EVENTS = 4096
-TRACE_MAX_RAW_CHUNK_BYTES = 64 * 1024
-TRACE_RETENTION_DAYS = 365
+TRACE_RETENTION_DAYS = 30
 _WRITER_RETRY_DELAYS = (0.1, 1.0, 5.0)
 _WRITER_BATCH_SIZE = 128
 _WRITER_BATCH_DELAY = 0.002
@@ -78,12 +72,11 @@ _TRACE_TOKEN_FIELDS = (
     "cached_input_tokens",
     "cache_creation_input_tokens",
 )
-_SCHEMA_VERSION = 1
 _PAGE_LIMIT_MAX = 1000
 _T = TypeVar("_T")
 _METHODLOGY = (
     "Statistics include published records retained in this database. Model failures "
-    "retain final error metadata but not failed request or response candidates. "
+    "retain received semantic output and final error metadata. "
     "Reported token values are summed independently; unknown and inapplicable usage "
     "is not counted as zero usage."
 )
@@ -132,6 +125,8 @@ CREATE TABLE IF NOT EXISTS trace_records (
     model TEXT,
     reasoning_effort TEXT,
     endpoint TEXT,
+    protocol TEXT,
+    output_complete INTEGER NOT NULL DEFAULT 1,
     status TEXT,
     started_at TEXT NOT NULL,
     finished_at TEXT,
@@ -157,43 +152,6 @@ CREATE TABLE IF NOT EXISTS trace_records (
     publish_sequence INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS trace_attempts (
-    record_id TEXT NOT NULL REFERENCES trace_records(record_id) ON DELETE CASCADE,
-    attempt_id TEXT NOT NULL,
-    ordinal INTEGER NOT NULL,
-    started_at TEXT NOT NULL,
-    model TEXT,
-    reasoning_effort TEXT,
-    endpoint TEXT,
-    request_json TEXT,
-    request_set INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (record_id, attempt_id)
-);
-
-CREATE TABLE IF NOT EXISTS trace_raw_streams (
-    stream_id INTEGER PRIMARY KEY,
-    record_id TEXT NOT NULL REFERENCES trace_records(record_id) ON DELETE CASCADE,
-    attempt_id TEXT,
-    source TEXT NOT NULL,
-    direction TEXT NOT NULL,
-    layer TEXT NOT NULL,
-    content_type TEXT,
-    content_encoding TEXT
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_trace_raw_stream_direct
-    ON trace_raw_streams(record_id, source) WHERE attempt_id IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_trace_raw_stream_attempt
-    ON trace_raw_streams(record_id, attempt_id, source) WHERE attempt_id IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS trace_raw_chunks (
-    stream_id INTEGER NOT NULL REFERENCES trace_raw_streams(stream_id) ON DELETE CASCADE,
-    sequence INTEGER NOT NULL,
-    part INTEGER NOT NULL,
-    original_size INTEGER NOT NULL CHECK (original_size >= 0),
-    compressed_data BLOB NOT NULL,
-    PRIMARY KEY (stream_id, sequence, part)
-);
-
 CREATE TABLE IF NOT EXISTS trace_capture_issues (
     issue_id INTEGER PRIMARY KEY,
     record_id TEXT NOT NULL REFERENCES trace_records(record_id) ON DELETE CASCADE,
@@ -216,7 +174,9 @@ CREATE INDEX IF NOT EXISTS idx_trace_records_subject_finished
     WHERE published = 1;
 CREATE INDEX IF NOT EXISTS idx_trace_records_root
     ON trace_records(root_id, publish_sequence DESC) WHERE published = 1;
-PRAGMA user_version = 1;
+CREATE INDEX IF NOT EXISTS idx_trace_records_parent
+    ON trace_records(parent_record_id, tool_call_id) WHERE published = 1;
+PRAGMA user_version = 2;
 """
 
 
@@ -509,15 +469,9 @@ class SQLiteTraceRecorder(TraceRecorder):
             ordinal = len(state.attempts) + 1
             state.attempts[attempt.attempt_id] = (ordinal, metadata)
             state.latest_attempt_id = attempt.attempt_id
-        self._enqueue(
-            "attempt",
-            handle.record_id,
-            {"attempt_id": attempt.attempt_id, "ordinal": ordinal, "metadata": metadata},
-            attempt_id=attempt.attempt_id,
-        )
         return attempt
 
-    def set_endpoint(self, handle: TraceRawHandle, endpoint: str) -> None:
+    def set_endpoint(self, handle: TraceMetadataHandle, endpoint: str) -> None:
         attempt_id = handle.attempt_id if isinstance(handle, TraceAttemptHandle) else None
         if not isinstance(endpoint, str) or not endpoint:
             self._note_loss(
@@ -539,21 +493,25 @@ class SQLiteTraceRecorder(TraceRecorder):
                     return
                 ordinal, metadata = attempt
                 state.attempts[attempt_id] = (ordinal, replace(metadata, endpoint=endpoint))
-        issue = TraceCaptureIssue(
-            state=TraceCaptureState.PARTIAL,
-            message="Call endpoint metadata could not be queued.",
-            source="provider_transport" if attempt_id is not None else "tool_endpoint",
-        )
-        self._enqueue(
-            "attempt_endpoint" if attempt_id is not None else "call_endpoint",
-            handle.record_id,
-            {"attempt_id": attempt_id, "endpoint": endpoint},
-            attempt_id=attempt_id,
-            source="endpoint",
-            dropped_issue=issue,
-        )
 
-    def set_request(self, handle: TraceRawHandle, request: object) -> None:
+    def set_protocol(self, handle: TraceMetadataHandle, protocol: str) -> None:
+        with self._condition:
+            state = self._states.get(handle.record_id)
+            if state is None or state.finished:
+                return
+            if isinstance(handle, TraceAttemptHandle):
+                attempt = state.attempts.get(handle.attempt_id)
+                if attempt is not None:
+                    ordinal, metadata = attempt
+                    state.attempts[handle.attempt_id] = (ordinal, replace(metadata, protocol=protocol))
+            else:
+                state.metadata = replace(state.metadata, protocol=protocol)
+
+    def set_request(self, handle: TraceMetadataHandle, request: object) -> None:
+        with self._condition:
+            state = self._states.get(handle.record_id)
+            if state is None or state.metadata.kind is not TraceKind.TOOL:
+                return
         attempt_id = handle.attempt_id if isinstance(handle, TraceAttemptHandle) else None
         self._enqueue(
             "request",
@@ -563,7 +521,7 @@ class SQLiteTraceRecorder(TraceRecorder):
             source="request",
         )
 
-    def report_capture_issue(self, handle: TraceRawHandle, issue: TraceCaptureIssue) -> None:
+    def report_capture_issue(self, handle: TraceMetadataHandle, issue: TraceCaptureIssue) -> None:
         attempt_id = handle.attempt_id if isinstance(handle, TraceAttemptHandle) else None
         self._enqueue(
             "issue",
@@ -574,51 +532,6 @@ class SQLiteTraceRecorder(TraceRecorder):
             dropped_issue=issue,
         )
 
-    def append_raw(
-        self,
-        handle: TraceRawHandle,
-        *,
-        source: str,
-        direction: TraceDirection,
-        layer: TraceCaptureLayer,
-        sequence: int,
-        data: bytes,
-        content_type: str | None = None,
-        content_encoding: str | None = None,
-    ) -> None:
-        attempt_id = handle.attempt_id if isinstance(handle, TraceAttemptHandle) else None
-        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
-            self._note_loss(handle.record_id, attempt_id, source, "Invalid raw data sequence.")
-            return
-        if not isinstance(data, bytes):
-            self._note_loss(handle.record_id, attempt_id, source, "Raw data was not bytes.")
-            return
-        part = 0
-        start = 0
-        while start < len(data) or (not data and part == 0):
-            end = min(start + TRACE_MAX_RAW_CHUNK_BYTES, len(data))
-            chunk = data[start:end]
-            self._enqueue(
-                "raw",
-                handle.record_id,
-                {
-                    "attempt_id": attempt_id,
-                    "source": source,
-                    "direction": direction,
-                    "layer": layer,
-                    "sequence": sequence,
-                    "part": part,
-                    "data": chunk,
-                    "content_type": content_type,
-                    "content_encoding": content_encoding,
-                },
-                attempt_id=attempt_id,
-                source=source,
-            )
-            start = end
-            part += 1
-            if not data:
-                break
 
     def finish_call(
         self,
@@ -648,11 +561,8 @@ class SQLiteTraceRecorder(TraceRecorder):
                 "retry_count": retry_count,
                 "final_attempt_id": attempt_id,
                 "final_attempt": attempt[1] if attempt is not None else None,
-                "final_attempt_ordinal": attempt[0] if attempt is not None else 0,
                 "issues": issues,
             }
-        if outcome.status is TraceStatus.FAILED and state.metadata.kind is TraceKind.MODEL:
-            payload["result"] = None
         ticket = self._enqueue(
             "finish",
             handle.record_id,
@@ -730,25 +640,6 @@ class SQLiteTraceRecorder(TraceRecorder):
     async def get_record(self, record_id: str) -> TraceRecordDetail | None:
         return await self._run_query(self._get_record_sync, record_id)
 
-    async def read_raw(
-        self,
-        record_id: str,
-        *,
-        source: str,
-        offset: int,
-        limit_bytes: int,
-    ) -> TraceRawPage:
-        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-            raise ValueError("offset must be a nonnegative integer")
-        if isinstance(limit_bytes, bool) or not isinstance(limit_bytes, int) or limit_bytes <= 0:
-            raise ValueError("limit_bytes must be a positive integer")
-        return await self._run_query(
-            self._read_raw_sync,
-            record_id,
-            source,
-            offset,
-            limit_bytes,
-        )
 
     async def get_stats(self, filters: TraceRecordFilters | None = None) -> TraceStats:
         return await self._run_query(self._get_stats_sync, filters)
@@ -929,14 +820,8 @@ class SQLiteTraceRecorder(TraceRecorder):
             connection.execute("PRAGMA journal_mode = WAL")
         return connection
 
-    def _migrate(self, connection: sqlite3.Connection) -> None:
-        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version > _SCHEMA_VERSION:
-            raise RuntimeError(f"Unsupported Trace schema version {version}")
-        if version == 0:
-            connection.executescript(_SCHEMA)
-        elif version != _SCHEMA_VERSION:
-            raise RuntimeError(f"No migration path for Trace schema version {version}")
+    def _initialize_schema(self, connection: sqlite3.Connection) -> None:
+        connection.executescript(_SCHEMA)
         connection.execute("BEGIN IMMEDIATE")
         try:
             connection.execute(
@@ -960,7 +845,7 @@ class SQLiteTraceRecorder(TraceRecorder):
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             connection = self._connect(writer=True)
-            self._migrate(connection)
+            self._initialize_schema(connection)
         except Exception as error:
             self._startup_error = error
             self._ready.set()
@@ -1122,29 +1007,10 @@ class SQLiteTraceRecorder(TraceRecorder):
                     return
         if event.kind == "begin":
             self._write_begin(connection, event.record_id, event.payload)
-        elif event.kind == "attempt":
-            self._write_attempt(connection, event.record_id, event.payload)
-        elif event.kind == "attempt_endpoint":
-            connection.execute(
-                "UPDATE trace_attempts SET endpoint = ? WHERE record_id = ? AND attempt_id = ?",
-                (
-                    cast(str, event.payload["endpoint"]),
-                    event.record_id,
-                    cast(str, event.payload["attempt_id"]),
-                ),
-            )
         elif event.kind == "request":
             self._write_request(connection, event.record_id, event.payload)
-        elif event.kind == "call_endpoint":
-            self._ensure_call_record(connection, event.record_id)
-            connection.execute(
-                "UPDATE trace_records SET endpoint = ? WHERE record_id = ? AND published = 0",
-                (cast(str, event.payload["endpoint"]), event.record_id),
-            )
         elif event.kind == "issue":
             self._write_issue_event(connection, event.record_id, event.payload)
-        elif event.kind == "raw":
-            self._write_raw(connection, event.record_id, event.payload)
         elif event.kind == "finish":
             self._write_finish(connection, event.record_id, event.payload)
         elif event.kind == "restore":
@@ -1219,28 +1085,6 @@ class SQLiteTraceRecorder(TraceRecorder):
             ),
         )
 
-    def _write_attempt(
-        self,
-        connection: sqlite3.Connection,
-        record_id: str,
-        payload: dict[str, object],
-    ) -> None:
-        self._ensure_call_record(connection, record_id)
-        metadata = cast(TraceAttemptMetadata, payload["metadata"])
-        connection.execute(
-            """INSERT OR IGNORE INTO trace_attempts(
-                record_id, attempt_id, ordinal, started_at, model, reasoning_effort, endpoint
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                record_id,
-                cast(str, payload["attempt_id"]),
-                cast(int, payload["ordinal"]),
-                _utc_text(metadata.started_at),
-                metadata.model,
-                metadata.reasoning_effort,
-                metadata.endpoint,
-            ),
-        )
 
     def _write_request(
         self,
@@ -1264,18 +1108,11 @@ class SQLiteTraceRecorder(TraceRecorder):
                 ),
             )
             return
-        if attempt_id is None:
-            result = connection.execute(
-                "UPDATE trace_records SET request_json = ?, request_set = 1 "
-                "WHERE record_id = ? AND published = 0",
-                (request_json, record_id),
-            )
-        else:
-            result = connection.execute(
-                "UPDATE trace_attempts SET request_json = ?, request_set = 1 "
-                "WHERE record_id = ? AND attempt_id = ?",
-                (request_json, record_id, attempt_id),
-            )
+        result = connection.execute(
+            "UPDATE trace_records SET request_json = ?, request_set = 1 "
+            "WHERE record_id = ? AND kind = 'tool' AND published = 0",
+            (request_json, record_id),
+        )
         if result.rowcount != 1:
             raise sqlite3.IntegrityError("Trace request arrived before its call candidate")
 
@@ -1313,78 +1150,6 @@ class SQLiteTraceRecorder(TraceRecorder):
                 (record_id, attempt_id, issue.state.value, issue.message, issue.source),
             )
 
-    def _write_raw(
-        self,
-        connection: sqlite3.Connection,
-        record_id: str,
-        payload: dict[str, object],
-    ) -> None:
-        self._ensure_call_record(connection, record_id)
-        attempt_id = cast(str | None, payload["attempt_id"])
-        source = cast(str, payload["source"])
-        direction = cast(TraceDirection, payload["direction"])
-        layer = cast(TraceCaptureLayer, payload["layer"])
-        stream = connection.execute(
-            """SELECT stream_id, direction, layer, content_type, content_encoding
-               FROM trace_raw_streams
-               WHERE record_id = ? AND attempt_id IS ? AND source = ?""",
-            (record_id, attempt_id, source),
-        ).fetchone()
-        content_type = cast(str | None, payload["content_type"])
-        content_encoding = cast(str | None, payload["content_encoding"])
-        if stream is None:
-            cursor = connection.execute(
-                """INSERT INTO trace_raw_streams(
-                    record_id, attempt_id, source, direction, layer, content_type, content_encoding
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    record_id,
-                    attempt_id,
-                    source,
-                    direction.value,
-                    layer.value,
-                    content_type,
-                    content_encoding,
-                ),
-            )
-            stream_id = int(cursor.lastrowid or 0)
-        else:
-            stream_id = int(stream["stream_id"])
-            if (
-                stream["direction"] != direction.value
-                or stream["layer"] != layer.value
-                or stream["content_type"] != content_type
-                or stream["content_encoding"] != content_encoding
-            ):
-                SQLiteTraceRecorder._insert_issue(
-                    connection,
-                    record_id,
-                    attempt_id,
-                    TraceCaptureIssue(
-                        state=TraceCaptureState.PARTIAL,
-                        message="Raw source metadata changed during capture.",
-                        source=source,
-                    ),
-                )
-                return
-        data = cast(bytes, payload["data"])
-        if cast(int, payload["part"]) == 0:
-            connection.execute(
-                "DELETE FROM trace_raw_chunks WHERE stream_id = ? AND sequence = ?",
-                (stream_id, cast(int, payload["sequence"])),
-            )
-        connection.execute(
-            """INSERT OR REPLACE INTO trace_raw_chunks(
-                stream_id, sequence, part, original_size, compressed_data
-            ) VALUES (?, ?, ?, ?, ?)""",
-            (
-                stream_id,
-                cast(int, payload["sequence"]),
-                cast(int, payload["part"]),
-                len(data),
-                zlib.compress(data),
-            ),
-        )
 
     def _ensure_call_record(self, connection: sqlite3.Connection, record_id: str) -> None:
         with self._condition:
@@ -1422,72 +1187,15 @@ class SQLiteTraceRecorder(TraceRecorder):
         metadata = cast(TraceCallMetadata, payload["metadata"])
         final_attempt_id = cast(str | None, payload["final_attempt_id"])
         final_attempt = cast(TraceAttemptMetadata | None, payload["final_attempt"])
-        attempt_ordinal = cast(int, payload["final_attempt_ordinal"])
-        if final_attempt_id is not None and final_attempt is not None:
-            connection.execute(
-                """INSERT OR IGNORE INTO trace_attempts(
-                    record_id, attempt_id, ordinal, started_at, model, reasoning_effort, endpoint
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    record_id,
-                    final_attempt_id,
-                    attempt_ordinal,
-                    _utc_text(final_attempt.started_at),
-                    final_attempt.model,
-                    final_attempt.reasoning_effort,
-                    final_attempt.endpoint,
-                ),
-            )
-
-        successful_model = (
-            outcome.status is TraceStatus.SUCCESS and metadata.kind is TraceKind.MODEL
+        connection.execute(
+            "DELETE FROM trace_capture_issues WHERE record_id = ? "
+            "AND attempt_id IS NOT NULL AND attempt_id != ?",
+            (record_id, final_attempt_id),
         )
-        if successful_model:
-            connection.execute(
-                """DELETE FROM trace_raw_streams
-                   WHERE record_id = ? AND attempt_id IS NOT NULL AND attempt_id != ?""",
-                (record_id, final_attempt_id),
-            )
-            selected_sources = connection.execute(
-                "SELECT source FROM trace_raw_streams WHERE record_id = ? AND attempt_id = ?",
-                (record_id, final_attempt_id),
-            ).fetchall()
-            for source_row in selected_sources:
-                connection.execute(
-                    "DELETE FROM trace_raw_streams WHERE record_id = ? AND attempt_id IS NULL AND source = ?",
-                    (record_id, source_row["source"]),
-                )
-            connection.execute(
-                "UPDATE trace_raw_streams SET attempt_id = NULL "
-                "WHERE record_id = ? AND attempt_id = ?",
-                (record_id, final_attempt_id),
-            )
-            connection.execute(
-                "DELETE FROM trace_capture_issues WHERE record_id = ? "
-                "AND attempt_id IS NOT NULL AND attempt_id != ?",
-                (record_id, final_attempt_id),
-            )
-            connection.execute(
-                "UPDATE trace_capture_issues SET attempt_id = NULL "
-                "WHERE record_id = ? AND attempt_id = ?",
-                (record_id, final_attempt_id),
-            )
-        elif metadata.kind is TraceKind.MODEL:
-            connection.execute(
-                "DELETE FROM trace_raw_streams WHERE record_id = ?",
-                (record_id,),
-            )
-            connection.execute(
-                "DELETE FROM trace_capture_issues WHERE record_id = ? AND attempt_id IS NOT NULL",
-                (record_id,),
-            )
-        else:
-            connection.execute(
-                "UPDATE trace_capture_issues SET attempt_id = NULL "
-                "WHERE record_id = ? AND attempt_id IS NOT NULL",
-                (record_id,),
-            )
-
+        connection.execute(
+            "UPDATE trace_capture_issues SET attempt_id = NULL WHERE record_id = ?",
+            (record_id,),
+        )
         with self._condition:
             state = self._states.get(record_id)
             pending_issues = tuple(state.issues.items()) if state is not None else ()
@@ -1500,30 +1208,15 @@ class SQLiteTraceRecorder(TraceRecorder):
         ):
             if issue_attempt_id is None or issue_attempt_id == final_attempt_id:
                 final_issues.append((issue_attempt_id, issue))
-        for issue_attempt_id, issue in final_issues:
-            normalized_attempt_id = None if successful_model else issue_attempt_id
-            if metadata.kind is TraceKind.MODEL and not successful_model and issue_attempt_id:
-                continue
-            self._insert_issue(connection, record_id, normalized_attempt_id, issue)
+        for _issue_attempt_id, issue in final_issues:
+            self._insert_issue(connection, record_id, None, issue)
 
-        request_json: str | None = None
-        request_set = 0
-        if successful_model and final_attempt_id is not None:
-            request = connection.execute(
-                """SELECT request_json, request_set FROM trace_attempts
-                   WHERE record_id = ? AND attempt_id = ?""",
-                (record_id, final_attempt_id),
-            ).fetchone()
-            if request is not None:
-                request_json = cast(str | None, request["request_json"])
-                request_set = int(request["request_set"])
-        elif metadata.kind is TraceKind.TOOL:
-            request_json = cast(str | None, row["request_json"])
-            request_set = int(row["request_set"])
+        request_json = row["request_json"] if metadata.kind is TraceKind.TOOL else None
+        request_set = int(row["request_set"]) if metadata.kind is TraceKind.TOOL else 0
 
         result_json: str | None = None
         result_set = 0
-        if outcome.status is TraceStatus.SUCCESS or metadata.kind is TraceKind.TOOL:
+        if payload["result"] is not None:
             try:
                 result_json = _encode_json(payload["result"])
                 result_set = 1
@@ -1543,13 +1236,7 @@ class SQLiteTraceRecorder(TraceRecorder):
             "SELECT state FROM trace_capture_issues WHERE record_id = ?",
             (record_id,),
         ).fetchall()
-        raw_count = int(
-            connection.execute(
-                "SELECT COUNT(*) FROM trace_raw_streams WHERE record_id = ? AND attempt_id IS NULL",
-                (record_id,),
-            ).fetchone()[0]
-        )
-        has_content = bool(request_set or result_set or raw_count)
+        has_content = bool(request_set or result_set)
         capture_state = (
             TraceCaptureState.COMPLETE
             if not issue_rows
@@ -1571,7 +1258,7 @@ class SQLiteTraceRecorder(TraceRecorder):
         )
         updated = connection.execute(
             """UPDATE trace_records SET
-                model = ?, reasoning_effort = ?, endpoint = ?,
+                model = ?, reasoning_effort = ?, endpoint = ?, protocol = ?, output_complete = ?,
                 status = ?, finished_at = ?, duration_ms = ?, final_attempt_duration_ms = ?,
                 retry_count = ?, error_category = ?, error_code = ?, error_message = ?,
                 usage_state = ?, input_tokens = ?, output_tokens = ?, total_tokens = ?,
@@ -1583,6 +1270,8 @@ class SQLiteTraceRecorder(TraceRecorder):
                 selected_metadata.model,
                 selected_metadata.reasoning_effort,
                 selected_metadata.endpoint,
+                selected_metadata.protocol,
+                int(outcome.output_complete),
                 outcome.status.value,
                 _utc_text(outcome.finished_at),
                 outcome.duration_ms,
@@ -1606,7 +1295,6 @@ class SQLiteTraceRecorder(TraceRecorder):
                 record_id,
             ),
         )
-        connection.execute("DELETE FROM trace_attempts WHERE record_id = ?", (record_id,))
         return updated.rowcount == 1
 
     @staticmethod
@@ -1680,7 +1368,8 @@ class SQLiteTraceRecorder(TraceRecorder):
                           r.cache_creation_input_tokens, r.owner_session_id, r.subject_session_id,
                           r.run_id, r.schedule_run_id, r.restore_run_token, r.agent_id,
                           r.parent_root_id, r.parent_record_id, r.tool_call_id, r.tool_name,
-                          r.model, r.reasoning_effort, r.endpoint, r.final_attempt_duration_ms,
+                          r.model, r.reasoning_effort, r.endpoint, r.protocol, r.output_complete,
+                          r.final_attempt_duration_ms,
                           r.error_category, r.error_code, r.error_message, r.restored
                    FROM trace_records AS r
                    WHERE r.published = 1 AND r.publish_sequence <= ?"""
@@ -1782,14 +1471,12 @@ class SQLiteTraceRecorder(TraceRecorder):
             ).fetchone()
             if row is None:
                 return None
-            streams = connection.execute(
-                """SELECT s.source, s.direction, s.layer, s.content_type, s.content_encoding,
-                          COALESCE(SUM(c.original_size), 0) AS total_bytes
-                   FROM trace_raw_streams AS s
-                   LEFT JOIN trace_raw_chunks AS c ON c.stream_id = s.stream_id
-                   WHERE s.record_id = ? AND s.attempt_id IS NULL
-                   GROUP BY s.stream_id ORDER BY s.source""",
-                (record_id,),
+            tools = connection.execute(
+                "SELECT r.record_id, r.tool_call_id, r.tool_name, r.status FROM trace_records AS r "
+                "WHERE r.parent_record_id = ? AND r.workspace_key = ? "
+                "AND r.owner_session_id IS ? AND r.kind = 'tool' AND r.published = 1"
+                + visibility_sql + " ORDER BY r.started_at, r.record_id",
+                (record_id, row["workspace_key"], row["owner_session_id"], *visibility_parameters),
             ).fetchall()
             issues = connection.execute(
                 """SELECT state, message, source FROM trace_capture_issues
@@ -1808,16 +1495,11 @@ class SQLiteTraceRecorder(TraceRecorder):
                     if row["result_set"] and row["result_json"] is not None
                     else None
                 ),
-                raw_sources=tuple(
-                    TraceRawSource(
-                        source=cast(str, stream["source"]),
-                        direction=TraceDirection(stream["direction"]),
-                        layer=TraceCaptureLayer(stream["layer"]),
-                        content_type=cast(str | None, stream["content_type"]),
-                        content_encoding=cast(str | None, stream["content_encoding"]),
-                        total_bytes=int(stream["total_bytes"]),
-                    )
-                    for stream in streams
+                related_tools=tuple(
+                    TraceToolLink(
+                        record_id=tool["record_id"], tool_call_id=tool["tool_call_id"],
+                        tool_name=tool["tool_name"], status=TraceStatus(tool["status"]),
+                    ) for tool in tools
                 ),
                 capture_issues=tuple(
                     TraceCaptureIssue(
@@ -1831,79 +1513,6 @@ class SQLiteTraceRecorder(TraceRecorder):
         finally:
             connection.close()
 
-    def _read_raw_sync(
-        self,
-        record_id: str,
-        source: str,
-        offset: int,
-        limit_bytes: int,
-    ) -> TraceRawPage:
-        connection = self._connect()
-        try:
-            visibility_sql, visibility_parameters = self._record_visibility_sql(connection)
-            stream = connection.execute(
-                """SELECT s.stream_id, s.direction, s.layer, s.content_type, s.content_encoding,
-                          COALESCE(SUM(c.original_size), 0) AS total_bytes
-                   FROM trace_raw_streams AS s
-                   JOIN trace_records AS r ON r.record_id = s.record_id
-                   LEFT JOIN trace_raw_chunks AS c ON c.stream_id = s.stream_id
-                   WHERE s.record_id = ? AND s.source = ? AND s.attempt_id IS NULL
-                     AND r.published = 1"""
-                + visibility_sql
-                + " GROUP BY s.stream_id",
-                (record_id, source, *visibility_parameters),
-            ).fetchone()
-            if stream is None:
-                return TraceRawPage(
-                    source=source,
-                    direction=None,
-                    layer=None,
-                    offset=offset,
-                    data=b"",
-                    total_bytes=0,
-                    next_offset=None,
-                )
-            total_bytes = int(stream["total_bytes"])
-            output = bytearray()
-            end_offset = offset + limit_bytes
-            position = 0
-            if offset < total_bytes:
-                chunks = connection.execute(
-                    """SELECT sequence, part, original_size FROM trace_raw_chunks
-                       WHERE stream_id = ? ORDER BY sequence, part""",
-                    (stream["stream_id"],),
-                )
-                for chunk in chunks:
-                    chunk_end = position + int(chunk["original_size"])
-                    if chunk_end > position and chunk_end > offset and position < end_offset:
-                        body = connection.execute(
-                            """SELECT compressed_data FROM trace_raw_chunks
-                               WHERE stream_id = ? AND sequence = ? AND part = ?""",
-                            (stream["stream_id"], chunk["sequence"], chunk["part"]),
-                        ).fetchone()
-                        if body is None:
-                            break
-                        data = zlib.decompress(body["compressed_data"])
-                        start = max(0, offset - position)
-                        stop = min(len(data), end_offset - position)
-                        output.extend(data[start:stop])
-                    position = chunk_end
-                    if position >= end_offset:
-                        break
-            next_offset = offset + len(output)
-            return TraceRawPage(
-                source=source,
-                direction=TraceDirection(stream["direction"]),
-                layer=TraceCaptureLayer(stream["layer"]),
-                offset=offset,
-                data=bytes(output),
-                total_bytes=total_bytes,
-                next_offset=next_offset if next_offset < total_bytes else None,
-                content_type=cast(str | None, stream["content_type"]),
-                content_encoding=cast(str | None, stream["content_encoding"]),
-            )
-        finally:
-            connection.close()
 
     def _get_stats_sync(self, filters: TraceRecordFilters | None) -> TraceStats:
         connection = self._connect()
@@ -2095,6 +1704,8 @@ class SQLiteTraceRecorder(TraceRecorder):
             model=row["model"],
             reasoning_effort=cast(ReasoningEffort | None, effort),
             endpoint=row["endpoint"],
+            protocol=row["protocol"],
+            output_complete=bool(row["output_complete"]),
             final_attempt_duration_ms=row["final_attempt_duration_ms"],
             error_category=(
                 TraceErrorCategory(row["error_category"])

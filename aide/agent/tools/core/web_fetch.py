@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
@@ -38,9 +37,7 @@ from aide.agent.tools.permission import (
     ToolAuthorizationSession,
     ToolInvocationFacts,
 )
-from aide.trace.sanitization import sanitize_trace_url
 from aide.trace.scope import current_trace_tool_call
-from aide.trace.types import TraceCaptureLayer, TraceDirection
 
 CONNECT_TIMEOUT_SECONDS = 10.0
 TOTAL_TIMEOUT_SECONDS = 30.0
@@ -351,6 +348,7 @@ class WebFetchTool(BaseTool):
         while True:
             trace_call = current_trace_tool_call()
             if trace_call is not None:
+                trace_call.set_protocol("http")
                 trace_call.set_endpoint(target.url)
             response = await self._http_client.get(
                 target.url,
@@ -379,63 +377,12 @@ class WebFetchTool(BaseTool):
                     continue
 
                 content_type = _header(response.headers, "content-type")
-                capture_scope = current_trace_tool_call()
-                capture_content_type = content_type
-                content_encoding = _header(response.headers, "content-encoding")
-                if capture_scope is not None:
-                    try:
-                        metadata = json.dumps(
-                            {
-                                "endpoint": sanitize_trace_url(target.url),
-                                "status_code": response.status_code,
-                                "content_type": content_type,
-                                "content_encoding": content_encoding,
-                                "content_decoding": "http_content_decoded",
-                            },
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ).encode("utf-8")
-                        capture_scope.append_raw(
-                            source="web_fetch_response_metadata",
-                            direction=TraceDirection.RESPONSE,
-                            layer=TraceCaptureLayer.HTTP_METADATA,
-                            sequence=0,
-                            data=metadata,
-                            content_type="application/json",
-                        )
-                    except Exception:
-                        capture_content_type = None
-                        capture_scope.report_capture_issue(
-                            "Web Fetch response metadata could not be captured.",
-                            source="web_fetch_response_metadata",
-                        )
-
                 if not _is_textual_media_type(_media_type(content_type)):
                     raise ToolError("Web Fetch response media type is unsupported.")
 
                 chunks: list[bytes] = []
-                sequence = 0
                 async for chunk in response.iter_bytes():
-                    if capture_scope is not None:
-                        capture_scope.append_raw(
-                            source="web_fetch_response",
-                            direction=TraceDirection.RESPONSE,
-                            layer=TraceCaptureLayer.HTTP_DECODED_BODY,
-                            sequence=sequence,
-                            data=chunk,
-                            content_type=capture_content_type,
-                        )
                     chunks.append(chunk)
-                    sequence += 1
-                if sequence == 0 and capture_scope is not None:
-                    capture_scope.append_raw(
-                        source="web_fetch_response",
-                        direction=TraceDirection.RESPONSE,
-                        layer=TraceCaptureLayer.HTTP_DECODED_BODY,
-                        sequence=0,
-                        data=b"",
-                        content_type=capture_content_type,
-                    )
                 body = b"".join(chunks)
                 return _decode_response(
                     body,

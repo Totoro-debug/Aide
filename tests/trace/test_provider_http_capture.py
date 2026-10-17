@@ -103,15 +103,6 @@ def _router(
     )
 
 
-async def _raw(
-    recorder: SQLiteTraceRecorder,
-    record_id: str,
-    source: str,
-) -> bytes:
-    page = await recorder.read_raw(record_id, source=source, offset=0, limit_bytes=100_000)
-    return page.data
-
-
 @pytest.mark.asyncio
 async def test_openai_complete_captures_wire_bytes_and_redacts_authentication(
     tmp_path: Path,
@@ -173,18 +164,8 @@ async def test_openai_complete_captures_wire_bytes_and_redacts_authentication(
         detail = await recorder.get_record(record.record_id)
         assert detail is not None
 
-        request_body = await _raw(recorder, record.record_id, "http_request")
-        response_bytes = await _raw(recorder, record.record_id, "http_response")
-        request_metadata = json.loads(
-            (await _raw(recorder, record.record_id, "http_request_metadata")).decode("utf-8")
-        )
-        response_metadata = json.loads(
-            (await _raw(recorder, record.record_id, "http_response_metadata")).decode("utf-8")
-        )
         sent = json.loads(actual_request_body)
 
-        assert request_body == actual_request_body
-        assert response_bytes == response_body
         assert sent["messages"][-1]["reasoning_content"] == "retained reasoning"
         assert sent["tools"] == list(tools)
         assert sent["model"] == "chat-model"
@@ -192,21 +173,6 @@ async def test_openai_complete_captures_wire_bytes_and_redacts_authentication(
         assert sent["temperature"] == 0.1
         assert sent["stream"] is False
         assert record.endpoint == "https://chat.example/v1?region=west/chat/completions"
-        assert request_metadata["url"] == record.endpoint
-        assert "authorization" not in request_metadata["headers"]
-        assert "url-secret" not in json.dumps(request_metadata)
-        assert "signature-secret" not in json.dumps(request_metadata)
-        assert "chat-secret" not in json.dumps(request_metadata)
-        assert response_metadata["status_code"] == 200
-        assert response_metadata["headers"]["x-request-id"] == "response-id"
-        assert "set-cookie" not in response_metadata["headers"]
-        assert "response-secret" not in json.dumps(response_metadata)
-        assert response_metadata["headers"]["location"] == "https://chat.example/next?page=2"
-        assert response_metadata["headers"]["content-location"] == "/result?format=json"
-        assert response_metadata["headers"]["link"] == (
-            '<https://chat.example/next?page=2>; rel="next"'
-        )
-        assert "http_request" in {source.source for source in detail.raw_sources}
         assert not detail.capture_issues
     finally:
         await router.close()
@@ -258,7 +224,6 @@ async def test_openai_stream_capture_does_not_prefetch_response_chunks(tmp_path:
         assert isinstance(remaining[-1], ModelCompleted)
         assert remaining[-1].response.message.content == "firstsecond"
         (record,) = (await recorder.list_records()).items
-        assert await _raw(recorder, record.record_id, "http_response") == b"".join(chunks)
         detail = await recorder.get_record(record.record_id)
         assert detail is not None and not detail.capture_issues
     finally:
@@ -319,11 +284,8 @@ async def test_http_retries_keep_only_final_attempt_and_isolate_sessions(
         records = {record.owner_session_id: record for record in (await recorder.list_records()).items}
         assert records["session-retry"].retry_count == 1
         assert records["session-other"].retry_count == 0
-        for session_id, expected_body in response_bodies.items():
+        for session_id, _expected_body in response_bodies.items():
             record = records[session_id]
-            assert await _raw(recorder, record.record_id, "http_response") == expected_body
-            request_body = json.loads(await _raw(recorder, record.record_id, "http_request"))
-            assert request_body["messages"][0]["content"] == session_id
             detail = await recorder.get_record(record.record_id)
             assert detail is not None and not detail.capture_issues
         assert attempts == {"session-retry": 2, "session-other": 1}
@@ -480,8 +442,6 @@ async def test_anthropic_wire_conversion_and_consumption_match_noop(
                 (record,) = (await recorder.list_records()).items
                 detail = await recorder.get_record(record.record_id)
                 assert detail is not None and not detail.capture_issues
-                assert await _raw(recorder, record.record_id, "http_request") == request.content
-                assert await _raw(recorder, record.record_id, "http_response") == b"".join(chunks)
         finally:
             await router.close()
             await recorder.close()
@@ -587,10 +547,8 @@ async def test_http_retry_exhaustion_discards_all_request_and_response_candidate
         assert record.endpoint is not None
         detail = await recorder.get_record(record.record_id)
         assert detail is not None
-        assert detail.request is None and detail.result is None
-        assert detail.raw_sources == ()
+        assert detail.request is None
         assert not detail.capture_issues
-        assert await _raw(recorder, record.record_id, "http_response") == b""
     finally:
         await router.close()
         await recorder.close()
@@ -656,8 +614,10 @@ async def test_http_stream_failure_preserves_partial_output_and_original_excepti
         if cancelled:
             assert record.error_category is TraceErrorCategory.CANCELLED
         detail = await recorder.get_record(record.record_id)
-        assert detail is not None and detail.raw_sources == ()
-        assert detail.request is None and detail.result is None
+        assert detail is not None
+        assert detail.request is None
+        assert detail.result == {"text": "partial", "reasoning": "", "tool_calls": []}
+        assert not record.output_complete
     finally:
         await router.close()
         await recorder.close()
@@ -683,7 +643,7 @@ async def test_http_capture_failure_keeps_success_and_marks_missing_data(
     def broken_capture(*args: object, **kwargs: object) -> None:
         raise OSError("capture unavailable")
 
-    monkeypatch.setattr(recorder, "append_raw", broken_capture)
+    monkeypatch.setattr(recorder, "set_endpoint", broken_capture)
     try:
         with trace_scope(recorder, _source(tmp_path)):
             response = await router.complete("title", messages=(), tools=())
@@ -694,7 +654,6 @@ async def test_http_capture_failure_keeps_success_and_marks_missing_data(
         assert record.capture_state.value == "partial"
         detail = await recorder.get_record(record.record_id)
         assert detail is not None and detail.capture_issues
-        assert detail.raw_sources == ()
     finally:
         await router.close()
         await recorder.close()

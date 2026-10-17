@@ -21,7 +21,7 @@ from aide.trace.context import TraceRootSource, workspace_key_for
 from aide.trace.recorder import NoOpTraceRecorder
 from aide.trace.scope import trace_scope
 from aide.trace.sqlite_recorder import SQLiteTraceRecorder
-from aide.trace.types import TraceCaptureLayer, TraceErrorCategory, TraceOrigin, TracePurpose
+from aide.trace.types import TraceErrorCategory, TraceOrigin, TracePurpose
 from tests.fixtures import SingleToolGateway
 from tests.fixtures.trace import wait_for_trace_writer
 from tests.tools.core.test_web_fetch import FakeHTTPClient, FakeResolver, FakeResponse
@@ -144,12 +144,8 @@ async def test_fetch_metadata_encoding_failure_keeps_business_result(
     assert (results[1].status, results[1].content) == ("success", "page")
     await wait_for_trace_writer(recorder)
     (record,) = (await recorder.list_records()).items
-    assert record.capture_state.value == "partial"
+    assert record.capture_state.value == "complete"
     assert record.endpoint == "https://public.example/page"
-    raw = await recorder.read_raw(
-        record.record_id, source="web_fetch_response", offset=0, limit_bytes=1000
-    )
-    assert raw.data == b"page"
 
 
 @pytest.mark.asyncio
@@ -183,11 +179,6 @@ async def test_search_preserves_all_noncredential_fields_and_url_spelling(
     assert FakeDDGS.calls == [("trace", {"max_results": 1, "backend": "duckduckgo"})] * 2
     await wait_for_trace_writer(recorder)
     (record,) = (await recorder.list_records()).items
-    raw = await recorder.read_raw(
-        record.record_id, source="web_search_ddgs", offset=0, limit_bytes=100_000
-    )
-    assert json.loads(raw.data) == fixture
-    assert raw.layer is TraceCaptureLayer.SDK_RESULT
     assert record.capture_state.value == "complete"
 
 
@@ -222,18 +213,11 @@ async def test_search_excludes_credentials_from_every_saved_result_channel(
     assert cast(dict[str, object], detail.result)["content"] == result.content.replace(
         url, safe_url
     )
-    for raw_source in detail.raw_sources:
-        raw = await recorder.read_raw(
-            record.record_id, source=raw_source.source, offset=0, limit_bytes=100_000
-        )
-        assert b"search-secret" not in raw.data
-        assert b"field-secret" not in raw.data
-        assert b"user:password" not in raw.data
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("output_format", ["text", "markdown"])
-async def test_fetch_raw_survives_conversion_truncation_and_multiple_chunks(
+async def test_fetch_saves_final_converted_truncated_result(
     recorder: SQLiteTraceRecorder, source: TraceRootSource, output_format: str
 ) -> None:
     chunks = (
@@ -258,15 +242,9 @@ async def test_fetch_raw_survives_conversion_truncation_and_multiple_chunks(
     assert len(results[1].content) == 20
     await wait_for_trace_writer(recorder)
     (record,) = (await recorder.list_records()).items
-    first = await recorder.read_raw(
-        record.record_id, source="web_fetch_response", offset=0, limit_bytes=80_000
-    )
-    rest = await recorder.read_raw(
-        record.record_id, source="web_fetch_response", offset=80_000, limit_bytes=100_000
-    )
-    assert first.data + rest.data == b"".join(chunks)
-    assert first.layer is TraceCaptureLayer.HTTP_DECODED_BODY
     assert record.capture_state.value == "complete"
+    detail = await recorder.get_record(record.record_id)
+    assert detail is not None and detail.result == {"content": results[1].content, "artifact": None}
 
 
 @pytest.mark.asyncio
@@ -301,23 +279,12 @@ async def test_fetch_does_not_consume_skipped_response_bodies(
     (record,) = (await recorder.list_records()).items
     detail = await recorder.get_record(record.record_id)
     assert detail is not None
-    if case == "redirect":
-        raw = await recorder.read_raw(
-            record.record_id, source="web_fetch_response", offset=0, limit_bytes=1000
-        )
-        assert raw.data == b"final"
-    else:
-        assert all(raw.source != "web_fetch_response" for raw in detail.raw_sources)
-        metadata = await recorder.read_raw(
-            record.record_id, source="web_fetch_response_metadata", offset=0, limit_bytes=1000
-        )
-        assert json.loads(metadata.data)["endpoint"] == "https://public.example/start"
-        assert json.loads(metadata.data)["status_code"] == 415
+    assert record.endpoint == ("https://public.example/final" if case == "redirect" else "https://public.example/start")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [TimeoutError, asyncio.CancelledError])
-async def test_fetch_retains_consumed_bytes_when_interrupted(
+async def test_fetch_interruption_preserves_business_failure(
     recorder: SQLiteTraceRecorder, source: TraceRootSource, failure: type[BaseException]
 ) -> None:
     class InterruptedResponse(FakeResponse):
@@ -353,10 +320,6 @@ async def test_fetch_retains_consumed_bytes_when_interrupted(
         TraceErrorCategory.TIMEOUT if failure is TimeoutError else TraceErrorCategory.CANCELLED
     )
     assert record.endpoint == "https://public.example/page"
-    raw = await recorder.read_raw(
-        record.record_id, source="web_fetch_response", offset=0, limit_bytes=1000
-    )
-    assert raw.data == b"already consumed\xff"
 
 
 @pytest.mark.asyncio
@@ -474,7 +437,7 @@ async def test_search_unserializable_extra_field_does_not_change_result(
     assert result.status == "success"
     await wait_for_trace_writer(recorder)
     (record,) = (await recorder.list_records()).items
-    assert record.capture_state.value == "partial"
+    assert record.capture_state.value == "complete"
     detail = await recorder.get_record(record.record_id)
     assert detail is not None
-    assert any(issue.source == "web_search_ddgs" for issue in detail.capture_issues)
+    assert not detail.capture_issues

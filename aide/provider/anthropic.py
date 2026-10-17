@@ -25,7 +25,7 @@ from aide.provider.errors import (
     ModelCallError,
     parse_retry_after_seconds,
 )
-from aide.provider.http_capture import capture_http_request, capture_http_response
+from aide.provider.http_capture import capture_http_request
 from aide.provider.models import (
     AssistantModelMessage,
     FinishReason,
@@ -111,7 +111,6 @@ class AnthropicProvider:
             http_arguments: dict[str, object] = {
                 "event_hooks": {
                     "request": [capture_http_request],
-                    "response": [capture_http_response],
                 },
             }
             if http_transport_factory is not None:

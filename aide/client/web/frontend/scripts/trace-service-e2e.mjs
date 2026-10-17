@@ -36,8 +36,8 @@ try {
   await expect.poll(async () => (await records()).filter(record => record.kind === "model"
     && record.purpose === "agent_run").length, { timeout: 30000 }).toBe(3);
   const persisted = await records();
-  const model = persisted.find(record => record.kind === "model" && record.purpose === "agent_run");
   const tool = persisted.find(record => record.kind === "tool");
+  const model = persisted.find(record => record.record_id === tool.parent_record_id);
   assert.ok(persisted.some(record => record.record_id === tool.parent_record_id));
   assert.equal(tool.tool_name, "read_file");
   assert.equal(model.capture_state, "complete");
@@ -46,11 +46,12 @@ try {
   await page.goto(`${url}?recordId=${model.record_id}`);
   await expect(page.getByRole("heading", { name: "Execution Trace", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "small-model", exact: true })).toBeVisible();
-  await page.getByLabel("Raw source", { exact: true }).selectOption("http_response");
-  await expect(page.locator("pre").filter({ hasText: "data:" })).toBeVisible();
-  await page.getByRole("button", { name: `Open ${tool.record_id}`, exact: true }).click();
+  await page.getByRole("link", { name: /read_file · Succeeded/ }).click();
   await expect(page.getByRole("heading", { name: "read_file", exact: true })).toBeVisible();
   await expect(page.locator("pre").filter({ hasText: "fixture.txt" }).first()).toBeVisible();
+  await page.getByRole("link", { name: "View initiating model call", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "small-model", exact: true })).toBeVisible();
+  assert.equal(traceRequests.filter(url => new URL(url).pathname.endsWith("/raw")).length, 0);
   const count = traceRequests.length;
   await page.waitForTimeout(500);
   assert.equal(traceRequests.length, count);

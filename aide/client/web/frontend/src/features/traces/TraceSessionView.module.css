@@ -58,8 +58,7 @@
 }
 
 .filterGroup select,
-.filterGroup input,
-.rawSourceSelect select {
+.filterGroup input {
   width: 100%;
   min-width: 0;
   min-height: 36px;
@@ -307,6 +306,10 @@
   font-size: 10px;
 }
 
+.detailSection > summary {
+  cursor: pointer;
+}
+
 .detailSection {
   display: grid;
   min-width: 0;
@@ -370,20 +373,7 @@
 }
 
 .payloadBlock {
-  display: grid;
   min-width: 0;
-  gap: 6px;
-}
-
-.payloadBlock h4 {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 650;
-}
-
-.payloadBlock pre,
-.rawText {
   max-width: 100%;
   max-height: 320px;
   margin: 0;
@@ -402,14 +392,6 @@
 
 .sectionHeading {
   align-items: flex-end;
-}
-
-.rawSourceSelect {
-  display: grid;
-  min-width: min(100%, 180px);
-  gap: 5px;
-  color: var(--text-secondary);
-  font-size: 10px;
 }
 
 .captureIssues {
@@ -434,40 +416,6 @@
 .captureIssues span,
 .captureIssues code {
   overflow-wrap: anywhere;
-}
-
-.rawContent {
-  display: grid;
-  min-width: 0;
-  justify-items: start;
-  gap: 9px;
-}
-
-.rawMetadata {
-  display: flex;
-  min-width: 0;
-  flex-wrap: wrap;
-  gap: 5px 12px;
-  color: var(--text-muted);
-  font-size: 10px;
-}
-
-.rawText {
-  width: 100%;
-  max-height: 360px;
-  overflow-wrap: anywhere;
-}
-
-.binaryNotice {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.inlineError {
-  margin: 0;
-  color: var(--danger-text);
-  font-size: 12px;
 }
 
 @media (max-width: 800px) {
@@ -535,10 +483,6 @@
   .sectionHeading {
     align-items: flex-start;
     flex-direction: column;
-  }
-
-  .rawSourceSelect {
-    width: 100%;
   }
 
   .runGroup[data-depth="1"],

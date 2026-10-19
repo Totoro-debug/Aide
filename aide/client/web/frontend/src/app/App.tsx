@@ -55,6 +55,7 @@ import moduleStyles from "./App.module.css";
 import type { NavigationProjectAction, NavigationSession, NavigationSessionAction } from "./NavigationSidebar";
 import NavigationSidebar from "./NavigationSidebar";
 import { ProjectActions } from "./ProjectActions.tsx";
+import SidebarResizeHandle from "./SidebarResizeHandle";
 import { projectErrorKey } from "./projects.ts";
 import type { Theme } from "./theme.ts";
 import { applyTheme, readThemePreference } from "./theme.ts";
@@ -577,6 +578,7 @@ function AppShell() {
           </NavLink>
         </div>
       </aside>
+      <SidebarResizeHandle />
 
       {memoryTarget !== null ? (
         <WorkspaceMemoryDialog

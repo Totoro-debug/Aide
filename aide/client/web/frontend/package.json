@@ -32,6 +32,8 @@
     "test:e2e:api-key": "node scripts/api-key-settings-e2e.mjs",
     "pretest:e2e:layout": "npm run build",
     "test:e2e:layout": "node scripts/workspace-layout-e2e.mjs",
+    "pretest:e2e:sidebar": "npm run build",
+    "test:e2e:sidebar": "node scripts/sidebar-resize-e2e.mjs",
     "pretest:e2e:subagents": "npm run build",
     "test:e2e:subagents": "node scripts/subagent-e2e.mjs",
     "pretest:e2e:statistics": "npm run build",

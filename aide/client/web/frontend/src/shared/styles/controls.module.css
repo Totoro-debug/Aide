@@ -1,9 +1,33 @@
 .appShell {
+  --sidebar-width: clamp(200px, var(--sidebar-preferred-width, 232px), min(480px, calc(100vw - 640px)));
+  position: relative;
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 232px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   background: var(--surface-app);
   color: var(--text-primary);
+}
+
+.sidebarResizeHandle {
+  position: absolute;
+  z-index: 10;
+  top: 0;
+  left: calc(var(--sidebar-width) - 4px);
+  width: 8px;
+  height: 100dvh;
+  cursor: col-resize;
+  user-select: none;
+}
+
+.sidebarResizeHandle::after {
+  position: absolute;
+  inset: 0 3px;
+  content: "";
+}
+
+.sidebarResizeHandle:hover::after,
+.sidebarResizeHandle[data-dragging="true"]::after {
+  background: var(--focus-ring);
 }
 
 .sidebar {
@@ -1260,6 +1284,7 @@ h1 {
 }
 
 .appShellSettings > .sidebar,
+.appShellSettings > .sidebarResizeHandle,
 .appShellSettings .topbar {
   display: none;
 }
@@ -1847,6 +1872,10 @@ h1 {
 }
 
 @media (max-width: 1023px) {
+  .sidebarResizeHandle {
+    display: none;
+  }
+
   .appShell {
     grid-template-columns: minmax(0, 1fr);
     min-height: 100dvh;

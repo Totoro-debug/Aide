@@ -33,7 +33,7 @@ An explicit Session model/effort combination is captured when its Run starts, be
 
 The service admits one Web client and multiple CLI clients. Session Claims, UI selection, resident history, and execution have independent lifetimes. Switching away can leave accepted work running. Reconnect grace retains Claims, accepted inputs, output, and confirmation identity; expiry cancels abandoned work and releases Claims. User-visible timing and launch/stop commands are in [README](../../README.md).
 
-When the final connected Web or CLI client leaves, shutdown starts immediately and drains accepted work through the normal service cleanup path. Reconnect grace remains available while another client keeps the service online. A Web registration awaiting its first connection retains the initial launch window.
+When the final connected Web or CLI client leaves, the service waits 3 seconds before starting shutdown and draining accepted work through the normal service cleanup path. A client connecting during this interval cancels shutdown. The existing per-client reconnect grace remains available while another client keeps the service online. A Web registration awaiting its first connection retains the initial launch window.
 
 Registered Projects can schedule while the service has online clients. An unregistered Workspace admits Schedule work only while an online client uses it. Project removal closes admission, cancels and drains its work, resolves confirmations, and removes registration while retaining user files and saved state. Re-registering saved user Jobs requires explicit Schedule resume.
 

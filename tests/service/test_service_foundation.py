@@ -4,12 +4,14 @@ import asyncio
 import json
 import os
 import subprocess
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
 
 import aide.service.runtime.service as service_runtime
 from aide.agent.confirmation import (
@@ -1439,13 +1441,46 @@ async def test_client_disconnect_expiry_aborts_owned_confirmation(tmp_path: Path
         await service.stop()
 
 
-@pytest.mark.asyncio
-async def test_last_client_disconnect_stops_without_grace(tmp_path: Path) -> None:
+@pytest_asyncio.fixture
+async def shutdown_service(
+    tmp_path: Path,
+) -> AsyncIterator[tuple[AgentService, Callable[[float], Awaitable[None]]]]:
     home = _configured_home(tmp_path / "agent-home")
+    clock = FakeClock(datetime(2026, 10, 20, tzinfo=UTC))
+    tick = asyncio.Condition()
+
+    async def sleep(seconds: float) -> None:
+        deadline = clock.monotonic() + seconds
+        async with tick:
+            await tick.wait_for(lambda: clock.monotonic() >= deadline)
+
+    async def advance(seconds: float) -> None:
+        # Let newly created timers capture their deadlines before advancing time.
+        await asyncio.sleep(0)
+        clock.advance(seconds)
+        async with tick:
+            tick.notify_all()
+        await asyncio.sleep(0)
+
+    service = AgentService(
+        home, ConfigLoader(home).load(), reconnect_timeout=30,
+        monotonic_now=clock.monotonic, sleep=sleep,
+    )
+    await service.start()
+    try:
+        yield service, advance
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_last_client_disconnect_stops_after_three_seconds(
+    tmp_path: Path,
+    shutdown_service: tuple[AgentService, Callable[[float], Awaitable[None]]],
+) -> None:
+    service, advance = shutdown_service
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
-    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=30)
-    await service.start()
     try:
         cli = await service.register_client("cli")
         web = await service.register_client("web")
@@ -1467,6 +1502,11 @@ async def test_last_client_disconnect_stops_without_grace(tmp_path: Path) -> Non
         await service.disconnect_client(web.client_id, sink=sink)
         assert service.state == "ready"
         await service.disconnect_client(cli.client_id, sink=sink)
+        assert service.state == "reconnecting"
+        assert not workspace._schedule_admitted
+        await advance(2.999)
+        assert service.state == "reconnecting"
+        await advance(0.001)
         await asyncio.wait_for(service.wait_closed(), timeout=2)
         assert service.state == "stopped"
     finally:
@@ -1475,10 +1515,10 @@ async def test_last_client_disconnect_stops_without_grace(tmp_path: Path) -> Non
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["cli", "web"])
-async def test_sole_client_disconnect_stops_without_grace(tmp_path: Path, kind: str) -> None:
-    home = _configured_home(tmp_path / "agent-home")
-    service = AgentService(home, ConfigLoader(home).load(), reconnect_timeout=30)
-    await service.start()
+async def test_sole_client_disconnect_stops_after_three_seconds(
+    shutdown_service: tuple[AgentService, Callable[[float], Awaitable[None]]], kind: str,
+) -> None:
+    service, advance = shutdown_service
     try:
         client = await service.register_client(kind)
 
@@ -1489,7 +1529,9 @@ async def test_sole_client_disconnect_stops_without_grace(tmp_path: Path, kind: 
         sink = Sink()
         await service.connect_client(client.client_id, sink)
         await service.disconnect_client(client.client_id, sink=sink)
-        await asyncio.sleep(0)
+        await advance(2.999)
+        assert service.state == "reconnecting"
+        await advance(0.001)
         with pytest.raises(ServiceError) as rejected:
             await service.connect_client(client.client_id, sink)
         assert rejected.value.code == "admission_closed"
@@ -1497,6 +1539,49 @@ async def test_sole_client_disconnect_stops_without_grace(tmp_path: Path, kind: 
         assert service.state == "stopped"
     finally:
         await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["cli", "web"])
+@pytest.mark.parametrize("new_client", [False, True])
+async def test_connection_cancels_shutdown_and_next_disconnect_restarts_timer(
+    shutdown_service: tuple[AgentService, Callable[[float], Awaitable[None]]],
+    kind: str, new_client: bool,
+) -> None:
+    service, advance = shutdown_service
+    client = await service.register_client(kind)
+    await service.connect_client(client.client_id, _CollectingSink())
+    await service.disconnect_client(client.client_id)
+    await advance(2)
+    if new_client:
+        client = await service.register_client("cli")
+    else:
+        client = await service.register_client(kind, client.reconnect_credential)
+    await service.connect_client(client.client_id, _CollectingSink())
+    await advance(1)
+    assert service.state == "ready"
+    await service.disconnect_client(client.client_id)
+    await advance(2.999)
+    assert service.state == "reconnecting"
+    await advance(0.001)
+    await asyncio.wait_for(service.wait_closed(), timeout=2)
+    assert service.state == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_shutdown_preserves_pending_web_launch_window(
+    shutdown_service: tuple[AgentService, Callable[[float], Awaitable[None]]],
+) -> None:
+    service, advance = shutdown_service
+    cli = await service.register_client("cli")
+    await service.connect_client(cli.client_id, _CollectingSink())
+    web = await service.register_client("web")
+    await service.disconnect_client(cli.client_id)
+    await advance(29)
+    assert service.state == "reconnecting"
+    await service.connect_client(web.client_id, _CollectingSink())
+    await advance(1)
+    assert service.state == "ready"
 
 
 @pytest.mark.asyncio

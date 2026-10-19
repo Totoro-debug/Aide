@@ -141,6 +141,7 @@ from aide.utils.time import local_now
 
 _TRACE_MAINTENANCE_INTERVAL_SECONDS = 24 * 60 * 60
 _TRACE_PURGE_RETRY_INTERVAL_SECONDS = 60
+_LAST_CLIENT_SHUTDOWN_DELAY_SECONDS = 3.0
 _PROJECT_REMOVAL_FAILURE_MESSAGE = (
     "Project work could not be stopped; the registration remains blocked."
 )
@@ -1097,7 +1098,10 @@ class AgentService:
                     None,
                 )
                 self._global_reconnect_task = asyncio.create_task(
-                    self._stop_after_grace(pending_web_deadline or self._monotonic())
+                    self._stop_after_grace(
+                        pending_web_deadline
+                        or self._monotonic() + _LAST_CLIENT_SHUTDOWN_DELAY_SECONDS
+                    )
                 )
         else:
             await self._reconcile_schedule_admission()

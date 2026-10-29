@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from aide.agent.subagents.models import SubAgentStatus
 from aide.agent.subagents.store import SubAgentRequestError, SubAgentStoreError
-from aide.agent.tools.base import BaseTool, ToolError
+from aide.agent.tools.base import WRITE_TOOL_PROFILE, BaseTool, ToolError
 from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.permission import ToolAuthorizationSession
 
@@ -49,6 +49,7 @@ def _json(value: object) -> str:
 
 class _SubAgentTool(BaseTool):
     _contextual: ClassVar[bool] = True
+    resource_profile = WRITE_TOOL_PROFILE
 
     async def execute_authorized_for_context(
         self,

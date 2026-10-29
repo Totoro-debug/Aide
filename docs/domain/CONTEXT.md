@@ -248,6 +248,10 @@ _Avoid_: Plugin list, command list, model tools, subagent registry, MCP registry
 The inclusion of a Tool's complete invocation definition among the capabilities presented to the model for one model call. It neither changes Tool Catalog membership nor gates invocation.
 _Avoid_: Tool Catalog membership, Tool Activation, Tool execution, Permission Policy
 
+**Tool Resource Access**:
+The resources one Tool invocation reads or changes, independently of whether its Tool Permission Level authorizes that invocation directly or requires confirmation.
+_Avoid_: Tool Permission Level, Tool Exposure, Tool Authorization
+
 **Tool Activation**:
 The Agent Run-scoped selection of a deferred Tool for exposure in subsequent model calls. It expires with the Agent Run and neither authorizes nor invokes the Tool.
 _Avoid_: MCP Server enablement, Tool Confirmation, execution permission, persistent Session capability, Tool execution

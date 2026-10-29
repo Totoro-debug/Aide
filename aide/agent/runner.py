@@ -13,6 +13,7 @@ from loguru import logger
 
 from aide.agent.confirmation import ConfirmationAborted
 from aide.agent.run_errors import CommittableAgentRunError
+from aide.agent.tool_concurrency import max_tool_call_concurrency, next_tool_call_batch
 from aide.agent.tools.file_mutation import FileMutationRecorder
 from aide.agent.tools.tool_gateway import (
     ConfirmationRequester,
@@ -414,20 +415,39 @@ class AgentRunner:
                     )
 
                 assert tool_gateway is not None
-                for tool_call in response.message.tool_calls:
+                tool_profiles = {
+                    tool.name: tool.resource_profile
+                    for tool in getattr(tool_gateway, "catalog", ())
+                }
+                concurrency_limit = max_tool_call_concurrency()
+                while pending_tool_calls:
                     if is_cancel_requested():
                         return finish_cancelled(final_content="")
-                    await emit(
-                        AgentRunnerToolCallStarted(
-                            tool_call_id=tool_call.id,
-                            tool_name=tool_call.name,
-                            arguments=tool_call.arguments,
+                    batch_size = len(
+                        next_tool_call_batch(
+                            tuple(
+                                tool_profiles.get(call.name)
+                                for call in pending_tool_calls
+                            ),
+                            limit=concurrency_limit,
                         )
                     )
+                    batch_calls = pending_tool_calls[:batch_size]
+                    states = [_ToolCallState() for _ in batch_calls]
+                    for tool_call in batch_calls:
+                        await emit(
+                            AgentRunnerToolCallStarted(
+                                tool_call_id=tool_call.id,
+                                tool_name=tool_call.name,
+                                arguments=tool_call.arguments,
+                            )
+                        )
 
-                    state = _ToolCallState()
-                    result: ToolResult | None = None
-                    try:
+                    async def execute_batch_call(
+                        index: int,
+                        tool_call: ModelToolCall,
+                        state: _ToolCallState,
+                    ) -> tuple[int, ToolResult]:
                         try:
                             result = await _await_tool_call(
                                 tool_gateway,
@@ -438,61 +458,107 @@ class AgentRunner:
                                 file_mutation_recorder=file_mutation_recorder,
                                 run_token=run_token,
                             )
-                        except BaseException as failure:
-                            if (
-                                isinstance(failure, (asyncio.CancelledError, ConfirmationAborted))
-                                and state.result is None
-                            ):
+                        except (asyncio.CancelledError, ConfirmationAborted) as failure:
+                            if state.result is None:
                                 state.trace.finish_cancelled(failure)
-                            if not isinstance(failure, Exception) and state.result is not None:
-                                try:
-                                    recovered = _externalize_tool_result(
-                                        state.result, externalize, trace=state.trace
-                                    )
-                                    _append_run_message(
-                                        runtime_messages,
-                                        increment,
-                                        _tool_run_message(recovered),
-                                    )
-                                except Exception:
-                                    pass
-                                else:
-                                    pending_tool_calls.pop(0)
                             raise
-                        if result is None:
-                            raise RuntimeError("Tool Gateway ended without a result")
-                    except asyncio.CancelledError:
-                        raise
-                    except ConfirmationAborted:
-                        raise
-                    except Exception:
-                        result = ToolResult(
-                            tool_call_id=tool_call.id,
-                            name=tool_call.name,
-                            status="error",
-                            content=f"{tool_call.name} could not complete the request.",
-                            artifact=None,
-                        )
+                        except Exception:
+                            result = ToolResult(
+                                tool_call_id=tool_call.id,
+                                name=tool_call.name,
+                                status="error",
+                                content=f"{tool_call.name} could not complete the request.",
+                                artifact=None,
+                            )
+                        result = _externalize_tool_result(result, externalize, trace=state.trace)
+                        state.result = result
+                        return index, result
 
-                    result = _externalize_tool_result(result, externalize, trace=state.trace)
-                    _append_run_message(runtime_messages, increment, _tool_run_message(result))
-                    pending_tool_calls.pop(0)
-                    await emit(
-                        AgentRunnerToolCallFinished(
-                            tool_call_id=tool_call.id,
-                            tool_name=tool_call.name,
-                            status=result.status,
-                            result=result.content,
+                    tasks = [
+                        asyncio.create_task(execute_batch_call(index, tool_call, state))
+                        for index, (tool_call, state) in enumerate(
+                            zip(batch_calls, states, strict=True)
                         )
-                    )
-                    if stop_on_tool_error and result.status != "success":
+                    ]
+                    results: list[ToolResult | None] = [None] * batch_size
+                    try:
+                        for completed in asyncio.as_completed(tasks):
+                            index, result = await completed
+                            results[index] = result
+                            tool_call = batch_calls[index]
+                            await emit(
+                                AgentRunnerToolCallFinished(
+                                    tool_call_id=tool_call.id,
+                                    tool_name=tool_call.name,
+                                    status=result.status,
+                                    result=result.content,
+                                )
+                            )
+                    except BaseException:
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        recovered_results: list[ToolResult] = []
+                        for tool_call, state in zip(batch_calls, states, strict=True):
+                            if state.result is None:
+                                result = ToolResult(
+                                    tool_call_id=tool_call.id,
+                                    name=tool_call.name,
+                                    status="error",
+                                    content="Tool call interrupted because the turn was cancelled.",
+                                    artifact=None,
+                                )
+                            else:
+                                result = state.result
+                            recovered_results.append(result)
+                        for result in recovered_results:
+                            _append_run_message(
+                                runtime_messages,
+                                increment,
+                                _tool_run_message(result),
+                            )
+                        del pending_tool_calls[:batch_size]
+                        raise
+
+                    completed_results = [result for result in results if result is not None]
+                    for result in completed_results:
+                        _append_run_message(
+                            runtime_messages,
+                            increment,
+                            _tool_run_message(result),
+                        )
+                    del pending_tool_calls[:batch_size]
+                    if stop_on_tool_error and any(
+                        result.status != "success" for result in completed_results
+                    ):
+                        error_result = next(
+                            result
+                            for result in completed_results
+                            if result.status != "success"
+                        )
+                        for tool_call in pending_tool_calls:
+                            _append_run_message(
+                                runtime_messages,
+                                increment,
+                                _tool_run_message(
+                                    ToolResult(
+                                        tool_call_id=tool_call.id,
+                                        name=tool_call.name,
+                                        status="error",
+                                        content="Tool call skipped because an earlier call failed.",
+                                        artifact=None,
+                                    )
+                                ),
+                            )
+                        pending_tool_calls.clear()
                         await checkpoint()
                         return AgentRunnerResult(
                             messages=increment,
                             final_content="",
                             usage=usage,
                             finish_reason="failed",
-                            error=ErrorInfo("tool_failed", result.content),
+                            error=ErrorInfo("tool_failed", error_result.content),
                         )
                     if is_cancel_requested():
                         return finish_cancelled(final_content="")

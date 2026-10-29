@@ -7,7 +7,7 @@ import json
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Annotated, cast
 
-from aide.agent.tools.base import BaseTool, ToolParam
+from aide.agent.tools.base import READ_ONLY_TOOL_PROFILE, BaseTool, ToolParam
 from aide.agent.tools.search import MAX_TOOL_SEARCH_RESULTS
 
 type SearchAndActivate = Callable[
@@ -25,6 +25,7 @@ class ToolSearchTool(BaseTool):
         "to the next model request."
     )
     required = ("query",)
+    resource_profile = READ_ONLY_TOOL_PROFILE
 
     query: Annotated[
         str,

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
-from aide.agent.tools.base import BaseTool, ToolError
+from aide.agent.tools.base import WRITE_TOOL_PROFILE, BaseTool, ToolError
 from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.permission import (
     ScheduleAction,
@@ -113,6 +113,7 @@ class ScheduleTool(BaseTool):
     description = "Manage one-time and recurring Schedule Jobs."
     parameters = _ScheduleArgumentsSchema().to_json_schema()
     _contextual = True
+    resource_profile = WRITE_TOOL_PROFILE
 
 
     def __init__(

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
-from aide.agent.tools.base import BaseTool, ToolError, ToolParam
+from aide.agent.tools.base import WRITE_TOOL_PROFILE, BaseTool, ToolError, ToolParam
 from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.file_mutation import (
     FileMutationRecorder,
@@ -24,6 +24,7 @@ class EditFileTool(BaseTool):
     )
     required = ("path", "old_text", "new_text")
     _contextual = True
+    resource_profile = WRITE_TOOL_PROFILE
 
     path: Annotated[
         str,

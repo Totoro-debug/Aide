@@ -47,6 +47,26 @@ _DEFAULT_TRUNCATION_MARKER = "\n\n...[truncated]"
 _ARTIFACT_WRITE_FAILURE_MARKER = "\n\n...[artifact write failed; full result was not stored]"
 
 
+@dataclass(frozen=True, slots=True)
+class ToolResourceProfile:
+    """Declared resource access used to decide whether local calls may overlap."""
+
+    reads: bool
+    writes: bool
+    exclusive: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.reads, bool) or not isinstance(self.writes, bool):
+            raise TypeError("Tool resource access flags must be booleans")
+        if not isinstance(self.exclusive, bool):
+            raise TypeError("Tool resource exclusivity must be a boolean")
+
+
+READ_ONLY_TOOL_PROFILE = ToolResourceProfile(reads=True, writes=False)
+WRITE_TOOL_PROFILE = ToolResourceProfile(reads=False, writes=True)
+EXCLUSIVE_TOOL_PROFILE = ToolResourceProfile(reads=False, writes=True, exclusive=True)
+
+
 class ToolError(Exception):
     """An expected Tool failure whose message is safe to return to the model."""
 
@@ -210,6 +230,7 @@ class BaseTool(ABC, metaclass=_BaseToolMeta):
     parameters: ClassVar[dict[str, Any]]
     required: ClassVar[tuple[str, ...]] = ()
     _contextual: ClassVar[bool] = False
+    resource_profile: ClassVar[ToolResourceProfile | None] = None
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)

@@ -7,7 +7,13 @@ from dataclasses import replace
 from typing import Annotated, Any, Final, Literal
 from urllib.parse import urlsplit
 
-from aide.agent.tools.base import BaseTool, ToolError, ToolParam, truncate_text
+from aide.agent.tools.base import (
+    EXCLUSIVE_TOOL_PROFILE,
+    BaseTool,
+    ToolError,
+    ToolParam,
+    truncate_text,
+)
 from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.core.exec_host import (
     ExecCapabilityUnavailable,
@@ -41,6 +47,7 @@ class ExecTool(BaseTool):
     description = "Run one host-shell command with captured output in the selected directory."
     required = ("command",)
     _contextual = True
+    resource_profile = EXCLUSIVE_TOOL_PROFILE
 
     command: Annotated[str, ToolParam(description="Shell command to execute.", min_length=1)]
     cwd: Annotated[str, ToolParam(description="Working directory.", min_length=1)] = "."

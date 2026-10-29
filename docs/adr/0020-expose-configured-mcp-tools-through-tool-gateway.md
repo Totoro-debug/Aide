@@ -12,6 +12,12 @@ Built-in and configured MCP Tools share one invocation and result boundary. MCP 
 
 Each Agent Run owns its catalog view and activation state. Initial exposure includes File Tools, Exec, and Tool Search; search activates deferred capabilities for subsequent requests in that Run. Activation expires at the terminal boundary and is never restored from Session history. Concurrent Runs may share Tool implementations without sharing activation or mutable Workspace context.
 
+## Same-response scheduling
+
+The Agent Runner may overlap explicitly declared read-only local Tools from one model response, up to `max(10, floor(process-available CPU cores / 4))`. Undeclared Tools, writes without a proven independent resource scope, and exclusive Tools remain sequential until their resource rules are defined. The limit applies per response and does not change concurrency across Agent Runs.
+
+Each Tool still enters the Gateway independently, retaining its authorization, confirmation, error normalization, events, and Trace. One Tool failure does not cancel other scheduled calls. Finished events follow completion order; Tool messages return to the model in request order. Run cancellation cleans up unfinished calls and preserves completed outcomes. The Tool Resource Profile is a scheduling hint only and does not grant permission.
+
 Exposure is a context choice, not an execution gate. A catalogued Tool remains callable through the normal Gateway even before its schema is exposed; calling it does not implicitly activate it. User Schedule catalogs exclude the Schedule Tool entirely, preventing search or direct invocation from managing Jobs. Dream uses its private `edit_file` capability.
 
 Tool Search queries the existing catalog using English BM25 keywords, matching complete expressions as defined in [ADR-0032](0032-match-complete-tool-search-expressions.md). It performs no MCP discovery. MCP keyword examples are in the [configuration template](../../aide/templates/default-config.md). Missing supplementary keywords are generated through the existing chat route and persisted best effort; generation failure retains both complete Tool identity names in the Run index without blocking startup. A changed exposure revises the complete request and is checked against [ADR-0023](0023-manage-agent-run-context-by-projected-token-budget.md) before the next model call.

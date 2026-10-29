@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Final
 
-from aide.agent.tools.base import BaseTool
+from aide.agent.tools.base import READ_ONLY_TOOL_PROFILE, BaseTool
 from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.permission import FileAccess
 from aide.utils.host_filesystem import HOST_FILESYSTEM
@@ -45,6 +45,7 @@ class DirectoryReadTool(BaseTool):
     """Collect read facts for a directory Tool's explicit Workspace and root."""
 
     _contextual = True
+    resource_profile = READ_ONLY_TOOL_PROFILE
 
     def build_file_accesses_for_context(
         self,

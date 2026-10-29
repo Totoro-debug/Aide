@@ -1104,6 +1104,287 @@ async def test_runner_executes_all_tools_in_provider_order_in_one_iteration() ->
 
 
 @pytest.mark.asyncio
+async def test_runner_limits_read_only_batches_and_keeps_result_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    import aide.agent.runner as runner_module
+
+    monkeypatch.setattr(runner_module, "max_tool_call_concurrency", lambda: 2)
+    calls = tuple(
+        ModelToolCall(id=f"call-{index}", name=f"reader_{index}", arguments="{}")
+        for index in range(5)
+    )
+    provider = ScriptedFakeProvider(
+        streams=(
+            StreamScript(
+                events=(
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(content="Working", tool_calls=calls),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="tool_calls",
+                        )
+                    ),
+                )
+            ),
+            StreamScript(
+                events=(
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(content="Done"),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="stop",
+                        )
+                    ),
+                )
+            ),
+        )
+    )
+
+    class CatalogTool:
+        def __init__(self, name: str) -> None:
+            from aide.agent.tools.base import READ_ONLY_TOOL_PROFILE
+
+            self.name = name
+            self.resource_profile = READ_ONLY_TOOL_PROFILE
+
+    class BarrierGateway(_DirectGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.catalog = tuple(CatalogTool(call.name) for call in calls)
+            self.started = asyncio.Event()
+            self.active = 0
+            self.max_active = 0
+
+        async def call(
+            self,
+            tool_call: ModelToolCall,
+            *,
+            confirmation: object = None,
+        ) -> ToolResult:
+            del confirmation
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            if self.active == 2:
+                self.started.set()
+            try:
+                await asyncio.wait_for(self.started.wait(), timeout=1)
+                if tool_call.id == "call-1":
+                    return ToolResult(
+                        tool_call_id=tool_call.id,
+                        name=tool_call.name,
+                        status="error",
+                        content="known tool failure",
+                    )
+                if tool_call.id == "call-0":
+                    await asyncio.sleep(0.01)
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    name=tool_call.name,
+                    status="success",
+                    content=tool_call.id,
+                )
+            finally:
+                self.active -= 1
+
+    gateway = BarrierGateway()
+    observed: list[object] = []
+    result = await _runner(ScriptedFakeRouter(provider)).run(
+        [{"role": "user", "content": "Read both."}],
+        model="chat",
+        tool_gateway=gateway,
+        on_output=lambda event: _observe(observed, event),
+        confirmation=None,
+        externalize_result=None,
+        cancel_requested=None,
+        max_iterations=50,
+    )
+
+    assert gateway.max_active == 2
+    assert [message["tool_call_id"] for message in result.messages[1:6]] == [
+        f"call-{index}" for index in range(5)
+    ]
+    assert [message["status"] for message in result.messages[1:6]] == [
+        "success",
+        "error",
+        "success",
+        "success",
+        "success",
+    ]
+    assert result.messages[2]["content"] == "known tool failure"
+    assert [
+        event.tool_call_id
+        for event in observed
+        if isinstance(event, AgentRunnerToolCallFinished)
+    ] == ["call-1", "call-0", "call-2", "call-3", "call-4"]
+
+
+@pytest.mark.asyncio
+async def test_stop_on_tool_error_repairs_calls_after_failed_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import aide.agent.runner as runner_module
+
+    monkeypatch.setattr(runner_module, "max_tool_call_concurrency", lambda: 2)
+    calls = tuple(
+        ModelToolCall(id=f"call-{index}", name=f"reader_{index}", arguments="{}")
+        for index in range(3)
+    )
+    provider = ScriptedFakeProvider(
+        streams=(
+            StreamScript(
+                events=(
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(content="Working", tool_calls=calls),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="tool_calls",
+                        )
+                    ),
+                )
+            ),
+        )
+    )
+
+    class CatalogTool:
+        def __init__(self, name: str) -> None:
+            from aide.agent.tools.base import READ_ONLY_TOOL_PROFILE
+
+            self.name = name
+            self.resource_profile = READ_ONLY_TOOL_PROFILE
+
+    class FailingBatchGateway(_DirectGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.catalog = tuple(CatalogTool(call.name) for call in calls)
+            self.executed: list[str] = []
+
+        async def call(
+            self,
+            tool_call: ModelToolCall,
+            *,
+            confirmation: object = None,
+        ) -> ToolResult:
+            del confirmation
+            self.executed.append(tool_call.id)
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                name=tool_call.name,
+                status="error" if tool_call.id == "call-0" else "success",
+                content="known tool failure" if tool_call.id == "call-0" else "done",
+            )
+
+    gateway = FailingBatchGateway()
+    result = await _runner(ScriptedFakeRouter(provider)).run(
+        [{"role": "user", "content": "Read three things."}],
+        model="chat",
+        tool_gateway=gateway,
+        on_output=None,
+        confirmation=None,
+        externalize_result=None,
+        cancel_requested=None,
+        max_iterations=50,
+        stop_on_tool_error=True,
+    )
+
+    tool_messages = [message for message in result.messages if message["role"] == "tool"]
+    assert result.finish_reason == "failed"
+    assert [message["tool_call_id"] for message in tool_messages] == [
+        "call-0",
+        "call-1",
+        "call-2",
+    ]
+    assert [message["status"] for message in tool_messages] == ["error", "success", "error"]
+    assert tool_messages[2]["content"] == "Tool call skipped because an earlier call failed."
+    assert gateway.executed == ["call-0", "call-1"]
+
+
+@pytest.mark.asyncio
+async def test_runner_cancellation_cleans_up_read_only_batch_and_repairs_each_call() -> None:
+    calls = tuple(
+        ModelToolCall(id=f"call-{index}", name=f"reader_{index}", arguments="{}")
+        for index in range(2)
+    )
+    provider = ScriptedFakeProvider(
+        streams=(
+            StreamScript(
+                events=(
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(content="Working", tool_calls=calls),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="tool_calls",
+                        )
+                    ),
+                )
+            ),
+        )
+    )
+
+    class CatalogTool:
+        def __init__(self, name: str) -> None:
+            from aide.agent.tools.base import READ_ONLY_TOOL_PROFILE
+
+            self.name = name
+            self.resource_profile = READ_ONLY_TOOL_PROFILE
+
+    class BlockingGateway(_DirectGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.catalog = tuple(CatalogTool(call.name) for call in calls)
+            self.started = asyncio.Event()
+            self.unblock = asyncio.Event()
+            self.active = 0
+            self.max_active = 0
+
+        async def call(
+            self,
+            tool_call: ModelToolCall,
+            *,
+            confirmation: object = None,
+        ) -> ToolResult:
+            del confirmation
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            if self.active == 2:
+                self.started.set()
+            try:
+                await self.unblock.wait()
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    name=tool_call.name,
+                    status="success",
+                    content=tool_call.id,
+                )
+            finally:
+                self.active -= 1
+
+    gateway = BlockingGateway()
+    cancellation_requested = False
+    run = asyncio.create_task(
+        _runner(ScriptedFakeRouter(provider)).run(
+            [{"role": "user", "content": "Read both."}],
+            model="chat",
+            tool_gateway=gateway,
+            on_output=None,
+            confirmation=None,
+            externalize_result=None,
+            cancel_requested=lambda: cancellation_requested,
+            max_iterations=50,
+        )
+    )
+    await asyncio.wait_for(gateway.started.wait(), timeout=1)
+    cancellation_requested = True
+    run.cancel()
+    result = await run
+
+    assert result.finish_reason == "cancelled"
+    assert gateway.max_active == 2
+    assert gateway.active == 0
+    tool_messages = [message for message in result.messages if message["role"] == "tool"]
+    assert [message["tool_call_id"] for message in tool_messages] == ["call-0", "call-1"]
+    assert all(message["status"] == "error" for message in tool_messages)
+
+
+@pytest.mark.asyncio
 async def test_runner_passes_confirmation_requester_directly_before_tool_call() -> None:
     call = ModelToolCall(id="call", name="work", arguments='{"raw":true}')
     provider = ScriptedFakeProvider(

@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
 
-from aide.agent.tools.base import BaseTool, ToolError, ToolParam
+from aide.agent.tools.base import READ_ONLY_TOOL_PROFILE, BaseTool, ToolError, ToolParam
 from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.permission import FileAccess
 
@@ -20,6 +20,7 @@ class ReadFileTool(BaseTool):
     )
     required = ("path",)
     _contextual = True
+    resource_profile = READ_ONLY_TOOL_PROFILE
 
     path: Annotated[
         str,

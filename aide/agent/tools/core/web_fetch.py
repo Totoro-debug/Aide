@@ -18,6 +18,7 @@ from aiohttp import ClientResponse, ClientSession, ClientTimeout, TCPConnector
 from aiohttp.abc import AbstractResolver, ResolveResult
 
 from aide.agent.tools.base import (
+    READ_ONLY_TOOL_PROFILE,
     BaseTool,
     ToolError,
     ToolParam,
@@ -200,6 +201,7 @@ class WebFetchTool(BaseTool):
     name = "web_fetch"
     description = "Fetch readable content from an HTTP or HTTPS URL."
     required = ("url",)
+    resource_profile = READ_ONLY_TOOL_PROFILE
 
     url: Annotated[
         str,

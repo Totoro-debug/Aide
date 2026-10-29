@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
-from aide.agent.tools.base import BaseTool, ToolError, ToolParam
+from aide.agent.tools.base import WRITE_TOOL_PROFILE, BaseTool, ToolError, ToolParam
 from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.file_mutation import (
     FileMutationRecorder,
@@ -22,6 +22,7 @@ class WriteFileTool(BaseTool):
     description = "Write UTF-8 text to a file. Paths outside the Workspace require confirmation."
     required = ("path", "content")
     _contextual = True
+    resource_profile = WRITE_TOOL_PROFILE
 
     path: Annotated[
         str,

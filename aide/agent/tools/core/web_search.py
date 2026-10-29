@@ -9,7 +9,7 @@ from typing import Annotated, Final, cast
 from ddgs import DDGS
 from ddgs.exceptions import DDGSException
 
-from aide.agent.tools.base import BaseTool, ToolError, ToolParam
+from aide.agent.tools.base import READ_ONLY_TOOL_PROFILE, BaseTool, ToolError, ToolParam
 
 _SEARCH_TIMEOUT_SECONDS: Final[float] = 30.0
 
@@ -20,6 +20,7 @@ class WebSearchTool(BaseTool):
     name = "web_search"
     description = "Search the public web and return normalized result summaries."
     required = ("query",)
+    resource_profile = READ_ONLY_TOOL_PROFILE
 
     query: Annotated[str, ToolParam(description="Public web search query.", min_length=1)]
     count: Annotated[

@@ -12,6 +12,7 @@ from mcp.types import CallToolResult
 
 from aide.agent.tool_concurrency import next_tool_call_batch
 from aide.agent.tools.base import BaseTool
+from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.deferred import (
     RUN_BASELINE_TOOL_NAMES,
     _document_for_tool,
@@ -866,6 +867,43 @@ async def test_directory_tools_resource_facts_conflict_with_descendant_writes(
         ((profiles[name], read_facts), (profiles["write_file"], write_facts)),
         limit=10,
     ) == (0,)
+
+
+@pytest.mark.asyncio
+async def test_resource_facts_do_not_prepare_tool_before_gateway_execution(
+    workspace: Path,
+    agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = _gateway(workspace, agent_home)
+    tool = gateway._tools["write_file"]
+    prepare_arguments = tool.prepare_arguments_for_context
+    preparations = 0
+
+    async def counted_prepare_arguments(
+        arguments: dict[str, Any],
+        *,
+        context: ToolRunContext,
+    ) -> dict[str, Any]:
+        nonlocal preparations
+        preparations += 1
+        return await prepare_arguments(arguments, context=context)
+
+    monkeypatch.setattr(tool, "prepare_arguments_for_context", counted_prepare_arguments)
+    call = ModelToolCall(
+        id="call-write",
+        name="write_file",
+        arguments=json.dumps({"path": "once.txt", "content": "value"}),
+    )
+
+    facts = await gateway.resource_facts(call)
+
+    assert facts is not None
+    assert preparations == 0
+    result = await gateway.call(call)
+
+    assert result.status == "success"
+    assert preparations == 1
 
 
 @pytest.mark.asyncio

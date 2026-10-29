@@ -24,6 +24,7 @@ from aide.agent.tools.base import (
     ToolError,
 )
 from aide.agent.tools.context import ToolRunContext
+from aide.agent.tools.core._directory import DirectoryReadTool
 from aide.agent.tools.core.edit_file import EditFileTool
 from aide.agent.tools.core.exec import ExecTool
 from aide.agent.tools.core.exec_host import ExecHost
@@ -38,10 +39,12 @@ from aide.agent.tools.core.write_file import WriteFileTool
 from aide.agent.tools.file_mutation import FileMutationRecorder, is_protected_restore_target
 from aide.agent.tools.mcp import MCPTool
 from aide.agent.tools.permission import (
+    FileAccess,
     MCPToolIdentity,
     NetworkConfirmationDecision,
     PermissionContext,
     PermissionSnapshot,
+    ScheduleAction,
     ToolAuthorizationFailure,
     ToolAuthorizationSession,
     ToolInvocationFacts,
@@ -772,7 +775,7 @@ class ToolGateway:
         return result
 
     async def resource_facts(self, tool_call: ModelToolCall) -> ToolInvocationFacts | None:
-        """Prepare a call's detached resource facts for same-response scheduling."""
+        """Project resource access without running full invocation preparation."""
         if not isinstance(tool_call, ModelToolCall) or not isinstance(tool_call.arguments, str):
             return None
         try:
@@ -782,13 +785,30 @@ class ToolGateway:
             tool = self._tools.get(tool_call.name)
             if tool is None:
                 return None
-            if self._tool_context is None:
-                facts = await tool.prepare(cast(dict[str, Any], parsed))
+            file_accesses: tuple[FileAccess, ...] = ()
+            schedule_action = None
+            if isinstance(tool, ScheduleTool):
+                action = parsed.get("action")
+                if not isinstance(action, str) or action not in {"list", "add", "remove"}:
+                    return None
+                schedule_action = ScheduleAction(action=cast(Literal["list", "add", "remove"], action))
+            elif isinstance(tool, (ReadFileTool, WriteFileTool, EditFileTool, DirectoryReadTool)):
+                if not isinstance(parsed.get("path"), str):
+                    return None
+                if self._tool_context is None:
+                    file_accesses = tool.build_file_accesses(cast(dict[str, Any], parsed))
+                else:
+                    file_accesses = tool.build_file_accesses_for_context(
+                        cast(dict[str, Any], parsed), context=self._tool_context
+                    )
             else:
-                facts = await tool.prepare_for_context(
-                    cast(dict[str, Any], parsed), context=self._tool_context
-                )
-            return facts if isinstance(facts, ToolInvocationFacts) else None
+                return None
+            return ToolInvocationFacts(
+                tool_name=tool.name,
+                normalized_arguments={},
+                file_accesses=file_accesses,
+                schedule_action=schedule_action,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:

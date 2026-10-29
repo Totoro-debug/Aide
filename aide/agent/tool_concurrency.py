@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Sequence
-from pathlib import Path
 
 from aide.agent.tools.base import ToolResourceProfile
 from aide.agent.tools.permission import ToolInvocationFacts
@@ -68,98 +67,101 @@ def next_tool_call_batch(
     if not profiles:
         return ()
 
-    first = _scheduled_access(profiles[0])
+    accesses: list[ScheduledToolAccess | None] = []
+    for item in profiles[:limit]:
+        if isinstance(item, tuple):
+            if len(item) != 2:
+                accesses.append(None)
+                continue
+            profile, facts = item
+        else:
+            profile, facts = item, None
+        if (
+            profile is None
+            or profile.exclusive
+            or not (
+                (facts is not None and facts.schedule_action is not None)
+                or (profile.reads and not profile.writes)
+                or (facts is not None and bool(facts.file_accesses))
+            )
+        ):
+            accesses.append(None)
+        else:
+            accesses.append((profile, facts))
+
+    first = accesses[0]
     if first is None:
         return (0,)
 
     batch = [0]
-    for index, item in enumerate(profiles[1:limit], start=1):
-        candidate = _scheduled_access(item)
-        if candidate is None or any(
-            _accesses_conflict(candidate, existing)
-            for existing in (first, *(_scheduled_access(profiles[prior]) for prior in batch[1:]))
-            if existing is not None
-        ):
+    batch_accesses = [first]
+    for index, candidate in enumerate(accesses[1:], start=1):
+        if candidate is None:
+            break
+        candidate_profile, candidate_facts = candidate
+        if candidate_profile is None:
+            break
+
+        conflict = False
+        for prior_profile, prior_facts in batch_accesses:
+            if prior_profile is None:
+                conflict = True
+                break
+
+            prior_schedule = None if prior_facts is None else prior_facts.schedule_action
+            candidate_schedule = (
+                None if candidate_facts is None else candidate_facts.schedule_action
+            )
+            if prior_schedule is not None and candidate_schedule is not None:
+                conflict = prior_schedule.action != "list" or candidate_schedule.action != "list"
+            elif prior_schedule is not None or candidate_schedule is not None:
+                other_profile, other_facts = (
+                    (candidate_profile, candidate_facts)
+                    if prior_schedule is not None
+                    else (prior_profile, prior_facts)
+                )
+                conflict = not (
+                    (other_profile.reads and not other_profile.writes)
+                    or (other_facts is not None and bool(other_facts.file_accesses))
+                )
+            elif (
+                prior_profile.reads
+                and not prior_profile.writes
+                and candidate_profile.reads
+                and not candidate_profile.writes
+            ):
+                conflict = False
+            elif prior_facts is None or candidate_facts is None:
+                conflict = True
+            else:
+                prior_accesses = prior_facts.file_accesses
+                candidate_accesses = candidate_facts.file_accesses
+                conflict = not prior_accesses or not candidate_accesses
+                if not conflict:
+                    for left in prior_accesses:
+                        for right in candidate_accesses:
+                            if left.role != "read" or right.role != "read":
+                                left_path = os.path.normcase(os.path.normpath(str(left.path)))
+                                right_path = os.path.normcase(os.path.normpath(str(right.path)))
+                                try:
+                                    overlaps = os.path.commonpath((left_path, right_path)) in {
+                                        left_path,
+                                        right_path,
+                                    }
+                                except ValueError:
+                                    overlaps = False
+                                if overlaps:
+                                    conflict = True
+                                    break
+                        if conflict:
+                            break
+            if conflict:
+                break
+        if conflict:
             break
         batch.append(index)
+        batch_accesses.append(candidate)
     return tuple(batch)
-
-
-def _scheduled_access(
-    item: ToolResourceProfile | None | ScheduledToolAccess,
-) -> ScheduledToolAccess | None:
-    if isinstance(item, tuple):
-        if len(item) != 2:
-            return None
-        profile, facts = item
-    else:
-        profile, facts = item, None
-    if not _is_parallel_access(profile, facts):
-        return None
-    return profile, facts
-
-
-def _is_parallel_access(
-    profile: ToolResourceProfile | None,
-    facts: ToolInvocationFacts | None,
-) -> bool:
-    if profile is None or profile.exclusive:
-        return False
-    if facts is not None and facts.schedule_action is not None:
-        return True
-    if profile.reads and not profile.writes:
-        return True
-    return facts is not None and bool(facts.file_accesses)
-
-
-def _accesses_conflict(first: ScheduledToolAccess, second: ScheduledToolAccess) -> bool:
-    first_profile, first_facts = first
-    second_profile, second_facts = second
-    if first_profile is None or second_profile is None:
-        return True
-    if first_profile.exclusive or second_profile.exclusive:
-        return True
-
-    first_schedule = None if first_facts is None else first_facts.schedule_action
-    second_schedule = None if second_facts is None else second_facts.schedule_action
-    if first_schedule is not None and second_schedule is not None:
-        return first_schedule.action != "list" or second_schedule.action != "list"
-    if first_schedule is not None or second_schedule is not None:
-        schedule, other_profile, other_facts = (
-            (first_schedule, second_profile, second_facts)
-            if first_schedule is not None
-            else (second_schedule, first_profile, first_facts)
-        )
-        if schedule is not None and other_profile.reads and not other_profile.writes:
-            return False
-        if other_facts is not None and other_facts.file_accesses:
-            return False
-        return True
-
-    if first_profile.reads and not first_profile.writes and second_profile.reads and not second_profile.writes:
-        return False
-    if first_facts is None or second_facts is None:
-        return True
-    first_accesses = first_facts.file_accesses
-    second_accesses = second_facts.file_accesses
-    if not first_accesses or not second_accesses:
-        return True
-    for left in first_accesses:
-        for right in second_accesses:
-            if left.role == "read" and right.role == "read":
-                continue
-            if _paths_overlap(left.path, right.path):
-                return True
-    return False
-
-
-def _paths_overlap(first: Path, second: Path) -> bool:
-    first_path = os.path.normcase(os.path.normpath(str(first)))
-    second_path = os.path.normcase(os.path.normpath(str(second)))
-    try:
-        return os.path.commonpath((first_path, second_path)) in {first_path, second_path}
-    except ValueError:
-        return False
 
 
 __all__ = ["available_process_cpu_count", "max_tool_call_concurrency", "next_tool_call_batch"]

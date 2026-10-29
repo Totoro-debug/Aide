@@ -105,6 +105,8 @@ def _is_parallel_access(
 ) -> bool:
     if profile is None or profile.exclusive:
         return False
+    if facts is not None and facts.schedule_action is not None:
+        return True
     if profile.reads and not profile.writes:
         return True
     return facts is not None and bool(facts.file_accesses)
@@ -115,6 +117,25 @@ def _accesses_conflict(first: ScheduledToolAccess, second: ScheduledToolAccess) 
     second_profile, second_facts = second
     if first_profile is None or second_profile is None:
         return True
+    if first_profile.exclusive or second_profile.exclusive:
+        return True
+
+    first_schedule = None if first_facts is None else first_facts.schedule_action
+    second_schedule = None if second_facts is None else second_facts.schedule_action
+    if first_schedule is not None and second_schedule is not None:
+        return first_schedule.action != "list" or second_schedule.action != "list"
+    if first_schedule is not None or second_schedule is not None:
+        schedule, other_profile, other_facts = (
+            (first_schedule, second_profile, second_facts)
+            if first_schedule is not None
+            else (second_schedule, first_profile, first_facts)
+        )
+        if schedule is not None and other_profile.reads and not other_profile.writes:
+            return False
+        if other_facts is not None and other_facts.file_accesses:
+            return False
+        return True
+
     if first_profile.reads and not first_profile.writes and second_profile.reads and not second_profile.writes:
         return False
     if first_facts is None or second_facts is None:

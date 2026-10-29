@@ -1221,6 +1221,216 @@ async def test_runner_limits_read_only_batches_and_keeps_result_order(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_runner_overlaps_schedule_lists_and_serializes_schedule_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import aide.agent.runner as runner_module
+    from aide.agent.tools.core.schedule import ScheduleTool
+    from aide.agent.tools.permission import ScheduleAction, ToolInvocationFacts
+
+    monkeypatch.setattr(runner_module, "max_tool_call_concurrency", lambda: 2)
+    actions = ("list", "list", "add", "remove")
+    calls = tuple(
+        ModelToolCall(f"call-{index}", "schedule", f'{{"action":"{action}"}}')
+        for index, action in enumerate(actions)
+    )
+    provider = ScriptedFakeProvider(
+        streams=(
+            StreamScript(
+                events=(
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(content="Working", tool_calls=calls),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="tool_calls",
+                        )
+                    ),
+                )
+            ),
+            StreamScript(
+                events=(
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(content="Done"),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="stop",
+                        )
+                    ),
+                )
+            ),
+        )
+    )
+
+    class ScheduleCatalogTool:
+        name = "schedule"
+        resource_profile = ScheduleTool.resource_profile
+
+    class ScheduleGateway(_DirectGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.catalog = (ScheduleCatalogTool(),)
+            self.started_lists = asyncio.Event()
+            self.active = 0
+            self.max_active = 0
+            self.active_actions: list[str] = []
+            self.overlap_violations: list[tuple[str, ...]] = []
+
+        async def resource_facts(self, tool_call: ModelToolCall) -> ToolInvocationFacts:
+            return ToolInvocationFacts(
+                tool_name="schedule",
+                normalized_arguments={"action": actions[int(tool_call.id.removeprefix("call-"))]},
+                schedule_action=ScheduleAction(action=actions[int(tool_call.id.removeprefix("call-"))]),
+            )
+
+        async def call(
+            self,
+            tool_call: ModelToolCall,
+            *,
+            confirmation: object = None,
+        ) -> ToolResult:
+            del confirmation
+            action = actions[int(tool_call.id.removeprefix("call-"))]
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.active_actions.append(action)
+            if action == "list":
+                if any(active_action != "list" for active_action in self.active_actions):
+                    self.overlap_violations.append(tuple(self.active_actions))
+            elif len(self.active_actions) > 1:
+                self.overlap_violations.append(tuple(self.active_actions))
+            try:
+                if tool_call.id in {"call-0", "call-1"}:
+                    if self.active == 2:
+                        self.started_lists.set()
+                    await asyncio.wait_for(self.started_lists.wait(), timeout=1)
+                    if tool_call.id == "call-0":
+                        await asyncio.sleep(0.01)
+                else:
+                    await asyncio.sleep(0.005)
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    name=tool_call.name,
+                    status="success",
+                    content=tool_call.id,
+                )
+            finally:
+                self.active_actions.remove(action)
+                self.active -= 1
+
+    gateway = ScheduleGateway()
+    result = await _runner(ScriptedFakeRouter(provider)).run(
+        [{"role": "user", "content": "List and update schedules."}],
+        model="chat",
+        tool_gateway=gateway,
+        on_output=None,
+        confirmation=None,
+        externalize_result=None,
+        cancel_requested=None,
+        max_iterations=50,
+    )
+
+    assert result.finish_reason == "completed"
+    assert gateway.max_active == 2
+    assert gateway.overlap_violations == []
+    assert [message["tool_call_id"] for message in result.messages[1:5]] == [
+        call.id for call in calls
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runner_keeps_exec_exclusive_from_read_only_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import aide.agent.runner as runner_module
+    from aide.agent.tools.base import EXCLUSIVE_TOOL_PROFILE, READ_ONLY_TOOL_PROFILE
+
+    monkeypatch.setattr(runner_module, "max_tool_call_concurrency", lambda: 2)
+    calls = (
+        ModelToolCall("call-exec", "exec", "{}"),
+        ModelToolCall("call-reader", "reader", "{}"),
+    )
+    provider = ScriptedFakeProvider(
+        streams=(
+            StreamScript(
+                events=(
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(content="Working", tool_calls=calls),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="tool_calls",
+                        )
+                    ),
+                )
+            ),
+            StreamScript(
+                events=(
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(content="Done"),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="stop",
+                        )
+                    ),
+                )
+            ),
+        )
+    )
+
+    class CatalogTool:
+        def __init__(self, name: str, profile: object) -> None:
+            self.name = name
+            self.resource_profile = profile
+
+    class ExecGateway(_DirectGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.catalog = (
+                CatalogTool("exec", EXCLUSIVE_TOOL_PROFILE),
+                CatalogTool("reader", READ_ONLY_TOOL_PROFILE),
+            )
+            self.active = 0
+            self.max_active = 0
+
+        async def call(
+            self,
+            tool_call: ModelToolCall,
+            *,
+            confirmation: object = None,
+        ) -> ToolResult:
+            del confirmation
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                await asyncio.sleep(0.01)
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    name=tool_call.name,
+                    status="success",
+                    content="done",
+                )
+            finally:
+                self.active -= 1
+
+    gateway = ExecGateway()
+    result = await _runner(ScriptedFakeRouter(provider)).run(
+        [{"role": "user", "content": "Run both tools."}],
+        model="chat",
+        tool_gateway=gateway,
+        on_output=None,
+        confirmation=None,
+        externalize_result=None,
+        cancel_requested=None,
+        max_iterations=50,
+    )
+
+    assert result.finish_reason == "completed"
+    assert gateway.max_active == 1
+    assert [message["tool_call_id"] for message in result.messages[1:3]] == [
+        call.id for call in calls
+    ]
+
+
+@pytest.mark.asyncio
 async def test_runner_overlaps_disjoint_file_writes_using_gateway_resource_facts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

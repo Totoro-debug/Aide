@@ -13,7 +13,7 @@ from aide.agent.tools.core.read_file import ReadFileTool
 from aide.agent.tools.core.subagents import SpawnAgentTool
 from aide.agent.tools.core.tool_search import ToolSearchTool
 from aide.agent.tools.core.write_file import WriteFileTool
-from aide.agent.tools.permission import FileAccess, ToolInvocationFacts
+from aide.agent.tools.permission import FileAccess, ScheduleAction, ToolInvocationFacts
 
 
 def test_concurrency_limit_uses_process_available_cpu_count() -> None:
@@ -29,6 +29,49 @@ def test_only_explicit_read_only_tools_share_a_batch() -> None:
     assert next_tool_call_batch((readonly, readonly, writer, readonly), limit=10) == (0, 1)
     assert next_tool_call_batch((None, readonly), limit=10) == (0,)
     assert next_tool_call_batch((writer, readonly), limit=10) == (0,)
+
+
+def test_schedule_actions_share_one_resource_and_exec_is_exclusive() -> None:
+    schedule = ToolResourceProfile(reads=False, writes=True)
+    readonly = ToolResourceProfile(reads=True, writes=False)
+    exclusive = ToolResourceProfile(reads=False, writes=True, exclusive=True)
+
+    def schedule_call(action: str) -> tuple[ToolResourceProfile, ToolInvocationFacts]:
+        return schedule, ToolInvocationFacts(
+            tool_name="schedule",
+            normalized_arguments={"action": action},
+            schedule_action=ScheduleAction(action=action),  # type: ignore[arg-type]
+        )
+
+    assert next_tool_call_batch(
+        (schedule_call("list"), schedule_call("list")), limit=10
+    ) == (0, 1)
+    assert next_tool_call_batch(
+        (schedule_call("list"), schedule_call("add")), limit=10
+    ) == (0,)
+    assert next_tool_call_batch(
+        (schedule_call("add"), schedule_call("remove")), limit=10
+    ) == (0,)
+    unrelated_file_write = (
+        ToolResourceProfile(reads=False, writes=True),
+        ToolInvocationFacts(
+            tool_name="write_file",
+            normalized_arguments={},
+            file_accesses=(
+                FileAccess(
+                    path=Path("C:/workspace/notes.txt"),
+                    role="write",
+                    base=Path("C:/workspace"),
+                    workspace_root=Path("C:/workspace"),
+                ),
+            ),
+        ),
+    )
+    assert next_tool_call_batch(
+        (schedule_call("add"), unrelated_file_write), limit=10
+    ) == (0, 1)
+    assert next_tool_call_batch(((exclusive, None), (readonly, None)), limit=10) == (0,)
+    assert next_tool_call_batch(((readonly, None), (exclusive, None)), limit=10) == (0,)
 
 
 def test_read_only_batch_respects_concurrency_limit() -> None:

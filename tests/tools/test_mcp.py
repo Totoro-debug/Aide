@@ -427,6 +427,29 @@ def _remote(name: str) -> Tool:
     return Tool(name=name, input_schema={"type": "object"}, description=name)
 
 
+@pytest.mark.parametrize(
+    ("annotations", "expected"),
+    [
+        ({"readOnlyHint": True}, True),
+        ({"readOnlyHint": False}, False),
+        ({}, None),
+        ({"readOnlyHint": "true"}, "true"),
+    ],
+)
+def test_mcp_discovery_preserves_read_only_hint(annotations: object, expected: object) -> None:
+    remote = {
+        "name": "inspect",
+        "inputSchema": {"type": "object"},
+        "annotations": annotations,
+    }
+
+    spec = mcp_tool_spec_from_remote(remote, server_name="remote", model_name="mcp_remote_inspect")
+    tool = MCPTool(spec, _Session())
+
+    assert spec.read_only_hint is expected
+    assert tool.read_only_hint is expected
+
+
 @pytest.mark.asyncio
 async def test_discovery_collects_three_pages_and_sorts_remote_tools() -> None:
     session = _PageSession(

@@ -14,7 +14,7 @@ from loguru import logger
 from aide.agent.confirmation import ConfirmationAborted
 from aide.agent.run_errors import CommittableAgentRunError
 from aide.agent.tool_concurrency import max_tool_call_concurrency, next_tool_call_batch
-from aide.agent.tools.base import ToolResourceProfile
+from aide.agent.tools.base import READ_ONLY_TOOL_PROFILE, ToolResourceProfile
 from aide.agent.tools.file_mutation import FileMutationRecorder
 from aide.agent.tools.permission import ToolInvocationFacts
 from aide.agent.tools.tool_gateway import (
@@ -418,7 +418,11 @@ class AgentRunner:
 
                 assert tool_gateway is not None
                 tool_profiles = {
-                    tool.name: tool.resource_profile
+                    tool.name: (
+                        READ_ONLY_TOOL_PROFILE
+                        if getattr(tool, "read_only_hint", None) is True
+                        else tool.resource_profile
+                    )
                     for tool in getattr(tool_gateway, "catalog", ())
                 }
                 concurrency_limit = max_tool_call_concurrency()

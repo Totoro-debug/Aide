@@ -62,6 +62,7 @@ class MCPToolSpec:
     model_name: str
     description: str
     parameters: dict[str, Any]
+    read_only_hint: object = None
 
     def __post_init__(self) -> None:
         for value, field_name in (
@@ -99,6 +100,7 @@ class MCPTool(BaseTool):
         self.remote_name = spec.remote_name
         self.name = spec.model_name
         self.description = spec.description
+        self.read_only_hint = spec.read_only_hint
         object.__setattr__(self, "parameters", deepcopy(spec.parameters))
         self._session = session
         self._call_timeout = float(call_timeout)
@@ -260,12 +262,22 @@ def mcp_tool_spec_from_remote(
     if not isinstance(description, str):
         raise MCPToolSchemaError("MCP Tool description must be a string")
 
+    annotations = _field(remote_tool, "annotations")
+    read_only_hint = (
+        None
+        if annotations is _MISSING or annotations is None
+        else _field(annotations, "read_only_hint", "readOnlyHint")
+    )
+    if read_only_hint is _MISSING:
+        read_only_hint = None
+
     return MCPToolSpec(
         server_name=server_name,
         remote_name=remote_name,
         model_name=model_name,
         description=description,
         parameters=cast(dict[str, Any], normalized),
+        read_only_hint=read_only_hint,
     )
 
 

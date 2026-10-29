@@ -1221,6 +1221,131 @@ async def test_runner_limits_read_only_batches_and_keeps_result_order(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("read_only_hint", "other_reads", "other_writes", "expected_active"),
+    [
+        (True, True, False, 2),
+        (True, False, True, 1),
+        (False, True, False, 1),
+        (None, True, False, 1),
+        ("true", True, False, 1),
+    ],
+)
+async def test_runner_schedules_mcp_calls_only_for_strict_read_only_hint(
+    read_only_hint: object,
+    other_reads: bool,
+    other_writes: bool,
+    expected_active: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import aide.agent.runner as runner_module
+    from aide.agent.tools.base import ToolResourceProfile
+    from aide.agent.tools.mcp import MCPTool, MCPToolSpec
+    from aide.agent.tools.permission import ToolInvocationFacts
+
+    monkeypatch.setattr(runner_module, "max_tool_call_concurrency", lambda: 2)
+    calls = (
+        ModelToolCall("mcp-call", "mcp_remote_inspect", "{}"),
+        ModelToolCall("other-call", "other", "{}"),
+    )
+    mcp_tool = MCPTool(
+        MCPToolSpec(
+            server_name="remote",
+            remote_name="inspect",
+            model_name="mcp_remote_inspect",
+            description="Inspect remotely.",
+            parameters={"type": "object"},
+            read_only_hint=read_only_hint,
+        ),
+        object(),
+    )
+
+    class CatalogTool:
+        name = "other"
+        resource_profile = ToolResourceProfile(reads=other_reads, writes=other_writes)
+
+    class MCPBarrierGateway(_DirectGateway):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.catalog = (mcp_tool, CatalogTool())
+            self.active = 0
+            self.max_active = 0
+            self.overlap = asyncio.Event()
+
+        async def resource_facts(self, tool_call: ModelToolCall) -> ToolInvocationFacts:
+            if tool_call.name == mcp_tool.name:
+                return await mcp_tool.prepare({})
+            return ToolInvocationFacts(tool_name="other", normalized_arguments={})
+
+        async def call(
+            self,
+            tool_call: ModelToolCall,
+            *,
+            confirmation: object = None,
+        ) -> ToolResult:
+            del confirmation
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            if self.active == 2:
+                self.overlap.set()
+            try:
+                await asyncio.sleep(0.02)
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    name=tool_call.name,
+                    status="error" if tool_call.id == "mcp-call" else "success",
+                    content="remote failure" if tool_call.id == "mcp-call" else "local result",
+                )
+            finally:
+                self.active -= 1
+
+    provider = ScriptedFakeProvider(
+        streams=(
+            StreamScript(
+                events=(
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(content="Working", tool_calls=calls),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="tool_calls",
+                        )
+                    ),
+                )
+            ),
+            StreamScript(
+                events=(
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(content="Done"),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="stop",
+                        )
+                    ),
+                )
+            ),
+        )
+    )
+    gateway = MCPBarrierGateway()
+    result = await _runner(ScriptedFakeRouter(provider)).run(
+        [{"role": "user", "content": "Inspect and read."}],
+        model="chat",
+        tool_gateway=gateway,
+        on_output=None,
+        confirmation=None,
+        externalize_result=None,
+        cancel_requested=None,
+        max_iterations=50,
+    )
+
+    assert gateway.max_active == expected_active
+    assert gateway.overlap.is_set() is (expected_active == 2)
+    tool_messages = [message for message in result.messages if message["role"] == "tool"]
+    assert [message["tool_call_id"] for message in tool_messages] == ["mcp-call", "other-call"]
+    assert [message["status"] for message in tool_messages] == ["error", "success"]
+    assert tool_messages[0]["content"] == "remote failure"
+
+
+@pytest.mark.asyncio
 async def test_runner_overlaps_schedule_lists_and_serializes_schedule_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

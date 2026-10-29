@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 from mcp.types import CallToolResult
 
+from aide.agent.tool_concurrency import next_tool_call_batch
 from aide.agent.tools.base import BaseTool
 from aide.agent.tools.deferred import (
     RUN_BASELINE_TOOL_NAMES,
@@ -828,6 +829,43 @@ async def test_generation_tools_share_gateway_schema_and_trusted_execution_bound
     assert result.status == "success"
     assert result.content == "(no output)"
     assert observed == [{"nested": {"value": 1}, "extra": [None]}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    (
+        ("list_dir", {"path": "sub"}),
+        ("glob", {"path": "sub", "pattern": "*.txt"}),
+        ("grep", {"path": "sub", "pattern": "needle"}),
+    ),
+)
+async def test_directory_tools_resource_facts_conflict_with_descendant_writes(
+    workspace: Path,
+    agent_home: Path,
+    name: str,
+    arguments: dict[str, str],
+) -> None:
+    (workspace / "sub").mkdir()
+    gateway = _gateway(workspace, agent_home)
+    profiles = {tool.name: tool.resource_profile for tool in gateway.catalog}
+    read_facts = await gateway.resource_facts(
+        ModelToolCall(id="call-read", name=name, arguments=json.dumps(arguments))
+    )
+    write_facts = await gateway.resource_facts(
+        ModelToolCall(
+            id="call-write",
+            name="write_file",
+            arguments=json.dumps({"path": "sub/child.txt", "content": "value"}),
+        )
+    )
+
+    assert read_facts is not None
+    assert write_facts is not None
+    assert next_tool_call_batch(
+        ((profiles[name], read_facts), (profiles["write_file"], write_facts)),
+        limit=10,
+    ) == (0,)
 
 
 @pytest.mark.asyncio

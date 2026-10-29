@@ -771,6 +771,29 @@ class ToolGateway:
                 logger.warning("Execution Trace Tool result could not be captured")
         return result
 
+    async def resource_facts(self, tool_call: ModelToolCall) -> ToolInvocationFacts | None:
+        """Prepare a call's detached resource facts for same-response scheduling."""
+        if not isinstance(tool_call, ModelToolCall) or not isinstance(tool_call.arguments, str):
+            return None
+        try:
+            parsed = json.loads(tool_call.arguments)
+            if not isinstance(parsed, dict):
+                return None
+            tool = self._tools.get(tool_call.name)
+            if tool is None:
+                return None
+            if self._tool_context is None:
+                facts = await tool.prepare(cast(dict[str, Any], parsed))
+            else:
+                facts = await tool.prepare_for_context(
+                    cast(dict[str, Any], parsed), context=self._tool_context
+                )
+            return facts if isinstance(facts, ToolInvocationFacts) else None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+
     async def _call_untraced(
         self,
         tool_call: ModelToolCall,

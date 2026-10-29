@@ -14,7 +14,9 @@ from loguru import logger
 from aide.agent.confirmation import ConfirmationAborted
 from aide.agent.run_errors import CommittableAgentRunError
 from aide.agent.tool_concurrency import max_tool_call_concurrency, next_tool_call_batch
+from aide.agent.tools.base import ToolResourceProfile
 from aide.agent.tools.file_mutation import FileMutationRecorder
+from aide.agent.tools.permission import ToolInvocationFacts
 from aide.agent.tools.tool_gateway import (
     ConfirmationRequester,
     ModelToolCall,
@@ -423,14 +425,20 @@ class AgentRunner:
                 while pending_tool_calls:
                     if is_cancel_requested():
                         return finish_cancelled(final_content="")
-                    batch_size = len(
-                        next_tool_call_batch(
-                            tuple(
-                                tool_profiles.get(call.name)
-                                for call in pending_tool_calls
-                            ),
-                            limit=concurrency_limit,
+                    scheduled_calls: list[
+                        tuple[ToolResourceProfile | None, ToolInvocationFacts | None]
+                    ] = []
+                    resource_facts = getattr(tool_gateway, "resource_facts", None)
+                    for call in pending_tool_calls:
+                        profile = tool_profiles.get(call.name)
+                        facts = (
+                            await resource_facts(call)
+                            if callable(resource_facts)
+                            else None
                         )
+                        scheduled_calls.append((profile, facts))
+                    batch_size = len(
+                        next_tool_call_batch(tuple(scheduled_calls), limit=concurrency_limit)
                     )
                     batch_calls = pending_tool_calls[:batch_size]
                     states = [_ToolCallState() for _ in batch_calls]

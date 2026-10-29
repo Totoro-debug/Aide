@@ -5,6 +5,7 @@ import inspect
 from collections.abc import AsyncIterator, Callable, Sequence
 from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import uuid4
 
@@ -21,10 +22,12 @@ from aide.agent.runner import (
     AgentRunnerToolCallStarted,
 )
 from aide.agent.tools.base import ArtifactReference
+from aide.agent.tools.core.write_file import WriteFileTool
 from aide.agent.tools.tool_gateway import (
     ConfirmationDecision,
     ConfirmationRequest,
     ModelToolCall,
+    ToolGateway,
     ToolResult,
 )
 from aide.provider.errors import ModelCallError
@@ -1215,6 +1218,96 @@ async def test_runner_limits_read_only_batches_and_keeps_result_order(monkeypatc
         for event in observed
         if isinstance(event, AgentRunnerToolCallFinished)
     ] == ["call-1", "call-0", "call-2", "call-3", "call-4"]
+
+
+@pytest.mark.asyncio
+async def test_runner_overlaps_disjoint_file_writes_using_gateway_resource_facts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import aide.agent.runner as runner_module
+
+    monkeypatch.setattr(runner_module, "max_tool_call_concurrency", lambda: 2)
+    calls = (
+        ModelToolCall("call-a", "write_file", '{"path":"a.txt","content":"a"}'),
+        ModelToolCall("call-b", "write_file", '{"path":"b.txt","content":"b"}'),
+    )
+    provider = ScriptedFakeProvider(
+        streams=(
+            StreamScript(
+                events=(
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(content="Working", tool_calls=calls),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="tool_calls",
+                        )
+                    ),
+                )
+            ),
+            StreamScript(
+                events=(
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(content="Done"),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="stop",
+                        )
+                    ),
+                )
+            ),
+        )
+    )
+
+    gateway = ToolGateway(workspace=tmp_path)
+    original_execute = WriteFileTool.execute_authorized_for_context
+    active = 0
+    max_active = 0
+    overlapped = asyncio.Event()
+
+    async def execute_with_barrier(
+        tool: WriteFileTool,
+        arguments: dict[str, object],
+        authorization: object,
+        *,
+        context: object,
+        **kwargs: object,
+    ) -> str:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        if active >= 2:
+            overlapped.set()
+        try:
+            await asyncio.wait_for(overlapped.wait(), timeout=1)
+            return await original_execute(
+                tool,
+                arguments,
+                authorization,
+                context=context,  # type: ignore[arg-type]
+                **kwargs,
+            )
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(WriteFileTool, "execute_authorized_for_context", execute_with_barrier)
+    result = await _runner(ScriptedFakeRouter(provider)).run(
+        [{"role": "user", "content": "Write both."}],
+        model="chat",
+        tool_gateway=gateway,
+        on_output=None,
+        confirmation=None,
+        externalize_result=None,
+        cancel_requested=None,
+        max_iterations=50,
+    )
+
+    assert result.finish_reason == "completed"
+    assert max_active == 2
+    assert overlapped.is_set()
+    assert [message["tool_call_id"] for message in result.messages[1:3]] == ["call-a", "call-b"]
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "a"
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "b"
 
 
 @pytest.mark.asyncio

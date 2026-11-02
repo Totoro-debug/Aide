@@ -74,6 +74,11 @@ class WorkspaceState:
         return self.path / "subagents"
 
     @property
+    def foreground_work_directory(self) -> Path:
+        """Canonical Workspace-owned root for Session foreground coordination."""
+        return self.path / "foreground-work"
+
+    @property
     def schedule_sessions_directory(self) -> Path:
         """Dedicated, lazily-created storage for Schedule Sessions."""
         return self.path / "schedule-sessions"
@@ -127,6 +132,10 @@ class WorkspaceState:
     def prepare_subagents_directory(self) -> Path:
         """Lazily prepare and validate the owned SubAgent directory for writes."""
         return self._prepare_sessions_directory(self.subagents_directory)
+
+    def prepare_foreground_work_directory(self) -> Path:
+        """Lazily prepare Session-scoped foreground coordination storage."""
+        return self._prepare_sessions_directory(self.foreground_work_directory)
 
     def _prepare_sessions_directory(self, path: Path) -> Path:
         workspace_root = self._owned_workspace_root()

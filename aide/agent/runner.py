@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, Literal, Protocol
 from uuid import UUID
 
@@ -15,6 +15,7 @@ from aide.agent.confirmation import ConfirmationAborted
 from aide.agent.run_errors import CommittableAgentRunError
 from aide.agent.tool_concurrency import max_tool_call_concurrency, next_tool_call_batch
 from aide.agent.tools.base import READ_ONLY_TOOL_PROFILE, ToolResourceProfile
+from aide.agent.tools.context import AgentRunSuspension
 from aide.agent.tools.file_mutation import FileMutationRecorder
 from aide.agent.tools.permission import ToolInvocationFacts
 from aide.agent.tools.tool_gateway import (
@@ -40,7 +41,9 @@ from aide.utils.validation import empty_token_usage, token_usage_validation_issu
 
 type AgentRunnerRoute = Literal["chat", "schedule", "subagent"]
 type AgentRunnerSegment = Literal["reasoning", "response"]
-type AgentRunnerFinishReason = Literal["completed", "failed", "cancelled", "max_iterations"]
+type AgentRunnerFinishReason = Literal[
+    "completed", "failed", "cancelled", "max_iterations", "suspended"
+]
 type AgentRunnerOutput = (
     ReasoningDelta
     | TextDelta
@@ -138,6 +141,7 @@ class AgentRunnerResult:
     usage: dict[str, int] = field(default_factory=empty_token_usage)
     finish_reason: AgentRunnerFinishReason = "completed"
     error: ErrorInfo | None = None
+    suspension: AgentRunSuspension | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.final_content, str):
@@ -150,8 +154,17 @@ class AgentRunnerResult:
         if usage_issue == "total":
             raise ValueError("usage total_tokens must equal input_tokens + output_tokens")
 
-        if self.finish_reason not in {"completed", "failed", "cancelled", "max_iterations"}:
+        if self.finish_reason not in {
+            "completed", "failed", "cancelled", "max_iterations", "suspended"
+        }:
             raise ValueError("finish_reason is invalid")
+        if self.suspension is not None and not isinstance(self.suspension, AgentRunSuspension):
+            raise TypeError("suspension must be an AgentRunSuspension")
+        if self.finish_reason == "suspended":
+            if self.error is not None or self.suspension is None:
+                raise ValueError("suspended Agent Runner results require only a suspension")
+        elif self.suspension is not None:
+            raise ValueError("only suspended Agent Runner results may contain a suspension")
         if self.finish_reason == "completed" and self.error is not None:
             raise ValueError("completed Agent Runner results cannot contain an error")
         if self.finish_reason == "failed" and not isinstance(self.error, ErrorInfo):
@@ -429,11 +442,21 @@ class AgentRunner:
                 while pending_tool_calls:
                     if is_cancel_requested():
                         return finish_cancelled(final_content="")
+                    question_index = next(
+                        (index for index, call in enumerate(pending_tool_calls)
+                         if call.name == "ask_user"),
+                        None,
+                    )
+                    schedulable_count = (
+                        len(pending_tool_calls)
+                        if question_index is None
+                        else max(1, question_index)
+                    )
                     scheduled_calls: list[
                         tuple[ToolResourceProfile | None, ToolInvocationFacts | None]
                     ] = []
                     resource_facts = getattr(tool_gateway, "resource_facts", None)
-                    for call in pending_tool_calls:
+                    for call in pending_tool_calls[:schedulable_count]:
                         profile = tool_profiles.get(call.name)
                         facts = (
                             await resource_facts(call)
@@ -442,7 +465,10 @@ class AgentRunner:
                         )
                         scheduled_calls.append((profile, facts))
                     batch_size = len(
-                        next_tool_call_batch(tuple(scheduled_calls), limit=concurrency_limit)
+                        next_tool_call_batch(
+                            tuple(scheduled_calls),
+                            limit=concurrency_limit,
+                        )
                     )
                     batch_calls = pending_tool_calls[:batch_size]
                     states = [_ToolCallState() for _ in batch_calls]
@@ -470,9 +496,9 @@ class AgentRunner:
                                 file_mutation_recorder=file_mutation_recorder,
                                 run_token=run_token,
                             )
-                        except (asyncio.CancelledError, ConfirmationAborted) as failure:
+                        except (asyncio.CancelledError, ConfirmationAborted) as interrupted:
                             if state.result is None:
-                                state.trace.finish_cancelled(failure)
+                                state.trace.finish_cancelled(interrupted)
                             raise
                         except Exception:
                             result = ToolResult(
@@ -541,6 +567,109 @@ class AgentRunner:
                             _tool_run_message(result),
                         )
                     del pending_tool_calls[:batch_size]
+                    suspensions = [
+                        result.suspension
+                        for result in completed_results
+                        if result.suspension is not None
+                    ]
+                    if suspensions:
+                        if len(suspensions) != 1 or batch_size != 1:
+                            raise RuntimeError("Agent Run received conflicting suspension requests")
+                        for tool_call in pending_tool_calls:
+                            await emit(
+                                AgentRunnerToolCallStarted(
+                                    tool_call_id=tool_call.id,
+                                    tool_name=tool_call.name,
+                                    arguments=tool_call.arguments,
+                                )
+                            )
+                            deferred = ToolResult(
+                                tool_call_id=tool_call.id,
+                                name=tool_call.name,
+                                status="error",
+                                content=(
+                                    "Tool call not executed because this Agent Run suspended "
+                                    "to wait for a Human Answer."
+                                ),
+                            )
+                            _append_run_message(
+                                runtime_messages,
+                                increment,
+                                _tool_run_message(deferred),
+                            )
+                            await emit(
+                                AgentRunnerToolCallFinished(
+                                    tool_call_id=tool_call.id,
+                                    tool_name=tool_call.name,
+                                    status="error",
+                                    result=deferred.content,
+                                )
+                            )
+                        pending_tool_calls.clear()
+                        await checkpoint()
+                        await close_segment()
+                        return AgentRunnerResult(
+                            messages=increment,
+                            final_content="",
+                            usage=usage,
+                            finish_reason="suspended",
+                            suspension=suspensions[0],
+                        )
+                    question_failure = next(
+                        (
+                            result
+                            for call, result in zip(
+                                batch_calls, completed_results, strict=True
+                            )
+                            if call.name == "ask_user" and result.status != "success"
+                        ),
+                        None,
+                    )
+                    if question_failure is not None:
+                        for tool_call in pending_tool_calls:
+                            await emit(
+                                AgentRunnerToolCallStarted(
+                                    tool_call_id=tool_call.id,
+                                    tool_name=tool_call.name,
+                                    arguments=tool_call.arguments,
+                                )
+                            )
+                            deferred = ToolResult(
+                                tool_call_id=tool_call.id,
+                                name=tool_call.name,
+                                status="error",
+                                content=(
+                                    "Tool call not executed because the foreground question "
+                                    "could not be saved."
+                                ),
+                            )
+                            _append_run_message(
+                                runtime_messages,
+                                increment,
+                                _tool_run_message(deferred),
+                            )
+                            await emit(
+                                AgentRunnerToolCallFinished(
+                                    tool_call_id=tool_call.id,
+                                    tool_name=tool_call.name,
+                                    status="error",
+                                    result=deferred.content,
+                                )
+                            )
+                        pending_tool_calls.clear()
+                        await checkpoint()
+                        await close_segment()
+                        question_error = ErrorInfo(
+                            "persistence_error",
+                            "The foreground question could not be saved.",
+                        )
+                        return AgentRunnerResult(
+                            messages=increment,
+                            final_content="",
+                            usage=usage,
+                            finish_reason="failed",
+                            error=question_error,
+                        )
                     if stop_on_tool_error and any(
                         result.status != "success" for result in completed_results
                     ):
@@ -807,7 +936,11 @@ def _build_assistant_repair_message(
 
 
 def _tool_run_message(result: ToolResult) -> dict[str, Any]:
-    return {"role": "tool", **result.to_dict()}
+    message = {"role": "tool", **result.to_dict()}
+    if result.suspension is not None:
+        message["foreground_question_id"] = result.suspension.question_id
+        message["foreground_execution_id"] = result.suspension.execution_id
+    return message
 
 
 def _identity_tool_result(result: ToolResult) -> ToolResult:
@@ -823,6 +956,8 @@ def _externalize_tool_result(
 ) -> ToolResult:
     try:
         final_result = externalize_result(result)
+        if result.suspension is not None and final_result.suspension is None:
+            final_result = replace(final_result, suspension=result.suspension)
     except Exception as failure:
         if on_artifact_failure is not None:
             on_artifact_failure(failure, result.name)

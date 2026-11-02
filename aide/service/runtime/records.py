@@ -51,7 +51,9 @@ class ClientState:
     sequence: int = 0
     events: deque[dict[str, object]] = field(default_factory=lambda: deque(maxlen=256))
     results: dict[str, dict[str, object]] = field(default_factory=dict)
+    result_fingerprints: dict[str, str] = field(default_factory=dict)
     inflight: dict[str, asyncio.Task[dict[str, object]]] = field(default_factory=dict)
+    inflight_fingerprints: dict[str, str] = field(default_factory=dict)
     rename_results: dict[str, tuple[tuple[object, ...], dict[str, object]]] = field(
         default_factory=dict
     )

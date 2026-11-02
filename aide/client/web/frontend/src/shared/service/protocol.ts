@@ -137,6 +137,7 @@ export type ClientCommandType =
   | "claim"
   | "release"
   | "input"
+  | "answer_question"
   | "session_model_configure"
   | "cancel"
   | "recall_queued_inputs"
@@ -561,6 +562,17 @@ export interface SessionSnapshot {
   live_state: SessionLiveState | null;
   model_configuration: SessionModelConfiguration | null;
   model_configuration_version: number;
+  foreground_questions?: ForegroundQuestionSnapshot[];
+}
+
+export interface ForegroundQuestionSnapshot {
+  question_id: string;
+  task_id: string;
+  generation: number;
+  text: string;
+  state: "pending" | "answer_received" | "interrupted";
+  answer: string | null;
+  revision: number;
 }
 
 export interface DirectoryPickerResult {

@@ -287,7 +287,20 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
     )
     streaming_request = "streaming markdown" in user_prompt.lower()
     wait_command = "Get-Content -LiteralPath .\\fixture.txt -Wait"
-    if process_request or cancel_gap_request:
+    if "foreground question acceptance" in normalized_requested_prompt and "ask_user" in tool_names:
+        chunks.append(_chunk(request_id=request_id, model=model, delta={"tool_calls": [{
+            "index": 0, "id": "foreground-question", "type": "function", "function": {
+                "name": "ask_user", "arguments": json.dumps({"question": "Which output directory?"}),
+            },
+        }, {
+            "index": 1, "id": "after-question", "type": "function", "function": {
+                "name": "write_file", "arguments": json.dumps({
+                    "path": "after-question.txt", "content": "must not execute",
+                }),
+            },
+        }]}))
+        chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="tool_calls"))
+    elif process_request or cancel_gap_request:
         if "call-process-first" not in current_tool_result_ids:
             process_text, process_call = "Before first tool.\n\n", "call-process-first"
         elif process_request and "call-process-second" not in current_tool_result_ids:

@@ -109,14 +109,15 @@ export function reduceLiveRunEvent(runs: LiveRun[], event: ServiceEvent): LiveRu
         : next.tools.map((item) => item.toolCallId === toolId
           ? { ...item, status, result: result ?? item.result } : item);
     } else if (value.type === "system_control" && metadata._streamed === true) {
-      next.status = metadata.finish_reason === "cancelled" ? "canceled" : "failed";
+      next.status = metadata.finish_reason === "cancelled" ? "canceled"
+        : metadata.finish_reason === "suspended" ? "completed" : "failed";
       next.error = content || null;
     }
   } else if (["run.completed", "run.failed", "run.cancelled"].includes(event.type)) {
     const finish = event.payload.finish_reason ?? (event.type === "run.cancelled" ? "cancelled"
       : event.type === "run.failed" ? "failed" : "completed");
     next.status = current.status === "canceled" || finish === "cancelled" ? "canceled"
-      : finish === "completed" ? "completed" : "failed";
+      : finish === "completed" || finish === "suspended" ? "completed" : "failed";
     next.cancellable = false;
   } else {
     return runs;

@@ -24,6 +24,7 @@ import {
   ApiError,
   ServiceCommandError,
   acknowledgeRestore,
+  answerForegroundQuestion,
   cancelConversationRun,
   cancelRestore,
   claimProjectSessionDeletion,
@@ -615,6 +616,12 @@ function ProjectSessionsContent({
   }, []);
   const [composerError, setComposerError] = useState<string | null>(null);
   const [composerNotice, setComposerNotice] = useState<string | null>(null);
+  const [questionAnswer, setQuestionAnswer] = useState("");
+  const [questionSubmitting, setQuestionSubmitting] = useState(false);
+  const activeForegroundQuestion = snapshot?.foreground_questions?.[0];
+  useEffect(() => {
+    setQuestionAnswer(activeForegroundQuestion?.answer ?? "");
+  }, [activeForegroundQuestion?.question_id, activeForegroundQuestion?.answer]);
   const claimRef = useRef<SessionClaim | null>(null);
   const snapshotRef = useRef<SessionSnapshot | null>(null);
   const sessionModelSavingRef = useRef(false);
@@ -1772,6 +1779,28 @@ function ProjectSessionsContent({
     await sendPendingSubmission(pending);
   }
 
+  async function submitQuestionAnswer(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const currentClaim = claimRef.current;
+    const question = snapshotRef.current?.foreground_questions?.[0];
+    const answer = questionAnswer.trim();
+    if (currentClaim === null || question === undefined || !answer || questionSubmitting
+      || connectionState !== "online") return;
+    setQuestionSubmitting(true);
+    setComposerError(null);
+    try {
+      await answerForegroundQuestion(sendServiceCommand, currentClaim, question, answer);
+      setQuestionAnswer("");
+    } catch (error) {
+      const message = error instanceof ServiceCommandError && error.body !== null
+        ? error.body.message
+        : null;
+      setComposerError(message ?? "conversation.questionAnswerFailed");
+    } finally {
+      setQuestionSubmitting(false);
+    }
+  }
+
   async function recallQueuedConversationInputs() {
     const currentClaim = claimRef.current;
     if (currentClaim === null || connectionState !== "online") return;
@@ -2396,6 +2425,37 @@ function ProjectSessionsContent({
                       </div>
                     )}
                   </div>
+                  {snapshot.foreground_questions?.[0] ? (
+                    <section className={styles.foregroundQuestion} aria-live="polite">
+                      <div className={styles.foregroundQuestionText}>
+                        <span>{t(snapshot.foreground_questions[0].state === "interrupted"
+                          ? "conversation.questionInterrupted" : "conversation.foregroundQuestion")}</span>
+                        <p>{snapshot.foreground_questions[0].text}</p>
+                      </div>
+                      <form className={styles.foregroundQuestionForm} onSubmit={(event) => void submitQuestionAnswer(event)}>
+                        <textarea
+                          aria-label={t("conversation.questionAnswerLabel")}
+                          value={questionAnswer}
+                          onChange={(event) => setQuestionAnswer(event.currentTarget.value)}
+                          rows={2}
+                          maxLength={10000}
+                          disabled={questionSubmitting || connectionState !== "online"
+                            || snapshot.foreground_questions[0].state !== "pending"}
+                        />
+                        <button
+                          type="submit"
+                          disabled={snapshot.foreground_questions[0].state === "interrupted"
+                            || !questionAnswer.trim() && !snapshot.foreground_questions[0].answer
+                            || questionSubmitting || connectionState !== "online"}
+                        >
+                          <Send size={14} aria-hidden="true" />
+                          {snapshot.foreground_questions[0].state === "answer_received"
+                            ? t("conversation.questionContinue")
+                            : t("conversation.questionSend")}
+                        </button>
+                      </form>
+                    </section>
+                  ) : null}
                   <form className={styles.composer} onSubmit={(event) => void submitInput(event)}>
                   <div className={styles.composerBox}>
                   <label className={styles.srOnly} htmlFor="conversation-input">{t("conversation.inputLabel")}</label>

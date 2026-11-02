@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,6 +14,33 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentRunSuspension:
+    """Typed control result that ends an Agent Run at a safe boundary."""
+
+    kind: str
+    task_id: str
+    generation: int
+    execution_id: str
+    question_id: str
+    tool_call_id: str
+
+    def __post_init__(self) -> None:
+        if self.kind != "human_question":
+            raise ValueError("Agent Run suspension kind is invalid")
+        if any(
+            not isinstance(value, str) or not value
+            for value in (self.task_id, self.execution_id, self.question_id, self.tool_call_id)
+        ):
+            raise ValueError("Agent Run suspension identities must be non-empty strings")
+        if (
+            isinstance(self.generation, bool)
+            or not isinstance(self.generation, int)
+            or self.generation < 1
+        ):
+            raise ValueError("Agent Run suspension generation must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class ToolRunContext:
     """Workspace and runtime targets used by one Tool invocation path."""
 
@@ -20,6 +48,11 @@ class ToolRunContext:
     schedule_service: ScheduleService | None = None
     exec_host: ExecHost | None = None
     subagent: SubAgentToolContext | None = None
+    foreground_question_handler: Callable[[str, str], str] | None = None
+    task_id: str | None = None
+    generation: int | None = None
+    execution_id: str | None = None
+    tool_call_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.workspace, Path):
@@ -29,6 +62,17 @@ class ToolRunContext:
             for name in ("coordinator", "parent_run_id", "source", "creator_snapshot")
         ):
             raise TypeError("Tool Run Context SubAgent facts are invalid")
+        foreground_identity = (self.task_id, self.generation, self.execution_id)
+        if self.foreground_question_handler is not None and any(
+            value is None for value in foreground_identity
+        ):
+            raise TypeError("Foreground question handling requires Task and execution identity")
+        if self.generation is not None and (
+            isinstance(self.generation, bool)
+            or not isinstance(self.generation, int)
+            or self.generation < 1
+        ):
+            raise ValueError("Tool Run Context generation must be positive")
 
 
-__all__ = ["ToolRunContext"]
+__all__ = ["AgentRunSuspension", "ToolRunContext"]

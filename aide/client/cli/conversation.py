@@ -376,6 +376,13 @@ class TerminalConversationApp(App[None]):
         color: $text-muted;
     }
 
+    #foreground-question {
+        display: none;
+        height: auto;
+        width: 100%;
+        padding: 0 1;
+    }
+
     #status-bar {
         height: 1;
         width: 100%;
@@ -448,6 +455,7 @@ class TerminalConversationApp(App[None]):
         self._confirmation_result: asyncio.Future[ConfirmationDecision | None] | None = None
         self._session_switch_result: asyncio.Future[bool | None] | None = None
         self._pending_inputs: deque[str] = deque()
+        self._foreground_question: dict[str, object] | None = None
         self._bus_snapshot: tuple[InboundMessage, ...] = ()
         self._consumed_runs: deque[_ConsumedRun] = deque()
         self._run_ready = Event()
@@ -1142,14 +1150,35 @@ class TerminalConversationApp(App[None]):
             return
 
         submit_user_input = getattr(self._management_dispatcher, "submit_user_input", None)
+        answer_question = getattr(self._management_dispatcher, "answer_question", None)
+        answer_text = _cli_question_answer(text)
         self._draining_inputs = True
         self._submitting_input = True
         try:
-            result = (
-                await submit_user_input(text)
-                if callable(submit_user_input)
-                else await self._management_dispatcher.dispatch(text)
-            )
+            if answer_text is not None:
+                if not answer_text:
+                    await self._mount_management_rows("input", "Enter /answer followed by your response.")
+                    return
+                question = self._foreground_question
+                if (
+                    question is None
+                    or not callable(answer_question)
+                    or not isinstance(question.get("question_id"), str)
+                    or not isinstance(question.get("revision"), int)
+                ):
+                    await self._mount_management_rows(
+                        "input", "No foreground question is available to answer."
+                    )
+                    return
+                result = await answer_question(
+                    question["question_id"], answer_text, question["revision"]
+                )
+            else:
+                result = (
+                    await submit_user_input(text)
+                    if callable(submit_user_input)
+                    else await self._management_dispatcher.dispatch(text)
+                )
         except Exception as error:
             if not self._service_run_projection:
                 raise
@@ -1413,6 +1442,42 @@ class TerminalConversationApp(App[None]):
         messages = snapshot.get("messages")
         if not isinstance(messages, list):
             return True
+        questions = snapshot.get("foreground_questions")
+        self._foreground_question = next(
+            (
+                item for item in questions
+                if isinstance(item, dict)
+                and item.get("state") in {"pending", "answer_received", "interrupted"}
+                and isinstance(item.get("question_id"), str)
+                and isinstance(item.get("revision"), int)
+                and isinstance(item.get("text"), str)
+            ),
+            None,
+        ) if isinstance(questions, list) else None
+        question_widget = next(
+            (widget for widget in self.query(Static) if widget.id == "foreground-question"), None
+        )
+        if question_widget is None and self._foreground_question is not None:
+            question_widget = Static("", id="foreground-question", markup=False)
+            await self.query_one("#conversation-input-region", Vertical).mount(
+                question_widget, before=self.query_one("#reasoning-effort-selector")
+            )
+        if question_widget is not None:
+            question_widget.display = self._foreground_question is not None
+            if self._foreground_question is None:
+                question_widget.update("")
+            else:
+                saved = self._foreground_question.get("state") == "answer_received"
+                question_status = "Answer saved" if saved else "Aide is waiting for an answer"
+                if self._foreground_question.get("state") == "interrupted":
+                    question_widget.update(
+                        "Work interrupted while saving. Check its effects before sending a new instruction."
+                    )
+                else:
+                    question_widget.update(
+                        f"{question_status}: {self._foreground_question['text']}\n"
+                        "Type /answer followed by your response to continue."
+                    )
         projection = ForegroundConversationProjection(
             session_id, tuple(message for message in messages if isinstance(message, dict)),
         )
@@ -2389,6 +2454,17 @@ class TerminalConversationApp(App[None]):
 
 
 
+
+
+def _cli_question_answer(text: str) -> str | None:
+    stripped = text.strip()
+    command, separator, value = stripped.partition(" ")
+    if command.casefold() != "/answer":
+        command, separator, value = stripped.partition("\n")
+        if command.casefold() != "/answer":
+            return None
+    answer = value.strip() if separator else ""
+    return answer
 
 
 def _stream_is_tty(stream: object) -> bool:

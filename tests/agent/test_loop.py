@@ -30,6 +30,7 @@ from aide.agent.session.backup_store import FileBackupStore
 from aide.agent.session.execution_state import SessionRunState
 from aide.agent.session.session import Session
 from aide.agent.tools.base import BaseTool
+from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.core.exec_host import create_exec_host, resolve_exec_shell
 from aide.agent.tools.deferred import RUN_BASELINE_TOOL_NAMES
 from aide.agent.tools.tool_gateway import ConfirmationRequest, ModelToolCall, ToolGateway
@@ -368,6 +369,7 @@ def test_agent_loop_constructor_is_the_generation_composition_boundary() -> None
         "session_run_state",
         "subagent_model_router",
         "trace_recorder",
+        "foreground_work_store",
     )
 
 
@@ -1131,6 +1133,8 @@ async def test_foreground_context_and_runner_share_exactly_one_run_gateway(
         excluded_names: Sequence[str] = (),
         permission_snapshot: PermissionSnapshot | None = None,
         permission_context: object = None,
+        tool_context: ToolRunContext | None = None,
+        run_tools: Sequence[BaseTool] = (),
     ) -> ToolGateway:
         assert permission_snapshot is not None
         assert permission_context is None
@@ -1138,6 +1142,8 @@ async def test_foreground_context_and_runner_share_exactly_one_run_gateway(
         gateway = original_new_run_gateway(
             excluded_names=excluded_names,
             permission_snapshot=permission_snapshot,
+            tool_context=tool_context,
+            run_tools=run_tools,
         )
         created_gateways.append(gateway)
         return gateway
@@ -1250,6 +1256,8 @@ async def test_foreground_captures_once_before_title_and_framing_and_switches_ne
         excluded_names: Sequence[str] = (),
         permission_snapshot: PermissionSnapshot | None = None,
         permission_context: object = None,
+        tool_context: ToolRunContext | None = None,
+        run_tools: Sequence[BaseTool] = (),
     ) -> ToolGateway:
         assert permission_snapshot is not None
         assert permission_context is None
@@ -1257,6 +1265,8 @@ async def test_foreground_captures_once_before_title_and_framing_and_switches_ne
         return original_new_run_gateway(
             excluded_names=excluded_names,
             permission_snapshot=permission_snapshot,
+            tool_context=tool_context,
+            run_tools=run_tools,
         )
 
     monkeypatch.setattr(RuntimePermissionControl, "snapshot", snapshot)

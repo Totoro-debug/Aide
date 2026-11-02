@@ -310,6 +310,26 @@ class RemoteManagementCommandDispatcher:
             submitted_run_id=run_id,
         )
 
+    async def answer_question(
+        self, question_id: str, answer: str, expected_revision: int
+    ) -> Any:
+        from aide.management.commands import ManagementCommandResult
+
+        result = await self.client.answer_question(
+            question_id,
+            answer,
+            expected_revision,
+            request_id=str(uuid4()),
+        )
+        if result.get("kind") != "conversation_input" or not isinstance(result.get("run_id"), str):
+            raise ServiceStartupError("service_protocol_error", "Question answer result is invalid.")
+        return ManagementCommandResult(
+            handled=False,
+            output=None,
+            submitted=True,
+            submitted_run_id=cast(str, result["run_id"]),
+        )
+
     async def recall_queued_inputs(self) -> list[dict[str, str]]:
         result = await self.client.recall_queued_inputs()
         items = result.get("recalled_inputs")
@@ -1029,6 +1049,27 @@ class ServiceClient:
             session_id=self.session_id,
             claim_version=self.claim_version,
             payload={"text": text},
+            request_id=request_id,
+        )
+
+    async def answer_question(
+        self,
+        question_id: str,
+        answer: str,
+        expected_revision: int,
+        *,
+        request_id: str | None = None,
+    ) -> dict[str, object]:
+        return await self._command(
+            "answer_question",
+            workspace_id=self.workspace_id,
+            session_id=self.session_id,
+            claim_version=self.claim_version,
+            payload={
+                "question_id": question_id,
+                "answer": answer,
+                "expected_revision": expected_revision,
+            },
             request_id=request_id,
         )
 

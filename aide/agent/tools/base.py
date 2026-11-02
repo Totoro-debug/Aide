@@ -26,7 +26,7 @@ from uuid import uuid4
 
 from loguru import logger
 
-from aide.agent.tools.context import ToolRunContext
+from aide.agent.tools.context import AgentRunSuspension, ToolRunContext
 from aide.agent.tools.permission import (
     FileAccess,
     FileAccessRole,
@@ -253,6 +253,10 @@ class BaseTool(ABC, metaclass=_BaseToolMeta):
             else:
                 cast(Any, cls).parameters = schema.to_json_schema()
         update_abstractmethods(cls)
+
+    def agent_run_suspension(self) -> AgentRunSuspension | None:
+        """Return a run-local typed suspension requested by this Tool, if any."""
+        return None
 
     async def execute(self, *args: Any, **kwargs: Any) -> str:
         """Execute one already prepared Tool invocation and return text."""

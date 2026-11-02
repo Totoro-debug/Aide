@@ -37,6 +37,7 @@ def build_agent_run_gateway(
     permission_snapshot: PermissionSnapshot | None = None,
     permission_context: PermissionContext | None = None,
     tool_context: ToolRunContext | None = None,
+    run_tools: Sequence[BaseTool] = (),
 ) -> ToolGateway:
     """Build one isolated deferred-exposure Gateway view.
 
@@ -55,13 +56,18 @@ def build_agent_run_gateway(
         raise TypeError("Agent Run allowed Tool names must be a collection of non-empty strings")
 
     allowed = None if allowed_names is None else frozenset(allowed_names)
+    injected_names = tuple(tool.name for tool in run_tools)
     base_catalog_names = frozenset(tool.name for tool in gateway.catalog)
     search_allowed = allowed is None or "tool_search" in allowed
     baseline_names = tuple(
         name
-        for name in RUN_BASELINE_TOOL_NAMES
+        for name in (*RUN_BASELINE_TOOL_NAMES, *injected_names)
         if (allowed is None or name in allowed)
-        and (name in base_catalog_names or (name == "tool_search" and search_allowed))
+        and (
+            name in base_catalog_names
+            or name in injected_names
+            or (name == "tool_search" and search_allowed)
+        )
     )
 
     run_gateway: ToolGateway | None = None
@@ -78,12 +84,15 @@ def build_agent_run_gateway(
         excluded_names=excluded_names,
         allowed_names=allowed_names,
         exposed_names=baseline_names,
-        run_tools=(ToolSearchTool(search_and_activate),) if search_allowed else (),
+        run_tools=(
+            *run_tools,
+            *((ToolSearchTool(search_and_activate),) if search_allowed else ()),
+        ),
         permission_snapshot=permission_snapshot,
         permission_context=permission_context,
         tool_context=tool_context,
     )
-    baseline_set = frozenset(RUN_BASELINE_TOOL_NAMES)
+    baseline_set = frozenset((*RUN_BASELINE_TOOL_NAMES, *injected_names))
     documents = tuple(
         _document_for_tool(
             tool,

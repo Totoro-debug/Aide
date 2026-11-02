@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Collection, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
@@ -23,7 +23,7 @@ from aide.agent.tools.base import (
     BaseTool,
     ToolError,
 )
-from aide.agent.tools.context import ToolRunContext
+from aide.agent.tools.context import AgentRunSuspension, ToolRunContext
 from aide.agent.tools.core._directory import DirectoryReadTool
 from aide.agent.tools.core.edit_file import EditFileTool
 from aide.agent.tools.core.exec import ExecTool
@@ -202,6 +202,7 @@ class ToolResult:
     content: str
     artifact: ArtifactReference | None = None
     confirmation: ToolConfirmationMetadata | None = None
+    suspension: AgentRunSuspension | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
@@ -214,6 +215,10 @@ class ToolResult:
             raise TypeError("Tool result artifact must be an ArtifactReference")
         if self.status != "success" and self.artifact is not None:
             raise ValueError("only successful Tool results may contain an artifact")
+        if self.suspension is not None and not isinstance(self.suspension, AgentRunSuspension):
+            raise TypeError("Tool suspension must be an AgentRunSuspension")
+        if self.suspension is not None and self.status != "success":
+            raise ValueError("only successful Tool results may request Agent Run suspension")
 
     def to_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -1061,10 +1066,11 @@ class ToolGateway:
                         if self._permission_context.origin == "foreground"
                         else None
                     )
+                    call_context = replace(tool_context, tool_call_id=tool_call.id)
                     content = await tool.execute_authorized_for_context(
                         deepcopy(prepared_arguments),
                         authorization,
-                        context=tool_context,
+                        context=call_context,
                         mutation_recorder=contextual_recorder,
                         run_token=run_token,
                         mutation_target=mutation_target,
@@ -1106,7 +1112,13 @@ class ToolGateway:
                 _generic_tool_failure(tool.name),
                 confirmation=confirmation_state[0],
             )
-        return _result(tool_call, "success", content, confirmation=confirmation_state[0])
+        return _result(
+            tool_call,
+            "success",
+            content,
+            confirmation=confirmation_state[0],
+            suspension=tool.agent_run_suspension(),
+        )
 
     def _record_unexpected_failure(self, tool: BaseTool, error: Exception) -> None:
         if self._failure_observer is None:
@@ -1179,6 +1191,7 @@ def _result(
     status: ToolResultStatus,
     content: str,
     confirmation: ToolConfirmationMetadata | None = None,
+    suspension: AgentRunSuspension | None = None,
 ) -> ToolResult:
     return ToolResult(
         tool_call_id=tool_call.id,
@@ -1187,6 +1200,7 @@ def _result(
         content=content,
         artifact=None,
         confirmation=confirmation,
+        suspension=suspension,
     )
 
 

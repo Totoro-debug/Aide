@@ -22,6 +22,11 @@ from aide.agent.confirmation import (
     SubAgentConfirmationOwner,
 )
 from aide.agent.context.builder import ContextBuilder
+from aide.agent.foreground_work.store import (
+    ForegroundWorkConflict,
+    ForegroundWorkStore,
+    StaleForegroundWorkRevision,
+)
 from aide.agent.loop import (
     AgentRunExecutor,
     ForegroundConversationProjection,
@@ -144,6 +149,7 @@ class WorkspaceRecord:
         self._restore_blocked = False
         self._restore_commit_task: asyncio.Task[Any] | None = None
         self._subagent_repositories: dict[str, SubAgentRecordRepository] = {}
+        self._foreground_work_stores: dict[str, ForegroundWorkStore] = {}
         self._subagent_coordinators: dict[str, SubAgentSessionCoordinator] = {}
         self._subagent_admission_closed = False
         self._subagent_blocked_job_ids: set[str] = set()
@@ -182,6 +188,19 @@ class WorkspaceRecord:
             repository = SubAgentRecordStore(self.workspace_state, session_id)
             self._subagent_repositories[session_id] = repository
         return repository
+
+    def foreground_work_store(self, session_id: str) -> ForegroundWorkStore:
+        store = self._foreground_work_stores.get(session_id)
+        if store is None:
+            store = ForegroundWorkStore(self.workspace_state, session_id)
+            self._foreground_work_stores[session_id] = store
+        return store
+
+    def _persisted_foreground_messages(self, session_id: str) -> list[dict[str, Any]]:
+        try:
+            return Session.load(self.workspace_state, session_id).messages
+        except FileNotFoundError:
+            return []
 
     def register_subagent_coordinator(
         self,
@@ -419,6 +438,10 @@ class WorkspaceRecord:
                     "Conversation Session is already claimed by another client.",
                     retryable=True,
                 )
+            if not loop_state.loop.has_active_run and not loop_state.run_ids:
+                self.foreground_work_store(session_id).reconcile(
+                    self._persisted_foreground_messages(session_id)
+                )
             loop_state.owner_client_id = client_id
             version = self._claim_versions.get(session_id, 0) + 1
             self._claim_versions[session_id] = version
@@ -640,6 +663,10 @@ class WorkspaceRecord:
         loop_state = self._loops.get(session_id)
         if loop_state is None:
             raise service_error("not_found", "Conversation Session was not found.", status=404)
+        work_store = self.foreground_work_store(session_id)
+        if not loop_state.loop.has_active_run and not loop_state.run_ids and not loop_state.live_runs:
+            work_store.reconcile(self._persisted_foreground_messages(session_id))
+        foreground_work = work_store.load()
         projection = loop_state.loop.project_foreground_conversation()
         messages = list(projection.messages)
         anchors = list(loop_state.loop.session.restore_candidates())
@@ -693,6 +720,19 @@ class WorkspaceRecord:
                     "timestamp": anchor.timestamp,
                 }
                 for anchor in anchors
+            ],
+            "foreground_questions": [
+                {
+                    "question_id": question.question_id,
+                    "task_id": question.task_id,
+                    "generation": question.generation,
+                    "text": question.text,
+                    "state": question.state,
+                    "answer": question.answer,
+                    "revision": foreground_work.revision,
+                }
+                for question in foreground_work.questions
+                if question.state in {"pending", "answer_received", "interrupted"}
             ],
         }
 
@@ -991,6 +1031,7 @@ class WorkspaceRecord:
             try:
                 begin_session_deletion(self.workspace_state, session_id)
                 deletion_started = True
+                self.foreground_work_store(session_id).close()
                 if loop_state is not None:
                     await loop_state.loop.wait_for_restore_idle()
                     if (
@@ -1099,6 +1140,9 @@ class WorkspaceRecord:
         claim = self._claims.get(session_id)
         if claim is None or claim.client_id != client_id:
             raise service_error("stale_claim", "Conversation Session Claim is missing or stale.")
+        previous_store = self._foreground_work_stores.pop(session_id, None)
+        if previous_store is not None:
+            previous_store.close()
         await self._close_loop(session_id, abort=True)
         state = await self._create_loop(session_id, client_id=client_id)
         version = self._claim_versions.get(session_id, 0) + 1
@@ -1288,6 +1332,10 @@ class WorkspaceRecord:
                     tuple(str(token) for token in stored.discarded_run_tokens),
                 )
                 await self._rebuild_restored_session(client_id, stored.session_id)
+                restored_loop = self._loops[stored.session_id].loop
+                self.foreground_work_store(stored.session_id).reconcile(
+                    restored_loop.session.messages
+                )
                 self._restore_results[(client_id, stored.session_id)] = result
                 return result
             except StaleRestorePlan as error:
@@ -1382,6 +1430,9 @@ class WorkspaceRecord:
         text: str,
         run_id: str,
         request_id: str | None = None,
+        *,
+        foreground_question_id: str | None = None,
+        foreground_task_id: str | None = None,
     ) -> SessionClaim:
         async with self._lock:
             self._require_admitted()
@@ -1408,6 +1459,8 @@ class WorkspaceRecord:
             state = self._loops[session_id]
             client = self.service.client(client_id)
             async with state.coordination_lock:
+                if run_id in state.live_runs:
+                    return claim
                 async with client.delivery_lock:
                     if not state.live_runs:
                         state.completed_user_count = sum(
@@ -1420,14 +1473,104 @@ class WorkspaceRecord:
                         "response_segments": [""],
                         "cancel_requested": False, "cancellable": False,
                     }
+                    inbound_metadata: dict[str, object] = {
+                        "run_id": run_id,
+                        "request_id": request_id or run_id,
+                    }
+                    if foreground_question_id is not None:
+                        inbound_metadata["foreground_question_id"] = foreground_question_id
+                    if foreground_task_id is not None:
+                        inbound_metadata["foreground_task_id"] = foreground_task_id
                     await state.bus.put_inbound(
                         InboundMessage(
                             content=text,
-                            metadata={"run_id": run_id, "request_id": request_id or run_id},
+                            metadata=inbound_metadata,
                         )
                     )
                 self._ensure_processor(state)
             return claim
+
+    async def answer_question(
+        self,
+        client_id: str,
+        session_id: str,
+        version: int,
+        question_id: str,
+        answer: str,
+        expected_revision: int,
+        request_id: str,
+    ) -> dict[str, object]:
+        """Persist and queue one explicit answer for the current claimed Session."""
+        self._require_admitted()
+        claim = self.require_claim(client_id, session_id, version)
+        self._ensure_session_available(session_id)
+        state = self._loops[session_id]
+        if not claim.loop.foreground_input_admitted():
+            raise service_error("admission_closed", "Conversation input is temporarily unavailable.")
+        if not self.session_model_available(session_id):
+            raise service_error(
+                "model_unavailable",
+                "Choose an available model before sending to this Session.",
+                status=422,
+                field_errors={"model": "choose an available model"},
+            )
+        if self._restore_session_id == session_id or self._restore_commit_task is not None:
+            raise service_error("session_restore_active", "Session Restore is in progress.", retryable=True)
+        store = self.foreground_work_store(session_id)
+        if not state.loop.has_active_run and not state.run_ids and not state.live_runs:
+            store.reconcile(self._persisted_foreground_messages(session_id))
+        try:
+            store.answer_question(
+                question_id,
+                answer,
+                expected_revision=expected_revision,
+                request_id=request_id,
+            )
+            snapshot = store.load()
+            question = snapshot.question(question_id)
+            if question is None:
+                raise ForegroundWorkConflict("question does not exist")
+            if question.state == "answered":
+                run_id = question.resume_execution_id
+                if run_id is None:
+                    raise ForegroundWorkConflict("completed question has no resume execution")
+                return {"run_id": run_id, "live_state": self.session_snapshot(session_id)["live_state"]}
+            if question.state in {"resuming", "executing"}:
+                run_id = question.resume_execution_id
+                if run_id is None:
+                    raise ForegroundWorkConflict("question resume has no execution")
+            else:
+                run_id = str(uuid4())
+                store.begin_resume(question_id, run_id)
+        except StaleForegroundWorkRevision as error:
+            raise service_error(
+                "foreground_question_conflict",
+                "The question changed; reload it before answering.",
+                status=409,
+            ) from error
+        except (ForegroundWorkConflict, ValueError) as error:
+            raise service_error(
+                "foreground_question_conflict",
+                "The question is no longer available for this answer.",
+                status=409,
+            ) from error
+        except OSError as error:
+            raise service_error(
+                "persistence_error",
+                "The question answer could not be saved.",
+                status=500,
+            ) from error
+        await self.input(
+            client_id,
+            session_id,
+            version,
+            cast(str, question.answer),
+            run_id,
+            question.answer_request_id or request_id,
+            foreground_question_id=question_id,
+            foreground_task_id=question.task_id,
+        )
+        return {"run_id": run_id, "live_state": self.session_snapshot(session_id)["live_state"]}
 
     async def recall_queued_inputs(
         self,
@@ -1721,6 +1864,11 @@ class WorkspaceRecord:
                     self.service.built_in_tool_catalog if configured is None else configured.shared.built_in_catalog
                 ),
                 "subagent_model_router": router,
+                "foreground_work_store": (
+                    self.foreground_work_store(authority.session_id)
+                    if authority._storage_partition is SessionStoragePartition.FOREGROUND
+                    else None
+                ),
             }
             executor = AgentRunExecutor(
                 session=authority, session_id=None, session_run_state=session_state, **loop_kwargs
@@ -1897,6 +2045,15 @@ class WorkspaceRecord:
                             "finish_reason": message.metadata.get("finish_reason", "completed")
                         },
                     )
+                    if not state.schedule and self.foreground_work_store(session_id).load().questions:
+                        claim = self._claims.get(session_id)
+                        client = (
+                            None if claim is None else self.service._clients.get(claim.client_id)
+                        )
+                        if client is not None and client.kind == "cli":
+                            await self.service._send_snapshot_required(
+                                client, reason="foreground_question_updated"
+                            )
                     return True
         except asyncio.CancelledError:
             raise

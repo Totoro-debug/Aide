@@ -1020,7 +1020,7 @@
       "properties": {
         "request_id": {"$ref": "#/$defs/request_id"},
         "type": {
-          "enum": ["claim", "release", "input", "session_model_configure", "cancel", "recall_queued_inputs", "confirmation_decide", "subscribe"]
+          "enum": ["claim", "release", "input", "answer_question", "session_model_configure", "cancel", "recall_queued_inputs", "confirmation_decide", "subscribe"]
         },
         "workspace_id": {"type": ["string", "null"]},
         "session_id": {"type": ["string", "null"]},
@@ -1029,7 +1029,7 @@
       },
       "allOf": [
         {
-          "if": {"properties": {"type": {"enum": ["claim", "release", "input", "session_model_configure", "cancel", "recall_queued_inputs"]}}},
+          "if": {"properties": {"type": {"enum": ["claim", "release", "input", "answer_question", "session_model_configure", "cancel", "recall_queued_inputs"]}}},
           "then": {
             "properties": {
               "workspace_id": {"$ref": "#/$defs/identifier"},
@@ -1038,7 +1038,7 @@
           }
         },
         {
-          "if": {"properties": {"type": {"enum": ["release", "input", "session_model_configure", "cancel", "recall_queued_inputs"]}}},
+          "if": {"properties": {"type": {"enum": ["release", "input", "answer_question", "session_model_configure", "cancel", "recall_queued_inputs"]}}},
           "then": {"properties": {"claim_version": {"$ref": "#/$defs/claim_version"}}}
         },
         {
@@ -1074,6 +1074,22 @@
                 "type": "object", "additionalProperties": false,
                 "required": ["text"],
                 "properties": {"text": {"type": "string", "minLength": 1}}
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "answer_question"}}},
+          "then": {
+            "properties": {
+              "payload": {
+                "type": "object", "additionalProperties": false,
+                "required": ["question_id", "answer", "expected_revision"],
+                "properties": {
+                  "question_id": {"$ref": "#/$defs/identifier"},
+                  "answer": {"type": "string", "minLength": 1, "maxLength": 10000},
+                  "expected_revision": {"type": "integer", "minimum": 1}
+                }
               }
             }
           }
@@ -1360,6 +1376,10 @@
         "messages": {"type": "array", "items": {"type": "object"}},
         "model_configuration": {"anyOf": [{"$ref": "#/$defs/session_model_configuration"}, {"type": "null"}]},
         "model_configuration_version": {"type": "integer", "minimum": 0},
+        "foreground_questions": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/foreground_question"}
+        },
         "active_model_configuration": {"anyOf": [{"$ref": "#/$defs/session_model_configuration"}, {"type": "null"}]},
         "model_configuration_available": {"type": "boolean"},
         "restore_anchors": {
@@ -1387,6 +1407,20 @@
         "run_token": {"$ref": "#/$defs/identifier"},
         "content": {"type": "string"},
         "timestamp": {"type": "string", "minLength": 1}
+      }
+    },
+    "foreground_question": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["question_id", "task_id", "generation", "text", "state", "answer", "revision"],
+      "properties": {
+        "question_id": {"$ref": "#/$defs/identifier"},
+        "task_id": {"$ref": "#/$defs/identifier"},
+        "generation": {"type": "integer", "minimum": 1},
+        "text": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "state": {"enum": ["pending", "answer_received", "interrupted"]},
+        "answer": {"type": ["string", "null"], "maxLength": 10000},
+        "revision": {"type": "integer", "minimum": 1}
       }
     },
     "session_claim": {

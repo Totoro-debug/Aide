@@ -279,6 +279,10 @@ class _MessageBusRunProjection:
             return
         if outbound.type == "system_control" and marker == "_streamed":
             finish_reason = outbound.metadata.get("finish_reason")
+            if finish_reason == "suspended":
+                self._terminal_status = "Waiting for an answer."
+                await self._finish_terminal("completed", outbound.content)
+                return
             if finish_reason not in {"cancelled", "failed", "max_iterations"}:
                 await self._fail_sparse_protocol()
                 return

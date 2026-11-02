@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import secrets
@@ -3535,6 +3536,46 @@ class AgentService:
             "live_state": workspace.session_snapshot(session_id)["live_state"],
         }
 
+    async def answer_foreground_question(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        claim_version: int,
+        question_id: str,
+        answer: str,
+        expected_revision: int,
+        request_id: str,
+    ) -> dict[str, object]:
+        workspace = self.workspace(workspace_id)
+        workspace.require_claim(client_id, session_id, claim_version)
+        self._capture_configuration()
+        result = await workspace.answer_question(
+            client_id,
+            session_id,
+            claim_version,
+            question_id,
+            answer,
+            expected_revision,
+            request_id,
+        )
+        run_id = result["run_id"]
+        if not isinstance(run_id, str):
+            raise service_error("service_state_invalid", "Question resume state is invalid.", status=500)
+        await self.emit(
+            "input.accepted",
+            workspace_id=workspace_id,
+            session_id=session_id,
+            run_id=run_id,
+            payload={
+                "text": answer,
+                "request_id": request_id,
+                "question_id": question_id,
+            },
+            target_client_ids=(client_id,),
+        )
+        return {"kind": "conversation_input", **result}
+
     async def handle_command(
         self, client_id: str, command: Mapping[str, object]
     ) -> dict[str, object]:
@@ -3542,18 +3583,46 @@ class AgentService:
         request_id = command.get("request_id")
         if not isinstance(request_id, str) or not request_id:
             raise service_error("validation_error", "request_id is required.", status=422)
+        if command.get("type") == "answer_question":
+            workspace_id = command.get("workspace_id")
+            session_id = command.get("session_id")
+            claim_version = command.get("claim_version")
+            self._validate_claim_fields(client_id, workspace_id, session_id, claim_version)
+            assert isinstance(workspace_id, str) and isinstance(session_id, str)
+            assert isinstance(claim_version, int)
+            self.workspace(workspace_id).require_claim(client_id, session_id, claim_version)
         previous = client.results.get(request_id)
         if previous is not None:
+            if (
+                command.get("type") == "answer_question"
+                and client.result_fingerprints.get(request_id) != _command_fingerprint(command)
+            ):
+                raise service_error(
+                    "foreground_question_conflict",
+                    "This answer request ID was already used with a different payload.",
+                    status=409,
+                )
             return previous
         inflight = client.inflight.get(request_id)
         if inflight is not None:
+            if (
+                command.get("type") == "answer_question"
+                and client.inflight_fingerprints.get(request_id) != _command_fingerprint(command)
+            ):
+                raise service_error(
+                    "foreground_question_conflict",
+                    "This answer request ID is already in use with a different payload.",
+                    status=409,
+                )
             return await asyncio.shield(inflight)
         task = asyncio.create_task(self._handle_command_once(client_id, command))
         client.inflight[request_id] = task
+        client.inflight_fingerprints[request_id] = _command_fingerprint(command)
 
         def forget(done: asyncio.Task[dict[str, object]]) -> None:
             if client.inflight.get(request_id) is done:
                 client.inflight.pop(request_id, None)
+                client.inflight_fingerprints.pop(request_id, None)
             _consume_task_result(done)
 
         task.add_done_callback(forget)
@@ -3606,6 +3675,36 @@ class AgentService:
                 session_id,
                 claim_version,
                 text,
+                request_id,
+            )
+        elif command_type == "answer_question":
+            self._validate_claim_fields(client_id, workspace_id, session_id, claim_version)
+            if set(payload) != {"question_id", "answer", "expected_revision"}:
+                raise service_error("validation_error", "Invalid answer payload.", status=422)
+            question_id = payload.get("question_id")
+            answer = payload.get("answer")
+            expected_revision = payload.get("expected_revision")
+            if not isinstance(question_id, str) or not isinstance(answer, str):
+                raise service_error(
+                    "validation_error", "question_id and answer are required.", status=422
+                )
+            if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+                raise service_error(
+                    "validation_error", "expected_revision is required.", status=422
+                )
+            assert (
+                isinstance(workspace_id, str)
+                and isinstance(session_id, str)
+                and isinstance(claim_version, int)
+            )
+            result = await self.answer_foreground_question(
+                client_id,
+                workspace_id,
+                session_id,
+                claim_version,
+                question_id,
+                answer,
+                expected_revision,
                 request_id,
             )
         elif command_type == "recall_queued_inputs":
@@ -3663,6 +3762,7 @@ class AgentService:
             raise service_error("validation_error", "Unsupported client command.", status=422)
         ack = {"request_id": request_id, "accepted": True, "result": result}
         client.results[request_id] = ack
+        client.result_fingerprints[request_id] = _command_fingerprint(command)
         return ack
 
     async def emit(
@@ -4089,3 +4189,11 @@ class AgentService:
             raise service_error(
                 "stale_claim", "Conversation Session Claim is missing or stale.", retryable=True
             )
+
+
+def _command_fingerprint(command: Mapping[str, object]) -> str:
+    try:
+        encoded = json.dumps(dict(command), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    except (TypeError, ValueError):
+        encoded = repr(sorted(command.items(), key=lambda item: str(item[0])))
+    return hashlib.sha256(encoded.encode("utf-8", errors="replace")).hexdigest()

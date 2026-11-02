@@ -36,6 +36,7 @@ from aide.agent.conversation_contracts import (
 from aide.agent.conversation_contracts import (
     TerminalAgentRunExecutorControl as TerminalAgentRunExecutorControl,
 )
+from aide.agent.foreground_work.store import ForegroundWorkStore
 from aide.agent.memory.manager import MemoryManager
 from aide.agent.message_bus import (
     InboundMessage,
@@ -75,6 +76,7 @@ from aide.agent.subagents.models import (
 from aide.agent.subagents.ports import SubAgentRecordRepository, SubAgentSessionCoordinator
 from aide.agent.tools.base import BaseTool
 from aide.agent.tools.context import ToolRunContext
+from aide.agent.tools.core.ask_user import AskUserTool
 from aide.agent.tools.core.exec_host import ExecHost
 from aide.agent.tools.core.subagents import build_subagent_tools
 from aide.agent.tools.deferred import build_agent_run_gateway
@@ -165,6 +167,7 @@ class AgentRunExecutor:
         session_run_state: SessionRunState | None = None,
         subagent_model_router: ModelRouter | None = None,
         trace_recorder: TraceRecorder | None = None,
+        foreground_work_store: ForegroundWorkStore | None = None,
     ) -> None:
         if workspace_state.workspace_path != workspace_path:
             raise ValueError("Agent Loop Workspace State must belong to the Workspace")
@@ -238,6 +241,7 @@ class AgentRunExecutor:
         self._trace_recorder = (
             NoOpTraceRecorder() if trace_recorder is None else trace_recorder
         )
+        self._foreground_work_store = foreground_work_store
         self._now = now
         self._new_uuid = new_uuid
         self._monotonic_now = monotonic_now
@@ -301,6 +305,7 @@ class AgentRunExecutor:
         permission_snapshot: PermissionSnapshot | None = None,
         permission_context: PermissionContext | None = None,
         tool_context: ToolRunContext | None = None,
+        run_tools: Sequence[BaseTool] = (),
     ) -> ToolGateway:
         return build_agent_run_gateway(
             self._tool_gateway,
@@ -309,6 +314,7 @@ class AgentRunExecutor:
             permission_snapshot=permission_snapshot,
             permission_context=permission_context,
             tool_context=tool_context,
+            run_tools=run_tools,
         )
 
     def bind_subagent_coordinator(
@@ -417,7 +423,7 @@ class AgentRunExecutor:
                 tool_names=tuple(tool.name for tool in run_gateway.catalog),
                 system_prompt=system_prompt,
             )
-        base_context = self._tool_gateway.tool_context
+        base_context = run_gateway.tool_context
         if base_context is None:
             raise RuntimeError("SubAgent execution requires a Tool Run context")
         tool_context = replace(
@@ -436,6 +442,7 @@ class AgentRunExecutor:
             permission_context=permission_context,
             permission_snapshot=(None if permission_context is not None else permission_snapshot),
             tool_context=tool_context,
+            run_tools=tuple(tool for tool in run_gateway.catalog if tool.name == "ask_user"),
         )
 
     async def wait_for_restore_idle(self) -> None:
@@ -1265,6 +1272,40 @@ class AgentRunExecutor:
         restore_run_token: UUID | None = None,
     ) -> bool:
         current_user = {"role": "user", "content": inbound.content}
+        question_id = inbound.metadata.get("foreground_question_id")
+        task_id = inbound.metadata.get("foreground_task_id")
+        execution_id = inbound.metadata.get("run_id")
+        task_generation = 1
+        if self._foreground_work_store is not None and inbound.content.strip():
+            if not isinstance(task_id, str):
+                task_id = str(self._new_uuid())
+            if not isinstance(execution_id, str):
+                execution_id = str(self._new_uuid())
+            if isinstance(question_id, str):
+                current_user["foreground_question_id"] = question_id
+                current_user["foreground_task_id"] = task_id
+                self._foreground_work_store.start_resume(question_id, execution_id)
+            else:
+                anchor_id = next(
+                    (
+                        message.get("restore_anchor_id")
+                        for message in reversed(active_session.messages)
+                        if type(message.get("restore_anchor_id")) is int
+                    ),
+                    None,
+                )
+                self._foreground_work_store.begin_task(
+                    task_id, execution_id, generation=1, origin_anchor_id=anchor_id
+                )
+            task = next(
+                (
+                    item for item in self._foreground_work_store.load().tasks
+                    if item.task_id == task_id
+                ),
+                None,
+            )
+            if task is not None:
+                task_generation = task.generation
         if title_work is not None:
             title_work.coordination.preparation_started.set()
         execution_ready.set()
@@ -1280,6 +1321,18 @@ class AgentRunExecutor:
             compaction_cursor: int,
             action_summary: str | None,
         ) -> list[dict[str, Any]]:
+            if isinstance(question_id, str) and current_user is not None:
+                assert self._foreground_work_store is not None
+                answered_question = self._foreground_work_store.load().question(question_id)
+                if answered_question is not None:
+                    current_user = {
+                        **current_user,
+                        "content": (
+                            f"Human Answer to question {question_id}\n"
+                            f"Question: {answered_question.text}\n"
+                            f"Answer: {current_user['content']}"
+                        ),
+                    }
             return self._context_builder.build_run_messages(
                 history,
                 current_user=current_user,
@@ -1352,11 +1405,40 @@ class AgentRunExecutor:
             self._subagent_coordinator is not None
             and restore_run_token is not None
         )
+        foreground_tools: tuple[BaseTool, ...] = ()
+        foreground_context: ToolRunContext | None = None
+        foreground_work_store = self._foreground_work_store
+        if foreground_work_store is not None and task_id is not None:
+            assert isinstance(execution_id, str)
+
+            def register_question(question: str, tool_call_id: str) -> str:
+                question_id = str(self._new_uuid())
+                foreground_work_store.prepare_question(
+                    task_id=cast(str, task_id),
+                    execution_id=execution_id,
+                    question_id=question_id,
+                    tool_call_id=tool_call_id,
+                    text=question,
+                )
+                return question_id
+
+            foreground_tools = (AskUserTool(),)
+            foreground_context = ToolRunContext(
+                workspace=self._workspace_state.workspace_path,
+                schedule_service=self._schedule_service,
+                exec_host=self._exec_host,
+                foreground_question_handler=register_question,
+                task_id=task_id,
+                generation=task_generation,
+                execution_id=execution_id,
+            )
         run_gateway = self._new_run_gateway(
             excluded_names=(
                 () if subagents_eligible else ("spawn_agent", "wait_agent", "list_agents")
             ),
             permission_snapshot=permission_snapshot,
+            tool_context=foreground_context,
+            run_tools=foreground_tools,
         )
         if subagents_eligible:
             assert restore_run_token is not None
@@ -1586,6 +1668,12 @@ class AgentRunExecutor:
                 type(failure).__name__,
             )
             await self._publish_commit_failure()
+            if self._foreground_work_store is not None:
+                try:
+                    persisted = Session.load(self._workspace_state, active_session.session_id)
+                    self._foreground_work_store.reconcile(persisted.messages)
+                except (OSError, UnicodeError, ValueError):
+                    pass
             return False
         except Exception as failure:
             _runtime_logger().error(
@@ -1596,6 +1684,59 @@ class AgentRunExecutor:
                 ErrorInfo("model_failed", "The model request failed.")
             )
             return False
+        if self._foreground_work_store is not None and isinstance(task_id, str):
+            if result.suspension is not None or isinstance(question_id, str):
+                try:
+                    await active_session.wait_for_pending_persist()
+                    persisted_session = Session.load(
+                        self._workspace_state,
+                        active_session.session_id,
+                        partition=SessionStoragePartition.FOREGROUND,
+                        now=self._now,
+                    )
+                    work_snapshot = self._foreground_work_store.reconcile(
+                        persisted_session.messages
+                    )
+                except (OSError, UnicodeError, ValueError):
+                    work_snapshot = self._foreground_work_store.load()
+                    persisted_session = None
+                if result.suspension is not None:
+                    question = work_snapshot.question(result.suspension.question_id)
+                    if question is None or question.state != "pending":
+                        result = replace(
+                            result,
+                            finish_reason="failed",
+                            final_content="",
+                            error=ErrorInfo(
+                                "persistence_error",
+                                "The question could not be saved to the Session.",
+                            ),
+                            suspension=None,
+                        )
+                elif isinstance(question_id, str) and (
+                    persisted_session is None
+                    or not any(
+                        message.get("foreground_question_id") == question_id
+                        and message.get("role") == "user"
+                        for message in persisted_session.messages
+                    )
+                ):
+                    result = replace(
+                        result,
+                        finish_reason="failed",
+                        final_content="",
+                        error=ErrorInfo(
+                            "persistence_error",
+                            "The answer could not be saved to the Session.",
+                        ),
+                        suspension=None,
+                    )
+            if (
+                result.finish_reason == "completed"
+                and result.suspension is None
+                and isinstance(execution_id, str)
+            ):
+                self._foreground_work_store.complete_task(task_id, execution_id)
         await self._publish_terminal(result)
         return True
 
@@ -1729,6 +1870,21 @@ class AgentRunExecutor:
 
     async def _publish_terminal(self, result: AgentRunnerResult) -> None:
         if self._aborted:
+            return
+        if result.finish_reason == "suspended" and result.suspension is not None:
+            await self._bus.put_outbound(
+                OutboundMessage(
+                    "system_control",
+                    "",
+                    {
+                        "finish_reason": "suspended",
+                        "task_id": result.suspension.task_id,
+                        "question_id": result.suspension.question_id,
+                        "execution_id": result.suspension.execution_id,
+                        "_streamed": True,
+                    },
+                )
+            )
             return
         if result.finish_reason == "completed":
             await self._bus.put_outbound(OutboundMessage("model_response", "", {"_streamed": True}))

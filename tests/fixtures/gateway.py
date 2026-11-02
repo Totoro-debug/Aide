@@ -46,12 +46,13 @@ class SingleToolGateway(ToolGateway):
         *,
         confirmation: ConfirmationRequester | None = None,
         permission_context: PermissionContext | None = None,
+        tool_context: ToolRunContext | None = None,
     ) -> None:
         selected_tools = tuple(tools)
         contexts = {_TEST_CONTEXTS[tool] for tool in selected_tools if tool in _TEST_CONTEXTS}
         if len(contexts) > 1:
             raise ValueError("Test Tools require one shared Tool Run Context")
-        context = next(iter(contexts), None)
+        context = tool_context or next(iter(contexts), None)
         self._gateway = ToolGateway._for_memory(
             selected_tools,
             tool_context=context,

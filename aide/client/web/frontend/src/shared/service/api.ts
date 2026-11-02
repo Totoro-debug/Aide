@@ -5,6 +5,7 @@ import type {
   ChatSessionsResponse,
   ChatWorkspaceEntry,
   ClientCommand,
+  ConversationInputAccepted,
   ConfigFields,
   ConfigPatchFields,
   ConfigPatchResponse,
@@ -13,6 +14,7 @@ import type {
   ConversationOpenResponse,
   DirectoryPickerResult,
   DreamRunResponse,
+  ForegroundQuestionSnapshot,
   ManagementResponse,
   ManagementResult,
   MemoryViewResponse,
@@ -158,6 +160,31 @@ export async function recallQueuedInputs(
     live_state: typeof result.live_state === "object" && result.live_state !== null
       ? result.live_state as SessionLiveState : null,
   };
+}
+
+export async function answerForegroundQuestion(
+  sendCommand: ClientCommandSender,
+  context: ConversationCommandContext,
+  question: ForegroundQuestionSnapshot,
+  answer: string,
+): Promise<ConversationInputAccepted> {
+  const result = await sendCommand({
+    request_id: createRequestId(),
+    type: "answer_question",
+    workspace_id: context.workspace_id,
+    session_id: context.session_id,
+    claim_version: context.claim_version,
+    payload: {
+      question_id: question.question_id,
+      answer,
+      expected_revision: question.revision,
+    },
+  });
+  if (result.kind !== "conversation_input" || typeof result.run_id !== "string"
+    || !result.run_id || (result.live_state !== null && typeof result.live_state !== "object")) {
+    throw new ServiceCommandError(null, false);
+  }
+  return result as unknown as ConversationInputAccepted;
 }
 
 export function cancelConversationRun(

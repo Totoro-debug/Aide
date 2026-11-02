@@ -1,15 +1,27 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
 from aide.agent.foreground_work.store import (
     ForegroundWorkConflict,
+    ForegroundWorkError,
     ForegroundWorkStore,
     StaleForegroundWorkRevision,
 )
+from aide.agent.subagents.models import (
+    SubAgentCreatorSnapshot,
+    SubAgentError,
+    SubAgentSource,
+    SubAgentSourceKind,
+    SubAgentStatus,
+)
+from aide.agent.subagents.store import SubAgentRecordStore
 from aide.agent.workspace_state import WorkspaceState
 
 
@@ -329,6 +341,31 @@ def test_unsupported_or_corrupt_state_is_reported_without_reset(
     assert store.path.read_text(encoding="utf-8") == content
 
 
+def test_malformed_delivery_state_is_reported_without_reset(tmp_path: Path) -> None:
+    from aide.agent.foreground_work.store import ForegroundWorkError
+
+    store = _store(tmp_path)
+    store.begin_task(str(uuid4()), str(uuid4()), generation=1)
+    state = json.loads(store.path.read_text(encoding="utf-8"))
+    state["deliveries"] = [
+        {
+            "agent_id": str(uuid4()),
+            "terminal_record_revision": 1,
+            "task_id": str(uuid4()),
+            "task_generation": 1,
+            "state": [],
+            "claimed_execution_id": None,
+            "receipt_id": None,
+        }
+    ]
+    store.path.write_text(json.dumps(state), encoding="utf-8")
+    before = store.path.read_bytes()
+
+    with pytest.raises(ForegroundWorkError):
+        _store(tmp_path).load()
+    assert store.path.read_bytes() == before
+
+
 @pytest.mark.parametrize("answered", [False, True])
 @pytest.mark.parametrize("legacy_version", [1, 2, 3])
 def test_legacy_question_state_upgrades_on_write_and_preserves_answer_retry(
@@ -350,6 +387,7 @@ def test_legacy_question_state_upgrades_on_write_and_preserves_answer_retry(
         )
     legacy = json.loads(store.path.read_text(encoding="utf-8"))
     legacy["schema_version"] = legacy_version
+    legacy.pop("deliveries", None)
     for question in legacy["questions"]:
         question.pop("owner_agent_id", None)
     for task in legacy["tasks"]:
@@ -379,7 +417,7 @@ def test_legacy_question_state_upgrades_on_write_and_preserves_answer_retry(
     if answered:
         assert accepted.revision == loaded.revision
     store.begin_resume("question-1", "execution-2")
-    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 5
+    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 6
     reloaded = _store(tmp_path).load().question("question-1")
     assert reloaded is not None and reloaded.answer == "reports"
     assert reloaded.answer_kind == "text"
@@ -449,3 +487,149 @@ def test_foreground_child_can_ask_after_main_segment_completes(tmp_path: Path) -
     question = snapshot.question("question")
     assert question is not None and question.state == "pending"
     assert snapshot.tasks[0].state == "waiting_for_answer"
+
+
+@pytest.mark.parametrize("status", [SubAgentStatus.COMPLETED, SubAgentStatus.FAILED, SubAgentStatus.CANCELLED, SubAgentStatus.INTERRUPTED])
+def test_persisted_terminal_result_is_discovered_once_by_its_durable_identity(
+    tmp_path: Path,
+    status: SubAgentStatus,
+) -> None:
+    task_id = str(uuid4())
+    first_execution_id = str(uuid4())
+    store = _store(tmp_path)
+    store.begin_task(task_id, first_execution_id, generation=1)
+    store.complete_task(task_id, first_execution_id)
+    repository = SubAgentRecordStore(store.workspace_state, store.session_id)
+    now = datetime(2026, 11, 3, tzinfo=UTC)
+    record = repository.register(
+        title="One-time delegated task",
+        task="Return one result.",
+        parent_run_id=str(uuid4()),
+        source=SubAgentSource(
+            kind=SubAgentSourceKind.FOREGROUND,
+            restore_run_token=str(uuid4()),
+            task_id=task_id,
+            task_generation=1,
+        ),
+        creator_snapshot=SubAgentCreatorSnapshot(
+            provider_id="test-provider",
+            model="test-model",
+            reasoning_effort="mid",
+            permission_level="workspace-write",
+            shell="pwsh",
+            tool_names=("read_file",),
+            system_prompt="You are Aide.",
+        ),
+    )
+    running = repository.save(
+        replace(
+            record,
+            status=SubAgentStatus.RUNNING,
+            started_at=now,
+            revision=record.revision + 1,
+        )
+    )
+    terminal = repository.save(
+        replace(
+            running,
+            status=status,
+            error=SubAgentError("model_failed", "Child failed") if status in {SubAgentStatus.FAILED, SubAgentStatus.INTERRUPTED} else None,
+            finished_at=now,
+            conversation=({"role": "assistant", "content": "Finished."},),
+            result="The durable result.",
+            revision=running.revision + 1,
+        )
+    )
+
+    if status in {SubAgentStatus.CANCELLED, SubAgentStatus.INTERRUPTED}:
+        assert not store.reconcile([], subagents=(terminal,)).deliveries
+        return
+
+    # Attention is a nonterminal observation, even when the child has since finished.
+    attention = {"role": "tool", "name": "wait_agent", "tool_call_id": "attention",
+                 "content": json.dumps([{"agent_id": terminal.agent_id,
+                                          "status": "waiting_for_answer"}])}
+    assert store.reconcile([attention], subagents=(terminal,)).deliveries[0].state == "pending"
+    stale_result = {**attention, "content": json.dumps([{
+        "agent_id": terminal.agent_id, "status": status.value,
+        "terminal_record_revision": terminal.revision - 1,
+    }])}
+    assert store.reconcile([stale_result], subagents=(terminal,)).deliveries[0].state == "pending"
+    snapshot = store.reconcile([], subagents=(terminal,))
+    for _ in range(99):
+        snapshot = _store(tmp_path).reconcile([], subagents=(terminal,))
+
+    assert len(snapshot.deliveries) == 1
+    delivery = snapshot.deliveries[0]
+    assert delivery.agent_id == terminal.agent_id
+    assert delivery.terminal_record_revision == terminal.revision
+    assert delivery.task_id == task_id
+    assert delivery.task_generation == 1
+    assert delivery.state == "pending"
+
+    execution_id = str(uuid4())
+    claimed = store.claim_delivery(
+        agent_id=terminal.agent_id,
+        terminal_record_revision=terminal.revision,
+        task_generation=1,
+        execution_id=execution_id,
+    )
+    assert claimed is not None and claimed.state == "claimed"
+    assert claimed.claimed_execution_id == execution_id
+    assert _store(tmp_path).claim_delivery(
+        agent_id=terminal.agent_id,
+        terminal_record_revision=terminal.revision,
+        task_generation=1,
+        execution_id=str(uuid4()),
+    ) is None
+    persisted = _store(tmp_path).load()
+    assert len(persisted.deliveries) == 1
+    assert persisted.deliveries[0].state == "claimed"
+    committed = store.commit_delivery(
+        agent_id=terminal.agent_id,
+        terminal_record_revision=terminal.revision,
+        task_generation=1,
+        execution_id=execution_id,
+        receipt_id=claimed.receipt_id,
+    )
+    assert committed is not None and committed.state == "committed"
+
+    wait_result = _store(tmp_path).reconcile(
+        [
+            {
+                "role": "tool",
+                "name": "wait_agent",
+                "tool_call_id": str(uuid4()),
+                "content": json.dumps(
+                    [
+                        {
+                            "agent_id": terminal.agent_id,
+                            "status": status.value,
+                            "terminal_record_revision": terminal.revision,
+                            "result": terminal.result,
+                        }
+                    ]
+                ),
+            }
+        ],
+        subagents=(terminal,),
+    )
+    delivered = wait_result.deliveries[0]
+    assert delivered.state == "committed"
+    assert delivered.receipt_id is not None
+
+
+@pytest.mark.parametrize("mutation", ["missing_version", "future_version", "unknown_field"])
+def test_delivery_schema_rejects_damaged_or_future_state(tmp_path: Path, mutation: str) -> None:
+    store = _store(tmp_path)
+    store.begin_task("task", "execution", generation=1)
+    value = json.loads(store.path.read_text(encoding="utf-8"))
+    if mutation == "missing_version":
+        del value["schema_version"]
+    elif mutation == "future_version":
+        value["schema_version"] = 999
+    else:
+        value["unknown"] = True
+    store.path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(ForegroundWorkError):
+        store.load()

@@ -699,6 +699,12 @@ class AgentRunExecutor:
                 self._execution_ready = None
             self._cancel_requested = False
 
+    async def run_automatic_continuation(self, inbound: InboundMessage) -> None:
+        """Run an internal SubAgent result through the foreground Session authority."""
+        if inbound.metadata.get("foreground_automatic_continuation") is not True:
+            raise ValueError("automatic continuation metadata is required")
+        await self.run_foreground(inbound)
+
     async def run_schedule_job(
         self,
         job: ScheduleJob,
@@ -1117,12 +1123,16 @@ class AgentRunExecutor:
         metadata_removals: tuple[str, ...] = (),
         restore_before: SessionRestoreBefore | None = None,
         restore_run_token: UUID | None = None,
+        persist_current_user: bool = True,
     ) -> None:
         values = context.controller.terminal_commit_values()
         combined_usage = _merge_usage_deltas(values.usage_delta, usage_delta)
+        pending_last_compacted = values.pending_last_compacted
+        if not persist_current_user and pending_last_compacted > len(session.messages):
+            pending_last_compacted -= 1
         session.commit_agent_run(
             messages,
-            pending_last_compacted=values.pending_last_compacted,
+            pending_last_compacted=pending_last_compacted,
             pending_action_summary=values.pending_action_summary,
             usage_delta=combined_usage or None,
             metadata_updates=metadata_updates,
@@ -1206,8 +1216,22 @@ class AgentRunExecutor:
         if not inbound.content.strip():
             execution_ready.set()
             return
-        restore_before = active_session.capture_restore_before()
-        restore_run_token = self._new_uuid()
+        automatic_continuation = (
+            inbound.metadata.get("foreground_automatic_continuation") is True
+        )
+        if automatic_continuation:
+            token_value = inbound.metadata.get("foreground_effect_run_token")
+            try:
+                restore_run_token = UUID(token_value) if isinstance(token_value, str) else None
+            except ValueError:
+                restore_run_token = None
+            if restore_run_token is None or restore_run_token.version != 4:
+                execution_ready.set()
+                raise ValueError("automatic continuation is missing a valid Task Run token")
+            restore_before = None
+        else:
+            restore_before = active_session.capture_restore_before()
+            restore_run_token = self._new_uuid()
         run_id = inbound.metadata.get("run_id")
         if not isinstance(run_id, str):
             run_id = None
@@ -1237,7 +1261,7 @@ class AgentRunExecutor:
         inbound: InboundMessage,
         *,
         execution_ready: asyncio.Event,
-        restore_before: SessionRestoreBefore,
+        restore_before: SessionRestoreBefore | None,
         restore_run_token: UUID,
     ) -> None:
         active_session = self._session
@@ -1345,6 +1369,17 @@ class AgentRunExecutor:
         task_id = inbound.metadata.get("foreground_task_id")
         execution_id = inbound.metadata.get("run_id")
         explicit_continuation = inbound.metadata.get("foreground_task_continue") is True
+        automatic_continuation = (
+            inbound.metadata.get("foreground_automatic_continuation") is True
+        )
+        if automatic_continuation:
+            current_user["_runtime_input_kind"] = "subagent_result"
+        runtime_subagent_result = inbound.metadata.get("foreground_subagent_result")
+        if isinstance(runtime_subagent_result, str):
+            current_user["_runtime_subagent_result"] = runtime_subagent_result
+        delivery_receipt_id = inbound.metadata.get("foreground_delivery_receipt_id")
+        delivery_agent_id = inbound.metadata.get("foreground_delivery_agent_id")
+        delivery_record_revision = inbound.metadata.get("foreground_delivery_record_revision")
         task_generation = 1
         if self._foreground_work_store is not None and inbound.content.strip():
             if not isinstance(execution_id, str):
@@ -1425,13 +1460,13 @@ class AgentRunExecutor:
         framing_usage: dict[str, int] | None = None
 
         def metadata_patch() -> tuple[dict[str, Any] | None, tuple[str, ...]]:
-            if manual_invocation is not None or explicit_continuation:
+            if manual_invocation is not None or explicit_continuation or automatic_continuation:
                 return None, ()
             if staged_blackboard is None:
                 return None, ("blackboard",)
             return {"blackboard": staged_blackboard.to_dict()}, ()
 
-        if manual_invocation is None and not explicit_continuation:
+        if manual_invocation is None and not explicit_continuation and not automatic_continuation:
             previous_blackboard = Blackboard.from_dict(active_session.metadata.get("blackboard"))
             last_assistant_content = _latest_assistant_content(active_session)
             try:
@@ -1465,7 +1500,11 @@ class AgentRunExecutor:
             staged_blackboard = framing_result.blackboard
             framing_usage = framing_result.usage_delta
         else:
-            staged_blackboard = None
+            staged_blackboard = (
+                Blackboard.from_dict(active_session.metadata.get("blackboard"))
+                if automatic_continuation
+                else None
+            )
             framing_usage = None
             framing_result = None
 
@@ -1482,7 +1521,22 @@ class AgentRunExecutor:
                 ),
                 None,
             )
-            if explicit_continuation:
+            if automatic_continuation:
+                generation_value = inbound.metadata.get("foreground_task_generation")
+                if (
+                    not isinstance(task_id, str)
+                    or isinstance(generation_value, bool)
+                    or not isinstance(generation_value, int)
+                ):
+                    raise ValueError("Automatic SubAgent result is missing its Task generation")
+                task_generation = generation_value
+                foreground_work_store.start_execution(
+                    task_id,
+                    execution_id,
+                    expected_generation=task_generation,
+                    explicit_user_operation=False,
+                )
+            elif explicit_continuation:
                 if not isinstance(task_id, str):
                     raise ValueError("Foreground Task continuation is missing its Task ID")
                 current_task = next(
@@ -1495,6 +1549,16 @@ class AgentRunExecutor:
                 )
                 if current_task is None:
                     raise ValueError("Foreground Task is no longer available")
+                expected_generation = inbound.metadata.get("foreground_task_generation")
+                if (
+                    expected_generation is not None
+                    and (
+                        isinstance(expected_generation, bool)
+                        or not isinstance(expected_generation, int)
+                        or expected_generation != current_task.generation
+                    )
+                ):
+                    raise ValueError("Foreground Task generation changed before continuation")
                 foreground_work_store.start_execution(
                     task_id,
                     execution_id,
@@ -1703,6 +1767,15 @@ class AgentRunExecutor:
                 session_model_configuration=session_model_configuration,
                 system_prompt=self._context_builder.foreground_system_prompt(),
             )
+        if (
+            automatic_continuation
+            and foreground_work_store is not None
+            and isinstance(task_id, str)
+            and not foreground_work_store.is_current_execution(
+                task_id, task_generation, cast(str, execution_id)
+            )
+        ):
+            return False
         try:
             initial_messages = run_context.controller.initial_messages()
         except asyncio.CancelledError:
@@ -1763,6 +1836,28 @@ class AgentRunExecutor:
                 restore_run_token=restore_run_token,
             )
 
+        wait_observations: dict[str, tuple[str, list[dict[str, Any]]]] = {}
+        externalize_result = self._result_externalizer_for(active_session)
+
+        def externalize_foreground_result(value: ToolResult) -> ToolResult:
+            final = externalize_result(value) if externalize_result is not None else value
+            if value.name == "wait_agent" and value.status == "success" and final.status == "success":
+                try:
+                    items = json.loads(value.content)
+                except json.JSONDecodeError:
+                    items = None
+                if isinstance(items, list):
+                    observations = [
+                        {key: item[key] for key in ("agent_id", "status", "terminal_record_revision")}
+                        for item in items
+                        if isinstance(item, dict)
+                        and isinstance(item.get("agent_id"), str)
+                        and item.get("status") in {"completed", "failed"}
+                        and type(item.get("terminal_record_revision")) is int
+                    ]
+                    wait_observations[value.tool_call_id] = (final.content, observations)
+            return final
+
         foreground_owner = ForegroundConfirmationOwner(
             generation_id=self._session_run_state.generation_id,
             run_id=self._new_uuid(),
@@ -1788,9 +1883,14 @@ class AgentRunExecutor:
                 tool_gateway=run_gateway,
                 on_output=self._publish_runner_output,
                 confirmation=self._request_confirmation,
-                externalize_result=self._result_externalizer_for(active_session),
+                externalize_result=externalize_foreground_result,
                 cancel_requested=lambda: self._cancel_requested,
                 max_iterations=self._max_iterations,
+                remaining_iterations=(
+                    min(self._max_iterations, foreground_work_store.remaining_iteration_budget(task_id, generation=task_generation))
+                    if automatic_continuation and foreground_work_store is not None and isinstance(task_id, str)
+                    else None
+                ),
                 file_mutation_recorder=file_mutation_recorder,
                 run_token=restore_run_token,
                 on_first_request_prepared=notify_title_prepared,
@@ -1877,7 +1977,7 @@ class AgentRunExecutor:
             return False
 
         metadata_removals: tuple[str, ...]
-        if manual_invocation is not None or explicit_continuation:
+        if manual_invocation is not None or explicit_continuation or automatic_continuation:
             metadata_updates = None
             metadata_removals = ()
         elif staged_blackboard is None:
@@ -1888,6 +1988,11 @@ class AgentRunExecutor:
             metadata_removals = ()
 
         run_messages = deepcopy(result.messages)
+        for message in run_messages:
+            observation = wait_observations.get(message.get("tool_call_id", ""))
+            if (message.get("role") == "tool" and message.get("name") == "wait_agent"
+                    and observation is not None and message.get("content") == observation[0]):
+                message["foreground_wait_results"] = observation[1]
         if result.finish_reason == "cancelled" and not any(
             message.get("status") == "interrupted" for message in run_messages
         ):
@@ -1897,18 +2002,44 @@ class AgentRunExecutor:
                 error=result.error or ErrorInfo("turn_cancelled", TURN_CANCELLED_MESSAGE),
                 model_calls=0,
             ))
+        if (
+            result.finish_reason == "completed"
+            and isinstance(delivery_receipt_id, str)
+            and isinstance(delivery_agent_id, str)
+            and isinstance(delivery_record_revision, int)
+            and not isinstance(delivery_record_revision, bool)
+        ):
+            assistant_message = next(
+                (message for message in reversed(run_messages) if message.get("role") == "assistant"),
+                None,
+            )
+            if assistant_message is not None:
+                receipts = assistant_message.get("foreground_delivery_receipts")
+                receipt_list = [item for item in receipts if isinstance(item, str)] if isinstance(receipts, list) else []
+                if delivery_receipt_id not in receipt_list:
+                    receipt_list.append(delivery_receipt_id)
+                assistant_message["foreground_delivery_receipts"] = receipt_list
+        durable_current_user = deepcopy(current_user)
+        durable_current_user.pop("_runtime_input_kind", None)
+        durable_current_user.pop("_runtime_subagent_result", None)
+        committed_messages = (
+            run_messages
+            if automatic_continuation
+            else [durable_current_user, *run_messages]
+        )
         try:
             if self._aborted:
                 return False
             self._commit_agent_run(
                 active_session,
                 run_context,
-                [deepcopy(current_user), *run_messages],
+                committed_messages,
                 usage_delta=framing_usage,
                 metadata_updates=metadata_updates,
                 metadata_removals=metadata_removals,
-                restore_before=restore_before,
-                restore_run_token=restore_run_token,
+                restore_before=None if automatic_continuation else restore_before,
+                restore_run_token=None if automatic_continuation else restore_run_token,
+                persist_current_user=not automatic_continuation,
             )
         except (OSError, UnicodeError) as failure:
             _runtime_logger().error(
@@ -1932,7 +2063,40 @@ class AgentRunExecutor:
                 ErrorInfo("model_failed", "The model request failed.")
             )
             return False
+        # Session.commit_agent_run queues a best-effort save. Delivery acknowledgement
+        # requires reading the durable increment, never just the resident history.
+        if self._foreground_work_store is not None and (automatic_continuation or wait_observations):
+            await active_session.wait_for_pending_persist()
+            try:
+                persisted = Session.load(self._workspace_state, active_session.session_id)
+                if persisted.messages != active_session.messages:
+                    raise OSError("Foreground result increment is not durable")
+            except (OSError, UnicodeError, ValueError):
+                self._foreground_work_store.interrupt_uncertain_tasks()
+                await self._publish_commit_failure()
+                return False
         if self._foreground_work_store is not None and isinstance(task_id, str):
+            if (
+                result.finish_reason == "completed"
+                and isinstance(delivery_agent_id, str)
+                and isinstance(delivery_record_revision, int)
+                and not isinstance(delivery_record_revision, bool)
+                and isinstance(delivery_receipt_id, str)
+                and isinstance(execution_id, str)
+            ):
+                try:
+                    self._foreground_work_store.commit_delivery(
+                        agent_id=delivery_agent_id,
+                        terminal_record_revision=delivery_record_revision,
+                        task_generation=task_generation,
+                        execution_id=execution_id,
+                        receipt_id=delivery_receipt_id,
+                    )
+                except (OSError, UnicodeError, ValueError) as failure:
+                    _runtime_logger().error(
+                        "Foreground SubAgent delivery receipt could not be indexed type={}",
+                        type(failure).__name__,
+                    )
             if isinstance(task_generation, int) and isinstance(execution_id, str):
                 try:
                     self._foreground_work_store.record_iteration_usage(
@@ -1946,6 +2110,9 @@ class AgentRunExecutor:
                         "Foreground Task iteration usage could not be persisted type={}",
                         type(failure).__name__,
                     )
+                    self._foreground_work_store.interrupt_uncertain_tasks()
+                    await self._publish_commit_failure()
+                    return False
             if result.suspension is not None or isinstance(question_id, str):
                 try:
                     await active_session.wait_for_pending_persist()
@@ -2016,28 +2183,33 @@ class AgentRunExecutor:
     ) -> bool:
         if self._aborted:
             return False
+        runtime_only = current_user.get("_runtime_input_kind") == "subagent_result"
+        durable_current_user = deepcopy(current_user)
+        durable_current_user.pop("_runtime_input_kind", None)
+        durable_current_user.pop("_runtime_subagent_result", None)
+        terminal_messages = [
+            _build_assistant_repair_message(
+                content=(TURN_CANCELLED_MESSAGE if error.code == "turn_cancelled" else ""),
+                status="interrupted" if error.code == "turn_cancelled" else "error",
+                error=error,
+                model_calls=0,
+            )
+        ]
+        if not runtime_only:
+            terminal_messages.insert(0, durable_current_user)
         try:
             if self._aborted:
                 return False
             self._commit_agent_run(
                 active_session,
                 context,
-                [
-                    deepcopy(current_user),
-                    _build_assistant_repair_message(
-                        content=(
-                            TURN_CANCELLED_MESSAGE if error.code == "turn_cancelled" else ""
-                        ),
-                        status="interrupted" if error.code == "turn_cancelled" else "error",
-                        error=error,
-                        model_calls=0,
-                    ),
-                ],
+                terminal_messages,
                 usage_delta=framing_usage,
                 metadata_updates=metadata_updates,
                 metadata_removals=metadata_removals,
-                restore_before=restore_before,
-                restore_run_token=restore_run_token,
+                restore_before=None if runtime_only else restore_before,
+                restore_run_token=None if runtime_only else restore_run_token,
+                persist_current_user=not runtime_only,
             )
         except (OSError, UnicodeError) as failure:
             _runtime_logger().error(

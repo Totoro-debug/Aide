@@ -25,6 +25,7 @@ export interface LiveRun {
   localId: string;
   runId: string | null;
   prompt: string;
+  source?: "user" | "automatic";
   responseSegments: string[];
   assistantContent: string;
   status: RunStatus;
@@ -81,6 +82,7 @@ export function reduceLiveRunEvent(runs: LiveRun[], event: ServiceEvent): LiveRu
   } else if (event.type === "run.started") {
     next.status = "running";
     next.cancellable = true;
+    if (event.payload.source === "automatic") next.source = "automatic";
   } else if (event.type === "run.output") {
     const message = event.payload.message;
     if (typeof message !== "object" || message === null || Array.isArray(message)) return runs;

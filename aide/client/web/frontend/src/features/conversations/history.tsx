@@ -403,10 +403,17 @@ export function LiveRunView({
   const showActivity = active || run.status !== "completed" || activityParts.length > 0;
   return (
     <article className={styles.liveRun} data-run-id={run.runId ?? run.localId}>
-      <div className={styles.historyMessage} data-role="user">
-        <div className={styles.historyMessageRole}>{t("sessions.userMessage")}</div>
-        <div className={styles.livePrompt}>{run.prompt}</div>
-      </div>
+      {run.source === "automatic" ? (
+        <div className={styles.historyMessage} data-role="system">
+          <div className={styles.historyMessageRole}>{t("conversation.automaticContinuation")}</div>
+          <div className={styles.livePrompt}>{run.prompt || t("conversation.subagentResult")}</div>
+        </div>
+      ) : (
+        <div className={styles.historyMessage} data-role="user">
+          <div className={styles.historyMessageRole}>{t("sessions.userMessage")}</div>
+          <div className={styles.livePrompt}>{run.prompt}</div>
+        </div>
+      )}
       <div className={styles.historyMessage} data-role="assistant">
         <div className={styles.liveRunHeader}>
           <span className={styles.historyMessageRole}>{t("sessions.assistantMessage")}</span>

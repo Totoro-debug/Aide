@@ -5,6 +5,7 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import uuid4
@@ -24,6 +25,7 @@ from aide.agent.subagents.models import (
     SubAgentCreatorSnapshot,
     SubAgentError,
     SubAgentEvent,
+    SubAgentEventKind,
     SubAgentExecutionResult,
     SubAgentRecord,
     SubAgentSource,
@@ -270,6 +272,12 @@ class _DelegatingProvider:
         self.question_parent_started = asyncio.Event()
         self.question_spawn_requested = False
         self.question_wait_requested = False
+        self.automatic_continuation_started = asyncio.Event()
+        self.automatic_continuation_count = 0
+        self.automatic_write = False
+        self.keep_task = False
+        self.explicit_result_continuation_started = asyncio.Event()
+        self.explicit_result_continuation_context = ""
 
     @staticmethod
     def _response(content: str, *, tool_call: ModelToolCall | None = None) -> ModelResponse:
@@ -319,6 +327,25 @@ class _DelegatingProvider:
             for message in messages[latest_user_index + 1 :]
             if message.get("role") == "tool"
         ]
+
+        if "SubAgent result for automatic continuation:" in user_text:
+            self.automatic_continuation_count += 1
+            self.automatic_continuation_started.set()
+            if self.automatic_write and not any(m.get("tool_call_id") == "auto-write" for m in current_tool_results):
+                if "write_file" not in tool_names:
+                    return self._events("", tool_call=ModelToolCall(
+                        "auto-search-write", "tool_search", '{"query":"write file"}'))
+                return self._events("", tool_call=ModelToolCall(
+                    "auto-write", "write_file", '{"path":"auto-output.txt","content":"automatic bytes"}'))
+            return self._events("Main automatically handled the delegated result.")
+
+        if "## Result from delegated work" in user_text:
+            self.explicit_result_continuation_context = user_text
+            self.explicit_result_continuation_started.set()
+            return self._events("Main used the recovered delegated result.")
+
+        if "Continuation recovery seed" in user_text:
+            return self._events("The foreground Task is ready to continue.")
 
         if "Direct schedule integration request" in user_text:
             self.direct_schedule_tool_names.append(tool_names)
@@ -594,6 +621,8 @@ class _DelegatingProvider:
                     '{"title":"Scheduled answer","task":"Make delegated integration answer."}',
                 ),
             )
+        if self.keep_task:
+            return self._response('{"action":"keep","task_goal":null,"completion_boundary":null}')
         return self._response(
             '{"action":"replace","task_goal":"answer the input",'
             '"completion_boundary":"return one answer"}'
@@ -1122,6 +1151,346 @@ async def test_foreground_main_run_delegates_and_later_reads_the_completed_resul
         assert provider.old_result_seen.is_set(), provider.wait_result_contents
     finally:
         provider.release_child.set()
+
+
+async def _wait_for_automatic_completion(
+    sink: _CollectingSink,
+    *,
+    excluded_run_id: str,
+) -> dict[str, object]:
+    while True:
+        sink.changed.clear()
+        started = next(
+            (
+                event
+                for event in sink.events
+                if event.get("type") == "run.started"
+                and isinstance(event.get("run_id"), str)
+                and event["run_id"] != excluded_run_id
+                and cast(dict[str, object], event.get("payload", {})).get("source") == "automatic"
+            ),
+            None,
+        )
+        if started is not None:
+            return await sink.wait_for("run.completed", cast(str, started["run_id"]))
+        await asyncio.wait_for(sink.changed.wait(), timeout=10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["none", "claim", "dropped_event", "session_before", "session_after", "ledger"])
+async def test_completed_child_automatically_continues_the_current_task_without_a_user_anchor(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    provider = _DelegatingProvider()
+    service.model_router._provider_factory = lambda _configuration: provider
+    service.model_router._providers.clear()
+    claim = cast(
+        dict[str, object],
+        (await service.claim(client_id, workspace.workspace_id, session_id))["claim"],
+    )
+    claim_version = cast(int, claim["claim_version"])
+    sink = cast(_CollectingSink, service.client(client_id).sink)
+
+    try:
+        await workspace.input(
+            client_id,
+            session_id,
+            claim_version,
+            "Please make an initial delegation request.",
+            _RUN_ID,
+        )
+        await asyncio.wait_for(provider.child_started.wait(), timeout=5)
+        await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=5)
+        before = workspace.session_snapshot(session_id)
+        before_messages = cast(list[dict[str, object]], before["messages"])
+        before_anchor_count = len(cast(list[object], before["restore_anchors"]))
+        assert len(cast(list[dict[str, object]], service.list_subagents(
+            client_id, workspace.workspace_id, session_id
+        )["items"])) == 1
+
+        original_replace = HOST_FILESYSTEM.atomic_replace_text
+        injected = asyncio.Event()
+
+        def fail_publication(path: Path, content: str) -> None:
+            value = json.loads(content) if path.name == "state.json" else None
+            deliveries = value.get("deliveries", []) if isinstance(value, dict) else []
+            trigger = not injected.is_set() and (
+                (fault == "claim" and any(d["state"] == "claimed" for d in deliveries))
+                or (fault == "ledger" and any(d["state"] == "committed" for d in deliveries))
+                or (fault == "session_after" and "Main automatically handled the delegated result." in content)
+            )
+            if trigger:
+                injected.set()
+                if fault == "session_after":
+                    original_replace(path, content)
+                raise OSError("Injected delivery publication failure")
+            original_replace(path, content)
+
+        monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_text", fail_publication)
+        original_bytes = HOST_FILESYSTEM.atomic_replace_bytes
+
+        def fail_session(path: Path, content: bytes) -> None:
+            if (fault in {"session_before", "session_after"} and path.suffix == ".jsonl"
+                    and b"Main automatically handled the delegated result." in content):
+                injected.set()
+                if fault == "session_after":
+                    original_bytes(path, content)
+                raise OSError("Injected Session persistence failure")
+            original_bytes(path, content)
+
+        monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_bytes", fail_session)
+        if fault == "dropped_event":
+            original_publish = workspace.publish
+
+            async def drop_terminal(event: SubAgentEvent) -> None:
+                if event.data.get("status") in {"completed", "failed"}:
+                    return
+                await original_publish(event)
+
+            monkeypatch.setattr(workspace, "publish", drop_terminal)
+        provider.release_child.set()
+        if fault == "dropped_event":
+            from tests.service.test_foreground_questions import _wait_until
+            items = cast(list[dict[str, Any]], service.list_subagents(client_id, workspace.workspace_id, session_id)["items"])
+            child_id = items[0]["agent_id"]
+            await _wait_until(lambda: service.get_subagent(client_id, workspace.workspace_id, session_id, child_id)["status"] == "completed")
+            assert provider.automatic_continuation_count == 0
+            provider.keep_task = True
+            wake = str(uuid4())
+            await workspace.input(client_id, session_id, claim_version, "independent supplement", wake)
+            await asyncio.wait_for(sink.wait_for("run.completed", wake), timeout=10)
+        if fault == "claim":
+            await asyncio.wait_for(injected.wait(), timeout=10)
+            work = workspace.foreground_work_store(session_id).load()
+            assert provider.automatic_continuation_count == 0
+            assert work.deliveries[0].state == "pending"
+            record = _require_record(workspace.subagent_repository(session_id), work.deliveries[0].agent_id)
+            await workspace.publish(SubAgentEvent(
+                kind=SubAgentEventKind.STATUS, workspace_id=workspace.workspace_id,
+                session_id=session_id, agent_id=record.agent_id, revision=record.revision + 1000,
+                occurred_at=_NOW, data={"status": "completed"},
+            ))
+        automatic_completed = await asyncio.wait_for(
+            _wait_for_automatic_completion(sink, excluded_run_id=_RUN_ID), timeout=12
+        )
+        await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=5)
+        if fault == "session_before":
+            assert injected.is_set()
+            work = workspace.foreground_work_store(session_id).load()
+            assert work.deliveries[0].state == "claimed"
+            assert work.tasks[-1].state == "interrupted"
+            assert provider.automatic_continuation_count == 1
+            assert not any(message.get("foreground_delivery_receipts") for message in
+                           Session.load(workspace.workspace_state, session_id).messages)
+            return
+
+        automatic_run_id = automatic_completed.get("run_id")
+        automatic_started = next(
+            event
+            for event in sink.events
+            if event.get("type") == "run.started" and event.get("run_id") == automatic_run_id
+        )
+        assert cast(dict[str, object], automatic_started["payload"]).get("source") == "automatic"
+        automatic_request = next(
+            text for text, _tools in provider.requests
+            if "SubAgent result for automatic continuation:" in text
+        )
+        assert "## Runtime Event: SubAgent Result" in automatic_request
+        workspace.session_snapshot(session_id)
+        delivery = workspace.foreground_work_store(session_id).load().deliveries[0]
+        assert delivery.state == "committed"
+        record = _require_record(workspace.subagent_repository(session_id), delivery.agent_id)
+        for index in range(100):
+            await workspace.publish(SubAgentEvent(
+                kind=SubAgentEventKind.STATUS, workspace_id=workspace.workspace_id,
+                session_id=session_id, agent_id=record.agent_id, revision=record.revision + index + 1000,
+                occurred_at=_NOW, data={"status": "completed"},
+            ))
+        if fault not in {"none", "dropped_event"}:
+            assert injected.is_set()
+
+        after = workspace.session_snapshot(session_id)
+        after_messages = cast(list[dict[str, object]], after["messages"])
+        assert provider.automatic_continuation_count == 1
+        assert sum(message.get("role") == "user" for message in after_messages) == sum(
+            message.get("role") == "user" for message in before_messages
+        ) + int(fault == "dropped_event")
+        assert len(cast(list[object], after["restore_anchors"])) == before_anchor_count + int(fault == "dropped_event")
+        assert any(
+            message.get("content") == "Main automatically handled the delegated result."
+            for message in after_messages
+        )
+        final_message = next(m for m in after_messages
+                             if m.get("content") == "Main automatically handled the delegated result.")
+        assert final_message["token_usage"] == {"model_calls": 1, "input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        recorder = service.trace_recorder
+        assert isinstance(recorder, SQLiteTraceRecorder)
+        await wait_for_trace_writer(recorder)
+        trace = [record for record in (await recorder.list_records()).items
+                 if record.run_id == automatic_run_id and record.kind is TraceKind.MODEL]
+        assert len(trace) == 1
+        assert trace[0].origin is TraceOrigin.FOREGROUND
+        assert trace[0].owner_session_id == session_id
+        assert trace[0].usage.input_tokens == 1 and trace[0].usage.output_tokens == 1
+        assert trace[0].restore_run_token == cast(list[dict[str, object]], after["restore_anchors"])[-1]["run_token"]
+        result = service.get_subagent(
+            client_id,
+            workspace.workspace_id,
+            session_id,
+            cast(str, cast(list[dict[str, object]], service.list_subagents(
+                client_id, workspace.workspace_id, session_id
+            )["items"])[0]["agent_id"]),
+        )
+        assert result["result"] == "SubAgent child answer."
+    finally:
+        provider.release_child.set()
+
+
+@pytest.mark.asyncio
+async def test_explicit_task_continue_recovers_a_persisted_subagent_result(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    provider = _DelegatingProvider()
+    service.model_router._provider_factory = lambda _configuration: provider
+    service.model_router._providers.clear()
+    claim = cast(
+        dict[str, object],
+        (await service.claim(client_id, workspace.workspace_id, session_id))["claim"],
+    )
+    claim_version = cast(int, claim["claim_version"])
+    sink = cast(_CollectingSink, service.client(client_id).sink)
+    seed_run_id = str(uuid4())
+
+    await workspace.input(
+        client_id,
+        session_id,
+        claim_version,
+        "Continuation recovery seed.",
+        seed_run_id,
+    )
+    await asyncio.wait_for(sink.wait_for("run.completed", seed_run_id), timeout=5)
+    before = workspace.session_snapshot(session_id)
+    persisted_messages = Session.load(workspace.workspace_state, session_id).messages
+    task = next(
+        item
+        for item in cast(list[dict[str, object]], before["foreground_tasks"])
+        if item["state"] == "completed"
+    )
+    user_anchor = next(
+        message
+        for message in reversed(persisted_messages)
+        if message.get("role") == "user"
+    )
+    task_id = cast(str, task["task_id"])
+    generation = cast(int, task["generation"])
+    repository = workspace.subagent_repository(session_id)
+    registered = repository.register(
+        title="Recovered delegated result",
+        task="Return a persisted result.",
+        parent_run_id=seed_run_id,
+        source=SubAgentSource(
+            kind=SubAgentSourceKind.FOREGROUND,
+            restore_run_token=cast(str, user_anchor["restore_run_token"]),
+            task_id=task_id,
+            task_generation=generation,
+        ),
+        creator_snapshot=_snapshot(),
+    )
+    running = repository.save(
+        replace(
+            registered,
+            status=SubAgentStatus.RUNNING,
+            started_at=_NOW,
+            revision=registered.revision + 1,
+        )
+    )
+    terminal = repository.save(
+        replace(
+            running,
+            status=SubAgentStatus.COMPLETED,
+            finished_at=_NOW,
+            conversation=({"role": "assistant", "content": "Recovered result."},),
+            result="Recovered result details.",
+            revision=running.revision + 1,
+        )
+    )
+    work_store = workspace.foreground_work_store(session_id)
+    work = work_store.reconcile(
+        persisted_messages,
+        subagents=(terminal,),
+    )
+    delivery = work.deliveries[0]
+    stale_execution_id = str(uuid4())
+    claimed = work_store.claim_delivery(
+        agent_id=delivery.agent_id,
+        terminal_record_revision=delivery.terminal_record_revision,
+        task_generation=delivery.task_generation,
+        execution_id=stale_execution_id,
+    )
+    assert claimed is not None
+    work_store.start_execution(
+        task_id,
+        stale_execution_id,
+        expected_generation=generation,
+        explicit_user_operation=False,
+    )
+    work = work_store.reconcile(persisted_messages, subagents=(terminal,))
+    assert work.deliveries[0].state == "claimed"
+    assert next(item for item in work.tasks if item.task_id == task_id).state == "interrupted"
+    before_user_count = sum(
+        message.get("role") == "user"
+        for message in cast(list[dict[str, object]], before["messages"])
+    )
+
+    old_request_count = len(provider.requests)
+    workspace_path = workspace.workspace_path
+    await service.stop()
+    recovered = AgentService(service.agent_home, ConfigLoader(service.agent_home).load())
+    await recovered.start()
+    recovered.model_router._provider_factory = lambda _: provider
+    recovered.model_router._providers.clear()
+    try:
+        client = await recovered.register_client("cli")
+        client_id = client.client_id
+        sink = _CollectingSink()
+        await recovered.connect_client(client_id, sink)
+        workspace = await recovered.attach_workspace(client_id, workspace_path)
+        claim = cast(dict[str, object], (await recovered.claim(client_id, workspace.workspace_id, session_id))["claim"])
+        claim_version = cast(int, claim["claim_version"])
+        work = workspace.foreground_work_store(session_id).load()
+        assert len(provider.requests) == old_request_count
+        assert work.deliveries[0].state == "claimed"
+        continued = await workspace.continue_task(
+            client_id,
+            session_id,
+            claim_version,
+            task_id,
+            work.revision,
+            str(uuid4()),
+        )
+        run_id = cast(str, continued["run_id"])
+        await asyncio.wait_for(provider.explicit_result_continuation_started.wait(), timeout=5)
+        await asyncio.wait_for(sink.wait_for("run.completed", run_id), timeout=5)
+
+        assert "Recovered delegated result" in provider.explicit_result_continuation_context
+        assert "Recovered result details." in provider.explicit_result_continuation_context
+        after = workspace.session_snapshot(session_id)
+        after_messages = cast(list[dict[str, object]], after["messages"])
+        assert sum(message.get("role") == "user" for message in after_messages) == before_user_count + 1
+        assert after_messages[-2]["content"] == "Continue the current foreground task."
+        assert after_messages[-2].get("foreground_delivery_receipts") is None
+        delivery = workspace.foreground_work_store(session_id).load().deliveries[0]
+        assert delivery.state == "committed"
+        assert any(
+            message.get("foreground_delivery_receipts") == [delivery.receipt_id]
+            for message in after_messages
+        )
+    finally:
+        await recovered.stop()
 
 
 @pytest.mark.asyncio
@@ -3063,3 +3432,86 @@ async def test_child_answer_does_not_replace_a_removed_registered_model(
     assert record.status is SubAgentStatus.INTERRUPTED
     assert record.creator_snapshot == registered
     assert provider.child_question_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lower_permission", [False, True])
+async def test_automatic_file_effect_uses_user_anchor_and_current_permission(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    lower_permission: bool,
+) -> None:
+    from aide.agent.session.restore import RestoreMode
+    from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
+
+    service, workspace, client, sid, _ = management_case
+    provider = _DelegatingProvider()
+    provider.automatic_write = True
+    service.model_router._provider_factory = lambda _: provider
+    service.model_router._providers.clear()
+    service.client_permission(client).select("workspace-write")
+    target = workspace.workspace_path / "auto-output.txt"
+    target.write_bytes(b"original\x00bytes")
+    claim = cast(dict[str, Any], (await service.claim(client, workspace.workspace_id, sid))["claim"])
+    version = claim["claim_version"]
+    sink = cast(_CollectingSink, service.client(client).sink)
+    run_id = str(uuid4())
+    await workspace.input(client, sid, version, "initial delegation request", run_id)
+    await asyncio.wait_for(sink.wait_for("run.completed", run_id), timeout=10)
+    if lower_permission:
+        service.client_permission(client).select("read-only")
+    provider.release_child.set()
+    if lower_permission:
+        await _wait_until(lambda: any(e["type"] == "confirmation.requested" for e in sink.events))
+        event = next(e for e in sink.events if e["type"] == "confirmation.requested")
+        service.decide_confirmation(client, cast(dict[str, Any], event["payload"])["token"], "declined")
+    await asyncio.wait_for(_wait_for_automatic_completion(sink, excluded_run_id=run_id), timeout=15)
+    assert target.read_bytes() == (b"original\x00bytes" if lower_permission else b"automatic bytes")
+    await _wait_for_idle(workspace, sid)
+    anchors = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["restore_anchors"])
+    anchor = next(a for a in anchors if a["content"] == "initial delegation request")
+    credential = workspace.require_claim(client, sid, version).credential
+    await service.inspect_restore(client, workspace.workspace_id, sid, version, credential,
+                                  "inspect-auto", anchor["anchor_id"])
+    await service.commit_restore(client, workspace.workspace_id, sid, version, credential,
+        "restore-auto", anchor["anchor_id"],
+        RestoreMode.CONVERSATION_ONLY.value if lower_permission else RestoreMode.FILES.value)
+    assert target.read_bytes() == b"original\x00bytes"
+    work = workspace.foreground_work_store(sid).load()
+    assert all(d.state == "invalidated" for d in work.deliveries)
+
+
+@pytest.mark.asyncio
+async def test_queued_users_and_wait_delivery_precede_automatic_arbitration(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
+
+    service, workspace, client, sid, _ = management_case
+    provider = _DelegatingProvider()
+    service.model_router._provider_factory = lambda _: provider
+    service.model_router._providers.clear()
+    claim = cast(dict[str, Any], (await service.claim(client, workspace.workspace_id, sid))["claim"])
+    sink = cast(_CollectingSink, service.client(client).sink)
+    runs = [str(uuid4()) for _ in range(3)]
+    await workspace.input(client, sid, claim["claim_version"], "initial delegation request", runs[0])
+    await asyncio.wait_for(sink.wait_for("run.completed", runs[0]), timeout=10)
+    provider.keep_task = True
+    items = cast(list[dict[str, Any]], service.list_subagents(client, workspace.workspace_id, sid)["items"])
+    provider.agent_id = items[0]["agent_id"]
+    await workspace.input(client, sid, claim["claim_version"], "follow-up result request one", runs[1])
+    await _wait_until(lambda: provider.wait_requested)
+    await workspace.input(client, sid, claim["claim_version"], "follow-up result request two", runs[2])
+    provider.release_child.set()
+    await asyncio.wait_for(sink.wait_for("run.completed", runs[2]), timeout=15)
+    await _wait_for_idle(workspace, sid)
+    snapshot = workspace.session_snapshot(sid)
+    assert provider.automatic_continuation_count == 0
+    assert provider.old_result_seen.is_set()
+    assert workspace.foreground_work_store(sid).load().deliveries[0].state == "committed"
+    starts = [event["run_id"] for event in sink.events if event["type"] == "run.started"]
+    assert starts == runs
+    for previous, following in pairwise(runs):
+        completed = next(i for i, e in enumerate(sink.events) if e["type"] == "run.completed" and e["run_id"] == previous)
+        started = next(i for i, e in enumerate(sink.events) if e["type"] == "run.started" and e["run_id"] == following)
+        assert completed < started
+    assert sum(m["role"] == "user" for m in cast(list[dict[str, Any]], snapshot["messages"])) >= 3

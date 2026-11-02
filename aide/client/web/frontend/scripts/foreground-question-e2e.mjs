@@ -95,6 +95,19 @@ try {
   await expect(page.getByText("Which child output?", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("log")).toContainText("child reports");
   await expect(cancelRun).toHaveCount(0);
+  const autoOpen = page.waitForResponse((response) =>
+    response.request().method() === "POST"
+      && new globalThis.URL(response.url()).pathname.endsWith("/conversations/open"));
+  await page.locator("#app-sidebar").getByRole("link", { name: "New conversation", exact: true }).click();
+  assert.equal((await autoOpen).status(), 200);
+  await expect(input).toBeEnabled();
+  await input.fill("automatic continuation acceptance");
+  await input.press("Enter");
+  await expect(page.getByRole("log")).toContainText("Automatic result handled in browser.", { timeout: 30000 });
+  await expect(cancelRun).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByRole("log")).toContainText("Automatic result handled in browser.");
+  await expect(page.locator('[data-role="user"]', { hasText: "SubAgent result:" })).toHaveCount(0);
   console.log("Foreground question and task operations: Web answer/continue/cancel passed");
 } finally {
   await browser?.close();

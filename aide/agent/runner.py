@@ -207,6 +207,7 @@ class AgentRunner:
         externalize_result: Callable[[ToolResult], ToolResult] | None,
         cancel_requested: Callable[[], bool] | None,
         max_iterations: int,
+        remaining_iterations: int | None = None,
         file_mutation_recorder: FileMutationRecorder | None = None,
         run_token: UUID | None = None,
         stop_on_tool_error: bool = False,
@@ -216,6 +217,11 @@ class AgentRunner:
         on_first_request_prepared: Callable[[], None] | None = None,
     ) -> AgentRunnerResult:
         _validate_max_iterations(max_iterations)
+        if remaining_iterations is not None:
+            if (type(remaining_iterations) is not int or remaining_iterations < 1
+                    or remaining_iterations > max_iterations):
+                raise ValueError("remaining_iterations must be within the configured Run limit")
+            max_iterations = remaining_iterations
 
         active_router = self._model_router
         active_preparer = self._request_preparer

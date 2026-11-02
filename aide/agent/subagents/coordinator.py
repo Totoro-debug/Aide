@@ -823,6 +823,10 @@ class SubAgentPool:
                         result=record.result,
                         error=record.error,
                         usage=record.usage or {},
+                        terminal_record_revision=(
+                            record.revision if record.status in {SubAgentStatus.COMPLETED, SubAgentStatus.FAILED}
+                            else None
+                        ),
                         question_id=(
                             (record.context_state or {}).get("pending_question_id")
                             if record.status is SubAgentStatus.WAITING_FOR_ANSWER

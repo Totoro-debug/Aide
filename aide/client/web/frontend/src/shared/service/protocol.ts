@@ -611,6 +611,7 @@ export interface ActiveRunSnapshot {
   run_id: string;
   request_id: string;
   prompt: string;
+  source?: "user" | "automatic";
   status: "accepted" | "running";
   assistant_content: string;
   response_segments?: string[];

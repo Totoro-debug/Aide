@@ -533,7 +533,7 @@ async def test_list_tool_pages_and_later_run_reads_long_wait_result_as_artifact(
     results = json.loads(waited.content)
     assert [item["agent_id"] for item in results] == ids
     assert all(
-        set(item) == {"agent_id", "title", "status", "result", "error", "usage"} for item in results
+        set(item) == {"agent_id", "title", "status", "result", "error", "usage", "terminal_record_revision"} for item in results
     )
     externalized = BaseTool.handle_result(
         waited.content,

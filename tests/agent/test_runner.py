@@ -2464,7 +2464,8 @@ async def test_runner_rejects_invalid_max_iterations(value: object) -> None:
 
 
 @pytest.mark.asyncio
-async def test_runner_stops_after_fiftieth_tool_iteration_without_a_new_model_call() -> None:
+@pytest.mark.parametrize("remaining", [None, 1, 2])
+async def test_runner_stops_after_fiftieth_tool_iteration_without_a_new_model_call(remaining: int | None) -> None:
     provider = ScriptedFakeProvider(streams=_tool_iteration_scripts(50))
     work = FakeTool(name="work", description="work", outcomes=tuple("ok" for _ in range(50)))
     gateway = SingleToolGateway((work,))
@@ -2479,6 +2480,7 @@ async def test_runner_stops_after_fiftieth_tool_iteration_without_a_new_model_ca
         externalize_result=None,
         cancel_requested=None,
         max_iterations=50,
+        remaining_iterations=remaining,
     )
 
     assert result.finish_reason == "max_iterations"
@@ -2488,9 +2490,9 @@ async def test_runner_stops_after_fiftieth_tool_iteration_without_a_new_model_ca
         "Aide 本轮对话已经达到最大循环次数，仍没有输出最终结果。"  # noqa: RUF001
         "可以再次尝试本次请求或者尝试给出更明确的任务目标。"
     )
-    assert len(provider.stream_requests) == 50
-    assert len(work.calls) == 50
-    assert result.usage["model_calls"] == 50
+    assert len(provider.stream_requests) == (50 if remaining is None else remaining)
+    assert len(work.calls) == (50 if remaining is None else remaining)
+    assert result.usage["model_calls"] == (50 if remaining is None else remaining)
     assert result.messages[-1]["content"] == result.final_content
     assert result.messages[-1]["token_usage"]["model_calls"] == 0
 

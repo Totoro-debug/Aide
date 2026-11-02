@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Any, Literal, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from tzlocal import get_localzone_name
 
@@ -106,6 +106,40 @@ from aide.utils.time import local_now
 
 if TYPE_CHECKING:
     from aide.service.runtime.service import AgentService
+
+
+def _effective_task_restore_token(
+    messages: list[dict[str, Any]], task_id: str, fallback_token: str | None
+) -> str | None:
+    valid_user_tokens: set[str] = set()
+    task_token: str | None = None
+    for message in messages:
+        token = message.get("restore_run_token")
+        if (
+            message.get("role") != "user"
+            or type(message.get("restore_anchor_id")) is not int
+            or not isinstance(token, str)
+        ):
+            continue
+        try:
+            parsed = UUID(token)
+        except ValueError:
+            continue
+        if parsed.version != 4:
+            continue
+        normalized = str(parsed)
+        valid_user_tokens.add(normalized)
+        if message.get("foreground_task_id") == task_id:
+            task_token = normalized
+    if task_token is not None:
+        return task_token
+    if fallback_token is None:
+        return None
+    try:
+        fallback = str(UUID(fallback_token))
+    except ValueError:
+        return None
+    return fallback if fallback in valid_user_tokens else None
 
 
 class WorkspaceRecord:
@@ -1467,6 +1501,8 @@ class WorkspaceRecord:
         foreground_question_id: str | None = None,
         foreground_task_id: str | None = None,
         foreground_task_continue: bool = False,
+        foreground_task_generation: int | None = None,
+        foreground_delivery: Mapping[str, object] | None = None,
     ) -> SessionClaim:
         async with self._lock:
             self._require_admitted()
@@ -1495,6 +1531,66 @@ class WorkspaceRecord:
             async with state.coordination_lock:
                 if run_id in state.live_runs:
                     return claim
+                claimed_delivery = None
+                claimed_delivery_result: object = None
+                if foreground_delivery is not None:
+                    agent_id = foreground_delivery.get("agent_id")
+                    record_revision = foreground_delivery.get("terminal_record_revision")
+                    generation = foreground_delivery.get("task_generation")
+                    if (
+                        not isinstance(agent_id, str)
+                        or isinstance(record_revision, bool)
+                        or not isinstance(record_revision, int)
+                        or isinstance(generation, bool)
+                        or not isinstance(generation, int)
+                        or generation != foreground_task_generation
+                        or foreground_task_id is None
+                    ):
+                        raise service_error(
+                            "validation_error", "SubAgent result continuation is invalid.", status=422
+                        )
+                    try:
+                        claimed_delivery = self.foreground_work_store(session_id).claim_delivery(
+                            agent_id=agent_id,
+                            terminal_record_revision=record_revision,
+                            task_generation=generation,
+                            execution_id=run_id,
+                            allow_reclaim=True,
+                        )
+                    except (OSError, UnicodeError, ValueError) as error:
+                        raise service_error(
+                            "persistence_error", "SubAgent result could not be claimed.", status=500
+                        ) from error
+                    if claimed_delivery is None:
+                        raise service_error(
+                            "foreground_task_conflict",
+                            "The SubAgent result changed; reload the Task before continuing.",
+                            status=409,
+                        )
+                    claimed_delivery_result = foreground_delivery.get("result")
+                if foreground_task_continue:
+                    if (
+                        foreground_task_id is None
+                        or isinstance(foreground_task_generation, bool)
+                        or not isinstance(foreground_task_generation, int)
+                    ):
+                        raise service_error(
+                            "validation_error", "Task continuation is invalid.", status=422
+                        )
+                    try:
+                        self.foreground_work_store(session_id).start_execution(
+                            foreground_task_id,
+                            run_id,
+                            expected_generation=foreground_task_generation,
+                        )
+                    except (ForegroundWorkConflict, ValueError) as error:
+                        raise service_error(
+                            "foreground_task_conflict", "The Task changed.", status=409
+                        ) from error
+                    except OSError as error:
+                        raise service_error(
+                            "persistence_error", "Task continuation could not be saved.", status=500
+                        ) from error
                 async with client.delivery_lock:
                     if not state.live_runs:
                         state.completed_user_count = sum(
@@ -1517,6 +1613,17 @@ class WorkspaceRecord:
                         inbound_metadata["foreground_task_id"] = foreground_task_id
                     if foreground_task_continue:
                         inbound_metadata["foreground_task_continue"] = True
+                    if foreground_task_generation is not None:
+                        inbound_metadata["foreground_task_generation"] = foreground_task_generation
+                    if claimed_delivery is not None:
+                        inbound_metadata.update(
+                            {
+                                "foreground_delivery_receipt_id": claimed_delivery.receipt_id,
+                                "foreground_delivery_agent_id": claimed_delivery.agent_id,
+                                "foreground_delivery_record_revision": claimed_delivery.terminal_record_revision,
+                                "foreground_subagent_result": claimed_delivery_result,
+                            }
+                        )
                     await state.bus.put_inbound(
                         InboundMessage(
                             content=text,
@@ -1915,9 +2022,10 @@ class WorkspaceRecord:
             raise service_error("session_restore_active", "Session Restore is in progress.", retryable=True)
         store = self.foreground_work_store(session_id)
         state = self._loops[session_id]
+        records = self._committed_subagents(session_id)
         if not state.loop.has_active_run and not state.run_ids and not state.live_runs:
             store.reconcile(self._persisted_foreground_messages(session_id),
-                            subagents=self._committed_subagents(session_id))
+                            subagents=records)
         current = store.load()
         if current.revision != expected_revision:
             raise service_error(
@@ -1938,14 +2046,44 @@ class WorkspaceRecord:
                 "The Task is active, cancelled, replaced, or waiting for an answer.",
                 status=409,
             )
+        record_by_id = {record.agent_id: record for record in records}
+        foreground_delivery: dict[str, object] | None = None
+        for delivery in current.deliveries:
+            if (
+                delivery.task_id != task_id
+                or delivery.task_generation != task.generation
+                or delivery.state not in {"pending", "claimed"}
+            ):
+                continue
+            record = record_by_id.get(delivery.agent_id)
+            if (
+                record is None
+                or record.revision != delivery.terminal_record_revision
+                or record.source.kind is not SubAgentSourceKind.FOREGROUND
+                or record.source.task_id != task_id
+                or record.source.task_generation != task.generation
+                or record.status not in {SubAgentStatus.COMPLETED, SubAgentStatus.FAILED}
+            ):
+                continue
+            result_text = record.result or ""
+            if record.status is SubAgentStatus.FAILED:
+                failure = ""
+                if record.error is not None:
+                    failure = f"\nFailure: {record.error.code}: {record.error.message}"
+                result_text = f"The SubAgent failed.{failure}"
+            foreground_delivery = {
+                "agent_id": delivery.agent_id,
+                "terminal_record_revision": delivery.terminal_record_revision,
+                "task_generation": delivery.task_generation,
+                "result": (
+                    f"Title: {record.title}\n"
+                    f"Status: {record.status.value}\n"
+                    f"Result: {result_text}"
+                ),
+            }
+            break
         run_id = str(uuid4())
         text = "Continue the current foreground task."
-        try:
-            store.start_execution(task_id, run_id, expected_generation=task.generation)
-        except (ForegroundWorkConflict, ValueError) as error:
-            raise service_error("foreground_task_conflict", "The Task changed.", status=409) from error
-        except OSError as error:
-            raise service_error("persistence_error", "Task continuation could not be saved.", status=500) from error
         await self.input(
             client_id,
             session_id,
@@ -1955,6 +2093,8 @@ class WorkspaceRecord:
             request_id,
             foreground_task_id=task_id,
             foreground_task_continue=True,
+            foreground_task_generation=task.generation,
+            foreground_delivery=foreground_delivery,
         )
         return {"run_id": run_id, "task_id": task_id}
 
@@ -2044,17 +2184,22 @@ class WorkspaceRecord:
             return
         release_when_idle = False
         while True:
+            inbound: InboundMessage | None = None
             async with state.coordination_lock:
                 if state.processor_stopping:
                     if state.processor_task is current:
                         state.processor_task = None
                     return
-                if not await state.bus.inbound_snapshot():
-                    if state.processor_task is current:
-                        state.processor_task = None
-                    release_when_idle = not self._closed and state.owner_client_id is not None
-                    break
-                inbound = await state.bus.get_inbound()
+                if await state.bus.inbound_snapshot():
+                    inbound = await state.bus.get_inbound()
+                else:
+                    inbound = self._claim_automatic_subagent_result(state)
+                    if inbound is None:
+                        if state.processor_task is current:
+                            state.processor_task = None
+                        release_when_idle = not self._closed and state.owner_client_id is not None
+                        break
+                assert inbound is not None
                 run_id = inbound.metadata.get("run_id")
                 if not isinstance(run_id, str):
                     run_id = state.run_ids[0] if state.run_ids else None
@@ -2063,7 +2208,14 @@ class WorkspaceRecord:
             state.output_task = output_task
             terminal_forwarded = False
             execution_failed = False
-            execution_task = asyncio.create_task(state.loop.run_foreground(inbound))
+            automatic_continuation = (
+                inbound.metadata.get("foreground_automatic_continuation") is True
+            )
+            execution_task = asyncio.create_task(
+                state.loop.run_automatic_continuation(inbound)
+                if automatic_continuation
+                else state.loop.run_foreground(inbound)
+            )
             try:
                 try:
                     while not state.loop.has_active_run and not execution_task.done():
@@ -2074,7 +2226,7 @@ class WorkspaceRecord:
                             workspace_id=self.workspace_id,
                             session_id=state.loop.session.session_id,
                             run_id=run_id,
-                            payload={},
+                            payload={"source": "automatic"} if automatic_continuation else {},
                         )
                     await execution_task
                 except asyncio.CancelledError:
@@ -2109,6 +2261,127 @@ class WorkspaceRecord:
                 self._release_switched_claim_when_idle(state.loop.session.session_id, state)
             )
             state.release_task.add_done_callback(_consume_task_result)
+
+    def _claim_automatic_subagent_result(self, state: _LoopState) -> InboundMessage | None:
+        """Claim one persisted foreground result after the current user queue is drained."""
+        session_id = state.loop.session.session_id
+        client_id = state.owner_client_id
+        claim = self._claims.get(session_id)
+        client = None if client_id is None else self.service._clients.get(client_id)
+        if (
+            self._closed
+            or self._restore_blocked
+            or self.service.state in {"draining", "stopped"}
+            or not state.loop.foreground_input_admitted()
+            or state.schedule
+            or client_id is None
+            or claim is None
+            or claim.client_id != client_id
+            or claim.status != "claimed"
+            or client is None
+            or not client.connected
+            or not self.session_model_available(session_id)
+        ):
+            return None
+        store = self.foreground_work_store(session_id)
+        try:
+            records = self._committed_subagents(session_id)
+            snapshot = store.reconcile(
+                self._persisted_foreground_messages(session_id),
+                subagents=records,
+            )
+        except (OSError, UnicodeError, ValueError, SubAgentStoreError):
+            return None
+        records_by_id = {record.agent_id: record for record in records}
+        for delivery in snapshot.pending_deliveries:
+            record = records_by_id.get(delivery.agent_id)
+            if (
+                record is None
+                or record.revision != delivery.terminal_record_revision
+                or record.source.kind is not SubAgentSourceKind.FOREGROUND
+                or record.source.task_id != delivery.task_id
+                or record.source.task_generation != delivery.task_generation
+                or record.status not in {SubAgentStatus.COMPLETED, SubAgentStatus.FAILED}
+            ):
+                continue
+            task = next(
+                (
+                    item
+                    for item in snapshot.tasks
+                    if item.task_id == delivery.task_id
+                    and item.generation == delivery.task_generation
+                ),
+                None,
+            )
+            if task is None or task.state not in {"running", "completed"}:
+                continue
+            effect_run_token = _effective_task_restore_token(
+                state.loop.session.messages,
+                delivery.task_id,
+                record.source.restore_run_token,
+            )
+            if effect_run_token is None:
+                continue
+            run_id = str(uuid4())
+            try:
+                claimed_delivery = store.claim_delivery(
+                    agent_id=delivery.agent_id,
+                    terminal_record_revision=delivery.terminal_record_revision,
+                    task_generation=delivery.task_generation,
+                    execution_id=run_id,
+                )
+                if claimed_delivery is None:
+                    continue
+                store.start_execution(
+                    delivery.task_id,
+                    run_id,
+                    expected_generation=delivery.task_generation,
+                    explicit_user_operation=False,
+                )
+            except (OSError, UnicodeError, ValueError):
+                return None
+            result_text = record.result or ""
+            if record.status is SubAgentStatus.FAILED:
+                error_text = ""
+                if record.error is not None:
+                    error_text = f"\nFailure: {record.error.code}: {record.error.message}"
+                result_text = f"The SubAgent failed.{error_text}"
+            inbound = InboundMessage(
+                content=(
+                    "SubAgent result for automatic continuation:\n"
+                    f"Title: {record.title}\n"
+                    f"Status: {record.status.value}\n"
+                    f"Result: {result_text}"
+                ),
+                metadata={
+                    "run_id": run_id,
+                    "foreground_task_id": delivery.task_id,
+                    "foreground_automatic_continuation": True,
+                    "foreground_delivery_receipt_id": claimed_delivery.receipt_id,
+                    "foreground_delivery_agent_id": delivery.agent_id,
+                    "foreground_delivery_record_revision": delivery.terminal_record_revision,
+                    "foreground_task_generation": delivery.task_generation,
+                    "foreground_effect_run_token": effect_run_token,
+                },
+            )
+            state.completed_user_count = sum(
+                message.get("role") == "user" for message in state.loop.session.messages
+            )
+            state.run_ids.append(run_id)
+            state.live_runs[run_id] = {
+                "run_id": run_id,
+                "request_id": run_id,
+                "prompt": f"SubAgent result: {record.title}",
+                "source": "automatic",
+                "status": "accepted",
+                "assistant_content": "",
+                "tools": [],
+                "response_segments": [""],
+                "cancel_requested": False,
+                "cancellable": False,
+            }
+            return inbound
+        return None
 
     async def _emit_unexpected_run_failure(self, state: _LoopState, run_id: str) -> None:
         """Keep one accepted Run from stranding when an execution boundary fails."""
@@ -2348,6 +2621,16 @@ class WorkspaceRecord:
         """Publish a SubAgent event to the active claimant without a Main Run ID."""
         if event.workspace_id != self.workspace_id:
             raise ValueError("SubAgent event belongs to a different Workspace")
+        if (
+            event.kind.value == "subagent.status"
+            and event.data.get("status") in {
+                SubAgentStatus.COMPLETED.value,
+                SubAgentStatus.FAILED.value,
+            }
+        ):
+            state = self._loops.get(event.session_id)
+            if state is not None and state.owner_client_id is not None:
+                self._ensure_processor(state)
         claim = self._claims.get(event.session_id)
         target_client_ids = () if claim is None else (claim.client_id,)
         await self.service.emit(

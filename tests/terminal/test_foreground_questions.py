@@ -308,3 +308,40 @@ async def test_cli_answers_two_subagents_independently(
         agent_home=tmp_path / "home", workspace=workspace, monkeypatch=monkeypatch,
         scenario=scenario, provider=cast(_FixedCatalogProvider, provider), size=(120, 40),
     )
+
+
+@pytest.mark.asyncio
+async def test_cli_shows_automatic_continuation_without_user_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typing import Any
+
+    import tomlkit
+
+    from tests.configuration.test_config import VALID_CONFIG
+    from tests.service.test_subagent_management import _DelegatingProvider
+    from tests.terminal import test_conversation as terminal_fixture
+    document = cast(Any, tomlkit.parse(VALID_CONFIG))
+    document["models"]["routes"]["subagent"] = dict(document["models"]["routes"]["chat"])
+    monkeypatch.setattr(terminal_fixture, "VALID_CONFIG", tomlkit.dumps(document))
+    provider = _DelegatingProvider()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
+        input_area = app.query_one("#conversation-input", TextArea)
+        input_area.text = "initial delegation request"
+        await pilot.press("enter")
+        await _wait_for_turn(app)
+        await asyncio.wait_for(provider.child_started.wait(), timeout=10)
+        provider.release_child.set()
+        async with asyncio.timeout(20):
+            while "Main automatically handled the delegated result." not in _visible_screen_text(app):
+                await pilot.pause()
+        assert provider.automatic_continuation_count == 1
+        assert "Automatic continuation from a SubAgent result." in _visible_screen_text(app)
+
+    await _run_cli_terminal_case(
+        agent_home=tmp_path / "home", workspace=workspace, monkeypatch=monkeypatch,
+        scenario=scenario, provider=cast(_FixedCatalogProvider, provider), size=(120, 50),
+    )

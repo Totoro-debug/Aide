@@ -292,7 +292,35 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
     )
     streaming_request = "streaming markdown" in user_prompt.lower()
     wait_command = "Get-Content -LiteralPath .\\fixture.txt -Wait"
-    if ("subagent question acceptance" in normalized_requested_prompt
+    if ("automatic continuation acceptance" in normalized_requested_prompt
+            or "browser-auto-child" in normalized_requested_prompt
+            or "Runtime Event: SubAgent Result" in user_prompt) and tool_names:
+        call_auto: tuple[str, str, dict[str, object]] | None = None
+        if "Runtime Event: SubAgent Result" in user_prompt:
+            text_auto = "Automatic result handled in browser."
+        elif "browser-auto-child" in normalized_requested_prompt:
+            text_auto = "Durable browser child result."
+        elif "browser-auto-spawn" not in current_tool_result_ids:
+            if "spawn_agent" not in tool_names:
+                call_auto = ("browser-auto-search", "tool_search", {"query": "spawn agent"})
+            else:
+                call_auto = ("browser-auto-spawn", "spawn_agent", {
+                    "title": "Automatic browser child", "task": "browser-auto-child"})
+            text_auto = ""
+        else:
+            text_auto = "Main delegated the browser task."
+        if call_auto is not None:
+            call_id, call_name, call_arguments = call_auto
+            chunks.append(_chunk(request_id=request_id, model=model, delta={"tool_calls": [{
+                "index": 0, "id": call_id, "type": "function", "function": {
+                    "name": call_name, "arguments": json.dumps(call_arguments),
+                },
+            }]}))
+            chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="tool_calls"))
+        else:
+            chunks.append(_chunk(request_id=request_id, model=model, delta={"content": text_auto}))
+            chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="stop"))
+    elif ("subagent question acceptance" in normalized_requested_prompt
             or "browser-child-question" in normalized_requested_prompt) and tool_names:
         call: tuple[str, str, dict[str, object]] | None = None
         if "browser-child-question" in normalized_requested_prompt:

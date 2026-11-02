@@ -12,11 +12,15 @@ from typing import Any, Literal, TypedDict, cast
 
 from aide.agent.permission import ToolPermissionLevel, validate_permission_level
 from aide.agent.session.session import Session, SessionStoragePartition
-from aide.agent.subagents.models import SubAgentRecord
+from aide.agent.subagents.models import (
+    SubAgentRecord,
+    SubAgentSourceKind,
+    SubAgentStatus,
+)
 from aide.agent.workspace_state import WorkspaceState
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 _MAX_QUESTION_LENGTH = 2_000
 _MAX_ANSWER_LENGTH = 10_000
 _SESSION_ID = re.compile(
@@ -42,6 +46,7 @@ TaskState = Literal[
     "cancelled",
     "superseded",
 ]
+DeliveryState = Literal["pending", "claimed", "committed", "invalidated"]
 
 
 class ForegroundQuestionOption(TypedDict):
@@ -116,10 +121,22 @@ class ForegroundWorkQuestion:
 
 
 @dataclass(frozen=True, slots=True)
+class ForegroundWorkDelivery:
+    agent_id: str
+    terminal_record_revision: int
+    task_id: str
+    task_generation: int
+    state: DeliveryState
+    claimed_execution_id: str | None = None
+    receipt_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ForegroundWorkSnapshot:
     revision: int
     tasks: tuple[ForegroundWorkTask, ...] = ()
     questions: tuple[ForegroundWorkQuestion, ...] = ()
+    deliveries: tuple[ForegroundWorkDelivery, ...] = ()
 
     def question(self, question_id: str) -> ForegroundWorkQuestion | None:
         return next(
@@ -130,6 +147,10 @@ class ForegroundWorkSnapshot:
     @property
     def pending_questions(self) -> tuple[ForegroundWorkQuestion, ...]:
         return tuple(item for item in self.questions if item.state == "pending")
+
+    @property
+    def pending_deliveries(self) -> tuple[ForegroundWorkDelivery, ...]:
+        return tuple(item for item in self.deliveries if item.state == "pending")
 
 
 class ForegroundWorkStore:
@@ -243,6 +264,135 @@ class ForegroundWorkStore:
         return self._publish(
             ForegroundWorkSnapshot(current.revision + 1, tasks, current.questions)
         )
+
+    def claim_delivery(
+        self,
+        *,
+        agent_id: str,
+        terminal_record_revision: int,
+        task_generation: int,
+        execution_id: str,
+        allow_reclaim: bool = False,
+    ) -> ForegroundWorkDelivery | None:
+        """Atomically claim one pending result for one Main execution segment."""
+        _require_identifier(agent_id, "agent_id")
+        _require_identifier(execution_id, "execution_id")
+        if not isinstance(allow_reclaim, bool):
+            raise ValueError("allow_reclaim must be a boolean")
+        for name, value in (
+            ("terminal_record_revision", terminal_record_revision),
+            ("task_generation", task_generation),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        current = self.load()
+        key = (agent_id, terminal_record_revision, task_generation)
+        delivery = next(
+            (
+                item
+                for item in current.deliveries
+                if (item.agent_id, item.terminal_record_revision, item.task_generation) == key
+            ),
+            None,
+        )
+        if delivery is None or (
+            delivery.state != "pending"
+            and not (allow_reclaim and delivery.state == "claimed")
+        ):
+            return None
+        task = next((item for item in current.tasks if item.task_id == delivery.task_id), None)
+        unresolved_question_states = {
+            "preparing",
+            "pending",
+            "answer_received",
+            "resuming",
+            "executing",
+            "interrupted",
+        }
+        if (
+            task is None
+            or task.generation != task_generation
+            or task.state not in ({"running", "completed", "interrupted"} if allow_reclaim else {"running", "completed"})
+            or (
+                not allow_reclaim
+                and task.iteration_budget_used >= task.iteration_budget_limit
+            )
+            or any(
+                question.task_id == task.task_id
+                and question.state in unresolved_question_states
+                for question in current.questions
+            )
+        ):
+            return None
+        claimed = replace(
+            delivery,
+            state="claimed",
+            claimed_execution_id=execution_id,
+            receipt_id=_delivery_receipt_id(*key),
+        )
+        deliveries = tuple(claimed if item == delivery else item for item in current.deliveries)
+        self._publish(
+            ForegroundWorkSnapshot(
+                current.revision + 1,
+                current.tasks,
+                current.questions,
+                deliveries,
+            )
+        )
+        return claimed
+
+    def commit_delivery(
+        self,
+        *,
+        agent_id: str,
+        terminal_record_revision: int,
+        task_generation: int,
+        execution_id: str,
+        receipt_id: str | None,
+    ) -> ForegroundWorkDelivery | None:
+        """Commit a claimed delivery after its Session receipt is durable."""
+        _require_identifier(agent_id, "agent_id")
+        _require_identifier(execution_id, "execution_id")
+        if receipt_id is not None:
+            _require_identifier(receipt_id, "receipt_id")
+        for name, value in (
+            ("terminal_record_revision", terminal_record_revision),
+            ("task_generation", task_generation),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        current = self.load()
+        key = (agent_id, terminal_record_revision, task_generation)
+        delivery = next(
+            (
+                item
+                for item in current.deliveries
+                if (item.agent_id, item.terminal_record_revision, item.task_generation) == key
+            ),
+            None,
+        )
+        if delivery is None:
+            return None
+        stable_receipt_id = _delivery_receipt_id(*key)
+        if delivery.state == "committed" and delivery.receipt_id == stable_receipt_id:
+            return delivery
+        if (
+            delivery.state != "claimed"
+            or delivery.claimed_execution_id != execution_id
+            or receipt_id != stable_receipt_id
+        ):
+            return None
+        committed = replace(delivery, state="committed", receipt_id=stable_receipt_id)
+        deliveries = tuple(committed if item == delivery else item for item in current.deliveries)
+        self._publish(
+            ForegroundWorkSnapshot(
+                current.revision + 1,
+                current.tasks,
+                current.questions,
+                deliveries,
+            )
+        )
+        return committed
 
     def replace_current_task(
         self,
@@ -937,6 +1087,49 @@ class ForegroundWorkStore:
             if message.get("role") == "tool" and isinstance(message.get("tool_call_id"), str)
         }
         child_records = {record.agent_id: record for record in (subagents or ())}
+        persisted_receipts = {
+            receipt
+            for message in messages
+            if message.get("role") == "assistant"
+            and isinstance(message.get("foreground_delivery_receipts"), list)
+            for receipt in message["foreground_delivery_receipts"]
+            if isinstance(receipt, str)
+        }
+        waited_results: set[tuple[str, int]] = set()
+        for message in messages:
+            if message.get("role") != "tool" or message.get("name") != "wait_agent":
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            try:
+                values = message.get("foreground_wait_results", json.loads(content))
+            except json.JSONDecodeError:
+                values = message.get("foreground_wait_results")
+            if isinstance(values, list):
+                waited_results.update(
+                    (item["agent_id"], item["terminal_record_revision"])
+                    for item in values
+                    if isinstance(item, dict)
+                    and isinstance(item.get("agent_id"), str)
+                    and item.get("status") in {"completed", "failed"}
+                    and type(item.get("terminal_record_revision")) is int
+                )
+        for agent_id, terminal_revision in waited_results:
+            record = child_records.get(agent_id)
+            if (
+                record is not None
+                and record.revision == terminal_revision
+                and record.source.kind is SubAgentSourceKind.FOREGROUND
+                and record.source.task_id is not None
+                and record.source.task_generation is not None
+                and record.status in {SubAgentStatus.COMPLETED, SubAgentStatus.FAILED}
+            ):
+                persisted_receipts.add(
+                    _delivery_receipt_id(
+                        record.agent_id, record.revision, record.source.task_generation
+                    )
+                )
         answer_messages = {
             message.get("foreground_question_id"): message
             for message in messages
@@ -944,6 +1137,59 @@ class ForegroundWorkStore:
             and isinstance(message.get("foreground_question_id"), str)
         }
         changed = False
+        tasks_by_id = {task.task_id: task for task in current.tasks}
+        deliveries_by_key = {
+            (item.agent_id, item.terminal_record_revision, item.task_generation): item
+            for item in current.deliveries
+        }
+        for delivery_key, delivery in tuple(deliveries_by_key.items()):
+            task = tasks_by_id.get(delivery.task_id)
+            if (
+                task is None
+                or task.generation != delivery.task_generation
+                or task.state in {"cancelled", "superseded"}
+            ) and delivery.state in {"pending", "claimed"}:
+                deliveries_by_key[delivery_key] = replace(delivery, state="invalidated")
+                changed = True
+        for record in child_records.values():
+            source = record.source
+            if (
+                source.kind is not SubAgentSourceKind.FOREGROUND
+                or source.task_id is None
+                or source.task_generation is None
+                or record.status not in {SubAgentStatus.COMPLETED, SubAgentStatus.FAILED}
+            ):
+                continue
+            delivery_key = (record.agent_id, record.revision, source.task_generation)
+            if delivery_key in deliveries_by_key:
+                continue
+            task = tasks_by_id.get(source.task_id)
+            delivery_state: DeliveryState = (
+                "pending"
+                if task is not None
+                and task.generation == source.task_generation
+                and task.state not in {"cancelled", "superseded"}
+                else "invalidated"
+            )
+            deliveries_by_key[delivery_key] = ForegroundWorkDelivery(
+                agent_id=record.agent_id,
+                terminal_record_revision=record.revision,
+                task_id=source.task_id,
+                task_generation=source.task_generation,
+                state=delivery_state,
+            )
+            changed = True
+        for delivery_key, delivery in tuple(deliveries_by_key.items()):
+            receipt_id = _delivery_receipt_id(*delivery_key)
+            if receipt_id in persisted_receipts:
+                updated = replace(delivery, state="committed", receipt_id=receipt_id)
+            elif delivery.state == "committed":
+                updated = replace(delivery, state="invalidated")
+            else:
+                continue
+            if updated != delivery:
+                deliveries_by_key[delivery_key] = updated
+                changed = True
         questions: list[ForegroundWorkQuestion] = []
         task_states: dict[str, tuple[str, TaskState]] = {}
         for question in current.questions:
@@ -1115,7 +1361,12 @@ class ForegroundWorkStore:
         if not changed:
             return current
         return self._publish(
-            ForegroundWorkSnapshot(current.revision + 1, tuple(tasks), tuple(questions))
+            ForegroundWorkSnapshot(
+                current.revision + 1,
+                tuple(tasks),
+                tuple(questions),
+                tuple(deliveries_by_key.values()),
+            )
         )
 
     def _replace_question(
@@ -1163,12 +1414,17 @@ class ForegroundWorkStore:
     def _publish(self, snapshot: ForegroundWorkSnapshot) -> ForegroundWorkSnapshot:
         if self._closed:
             raise ForegroundWorkConflict("foreground-work authority was revoked")
+        if not snapshot.deliveries:
+            existing = self.load().deliveries
+            if existing:
+                snapshot = replace(snapshot, deliveries=existing)
         root = self._prepare_session_root()
         value = {
             "schema_version": _SCHEMA_VERSION,
             "revision": snapshot.revision,
             "tasks": [_task_to_dict(item) for item in snapshot.tasks],
             "questions": [_question_to_dict(item) for item in snapshot.questions],
+            "deliveries": [_delivery_to_dict(item) for item in snapshot.deliveries],
         }
         content = json.dumps(value, ensure_ascii=True, separators=(",", ":")) + "\n"
         if HOST_FILESYSTEM.entry_exists(self.path):
@@ -1208,27 +1464,100 @@ def _snapshot_from_dict(value: object) -> ForegroundWorkSnapshot:
     if not isinstance(value, dict):
         raise ForegroundWorkError("Foreground Work state must be an object")
     data = cast(dict[str, object], value)
-    if set(data) != {"schema_version", "revision", "tasks", "questions"}:
-        raise ForegroundWorkError("Foreground Work state has an unsupported shape")
-    schema_version = data["schema_version"]
-    if type(schema_version) is not int or schema_version not in {1, 2, 3, 4, _SCHEMA_VERSION}:
+    schema_version = data.get("schema_version")
+    if type(schema_version) is not int or schema_version not in {1, 2, 3, 4, 5, _SCHEMA_VERSION}:
         raise ForegroundWorkError("Foreground Work state has an unsupported version")
+    expected_fields = {"schema_version", "revision", "tasks", "questions"}
+    if schema_version >= 6:
+        expected_fields.add("deliveries")
+    if set(data) != expected_fields:
+        raise ForegroundWorkError("Foreground Work state has an unsupported shape")
     revision, tasks_value, questions_value = (data["revision"], data["tasks"], data["questions"])
     if type(revision) is not int or revision < 1:
         raise ForegroundWorkError("Foreground Work revision is malformed")
     if not isinstance(tasks_value, list) or not isinstance(questions_value, list):
         raise ForegroundWorkError("Foreground Work state collections are malformed")
+    deliveries_value = data.get("deliveries", [])
+    if not isinstance(deliveries_value, list):
+        raise ForegroundWorkError("Foreground Work delivery collection is malformed")
     tasks = tuple(
         _task_from_dict(item, schema_version=schema_version) for item in tasks_value
     )
     questions = tuple(
         _question_from_dict(item, schema_version=schema_version) for item in questions_value
     )
+    deliveries = tuple(_delivery_from_dict(item) for item in deliveries_value)
     if len({item.task_id for item in tasks}) != len(tasks):
         raise ForegroundWorkError("Foreground Work contains duplicate task IDs")
     if len({item.question_id for item in questions}) != len(questions):
         raise ForegroundWorkError("Foreground Work contains duplicate question IDs")
-    return ForegroundWorkSnapshot(revision, tasks, questions)
+    if len(
+        {
+            (item.agent_id, item.terminal_record_revision, item.task_generation)
+            for item in deliveries
+        }
+    ) != len(deliveries):
+        raise ForegroundWorkError("Foreground Work contains duplicate result deliveries")
+    return ForegroundWorkSnapshot(revision, tasks, questions, deliveries)
+
+
+def _delivery_receipt_id(agent_id: str, terminal_record_revision: int, task_generation: int) -> str:
+    return f"{agent_id}:{terminal_record_revision}:{task_generation}"
+
+
+def _delivery_to_dict(delivery: ForegroundWorkDelivery) -> dict[str, object]:
+    return {
+        "agent_id": delivery.agent_id,
+        "terminal_record_revision": delivery.terminal_record_revision,
+        "task_id": delivery.task_id,
+        "task_generation": delivery.task_generation,
+        "state": delivery.state,
+        "claimed_execution_id": delivery.claimed_execution_id,
+        "receipt_id": delivery.receipt_id,
+    }
+
+
+def _delivery_from_dict(value: object) -> ForegroundWorkDelivery:
+    if not isinstance(value, dict):
+        raise ForegroundWorkError("Foreground Work delivery is malformed")
+    item = cast(dict[str, object], value)
+    if set(item) != {
+        "agent_id",
+        "terminal_record_revision",
+        "task_id",
+        "task_generation",
+        "state",
+        "claimed_execution_id",
+        "receipt_id",
+    }:
+        raise ForegroundWorkError("Foreground Work delivery has an unsupported shape")
+    agent_id = _require_stored_string(item["agent_id"], "delivery.agent_id")
+    task_id = _require_stored_string(item["task_id"], "delivery.task_id")
+    terminal_revision = item["terminal_record_revision"]
+    task_generation = item["task_generation"]
+    state = item["state"]
+    claimed_execution_id = item["claimed_execution_id"]
+    receipt_id = item["receipt_id"]
+    if (
+        type(terminal_revision) is not int
+        or terminal_revision < 1
+        or type(task_generation) is not int
+        or task_generation < 1
+        or not isinstance(state, str)
+        or state not in {"pending", "claimed", "committed", "invalidated"}
+        or (claimed_execution_id is not None and not isinstance(claimed_execution_id, str))
+        or (receipt_id is not None and not isinstance(receipt_id, str))
+    ):
+        raise ForegroundWorkError("Foreground Work delivery fields are malformed")
+    return ForegroundWorkDelivery(
+        agent_id,
+        terminal_revision,
+        task_id,
+        task_generation,
+        cast(DeliveryState, state),
+        claimed_execution_id,
+        receipt_id,
+    )
 
 
 def _task_to_dict(task: ForegroundWorkTask) -> dict[str, object]:

@@ -147,6 +147,7 @@ class _ConsumedRun:
     user_text: str
     projection: _MessageBusRunProjection
     run_id: str | None = None
+    source: str | None = None
     started: bool = False
 
 
@@ -1598,6 +1599,7 @@ class TerminalConversationApp(App[None]):
             current = _ConsumedRun(
                 turn_id, str(state.get("prompt", "")), _MessageBusRunProjection(self, turn_id),
                 run_id=state["run_id"],
+                source="automatic" if state.get("source") == "automatic" else None,
             )
             self._consumed_runs.append(current)
             if state.get("status") == "accepted":
@@ -1738,7 +1740,10 @@ class TerminalConversationApp(App[None]):
         display = self._conversation_display
         if display is None:
             display = self.query_one("#conversation-display", _ConversationDisplay)
-        await self._mount_user_message(run.user_text, display)
+        if run.source == "automatic":
+            await self._mount_status("Automatic continuation from a SubAgent result.", display)
+        else:
+            await self._mount_user_message(run.user_text, display)
         run.started = True
         input_area = self._conversation_input
         if input_area is None:

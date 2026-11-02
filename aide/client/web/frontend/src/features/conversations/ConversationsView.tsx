@@ -1173,6 +1173,7 @@ function ProjectSessionsContent({
       ));
       const recovered = live.runs.map((run): LiveRun => ({
         ...newLiveRun(run.request_id, run.run_id, run.prompt, run.status),
+        source: run.source,
         responseSegments: run.response_segments?.slice(0, -1) ?? [],
         assistantContent: run.response_segments?.at(-1) ?? run.assistant_content,
         tools: run.tools.map((tool) => ({ toolCallId: tool.tool_call_id, name: tool.name,

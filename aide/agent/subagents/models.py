@@ -462,6 +462,7 @@ class SubAgentWaitResult:
     error: SubAgentError | None
     usage: dict[str, int]
     question_id: str | None = None
+    terminal_record_revision: int | None = None
 
     def __post_init__(self) -> None:
         require_uuid4_string(self.agent_id, field="agent_id")
@@ -498,6 +499,8 @@ class SubAgentWaitResult:
         }
         if self.question_id is not None:
             value["question_id"] = self.question_id
+        if self.terminal_record_revision is not None:
+            value["terminal_record_revision"] = self.terminal_record_revision
         return value
 
 

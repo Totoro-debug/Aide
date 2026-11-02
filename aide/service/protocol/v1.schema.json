@@ -1623,6 +1623,12 @@
         "prompt": {
           "type": "string"
         },
+        "source": {
+          "enum": [
+            "user",
+            "automatic"
+          ]
+        },
         "status": {
           "enum": [
             "accepted",

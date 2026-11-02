@@ -81,6 +81,12 @@ class SessionExecution:
             self._pending_flushes.add(flush)
             flush.add_done_callback(self._flush_done)
 
+    async def run_automatic_continuation(self, inbound: InboundMessage) -> None:
+        """Execute one internal result continuation without submitting a user input."""
+        if inbound.metadata.get("foreground_automatic_continuation") is not True:
+            raise ValueError("automatic continuation metadata is required")
+        await self.run_foreground(inbound)
+
     async def _executor_for_run(self) -> tuple[AgentRunExecutor, Callable[[], None] | None]:
         if self._prepare_executor is None:
             return self._create_executor(), None

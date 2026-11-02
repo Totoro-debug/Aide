@@ -88,6 +88,10 @@ _Avoid_: Agent Service, Conversation Session, Runtime Lifetime, Provider retry l
 One complete Agent execution for one input against one Conversation Session, from input acceptance through its final outcome and persistence request.
 _Avoid_: Agent Turn, Runtime, Model call, Tool call
 
+**Foreground Task**:
+One unit of work authorized by a foreground user request, retaining its identity across Human Answers and automatic continuations until completed, cancelled, or replaced. It belongs to one Conversation Session and may delegate work to SubAgents.
+_Avoid_: Agent Run, Blackboard, Schedule Job, task list
+
 **Main Agent**:
 The Agent executing a foreground user input or a user Schedule occurrence that can delegate independent tasks to SubAgents.
 _Avoid_: SubAgent, independent Personal Agent
@@ -103,6 +107,10 @@ _Avoid_: Conversation Session, Main Agent history
 **SubAgent Pool**:
 The execution capacity and waiting queue owned by one Conversation Session for its SubAgents, independently of that Session's current Main Agent Run.
 _Avoid_: Agent Runner, global Run limit, foreground input queue
+
+**SubAgent Completion Continuation**:
+Main Agent work continued in the owning Conversation Session in response to a SubAgent's successful or failed completion, within the scope of the originating user request. Consuming the same result explicitly does not create another continuation, and cancellation or replacement of the originating task withdraws its automatic continuations.
+_Avoid_: SubAgent restart, new user request, Schedule occurrence
 
 **ReAct Cycle**:
 One assistant response that requests Tools together with every corresponding Tool result completed before the next model request; a terminal assistant response without Tool calls ends the Agent Run instead of starting another cycle.
@@ -231,6 +239,14 @@ _Avoid_: Conversation Summary, activity log, task note
 **Tool Gateway**:
 The sole public boundary for resolving, validating, authorizing, executing, and normalizing Tool calls.
 _Avoid_: Direct Tool registry, plugin executor, shell wrapper
+
+**Human Question**:
+A structured request from a Main Agent or SubAgent for information or a decision from the user needed to advance authorized work, associated with its owning Conversation Session. Only work depending on the answer waits; independent work may continue.
+_Avoid_: Tool Confirmation, permission grant, ordinary progress message
+
+**Human Answer**:
+The user's response to one Human Question, expressed as a supplied choice or free text.
+_Avoid_: Tool Confirmation, automatic default, ordinary conversation input
 
 **Tool Confirmation**:
 A host-mediated, one-shot user decision bound to one validated Tool call in one live Agent Run.

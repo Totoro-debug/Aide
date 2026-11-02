@@ -1,0 +1,17 @@
+---
+status: proposed
+---
+
+# Keep Foreground Questions and Continuations with the Session
+
+Foreground Tasks need to retain unanswered Human Questions and accept SubAgent results after an Agent Run ends or its Client switches conversations. Keep their durable coordination with the owning Conversation Session, separate from Client Claims, the Blackboard's semantic task definition, and transient presentation events. Use versioned Workspace-owned files under the existing file-first policy; retain existing Session and SubAgent records as their respective authorities. Cross-file publication requires recoverable intents and reconciliation, rather than an assumed shared transaction or a claim of exactly-once external effects.
+
+A Human Question is an information request, not permission to execute a Tool. Give questions their own answer operation, restricted to the current Session Claim. Finish the question Tool exchange and suspend execution at a complete ReAct boundary instead of retaining an awaiting coroutine or an unmatched Tool call. Resume with an explicit answer and saved conversation context; never replay completed Tools or persist a Provider's opaque ModelContinuation. This releases the Session processor and SubAgent capacity while retaining questions independently of context compaction.
+
+SubAgent completion events only wake a Session arbiter. The persisted terminal record and its delivery receipt determine whether a result needs handling; explicit wait delivery and automatic delivery share the same receipt. Prefer queued user input before starting a continuation, coalesce currently available results, and allow at most one Main Agent execution per Session. Automatic execution retains the originating foreground authorization ceiling and never falls back to Schedule permissions when a Claim is absent. Cancelling or replacing a Task fences its late callbacks. Restore and deletion fence the same coordination before changing Session authority.
+
+Separate a Task's logical origin from each execution segment's side-effect ownership. A Human Answer or explicit continuation is a real user operation with its own Restore Anchor; automatic segments inherit the applicable user operation rather than inventing a user message. SubAgent segment snapshots and file journals must follow these anchors. Extend the durable Restore transaction to restore the retained execution prefix and invalidate discarded questions, answers, and result receipts; merely deleting SubAgents by their original source token would miss changes made after an answer.
+
+The first delivery covers Web and CLI foreground work and its SubAgents. A Client switching conversations does not end that work while the service has online Clients. Service shutdown follows the current on-demand lifetime; startup exposes saved questions and interrupted work but does not execute it until a person answers or explicitly continues. Schedule integration is deferred because an unanswered occurrence needs separate recurrence and overlap rules.
+
+This changes the explicit-wait-only choice in [ADR-0030](0030-delegate-single-use-subagents-through-explicit-start-and-wait.md) and the relationship between execution and Client Claims in [ADR-0029](0029-host-cli-and-web-through-one-local-service.md). Those documents describe current behavior until this proposal is implemented and accepted. File ownership and Restore boundaries remain grounded in [ADR-0001](0001-file-first-local-persistence.md) and [ADR-0028](0028-session-restore-architecture.md).

@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import pytest
 from textual.pilot import Pilot
-from textual.widgets import Static, TextArea
+from textual.widgets import Input, OptionList, Static, TextArea
 
 from aide.client.cli.conversation import (
     TerminalConversationApp,
@@ -18,6 +18,7 @@ from tests.service.test_foreground_questions import _QuestionProvider
 from tests.terminal.test_conversation import (
     _run_cli_terminal_case,
     _visible_screen_text,
+    _wait_for_session_picker,
     _wait_for_turn,
 )
 
@@ -311,8 +312,9 @@ async def test_cli_answers_two_subagents_independently(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("switch_session", [False, True])
 async def test_cli_shows_automatic_continuation_without_user_input(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, switch_session: bool
 ) -> None:
     from typing import Any
 
@@ -334,12 +336,54 @@ async def test_cli_shows_automatic_continuation_without_user_input(
         await pilot.press("enter")
         await _wait_for_turn(app)
         await asyncio.wait_for(provider.child_started.wait(), timeout=10)
+        if switch_session:
+            original_session = app._control.project_foreground_conversation().session_id
+            from aide.agent.session.session import Session
+            from aide.agent.workspace_state import WorkspaceState
+            from aide.utils.time import local_now
+
+            alternate = Session.create(WorkspaceState(workspace), now=local_now)
+            alternate.update_metadata(title="Switch target")
+            from uuid import uuid4
+
+            alternate.commit_agent_run(
+                [{"role": "user", "content": "Switch target seed."}],
+                pending_last_compacted=0,
+                pending_action_summary="",
+                restore_before=alternate.capture_restore_before(),
+                restore_run_token=uuid4(),
+            )
+            await alternate.wait_for_pending_persist()
+            input_area.text = "/resume"
+            await pilot.press("enter")
+            await _wait_for_session_picker(app, pilot)
+            app.screen.query_one("#session-picker-filter", Input).value = "Switch target"
+            await pilot.pause()
+            await pilot.press("enter")
+            async with asyncio.timeout(10):
+                while app._control.project_foreground_conversation().session_id == original_session:
+                    await pilot.pause()
         provider.release_child.set()
+        if switch_session:
+            await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=10)
+            input_area.text = "/resume"
+            await pilot.press("enter")
+            await _wait_for_session_picker(app, pilot)
+            options = app.screen.query_one("#session-picker-options", OptionList)
+            options.highlighted = next(
+                index for index, option in enumerate(options.options)
+                if option.id == original_session
+            )
+            await pilot.press("enter")
+            async with asyncio.timeout(10):
+                while app._control.project_foreground_conversation().session_id != original_session:
+                    await pilot.pause()
         async with asyncio.timeout(20):
             while "Main automatically handled the delegated result." not in _visible_screen_text(app):
                 await pilot.pause()
         assert provider.automatic_continuation_count == 1
-        assert "Automatic continuation from a SubAgent result." in _visible_screen_text(app)
+        if not switch_session:
+            assert "Automatic continuation from a SubAgent result." in _visible_screen_text(app)
 
     await _run_cli_terminal_case(
         agent_home=tmp_path / "home", workspace=workspace, monkeypatch=monkeypatch,

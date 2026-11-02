@@ -39,9 +39,24 @@ class ServiceConfirmationPresenter(ConfirmationPresenter):
         token: object,
         respond: Callable[[object, ConfirmationDecision], bool],
     ) -> None:
+        workspace_id, session_id, run_id = self._service.confirmation_source(envelope.owner)
+        if isinstance(envelope.owner, ForegroundConfirmationOwner) and workspace_id is None:
+            respond(token, "declined")
+            return
+        if isinstance(envelope.owner, SubAgentConfirmationOwner) and envelope.origin == "foreground":
+            workspace = self._service._workspaces.get(envelope.owner.workspace_id)
+            record = (
+                None if workspace is None else
+                workspace.subagent_repository(envelope.owner.session_id).get(envelope.owner.agent_id)
+            )
+            if record is not None and record.source.task_id is not None and not any(
+                not self._service._clients[client_id].expired
+                for client_id in self._audience(workspace_id, session_id)
+            ):
+                respond(token, "declined")
+                return
         wire_token = str(uuid4())
         self._wire_tokens[token] = wire_token
-        workspace_id, session_id, run_id = self._service.confirmation_source(envelope.owner)
         self._wire_sources[token] = (workspace_id, session_id, run_id)
         payload: dict[str, object] = {
             "token": wire_token,

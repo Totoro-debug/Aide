@@ -496,6 +496,7 @@ class WorkspaceRecord:
                     subagents=self._committed_subagents(session_id),
                 )
             loop_state.owner_client_id = client_id
+            loop_state.foreground_permission_control = self.service.client_permission(client_id)
             version = self._claim_versions.get(session_id, 0) + 1
             self._claim_versions[session_id] = version
             claim = SessionClaim(
@@ -634,15 +635,23 @@ class WorkspaceRecord:
         for claim in owned_claims:
             session_id = claim.session_id
             loop_state = self._loops.get(session_id)
+            retain_foreground = (
+                loop_state is not None
+                and self.service.foreground_continuation_admission_open()
+                and self._has_resumable_foreground_work(session_id)
+            )
             try:
                 if loop_state is not None:
                     await self.service.confirmation.cancel_generation(loop_state.loop.generation_id)
-                    try:
-                        await loop_state.loop.cancel_active_run()
-                    except RuntimeError:
-                        pass
-                    self._retained_session_closes.add(session_id)
-                    await self._close_loop(session_id)
+                    if retain_foreground:
+                        loop_state.owner_client_id = None
+                    else:
+                        try:
+                            await loop_state.loop.cancel_active_run()
+                        except RuntimeError:
+                            pass
+                        self._retained_session_closes.add(session_id)
+                        await self._close_loop(session_id)
             except Exception as error:
                 errors.append(error)
                 continue
@@ -662,6 +671,61 @@ class WorkspaceRecord:
                 await self._close_loop(session_id, abort=True)
         if errors:
             raise ExceptionGroup("Client Session cleanup failed", errors)
+
+    def _has_resumable_foreground_work(self, session_id: str) -> bool:
+        """Keep an expired Client's loop only while an authorized Task remains live."""
+        if self._restore_blocked or self._restore_session_id == session_id:
+            return False
+        try:
+            if session_deletion_pending(self.workspace_state, session_id):
+                return False
+            records = self._committed_subagents(session_id)
+            snapshot = self.foreground_work_store(session_id).load()
+        except (OSError, UnicodeError, ValueError, SubAgentStoreError):
+            return False
+        task_states = {
+            (task.task_id, task.generation): task.state for task in snapshot.tasks
+        }
+        resumable_states = {"running", "waiting_for_answer"}
+        continuable_states = resumable_states | {"completed"}
+        delivery_states = {
+            (delivery.agent_id, delivery.terminal_record_revision, delivery.task_generation):
+            delivery.state
+            for delivery in snapshot.deliveries
+        }
+        if any(
+            delivery.state in {"pending", "claimed"}
+            and task_states.get((delivery.task_id, delivery.task_generation)) in continuable_states
+            for delivery in snapshot.deliveries
+        ):
+            return True
+        return any(
+            record.source.kind is SubAgentSourceKind.FOREGROUND
+            and record.source.task_id is not None
+            and record.source.task_generation is not None
+            and task_states.get((record.source.task_id, record.source.task_generation))
+            in continuable_states
+            and (
+                record.status
+                in {
+                    SubAgentStatus.QUEUED,
+                    SubAgentStatus.RUNNING,
+                    SubAgentStatus.WAITING_FOR_ANSWER,
+                }
+                or (
+                    record.status in {SubAgentStatus.COMPLETED, SubAgentStatus.FAILED}
+                    and delivery_states.get(
+                        (
+                            record.agent_id,
+                            record.revision,
+                            record.source.task_generation,
+                        )
+                    )
+                    not in ("committed", "invalidated")
+                )
+            )
+            for record in records
+        )
 
     def confirmation_source(
         self, owner: ConfirmationOwner
@@ -2164,6 +2228,7 @@ class WorkspaceRecord:
             )
         processor = state.processor_task
         if processor is not None and not processor.done():
+            state.processor_wakeup_pending = True
             return
         processor = asyncio.create_task(self._process_session(state))
         state.processor_task = processor
@@ -2173,10 +2238,72 @@ class WorkspaceRecord:
 
         processor.add_done_callback(processor_finished)
 
+    def wake_foreground_continuations(self) -> None:
+        """Wake retained foreground Sessions after the Service becomes available."""
+        if not self.service.foreground_continuation_admission_open():
+            return
+        for state in tuple(self._loops.values()):
+            if (
+                state.schedule
+                or state.processor_stopping
+                or state.foreground_permission_control is None
+                or not state.loop.foreground_input_admitted()
+                or not self.session_model_available(state.loop.session.session_id)
+            ):
+                continue
+            if self._has_pending_automatic_subagent_result(state):
+                self._ensure_processor(state)
+
+    def _has_pending_automatic_subagent_result(self, state: _LoopState) -> bool:
+        session_id = state.loop.session.session_id
+        try:
+            records = self._committed_subagents(session_id)
+            snapshot = self.foreground_work_store(session_id).load()
+        except (OSError, UnicodeError, ValueError, SubAgentStoreError):
+            return False
+        tasks = {
+            (task.task_id, task.generation): task for task in snapshot.tasks
+        }
+        deliveries = {
+            (delivery.agent_id, delivery.terminal_record_revision, delivery.task_generation):
+            delivery
+            for delivery in snapshot.deliveries
+        }
+        for record in records:
+            source = record.source
+            if (
+                source.kind is not SubAgentSourceKind.FOREGROUND
+                or source.task_id is None
+                or source.task_generation is None
+                or record.status not in {SubAgentStatus.COMPLETED, SubAgentStatus.FAILED}
+            ):
+                continue
+            task = tasks.get((source.task_id, source.task_generation))
+            if (
+                task is None
+                or task.state not in {"running", "completed"}
+                or task.iteration_budget_used >= task.iteration_budget_limit
+            ):
+                continue
+            delivery = deliveries.get(
+                (record.agent_id, record.revision, source.task_generation)
+            )
+            if delivery is None or delivery.state == "pending":
+                return True
+        return False
+
     def _processor_finished(self, state: _LoopState, task: asyncio.Task[None]) -> None:
         if state.processor_task is task:
             state.processor_task = None
         _consume_task_result(task)
+        if state.processor_wakeup_pending:
+            state.processor_wakeup_pending = False
+            if (
+                not state.processor_stopping
+                and not state.schedule
+                and self.service.foreground_continuation_admission_open()
+            ):
+                self._ensure_processor(state)
 
     async def _process_session(self, state: _LoopState) -> None:
         """Run accepted foreground inputs serially until the Session queue is empty."""
@@ -2266,21 +2393,14 @@ class WorkspaceRecord:
     def _claim_automatic_subagent_result(self, state: _LoopState) -> InboundMessage | None:
         """Claim one persisted foreground result after the current user queue is drained."""
         session_id = state.loop.session.session_id
-        client_id = state.owner_client_id
-        claim = self._claims.get(session_id)
-        client = None if client_id is None else self.service._clients.get(client_id)
         if (
             self._closed
             or self._restore_blocked
             or self.service.state in {"draining", "stopped"}
             or not state.loop.foreground_input_admitted()
             or state.schedule
-            or client_id is None
-            or claim is None
-            or claim.client_id != client_id
-            or claim.status != "claimed"
-            or client is None
-            or not client.connected
+            or state.foreground_permission_control is None
+            or not self.service.foreground_continuation_admission_open()
             or not self.session_model_available(session_id)
         ):
             return None
@@ -2482,7 +2602,14 @@ class WorkspaceRecord:
             session_id=session_id,
             permission_control=permission_control,
         )
-        state = _LoopState(loop=loop, bus=bus, owner_client_id=client_id)
+        state = _LoopState(
+            loop=loop,
+            bus=bus,
+            owner_client_id=client_id,
+            foreground_permission_control=(
+                None if client_id is None else self.service.client_permission(client_id)
+            ),
+        )
         self._loops[loop.session.session_id] = state
         return state
 
@@ -2515,10 +2642,14 @@ class WorkspaceRecord:
             captured_skills: SkillLoader | None = None,
         ) -> AgentRunExecutor:
             state = self._loops.get(authority.session_id)
-            owner = None if state is None else state.owner_client_id
-            control = (
-                self._schedule_permission if owner is None else self.service.client_permission(owner)
-            )
+            if state is None:
+                control = permission_control
+            elif state.schedule:
+                control = self._schedule_permission
+            elif state.foreground_permission_control is not None:
+                control = state.foreground_permission_control
+            else:
+                raise RuntimeError("Foreground execution has no permission source")
             current_configuration = (
                 self.configuration if configured is None else configured.shared.snapshot.configuration
             )
@@ -2602,8 +2733,14 @@ class WorkspaceRecord:
             self.service._initialize_shared_resources(snapshot.configuration)
             model = authority.model_configuration
             state = self._loops.get(authority.session_id)
-            owner = None if state is None else state.owner_client_id
-            control = self._schedule_permission if owner is None else self.service.client_permission(owner)
+            if state is None:
+                raise RuntimeError("Session execution state is unavailable")
+            if state.schedule:
+                control = self._schedule_permission
+            elif state.foreground_permission_control is not None:
+                control = state.foreground_permission_control
+            else:
+                raise RuntimeError("Foreground execution has no permission source")
             host = self.service._exec_host_for(snapshot.configuration)
             permission = control.snapshot(host.resolved_shell)
             skills = self.service.skill_loader.with_always_load(
@@ -2655,7 +2792,7 @@ class WorkspaceRecord:
             }
         ):
             state = self._loops.get(event.session_id)
-            if state is not None and state.owner_client_id is not None:
+            if state is not None and self.service.foreground_continuation_admission_open():
                 self._ensure_processor(state)
         claim = self._claims.get(event.session_id)
         target_client_ids = () if claim is None else (claim.client_id,)

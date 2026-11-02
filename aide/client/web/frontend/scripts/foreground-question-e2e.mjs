@@ -138,6 +138,48 @@ try {
   await page.reload();
   await expect(page.getByRole("log")).toContainText("Automatic result handled in browser.");
   await expect(page.locator('[data-role="user"]', { hasText: "SubAgent result:" })).toHaveCount(0);
+  const singleOpen = page.waitForResponse((response) =>
+    response.request().method() === "POST"
+      && new globalThis.URL(response.url()).pathname.endsWith("/conversations/open"));
+  await page.locator("#app-sidebar").getByRole("link", { name: "New conversation", exact: true }).click();
+  const singleResponse = await singleOpen;
+  assert.equal(singleResponse.status(), 200);
+  const original = await singleResponse.json();
+  await expect(input).toBeEnabled();
+  await input.fill("claimless continuation acceptance");
+  await input.press("Enter");
+  await expect(page.getByRole("log")).toContainText("Main delegated the browser task.");
+  await expect(cancelRun).toHaveCount(0);
+  const switchOpen = page.waitForResponse((response) =>
+    response.request().method() === "POST"
+      && new globalThis.URL(response.url()).pathname.endsWith("/conversations/open"));
+  await page.locator("#app-sidebar").getByRole("link", { name: "New conversation", exact: true }).click();
+  const switched = await switchOpen;
+  assert.equal(switched.status(), 200);
+  assert.notEqual((await switched.json()).session_id, original.session_id);
+  await control.command("auto-child-release");
+  await expect.poll(async () => {
+    const rows = (await readFile(control.details.provider_observation_path, "utf8"))
+      .trim().split("\n").map((line) => JSON.parse(line));
+    return rows.filter((row) => row.prompt.includes("Runtime Event: SubAgent Result")
+      && row.prompt.includes("Durable browser claimless child result.")).length;
+  }, { timeout: 30000 }).toBe(1);
+  const originalUrl = new globalThis.URL("/chat", control.details.url);
+  originalUrl.search = new globalThis.URLSearchParams({
+    directory: original.directory, session: original.session_id,
+  }).toString();
+  const returnOpen = page.waitForResponse((response) =>
+    response.request().method() === "POST"
+      && new globalThis.URL(response.url()).pathname.endsWith("/conversations/open"));
+  await page.goto(originalUrl.toString());
+  const returned = await returnOpen;
+  assert.equal(returned.status(), 200);
+  assert.equal((await returned.json()).session_id, original.session_id);
+  await expect(page.getByRole("log")).toContainText("Automatic result handled in browser.");
+  await expect(cancelRun).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByRole("log")).toContainText("Automatic result handled in browser.");
+  await expect(cancelRun).toHaveCount(0);
   console.log("Foreground question and task operations: Web answer/continue/cancel passed");
 } finally {
   await browser?.close();

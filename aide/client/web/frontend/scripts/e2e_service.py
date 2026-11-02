@@ -41,6 +41,7 @@ QUEUE_RECALL_RELEASE = asyncio.Event()
 MODEL_MCP_ENTERED = asyncio.Event()
 MODEL_MCP_RELEASE = asyncio.Event()
 PROVIDER_OBSERVATION_PATH: Path | None = None
+AUTO_CHILD_RELEASE = asyncio.Event()
 
 
 async def _release_session(client: ServiceClient) -> None:
@@ -292,19 +293,24 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
     )
     streaming_request = "streaming markdown" in user_prompt.lower()
     wait_command = "Get-Content -LiteralPath .\\fixture.txt -Wait"
-    if ("automatic continuation acceptance" in normalized_requested_prompt
+    if ("claimless continuation acceptance" in normalized_requested_prompt
+            or "browser-claimless-child" in normalized_requested_prompt
+            or "automatic continuation acceptance" in normalized_requested_prompt
             or "browser-auto-child" in normalized_requested_prompt
             or "Runtime Event: SubAgent Result" in user_prompt) and tool_names:
         call_auto: tuple[str, str, dict[str, object]] | None = None
         batch_calls: list[tuple[str, str, dict[str, object]]] = []
         if "Runtime Event: SubAgent Result" in user_prompt:
             text_auto = "Automatic result handled in browser."
+        elif "browser-claimless-child" in normalized_requested_prompt:
+            await AUTO_CHILD_RELEASE.wait()
+            text_auto = "Durable browser claimless child result."
         elif "browser-auto-child" in normalized_requested_prompt:
             child_number = normalized_requested_prompt.rsplit("browser-auto-child-", 1)[-1]
             text_auto = f"Durable browser batch child result {child_number}."
         elif not all(
             f"browser-auto-spawn-{index}" in current_tool_result_ids
-            for index in range(1, 4)
+            for index in range(1, 2 if "claimless continuation acceptance" in normalized_requested_prompt else 4)
         ):
             if "spawn_agent" not in tool_names:
                 call_auto = ("browser-auto-search", "tool_search", {"query": "spawn agent"})
@@ -315,10 +321,11 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
                         "spawn_agent",
                         {
                             "title": f"Automatic browser child {index}",
-                            "task": f"browser-auto-child-{index}",
+                            "task": ("browser-claimless-child" if "claimless continuation acceptance" in normalized_requested_prompt
+                                     else f"browser-auto-child-{index}"),
                         },
                     )
-                    for index in range(1, 4)
+                    for index in range(1, 2 if "claimless continuation acceptance" in normalized_requested_prompt else 4)
                 ]
             text_auto = ""
         else:
@@ -1051,6 +1058,10 @@ async def _run_e2e(provider_base_url: str) -> None:
                     result = await project_client.open_conversation(session_id=occupied_session_id)
                     print(json.dumps(result), flush=True)
                     continue
+                if command.strip() == "auto-child-release":
+                    AUTO_CHILD_RELEASE.set()
+                    print(json.dumps({"released": True}), flush=True)
+                    continue
                 if command.startswith("batch-subagents "):
                     _, workspace_id, session_id = command.strip().split(maxsplit=2)
                     result = await project_client._http_request(
@@ -1213,6 +1224,7 @@ async def _run_e2e(provider_base_url: str) -> None:
                 )
                 await announce()
         finally:
+            AUTO_CHILD_RELEASE.set()
             if peer_client is not None:
                 await peer_client.close()
             await project_client.close()

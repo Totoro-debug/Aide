@@ -17,6 +17,7 @@ import tomlkit
 from aiohttp.test_utils import TestServer
 
 from aide.agent.confirmation import ConfirmationEnvelope, SubAgentConfirmationOwner
+from aide.agent.permission import ToolPermissionLevel
 from aide.agent.runner import AgentRunner, AgentRunnerResult
 from aide.agent.session.deletion import begin_session_deletion
 from aide.agent.session.session import Session
@@ -2007,6 +2008,350 @@ async def test_unanswered_task_results_stay_gated_while_independent_task_continu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("successor_kind", ["cli", "web"])
+async def test_foreground_result_continues_after_session_claim_is_released(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    successor_kind: Literal["cli", "web"],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    provider = _DelegatingProvider()
+    service.model_router._provider_factory = lambda _configuration: provider
+    service.model_router._providers.clear()
+    claim_response = await service.claim(client_id, workspace.workspace_id, session_id)
+    claim = cast(dict[str, object], claim_response["claim"])
+    sink = cast(_CollectingSink, service.client(client_id).sink)
+
+    automatic_completed = asyncio.Event()
+    emit = service.emit
+
+    async def observe(event_type: str, **kwargs: Any) -> None:
+        await emit(event_type, **kwargs)
+        if event_type == "run.completed" and kwargs.get("run_id") != _RUN_ID:
+            automatic_completed.set()
+
+    monkeypatch.setattr(service, "emit", observe)
+    await workspace.input(
+        client_id,
+        session_id,
+        cast(int, claim["claim_version"]),
+        "Please make an initial delegation request.",
+        _RUN_ID,
+    )
+    await asyncio.wait_for(provider.child_started.wait(), timeout=5)
+    await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=5)
+    await workspace.release(client_id, session_id)
+
+    successor = await service.register_client(successor_kind)
+    await service.connect_client(successor.client_id, _CollectingSink())
+    provider.release_child.set()
+    await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=12)
+
+    async with asyncio.timeout(12):
+        while True:
+            sink.changed.clear()
+            snapshot = workspace.session_snapshot(session_id)
+            messages = cast(list[dict[str, object]], snapshot["messages"])
+            if any(
+                message.get("content") == "Main automatically handled the delegated result."
+                for message in messages
+            ):
+                break
+            await asyncio.sleep(0.01)
+
+    task = cast(list[dict[str, object]], snapshot["foreground_tasks"])[0]
+    for operation in (service.continue_foreground_task, service.cancel_foreground_task):
+        with pytest.raises(ServiceError) as stale_claim:
+            await operation(
+                client_id,
+                workspace.workspace_id,
+                session_id,
+                cast(int, claim["claim_version"]),
+                cast(str, task["task_id"]),
+                cast(int, task["revision"]),
+                str(uuid4()),
+            )
+        assert stale_claim.value.code == "stale_claim"
+
+    assert sum(
+        message.get("content") == "Main automatically handled the delegated result."
+        for message in messages
+    ) == 1
+    await asyncio.wait_for(automatic_completed.wait(), timeout=5)
+    claimed = await service.claim(successor.client_id, workspace.workspace_id, session_id)
+    assert cast(dict[str, object], claimed["claim"])["session_id"] == session_id
+    claimed_snapshot = cast(dict[str, object], claimed["snapshot"])
+    assert cast(dict[str, object], claimed_snapshot["live_state"])["runs"] == []
+    claimed_messages = cast(list[dict[str, object]], claimed_snapshot["messages"])
+    assert sum(
+        message.get("content") == "Main automatically handled the delegated result."
+        for message in claimed_messages
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_client_does_not_destroy_foreground_work_while_service_is_online(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    provider = _DelegatingProvider()
+    service.model_router._provider_factory = lambda _configuration: provider
+    service.model_router._providers.clear()
+    claim = cast(
+        dict[str, object],
+        (await service.claim(client_id, workspace.workspace_id, session_id))["claim"],
+    )
+    original_sink = cast(_CollectingSink, service.client(client_id).sink)
+    await workspace.input(
+        client_id,
+        session_id,
+        cast(int, claim["claim_version"]),
+        "Please make an initial delegation request.",
+        _RUN_ID,
+    )
+    await asyncio.wait_for(provider.child_started.wait(), timeout=5)
+    await asyncio.wait_for(original_sink.wait_for("run.completed", _RUN_ID), timeout=5)
+
+    successor = await service.register_client("cli")
+    successor_sink = _CollectingSink()
+    await service.connect_client(successor.client_id, successor_sink)
+    await service.attach_workspace(successor.client_id, workspace.workspace_path)
+    expiry_waiting = asyncio.Event()
+    allow_expiry = asyncio.Event()
+
+    async def wait_for_expiry(_deadline: float) -> None:
+        expiry_waiting.set()
+        await allow_expiry.wait()
+
+    monkeypatch.setattr(service, "_wait_until", wait_for_expiry)
+    await service.disconnect_client(client_id, sink=original_sink)
+    expired = service.client(client_id).disconnect_task
+    assert expired is not None
+    await asyncio.wait_for(expiry_waiting.wait(), timeout=5)
+    allow_expiry.set()
+    await asyncio.wait_for(expired, timeout=5)
+
+    subagents = cast(
+        list[dict[str, object]],
+        service.list_subagents(successor.client_id, workspace.workspace_id, session_id)["items"],
+    )
+    assert subagents[0]["status"] == "running"
+    provider.release_child.set()
+    await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=12)
+    async with asyncio.timeout(12):
+        while True:
+            successor_sink.changed.clear()
+            snapshot = workspace.session_snapshot(session_id)
+            messages = cast(list[dict[str, object]], snapshot["messages"])
+            if any(
+                message.get("content") == "Main automatically handled the delegated result."
+                for message in messages
+            ):
+                break
+            await asyncio.sleep(0.01)
+
+    assert sum(
+        message.get("content") == "Main automatically handled the delegated result."
+        for message in messages
+    ) == 1
+    claimed = await service.claim(successor.client_id, workspace.workspace_id, session_id)
+    assert cast(dict[str, object], claimed["claim"])["session_id"] == session_id
+    claimed_snapshot = cast(dict[str, object], claimed["snapshot"])
+    claimed_messages = cast(list[dict[str, object]], claimed_snapshot["messages"])
+    assert sum(
+        message.get("content") == "Main automatically handled the delegated result."
+        for message in claimed_messages
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_task_child_denies_confirmation_without_workspace_audience(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, workspace, client_id, session_id, _ = management_case
+    provider = _DelegatingProvider()
+    provider.write_path = "unroutable-child.txt"
+    service.model_router._provider_factory = lambda _configuration: provider
+    service.model_router._providers.clear()
+    service.client_permission(client_id).select("read-only")
+    sink = cast(_CollectingSink, service.client(client_id).sink)
+    claim = cast(dict[str, Any], (await service.claim(
+        client_id, workspace.workspace_id, session_id
+    ))["claim"])
+    await workspace.input(client_id, session_id, claim["claim_version"],
+                          "initial delegation request", _RUN_ID)
+    await asyncio.wait_for(provider.child_started.wait(), timeout=5)
+    await sink.wait_for("run.completed", _RUN_ID)
+    outsider = await service.register_client("cli")
+    outsider_sink = _CollectingSink()
+    await service.connect_client(outsider.client_id, outsider_sink)
+    allow_expiry = asyncio.Event()
+    waiting = asyncio.Event()
+
+    async def wait_for_expiry(_deadline: float) -> None:
+        waiting.set()
+        await allow_expiry.wait()
+
+    monkeypatch.setattr(service, "_wait_until", wait_for_expiry)
+    await service.disconnect_client(client_id, sink=sink)
+    expiry = service.client(client_id).disconnect_task
+    assert expiry is not None
+    await asyncio.wait_for(waiting.wait(), timeout=5)
+    allow_expiry.set()
+    await asyncio.wait_for(expiry, timeout=5)
+    provider.allow_write.set()
+    provider.release_child.set()
+    await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=10)
+    assert not (workspace.workspace_path / "unroutable-child.txt").exists()
+    assert not any(event["type"] == "confirmation.requested" for event in outsider_sink.events)
+
+
+@pytest.mark.asyncio
+async def test_offline_foreground_result_waits_until_client_reconnects(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    provider = _DelegatingProvider()
+    service.model_router._provider_factory = lambda _configuration: provider
+    service.model_router._providers.clear()
+    client = service.client(client_id)
+    reconnect_credential = client.reconnect_credential
+    claim = cast(
+        dict[str, object],
+        (await service.claim(client_id, workspace.workspace_id, session_id))["claim"],
+    )
+    sink = cast(_CollectingSink, client.sink)
+    await workspace.input(
+        client_id,
+        session_id,
+        cast(int, claim["claim_version"]),
+        "Please make an initial delegation request.",
+        _RUN_ID,
+    )
+    await asyncio.wait_for(provider.child_started.wait(), timeout=5)
+    await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=5)
+
+    await service.disconnect_client(client_id, sink=sink)
+    assert service.state == "reconnecting"
+    provider.release_child.set()
+    async with asyncio.timeout(5):
+        while True:
+            subagents = cast(
+                list[dict[str, object]],
+                service.list_subagents(client_id, workspace.workspace_id, session_id)["items"],
+            )
+            if subagents[0]["status"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+    assert provider.automatic_continuation_count == 0
+
+    reconnected = await service.register_client("cli", reconnect_credential)
+    reconnected_sink = _CollectingSink()
+    await service.connect_client(reconnected.client_id, reconnected_sink)
+    assert service.state == "ready"
+    await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=12)
+    async with asyncio.timeout(12):
+        while True:
+            messages = cast(
+                list[dict[str, object]],
+                workspace.session_snapshot(session_id)["messages"],
+            )
+            if any(
+                message.get("content") == "Main automatically handled the delegated result."
+                for message in messages
+            ):
+                break
+            await asyncio.sleep(0.01)
+
+    assert provider.automatic_continuation_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_permission", "current_permission", "schedule_permission"),
+    [
+        ("read-only", "full-access", "workspace-write"),
+        ("workspace-write", "read-only", "full-access"),
+    ],
+)
+@pytest.mark.parametrize("expire_origin", [False, True])
+async def test_claimless_automatic_continuation_keeps_task_ceiling_and_denies_unroutable_confirmation(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    expire_origin: bool,
+    task_permission: ToolPermissionLevel,
+    current_permission: ToolPermissionLevel,
+    schedule_permission: ToolPermissionLevel,
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    provider = _DelegatingProvider()
+    provider.automatic_write = True
+    service.model_router._provider_factory = lambda _configuration: provider
+    service.model_router._providers.clear()
+    service.client_permission(client_id).select(task_permission)
+    workspace._schedule_permission.select(schedule_permission)
+    target = workspace.workspace_path / "auto-output.txt"
+    target.write_bytes(b"original bytes")
+    claim = cast(
+        dict[str, object],
+        (await service.claim(client_id, workspace.workspace_id, session_id))["claim"],
+    )
+    sink = cast(_CollectingSink, service.client(client_id).sink)
+    await workspace.input(
+        client_id,
+        session_id,
+        cast(int, claim["claim_version"]),
+        "Please make an initial delegation request.",
+        _RUN_ID,
+    )
+    await asyncio.wait_for(provider.child_started.wait(), timeout=5)
+    await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=5)
+
+    await workspace.release(client_id, session_id)
+    service.client_permission(client_id).select(current_permission)
+    if expire_origin:
+        successor = await service.register_client("cli")
+        await service.connect_client(successor.client_id, _CollectingSink())
+        expiry_waiting = asyncio.Event()
+        allow_expiry = asyncio.Event()
+
+        async def wait_for_expiry(_deadline: float) -> None:
+            expiry_waiting.set()
+            await allow_expiry.wait()
+
+        monkeypatch.setattr(service, "_wait_until", wait_for_expiry)
+        await service.disconnect_client(client_id, sink=sink)
+        expiry = service.client(client_id).disconnect_task
+        assert expiry is not None
+        await asyncio.wait_for(expiry_waiting.wait(), timeout=5)
+        allow_expiry.set()
+        await asyncio.wait_for(expiry, timeout=5)
+    provider.release_child.set()
+    await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=10)
+    async with asyncio.timeout(12):
+        while True:
+            messages = cast(
+                list[dict[str, object]],
+                workspace.session_snapshot(session_id)["messages"],
+            )
+            if any(
+                message.get("content") == "Main automatically handled the delegated result."
+                for message in messages
+            ):
+                break
+            await asyncio.sleep(0.01)
+
+    assert target.read_bytes() == b"original bytes"
+    assert not any(event.get("type") == "confirmation.requested" for event in sink.events)
+    assert sum(
+        message.get("content") == "Main automatically handled the delegated result."
+        for message in messages
+    ) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ["none", "claim", "dropped_event", "session_before", "session_after", "ledger"])
 async def test_completed_child_automatically_continues_the_current_task_without_a_user_anchor(
     management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
@@ -3901,6 +4246,9 @@ async def test_task_control_drains_owned_child_and_keeps_history(
                               "initial delegation request", str(uuid4()))
         await asyncio.wait_for(provider.child_started.wait(), timeout=5)
         await _wait_for_idle(workspace, session_id)
+        await workspace.release(client_id, session_id)
+        reclaimed = await service.claim(client_id, workspace.workspace_id, session_id)
+        version = cast(int, cast(dict[str, Any], reclaimed["claim"])["claim_version"])
         snapshot = workspace.session_snapshot(session_id)
         task = cast(list[dict[str, Any]], snapshot["foreground_tasks"])[-1]
         items = cast(list[dict[str, Any]], service.list_subagents(

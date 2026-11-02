@@ -1014,6 +1014,11 @@ class AgentService:
             raise service_error("unauthenticated", "Client identity is not recognized.", status=401)
         return client.permission_control
 
+    def foreground_continuation_admission_open(self) -> bool:
+        return self.state == "ready" and any(
+            client.connected and not client.expired for client in self._clients.values()
+        )
+
     def client_claim_released(self, client_id: str, workspace_id: str, session_id: str) -> None:
         client = self._clients.get(client_id)
         if client is not None:
@@ -1052,6 +1057,7 @@ class AgentService:
             self.state = "ready"
         for workspace in self._workspaces.values():
             workspace.set_client_connection(client_id, connected=True)
+            workspace.wake_foreground_continuations()
         await self._reconcile_schedule_admission()
         if not wait_for_subscribe:
             async with client.delivery_lock:
@@ -3940,6 +3946,16 @@ class AgentService:
             "project.removed",
         } and isinstance(payload.get("project_id"), str):
             project_id = cast(str, payload["project_id"])
+        if workspace_id is not None and session_id is not None and run_id is not None:
+            workspace = self._workspaces.get(workspace_id)
+            state = workspace._loops.get(session_id) if workspace is not None else None
+            if (
+                state is not None
+                and state.owner_client_id is None
+                and state.live_runs.get(run_id, {}).get("source") == "automatic"
+            ):
+                # Task-owned work must settle even when no Claim receives its events.
+                self._update_live_run(state, event_type, run_id, payload)
         targets = (
             tuple(self._clients.values())
             if target_client_ids is None

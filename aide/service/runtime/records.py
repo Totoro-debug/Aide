@@ -108,6 +108,7 @@ class _LoopState:
     loop: SessionExecution
     bus: MessageBus
     owner_client_id: str | None
+    foreground_permission_control: RuntimePermissionControl | None = None
     run_ids: deque[str] = field(default_factory=deque)
     live_runs: dict[str, dict[str, Any]] = field(default_factory=dict)
     completed_user_count: int | None = None
@@ -115,6 +116,7 @@ class _LoopState:
     processor_task: asyncio.Task[None] | None = None
     coordination_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     processor_stopping: bool = False
+    processor_wakeup_pending: bool = False
     release_task: asyncio.Task[None] | None = None
     schedule: bool = False
 

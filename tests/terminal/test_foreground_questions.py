@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from textual.pilot import Pilot
@@ -339,6 +339,52 @@ async def test_cli_shows_automatic_continuation_without_user_input(
             while "Main automatically handled the delegated result." not in _visible_screen_text(app):
                 await pilot.pause()
         assert provider.automatic_continuation_count == 1
+        assert "Automatic continuation from a SubAgent result." in _visible_screen_text(app)
+
+    await _run_cli_terminal_case(
+        agent_home=tmp_path / "home", workspace=workspace, monkeypatch=monkeypatch,
+        scenario=scenario, provider=cast(_FixedCatalogProvider, provider), size=(120, 50),
+    )
+
+
+@pytest.mark.asyncio
+async def test_cli_batches_terminal_subagent_results_in_one_automatic_continuation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tomlkit
+
+    from tests.configuration.test_config import VALID_CONFIG
+    from tests.service.test_subagent_management import _BatchDelegatingProvider
+    from tests.terminal import test_conversation as terminal_fixture
+
+    document = cast(Any, tomlkit.parse(VALID_CONFIG))
+    document["models"]["routes"]["subagent"] = dict(document["models"]["routes"]["chat"])
+    monkeypatch.setattr(terminal_fixture, "VALID_CONFIG", tomlkit.dumps(document))
+    provider = _BatchDelegatingProvider()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
+        input_area = app.query_one("#conversation-input", TextArea)
+        input_area.text = "initial delegation request for batch delegation request"
+        await pilot.press("enter")
+        await asyncio.wait_for(provider.batch_parent_waiting.wait(), timeout=10)
+        for child_started in provider.batch_child_waiting.values():
+            await asyncio.wait_for(child_started.wait(), timeout=10)
+        for release_child in provider.release_batch_children.values():
+            release_child.set()
+        provider.release_batch_parent.set()
+        await _wait_for_turn(app)
+
+        async with asyncio.timeout(20):
+            while "Main automatically handled the delegated result." not in _visible_screen_text(app):
+                await pilot.pause()
+        assert provider.automatic_continuation_count == 1
+        assert len(provider.batch_auto_requests) == 1
+        assert all(
+            f"Batch child result {index}." in provider.batch_auto_requests[0]
+            for index in range(1, 4)
+        )
         assert "Automatic continuation from a SubAgent result." in _visible_screen_text(app)
 
     await _run_cli_terminal_case(

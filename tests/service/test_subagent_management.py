@@ -738,6 +738,138 @@ class _FirstDraftProvider(_DelegatingProvider):
         return hold_child()
 
 
+class _BatchDelegatingProvider(_DelegatingProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.batch_parent_waiting = asyncio.Event()
+        self.release_batch_parent = asyncio.Event()
+        self.batch_auto_requests: list[str] = []
+        self.hold_batch_children: set[int] = set()
+        self.batch_child_waiting = {index: asyncio.Event() for index in range(1, 4)}
+        self.release_batch_children = {index: asyncio.Event() for index in range(1, 4)}
+        self.hold_automatic = False
+        self.release_automatic = asyncio.Event()
+
+    def stream(
+        self,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        model: str,
+        max_output: int,
+        temperature: float,
+        reasoning_effort: object,
+        timeout: int,
+        continuation: object = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        del model, max_output, temperature, reasoning_effort, timeout, continuation
+        user_text = "\n".join(
+            str(message.get("content", ""))
+            for message in messages
+            if message.get("role") in {"user", "tool"}
+        )
+        child_prompt = next(
+            (
+                str(message.get("content", ""))
+                for message in messages
+                if message.get("role") == "user"
+                and str(message.get("content", "")).startswith("Make batch child ")
+            ),
+            None,
+        )
+        if child_prompt is not None:
+            result_number = child_prompt.split()[3].rstrip(".")
+            index = int(result_number)
+
+            async def finish_child() -> AsyncIterator[ModelStreamEvent]:
+                self.batch_child_waiting[index].set()
+                if index in self.hold_batch_children:
+                    await self.release_batch_children[index].wait()
+                yield ModelCompleted(self._response(f"Batch child result {result_number}."))
+
+            return finish_child()
+
+        tool_names = {
+            name
+            for tool in tools
+            if isinstance(tool.get("function"), dict)
+            and isinstance((name := tool["function"].get("name")), str)
+        }
+        if "batch delegation request" in user_text:
+            completed = {
+                item.get("tool_call_id")
+                for item in messages
+                if item.get("role") == "tool"
+            }
+            pending = [
+                index for index in range(1, 4) if f"batch-child-{index}" not in completed
+            ]
+            if pending and "spawn_agent" in tool_names:
+                self.spawn_requested = True
+                calls = tuple(
+                    ModelToolCall(
+                        f"batch-child-{index}",
+                        "spawn_agent",
+                        json.dumps(
+                            {
+                                "title": f"Batch child {index}",
+                                "task": f"Make batch child {index}.",
+                            }
+                        ),
+                    )
+                    for index in pending
+                )
+
+                async def emit_children() -> AsyncIterator[ModelStreamEvent]:
+                    yield ModelCompleted(
+                        ModelResponse(
+                            message=AssistantModelMessage(content="", tool_calls=calls),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="tool_calls",
+                        )
+                    )
+
+                return emit_children()
+            if not pending and not self.batch_parent_waiting.is_set():
+
+                async def finish_parent() -> AsyncIterator[ModelStreamEvent]:
+                    self.batch_parent_waiting.set()
+                    await self.release_batch_parent.wait()
+                    yield ModelCompleted(self._response("Main run completed."))
+
+                return finish_parent()
+
+        if "## Runtime Event: SubAgent Result" in user_text:
+            self.batch_auto_requests.append(user_text)
+            response = super().stream(
+                messages=messages,
+                tools=tools,
+                model="test-model",
+                max_output=1,
+                temperature=0,
+                reasoning_effort=None,
+                timeout=1,
+            )
+            if self.hold_automatic:
+
+                async def finish_automatic() -> AsyncIterator[ModelStreamEvent]:
+                    await self.release_automatic.wait()
+                    async for event in response:
+                        yield event
+
+                return finish_automatic()
+            return response
+        return super().stream(
+            messages=messages,
+            tools=tools,
+            model="test-model",
+            max_output=1,
+            temperature=0,
+            reasoning_effort=None,
+            timeout=1,
+        )
+
+
 @pytest_asyncio.fixture
 async def management_case(
     tmp_path: Path,
@@ -1174,6 +1306,704 @@ async def _wait_for_automatic_completion(
         if started is not None:
             return await sink.wait_for("run.completed", cast(str, started["run_id"]))
         await asyncio.wait_for(sink.changed.wait(), timeout=10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["none", "partial_ledger", "session_before", "session_after"])
+async def test_same_task_terminal_results_are_combined_in_one_automatic_main_request(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    provider = _BatchDelegatingProvider()
+    service.model_router._provider_factory = lambda _configuration: provider
+    service.model_router._providers.clear()
+    claim = cast(
+        dict[str, object],
+        (await service.claim(client_id, workspace.workspace_id, session_id))["claim"],
+    )
+    claim_version = cast(int, claim["claim_version"])
+    sink = cast(_CollectingSink, service.client(client_id).sink)
+
+    try:
+        await workspace.input(
+            client_id,
+            session_id,
+            claim_version,
+            "initial delegation request for batch delegation request",
+            _RUN_ID,
+        )
+        await asyncio.wait_for(provider.batch_parent_waiting.wait(), timeout=10)
+        async with asyncio.timeout(10):
+            while True:
+                sink.changed.clear()
+                items = cast(
+                    list[dict[str, object]],
+                    service.list_subagents(client_id, workspace.workspace_id, session_id)["items"],
+                )
+                if len(items) == 3 and all(
+                    item["status"] in {"completed", "failed"} for item in items
+                ):
+                    break
+                await sink.changed.wait()
+
+        repository = workspace.subagent_repository(session_id)
+        terminal_records = [
+            _require_record(repository, cast(str, item["agent_id"])) for item in items
+        ]
+        await asyncio.gather(
+            *(
+                workspace.publish(
+                    SubAgentEvent(
+                        kind=SubAgentEventKind.STATUS,
+                        workspace_id=workspace.workspace_id,
+                        session_id=session_id,
+                        agent_id=record.agent_id,
+                        revision=record.revision + duplicate + 1_000,
+                        occurred_at=_NOW,
+                        data={"status": record.status.value},
+                    )
+                )
+                for record in terminal_records
+                for duplicate in range(4)
+            )
+        )
+
+        provider.keep_task = True
+        original_text = HOST_FILESYSTEM.atomic_replace_text
+        original_bytes = HOST_FILESYSTEM.atomic_replace_bytes
+        injected = asyncio.Event()
+
+        def fail_partial_ledger(path: Path, content: str) -> None:
+            if fault == "partial_ledger" and path.name == "state.json" and not injected.is_set():
+                value = json.loads(content)
+                deliveries = value.get("deliveries", [])
+                if sum(item["state"] == "committed" for item in deliveries) == 2:
+                    injected.set()
+                    raise OSError("Injected second receipt confirmation failure")
+            original_text(path, content)
+
+        def fail_batch_session(path: Path, content: bytes) -> None:
+            if (fault in {"session_before", "session_after"} and path.suffix == ".jsonl"
+                    and b"Main automatically handled the delegated result." in content):
+                injected.set()
+                if fault == "session_after":
+                    original_bytes(path, content)
+                raise OSError("Injected batch Session persistence failure")
+            original_bytes(path, content)
+
+        monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_text", fail_partial_ledger)
+        monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_bytes", fail_batch_session)
+
+        async def verify_restart(expected_state: str) -> None:
+            expected_keys = {
+                (item.agent_id, item.terminal_record_revision, item.task_generation, item.receipt_id)
+                for item in workspace.foreground_work_store(session_id).load().deliveries
+            }
+            await service.stop()
+            monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_text", original_text)
+            monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_bytes", original_bytes)
+            recovered = AgentService(service.agent_home, ConfigLoader(service.agent_home).load())
+            await recovered.start()
+            recovered.model_router._provider_factory = lambda _: provider
+            recovered.model_router._providers.clear()
+            try:
+                client = await recovered.register_client("cli")
+                await recovered.connect_client(client.client_id, _CollectingSink())
+                resident = await recovered.attach_workspace(client.client_id, workspace.workspace_path)
+                await recovered.claim(client.client_id, resident.workspace_id, session_id)
+                resident.session_snapshot(session_id)
+                recovered_deliveries = resident.foreground_work_store(session_id).load().deliveries
+                assert {
+                    (item.agent_id, item.terminal_record_revision, item.task_generation, item.receipt_id)
+                    for item in recovered_deliveries
+                } == expected_keys
+                assert all(item.state == expected_state for item in recovered_deliveries)
+                assert provider.automatic_continuation_count == 1
+                assert len(provider.batch_auto_requests) == 1
+            finally:
+                await recovered.stop()
+
+        queued_runs = [str(uuid4()), str(uuid4())]
+        for run_id, text in zip(
+            queued_runs, ("first queued supplement", "second queued supplement"), strict=True
+        ):
+            await workspace.input(client_id, session_id, claim_version, text, run_id)
+        provider.release_batch_parent.set()
+        await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=10)
+        for run_id in queued_runs:
+            await asyncio.wait_for(sink.wait_for("run.completed", run_id), timeout=10)
+        await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=10)
+        await asyncio.wait_for(
+            _wait_for_automatic_completion(sink, excluded_run_id=_RUN_ID), timeout=10
+        )
+
+        assert len(provider.batch_auto_requests) == 1
+        if fault != "none":
+            assert injected.is_set()
+        if fault == "session_before":
+            work = workspace.foreground_work_store(session_id).load()
+            assert len(work.deliveries) == 3
+            assert all(item.state == "claimed" for item in work.deliveries)
+            assert work.tasks[-1].state == "interrupted"
+            assert len({item.receipt_id for item in work.deliveries}) == 3
+            assert not any(message.get("foreground_delivery_receipts") for message in
+                           Session.load(workspace.workspace_state, session_id).messages)
+            assert provider.automatic_continuation_count == 1
+            await verify_restart("claimed")
+            return
+        merged_request = provider.batch_auto_requests[0]
+        assert all(f"Batch child result {index}." in merged_request for index in range(1, 4))
+        ordered_runs = [_RUN_ID, *queued_runs]
+        started = [
+            event
+            for event in sink.events
+            if event.get("type") == "run.started" and event.get("run_id") in ordered_runs
+        ]
+        assert [event["run_id"] for event in started] == ordered_runs
+        for previous, following in pairwise(ordered_runs):
+            previous_completion = next(
+                index
+                for index, event in enumerate(sink.events)
+                if event.get("type") == "run.completed" and event.get("run_id") == previous
+            )
+            following_start = next(
+                index
+                for index, event in enumerate(sink.events)
+                if event.get("type") == "run.started" and event.get("run_id") == following
+            )
+            assert previous_completion < following_start
+        automatic_start = next(
+            event
+            for event in sink.events
+            if event.get("type") == "run.started"
+            and cast(dict[str, object], event.get("payload", {})).get("source") == "automatic"
+        )
+        user_completion_indexes = [
+            next(
+                index
+                for index, event in enumerate(sink.events)
+                if event.get("type") == "run.completed" and event.get("run_id") == run_id
+            )
+            for run_id in ordered_runs
+        ]
+        assert max(user_completion_indexes) < sink.events.index(automatic_start)
+        assert provider.automatic_continuation_count == 1
+        automatic_run_id = cast(str, automatic_start["run_id"])
+        main_run_ids = {*ordered_runs, automatic_run_id}
+        active_main_runs: set[str] = set()
+        max_main_concurrency = 0
+        for event in sink.events:
+            event_run_id = event.get("run_id")
+            if not isinstance(event_run_id, str) or event_run_id not in main_run_ids:
+                continue
+            if event.get("type") == "run.started":
+                active_main_runs.add(event_run_id)
+                max_main_concurrency = max(max_main_concurrency, len(active_main_runs))
+            elif event.get("type") == "run.completed":
+                active_main_runs.discard(event_run_id)
+        assert max_main_concurrency == 1
+        snapshot = workspace.session_snapshot(session_id)
+        messages = cast(list[dict[str, object]], snapshot["messages"])
+        user_messages = [message for message in messages if message.get("role") == "user"]
+        assert [message.get("content") for message in user_messages] == [
+            "Saved Session history.",
+            "initial delegation request for batch delegation request",
+            "first queued supplement",
+            "second queued supplement",
+        ]
+        assert not any(
+            message.get("role") == "user" and "SubAgent result" in str(message.get("content", ""))
+            for message in messages
+        )
+        automatic_responses = [
+            message
+            for message in messages
+            if message.get("role") == "assistant"
+            and message.get("content") == "Main automatically handled the delegated result."
+        ]
+        assert len(automatic_responses) == 1
+        assert automatic_responses[0]["token_usage"] == {
+            "model_calls": 1,
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "total_tokens": 2,
+        }
+        deliveries = workspace.foreground_work_store(session_id).load().deliveries
+        assert len(deliveries) == 3
+        assert all(delivery.state == "committed" for delivery in deliveries)
+        persisted = Session.load(workspace.workspace_state, session_id).messages
+        receipts = [receipt for message in persisted
+                    for receipt in message.get("foreground_delivery_receipts", [])]
+        assert len(receipts) == 3 and set(receipts) == {item.receipt_id for item in deliveries}
+        recorder = service.trace_recorder
+        assert isinstance(recorder, SQLiteTraceRecorder)
+        await wait_for_trace_writer(recorder)
+        trace = [record for record in (await recorder.list_records()).items
+                 if record.run_id == automatic_run_id and record.kind is TraceKind.MODEL]
+        assert len(trace) == 1
+        assert trace[0].origin is TraceOrigin.FOREGROUND
+        assert trace[0].owner_session_id == session_id
+        assert trace[0].usage.input_tokens == 1 and trace[0].usage.output_tokens == 1
+        await verify_restart("committed")
+    finally:
+        provider.release_batch_parent.set()
+
+
+@pytest.mark.asyncio
+async def test_recalling_queued_inputs_does_not_recall_automatic_results(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    provider = _BatchDelegatingProvider()
+    service.model_router._provider_factory = lambda _configuration: provider
+    service.model_router._providers.clear()
+    claim = cast(
+        dict[str, object],
+        (await service.claim(client_id, workspace.workspace_id, session_id))["claim"],
+    )
+    claim_version = cast(int, claim["claim_version"])
+    sink = cast(_CollectingSink, service.client(client_id).sink)
+
+    try:
+        await workspace.input(
+            client_id,
+            session_id,
+            claim_version,
+            "initial delegation request for batch delegation request",
+            _RUN_ID,
+        )
+        await asyncio.wait_for(provider.batch_parent_waiting.wait(), timeout=10)
+        async with asyncio.timeout(10):
+            while True:
+                sink.changed.clear()
+                items = cast(
+                    list[dict[str, object]],
+                    service.list_subagents(client_id, workspace.workspace_id, session_id)["items"],
+                )
+                if len(items) == 3 and all(
+                    item["status"] in {"completed", "failed"} for item in items
+                ):
+                    break
+                await sink.changed.wait()
+
+        queued = [(str(uuid4()), "recall first input"), (str(uuid4()), "recall second input")]
+        for run_id, text in queued:
+            await workspace.input(client_id, session_id, claim_version, text, run_id)
+        recalled = await service.recall_queued_inputs(
+            client_id, workspace.workspace_id, session_id, claim_version
+        )
+        assert recalled["recalled_inputs"] == [
+            {"run_id": run_id, "text": text} for run_id, text in queued
+        ]
+
+        provider.release_batch_parent.set()
+        await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=10)
+        await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=10)
+        await asyncio.wait_for(
+            _wait_for_automatic_completion(sink, excluded_run_id=_RUN_ID), timeout=10
+        )
+        assert provider.automatic_continuation_count == 1
+        assert len(provider.batch_auto_requests) == 1
+        assert all(
+            f"Batch child result {index}." in provider.batch_auto_requests[0]
+            for index in range(1, 4)
+        )
+        assert not any(
+            event.get("type") == "run.started" and event.get("run_id") == run_id
+            for run_id, _text in queued
+            for event in sink.events
+        )
+    finally:
+        provider.release_batch_parent.set()
+
+
+@pytest.mark.asyncio
+async def test_results_arriving_during_automatic_run_wait_for_next_user_first_arbitration(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    provider = _BatchDelegatingProvider()
+    provider.hold_batch_children = {2, 3}
+    provider.hold_automatic = True
+    service.model_router._provider_factory = lambda _configuration: provider
+    service.model_router._providers.clear()
+    claim = cast(
+        dict[str, object],
+        (await service.claim(client_id, workspace.workspace_id, session_id))["claim"],
+    )
+    sink = cast(_CollectingSink, service.client(client_id).sink)
+    queued_run_id = str(uuid4())
+
+    async def wait_for_child_statuses(expected: dict[str, set[str]]) -> list[dict[str, object]]:
+        async with asyncio.timeout(10):
+            while True:
+                sink.changed.clear()
+                items = cast(
+                    list[dict[str, object]],
+                    service.list_subagents(client_id, workspace.workspace_id, session_id)["items"],
+                )
+                statuses = {
+                    cast(str, item["title"]): cast(str, item["status"])
+                    for item in items
+                }
+                if all(statuses.get(title) in values for title, values in expected.items()):
+                    return items
+                await sink.changed.wait()
+
+    async def wait_for_automatic_starts(count: int) -> list[dict[str, object]]:
+        async with asyncio.timeout(10):
+            while True:
+                sink.changed.clear()
+                starts = [
+                    event
+                    for event in sink.events
+                    if event.get("type") == "run.started"
+                    and cast(dict[str, object], event.get("payload", {})).get("source") == "automatic"
+                ]
+                if len(starts) >= count:
+                    return starts
+                await sink.changed.wait()
+
+    try:
+        await workspace.input(
+            client_id,
+            session_id,
+            cast(int, claim["claim_version"]),
+            "initial delegation request for batch delegation request",
+            _RUN_ID,
+        )
+        await asyncio.wait_for(provider.batch_parent_waiting.wait(), timeout=10)
+        await asyncio.gather(*(event.wait() for event in provider.batch_child_waiting.values()))
+        await wait_for_child_statuses(
+            {
+                "Batch child 1": {"completed", "failed"},
+                "Batch child 2": {"running"},
+                "Batch child 3": {"running"},
+            }
+        )
+
+        provider.release_batch_parent.set()
+        await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=10)
+        first_auto = await wait_for_automatic_starts(1)
+        first_auto_id = cast(str, first_auto[0]["run_id"])
+        await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=10)
+        assert provider.automatic_continuation_count == 1
+        assert len(provider.batch_auto_requests) == 1
+        assert "Batch child result 1." in provider.batch_auto_requests[0]
+        assert "Batch child result 2." not in provider.batch_auto_requests[0]
+        assert "Batch child result 3." not in provider.batch_auto_requests[0]
+
+        provider.keep_task = True
+        await workspace.input(
+            client_id,
+            session_id,
+            cast(int, claim["claim_version"]),
+            "input queued during automatic execution",
+            queued_run_id,
+        )
+        provider.release_batch_children[2].set()
+        provider.release_batch_children[3].set()
+        await wait_for_child_statuses(
+            {
+                "Batch child 2": {"completed", "failed"},
+                "Batch child 3": {"completed", "failed"},
+            }
+        )
+        assert provider.automatic_continuation_count == 1
+        assert not any(
+            event.get("type") == "run.started" and event.get("run_id") == queued_run_id
+            for event in sink.events
+        )
+
+        provider.release_automatic.set()
+        automatic_starts = await wait_for_automatic_starts(2)
+        second_auto_id = cast(str, automatic_starts[1]["run_id"])
+        await asyncio.wait_for(sink.wait_for("run.completed", first_auto_id), timeout=10)
+        await asyncio.wait_for(sink.wait_for("run.completed", queued_run_id), timeout=10)
+        await asyncio.wait_for(sink.wait_for("run.completed", second_auto_id), timeout=10)
+
+        first_auto_completion = next(
+            index
+            for index, event in enumerate(sink.events)
+            if event.get("type") == "run.completed" and event.get("run_id") == first_auto_id
+        )
+        user_start = next(
+            index
+            for index, event in enumerate(sink.events)
+            if event.get("type") == "run.started" and event.get("run_id") == queued_run_id
+        )
+        user_completion = next(
+            index
+            for index, event in enumerate(sink.events)
+            if event.get("type") == "run.completed" and event.get("run_id") == queued_run_id
+        )
+        second_auto_start = next(
+            index
+            for index, event in enumerate(sink.events)
+            if event.get("type") == "run.started" and event.get("run_id") == second_auto_id
+        )
+        assert first_auto_completion < user_start < user_completion < second_auto_start
+        assert provider.automatic_continuation_count == 2
+        assert len(provider.batch_auto_requests) == 2
+        assert "Batch child result 2." in provider.batch_auto_requests[1]
+        assert "Batch child result 3." in provider.batch_auto_requests[1]
+        assert "Batch child result 1." not in provider.batch_auto_requests[1]
+        assert all(
+            item.state == "committed"
+            for item in workspace.foreground_work_store(session_id).load().deliveries
+        )
+    finally:
+        provider.release_batch_parent.set()
+        provider.release_automatic.set()
+        for event in provider.release_batch_children.values():
+            event.set()
+
+
+@pytest.mark.asyncio
+async def test_batch_claim_failure_preserves_each_result_for_reconciliation(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    provider = _BatchDelegatingProvider()
+    service.model_router._provider_factory = lambda _configuration: provider
+    service.model_router._providers.clear()
+    claim = cast(
+        dict[str, object],
+        (await service.claim(client_id, workspace.workspace_id, session_id))["claim"],
+    )
+    sink = cast(_CollectingSink, service.client(client_id).sink)
+    injected = asyncio.Event()
+    original_replace = HOST_FILESYSTEM.atomic_replace_text
+
+    def fail_batch_claim(path: Path, content: str) -> None:
+        if path.name == "state.json" and not injected.is_set():
+            value = json.loads(content)
+            deliveries = value.get("deliveries", []) if isinstance(value, dict) else []
+            if len(deliveries) == 3 and all(item.get("state") == "claimed" for item in deliveries):
+                injected.set()
+                raise OSError("Injected atomic batch claim failure")
+        original_replace(path, content)
+
+    try:
+        await workspace.input(
+            client_id,
+            session_id,
+            cast(int, claim["claim_version"]),
+            "initial delegation request for batch delegation request",
+            _RUN_ID,
+        )
+        await asyncio.wait_for(provider.batch_parent_waiting.wait(), timeout=10)
+        async with asyncio.timeout(10):
+            while True:
+                sink.changed.clear()
+                items = cast(
+                    list[dict[str, object]],
+                    service.list_subagents(client_id, workspace.workspace_id, session_id)["items"],
+                )
+                if len(items) == 3 and all(
+                    item["status"] in {"completed", "failed"} for item in items
+                ):
+                    break
+                await sink.changed.wait()
+
+        terminal_records = [
+            _require_record(
+                workspace.subagent_repository(session_id), cast(str, item["agent_id"])
+            )
+            for item in items
+        ]
+        expected_keys = {
+            (record.agent_id, record.revision, cast(int, record.source.task_generation))
+            for record in terminal_records
+        }
+        monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_text", fail_batch_claim)
+        provider.release_batch_parent.set()
+        await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=10)
+        await asyncio.wait_for(injected.wait(), timeout=10)
+        assert provider.automatic_continuation_count == 0
+        pending = workspace.foreground_work_store(session_id).load().deliveries
+        assert {
+            (item.agent_id, item.terminal_record_revision, item.task_generation)
+            for item in pending
+        } == expected_keys
+        assert all(item.state == "pending" for item in pending)
+
+        monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_text", original_replace)
+        record = terminal_records[0]
+        await workspace.publish(
+            SubAgentEvent(
+                kind=SubAgentEventKind.STATUS,
+                workspace_id=workspace.workspace_id,
+                session_id=session_id,
+                agent_id=record.agent_id,
+                revision=record.revision + 1_000,
+                occurred_at=_NOW,
+                data={"status": record.status.value},
+            )
+        )
+        await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=10)
+        await asyncio.wait_for(
+            _wait_for_automatic_completion(sink, excluded_run_id=_RUN_ID), timeout=10
+        )
+        workspace.session_snapshot(session_id)
+        recovered = workspace.foreground_work_store(session_id).load().deliveries
+        assert {
+            (item.agent_id, item.terminal_record_revision, item.task_generation)
+            for item in recovered
+        } == expected_keys
+        assert all(item.state == "committed" for item in recovered)
+        assert provider.automatic_continuation_count == 1
+    finally:
+        provider.release_batch_parent.set()
+
+
+@pytest.mark.asyncio
+async def test_unanswered_task_results_stay_gated_while_independent_task_continues(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    provider = _BatchDelegatingProvider()
+    service.model_router._provider_factory = lambda _configuration: provider
+    service.model_router._providers.clear()
+    claim = cast(
+        dict[str, object],
+        (await service.claim(client_id, workspace.workspace_id, session_id))["claim"],
+    )
+    sink = cast(_CollectingSink, service.client(client_id).sink)
+    store = workspace.foreground_work_store(session_id)
+    repository = workspace.subagent_repository(session_id)
+
+    try:
+        await workspace.input(
+            client_id,
+            session_id,
+            cast(int, claim["claim_version"]),
+            "initial delegation request for batch delegation request",
+            _RUN_ID,
+        )
+        await asyncio.wait_for(provider.batch_parent_waiting.wait(), timeout=10)
+        async with asyncio.timeout(10):
+            while True:
+                sink.changed.clear()
+                children = cast(
+                    list[dict[str, object]],
+                    service.list_subagents(client_id, workspace.workspace_id, session_id)["items"],
+                )
+                if len(children) == 3 and all(
+                    item["status"] in {"completed", "failed"} for item in children
+                ):
+                    break
+                await sink.changed.wait()
+
+        primary_task = store.load().tasks[0]
+        owner_agent_id = cast(str, children[0]["agent_id"])
+        question_id = str(uuid4())
+        question_call_id = str(uuid4())
+        store.prepare_question(
+            task_id=primary_task.task_id,
+            execution_id=primary_task.execution_id,
+            question_id=question_id,
+            tool_call_id=question_call_id,
+            text="Which result should the Main Agent use?",
+            owner_agent_id=owner_agent_id,
+        )
+        store.publish_question(question_id, committed_tool_call_ids={question_call_id})
+
+        persisted_messages = Session.load(workspace.workspace_state, session_id).messages
+        anchor = next(
+            message
+            for message in reversed(persisted_messages)
+            if message.get("role") == "user"
+            and isinstance(message.get("restore_anchor_id"), int)
+            and isinstance(message.get("restore_run_token"), str)
+        )
+        independent_task_id = str(uuid4())
+        independent_execution_id = str(uuid4())
+        store.begin_task(
+            independent_task_id,
+            independent_execution_id,
+            generation=1,
+            origin_anchor_id=cast(int, anchor["restore_anchor_id"]),
+            permission_level="workspace-write",
+        )
+        store.complete_task(independent_task_id, independent_execution_id)
+        independent_record = repository.register(
+            title="Independent task result",
+            task="Finish independent work.",
+            parent_run_id=independent_execution_id,
+            source=SubAgentSource(
+                kind=SubAgentSourceKind.FOREGROUND,
+                restore_run_token=cast(str, anchor["restore_run_token"]),
+                task_id=independent_task_id,
+                task_generation=1,
+            ),
+            creator_snapshot=_snapshot(),
+        )
+        independent_record = _complete(repository, independent_record)
+        stale_record = repository.register(
+            title="Stale generation result",
+            task="Finish obsolete generation.",
+            parent_run_id=independent_execution_id,
+            source=SubAgentSource(
+                kind=SubAgentSourceKind.FOREGROUND,
+                restore_run_token=cast(str, anchor["restore_run_token"]),
+                task_id=independent_task_id,
+                task_generation=2,
+            ),
+            creator_snapshot=_snapshot(),
+        )
+        stale_record = _complete(repository, stale_record)
+        await workspace.publish(
+            SubAgentEvent(
+                kind=SubAgentEventKind.STATUS,
+                workspace_id=workspace.workspace_id,
+                session_id=session_id,
+                agent_id=independent_record.agent_id,
+                revision=independent_record.revision,
+                occurred_at=_NOW,
+                data={"status": "completed"},
+            )
+        )
+        await workspace.publish(
+            SubAgentEvent(
+                kind=SubAgentEventKind.STATUS,
+                workspace_id=workspace.workspace_id,
+                session_id=session_id,
+                agent_id=stale_record.agent_id,
+                revision=stale_record.revision,
+                occurred_at=_NOW,
+                data={"status": "completed"},
+            )
+        )
+
+        provider.release_batch_parent.set()
+        await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=10)
+        await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=10)
+        automatic = await asyncio.wait_for(
+            _wait_for_automatic_completion(sink, excluded_run_id=_RUN_ID), timeout=10
+        )
+
+        assert len(provider.batch_auto_requests) == 1
+        independent_request = provider.batch_auto_requests[0]
+        assert "Independent task result" in independent_request
+        assert "Batch child result" not in independent_request
+        assert "Stale generation result" not in independent_request
+        deliveries = store.load().deliveries
+        primary_deliveries = [item for item in deliveries if item.task_id == primary_task.task_id]
+        independent_delivery = next(
+            item for item in deliveries if item.task_id == independent_task_id
+        )
+        assert len(primary_deliveries) == 3
+        assert all(item.state == "pending" for item in primary_deliveries)
+        assert independent_delivery.state == "committed"
+        stale_delivery = next(item for item in deliveries if item.agent_id == stale_record.agent_id)
+        assert stale_delivery.state == "invalidated"
+        assert automatic["run_id"] != _RUN_ID
+    finally:
+        provider.release_batch_parent.set()
 
 
 @pytest.mark.asyncio

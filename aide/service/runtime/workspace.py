@@ -25,6 +25,7 @@ from aide.agent.confirmation import (
 from aide.agent.context.builder import ContextBuilder
 from aide.agent.foreground_work.store import (
     ForegroundWorkConflict,
+    ForegroundWorkDelivery,
     ForegroundWorkStore,
     StaleForegroundWorkRevision,
 )
@@ -2293,6 +2294,9 @@ class WorkspaceRecord:
         except (OSError, UnicodeError, ValueError, SubAgentStoreError):
             return None
         records_by_id = {record.agent_id: record for record in records}
+        eligible: dict[
+            tuple[str, int], list[tuple[ForegroundWorkDelivery, SubAgentRecord, str]]
+        ] = {}
         for delivery in snapshot.pending_deliveries:
             record = records_by_id.get(delivery.agent_id)
             if (
@@ -2313,7 +2317,11 @@ class WorkspaceRecord:
                 ),
                 None,
             )
-            if task is None or task.state not in {"running", "completed"}:
+            if (
+                task is None
+                or task.state not in {"running", "completed"}
+                or task.iteration_budget_used >= task.iteration_budget_limit
+            ):
                 continue
             effect_run_token = _effective_task_restore_token(
                 state.loop.session.messages,
@@ -2322,46 +2330,64 @@ class WorkspaceRecord:
             )
             if effect_run_token is None:
                 continue
+            eligible.setdefault((delivery.task_id, delivery.task_generation), []).append(
+                (delivery, record, effect_run_token)
+            )
+
+        for (task_id, task_generation), candidates in eligible.items():
             run_id = str(uuid4())
             try:
-                claimed_delivery = store.claim_delivery(
-                    agent_id=delivery.agent_id,
-                    terminal_record_revision=delivery.terminal_record_revision,
-                    task_generation=delivery.task_generation,
+                claimed_deliveries = store.claim_delivery_batch(
+                    tuple(
+                        (
+                            delivery.agent_id,
+                            delivery.terminal_record_revision,
+                            delivery.task_generation,
+                        )
+                        for delivery, _record, _effect_run_token in candidates
+                    ),
                     execution_id=run_id,
                 )
-                if claimed_delivery is None:
+                if claimed_deliveries is None:
                     continue
-                store.start_execution(
-                    delivery.task_id,
-                    run_id,
-                    expected_generation=delivery.task_generation,
-                    explicit_user_operation=False,
-                )
             except (OSError, UnicodeError, ValueError):
                 return None
-            result_text = record.result or ""
-            if record.status is SubAgentStatus.FAILED:
-                error_text = ""
-                if record.error is not None:
-                    error_text = f"\nFailure: {record.error.code}: {record.error.message}"
-                result_text = f"The SubAgent failed.{error_text}"
+            claimed_by_key = {
+                (item.agent_id, item.terminal_record_revision, item.task_generation): item
+                for item in claimed_deliveries
+            }
+            result_sections: list[str] = []
+            receipt_records: list[dict[str, object]] = []
+            for delivery, record, _effect_run_token in candidates:
+                claimed = claimed_by_key[
+                    (delivery.agent_id, delivery.terminal_record_revision, delivery.task_generation)
+                ]
+                result_text = record.result or ""
+                if record.status is SubAgentStatus.FAILED:
+                    error_text = ""
+                    if record.error is not None:
+                        error_text = f"\nFailure: {record.error.code}: {record.error.message}"
+                    result_text = f"The SubAgent failed.{error_text}"
+                result_sections.append(
+                    f"Title: {record.title}\nStatus: {record.status.value}\nResult: {result_text}"
+                )
+                receipt_records.append(
+                    {
+                        "agent_id": claimed.agent_id,
+                        "terminal_record_revision": claimed.terminal_record_revision,
+                        "task_generation": claimed.task_generation,
+                        "receipt_id": claimed.receipt_id,
+                    }
+                )
             inbound = InboundMessage(
-                content=(
-                    "SubAgent result for automatic continuation:\n"
-                    f"Title: {record.title}\n"
-                    f"Status: {record.status.value}\n"
-                    f"Result: {result_text}"
-                ),
+                content=("SubAgent result for automatic continuation:\n" + "\n\n".join(result_sections)),
                 metadata={
                     "run_id": run_id,
-                    "foreground_task_id": delivery.task_id,
+                    "foreground_task_id": task_id,
                     "foreground_automatic_continuation": True,
-                    "foreground_delivery_receipt_id": claimed_delivery.receipt_id,
-                    "foreground_delivery_agent_id": delivery.agent_id,
-                    "foreground_delivery_record_revision": delivery.terminal_record_revision,
-                    "foreground_task_generation": delivery.task_generation,
-                    "foreground_effect_run_token": effect_run_token,
+                    "foreground_delivery_receipts": receipt_records,
+                    "foreground_task_generation": task_generation,
+                    "foreground_effect_run_token": candidates[0][2],
                 },
             )
             state.completed_user_count = sum(
@@ -2371,7 +2397,7 @@ class WorkspaceRecord:
             state.live_runs[run_id] = {
                 "run_id": run_id,
                 "request_id": run_id,
-                "prompt": f"SubAgent result: {record.title}",
+                "prompt": f"SubAgent results: {', '.join(record.title for _, record, _ in candidates)}",
                 "source": "automatic",
                 "status": "accepted",
                 "assistant_content": "",

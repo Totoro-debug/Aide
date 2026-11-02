@@ -1377,9 +1377,48 @@ class AgentRunExecutor:
         runtime_subagent_result = inbound.metadata.get("foreground_subagent_result")
         if isinstance(runtime_subagent_result, str):
             current_user["_runtime_subagent_result"] = runtime_subagent_result
-        delivery_receipt_id = inbound.metadata.get("foreground_delivery_receipt_id")
-        delivery_agent_id = inbound.metadata.get("foreground_delivery_agent_id")
-        delivery_record_revision = inbound.metadata.get("foreground_delivery_record_revision")
+        delivery_receipts: list[tuple[str, int, int, str]] = []
+        raw_delivery_receipts = inbound.metadata.get("foreground_delivery_receipts")
+        if isinstance(raw_delivery_receipts, list):
+            for item in raw_delivery_receipts:
+                if not isinstance(item, dict):
+                    continue
+                agent_id = item.get("agent_id")
+                record_revision = item.get("terminal_record_revision")
+                generation = item.get("task_generation")
+                receipt_id = item.get("receipt_id")
+                if (
+                    isinstance(agent_id, str)
+                    and isinstance(record_revision, int)
+                    and not isinstance(record_revision, bool)
+                    and isinstance(generation, int)
+                    and not isinstance(generation, bool)
+                    and isinstance(receipt_id, str)
+                ):
+                    delivery_receipts.append((agent_id, record_revision, generation, receipt_id))
+        if not delivery_receipts:
+            delivery_receipt_id = inbound.metadata.get("foreground_delivery_receipt_id")
+            delivery_agent_id = inbound.metadata.get("foreground_delivery_agent_id")
+            delivery_record_revision = inbound.metadata.get(
+                "foreground_delivery_record_revision"
+            )
+            delivery_generation = inbound.metadata.get("foreground_task_generation", 1)
+            if (
+                isinstance(delivery_receipt_id, str)
+                and isinstance(delivery_agent_id, str)
+                and isinstance(delivery_record_revision, int)
+                and not isinstance(delivery_record_revision, bool)
+                and isinstance(delivery_generation, int)
+                and not isinstance(delivery_generation, bool)
+            ):
+                delivery_receipts.append(
+                    (
+                        delivery_agent_id,
+                        delivery_record_revision,
+                        delivery_generation,
+                        delivery_receipt_id,
+                    )
+                )
         task_generation = 1
         if self._foreground_work_store is not None and inbound.content.strip():
             if not isinstance(execution_id, str):
@@ -2002,13 +2041,7 @@ class AgentRunExecutor:
                 error=result.error or ErrorInfo("turn_cancelled", TURN_CANCELLED_MESSAGE),
                 model_calls=0,
             ))
-        if (
-            result.finish_reason == "completed"
-            and isinstance(delivery_receipt_id, str)
-            and isinstance(delivery_agent_id, str)
-            and isinstance(delivery_record_revision, int)
-            and not isinstance(delivery_record_revision, bool)
-        ):
+        if result.finish_reason == "completed" and delivery_receipts:
             assistant_message = next(
                 (message for message in reversed(run_messages) if message.get("role") == "assistant"),
                 None,
@@ -2016,8 +2049,9 @@ class AgentRunExecutor:
             if assistant_message is not None:
                 receipts = assistant_message.get("foreground_delivery_receipts")
                 receipt_list = [item for item in receipts if isinstance(item, str)] if isinstance(receipts, list) else []
-                if delivery_receipt_id not in receipt_list:
-                    receipt_list.append(delivery_receipt_id)
+                for _agent_id, _record_revision, _generation, receipt_id in delivery_receipts:
+                    if receipt_id not in receipt_list:
+                        receipt_list.append(receipt_id)
                 assistant_message["foreground_delivery_receipts"] = receipt_list
         durable_current_user = deepcopy(current_user)
         durable_current_user.pop("_runtime_input_kind", None)
@@ -2076,27 +2110,21 @@ class AgentRunExecutor:
                 await self._publish_commit_failure()
                 return False
         if self._foreground_work_store is not None and isinstance(task_id, str):
-            if (
-                result.finish_reason == "completed"
-                and isinstance(delivery_agent_id, str)
-                and isinstance(delivery_record_revision, int)
-                and not isinstance(delivery_record_revision, bool)
-                and isinstance(delivery_receipt_id, str)
-                and isinstance(execution_id, str)
-            ):
-                try:
-                    self._foreground_work_store.commit_delivery(
-                        agent_id=delivery_agent_id,
-                        terminal_record_revision=delivery_record_revision,
-                        task_generation=task_generation,
-                        execution_id=execution_id,
-                        receipt_id=delivery_receipt_id,
-                    )
-                except (OSError, UnicodeError, ValueError) as failure:
-                    _runtime_logger().error(
-                        "Foreground SubAgent delivery receipt could not be indexed type={}",
-                        type(failure).__name__,
-                    )
+            if result.finish_reason == "completed" and isinstance(execution_id, str):
+                for agent_id, record_revision, generation, receipt_id in delivery_receipts:
+                    try:
+                        self._foreground_work_store.commit_delivery(
+                            agent_id=agent_id,
+                            terminal_record_revision=record_revision,
+                            task_generation=generation,
+                            execution_id=execution_id,
+                            receipt_id=receipt_id,
+                        )
+                    except (OSError, UnicodeError, ValueError) as failure:
+                        _runtime_logger().error(
+                            "Foreground SubAgent delivery receipt could not be indexed type={}",
+                            type(failure).__name__,
+                        )
             if isinstance(task_generation, int) and isinstance(execution_id, str):
                 try:
                     self._foreground_work_store.record_iteration_usage(

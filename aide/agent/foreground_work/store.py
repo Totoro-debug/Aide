@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
@@ -337,6 +338,112 @@ class ForegroundWorkStore:
                 current.tasks,
                 current.questions,
                 deliveries,
+            )
+        )
+        return claimed
+
+    def claim_delivery_batch(
+        self,
+        keys: Sequence[tuple[str, int, int]],
+        *,
+        execution_id: str,
+    ) -> tuple[ForegroundWorkDelivery, ...] | None:
+        """Atomically claim same-Task results and start their shared Main execution."""
+        _require_identifier(execution_id, "execution_id")
+        if not isinstance(keys, Sequence) or isinstance(keys, (str, bytes)) or not keys:
+            raise ValueError("delivery batch must not be empty")
+        normalized_keys: list[tuple[str, int, int]] = []
+        for key in keys:
+            if not isinstance(key, tuple) or len(key) != 3:
+                raise ValueError("delivery batch keys must be three-item tuples")
+            agent_id, terminal_record_revision, task_generation = key
+            _require_identifier(agent_id, "agent_id")
+            for name, value in (
+                ("terminal_record_revision", terminal_record_revision),
+                ("task_generation", task_generation),
+            ):
+                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                    raise ValueError(f"{name} must be a positive integer")
+            normalized_keys.append(key)
+        if len(set(normalized_keys)) != len(normalized_keys):
+            raise ValueError("delivery batch keys must be unique")
+
+        current = self.load()
+        by_key = {
+            (item.agent_id, item.terminal_record_revision, item.task_generation): item
+            for item in current.deliveries
+        }
+        deliveries = tuple(by_key.get(key) for key in normalized_keys)
+        if any(item is None or item.state != "pending" for item in deliveries):
+            return None
+        selected = cast(tuple[ForegroundWorkDelivery, ...], deliveries)
+        task_id = selected[0].task_id
+        task_generation = selected[0].task_generation
+        if any(
+            item.task_id != task_id or item.task_generation != task_generation
+            for item in selected
+        ):
+            return None
+        task = next(
+            (
+                item
+                for item in current.tasks
+                if item.task_id == task_id and item.generation == task_generation
+            ),
+            None,
+        )
+        unresolved_question_states = {
+            "preparing",
+            "pending",
+            "answer_received",
+            "resuming",
+            "executing",
+            "interrupted",
+        }
+        if (
+            task is None
+            or task.state not in {"running", "completed"}
+            or task.iteration_budget_used >= task.iteration_budget_limit
+            or any(
+                question.task_id == task_id
+                and question.state in unresolved_question_states
+                for question in current.questions
+            )
+        ):
+            return None
+
+        claimed = tuple(
+            replace(
+                item,
+                state="claimed",
+                claimed_execution_id=execution_id,
+                receipt_id=_delivery_receipt_id(
+                    item.agent_id, item.terminal_record_revision, item.task_generation
+                ),
+            )
+            for item in selected
+        )
+        claimed_by_key = {
+            (item.agent_id, item.terminal_record_revision, item.task_generation): item
+            for item in claimed
+        }
+        deliveries_after = tuple(
+            claimed_by_key.get(
+                (item.agent_id, item.terminal_record_revision, item.task_generation), item
+            )
+            for item in current.deliveries
+        )
+        started_task = replace(task, execution_id=execution_id, state="running")
+        tasks_after = tuple(
+            started_task if item.task_id == task_id and item.generation == task_generation else item
+            for item in current.tasks
+        )
+        self._publish(
+            ForegroundWorkSnapshot(
+                current.revision + 1,
+                tasks_after,
+                current.questions,
+                deliveries_after,
             )
         )
         return claimed

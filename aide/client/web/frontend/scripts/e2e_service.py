@@ -296,26 +296,45 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
             or "browser-auto-child" in normalized_requested_prompt
             or "Runtime Event: SubAgent Result" in user_prompt) and tool_names:
         call_auto: tuple[str, str, dict[str, object]] | None = None
+        batch_calls: list[tuple[str, str, dict[str, object]]] = []
         if "Runtime Event: SubAgent Result" in user_prompt:
             text_auto = "Automatic result handled in browser."
         elif "browser-auto-child" in normalized_requested_prompt:
-            text_auto = "Durable browser child result."
-        elif "browser-auto-spawn" not in current_tool_result_ids:
+            child_number = normalized_requested_prompt.rsplit("browser-auto-child-", 1)[-1]
+            text_auto = f"Durable browser batch child result {child_number}."
+        elif not all(
+            f"browser-auto-spawn-{index}" in current_tool_result_ids
+            for index in range(1, 4)
+        ):
             if "spawn_agent" not in tool_names:
                 call_auto = ("browser-auto-search", "tool_search", {"query": "spawn agent"})
             else:
-                call_auto = ("browser-auto-spawn", "spawn_agent", {
-                    "title": "Automatic browser child", "task": "browser-auto-child"})
+                batch_calls = [
+                    (
+                        f"browser-auto-spawn-{index}",
+                        "spawn_agent",
+                        {
+                            "title": f"Automatic browser child {index}",
+                            "task": f"browser-auto-child-{index}",
+                        },
+                    )
+                    for index in range(1, 4)
+                ]
             text_auto = ""
         else:
             text_auto = "Main delegated the browser task."
-        if call_auto is not None:
-            call_id, call_name, call_arguments = call_auto
-            chunks.append(_chunk(request_id=request_id, model=model, delta={"tool_calls": [{
-                "index": 0, "id": call_id, "type": "function", "function": {
-                    "name": call_name, "arguments": json.dumps(call_arguments),
-                },
-            }]}))
+        auto_calls = [] if call_auto is None else [call_auto]
+        auto_calls.extend(batch_calls)
+        if auto_calls:
+            chunks.append(_chunk(request_id=request_id, model=model, delta={"tool_calls": [
+                {
+                    "index": index,
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": call_name, "arguments": json.dumps(call_arguments)},
+                }
+                for index, (call_id, call_name, call_arguments) in enumerate(auto_calls)
+            ]}))
             chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="tool_calls"))
         else:
             chunks.append(_chunk(request_id=request_id, model=model, delta={"content": text_auto}))
@@ -1030,6 +1049,14 @@ async def _run_e2e(provider_base_url: str) -> None:
                     continue
                 if command.strip() == "trace-claim":
                     result = await project_client.open_conversation(session_id=occupied_session_id)
+                    print(json.dumps(result), flush=True)
+                    continue
+                if command.startswith("batch-subagents "):
+                    _, workspace_id, session_id = command.strip().split(maxsplit=2)
+                    result = await project_client._http_request(
+                        "GET",
+                        f"/api/v1/workspaces/{workspace_id}/sessions/{session_id}/subagents",
+                    )
                     print(json.dumps(result), flush=True)
                     continue
                 if command.startswith("cli-claim "):

@@ -1538,7 +1538,14 @@ class TerminalConversationApp(App[None]):
                 question_widget.update("")
             else:
                 saved = self._foreground_question.get("state") == "answer_received"
-                question_status = "Answer saved" if saved else "Aide is waiting for an answer"
+                owner_agent_id = self._foreground_question.get("owner_agent_id")
+                question_status = (
+                    "Answer saved"
+                    if saved
+                    else f"SubAgent {owner_agent_id} is waiting for an answer"
+                    if isinstance(owner_agent_id, str)
+                    else "Aide is waiting for an answer"
+                )
                 if self._foreground_question.get("state") == "interrupted":
                     question_widget.update(
                         "Work interrupted while saving. Check its effects before sending a new instruction."

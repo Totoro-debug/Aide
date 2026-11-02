@@ -260,3 +260,51 @@ async def test_cli_ordinary_task_is_visible_and_can_continue(
         agent_home=tmp_path / "home", workspace=workspace, monkeypatch=monkeypatch,
         scenario=scenario, provider=cast(_FixedCatalogProvider, provider), size=(120, 40),
     )
+
+
+@pytest.mark.asyncio
+async def test_cli_answers_two_subagents_independently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typing import Any
+
+    import tomlkit
+
+    from tests.configuration.test_config import VALID_CONFIG
+    from tests.service.test_subagent_management import _DelegatingProvider
+    from tests.terminal import test_conversation as terminal_fixture
+    document = cast(Any, tomlkit.parse(VALID_CONFIG))
+    document["models"]["routes"]["subagent"] = dict(document["models"]["routes"]["chat"])
+    monkeypatch.setattr(terminal_fixture, "VALID_CONFIG", tomlkit.dumps(document))
+    provider = _DelegatingProvider()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
+        input_area = app.query_one("#conversation-input", TextArea)
+        input_area.text = "SubAgent question delegation request"
+        await pilot.press("enter")
+        await _wait_for_turn(app)
+        widget = await _wait_for_question(app, pilot, "Which output should I prepare?")
+        assert app._foreground_question is not None
+        first_id = app._foreground_question["question_id"]
+        input_area.text = "/answer first output"
+        await pilot.press("enter")
+        async with asyncio.timeout(10):
+            while not provider.child_answer_seen.is_set():
+                await pilot.pause()
+        async with asyncio.timeout(10):
+            while app._foreground_question is None or app._foreground_question["question_id"] == first_id:
+                await pilot.pause()
+        provider.child_answer_seen.clear()
+        input_area.text = "/answer second output"
+        await pilot.press("enter")
+        async with asyncio.timeout(10):
+            while not provider.child_answer_seen.is_set() or str(widget.content):
+                await pilot.pause()
+        assert provider.child_question_count == 4
+
+    await _run_cli_terminal_case(
+        agent_home=tmp_path / "home", workspace=workspace, monkeypatch=monkeypatch,
+        scenario=scenario, provider=cast(_FixedCatalogProvider, provider), size=(120, 40),
+    )

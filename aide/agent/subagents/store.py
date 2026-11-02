@@ -239,17 +239,58 @@ class SubAgentRecordStore:
                 record
                 for record in self._read_records()
                 if record.source.kind is SubAgentSourceKind.FOREGROUND
-                and record.source.restore_run_token in selected_tokens
             )
             directory = self._existing_session_directory()
             for record in records:
-                self._remove_record_artifacts(record)
-                if directory is None:
+                if record.source.restore_run_token in selected_tokens:
+                    self._remove_record_artifacts(record)
+                    if directory is None:
+                        continue
+                    path = self._record_path(directory, record.agent_id)
+                    if HOST_FILESYSTEM.entry_exists(path):
+                        HOST_FILESYSTEM.require_owned_regular_file(path, within=directory)
+                        HOST_FILESYSTEM.remove_owned_entry(path, root=directory, tree=False)
                     continue
-                path = self._record_path(directory, record.agent_id)
-                if HOST_FILESYSTEM.entry_exists(path):
-                    HOST_FILESYSTEM.require_owned_regular_file(path, within=directory)
-                    HOST_FILESYSTEM.remove_owned_entry(path, root=directory, tree=False)
+                prefix_index = next(
+                    (
+                        index
+                        for index, prefix in enumerate(record.restore_prefixes)
+                        if prefix.get("restore_run_token") in selected_tokens
+                    ),
+                    None,
+                )
+                if prefix_index is None:
+                    continue
+                prefix = record.restore_prefixes[prefix_index]
+                prior_artifacts = tuple(cast(list[str], prefix["artifact_paths"]))
+                self._remove_record_artifacts(
+                    replace(record, artifact_paths=tuple(
+                        path for path in record.artifact_paths if path not in prior_artifacts
+                    ))
+                )
+                if directory is None:
+                    raise SubAgentStoreError("SubAgent Restore directory is unavailable")
+                restored = replace(
+                    record,
+                    status=SubAgentStatus.WAITING_FOR_ANSWER,
+                    started_at=_datetime_from_prefix(prefix.get("started_at")),
+                    finished_at=_datetime_from_prefix(prefix.get("finished_at")),
+                    conversation=tuple(cast(list[dict[str, object]], prefix["conversation"])),
+                    context_state=cast(dict[str, object], prefix["context_state"]),
+                    artifact_paths=prior_artifacts,
+                    result=None,
+                    error=None,
+                    usage=cast(dict[str, int], prefix["usage"]),
+                    execution_id=cast(str, prefix["execution_id"]),
+                    restore_run_token=cast(str | None, prefix["current_restore_run_token"]),
+                    restore_prefixes=record.restore_prefixes[:prefix_index],
+                    revision=record.revision + 1,
+                )
+                self._write_record(
+                    self._record_path(directory, record.agent_id),
+                    restored,
+                    directory=directory,
+                )
 
     def _remove_record_artifacts(self, record: SubAgentRecord) -> None:
         workspace_root = self._workspace_state.workspace_path
@@ -467,8 +508,15 @@ class SubAgentRecordStore:
         elif existing.status is SubAgentStatus.RUNNING:
             allowed = {
                 SubAgentStatus.RUNNING,
+                SubAgentStatus.WAITING_FOR_ANSWER,
                 SubAgentStatus.COMPLETED,
                 SubAgentStatus.FAILED,
+                SubAgentStatus.CANCELLED,
+                SubAgentStatus.INTERRUPTED,
+            }
+        elif existing.status is SubAgentStatus.WAITING_FOR_ANSWER:
+            allowed = {
+                SubAgentStatus.QUEUED,
                 SubAgentStatus.CANCELLED,
                 SubAgentStatus.INTERRUPTED,
             }
@@ -476,3 +524,16 @@ class SubAgentRecordStore:
             raise SubAgentStoreError("terminal SubAgent records cannot be changed")
         if candidate.status not in allowed:
             raise SubAgentStoreError("SubAgent status transition is invalid")
+
+
+def _datetime_from_prefix(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise SubAgentStoreError("SubAgent Restore prefix timestamp is malformed")
+    try:
+        result = datetime.fromisoformat(value)
+        require_aware_datetime(result, field="restore_prefix.timestamp")
+        return result
+    except ValueError as error:
+        raise SubAgentStoreError("SubAgent Restore prefix timestamp is malformed") from error

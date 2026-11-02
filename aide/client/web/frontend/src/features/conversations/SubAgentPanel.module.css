@@ -217,6 +217,10 @@
   color: var(--accent-strong);
 }
 
+.statuswaiting_for_answer {
+  color: var(--warning-text);
+}
+
 .statuscompleted {
   color: var(--success-text);
 }

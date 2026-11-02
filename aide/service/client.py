@@ -327,6 +327,15 @@ class RemoteManagementCommandDispatcher:
             choice_id=choice_id,
             request_id=str(uuid4()),
         )
+        if result.get("kind") in {"subagent_resumed", "subagent_interrupted"}:
+            return ManagementCommandResult(
+                handled=True,
+                output=(
+                    "SubAgent resumed."
+                    if result["kind"] == "subagent_resumed"
+                    else "SubAgent execution was interrupted."
+                ),
+            )
         if result.get("kind") != "conversation_input" or not isinstance(result.get("run_id"), str):
             raise ServiceStartupError("service_protocol_error", "Question answer result is invalid.")
         return ManagementCommandResult(

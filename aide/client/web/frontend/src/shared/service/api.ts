@@ -16,6 +16,7 @@ import type {
   DreamRunResponse,
   ForegroundTaskSnapshot,
   ForegroundQuestionSnapshot,
+  ForegroundQuestionAnswerResult,
   ManagementResponse,
   ManagementResult,
   MemoryViewResponse,
@@ -168,7 +169,7 @@ export async function answerForegroundQuestion(
   context: ConversationCommandContext,
   question: ForegroundQuestionSnapshot,
   answer: { kind: "text"; text: string } | { kind: "choice"; choice_id: string },
-): Promise<ConversationInputAccepted> {
+): Promise<ForegroundQuestionAnswerResult> {
   const result = await sendCommand({
     request_id: createRequestId(),
     type: "answer_question",
@@ -181,11 +182,18 @@ export async function answerForegroundQuestion(
       expected_revision: question.revision,
     },
   });
-  if (result.kind !== "conversation_input" || typeof result.run_id !== "string"
-    || !result.run_id || (result.live_state !== null && typeof result.live_state !== "object")) {
-    throw new ServiceCommandError(null, false);
+  if (result.kind === "conversation_input" && typeof result.run_id === "string"
+    && result.run_id && (result.live_state === null || typeof result.live_state === "object")) {
+    return result as unknown as ConversationInputAccepted;
   }
-  return result as unknown as ConversationInputAccepted;
+  if ((result.kind === "subagent_resumed" || result.kind === "subagent_interrupted")
+    && typeof result.agent_id === "string" && result.agent_id
+    && typeof result.run_id === "string" && result.run_id
+    && typeof result.answer === "string"
+    && (result.live_state === null || typeof result.live_state === "object")) {
+    return result as unknown as ForegroundQuestionAnswerResult;
+  }
+  throw new ServiceCommandError(null, false);
 }
 
 export async function cancelForegroundTask(

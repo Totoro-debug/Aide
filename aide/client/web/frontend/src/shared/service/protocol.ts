@@ -16,6 +16,7 @@ export interface ServiceEvent {
 export type SubAgentStatus =
   | "queued"
   | "running"
+  | "waiting_for_answer"
   | "completed"
   | "failed"
   | "cancelled"
@@ -584,6 +585,7 @@ export interface ForegroundTaskSnapshot {
 export interface ForegroundQuestionSnapshot {
   question_id: string;
   task_id: string;
+  owner_agent_id?: string | null;
   generation: number;
   text: string;
   options: { id: string; label: string }[];
@@ -742,6 +744,18 @@ export interface ConversationInputAccepted {
   run_id: string;
   live_state: SessionLiveState | null;
 }
+
+export interface SubAgentQuestionAnswerResult {
+  kind: "subagent_resumed" | "subagent_interrupted";
+  agent_id: string;
+  run_id: string;
+  answer: string;
+  live_state: SessionLiveState | null;
+}
+
+export type ForegroundQuestionAnswerResult =
+  | ConversationInputAccepted
+  | SubAgentQuestionAnswerResult;
 
 export interface ManagementInputResult {
   kind: "management";

@@ -25,7 +25,7 @@ class AgentRunSuspension:
     tool_call_id: str
 
     def __post_init__(self) -> None:
-        if self.kind != "human_question":
+        if self.kind not in {"human_question", "subagent_attention"}:
             raise ValueError("Agent Run suspension kind is invalid")
         if any(
             not isinstance(value, str) or not value
@@ -51,6 +51,9 @@ class ToolRunContext:
     foreground_question_handler: Callable[[str, Sequence[Mapping[str, str]], str], str] | None = (
         None
     )
+    run_suspension_handler: Callable[
+        [str, Mapping[str, object], str, str], AgentRunSuspension | None
+    ] | None = None
     task_id: str | None = None
     generation: int | None = None
     execution_id: str | None = None

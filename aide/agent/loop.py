@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -76,7 +77,7 @@ from aide.agent.subagents.models import (
 )
 from aide.agent.subagents.ports import SubAgentRecordRepository, SubAgentSessionCoordinator
 from aide.agent.tools.base import BaseTool
-from aide.agent.tools.context import ToolRunContext
+from aide.agent.tools.context import AgentRunSuspension, ToolRunContext
 from aide.agent.tools.core.ask_user import AskUserTool
 from aide.agent.tools.core.exec_host import ExecHost
 from aide.agent.tools.core.subagents import build_subagent_tools
@@ -353,6 +354,63 @@ class AgentRunExecutor:
                 source=record.source, creator_snapshot=record.creator_snapshot,
             )
 
+        def child_question_handler_for(
+            record: SubAgentRecord,
+        ) -> Callable[[str, Sequence[Mapping[str, str]], str], str] | None:
+            store = self._foreground_work_store
+            if (
+                store is None
+                or record.source.kind is not SubAgentSourceKind.FOREGROUND
+                or record.source.task_id is None
+                or record.source.task_generation is None
+            ):
+                return None
+
+            def register_question(
+                question: str,
+                options: Sequence[Mapping[str, str]],
+                tool_call_id: str,
+            ) -> str:
+                question_id = str(self._new_uuid())
+                store.prepare_question(
+                    task_id=cast(str, record.source.task_id),
+                    execution_id=cast(str, record.execution_id),
+                    question_id=question_id,
+                    tool_call_id=tool_call_id,
+                    text=question,
+                    options=[{"id": option["id"], "label": option["label"]} for option in options],
+                    owner_agent_id=record.agent_id,
+                )
+                return question_id
+
+            return register_question
+
+        def publish_child_question(
+            record: SubAgentRecord,
+            question_id: str,
+            committed_tool_call_ids: set[str],
+        ) -> None:
+            store = self._foreground_work_store
+            if store is not None:
+                store.publish_question(
+                    question_id,
+                    committed_tool_call_ids=committed_tool_call_ids,
+                )
+
+        def finish_child_execution(record: SubAgentRecord) -> None:
+            store = self._foreground_work_store
+            if (
+                store is not None
+                and record.source.task_id is not None
+                and record.source.task_generation is not None
+            ):
+                store.finish_subagent_execution(
+                    record.source.task_id,
+                    generation=record.source.task_generation,
+                    agent_id=record.agent_id,
+                    execution_id=cast(str, record.execution_id),
+                )
+
         return SubAgentRunnerExecutor(
             workspace_id=workspace_id,
             workspace_state=self._workspace_state,
@@ -372,6 +430,9 @@ class AgentRunExecutor:
                 None if self._foreground_work_store is None
                 else self._foreground_work_store.is_active_generation
             ),
+            foreground_question_handler_for=child_question_handler_for,
+            foreground_question_publisher=publish_child_question,
+            foreground_task_finished=finish_child_execution,
             file_mutation_recorder_for=lambda record: FileBackupStore(
                 workspace_state,
                 record.session_id,
@@ -417,6 +478,9 @@ class AgentRunExecutor:
                 raise
             snapshot = None
         else:
+            creator_tool_names = tuple(tool.name for tool in run_gateway.catalog)
+            if source.kind is SubAgentSourceKind.FOREGROUND and source.task_id is not None:
+                creator_tool_names = tuple(dict.fromkeys((*creator_tool_names, "ask_user")))
             snapshot = SubAgentCreatorSnapshot(
                 provider_id=route_status.provider_id,
                 model=route_status.model,
@@ -425,7 +489,7 @@ class AgentRunExecutor:
                 ),
                 permission_level=permission_snapshot.level,
                 shell=self._exec_host.resolved_shell.selector,
-                tool_names=tuple(tool.name for tool in run_gateway.catalog),
+                tool_names=creator_tool_names,
                 system_prompt=system_prompt,
             )
         base_context = run_gateway.tool_context
@@ -1550,12 +1614,65 @@ class AgentRunExecutor:
                 )
                 return question_id
 
+            def suspend_for_subagent_attention(
+                tool_name: str,
+                arguments: Mapping[str, object],
+                tool_call_id: str,
+                content: str,
+            ) -> AgentRunSuspension | None:
+                if tool_name != "wait_agent":
+                    return None
+                try:
+                    results = json.loads(content)
+                except (TypeError, json.JSONDecodeError):
+                    return None
+                requested = arguments.get("agent_ids")
+                if (
+                    not isinstance(results, list)
+                    or not isinstance(requested, list)
+                    or any(not isinstance(agent_id, str) for agent_id in requested)
+                ):
+                    return None
+                requested_ids = set(requested)
+                for result in results:
+                    if (
+                        not isinstance(result, dict)
+                        or result.get("status") != "waiting_for_answer"
+                        or result.get("agent_id") not in requested_ids
+                        or not isinstance(result.get("question_id"), str)
+                    ):
+                        continue
+                    child_question = foreground_work_store.load().question(
+                        result["question_id"]
+                    )
+                    if (
+                        child_question is None
+                        or child_question.state != "pending"
+                        or child_question.owner_agent_id != result.get("agent_id")
+                    ):
+                        continue
+                    foreground_work_store.suspend_for_child_question(
+                        cast(str, task_id),
+                        generation=task_generation,
+                        execution_id=execution_id,
+                    )
+                    return AgentRunSuspension(
+                        kind="subagent_attention",
+                        task_id=cast(str, task_id),
+                        generation=task_generation,
+                        execution_id=execution_id,
+                        question_id=result["question_id"],
+                        tool_call_id=tool_call_id,
+                    )
+                return None
+
             foreground_tools = (AskUserTool(),)
             foreground_context = ToolRunContext(
                 workspace=self._workspace_state.workspace_path,
                 schedule_service=self._schedule_service,
                 exec_host=self._exec_host,
                 foreground_question_handler=register_question,
+                run_suspension_handler=suspend_for_subagent_attention,
                 task_id=task_id,
                 generation=task_generation,
                 execution_id=execution_id,

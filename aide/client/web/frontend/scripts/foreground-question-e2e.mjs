@@ -84,6 +84,17 @@ try {
   await page.reload();
   await expect(taskPanel).toContainText("Cancelled");
   await expect(page.getByRole("textbox", { name: "Answer to Aide's question", exact: true })).toHaveCount(0);
+  await input.fill("subagent question acceptance");
+  await input.press("Enter");
+  await expect(page.getByText("Which child output?", { exact: true })).toBeVisible();
+  await expect(cancelRun).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByText("Which child output?", { exact: true })).toBeVisible();
+  await page.getByRole("textbox", { name: "Answer to Aide's question", exact: true }).fill("child reports");
+  await page.getByRole("button", { name: "Send answer", exact: true }).click();
+  await expect(page.getByText("Which child output?", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("log")).toContainText("child reports");
+  await expect(cancelRun).toHaveCount(0);
   console.log("Foreground question and task operations: Web answer/continue/cancel passed");
 } finally {
   await browser?.close();

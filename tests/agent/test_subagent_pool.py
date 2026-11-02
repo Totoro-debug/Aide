@@ -5,6 +5,8 @@ import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
+from uuid import uuid4
 
 import pytest
 
@@ -73,6 +75,7 @@ class _ControlledExecutor:
         self.cancel_requested: dict[str, asyncio.Event] = {}
         self.failure_ids: set[str] = set()
         self.started_ids: list[str] = []
+        self.waiting_ids: set[str] = set()
 
     async def execute(
         self,
@@ -86,6 +89,16 @@ class _ControlledExecutor:
         await self.release[record.agent_id].wait()
         if record.agent_id in self.failure_ids:
             raise RuntimeError("controlled execution failure")
+        if record.agent_id in self.waiting_ids:
+            return SubAgentExecutionResult(
+                status=SubAgentStatus.WAITING_FOR_ANSWER,
+                conversation=({"role": "assistant", "content": "Need an answer."},),
+                context_state={"pending_question_id": f"question-{record.agent_id}"},
+                artifact_paths=(),
+                result=None,
+                error=None,
+                usage={"model_calls": 1, "input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+            )
         cancelled = self.cancel_requested[record.agent_id].is_set()
         return SubAgentExecutionResult(
             status=SubAgentStatus.CANCELLED if cancelled else SubAgentStatus.COMPLETED,
@@ -243,6 +256,79 @@ async def test_executor_updates_preserve_queued_children_and_release_each_genera
         for executor in (old, new):
             for gate in executor.release.values():
                 gate.set()
+        await pool.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_waiting_questions_release_capacity_and_answer_resumes_at_fifo_tail(
+    tmp_path: Path,
+) -> None:
+    from aide.agent.subagents.coordinator import SubAgentPool
+
+    state, session_id = _workspace(tmp_path)
+    repository = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    executor = _ControlledExecutor()
+    pool = SubAgentPool(repository, executor)
+    source = SubAgentSource(
+        kind=SubAgentSourceKind.FOREGROUND,
+        restore_run_token=_RESTORE_TOKEN,
+        task_id=str(uuid4()),
+        task_generation=1,
+    )
+    records: list[SubAgentRecord] = []
+    for index in range(10):
+        record = pool.submit(
+            title=f"Question task {index}",
+            task=f"Do question task {index}",
+            parent_run_id=_RUN_ID,
+            source=source,
+            creator_snapshot=_snapshot(),
+        )
+        records.append(record)
+        executor.release[record.agent_id] = asyncio.Event()
+        executor.cancel_requested[record.agent_id] = asyncio.Event()
+        if index < 8:
+            executor.waiting_ids.add(record.agent_id)
+
+    try:
+        started = [await asyncio.wait_for(executor.started.get(), timeout=2) for _ in range(8)]
+        assert started == [record.agent_id for record in records[:8]]
+        for record in records[:8]:
+            executor.release[record.agent_id].set()
+        waiting_results = await asyncio.wait_for(
+            pool.wait([record.agent_id for record in records[:8]]), timeout=3
+        )
+        assert all(result.status is SubAgentStatus.WAITING_FOR_ANSWER for result in waiting_results)
+        assert all(result.question_id for result in waiting_results)
+        assert await asyncio.wait_for(executor.started.get(), timeout=2) == records[8].agent_id
+
+        resumed_id = str(uuid4())
+        waiting_record = repository.get(records[0].agent_id)
+        assert waiting_record is not None
+        pool.resume_for_answer(
+            records[0].agent_id,
+            question_id=cast(str, (waiting_record.context_state or {})["pending_question_id"]),
+            answer="Resume this child.",
+            execution_id=resumed_id,
+            restore_run_token=str(uuid4()),
+        )
+        executor.waiting_ids.remove(records[0].agent_id)
+        executor.release[records[0].agent_id] = asyncio.Event()
+
+        executor.release[records[8].agent_id].set()
+        assert await asyncio.wait_for(executor.started.get(), timeout=2) == records[9].agent_id
+        executor.release[records[9].agent_id].set()
+        assert await asyncio.wait_for(executor.started.get(), timeout=2) == records[0].agent_id
+        resumed = repository.get(records[0].agent_id)
+        assert resumed is not None
+        assert resumed.execution_id == resumed_id
+        assert resumed.conversation[-1]["content"] == "Human Answer: Resume this child."
+        executor.release[records[0].agent_id].set()
+        result = await asyncio.wait_for(pool.wait([records[0].agent_id]), timeout=3)
+        assert result[0].status is SubAgentStatus.COMPLETED
+    finally:
+        for gate in executor.release.values():
+            gate.set()
         await pool.shutdown()
 
 

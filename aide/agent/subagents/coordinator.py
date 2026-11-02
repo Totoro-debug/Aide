@@ -159,6 +159,100 @@ class SubAgentPool:
         """List durable checkpoints, which may predate a reported storage failure."""
         return self._repository.list(status=status, cursor=cursor, limit=limit)
 
+    def resume_for_answer(
+        self,
+        agent_id: str,
+        *,
+        question_id: str,
+        answer: str,
+        execution_id: str,
+        restore_run_token: str,
+        permission_level: str | None = None,
+    ) -> SubAgentRecord:
+        """Queue one answered foreground SubAgent as a new FIFO execution segment."""
+        loop = self._bind_loop()
+        if not self._accepting or self._shutdown:
+            raise SubAgentRequestError("SubAgent Pool is not accepting resumed tasks")
+        current = self._repository.get(agent_id)
+        if current is None or current.source.kind is not SubAgentSourceKind.FOREGROUND:
+            raise SubAgentRequestError("SubAgent question does not belong to this Session")
+        if current.execution_id == execution_id and current.status in {
+            SubAgentStatus.QUEUED,
+            SubAgentStatus.RUNNING,
+        }:
+            return current
+        if current.status is not SubAgentStatus.WAITING_FOR_ANSWER:
+            raise SubAgentRequestError("SubAgent is not waiting for an answer")
+        if (current.context_state or {}).get("pending_question_id") != question_id:
+            raise SubAgentRequestError("SubAgent question is no longer current")
+        if not isinstance(answer, str) or not answer.strip():
+            raise SubAgentRequestError("SubAgent answer must not be empty")
+        if (
+            current.source.task_id is None
+            or current.source.task_generation is None
+            or (
+                self._foreground_task_is_current is not None
+                and not self._foreground_task_is_current(
+                    current.source.task_id, current.source.task_generation
+                )
+            )
+        ):
+            raise SubAgentRequestError("Foreground Task generation is no longer active")
+
+        prefix = {
+            "restore_run_token": restore_run_token,
+            "started_at": None if current.started_at is None else current.started_at.isoformat(),
+            "finished_at": None if current.finished_at is None else current.finished_at.isoformat(),
+            "conversation": list(current.conversation),
+            "context_state": current.context_state or {},
+            "artifact_paths": list(current.artifact_paths),
+            "usage": current.usage,
+            "execution_id": current.execution_id,
+            "current_restore_run_token": current.restore_run_token,
+        }
+        next_context = dict(current.context_state or {})
+        next_context.pop("pending_question_id", None)
+        next_context["segment_usage_base"] = dict(current.usage or {})
+        if permission_level is not None:
+            next_context["resume_permission_level"] = permission_level
+        updated = self._repository.save(
+            replace(
+                current,
+                status=SubAgentStatus.QUEUED,
+                started_at=None,
+                finished_at=None,
+                conversation=(
+                    *current.conversation,
+                    {
+                        "role": "user",
+                        "content": f"Human Answer: {answer}",
+                        "foreground_question_id": question_id,
+                    },
+                ),
+                context_state=next_context,
+                result=None,
+                error=None,
+                execution_id=execution_id,
+                restore_run_token=restore_run_token,
+                restore_prefixes=(*current.restore_prefixes, prefix),
+                revision=current.revision + 1,
+            ),
+            expected_revision=current.revision,
+        )
+        self._task_executors[agent_id] = self._executor
+        self._task_contexts[agent_id] = copy_context()
+        if self._retain_executor is not None:
+            try:
+                self._task_releases[agent_id] = self._retain_executor()
+            except Exception as error:
+                self._release_executor(agent_id)
+                raise SubAgentRequestError("SubAgent execution resource is unavailable") from error
+        self._publish_status(updated)
+        self._queued.append(agent_id)
+        self._start_queued(loop)
+        self._signal_waiters()
+        return updated
+
     async def wait(
         self,
         agent_ids: Sequence[str],
@@ -205,9 +299,13 @@ class SubAgentPool:
             record = self._repository.get(agent_id)
         except (TypeError, ValueError) as error:
             raise SubAgentRequestError("SubAgent ID is invalid") from error
-        if record is None or record.status not in {SubAgentStatus.QUEUED, SubAgentStatus.RUNNING}:
+        if record is None or record.status not in {
+            SubAgentStatus.QUEUED,
+            SubAgentStatus.RUNNING,
+            SubAgentStatus.WAITING_FOR_ANSWER,
+        }:
             return False
-        if record.status is SubAgentStatus.QUEUED or (
+        if record.status in {SubAgentStatus.QUEUED, SubAgentStatus.WAITING_FOR_ANSWER} or (
             agent_id in self._storage_failures and agent_id not in self._active
         ):
             status = SubAgentStatus.INTERRUPTED if interrupted else SubAgentStatus.CANCELLED
@@ -303,7 +401,11 @@ class SubAgentPool:
         record = self._repository.get(agent_id)
         if record is None:
             return None
-        if record.status in {SubAgentStatus.QUEUED, SubAgentStatus.RUNNING}:
+        if record.status in {
+            SubAgentStatus.QUEUED,
+            SubAgentStatus.RUNNING,
+            SubAgentStatus.WAITING_FOR_ANSWER,
+        }:
             self.cancel(agent_id, interrupted=interrupted)
         task = self._active.get(agent_id)
         if task is not None:
@@ -365,7 +467,11 @@ class SubAgentPool:
                 record = self._repository.get(item.agent_id)
                 if (
                     record is not None
-                    and record.status in {SubAgentStatus.QUEUED, SubAgentStatus.RUNNING}
+                    and record.status in {
+                        SubAgentStatus.QUEUED,
+                        SubAgentStatus.RUNNING,
+                        SubAgentStatus.WAITING_FOR_ANSWER,
+                    }
                     and record.source.kind is SubAgentSourceKind.FOREGROUND
                     and record.source.task_id == task_id
                     and record.source.task_generation == generation
@@ -504,6 +610,14 @@ class SubAgentPool:
                 self._save_failure(agent_id)
             else:
                 self._save_result(agent_id, result)
+                committed = self._repository.get(agent_id)
+                publish = getattr(self._task_executors.get(agent_id, self._executor),
+                                  "commit_foreground_state", None)
+                if committed is not None and callable(publish):
+                    try:
+                        publish(committed)
+                    except Exception:
+                        logger.exception("SubAgent coordination awaits reconciliation for {}", agent_id)
         except SubAgentStoreError:
             self._storage_failures.add(agent_id)
             logger.exception("SubAgent Pool could not persist task {}", agent_id)
@@ -577,6 +691,7 @@ class SubAgentPool:
                 "result": record.result,
                 "error": None if error is None else {"code": error.code, "message": error.message},
                 "usage": dict(record.usage or {}),
+                "question_id": (record.context_state or {}).get("pending_question_id"),
             },
         )
         self._queue_event(event)
@@ -609,7 +724,7 @@ class SubAgentPool:
             replace(
                 current,
                 status=status,
-                finished_at=self._aware_now(),
+                finished_at=(None if status is SubAgentStatus.WAITING_FOR_ANSWER else self._aware_now()),
                 conversation=result.conversation,
                 context_state=result.context_state,
                 artifact_paths=result.artifact_paths,
@@ -694,6 +809,7 @@ class SubAgentPool:
             if record is None:
                 raise SubAgentRequestError("SubAgent does not belong to this Session")
             if record.status in {
+                SubAgentStatus.WAITING_FOR_ANSWER,
                 SubAgentStatus.COMPLETED,
                 SubAgentStatus.FAILED,
                 SubAgentStatus.CANCELLED,
@@ -707,6 +823,11 @@ class SubAgentPool:
                         result=record.result,
                         error=record.error,
                         usage=record.usage or {},
+                        question_id=(
+                            (record.context_state or {}).get("pending_question_id")
+                            if record.status is SubAgentStatus.WAITING_FOR_ANSWER
+                            else None
+                        ),
                     )
                 )
         return tuple(results)

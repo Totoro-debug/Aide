@@ -12,10 +12,11 @@ from typing import Any, Literal, TypedDict, cast
 
 from aide.agent.permission import ToolPermissionLevel, validate_permission_level
 from aide.agent.session.session import Session, SessionStoragePartition
+from aide.agent.subagents.models import SubAgentRecord
 from aide.agent.workspace_state import WorkspaceState
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _MAX_QUESTION_LENGTH = 2_000
 _MAX_ANSWER_LENGTH = 10_000
 _SESSION_ID = re.compile(
@@ -111,6 +112,7 @@ class ForegroundWorkQuestion:
     resume_execution_id: str | None = None
     answer_anchor_id: int | None = None
     options: tuple[ForegroundQuestionOption, ...] = ()
+    owner_agent_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +303,7 @@ class ForegroundWorkStore:
                     item.resume_execution_id,
                     item.answer_anchor_id,
                     item.options,
+                    item.owner_agent_id,
                 )
                 for item in questions
             ]
@@ -342,6 +345,7 @@ class ForegroundWorkStore:
         tool_call_id: str,
         text: str,
         options: list[ForegroundQuestionOption] | None = None,
+        owner_agent_id: str | None = None,
     ) -> ForegroundWorkSnapshot:
         for name, value in (
             ("task_id", task_id),
@@ -361,15 +365,23 @@ class ForegroundWorkStore:
                 execution_id,
                 tool_call_id,
                 text,
-            ) and existing.options == normalized_options:
+            ) and existing.options == normalized_options and existing.owner_agent_id == owner_agent_id:
                 return current
             raise ForegroundWorkConflict("question_id is already bound to another question")
+        if owner_agent_id is not None:
+            _require_identifier(owner_agent_id, "owner_agent_id")
         task = next((item for item in current.tasks if item.task_id == task_id), None)
-        if task is None or task.execution_id != execution_id or task.state != "running":
+        allowed_task_states = {"running"}
+        if owner_agent_id is not None:
+            allowed_task_states.update({"waiting_for_answer", "completed"})
+        if task is None or task.state not in allowed_task_states:
+            raise ForegroundWorkConflict("question belongs to an inactive execution")
+        if owner_agent_id is None and task.execution_id != execution_id:
             raise ForegroundWorkConflict("question belongs to an inactive execution")
         unresolved = {"preparing", "pending", "answer_received", "resuming", "executing"}
-        if any(
+        if owner_agent_id is None and any(
             item.task_id == task_id
+            and item.owner_agent_id is None
             and item.state in unresolved
             and not (
                 item.state in {"resuming", "executing"}
@@ -388,6 +400,7 @@ class ForegroundWorkStore:
             text,
             "preparing",
             options=normalized_options,
+            owner_agent_id=owner_agent_id,
         )
         return self._publish(
             ForegroundWorkSnapshot(
@@ -430,12 +443,22 @@ class ForegroundWorkStore:
                 item.resume_execution_id,
                 item.answer_anchor_id,
                 item.options,
+                item.owner_agent_id,
             )
             if item.question_id == question_id
             else item
             for item in current.questions
         )
-        task_state: TaskState = "waiting_for_answer" if committed else "interrupted"
+        prior_task = next(
+            (item for item in current.tasks if item.task_id == question.task_id), None
+        )
+        task_state: TaskState = (
+            "waiting_for_answer"
+            if committed and question.owner_agent_id is None
+            else ("waiting_for_answer" if prior_task.state == "completed" else prior_task.state)
+            if question.owner_agent_id is not None and prior_task is not None
+            else "interrupted"
+        )
         tasks = tuple(
             ForegroundWorkTask(
                 item.task_id,
@@ -454,6 +477,32 @@ class ForegroundWorkStore:
             for item in current.tasks
         )
         return self._publish(ForegroundWorkSnapshot(current.revision + 1, tasks, questions))
+
+    def suspend_for_child_question(
+        self,
+        task_id: str,
+        *,
+        generation: int,
+        execution_id: str,
+    ) -> ForegroundWorkSnapshot:
+        """Keep Main nonterminal while its wait tool reports child attention."""
+        current = self.load()
+        task = next((item for item in current.tasks if item.task_id == task_id), None)
+        if (
+            task is None
+            or task.generation != generation
+            or task.execution_id != execution_id
+            or task.state != "running"
+        ):
+            raise ForegroundWorkConflict("foreground execution is no longer current")
+        updated = replace(task, state="waiting_for_answer")
+        return self._publish(
+            ForegroundWorkSnapshot(
+                current.revision + 1,
+                tuple(updated if item.task_id == task_id else item for item in current.tasks),
+                current.questions,
+            )
+        )
 
     def answer_question(
         self,
@@ -549,6 +598,7 @@ class ForegroundWorkStore:
             execution_id,
             question.answer_anchor_id,
             question.options,
+            question.owner_agent_id,
         )
         updated_task = ForegroundWorkTask(
             task.task_id,
@@ -572,6 +622,120 @@ class ForegroundWorkStore:
                     updated_question if item.question_id == question_id else item
                     for item in current.questions
                 ),
+            )
+        )
+
+    def begin_subagent_resume(
+        self,
+        question_id: str,
+        execution_id: str,
+        *,
+        answer_anchor_id: int,
+    ) -> ForegroundWorkSnapshot:
+        """Commit a child answer to its new execution without resuming Main."""
+        _require_identifier(question_id, "question_id")
+        _require_identifier(execution_id, "execution_id")
+        if isinstance(answer_anchor_id, bool) or not isinstance(answer_anchor_id, int) or answer_anchor_id < 1:
+            raise ValueError("answer_anchor_id must be a positive integer")
+        current = self.load()
+        question = current.question(question_id)
+        if question is None or question.owner_agent_id is None or question.answer is None:
+            raise ForegroundWorkConflict("question is not owned by a SubAgent")
+        if question.state == "answered":
+            if question.resume_execution_id == execution_id:
+                return current
+            raise ForegroundWorkConflict("question answer already has an execution")
+        if question.state != "answer_received":
+            raise ForegroundWorkConflict("question answer is not ready to resume")
+        updated = self._replace_question(
+            current,
+            question_id,
+            state="executing",
+            resume_execution_id=execution_id,
+            answer_anchor_id=answer_anchor_id,
+        )
+        task = next((item for item in updated.tasks if item.task_id == question.task_id), None)
+        if task is None:
+            raise ForegroundWorkConflict("question task does not exist")
+        waiting_task = replace(task, state="waiting_for_answer")
+        return self._publish(
+            ForegroundWorkSnapshot(
+                updated.revision + 1,
+                tuple(waiting_task if item.task_id == task.task_id else item for item in updated.tasks),
+                updated.questions,
+            )
+        )
+
+    def finish_subagent_execution(
+        self, task_id: str, *, generation: int, agent_id: str, execution_id: str
+    ) -> ForegroundWorkSnapshot:
+        """Release Main for an explicit continuation after child work has settled."""
+        current = self.load()
+        task = next((item for item in current.tasks if item.task_id == task_id), None)
+        if task is None or task.generation != generation:
+            raise ForegroundWorkConflict("task generation is no longer current")
+        if task.state in {"cancelled", "superseded"}:
+            return current
+        questions = tuple(
+            replace(question, state="answered")
+            if question.task_id == task_id
+            and question.owner_agent_id is not None
+            and question.state == "executing"
+            and question.owner_agent_id == agent_id
+            and question.resume_execution_id == execution_id
+            else question
+            for question in current.questions
+        )
+        unresolved = {"preparing", "pending", "answer_received", "resuming", "executing"}
+        state: TaskState = task.state if task.state in {"running", "completed"} else (
+            "waiting_for_answer"
+            if any(
+                question.task_id == task_id and question.state in unresolved
+                for question in questions
+            )
+            else "interrupted"
+        )
+        if task.state == state and questions == current.questions:
+            return current
+        updated = replace(task, state=state)
+        return self._publish(
+            ForegroundWorkSnapshot(
+                current.revision + 1,
+                tuple(updated if item.task_id == task_id else item for item in current.tasks),
+                questions,
+            )
+        )
+
+    def interrupt_subagent_question(self, question_id: str) -> ForegroundWorkSnapshot:
+        """Mark a child question interrupted when its saved execution resource is absent."""
+        current = self.load()
+        question = current.question(question_id)
+        if question is None or question.owner_agent_id is None:
+            raise ForegroundWorkConflict("question is not owned by a SubAgent")
+        updated = self._replace_question(current, question_id, state="interrupted")
+        task = next((item for item in updated.tasks if item.task_id == question.task_id), None)
+        if task is None or task.state in {"cancelled", "superseded", "interrupted"}:
+            return updated
+        unresolved = {"preparing", "pending", "answer_received", "resuming", "executing"}
+        task_state: TaskState = (
+            "waiting_for_answer"
+            if any(
+                item.task_id == task.task_id and item.state in unresolved
+                for item in updated.questions
+            )
+            else "interrupted"
+        )
+        if task.state == task_state:
+            return updated
+        interrupted_task = replace(task, state=task_state)
+        return self._publish(
+            ForegroundWorkSnapshot(
+                updated.revision + 1,
+                tuple(
+                    interrupted_task if item.task_id == task.task_id else item
+                    for item in updated.tasks
+                ),
+                updated.questions,
             )
         )
 
@@ -630,6 +794,7 @@ class ForegroundWorkStore:
                 item.resume_execution_id,
                 item.answer_anchor_id,
                 item.options,
+                item.owner_agent_id,
             )
             for item in current.questions
         )
@@ -654,6 +819,15 @@ class ForegroundWorkStore:
         task = next((item for item in current.tasks if item.task_id == task_id), None)
         if task is None or task.execution_id != execution_id or task.state != "running":
             return current
+        unresolved = {"preparing", "pending", "answer_received", "resuming", "executing"}
+        state: TaskState = (
+            "waiting_for_answer"
+            if any(
+                question.task_id == task_id and question.state in unresolved
+                for question in current.questions
+            )
+            else "completed"
+        )
         return self._publish(
             ForegroundWorkSnapshot(
                 current.revision + 1,
@@ -662,7 +836,7 @@ class ForegroundWorkStore:
                         item.task_id,
                         item.generation,
                         item.execution_id,
-                        "completed" if item.task_id == task_id else item.state,
+                        state if item.task_id == task_id else item.state,
                         item.origin_anchor_id,
                         item.permission_level,
                         item.iteration_stage,
@@ -752,7 +926,9 @@ class ForegroundWorkStore:
             and task.state == "running"
         )
 
-    def reconcile(self, messages: list[dict[str, Any]]) -> ForegroundWorkSnapshot:
+    def reconcile(
+        self, messages: list[dict[str, Any]], *, subagents: tuple[SubAgentRecord, ...] | None = None
+    ) -> ForegroundWorkSnapshot:
         """Reconcile persisted intents with the committed Session after startup or Restore."""
         current = self.load()
         session_tool_calls = {
@@ -760,6 +936,7 @@ class ForegroundWorkStore:
             for message in messages
             if message.get("role") == "tool" and isinstance(message.get("tool_call_id"), str)
         }
+        child_records = {record.agent_id: record for record in (subagents or ())}
         answer_messages = {
             message.get("foreground_question_id"): message
             for message in messages
@@ -778,14 +955,36 @@ class ForegroundWorkStore:
             fingerprint = question.answer_fingerprint
             resume_id = question.resume_execution_id
             anchor = question.answer_anchor_id
+            child = child_records.get(question.owner_agent_id or "")
+            child_committed = (
+                child is not None
+                and child.source.task_id == question.task_id
+                and child.source.task_generation == question.generation
+            )
             if question.state == "preparing":
+                committed = question.question_id in session_tool_calls
+                if child_committed and child is not None:
+                    committed = any(
+                        message.get("role") == "tool"
+                        and message.get("foreground_question_id") == question.question_id
+                        and message.get("tool_call_id") == question.tool_call_id
+                        for message in child.conversation
+                    )
                 question_state = (
-                    "pending" if question.question_id in session_tool_calls else "interrupted"
+                    "preparing"
+                    if (child is not None and child.status.value in {"queued", "running"})
+                    or (question.owner_agent_id is not None and subagents is None)
+                    else "pending" if committed else "interrupted"
                 )
-            elif question.state == "pending" and question.question_id not in session_tool_calls:
+            elif (
+                question.state == "pending"
+                and question.owner_agent_id is None
+                and question.question_id not in session_tool_calls
+            ):
                 question_state = "invalidated"
             elif (
                 question.state == "answer_received"
+                and question.owner_agent_id is None
                 and question.question_id not in session_tool_calls
             ):
                 question_state = "invalidated"
@@ -794,15 +993,31 @@ class ForegroundWorkStore:
             elif question.state in {"resuming", "executing"}:
                 answer_message = answer_messages.get(question.question_id)
                 if answer_message is not None:
-                    question_state = "answered"
+                    question_state = (
+                        "executing"
+                        if question.owner_agent_id is not None and question.state == "executing"
+                        else "answered"
+                    )
+                    if (child_committed and child is not None
+                            and child.execution_id == question.resume_execution_id
+                            and child.status.value in {"completed", "failed", "cancelled", "interrupted"}):
+                        question_state = "answered"
                     anchor_value = answer_message.get("restore_anchor_id")
                     anchor = (
                         anchor_value if type(anchor_value) is int and anchor_value > 0 else None
                     )
                 else:
                     question_state = (
-                        "interrupted" if question.state == "executing" else "answer_received"
+                        "pending"
+                        if question.owner_agent_id is not None
+                        else "interrupted"
+                        if question.state == "executing"
+                        else "answer_received"
                     )
+                    if question.owner_agent_id is not None:
+                        answer = request_id = fingerprint = resume_id = None
+                        answer_kind = answer_option_id = None
+                        anchor = None
                     resume_id = None
             elif question.state == "answered":
                 answer_message = answer_messages.get(question.question_id)
@@ -811,7 +1026,10 @@ class ForegroundWorkStore:
                 )
                 if answer_message is None or (anchor is not None and anchor_value != anchor):
                     question_state = (
-                        "pending" if question.question_id in session_tool_calls else "invalidated"
+                        "pending"
+                        if question.owner_agent_id is not None
+                        or question.question_id in session_tool_calls
+                        else "invalidated"
                     )
                     answer = request_id = fingerprint = resume_id = None
                     answer_kind = answer_option_id = None
@@ -843,16 +1061,30 @@ class ForegroundWorkStore:
                     resume_id,
                     anchor,
                     question.options,
+                    question.owner_agent_id,
                 )
             )
-            if question_state in {"pending", "answer_received"}:
-                task_states[question.task_id] = (question.execution_id, "waiting_for_answer")
-            elif question_state == "resuming":
-                task_states[question.task_id] = (resume_id or question.execution_id, "running")
-            elif question_state == "answered":
-                task_states[question.task_id] = (resume_id or question.execution_id, "completed")
-            elif question_state in {"interrupted", "invalidated"}:
-                task_states[question.task_id] = (question.execution_id, "interrupted")
+            state_rank = {
+                "interrupted": 1,
+                "completed": 2,
+                "running": 3,
+                "waiting_for_answer": 4,
+            }
+            if question.owner_agent_id is not None and question_state in {"answered", "preparing"}:
+                continue
+            candidate = (
+                question.execution_id,
+                "waiting_for_answer"
+                if question_state in {"pending", "answer_received", "executing"}
+                else "running"
+                if question_state == "resuming" and question.owner_agent_id is None
+                else "completed"
+                if question_state == "answered" and question.owner_agent_id is None
+                else "interrupted",
+            )
+            previous = task_states.get(question.task_id)
+            if previous is None or state_rank[candidate[1]] > state_rank[previous[1]]:
+                task_states[question.task_id] = cast(tuple[str, TaskState], candidate)
         tasks: list[ForegroundWorkTask] = []
         for task in current.tasks:
             override = (
@@ -921,6 +1153,7 @@ class ForegroundWorkStore:
                 int | None, changes.get("answer_anchor_id", question.answer_anchor_id)
             ),
             options=question.options,
+            owner_agent_id=question.owner_agent_id,
         )
         questions = tuple(
             updated if item.question_id == question_id else item for item in current.questions
@@ -978,7 +1211,7 @@ def _snapshot_from_dict(value: object) -> ForegroundWorkSnapshot:
     if set(data) != {"schema_version", "revision", "tasks", "questions"}:
         raise ForegroundWorkError("Foreground Work state has an unsupported shape")
     schema_version = data["schema_version"]
-    if type(schema_version) is not int or schema_version not in {1, 2, 3, _SCHEMA_VERSION}:
+    if type(schema_version) is not int or schema_version not in {1, 2, 3, 4, _SCHEMA_VERSION}:
         raise ForegroundWorkError("Foreground Work state has an unsupported version")
     revision, tasks_value, questions_value = (data["revision"], data["tasks"], data["questions"])
     if type(revision) is not int or revision < 1:
@@ -1098,6 +1331,7 @@ def _question_to_dict(question: ForegroundWorkQuestion) -> dict[str, object]:
         "resume_execution_id": question.resume_execution_id,
         "answer_anchor_id": question.answer_anchor_id,
         "options": [dict(option) for option in question.options],
+        "owner_agent_id": question.owner_agent_id,
     }
 
 
@@ -1121,6 +1355,8 @@ def _question_from_dict(value: object, *, schema_version: int) -> ForegroundWork
     }
     if schema_version >= 2:
         expected.update({"options", "answer_kind", "answer_option_id"})
+    if schema_version >= 5:
+        expected.add("owner_agent_id")
     if set(item) != expected:
         raise ForegroundWorkError("Foreground Work question has an unsupported shape")
     task_id = _require_stored_string(item["task_id"], "task_id")
@@ -1148,6 +1384,11 @@ def _question_from_dict(value: object, *, schema_version: int) -> ForegroundWork
             raise ForegroundWorkError(f"Foreground Work {name} is malformed")
     if anchor is not None and (type(anchor) is not int or anchor < 1):
         raise ForegroundWorkError("Foreground Work answer anchor is malformed")
+    owner_agent_id = item.get("owner_agent_id")
+    if schema_version < 5:
+        owner_agent_id = None
+    elif owner_agent_id is not None and not isinstance(owner_agent_id, str):
+        raise ForegroundWorkError("Foreground Work question owner is malformed")
     if schema_version >= 2 and not isinstance(item["options"], list):
         raise ForegroundWorkError("Foreground Work question options are malformed")
     try:
@@ -1195,6 +1436,7 @@ def _question_from_dict(value: object, *, schema_version: int) -> ForegroundWork
         cast(str | None, item["resume_execution_id"]),
         anchor,
         options,
+        owner_agent_id,
     )
 
 

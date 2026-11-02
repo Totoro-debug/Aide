@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
@@ -52,9 +53,11 @@ from aide.agent.session.restore import (
 from aide.agent.session.session import Session, SessionStoragePartition
 from aide.agent.subagents.coordinator import SubAgentPool
 from aide.agent.subagents.models import (
+    SubAgentError,
     SubAgentEvent,
     SubAgentRecord,
     SubAgentSourceKind,
+    SubAgentStatus,
 )
 from aide.agent.subagents.ports import SubAgentRecordRepository, SubAgentSessionCoordinator
 from aide.agent.subagents.store import (
@@ -195,6 +198,20 @@ class WorkspaceRecord:
             store = ForegroundWorkStore(self.workspace_state, session_id)
             self._foreground_work_stores[session_id] = store
         return store
+
+    def _committed_subagents(self, session_id: str) -> tuple[SubAgentRecord, ...]:
+        repository = self.subagent_repository(session_id)
+        records: list[SubAgentRecord] = []
+        cursor = None
+        while True:
+            page = repository.list(cursor=cursor, limit=100)
+            for item in page.items:
+                record = repository.get(item.agent_id)
+                if record is not None:
+                    records.append(record)
+            cursor = page.next_cursor
+            if cursor is None:
+                return tuple(records)
 
     def _persisted_foreground_messages(self, session_id: str) -> list[dict[str, Any]]:
         try:
@@ -440,7 +457,8 @@ class WorkspaceRecord:
                 )
             if not loop_state.loop.has_active_run and not loop_state.run_ids:
                 self.foreground_work_store(session_id).reconcile(
-                    self._persisted_foreground_messages(session_id)
+                    self._persisted_foreground_messages(session_id),
+                    subagents=self._committed_subagents(session_id),
                 )
             loop_state.owner_client_id = client_id
             version = self._claim_versions.get(session_id, 0) + 1
@@ -665,7 +683,8 @@ class WorkspaceRecord:
             raise service_error("not_found", "Conversation Session was not found.", status=404)
         work_store = self.foreground_work_store(session_id)
         if not loop_state.loop.has_active_run and not loop_state.run_ids and not loop_state.live_runs:
-            work_store.reconcile(self._persisted_foreground_messages(session_id))
+            work_store.reconcile(self._persisted_foreground_messages(session_id),
+                            subagents=self._committed_subagents(session_id))
         foreground_work = work_store.load()
         projection = loop_state.loop.project_foreground_conversation()
         messages = list(projection.messages)
@@ -725,6 +744,7 @@ class WorkspaceRecord:
                 {
                     "question_id": question.question_id,
                     "task_id": question.task_id,
+                    "owner_agent_id": question.owner_agent_id,
                     "generation": question.generation,
                     "text": question.text,
                     "options": [dict(option) for option in question.options],
@@ -1346,7 +1366,8 @@ class WorkspaceRecord:
                 await self._rebuild_restored_session(client_id, stored.session_id)
                 restored_loop = self._loops[stored.session_id].loop
                 self.foreground_work_store(stored.session_id).reconcile(
-                    restored_loop.session.messages
+                    restored_loop.session.messages,
+                    subagents=self._committed_subagents(stored.session_id),
                 )
                 self._restore_results[(client_id, stored.session_id)] = result
                 return result
@@ -1534,7 +1555,8 @@ class WorkspaceRecord:
             raise service_error("session_restore_active", "Session Restore is in progress.", retryable=True)
         store = self.foreground_work_store(session_id)
         if not state.loop.has_active_run and not state.run_ids and not state.live_runs:
-            store.reconcile(self._persisted_foreground_messages(session_id))
+            store.reconcile(self._persisted_foreground_messages(session_id),
+                            subagents=self._committed_subagents(session_id))
         try:
             store.answer_question(
                 question_id,
@@ -1547,6 +1569,14 @@ class WorkspaceRecord:
             question = snapshot.question(question_id)
             if question is None:
                 raise ForegroundWorkConflict("question does not exist")
+            if question.owner_agent_id is not None:
+                return await self._resume_subagent_question(
+                    client_id=client_id,
+                    session_id=session_id,
+                    state=state,
+                    store=store,
+                    question=question,
+                )
             if question.state == "answered":
                 run_id = question.resume_execution_id
                 if run_id is None:
@@ -1597,6 +1627,174 @@ class WorkspaceRecord:
             "live_state": self.session_snapshot(session_id)["live_state"],
         }
 
+    async def _resume_subagent_question(
+        self,
+        *,
+        client_id: str,
+        session_id: str,
+        state: _LoopState,
+        store: ForegroundWorkStore,
+        question: Any,
+    ) -> dict[str, object]:
+        if state.loop.has_active_run or state.run_ids or state.live_runs:
+            raise service_error(
+                "foreground_run_active",
+                "Wait for the Main Agent to release this Session before answering the SubAgent.",
+                retryable=True,
+            )
+        session = state.loop.session
+        answer_message = next(
+            (
+                message
+                for message in reversed(session.messages)
+                if message.get("role") == "user"
+                and message.get("foreground_question_id") == question.question_id
+            ),
+            None,
+        )
+        run_id = question.resume_execution_id or str(uuid4())
+        if answer_message is None:
+            if not isinstance(question.answer, str):
+                raise service_error(
+                    "foreground_question_conflict",
+                    "The SubAgent question has no saved answer.",
+                    status=409,
+                )
+            restore_run_token = uuid4()
+            summary = session.metadata.get("summary", "")
+            session.commit_agent_run(
+                [
+                    {
+                        "role": "user",
+                        "content": f"SubAgent answer: {question.answer}",
+                        "foreground_question_id": question.question_id,
+                        "foreground_task_id": question.task_id,
+                        "subagent_answer": True,
+                    }
+                ],
+                pending_last_compacted=session.last_compacted,
+                pending_action_summary=summary if isinstance(summary, str) else "",
+                restore_before=session.capture_restore_before(),
+                restore_run_token=restore_run_token,
+            )
+            answer_message = session.messages[-1]
+        await session.wait_for_pending_persist()
+        persisted_answer = next(
+            (
+                message
+                for message in self._persisted_foreground_messages(session_id)
+                if message.get("role") == "user"
+                and message.get("foreground_question_id") == question.question_id
+            ),
+            None,
+        )
+        if (
+            persisted_answer is None
+            or persisted_answer.get("restore_anchor_id") != answer_message.get("restore_anchor_id")
+            or persisted_answer.get("restore_run_token") != answer_message.get("restore_run_token")
+        ):
+            raise service_error(
+                "persistence_error",
+                "The SubAgent answer Restore anchor could not be saved.",
+                status=500,
+            )
+        answer_message = persisted_answer
+        answer_anchor_id = answer_message.get("restore_anchor_id")
+        token_value = answer_message.get("restore_run_token")
+        if (
+            isinstance(answer_anchor_id, bool)
+            or not isinstance(answer_anchor_id, int)
+            or not isinstance(token_value, str)
+        ):
+            raise service_error(
+                "persistence_error",
+                "The SubAgent answer Restore anchor could not be saved.",
+                status=500,
+            )
+        try:
+            if question.state == "answer_received":
+                store.begin_subagent_resume(
+                    question.question_id,
+                    run_id,
+                    answer_anchor_id=answer_anchor_id,
+                )
+            record = self.subagent_repository(session_id).get(question.owner_agent_id)
+            if record is None:
+                raise SubAgentRequestError("SubAgent execution resource is unavailable")
+            creator = record.creator_snapshot
+            try:
+                self.configuration.resolve_session_model_route(
+                    creator.provider_id, creator.model, creator.reasoning_effort
+                )
+            except (ConfigError, ValueError) as error:
+                raise SubAgentRequestError("SubAgent model resource is unavailable") from error
+            coordinator = self._subagent_coordinators.get(session_id)
+            resume = getattr(coordinator, "resume_for_answer", None)
+            if not callable(resume):
+                raise SubAgentRequestError("SubAgent execution resource is unavailable")
+            assert self._exec_host is not None
+            resume(
+                question.owner_agent_id,
+                question_id=question.question_id,
+                answer=cast(str, question.answer),
+                execution_id=run_id,
+                restore_run_token=token_value,
+                permission_level=self.service.client_permission(client_id).snapshot(
+                    self._exec_host.resolved_shell
+                ).level,
+            )
+        except (SubAgentRequestError, SubAgentStoreError):
+            record = self.subagent_repository(session_id).get(question.owner_agent_id)
+            if (
+                record is not None
+                and record.execution_id == run_id
+                and record.status
+                in {
+                    SubAgentStatus.RUNNING,
+                    SubAgentStatus.COMPLETED,
+                    SubAgentStatus.FAILED,
+                    SubAgentStatus.CANCELLED,
+                }
+            ):
+                return {
+                    "kind": "subagent_resumed",
+                    "agent_id": question.owner_agent_id,
+                    "run_id": run_id,
+                    "answer": question.answer,
+                    "live_state": self.session_snapshot(session_id)["live_state"],
+                }
+            if record is not None and record.status in {
+                SubAgentStatus.WAITING_FOR_ANSWER, SubAgentStatus.QUEUED
+            }:
+                self.subagent_repository(session_id).save(
+                    replace(
+                        record,
+                        status=SubAgentStatus.INTERRUPTED,
+                        finished_at=local_now(),
+                        error=SubAgentError(
+                            code="resource_unavailable",
+                            message="The saved SubAgent execution resource is unavailable.",
+                        ),
+                        revision=record.revision + 1,
+                    ),
+                    expected_revision=record.revision,
+                )
+            store.interrupt_subagent_question(question.question_id)
+            return {
+                "kind": "subagent_interrupted",
+                "agent_id": question.owner_agent_id,
+                "run_id": run_id,
+                "answer": question.answer,
+                "live_state": self.session_snapshot(session_id)["live_state"],
+            }
+        return {
+            "kind": "subagent_resumed",
+            "agent_id": question.owner_agent_id,
+            "run_id": run_id,
+            "answer": question.answer,
+            "live_state": self.session_snapshot(session_id)["live_state"],
+        }
+
     async def cancel_task(
         self,
         client_id: str,
@@ -1615,7 +1813,8 @@ class WorkspaceRecord:
         state = self._loops[session_id]
         store = self.foreground_work_store(session_id)
         if not state.loop.has_active_run and not state.run_ids and not state.live_runs:
-            store.reconcile(self._persisted_foreground_messages(session_id))
+            store.reconcile(self._persisted_foreground_messages(session_id),
+                            subagents=self._committed_subagents(session_id))
         current = store.load()
         task = next((item for item in current.tasks if item.task_id == task_id), None)
         if task is None:
@@ -1717,7 +1916,8 @@ class WorkspaceRecord:
         store = self.foreground_work_store(session_id)
         state = self._loops[session_id]
         if not state.loop.has_active_run and not state.run_ids and not state.live_runs:
-            store.reconcile(self._persisted_foreground_messages(session_id))
+            store.reconcile(self._persisted_foreground_messages(session_id),
+                            subagents=self._committed_subagents(session_id))
         current = store.load()
         if current.revision != expected_revision:
             raise service_error(
@@ -2162,6 +2362,10 @@ class WorkspaceRecord:
             },
             target_client_ids=target_client_ids,
         )
+        if claim is not None and event.kind.value == "subagent.status":
+            client = self.service._clients.get(claim.client_id)
+            if client is not None:
+                await self.service._send_snapshot_required(client, reason="subagent_status_changed")
 
     def _subagent_confirmation_for(self, record: SubAgentRecord) -> ConfirmationRequester:
         owner = SubAgentConfirmationOwner(

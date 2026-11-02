@@ -19,7 +19,7 @@ from aide.utils.validation import (
     token_usage_validation_issue,
 )
 
-SUBAGENT_RECORD_SCHEMA_VERSION = 3
+SUBAGENT_RECORD_SCHEMA_VERSION = 4
 _USAGE_FIELDS = frozenset({"model_calls", "input_tokens", "output_tokens", "total_tokens"})
 
 
@@ -28,6 +28,7 @@ class SubAgentStatus(StrEnum):
 
     QUEUED = "queued"
     RUNNING = "running"
+    WAITING_FOR_ANSWER = "waiting_for_answer"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -184,6 +185,9 @@ class SubAgentRecord:
     result: str | None = None
     error: SubAgentError | None = None
     usage: dict[str, int] | None = None
+    execution_id: str | None = None
+    restore_run_token: str | None = None
+    restore_prefixes: tuple[dict[str, Any], ...] = ()
     schema_version: int = SUBAGENT_RECORD_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -221,6 +225,24 @@ class SubAgentRecord:
             raise ValueError("SubAgent source is invalid")
         if not isinstance(self.creator_snapshot, SubAgentCreatorSnapshot):
             raise ValueError("SubAgent creator snapshot is invalid")
+        execution_id = self.agent_id if self.execution_id is None else self.execution_id
+        require_uuid4_string(execution_id, field="execution_id")
+        object.__setattr__(self, "execution_id", execution_id)
+        restore_run_token = self.restore_run_token
+        if restore_run_token is None and self.source.kind is SubAgentSourceKind.FOREGROUND:
+            restore_run_token = self.source.restore_run_token
+        if restore_run_token is not None:
+            require_uuid4_string(restore_run_token, field="restore_run_token")
+        object.__setattr__(self, "restore_run_token", restore_run_token)
+        if not isinstance(self.restore_prefixes, tuple) or any(
+            not isinstance(item, dict) for item in self.restore_prefixes
+        ):
+            raise ValueError("restore_prefixes must contain objects")
+        object.__setattr__(
+            self,
+            "restore_prefixes",
+            tuple(_restore_prefix_from_value(item) for item in self.restore_prefixes),
+        )
         if any(not isinstance(message, dict) for message in self.conversation):
             raise ValueError("SubAgent conversation entries must be objects")
         context_state = {} if self.context_state is None else self.context_state
@@ -252,6 +274,13 @@ class SubAgentRecord:
         elif self.status is SubAgentStatus.RUNNING:
             if self.started_at is None or self.finished_at is not None:
                 raise ValueError("running SubAgent requires only a start timestamp")
+        elif self.status is SubAgentStatus.WAITING_FOR_ANSWER:
+            if self.source.kind is not SubAgentSourceKind.FOREGROUND:
+                raise ValueError("only foreground SubAgents may wait for an answer")
+            if self.started_at is None or self.finished_at is not None:
+                raise ValueError("waiting SubAgent requires only a start timestamp")
+            if self.result is not None or self.error is not None:
+                raise ValueError("waiting SubAgent cannot have a result or error")
         elif self.finished_at is None:
             raise ValueError("terminal SubAgent requires a finish timestamp")
         if self.status is SubAgentStatus.COMPLETED and self.result is None:
@@ -284,6 +313,9 @@ class SubAgentRecord:
             "result": self.result,
             "error": None if self.error is None else self.error.to_dict(),
             "usage": copy.deepcopy(self.usage),
+            "execution_id": self.execution_id,
+            "restore_run_token": self.restore_run_token,
+            "restore_prefixes": copy.deepcopy(list(self.restore_prefixes)),
         }
 
     @classmethod
@@ -312,11 +344,17 @@ class SubAgentRecord:
             "error",
             "usage",
         }
-        if set(value) != fields:
-            raise ValueError("SubAgent record fields do not match the current format")
-        schema_version = _integer(value["schema_version"], field="schema_version")
-        if schema_version not in {2, SUBAGENT_RECORD_SCHEMA_VERSION}:
+        schema_version = _integer(value.get("schema_version"), field="schema_version")
+        if schema_version not in {2, 3, SUBAGENT_RECORD_SCHEMA_VERSION}:
             raise ValueError("SubAgent record schema version is unsupported")
+        current_fields = fields | {
+            "execution_id",
+            "restore_run_token",
+            "restore_prefixes",
+        }
+        expected_fields = current_fields if schema_version == SUBAGENT_RECORD_SCHEMA_VERSION else fields
+        if set(value) != expected_fields:
+            raise ValueError("SubAgent record fields do not match the current format")
         source = _source_from_dict(value["source"], schema_version=schema_version)
         creator_snapshot = _snapshot_from_dict(value["creator_snapshot"])
         created_at = _datetime_from_value(value["created_at"], field="created_at")
@@ -350,6 +388,23 @@ class SubAgentRecord:
             raise ValueError("SubAgent result must be a string or null")
         error = _error_from_value(value["error"])
         usage = _usage_from_value(value["usage"])
+        execution_id = (
+            None
+            if schema_version < SUBAGENT_RECORD_SCHEMA_VERSION
+            else _optional_string(value["execution_id"], field="execution_id")
+        )
+        restore_run_token = (
+            None
+            if schema_version < SUBAGENT_RECORD_SCHEMA_VERSION
+            else _optional_string(value["restore_run_token"], field="restore_run_token")
+        )
+        restore_prefixes_value = (
+            [] if schema_version < SUBAGENT_RECORD_SCHEMA_VERSION else value["restore_prefixes"]
+        )
+        if not isinstance(restore_prefixes_value, list) or any(
+            not isinstance(item, dict) for item in restore_prefixes_value
+        ):
+            raise ValueError("SubAgent restore_prefixes must be a list of objects")
         return cls(
             agent_id=_string(value["agent_id"], field="agent_id"),
             session_id=_string(value["session_id"], field="session_id"),
@@ -370,6 +425,9 @@ class SubAgentRecord:
             result=result,
             error=error,
             usage=usage,
+            execution_id=execution_id,
+            restore_run_token=restore_run_token,
+            restore_prefixes=tuple(cast(dict[str, Any], item) for item in restore_prefixes_value),
             schema_version=SUBAGENT_RECORD_SCHEMA_VERSION,
         )
 
@@ -395,7 +453,7 @@ class SubAgentPage:
 
 @dataclass(frozen=True, slots=True)
 class SubAgentWaitResult:
-    """Compact terminal result returned to a Main Agent waiting on tasks."""
+    """Compact terminal result or nonterminal question attention for a waiting Main Agent."""
 
     agent_id: str
     title: str
@@ -403,14 +461,22 @@ class SubAgentWaitResult:
     result: str | None
     error: SubAgentError | None
     usage: dict[str, int]
+    question_id: str | None = None
 
     def __post_init__(self) -> None:
         require_uuid4_string(self.agent_id, field="agent_id")
         _require_nonempty_string(self.title, field="title")
         if not isinstance(self.status, SubAgentStatus):
             raise ValueError("SubAgent wait result status is invalid")
-        if self.status in {SubAgentStatus.QUEUED, SubAgentStatus.RUNNING}:
-            raise ValueError("SubAgent wait result must be terminal")
+        if self.status in {
+            SubAgentStatus.QUEUED,
+            SubAgentStatus.RUNNING,
+        }:
+            raise ValueError("SubAgent wait result must be terminal or awaiting an answer")
+        if (self.status is SubAgentStatus.WAITING_FOR_ANSWER) != (self.question_id is not None):
+            raise ValueError("waiting SubAgent result requires its question ID")
+        if self.question_id is not None:
+            _require_nonempty_string(self.question_id, field="question_id")
         if self.result is not None and not isinstance(self.result, str):
             raise ValueError("result must be a string or null")
         if self.error is not None and not isinstance(self.error, SubAgentError):
@@ -422,7 +488,7 @@ class SubAgentWaitResult:
             raise ValueError("failed SubAgent wait result requires an error")
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "agent_id": self.agent_id,
             "title": self.title,
             "status": self.status.value,
@@ -430,6 +496,9 @@ class SubAgentWaitResult:
             "error": None if self.error is None else self.error.to_dict(),
             "usage": copy.deepcopy(self.usage),
         }
+        if self.question_id is not None:
+            value["question_id"] = self.question_id
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,13 +517,14 @@ class SubAgentExecutionResult:
         if not isinstance(self.status, SubAgentStatus):
             raise ValueError("SubAgent execution result status is invalid")
         if self.status not in {
+            SubAgentStatus.WAITING_FOR_ANSWER,
             SubAgentStatus.COMPLETED,
             SubAgentStatus.FAILED,
             SubAgentStatus.CANCELLED,
             SubAgentStatus.INTERRUPTED,
         }:
             raise ValueError(
-                "SubAgent execution result must be completed, failed, cancelled, or interrupted"
+                "SubAgent execution result must be waiting, completed, failed, cancelled, or interrupted"
             )
         if any(not isinstance(message, dict) for message in self.conversation):
             raise ValueError("SubAgent conversation entries must be objects")
@@ -586,6 +656,66 @@ def _usage_from_value(value: object) -> dict[str, int]:
     usage = cast(dict[str, int], value)
     _validate_usage(usage)
     return usage
+
+
+def _restore_prefix_from_value(value: object) -> dict[str, Any]:
+    fields = {
+        "restore_run_token",
+        "started_at",
+        "finished_at",
+        "conversation",
+        "context_state",
+        "artifact_paths",
+        "usage",
+        "execution_id",
+        "current_restore_run_token",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("SubAgent restore prefix fields do not match the current format")
+    restore_run_token = _string(
+        value["restore_run_token"], field="restore_prefix.restore_run_token"
+    )
+    execution_id = _string(value["execution_id"], field="restore_prefix.execution_id")
+    require_uuid4_string(restore_run_token, field="restore_prefix.restore_run_token")
+    require_uuid4_string(execution_id, field="restore_prefix.execution_id")
+    current_restore_run_token = _optional_string(
+        value["current_restore_run_token"], field="restore_prefix.current_restore_run_token"
+    )
+    if current_restore_run_token is not None:
+        require_uuid4_string(
+            current_restore_run_token, field="restore_prefix.current_restore_run_token"
+        )
+    _datetime_from_value(value["started_at"], field="restore_prefix.started_at")
+    if value["finished_at"] is not None:
+        raise ValueError("waiting restore prefix cannot have a finish timestamp")
+    conversation = value["conversation"]
+    if not isinstance(conversation, list) or any(
+        not isinstance(item, dict) for item in conversation
+    ):
+        raise ValueError("SubAgent restore prefix conversation must be a list of objects")
+    context_state = value["context_state"]
+    if not isinstance(context_state, dict):
+        raise ValueError("SubAgent restore prefix context_state must be an object")
+    artifact_paths = value["artifact_paths"]
+    if not isinstance(artifact_paths, list) or any(
+        not isinstance(item, str) for item in artifact_paths
+    ):
+        raise ValueError("SubAgent restore prefix artifact_paths must be a list of strings")
+    _validate_artifact_paths(tuple(artifact_paths))
+    usage = _usage_from_value(value["usage"])
+    _ensure_json_value(conversation, field="restore_prefix.conversation")
+    _ensure_json_value(context_state, field="restore_prefix.context_state")
+    return {
+        "restore_run_token": restore_run_token,
+        "started_at": value["started_at"],
+        "finished_at": value["finished_at"],
+        "conversation": copy.deepcopy(conversation),
+        "context_state": copy.deepcopy(context_state),
+        "artifact_paths": list(artifact_paths),
+        "usage": copy.deepcopy(usage),
+        "execution_id": execution_id,
+        "current_restore_run_token": current_restore_run_token,
+    }
 
 
 def _validate_usage(value: dict[str, int]) -> None:

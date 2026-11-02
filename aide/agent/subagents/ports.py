@@ -90,6 +90,17 @@ class SubAgentSessionCoordinator(Protocol):
         limit: int | None = None,
     ) -> SubAgentPage: ...
 
+    def resume_for_answer(
+        self,
+        agent_id: str,
+        *,
+        question_id: str,
+        answer: str,
+        execution_id: str,
+        restore_run_token: str,
+        permission_level: str | None = None,
+    ) -> SubAgentRecord: ...
+
     async def wait(
         self,
         agent_ids: Sequence[str],

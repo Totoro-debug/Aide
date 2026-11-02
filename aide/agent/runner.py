@@ -443,8 +443,11 @@ class AgentRunner:
                     if is_cancel_requested():
                         return finish_cancelled(final_content="")
                     question_index = next(
-                        (index for index, call in enumerate(pending_tool_calls)
-                         if call.name == "ask_user"),
+                        (
+                            index
+                            for index, call in enumerate(pending_tool_calls)
+                            if call.name in {"ask_user", "wait_agent"}
+                        ),
                         None,
                     )
                     schedulable_count = (
@@ -589,7 +592,7 @@ class AgentRunner:
                                 status="error",
                                 content=(
                                     "Tool call not executed because this Agent Run suspended "
-                                    "to wait for a Human Answer."
+                                    "for a required user response."
                                 ),
                             )
                             _append_run_message(

@@ -1091,6 +1091,16 @@ class ToolGateway:
                     )
             if not isinstance(content, str):
                 raise TypeError("Tool execution must return a string")
+            suspension = tool.agent_run_suspension()
+            if suspension is None and tool_context is not None:
+                handler = tool_context.run_suspension_handler
+                if handler is not None:
+                    suspension = handler(
+                        tool.name,
+                        prepared_arguments,
+                        tool_call.id,
+                        content,
+                    )
         except asyncio.CancelledError:
             raise
         except ConfirmationAborted:
@@ -1126,7 +1136,7 @@ class ToolGateway:
             "success",
             content,
             confirmation=confirmation_state[0],
-            suspension=tool.agent_run_suspension(),
+            suspension=suspension,
         )
 
     def _record_unexpected_failure(self, tool: BaseTool, error: Exception) -> None:

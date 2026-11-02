@@ -17,7 +17,7 @@ from aide.agent.context.run_context import (
     AgentRunTerminalCommitValues,
     ContextController,
 )
-from aide.agent.permission import PermissionSnapshot, ToolPermissionLevel
+from aide.agent.permission import PERMISSION_LEVELS, PermissionSnapshot, ToolPermissionLevel
 from aide.agent.runner import (
     AgentRunner,
     AgentRunnerOutput,
@@ -40,6 +40,7 @@ from aide.agent.subagents.ports import SubAgentRecordRepository
 from aide.agent.subagents.store import SubAgentStoreError
 from aide.agent.tools.base import BaseTool
 from aide.agent.tools.context import ToolRunContext
+from aide.agent.tools.core.ask_user import AskUserTool
 from aide.agent.tools.deferred import build_agent_run_gateway
 from aide.agent.tools.file_mutation import FileMutationRecorder
 from aide.agent.tools.tool_gateway import ConfirmationRequester, ToolGateway, ToolResult
@@ -99,6 +100,14 @@ class SubAgentRunnerExecutor:
         file_mutation_recorder_for: SubAgentFileMutationRecorderFactory | None = None,
         tool_context_for: Callable[[SubAgentRecord], SubAgentToolContext] | None = None,
         foreground_task_is_current: Callable[[str, int], bool] | None = None,
+        foreground_question_handler_for: Callable[
+            [SubAgentRecord],
+            Callable[[str, Sequence[Mapping[str, str]], str], str] | None,
+        ] | None = None,
+        foreground_question_publisher: Callable[
+            [SubAgentRecord, str, set[str]], None
+        ] | None = None,
+        foreground_task_finished: Callable[[SubAgentRecord], None] | None = None,
         trace_recorder: TraceRecorder | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -146,6 +155,9 @@ class SubAgentRunnerExecutor:
         self._file_mutation_recorder_for = file_mutation_recorder_for
         self._tool_context_for = tool_context_for
         self._foreground_task_is_current = foreground_task_is_current
+        self._foreground_question_handler_for = foreground_question_handler_for
+        self._foreground_question_publisher = foreground_question_publisher
+        self._foreground_task_finished = foreground_task_finished
         self._trace_recorder = (
             NoOpTraceRecorder() if trace_recorder is None else trace_recorder
         )
@@ -180,7 +192,7 @@ class SubAgentRunnerExecutor:
                 owner_session_id=record.session_id,
                 subject_session_id=None,
                 run_id=None if parent is None else parent.context.run_id,
-                restore_run_token=record.source.restore_run_token,
+                restore_run_token=record.restore_run_token,
                 agent_id=record.agent_id,
                 parent_root_id=None if parent is None else parent.context.root_id,
                 schedule_run_id=record.source.occurrence_id,
@@ -200,8 +212,9 @@ class SubAgentRunnerExecutor:
             raise ValueError("SubAgent execution requires a running record")
         if record.session_id != self._repository.session_id:
             raise ValueError("SubAgent record belongs to a different Session")
-        if record.agent_id in self._started_agent_ids:
-            raise ValueError("A SubAgent can be started only once")
+        execution_id = cast(str, record.execution_id)
+        if execution_id in self._started_agent_ids:
+            raise ValueError("A SubAgent execution segment can be started only once")
         if record.agent_id in self._cancellations:
             raise ValueError("SubAgent execution is already active")
 
@@ -213,6 +226,7 @@ class SubAgentRunnerExecutor:
         latest_runner_usage = empty_token_usage()
         controller: ContextController | None = None
         artifact_paths: list[str] = list(record.artifact_paths)
+
         try:
             run_router, run_gateway = self._create_run_resources(record)
             if not current_record[0].conversation:
@@ -345,7 +359,7 @@ class SubAgentRunnerExecutor:
                 next_conversation = [*current.conversation, *appended]
                 context_values = run_controller.terminal_commit_values()
                 next_context_state = _context_state(current, context_values)
-                usage = _combined_usage(runner_usage, context_values.usage_delta)
+                usage = _segment_total_usage(record, runner_usage, context_values.usage_delta)
                 next_artifact_paths = tuple(
                     dict.fromkeys((*current.artifact_paths, *artifact_paths))
                 )
@@ -401,15 +415,15 @@ class SubAgentRunnerExecutor:
                 else None
             )
             run_token = (
-                UUID(record.source.restore_run_token)
+                UUID(record.restore_run_token)
                 if record.source.kind is SubAgentSourceKind.FOREGROUND
-                and record.source.restore_run_token is not None
+                and record.restore_run_token is not None
                 else None
             )
             confirmation = (
                 None if self._confirmation_for is None else self._confirmation_for(record)
             )
-            self._started_agent_ids.add(record.agent_id)
+            self._started_agent_ids.add(execution_id)
             runner_task = asyncio.create_task(
                 runner.run(
                     (),
@@ -440,13 +454,27 @@ class SubAgentRunnerExecutor:
                     cancellation.request(interrupted=True)
 
             await checkpoint(runner_result.messages, runner_result.usage)
-            return _execution_result(
+            result = _execution_result(
                 current_record[0],
                 runner_result,
                 run_controller.terminal_commit_values(),
                 artifact_paths,
+                segment_base=record,
                 interrupted=cancellation.interrupted,
             )
+            if result.status is SubAgentStatus.WAITING_FOR_ANSWER:
+                result = replace(
+                    result,
+                    context_state={
+                        **result.context_state,
+                        "pending_question_id": (
+                            None
+                            if runner_result.suspension is None
+                            else runner_result.suspension.question_id
+                        ),
+                    },
+                )
+            return result
         except asyncio.CancelledError:
             cancellation.interrupted = True
             cancellation.event.set()
@@ -458,10 +486,24 @@ class SubAgentRunnerExecutor:
         except Exception as error:
             usage = latest_runner_usage
             if controller is not None:
-                usage = _combined_usage(usage, controller.terminal_commit_values().usage_delta)
+                usage = _segment_total_usage(
+                    record, usage, controller.terminal_commit_values().usage_delta
+                )
             return _failed_execution(current_record[0], artifact_paths, error, usage=usage)
         finally:
             self._cancellations.pop(record.agent_id, None)
+
+    def commit_foreground_state(self, record: SubAgentRecord) -> None:
+        """Publish coordination only after Pool has committed the execution record."""
+        if record.status is SubAgentStatus.WAITING_FOR_ANSWER:
+            question_id = (record.context_state or {}).get("pending_question_id")
+            if isinstance(question_id, str) and self._foreground_question_publisher is not None:
+                self._foreground_question_publisher(record, question_id, {
+                    str(message["tool_call_id"]) for message in record.conversation
+                    if message.get("role") == "tool" and isinstance(message.get("tool_call_id"), str)
+                })
+        elif self._foreground_task_finished is not None:
+            self._foreground_task_finished(record)
 
     def _create_run_resources(self, record: SubAgentRecord) -> tuple[RunModelRouter, ToolGateway]:
         creator = record.creator_snapshot
@@ -480,6 +522,11 @@ class SubAgentRunnerExecutor:
             raise ValueError("SubAgent snapshot shell does not match the shared Exec Host")
         task_guard = self._foreground_task_is_current
         guarded = record.source.task_id is not None and task_guard is not None
+        question_handler = (
+            None
+            if not guarded or self._foreground_question_handler_for is None
+            else self._foreground_question_handler_for(record)
+        )
         tool_context = ToolRunContext(
             workspace=workspace,
             schedule_service=base_context.schedule_service,
@@ -487,14 +534,19 @@ class SubAgentRunnerExecutor:
             subagent=(None if self._tool_context_for is None else self._tool_context_for(record)),
             task_id=record.source.task_id if guarded else None,
             generation=record.source.task_generation if guarded else None,
-            execution_id=record.agent_id if guarded else None,
+            execution_id=record.execution_id if guarded else None,
+            foreground_question_handler=question_handler,
             foreground_task_is_current=(
                 None if not guarded or task_guard is None
                 else lambda task_id, generation, _execution_id: task_guard(task_id, generation)
             ),
         )
+        level = cast(ToolPermissionLevel, creator.permission_level)
+        resumed_level = (record.context_state or {}).get("resume_permission_level", level)
+        if resumed_level not in PERMISSION_LEVELS:
+            raise ValueError("SubAgent resume permission level is invalid")
         permission_snapshot = PermissionSnapshot(
-            level=cast(ToolPermissionLevel, creator.permission_level),
+            level=min((level, cast(ToolPermissionLevel, resumed_level)), key=PERMISSION_LEVELS.index),
             exec_shell=shell,
         )
         return run_router, build_agent_run_gateway(
@@ -504,6 +556,12 @@ class SubAgentRunnerExecutor:
             mcp_keywords=self._mcp_keywords,
             permission_snapshot=permission_snapshot,
             tool_context=tool_context,
+            run_tools=(
+                (AskUserTool(),)
+                if record.source.kind is SubAgentSourceKind.FOREGROUND
+                and "ask_user" in creator.tool_names
+                else ()
+            ),
         )
 
 
@@ -528,12 +586,24 @@ def _combined_usage(*values: Mapping[str, int]) -> dict[str, int]:
     return total
 
 
+def _segment_total_usage(
+    record: SubAgentRecord,
+    runner_usage: Mapping[str, int],
+    context_delta: Mapping[str, int],
+) -> dict[str, int]:
+    base = (record.context_state or {}).get("segment_usage_base", record.usage)
+    if not isinstance(base, dict):
+        raise ValueError("SubAgent segment usage base is malformed")
+    return _combined_usage(base, runner_usage, context_delta)
+
+
 def _execution_result(
     record: SubAgentRecord,
     runner_result: AgentRunnerResult,
     context_values: AgentRunTerminalCommitValues,
     artifact_paths: Sequence[str],
     *,
+    segment_base: SubAgentRecord,
     interrupted: bool,
 ) -> SubAgentExecutionResult:
     conversation = tuple(record.conversation)
@@ -554,6 +624,8 @@ def _execution_result(
         )
     elif finish_reason == "completed":
         status = SubAgentStatus.COMPLETED
+    elif finish_reason == "suspended" and runner_result.suspension is not None:
+        status = SubAgentStatus.WAITING_FOR_ANSWER
     elif finish_reason == "cancelled":
         status = SubAgentStatus.CANCELLED
     else:
@@ -571,7 +643,7 @@ def _execution_result(
         artifact_paths=tuple(dict.fromkeys((*record.artifact_paths, *artifact_paths))),
         result=result,
         error=error,
-        usage=_combined_usage(runner_result.usage, context_values.usage_delta),
+        usage=_segment_total_usage(segment_base, runner_result.usage, context_values.usage_delta),
     )
 
 

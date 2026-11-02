@@ -262,6 +262,14 @@ class _DelegatingProvider:
         self.wait_result_contents: list[str] = []
         self.direct_schedule_tool_names: list[set[str]] = []
         self.requests: list[tuple[str, set[str]]] = []
+        self.child_question_started = asyncio.Event()
+        self.child_answer_seen = asyncio.Event()
+        self.child_question_count = 0
+        self.question_children = 2
+        self.independent_ninth = False
+        self.question_parent_started = asyncio.Event()
+        self.question_spawn_requested = False
+        self.question_wait_requested = False
 
     @staticmethod
     def _response(content: str, *, tool_call: ModelToolCall | None = None) -> ModelResponse:
@@ -315,6 +323,109 @@ class _DelegatingProvider:
         if "Direct schedule integration request" in user_text:
             self.direct_schedule_tool_names.append(tool_names)
             return self._events("Direct schedule completed.")
+
+        if "SubAgent question delegation request" in user_text:
+            self.question_parent_started.set()
+            self.parent_tool_names.append(tool_names)
+            spawn_results = {
+                item.get("tool_call_id"): item
+                for item in current_tool_results
+                if item.get("tool_call_id") in {f"question-child-{index}" for index in range(1, self.question_children + 1)}
+            }
+            wait_result = next(
+                (item for item in current_tool_results if item.get("tool_call_id") == "question-wait"),
+                None,
+            )
+            missing_child = next(
+                (index for index in range(1, self.question_children + 1) if f"question-child-{index}" not in spawn_results),
+                None,
+            )
+            if missing_child is not None:
+                if "spawn_agent" not in tool_names:
+                    return self._events(
+                        "",
+                        tool_call=ModelToolCall(
+                            "question-search-spawn",
+                            "tool_search",
+                            '{"query":"spawn agent"}',
+                        ),
+                    )
+                self.question_spawn_requested = True
+                return self._events(
+                    "",
+                    tool_call=ModelToolCall(
+                    f"question-child-{missing_child}",
+                        "spawn_agent",
+                    json.dumps(
+                        {
+                            "title": f"Child question {missing_child}",
+                            "task": ("Make delegated integration answer."
+                                     if self.independent_ninth and missing_child == 9
+                                     else "ask-child-question"),
+                        }
+                    ),
+                    ),
+                )
+            if wait_result is None:
+                if "wait_agent" not in tool_names:
+                    return self._events(
+                        "",
+                        tool_call=ModelToolCall(
+                            "question-search-wait",
+                            "tool_search",
+                            '{"query":"wait agent"}',
+                        ),
+                    )
+                children = [
+                    json.loads(str(spawn_results[f"question-child-{index}"].get("content", "{}")))
+                    for index in range(1, self.question_children + 1)
+                ]
+                self.question_wait_requested = True
+                return self._events(
+                    "",
+                    tool_call=ModelToolCall(
+                        "question-wait",
+                        "wait_agent",
+                        json.dumps({"agent_ids": [child["agent_id"] for child in children]}),
+                    ),
+                )
+            return self._events("Main was notified that its child needs an answer.")
+
+        if "ask-child-question" in user_text:
+            self.child_question_started.set()
+            self.child_question_count += 1
+            self.child_tool_names = tool_names
+            if "ask_user" not in tool_names:
+                return self._events("The child does not have a question Tool.")
+            latest_user_text = next(
+                (
+                    str(message.get("content", ""))
+                    for message in reversed(messages)
+                    if message.get("role") == "user"
+                ),
+                "",
+            )
+            if latest_user_text.startswith("Human Answer:"):
+                self.child_answer_seen.set()
+                if latest_user_text == "Human Answer: write-answer" and not any(
+                    item.get("tool_call_id") == "answer-write" for item in current_tool_results
+                ):
+                    return self._events("", tool_call=ModelToolCall(
+                        "answer-write", "write_file", '{"path":"child-answer.txt","content":"changed"}'))
+                return self._events("The child received the answer and completed the task.")
+            already_asked = any(
+                item.get("tool_call_id") == "child-question" for item in current_tool_results
+            )
+            if already_asked:
+                return self._events("The child question was submitted.")
+            return self._events(
+                "",
+                tool_call=ModelToolCall(
+                    "child-question",
+                    "ask_user",
+                    '{"question":"Which output should I prepare?"}',
+                ),
+            )
 
         if (
             "initial delegation request" in user_text
@@ -1011,6 +1122,181 @@ async def test_foreground_main_run_delegates_and_later_reads_the_completed_resul
         assert provider.old_result_seen.is_set(), provider.wait_result_contents
     finally:
         provider.release_child.set()
+
+
+@pytest.mark.asyncio
+async def test_foreground_subagent_question_suspends_and_notifies_its_waiter(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
+
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    provider = _DelegatingProvider()
+    service.model_router._provider_factory = lambda _configuration: provider
+    service.model_router._providers.clear()
+    claim = cast(
+        dict[str, object],
+        (await service.claim(client_id, workspace.workspace_id, session_id))["claim"],
+    )
+    claim_version = cast(int, claim["claim_version"])
+    run_id = str(uuid4())
+
+    await workspace.input(
+        client_id,
+        session_id,
+        claim_version,
+        "SubAgent question delegation request",
+        run_id,
+    )
+    await asyncio.wait_for(provider.question_parent_started.wait(), timeout=5)
+    await _wait_until(lambda: provider.child_question_count == 2)
+    await _wait_for_idle(workspace, session_id)
+
+    assert "ask_user" in provider.child_tool_names
+    page = service.list_subagents(client_id, workspace.workspace_id, session_id)
+    items = cast(list[dict[str, object]], page["items"])
+    assert len(items) == 2
+    assert all(item["status"] == "waiting_for_answer" for item in items)
+    assert all(item["finished_at"] is None for item in items)
+    questions = cast(list[dict[str, object]], workspace.session_snapshot(session_id)["foreground_questions"])
+    assert len(questions) == 2
+    assert {question["owner_agent_id"] for question in questions} == {
+        item["agent_id"] for item in items
+    }
+    task = cast(list[dict[str, object]], workspace.session_snapshot(session_id)["foreground_tasks"])[0]
+    assert task["state"] == "waiting_for_answer"
+
+    coordinator = workspace._subagent_coordinator(session_id)
+    assert coordinator is not None
+    parent_requests = len(provider.parent_tool_names)
+    first_question = questions[0]
+    first_answer_request_id = str(uuid4())
+    result = await service.answer_foreground_question(
+        client_id,
+        workspace.workspace_id,
+        session_id,
+        cast(int, claim["claim_version"]),
+        cast(str, first_question["question_id"]),
+        "Use the concise format.",
+        None,
+        cast(int, first_question["revision"]),
+        first_answer_request_id,
+    )
+    assert result["kind"] == "subagent_resumed"
+    first_agent_id = cast(str, first_question["owner_agent_id"])
+    second_question = questions[1]
+    second_agent_id = cast(str, second_question["owner_agent_id"])
+    result_after_one = await asyncio.wait_for(
+        coordinator.wait([first_agent_id], timeout_ms=5000), timeout=6
+    )
+    assert provider.child_answer_seen.is_set()
+    assert result_after_one[0].status is SubAgentStatus.COMPLETED
+    assert _require_record(workspace.subagent_repository(session_id), second_agent_id).status is (
+        SubAgentStatus.WAITING_FOR_ANSWER
+    )
+    assert len(cast(list[object], workspace.session_snapshot(session_id)["foreground_questions"])) == 1
+    assert len(provider.parent_tool_names) == parent_requests
+
+    replayed = await service.answer_foreground_question(
+        client_id,
+        workspace.workspace_id,
+        session_id,
+        cast(int, claim["claim_version"]),
+        cast(str, first_question["question_id"]),
+        "Use the concise format.",
+        None,
+        cast(int, first_question["revision"]),
+        first_answer_request_id,
+    )
+    assert replayed["kind"] == "subagent_resumed"
+    assert _require_record(workspace.subagent_repository(session_id), first_agent_id).status is (
+        SubAgentStatus.COMPLETED
+    )
+    assert len(provider.parent_tool_names) == parent_requests
+
+    second_question = cast(
+        dict[str, object], cast(list[object], workspace.session_snapshot(session_id)["foreground_questions"])[0]
+    )
+    second_result = await service.answer_foreground_question(
+        client_id,
+        workspace.workspace_id,
+        session_id,
+        cast(int, claim["claim_version"]),
+        cast(str, second_question["question_id"]),
+        "Use the detailed format.",
+        None,
+        cast(int, second_question["revision"]),
+        str(uuid4()),
+    )
+    assert second_result["kind"] == "subagent_resumed"
+    result_after_two = await asyncio.wait_for(
+        coordinator.wait([second_agent_id], timeout_ms=5000), timeout=6
+    )
+    assert result_after_two[0].status is SubAgentStatus.COMPLETED
+    assert len(provider.parent_tool_names) == parent_requests
+
+
+@pytest.mark.asyncio
+async def test_missing_subagent_question_resource_reports_interruption(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
+
+    service, workspace, client_id, session_id, _other_session_id = management_case
+    provider = _DelegatingProvider()
+    service.model_router._provider_factory = lambda _configuration: provider
+    service.model_router._providers.clear()
+    claim = cast(
+        dict[str, object],
+        (await service.claim(client_id, workspace.workspace_id, session_id))["claim"],
+    )
+    await workspace.input(
+        client_id,
+        session_id,
+        cast(int, claim["claim_version"]),
+        "SubAgent question delegation request",
+        str(uuid4()),
+    )
+    await asyncio.wait_for(provider.question_parent_started.wait(), timeout=5)
+    await _wait_until(lambda: provider.child_question_count == 2)
+    await _wait_for_idle(workspace, session_id)
+
+    questions = cast(
+        list[dict[str, object]],
+        workspace.session_snapshot(session_id)["foreground_questions"],
+    )
+    first_question, second_question = questions
+    coordinator = workspace._subagent_coordinators.pop(session_id)
+    parent_requests = len(provider.parent_tool_names)
+    try:
+        result = await service.answer_foreground_question(
+            client_id,
+            workspace.workspace_id,
+            session_id,
+            cast(int, claim["claim_version"]),
+            cast(str, first_question["question_id"]),
+            "Use the concise format.",
+            None,
+            cast(int, first_question["revision"]),
+            str(uuid4()),
+        )
+    finally:
+        workspace._subagent_coordinators[session_id] = coordinator
+
+    assert result["kind"] == "subagent_interrupted"
+    record = _require_record(
+        workspace.subagent_repository(session_id), cast(str, first_question["owner_agent_id"])
+    )
+    assert record.status is SubAgentStatus.INTERRUPTED
+    assert record.error is not None and record.error.code == "resource_unavailable"
+    remaining = workspace.session_snapshot(session_id)
+    remaining_questions = cast(list[dict[str, object]], remaining["foreground_questions"])
+    states = {item["question_id"]: item["state"] for item in remaining_questions}
+    assert states[first_question["question_id"]] == "interrupted"
+    assert states[second_question["question_id"]] == "pending"
+    task = cast(list[dict[str, object]], remaining["foreground_tasks"])[0]
+    assert task["state"] == "waiting_for_answer"
+    assert len(provider.parent_tool_names) == parent_requests
 
 
 @pytest.mark.asyncio
@@ -2527,3 +2813,253 @@ async def test_task_fence_blocks_child_tools_before_cleanup_finishes(
         release.set()
         provider.release_child.set()
         await cancellation
+
+
+@pytest.mark.asyncio
+async def test_child_completion_does_not_acknowledge_another_running_answer(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
+
+    class HeldAnswerProvider(_DelegatingProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.held = asyncio.Event()
+            self.release = asyncio.Event()
+
+        def stream(self, **kwargs: Any) -> AsyncIterator[ModelStreamEvent]:
+            async def emit() -> AsyncIterator[ModelStreamEvent]:
+                users = [m for m in kwargs["messages"] if m.get("role") == "user"]
+                if users and users[-1].get("content") == "Human Answer: hold":
+                    self.held.set()
+                    await self.release.wait()
+                async for event in super(HeldAnswerProvider, self).stream(**kwargs):
+                    yield event
+            return emit()
+
+    service, workspace, client_id, sid, _ = management_case
+    provider = HeldAnswerProvider()
+    service.model_router._provider_factory = lambda _: provider
+    service.model_router._providers.clear()
+    claim = cast(dict[str, Any], (await service.claim(client_id, workspace.workspace_id, sid))["claim"])
+    version = claim["claim_version"]
+    await workspace.input(client_id, sid, version, "SubAgent question delegation request", str(uuid4()))
+    await _wait_until(lambda: provider.child_question_count == 2)
+    await _wait_for_idle(workspace, sid)
+    questions = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_questions"])
+    held_id = questions[0]["question_id"]
+    try:
+        await service.answer_foreground_question(client_id, workspace.workspace_id, sid, version,
+            held_id, "hold", None, questions[0]["revision"], str(uuid4()))
+        await asyncio.wait_for(provider.held.wait(), 5)
+        other = next(q for q in cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_questions"])
+                     if q["question_id"] != held_id)
+        await service.answer_foreground_question(client_id, workspace.workspace_id, sid, version,
+            other["question_id"], "finish", None, other["revision"], str(uuid4()))
+        await _wait_until(lambda: service.get_subagent(client_id, workspace.workspace_id, sid,
+            other["owner_agent_id"])["status"] == "completed")
+        task = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_tasks"])[0]
+        with pytest.raises(ServiceError) as blocked:
+            await service.continue_foreground_task(client_id, workspace.workspace_id, sid, version,
+                task["task_id"], task["revision"], str(uuid4()))
+        assert blocked.value.code == "foreground_task_conflict"
+    finally:
+        provider.release.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lower_permission", [False, True])
+async def test_child_answer_restore_recovers_file_and_conversation_prefix(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    lower_permission: bool,
+) -> None:
+    from aide.agent.session.restore import RestoreMode
+    from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
+
+    service, workspace, client, sid, _ = management_case
+    provider = _DelegatingProvider()
+    service.model_router._provider_factory = lambda _: provider
+    service.model_router._providers.clear()
+    service.client_permission(client).select("workspace-write")
+    target = workspace.workspace_path / "child-answer.txt"
+    target.write_bytes(b"original\x00bytes")
+    claim = cast(dict[str, Any], (await service.claim(client, workspace.workspace_id, sid))["claim"])
+    version = claim["claim_version"]
+    await workspace.input(client, sid, version, "SubAgent question delegation request", str(uuid4()))
+    await _wait_until(lambda: provider.child_question_count == 2)
+    await _wait_for_idle(workspace, sid)
+    questions = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_questions"])
+    first = questions[0]
+    before = service.get_subagent(client, workspace.workspace_id, sid, first["owner_agent_id"])
+    before_context = _require_record(workspace.subagent_repository(sid), first["owner_agent_id"]).context_state
+    if lower_permission:
+        service.client_permission(client).select("read-only")
+    for index, question in enumerate(questions):
+        current = next(q for q in cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_questions"])
+                       if q["question_id"] == question["question_id"])
+        await service.answer_foreground_question(client, workspace.workspace_id, sid, version,
+            current["question_id"], "write-answer" if index == 0 else "finish", None,
+            current["revision"], str(uuid4()))
+        if lower_permission and index == 0:
+            events = service.client(client).events
+            await _wait_until(lambda events=events: any(e["type"] == "confirmation.requested" for e in events))
+            event = next(e for e in events if e["type"] == "confirmation.requested")
+            service.decide_confirmation(client, cast(dict[str, Any], event["payload"])["token"], "declined")
+        await _wait_until(lambda agent_id=current["owner_agent_id"]: service.get_subagent(client, workspace.workspace_id, sid,
+            agent_id)["status"] == "completed")
+    assert target.read_bytes() == (b"original\x00bytes" if lower_permission else b"changed")
+    total = service.get_subagent(client, workspace.workspace_id, sid, first["owner_agent_id"])["usage"]
+    assert total == {"model_calls": 3, "input_tokens": 3, "output_tokens": 3, "total_tokens": 6}
+    anchors = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["restore_anchors"])
+    anchor = next(a for a in anchors if a["content"] == "SubAgent answer: write-answer")
+    service.client_permission(client).select("workspace-write")
+    credential = workspace.require_claim(client, sid, version).credential
+    await service.inspect_restore(client, workspace.workspace_id, sid, version, credential,
+                                  "inspect-child-answer", anchor["anchor_id"])
+    await service.commit_restore(client, workspace.workspace_id, sid, version, credential,
+        "restore-child-answer", anchor["anchor_id"],
+        RestoreMode.CONVERSATION_ONLY.value if lower_permission else RestoreMode.FILES.value)
+    restored = service.get_subagent(client, workspace.workspace_id, sid, first["owner_agent_id"])
+    assert target.read_bytes() == b"original\x00bytes"
+    assert restored["status"] == "waiting_for_answer"
+    assert restored["conversation"] == before["conversation"]
+    assert _require_record(workspace.subagent_repository(sid), first["owner_agent_id"]).context_state == before_context
+
+
+@pytest.mark.asyncio
+async def test_eight_real_question_runners_release_capacity_for_ninth_child(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
+
+    service, workspace, client, sid, _ = management_case
+    provider = _DelegatingProvider()
+    provider.question_children = 9
+    provider.independent_ninth = True
+    service.model_router._provider_factory = lambda _: provider
+    service.model_router._providers.clear()
+    claim = cast(dict[str, Any], (await service.claim(client, workspace.workspace_id, sid))["claim"])
+    await workspace.input(client, sid, claim["claim_version"], "SubAgent question delegation request", str(uuid4()))
+    try:
+        await asyncio.wait_for(provider.child_started.wait(), 20)
+        await _wait_until(lambda: provider.child_question_count == 8)
+        await _wait_for_idle(workspace, sid)
+        items = cast(list[dict[str, Any]], service.list_subagents(client, workspace.workspace_id, sid)["items"])
+        assert sum(item["status"] == "waiting_for_answer" for item in items) == 8
+        assert sum(item["status"] == "running" for item in items) == 1
+        assert len(cast(list[object], workspace.session_snapshot(sid)["foreground_questions"])) == 8
+    finally:
+        provider.release_child.set()
+
+
+@pytest.mark.asyncio
+async def test_child_question_publication_failure_reconciles_committed_runner(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
+
+    service, workspace, client, sid, _ = management_case
+    provider = _DelegatingProvider()
+    service.model_router._provider_factory = lambda _: provider
+    service.model_router._providers.clear()
+    claim = cast(dict[str, Any], (await service.claim(client, workspace.workspace_id, sid))["claim"])
+    original = HOST_FILESYSTEM.atomic_replace_text
+    failures = 0
+
+    def fail_once(path: Path, content: str) -> None:
+        nonlocal failures
+        if path.name == "state.json" and failures == 0:
+            data = json.loads(content)
+            if any(q.get("owner_agent_id") and q["state"] == "pending" for q in data["questions"]):
+                failures += 1
+                raise OSError("injected child question publication failure")
+        original(path, content)
+
+    monkeypatch.setattr(HOST_FILESYSTEM, "atomic_replace_text", fail_once)
+    await workspace.input(client, sid, claim["claim_version"], "SubAgent question delegation request", str(uuid4()))
+    await _wait_until(lambda: provider.child_question_count == 2)
+    await _wait_for_idle(workspace, sid)
+    snapshot = workspace.session_snapshot(sid)
+    questions = cast(list[dict[str, Any]], snapshot["foreground_questions"])
+    assert failures == 1
+    assert len(questions) == 2
+    assert all(q["state"] == "pending" for q in questions)
+    calls = provider.child_question_count
+    first = questions[0]
+    await service.answer_foreground_question(client, workspace.workspace_id, sid, claim["claim_version"],
+        first["question_id"], "finish", None, first["revision"], str(uuid4()))
+    await _wait_until(lambda: service.get_subagent(client, workspace.workspace_id, sid,
+        first["owner_agent_id"])["status"] == "completed")
+    assert provider.child_question_count == calls + 1
+
+
+@pytest.mark.asyncio
+async def test_saved_answer_with_failed_queue_publication_is_explicitly_interrupted(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
+
+    service, workspace, client, sid, _ = management_case
+    provider = _DelegatingProvider()
+    service.model_router._provider_factory = lambda _: provider
+    service.model_router._providers.clear()
+    claim = cast(dict[str, Any], (await service.claim(client, workspace.workspace_id, sid))["claim"])
+    await workspace.input(client, sid, claim["claim_version"], "SubAgent question delegation request", str(uuid4()))
+    await _wait_until(lambda: provider.child_question_count == 2)
+    await _wait_for_idle(workspace, sid)
+    question = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_questions"])[0]
+    original = HOST_FILESYSTEM.atomic_replace_text
+    failures = 0
+
+    def fail_after_queue_save(path: Path, content: str) -> None:
+        nonlocal failures
+        original(path, content)
+        if path.stem == question["owner_agent_id"] and failures == 0:
+            if json.loads(content).get("status") == "queued":
+                failures += 1
+                raise OSError("injected failure after queue publication")
+
+    monkeypatch.setattr(workspace.subagent_repository(sid), "_replace_text", fail_after_queue_save)
+    result = await service.answer_foreground_question(client, workspace.workspace_id, sid,
+        claim["claim_version"], question["question_id"], "saved answer", None, question["revision"], str(uuid4()))
+    assert failures == 1
+    assert result["kind"] == "subagent_interrupted"
+    assert service.get_subagent(client, workspace.workspace_id, sid, question["owner_agent_id"])["status"] == "interrupted"
+    assert provider.child_question_count == 2
+    assert "saved answer" in str(workspace.session_snapshot(sid)["messages"])
+
+
+@pytest.mark.asyncio
+async def test_child_answer_does_not_replace_a_removed_registered_model(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    from tests.configuration.test_model_configuration import editable_models
+    from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
+
+    service, workspace, client, sid, _ = management_case
+    provider = _DelegatingProvider()
+    service.model_router._provider_factory = lambda _: provider
+    service.model_router._providers.clear()
+    claim = cast(dict[str, Any], (await service.claim(client, workspace.workspace_id, sid))["claim"])
+    await workspace.input(client, sid, claim["claim_version"], "SubAgent question delegation request", str(uuid4()))
+    await _wait_until(lambda: provider.child_question_count == 2)
+    await _wait_for_idle(workspace, sid)
+    first = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_questions"])[0]
+    models = editable_models(ConfigLoader(service.agent_home))
+    registered = _require_record(workspace.subagent_repository(sid), first["owner_agent_id"]).creator_snapshot
+    available = models["providers"][registered.provider_id]["models"]
+    available["replacement-model"] = available.pop(registered.model)
+    for route in models["routes"].values():
+        if route.get("provider_id") == registered.provider_id:
+            route["model"] = "replacement-model"
+    await service.update_configuration("remove-registered-model", cast(str, service.config_view()["revision"]),
+                                       {"models": models})
+    result = await service.answer_foreground_question(client, workspace.workspace_id, sid,
+        claim["claim_version"], first["question_id"], "finish", None, first["revision"], str(uuid4()))
+    assert result["kind"] == "subagent_interrupted"
+    record = _require_record(workspace.subagent_repository(sid), first["owner_agent_id"])
+    assert record.status is SubAgentStatus.INTERRUPTED
+    assert record.creator_snapshot == registered
+    assert provider.child_question_count == 2

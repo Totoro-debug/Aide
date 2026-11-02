@@ -39,6 +39,7 @@ const SUBAGENT_EVENT_KINDS = new Set<string>([
 const SUBAGENT_STATUSES = new Set<SubAgentStatus>([
   "queued",
   "running",
+  "waiting_for_answer",
   "completed",
   "failed",
   "cancelled",
@@ -238,7 +239,7 @@ function statusIcon(status: SubAgentStatus) {
 }
 
 function isTerminal(status: SubAgentStatus): boolean {
-  return status !== "queued" && status !== "running";
+  return status !== "queued" && status !== "running" && status !== "waiting_for_answer";
 }
 
 function usageLine(usage: SubAgentUsage, format: (value: number | undefined) => string, labels: {

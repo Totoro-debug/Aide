@@ -2518,8 +2518,13 @@ function ProjectSessionsContent({
                   {snapshot.foreground_questions?.[0] ? (
                     <section className={styles.foregroundQuestion} aria-live="polite">
                       <div className={styles.foregroundQuestionText}>
-                        <span>{t(snapshot.foreground_questions[0].state === "interrupted"
-                          ? "conversation.questionInterrupted" : "conversation.foregroundQuestion")}</span>
+                        <span>{snapshot.foreground_questions[0].state === "interrupted"
+                          ? t("conversation.questionInterrupted")
+                          : snapshot.foreground_questions[0].owner_agent_id
+                            ? t("conversation.subagentQuestion", {
+                              agentId: snapshot.foreground_questions[0].owner_agent_id,
+                            })
+                            : t("conversation.foregroundQuestion")}</span>
                         <p>{snapshot.foreground_questions[0].text}</p>
                       </div>
                       {snapshot.foreground_questions[0].options.length > 0 ? (

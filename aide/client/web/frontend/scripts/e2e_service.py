@@ -112,6 +112,10 @@ model = "small-model"
 provider_id = "primary"
 model = "small-model"
 
+[models.routes.subagent]
+provider_id = "primary"
+model = "small-model"
+
 [mcp.servers.fixture]
 enabled = true
 transport = "stdio"
@@ -288,7 +292,38 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
     )
     streaming_request = "streaming markdown" in user_prompt.lower()
     wait_command = "Get-Content -LiteralPath .\\fixture.txt -Wait"
-    if (
+    if ("subagent question acceptance" in normalized_requested_prompt
+            or "browser-child-question" in normalized_requested_prompt) and tool_names:
+        call: tuple[str, str, dict[str, object]] | None = None
+        if "browser-child-question" in normalized_requested_prompt:
+            if "child-browser-question" not in question_tool_results:
+                call = ("child-browser-question", "ask_user", {"question": "Which child output?"})
+        elif "browser-spawn" not in current_tool_result_ids:
+            if "spawn_agent" not in tool_names:
+                call = ("browser-search", "tool_search", {"query": "spawn agent wait agent"})
+            else:
+                call = ("browser-spawn", "spawn_agent", {
+                    "title": "Browser question child", "task": "browser-child-question"})
+        elif "browser-wait" not in current_tool_result_ids:
+            if "wait_agent" not in tool_names:
+                call = ("browser-search-wait", "tool_search", {"query": "wait agent"})
+            else:
+                spawned = next(m for m in messages if m.get("tool_call_id") == "browser-spawn")
+                child_id = json.loads(spawned["content"])["agent_id"]
+                call = ("browser-wait", "wait_agent", {"agent_ids": [child_id]})
+        if call is not None:
+            call_id, call_name, call_arguments = call
+            chunks.append(_chunk(request_id=request_id, model=model, delta={"tool_calls": [{
+                "index": 0, "id": call_id, "type": "function", "function": {
+                    "name": call_name, "arguments": json.dumps(call_arguments),
+                },
+            }]}))
+            chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="tool_calls"))
+        else:
+            chunks.append(_chunk(request_id=request_id, model=model,
+                                 delta={"content": "Fixture response."}))
+            chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="stop"))
+    elif (
         "foreground question choice acceptance" in normalized_requested_prompt
         and "ask_user" in tool_names
         and "foreground-question-choice" not in question_tool_results

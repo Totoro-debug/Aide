@@ -3561,6 +3561,18 @@ class AgentService:
             expected_revision,
             request_id,
         )
+        if result.get("kind") in {"subagent_resumed", "subagent_interrupted"}:
+            client = self._clients.get(client_id)
+            if client is not None:
+                await self._send_snapshot_required(
+                    client,
+                    reason=(
+                        "subagent_resumed"
+                        if result["kind"] == "subagent_resumed"
+                        else "subagent_interrupted"
+                    ),
+                )
+            return result
         run_id = result["run_id"]
         if not isinstance(run_id, str):
             raise service_error("service_state_invalid", "Question resume state is invalid.", status=500)

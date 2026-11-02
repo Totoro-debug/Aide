@@ -5,7 +5,7 @@ import os
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -121,7 +121,7 @@ def test_record_round_trips_through_a_new_session_scoped_store(tmp_path: Path) -
     assert loaded.creator_snapshot.tool_names == ("read_file", "list_dir")
     path = state.subagents_directory / session_id / f"{completed.agent_id}.json"
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["schema_version"] == 3
+    assert saved["schema_version"] == 4
     assert saved["creator_snapshot"] == {
         "provider_id": "test-provider",
         "model": "chat",
@@ -165,6 +165,8 @@ def test_legacy_subagent_record_upgrades_from_schema_v2(tmp_path: Path) -> None:
     path = state.subagents_directory / session_id / f"{record.agent_id}.json"
     value = json.loads(path.read_text(encoding="utf-8"))
     value["schema_version"] = 2
+    for field in ("execution_id", "restore_run_token", "restore_prefixes"):
+        value.pop(field)
     value["source"].pop("task_id")
     value["source"].pop("task_generation")
     path.write_text(json.dumps(value), encoding="utf-8")
@@ -176,8 +178,176 @@ def test_legacy_subagent_record_upgrades_from_schema_v2(tmp_path: Path) -> None:
     assert loaded.source.task_generation is None
     store.save(replace(loaded, revision=loaded.revision + 1))
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["schema_version"] == 3
+    assert saved["schema_version"] == 4
     assert saved["source"]["task_id"] is None
+
+
+def test_legacy_subagent_record_upgrades_from_schema_v3(tmp_path: Path) -> None:
+    state, session_id = _workspace(tmp_path)
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    record = _register(store, "Schema v3 record")
+    path = state.subagents_directory / session_id / f"{record.agent_id}.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["schema_version"] = 3
+    for field in ("execution_id", "restore_run_token", "restore_prefixes"):
+        value.pop(field)
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    loaded = store.get(record.agent_id)
+
+    assert loaded is not None
+    assert loaded.execution_id == record.agent_id
+    assert loaded.restore_run_token == _RESTORE_TOKEN
+    store.save(replace(loaded, revision=loaded.revision + 1))
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["schema_version"] == 4
+
+
+def test_restore_discards_child_answer_and_restores_waiting_checkpoint_and_artifacts(
+    tmp_path: Path,
+) -> None:
+    state, session_id = _workspace(tmp_path)
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    queued = _register(store, "Restore child question")
+    question_id = "question-restore"
+    original_artifact = f".aide/artifacts/{session_id}/{queued.agent_id}_before.txt"
+    answer_artifact = f".aide/artifacts/{session_id}/{queued.agent_id}_after.txt"
+    original_path = state.workspace_path.joinpath(*original_artifact.split("/"))
+    answer_path = state.workspace_path.joinpath(*answer_artifact.split("/"))
+    original_path.parent.mkdir(parents=True, exist_ok=True)
+    original_path.write_bytes(b"before answer")
+    original_conversation = (
+        {"role": "user", "content": queued.task},
+        {"role": "assistant", "content": "Which output?"},
+    )
+    original_context = {"pending_question_id": question_id, "last_compacted": 0}
+    original_usage = {
+        "model_calls": 1,
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "total_tokens": 10,
+    }
+    running = replace(
+        queued,
+        status=SubAgentStatus.RUNNING,
+        started_at=_NOW,
+        conversation=original_conversation,
+        context_state=original_context,
+        artifact_paths=(original_artifact,),
+        usage=original_usage,
+        revision=queued.revision + 1,
+    )
+    store.save(running)
+    waiting = replace(
+        running,
+        status=SubAgentStatus.WAITING_FOR_ANSWER,
+        finished_at=None,
+        revision=running.revision + 1,
+    )
+    store.save(waiting)
+
+    answer_token = "223e4567-e89b-42d3-a456-426614174001"
+    next_execution = "323e4567-e89b-42d3-a456-426614174001"
+    prefix: dict[str, Any] = {
+        "restore_run_token": answer_token,
+        "started_at": _NOW.isoformat(),
+        "finished_at": None,
+        "conversation": list(waiting.conversation),
+        "context_state": waiting.context_state,
+        "artifact_paths": list(waiting.artifact_paths),
+        "usage": waiting.usage,
+        "execution_id": waiting.execution_id,
+        "current_restore_run_token": waiting.restore_run_token,
+    }
+    resumed = replace(
+        waiting,
+        status=SubAgentStatus.QUEUED,
+        started_at=None,
+        finished_at=None,
+        conversation=(*waiting.conversation, {
+            "role": "user",
+            "content": "Human Answer: Keep the concise output.",
+            "foreground_question_id": question_id,
+        }),
+        context_state={**(waiting.context_state or {}), "segment_usage_base": waiting.usage},
+        execution_id=next_execution,
+        restore_run_token=answer_token,
+        restore_prefixes=(prefix,),
+        revision=waiting.revision + 1,
+    )
+    store.save(resumed)
+    running_again = replace(
+        resumed,
+        status=SubAgentStatus.RUNNING,
+        started_at=_NOW,
+        revision=resumed.revision + 1,
+    )
+    store.save(running_again)
+    answer_path.write_bytes(b"after answer")
+    completed = replace(
+        running_again,
+        status=SubAgentStatus.COMPLETED,
+        finished_at=_NOW,
+        artifact_paths=(original_artifact, answer_artifact),
+        result="Done",
+        usage={"model_calls": 2, "input_tokens": 11, "output_tokens": 5, "total_tokens": 16},
+        revision=running_again.revision + 1,
+    )
+    store.save(completed)
+
+    store.discard_restore_run_tokens((answer_token,))
+
+    restored = store.get(queued.agent_id)
+    assert restored is not None
+    assert restored.status is SubAgentStatus.WAITING_FOR_ANSWER
+    assert restored.execution_id == waiting.execution_id
+    assert restored.restore_run_token == waiting.restore_run_token
+    assert restored.conversation == original_conversation
+    assert restored.context_state == original_context
+    assert restored.artifact_paths == (original_artifact,)
+    assert restored.usage == original_usage
+    assert original_path.read_bytes() == b"before answer"
+    assert not answer_path.exists()
+
+
+def test_subagent_restore_prefix_rejects_unknown_fields(tmp_path: Path) -> None:
+    state, session_id = _workspace(tmp_path)
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    queued = _register(store, "Unknown Restore prefix field")
+    running = replace(
+        queued,
+        status=SubAgentStatus.RUNNING,
+        started_at=_NOW,
+        revision=queued.revision + 1,
+    )
+    store.save(running)
+    waiting = replace(
+        running,
+        status=SubAgentStatus.WAITING_FOR_ANSWER,
+        finished_at=None,
+        context_state={"pending_question_id": "question-prefix"},
+        revision=running.revision + 1,
+    )
+    store.save(waiting)
+    prefix: dict[str, Any] = {
+        "restore_run_token": "223e4567-e89b-42d3-a456-426614174001",
+        "started_at": _NOW.isoformat(),
+        "finished_at": None,
+        "conversation": [],
+        "context_state": {},
+        "artifact_paths": [],
+        "usage": waiting.usage,
+        "execution_id": waiting.execution_id,
+        "current_restore_run_token": waiting.restore_run_token,
+    }
+    path = state.subagents_directory / session_id / f"{queued.agent_id}.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["restore_prefixes"] = [prefix]
+    value["restore_prefixes"][0]["future_field"] = True
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(SubAgentStoreError, match="restore prefix fields"):
+        store.get(queued.agent_id)
 
 
 def test_session_without_subagents_lists_no_records_without_creating_subagent_storage(

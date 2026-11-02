@@ -350,6 +350,8 @@ def test_legacy_question_state_upgrades_on_write_and_preserves_answer_retry(
         )
     legacy = json.loads(store.path.read_text(encoding="utf-8"))
     legacy["schema_version"] = legacy_version
+    for question in legacy["questions"]:
+        question.pop("owner_agent_id", None)
     for task in legacy["tasks"]:
         if legacy_version < 3:
             task.pop("permission_level", None)
@@ -377,7 +379,7 @@ def test_legacy_question_state_upgrades_on_write_and_preserves_answer_retry(
     if answered:
         assert accepted.revision == loaded.revision
     store.begin_resume("question-1", "execution-2")
-    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 4
+    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 5
     reloaded = _store(tmp_path).load().question("question-1")
     assert reloaded is not None and reloaded.answer == "reports"
     assert reloaded.answer_kind == "text"
@@ -404,3 +406,46 @@ def test_uncertain_framing_remains_interrupted_after_question_reconciliation(tmp
     assert snapshot.tasks[0].state == "interrupted"
     assert not store.is_active_generation("task", 1)
     assert snapshot.pending_questions[0].question_id == "question"
+
+
+def test_interrupting_one_child_question_keeps_other_question_waitable(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.begin_task("task", "execution", generation=1)
+    store.prepare_question(
+        task_id="task",
+        execution_id="child-execution-1",
+        question_id="question-1",
+        tool_call_id="call-1",
+        text="First question",
+        owner_agent_id="agent-1",
+    )
+    store.publish_question("question-1", committed_tool_call_ids={"call-1"})
+    store.prepare_question(
+        task_id="task",
+        execution_id="child-execution-2",
+        question_id="question-2",
+        tool_call_id="call-2",
+        text="Second question",
+        owner_agent_id="agent-2",
+    )
+    store.publish_question("question-2", committed_tool_call_ids={"call-2"})
+    store.suspend_for_child_question("task", generation=1, execution_id="execution")
+
+    snapshot = store.interrupt_subagent_question("question-1")
+
+    first, second = snapshot.question("question-1"), snapshot.question("question-2")
+    assert first is not None and first.state == "interrupted"
+    assert second is not None and second.state == "pending"
+    assert snapshot.tasks[0].state == "waiting_for_answer"
+
+
+def test_foreground_child_can_ask_after_main_segment_completes(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.begin_task("task", "main", generation=1)
+    store.complete_task("task", "main")
+    store.prepare_question(task_id="task", execution_id="child", question_id="question",
+                           tool_call_id="call", text="Which directory?", owner_agent_id="agent")
+    snapshot = store.publish_question("question", committed_tool_call_ids={"call"})
+    question = snapshot.question("question")
+    assert question is not None and question.state == "pending"
+    assert snapshot.tasks[0].state == "waiting_for_answer"

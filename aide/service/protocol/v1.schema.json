@@ -1440,6 +1440,7 @@
       "properties": {
         "question_id": {"$ref": "#/$defs/identifier"},
         "task_id": {"$ref": "#/$defs/identifier"},
+        "owner_agent_id": {"anyOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]},
         "generation": {"type": "integer", "minimum": 1},
         "text": {"type": "string", "minLength": 1, "maxLength": 2000},
           "options": {

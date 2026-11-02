@@ -41,6 +41,36 @@ def test_schema_builders_export_restricted_detached_json_schema() -> None:
     }
 
 
+def test_array_schema_casts_and_validates_items_with_stable_paths() -> None:
+    schema = Schema.array(
+        Schema.object(
+            {"id": Schema.string(min_length=1), "label": Schema.string(max_length=200)},
+            required=("id", "label"),
+            additional_properties=False,
+        ),
+        max_items=4,
+    )
+
+    assert schema.to_json_schema() == {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "minLength": 1},
+                "label": {"type": "string", "maxLength": 200},
+            },
+            "required": ["id", "label"],
+            "additionalProperties": False,
+        },
+        "maxItems": 4,
+    }
+    assert schema.cast([{"id": "reports", "label": "Reports"}]) == [
+        {"id": "reports", "label": "Reports"}
+    ]
+    assert [error.path for error in schema.validate([{"id": "", "label": "x"}])] == ["$[0].id"]
+    assert schema.validate([{"id": "reports", "label": "Reports"}] * 5)[0].keyword == "maxItems"
+
+
 def test_schema_builders_reject_non_json_defaults_and_enum_values() -> None:
     with pytest.raises(TypeError, match=r"Schema default\.invalid must be JSON-compatible"):
         Schema.object(default={"invalid": object()})

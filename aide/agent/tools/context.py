@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -48,7 +48,9 @@ class ToolRunContext:
     schedule_service: ScheduleService | None = None
     exec_host: ExecHost | None = None
     subagent: SubAgentToolContext | None = None
-    foreground_question_handler: Callable[[str, str], str] | None = None
+    foreground_question_handler: Callable[[str, Sequence[Mapping[str, str]], str], str] | None = (
+        None
+    )
     task_id: str | None = None
     generation: int | None = None
     execution_id: str | None = None

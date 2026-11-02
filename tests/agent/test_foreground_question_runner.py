@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
 
 from aide.agent.runner import AgentRunner
+from aide.agent.tools.base import ToolError
 from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.core.ask_user import AskUserTool
 from aide.agent.tools.tool_gateway import ModelToolCall
@@ -32,10 +34,10 @@ async def _ignore_output(_event: object) -> None:
 async def test_question_suspends_runner_and_pairs_later_calls_without_executing_them(
     tmp_path: Path,
 ) -> None:
-    question_calls: list[tuple[str, str]] = []
+    question_calls: list[tuple[str, list[dict[str, str]], str]] = []
 
-    def ask(question: str, tool_call_id: str) -> str:
-        question_calls.append((question, tool_call_id))
+    def ask(question: str, options: Sequence[Mapping[str, str]], tool_call_id: str) -> str:
+        question_calls.append((question, [dict(option) for option in options], tool_call_id))
         return "question-1"
 
     question_tool = AskUserTool()
@@ -84,7 +86,7 @@ async def test_question_suspends_runner_and_pairs_later_calls_without_executing_
     assert result.finish_reason == "suspended"
     assert result.suspension is not None
     assert result.suspension.question_id == "question-1"
-    assert question_calls == [("Which folder?", "question-call")]
+    assert question_calls == [("Which folder?", [], "question-call")]
     assert later_tool.calls == []
     assert [item["role"] for item in result.messages] == ["assistant", "tool", "tool"]
     paired = {item.get("tool_call_id") for item in result.messages if item["role"] == "tool"}
@@ -92,3 +94,34 @@ async def test_question_suspends_runner_and_pairs_later_calls_without_executing_
     assert result.messages[-1]["status"] == "error"
     assert "not executed" in str(result.messages[-1]["content"]).lower()
     assert result.usage["model_calls"] == 1
+
+
+def test_question_schema_exposes_bounded_stable_id_options() -> None:
+    parameters = AskUserTool().to_schema()["function"]["parameters"]
+    properties = parameters["properties"]
+    assert properties["question"]["maxLength"] == 2000
+    options = properties["options"]
+    assert options["maxItems"] == 4
+    assert options["items"]["type"] == "object"
+    assert set(options["items"]["properties"]) == {"id", "label"}
+    assert set(options["items"]["required"]) == {"id", "label"}
+    assert options["items"]["properties"]["id"]["maxLength"] == 200
+    assert options["items"]["properties"]["label"]["maxLength"] == 200
+
+
+def test_question_argument_validation_accepts_bounds_and_rejects_invalid_options() -> None:
+    tool = AskUserTool()
+    four_options = [{"id": f"option-{index}", "label": "x" * 200} for index in range(4)]
+    tool.validate_arguments(question="?" * 2000, options=four_options)
+
+    for question, options in (
+        (" ", []),
+        ("?" * 2001, []),
+        ("Valid question?", [*four_options, {"id": "extra", "label": "Extra"}]),
+        ("Valid question?", [{"id": "same", "label": "One"}, {"id": "same", "label": "Two"}]),
+        ("Valid question?", [{"id": "blank", "label": " "}]),
+        ("Valid question?", [{"id": "long", "label": "x" * 201}]),
+        ("Valid question?", [{"id": "invalid", "label": "Bad", "extra": "field"}]),
+    ):
+        with pytest.raises(ToolError):
+            tool.validate_arguments(question=question, options=options)

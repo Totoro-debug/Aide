@@ -617,11 +617,16 @@ function ProjectSessionsContent({
   const [composerError, setComposerError] = useState<string | null>(null);
   const [composerNotice, setComposerNotice] = useState<string | null>(null);
   const [questionAnswer, setQuestionAnswer] = useState("");
+  const [questionChoiceId, setQuestionChoiceId] = useState("");
   const [questionSubmitting, setQuestionSubmitting] = useState(false);
   const activeForegroundQuestion = snapshot?.foreground_questions?.[0];
   useEffect(() => {
-    setQuestionAnswer(activeForegroundQuestion?.answer ?? "");
-  }, [activeForegroundQuestion?.question_id, activeForegroundQuestion?.answer]);
+    setQuestionAnswer(activeForegroundQuestion?.answer_kind === "text"
+      ? activeForegroundQuestion.answer ?? "" : "");
+    setQuestionChoiceId(activeForegroundQuestion?.answer_kind === "choice"
+      ? activeForegroundQuestion.answer_option_id ?? "" : "");
+  }, [activeForegroundQuestion?.answer, activeForegroundQuestion?.answer_kind,
+    activeForegroundQuestion?.answer_option_id, activeForegroundQuestion?.question_id]);
   const claimRef = useRef<SessionClaim | null>(null);
   const snapshotRef = useRef<SessionSnapshot | null>(null);
   const sessionModelSavingRef = useRef(false);
@@ -1784,13 +1789,23 @@ function ProjectSessionsContent({
     const currentClaim = claimRef.current;
     const question = snapshotRef.current?.foreground_questions?.[0];
     const answer = questionAnswer.trim();
-    if (currentClaim === null || question === undefined || !answer || questionSubmitting
+    const choiceId = questionChoiceId || (answer === "" && question?.answer_kind === "choice"
+      ? question.answer_option_id ?? "" : "");
+    if (currentClaim === null || question === undefined || (!answer && !choiceId) || questionSubmitting
       || connectionState !== "online") return;
     setQuestionSubmitting(true);
     setComposerError(null);
     try {
-      await answerForegroundQuestion(sendServiceCommand, currentClaim, question, answer);
+      await answerForegroundQuestion(
+        sendServiceCommand,
+        currentClaim,
+        question,
+        choiceId
+          ? { kind: "choice", choice_id: choiceId }
+          : { kind: "text", text: answer },
+      );
       setQuestionAnswer("");
+      setQuestionChoiceId("");
     } catch (error) {
       const message = error instanceof ServiceCommandError && error.body !== null
         ? error.body.message
@@ -2432,11 +2447,39 @@ function ProjectSessionsContent({
                           ? "conversation.questionInterrupted" : "conversation.foregroundQuestion")}</span>
                         <p>{snapshot.foreground_questions[0].text}</p>
                       </div>
+                      {snapshot.foreground_questions[0].options.length > 0 ? (
+                        <fieldset className={styles.foregroundQuestionOptions}
+                          disabled={questionSubmitting || connectionState !== "online"
+                            || snapshot.foreground_questions[0].state !== "pending"}>
+                          <legend>{t("conversation.questionOptions")}</legend>
+                          {snapshot.foreground_questions[0].options.map((option) => (
+                            <label key={option.id}>
+                              <input
+                                type="radio"
+                                name={`foreground-question-${activeForegroundQuestion?.question_id ?? ""}`}
+                                value={option.id}
+                                aria-label={option.label}
+                                checked={(questionChoiceId || (activeForegroundQuestion?.answer_kind === "choice"
+                                  ? activeForegroundQuestion.answer_option_id ?? "" : "")) === option.id}
+                                onChange={() => {
+                                  setQuestionChoiceId(option.id);
+                                  setQuestionAnswer("");
+                                }}
+                              />
+                              <span>{option.label}</span>
+                              <code>{option.id}</code>
+                            </label>
+                          ))}
+                        </fieldset>
+                      ) : null}
                       <form className={styles.foregroundQuestionForm} onSubmit={(event) => void submitQuestionAnswer(event)}>
                         <textarea
                           aria-label={t("conversation.questionAnswerLabel")}
                           value={questionAnswer}
-                          onChange={(event) => setQuestionAnswer(event.currentTarget.value)}
+                          onChange={(event) => {
+                            setQuestionAnswer(event.currentTarget.value);
+                            setQuestionChoiceId("");
+                          }}
                           rows={2}
                           maxLength={10000}
                           disabled={questionSubmitting || connectionState !== "online"
@@ -2445,7 +2488,8 @@ function ProjectSessionsContent({
                         <button
                           type="submit"
                           disabled={snapshot.foreground_questions[0].state === "interrupted"
-                            || !questionAnswer.trim() && !snapshot.foreground_questions[0].answer
+                            || !questionAnswer.trim() && !questionChoiceId
+                              && !snapshot.foreground_questions[0].answer
                             || questionSubmitting || connectionState !== "online"}
                         >
                           <Send size={14} aria-hidden="true" />
@@ -2454,6 +2498,7 @@ function ProjectSessionsContent({
                             : t("conversation.questionSend")}
                         </button>
                       </form>
+                      <p className={styles.foregroundQuestionLimits}>{t("conversation.questionLimits")}</p>
                     </section>
                   ) : null}
                   <form className={styles.composer} onSubmit={(event) => void submitInput(event)}>

@@ -3543,7 +3543,8 @@ class AgentService:
         session_id: str,
         claim_version: int,
         question_id: str,
-        answer: str,
+        answer: str | None,
+        choice_id: str | None,
         expected_revision: int,
         request_id: str,
     ) -> dict[str, object]:
@@ -3556,6 +3557,7 @@ class AgentService:
             claim_version,
             question_id,
             answer,
+            choice_id,
             expected_revision,
             request_id,
         )
@@ -3568,7 +3570,7 @@ class AgentService:
             session_id=session_id,
             run_id=run_id,
             payload={
-                "text": answer,
+                "text": result.get("answer"),
                 "request_id": request_id,
                 "question_id": question_id,
             },
@@ -3679,14 +3681,24 @@ class AgentService:
             )
         elif command_type == "answer_question":
             self._validate_claim_fields(client_id, workspace_id, session_id, claim_version)
-            if set(payload) != {"question_id", "answer", "expected_revision"}:
+            common_fields = {"question_id", "expected_revision"}
+            payload_fields = set(payload)
+            if payload_fields not in (
+                common_fields | {"answer"},
+                common_fields | {"choice_id"},
+            ):
                 raise service_error("validation_error", "Invalid answer payload.", status=422)
             question_id = payload.get("question_id")
             answer = payload.get("answer")
+            choice_id = payload.get("choice_id")
             expected_revision = payload.get("expected_revision")
-            if not isinstance(question_id, str) or not isinstance(answer, str):
+            if (
+                not isinstance(question_id, str)
+                or ("answer" in payload and not isinstance(answer, str))
+                or ("choice_id" in payload and not isinstance(choice_id, str))
+            ):
                 raise service_error(
-                    "validation_error", "question_id and answer are required.", status=422
+                    "validation_error", "A question ID and one valid answer are required.", status=422
                 )
             if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
                 raise service_error(
@@ -3703,7 +3715,8 @@ class AgentService:
                 session_id,
                 claim_version,
                 question_id,
-                answer,
+                cast(str | None, answer),
+                cast(str | None, choice_id),
                 expected_revision,
                 request_id,
             )

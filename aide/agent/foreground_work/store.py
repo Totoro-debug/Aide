@@ -8,13 +8,13 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypedDict, cast
 
 from aide.agent.session.session import Session, SessionStoragePartition
 from aide.agent.workspace_state import WorkspaceState
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _MAX_QUESTION_LENGTH = 2_000
 _MAX_ANSWER_LENGTH = 10_000
 _SESSION_ID = re.compile(
@@ -31,7 +31,13 @@ QuestionState = Literal[
     "interrupted",
     "invalidated",
 ]
+AnswerKind = Literal["text", "choice"]
 TaskState = Literal["running", "waiting_for_answer", "completed", "interrupted", "cancelled"]
+
+
+class ForegroundQuestionOption(TypedDict):
+    id: str
+    label: str
 
 
 class ForegroundWorkError(ValueError):
@@ -67,8 +73,11 @@ class ForegroundWorkQuestion:
     answer: str | None = None
     answer_request_id: str | None = None
     answer_fingerprint: str | None = None
+    answer_kind: AnswerKind | None = None
+    answer_option_id: str | None = None
     resume_execution_id: str | None = None
     answer_anchor_id: int | None = None
+    options: tuple[ForegroundQuestionOption, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +164,7 @@ class ForegroundWorkStore:
         question_id: str,
         tool_call_id: str,
         text: str,
+        options: list[ForegroundQuestionOption] | None = None,
     ) -> ForegroundWorkSnapshot:
         for name, value in (
             ("task_id", task_id),
@@ -165,6 +175,7 @@ class ForegroundWorkStore:
             _require_identifier(value, name)
         if not isinstance(text, str) or not text.strip() or len(text) > _MAX_QUESTION_LENGTH:
             raise ValueError("question must contain 1 to 2000 characters")
+        normalized_options = _validated_question_options(options)
         current = self.load()
         existing = current.question(question_id)
         if existing is not None:
@@ -173,7 +184,7 @@ class ForegroundWorkStore:
                 execution_id,
                 tool_call_id,
                 text,
-            ):
+            ) and existing.options == normalized_options:
                 return current
             raise ForegroundWorkConflict("question_id is already bound to another question")
         task = next((item for item in current.tasks if item.task_id == task_id), None)
@@ -192,7 +203,14 @@ class ForegroundWorkStore:
         ):
             raise ForegroundWorkConflict("task already has an unresolved question")
         question = ForegroundWorkQuestion(
-            question_id, task_id, task.generation, execution_id, tool_call_id, text, "preparing"
+            question_id,
+            task_id,
+            task.generation,
+            execution_id,
+            tool_call_id,
+            text,
+            "preparing",
+            options=normalized_options,
         )
         return self._publish(
             ForegroundWorkSnapshot(
@@ -230,8 +248,11 @@ class ForegroundWorkStore:
                 item.answer,
                 item.answer_request_id,
                 item.answer_fingerprint,
+                item.answer_kind,
+                item.answer_option_id,
                 item.resume_execution_id,
                 item.answer_anchor_id,
+                item.options,
             )
             if item.question_id == question_id
             else item
@@ -255,20 +276,40 @@ class ForegroundWorkStore:
     def answer_question(
         self,
         question_id: str,
-        answer: str,
+        answer: str | None = None,
         *,
+        choice_id: str | None = None,
         expected_revision: int,
         request_id: str,
     ) -> ForegroundWorkSnapshot:
         _require_identifier(question_id, "question_id")
         _require_identifier(request_id, "request_id")
-        if not isinstance(answer, str) or not answer.strip() or len(answer) > _MAX_ANSWER_LENGTH:
-            raise ValueError("answer must contain 1 to 10000 characters")
-        fingerprint = _answer_fingerprint(question_id, answer)
+        if (answer is None) == (choice_id is None):
+            raise ValueError("answer must be either free text or one choice ID")
         current = self.load()
         question = current.question(question_id)
         if question is None:
             raise ForegroundWorkConflict("question does not exist")
+        if choice_id is not None:
+            _require_identifier(choice_id, "choice_id")
+            selected = next((item for item in question.options if item["id"] == choice_id), None)
+            if selected is None:
+                raise ValueError("choice_id does not belong to this question")
+            answer_text = selected["label"]
+            answer_kind: AnswerKind = "choice"
+            answer_option_id: str | None = choice_id
+            fingerprint = _choice_fingerprint(question_id, choice_id)
+        else:
+            if (
+                not isinstance(answer, str)
+                or not answer.strip()
+                or len(answer) > _MAX_ANSWER_LENGTH
+            ):
+                raise ValueError("answer must contain 1 to 10000 characters")
+            answer_text = answer
+            answer_kind = "text"
+            answer_option_id = None
+            fingerprint = _answer_fingerprint(question_id, answer_text)
         if question.answer_request_id == request_id:
             if question.answer_fingerprint != fingerprint:
                 raise ForegroundWorkConflict("request_id was reused with a different answer")
@@ -286,7 +327,9 @@ class ForegroundWorkStore:
             current,
             question_id,
             state="answer_received",
-            answer=answer,
+            answer=answer_text,
+            answer_kind=answer_kind,
+            answer_option_id=answer_option_id,
             answer_request_id=request_id,
             answer_fingerprint=fingerprint,
         )
@@ -319,8 +362,11 @@ class ForegroundWorkStore:
             question.answer,
             question.answer_request_id,
             question.answer_fingerprint,
+            question.answer_kind,
+            question.answer_option_id,
             execution_id,
             question.answer_anchor_id,
+            question.options,
         )
         updated_task = ForegroundWorkTask(
             task.task_id, task.generation + 1, execution_id, "running", task.origin_anchor_id
@@ -392,6 +438,8 @@ class ForegroundWorkStore:
         for question in current.questions:
             question_state = question.state
             answer = question.answer
+            answer_kind = question.answer_kind
+            answer_option_id = question.answer_option_id
             request_id = question.answer_request_id
             fingerprint = question.answer_fingerprint
             resume_id = question.resume_execution_id
@@ -408,6 +456,7 @@ class ForegroundWorkStore:
             ):
                 question_state = "invalidated"
                 answer = request_id = fingerprint = resume_id = None
+                answer_kind = answer_option_id = None
             elif question.state in {"resuming", "executing"}:
                 answer_message = answer_messages.get(question.question_id)
                 if answer_message is not None:
@@ -431,10 +480,13 @@ class ForegroundWorkStore:
                         "pending" if question.question_id in session_tool_calls else "invalidated"
                     )
                     answer = request_id = fingerprint = resume_id = None
+                    answer_kind = answer_option_id = None
                     anchor = None
             changed |= (
                 question_state != question.state
                 or answer != question.answer
+                or answer_kind != question.answer_kind
+                or answer_option_id != question.answer_option_id
                 or request_id != question.answer_request_id
                 or fingerprint != question.answer_fingerprint
                 or resume_id != question.resume_execution_id
@@ -452,8 +504,11 @@ class ForegroundWorkStore:
                     answer,
                     request_id,
                     fingerprint,
+                    answer_kind,
+                    answer_option_id,
                     resume_id,
                     anchor,
+                    question.options,
                 )
             )
             if question_state in {"pending", "answer_received"}:
@@ -512,12 +567,17 @@ class ForegroundWorkStore:
             answer_fingerprint=cast(
                 str | None, changes.get("answer_fingerprint", question.answer_fingerprint)
             ),
+            answer_kind=cast(AnswerKind | None, changes.get("answer_kind", question.answer_kind)),
+            answer_option_id=cast(
+                str | None, changes.get("answer_option_id", question.answer_option_id)
+            ),
             resume_execution_id=cast(
                 str | None, changes.get("resume_execution_id", question.resume_execution_id)
             ),
             answer_anchor_id=cast(
                 int | None, changes.get("answer_anchor_id", question.answer_anchor_id)
             ),
+            options=question.options,
         )
         questions = tuple(
             updated if item.question_id == question_id else item for item in current.questions
@@ -574,7 +634,8 @@ def _snapshot_from_dict(value: object) -> ForegroundWorkSnapshot:
     data = cast(dict[str, object], value)
     if set(data) != {"schema_version", "revision", "tasks", "questions"}:
         raise ForegroundWorkError("Foreground Work state has an unsupported shape")
-    if type(data["schema_version"]) is not int or data["schema_version"] != _SCHEMA_VERSION:
+    schema_version = data["schema_version"]
+    if type(schema_version) is not int or schema_version not in {1, _SCHEMA_VERSION}:
         raise ForegroundWorkError("Foreground Work state has an unsupported version")
     revision, tasks_value, questions_value = (data["revision"], data["tasks"], data["questions"])
     if type(revision) is not int or revision < 1:
@@ -582,7 +643,9 @@ def _snapshot_from_dict(value: object) -> ForegroundWorkSnapshot:
     if not isinstance(tasks_value, list) or not isinstance(questions_value, list):
         raise ForegroundWorkError("Foreground Work state collections are malformed")
     tasks = tuple(_task_from_dict(item) for item in tasks_value)
-    questions = tuple(_question_from_dict(item) for item in questions_value)
+    questions = tuple(
+        _question_from_dict(item, schema_version=schema_version) for item in questions_value
+    )
     if len({item.task_id for item in tasks}) != len(tasks):
         raise ForegroundWorkError("Foreground Work contains duplicate task IDs")
     if len({item.question_id for item in questions}) != len(questions):
@@ -630,12 +693,15 @@ def _question_to_dict(question: ForegroundWorkQuestion) -> dict[str, object]:
         "answer": question.answer,
         "answer_request_id": question.answer_request_id,
         "answer_fingerprint": question.answer_fingerprint,
+        "answer_kind": question.answer_kind,
+        "answer_option_id": question.answer_option_id,
         "resume_execution_id": question.resume_execution_id,
         "answer_anchor_id": question.answer_anchor_id,
+        "options": [dict(option) for option in question.options],
     }
 
 
-def _question_from_dict(value: object) -> ForegroundWorkQuestion:
+def _question_from_dict(value: object, *, schema_version: int) -> ForegroundWorkQuestion:
     if not isinstance(value, dict):
         raise ForegroundWorkError("Foreground Work question is malformed")
     item = cast(dict[str, object], value)
@@ -653,6 +719,8 @@ def _question_from_dict(value: object) -> ForegroundWorkQuestion:
         "resume_execution_id",
         "answer_anchor_id",
     }
+    if schema_version >= 2:
+        expected.update({"options", "answer_kind", "answer_option_id"})
     if set(item) != expected:
         raise ForegroundWorkError("Foreground Work question has an unsupported shape")
     task_id = _require_stored_string(item["task_id"], "task_id")
@@ -680,6 +748,37 @@ def _question_from_dict(value: object) -> ForegroundWorkQuestion:
             raise ForegroundWorkError(f"Foreground Work {name} is malformed")
     if anchor is not None and (type(anchor) is not int or anchor < 1):
         raise ForegroundWorkError("Foreground Work answer anchor is malformed")
+    if schema_version >= 2 and not isinstance(item["options"], list):
+        raise ForegroundWorkError("Foreground Work question options are malformed")
+    try:
+        options = _validated_question_options(item.get("options") if schema_version >= 2 else None)
+    except (TypeError, ValueError) as error:
+        raise ForegroundWorkError("Foreground Work question options are malformed") from error
+    answer = cast(str | None, item["answer"])
+    if schema_version >= 2:
+        answer_kind_value = item["answer_kind"]
+        answer_option_id_value = item["answer_option_id"]
+        if not (
+            answer_kind_value is None
+            or (isinstance(answer_kind_value, str) and answer_kind_value in {"text", "choice"})
+        ):
+            raise ForegroundWorkError("Foreground Work answer kind is malformed")
+        if answer_option_id_value is not None and not isinstance(answer_option_id_value, str):
+            raise ForegroundWorkError("Foreground Work answer option ID is malformed")
+        answer_kind = cast(AnswerKind | None, answer_kind_value)
+        answer_option_id = answer_option_id_value
+    else:
+        answer_kind = "text" if answer is not None else None
+        answer_option_id = None
+    if answer is None:
+        if answer_kind is not None or answer_option_id is not None:
+            raise ForegroundWorkError("Foreground Work empty answer has answer metadata")
+    elif answer_kind == "choice":
+        selected = next((option for option in options if option["id"] == answer_option_id), None)
+        if selected is None or selected["label"] != answer:
+            raise ForegroundWorkError("Foreground Work choice answer does not match an option")
+    elif answer_kind != "text" or answer_option_id is not None:
+        raise ForegroundWorkError("Foreground Work text answer metadata is malformed")
     return ForegroundWorkQuestion(
         question_id,
         task_id,
@@ -688,12 +787,39 @@ def _question_from_dict(value: object) -> ForegroundWorkQuestion:
         tool_call_id,
         text,
         cast(QuestionState, state),
-        cast(str | None, item["answer"]),
+        answer,
         cast(str | None, item["answer_request_id"]),
         cast(str | None, item["answer_fingerprint"]),
+        answer_kind,
+        answer_option_id,
         cast(str | None, item["resume_execution_id"]),
         anchor,
+        options,
     )
+
+
+def _validated_question_options(
+    value: object,
+) -> tuple[ForegroundQuestionOption, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or len(value) > 4:
+        raise ValueError("question options must contain at most 4 items")
+    normalized: list[ForegroundQuestionOption] = []
+    seen_ids: set[str] = set()
+    for option in value:
+        if not isinstance(option, dict) or set(option) != {"id", "label"}:
+            raise ValueError("each question option must contain only id and label")
+        option_id = option["id"]
+        label = option["label"]
+        _require_identifier(option_id, "option id")
+        if not isinstance(label, str) or not label.strip() or len(label) > 200:
+            raise ValueError("option label must contain 1 to 200 characters")
+        if option_id in seen_ids:
+            raise ValueError("question option IDs must be unique")
+        seen_ids.add(option_id)
+        normalized.append({"id": option_id, "label": label})
+    return tuple(normalized)
 
 
 def _require_identifier(value: str, name: str) -> None:
@@ -709,6 +835,13 @@ def _require_stored_string(value: object, name: str) -> str:
 
 def _answer_fingerprint(question_id: str, answer: str) -> str:
     encoded = json.dumps([question_id, answer], ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _choice_fingerprint(question_id: str, choice_id: str) -> str:
+    encoded = json.dumps(
+        ["choice", question_id, choice_id], ensure_ascii=True, separators=(",", ":")
+    )
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 

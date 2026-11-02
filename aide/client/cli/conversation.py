@@ -1151,13 +1151,16 @@ class TerminalConversationApp(App[None]):
 
         submit_user_input = getattr(self._management_dispatcher, "submit_user_input", None)
         answer_question = getattr(self._management_dispatcher, "answer_question", None)
-        answer_text = _cli_question_answer(text)
+        parsed_answer = _cli_question_answer(text)
         self._draining_inputs = True
         self._submitting_input = True
         try:
-            if answer_text is not None:
-                if not answer_text:
-                    await self._mount_management_rows("input", "Enter /answer followed by your response.")
+            if parsed_answer is not None:
+                answer_kind, answer_value = parsed_answer
+                if not answer_value:
+                    await self._mount_management_rows(
+                        "input", "Use /answer <text>, /answer --option <id>, or /answer --text <text>."
+                    )
                     return
                 question = self._foreground_question
                 if (
@@ -1170,8 +1173,21 @@ class TerminalConversationApp(App[None]):
                         "input", "No foreground question is available to answer."
                     )
                     return
+                if answer_kind == "choice":
+                    options = question.get("options")
+                    if not isinstance(options, list) or not any(
+                        isinstance(option, dict) and option.get("id") == answer_value
+                        for option in options
+                    ):
+                        await self._mount_management_rows(
+                            "input", "Choose one of the listed foreground question option IDs."
+                        )
+                        return
                 result = await answer_question(
-                    question["question_id"], answer_text, question["revision"]
+                    question["question_id"],
+                    answer_value if answer_kind == "text" else None,
+                    question["revision"],
+                    **({"choice_id": answer_value} if answer_kind == "choice" else {}),
                 )
             else:
                 result = (
@@ -1474,9 +1490,27 @@ class TerminalConversationApp(App[None]):
                         "Work interrupted while saving. Check its effects before sending a new instruction."
                     )
                 else:
+                    options = self._foreground_question.get("options")
+                    option_lines = (
+                        [
+                            f"  {option['id']}: {option['label']}"
+                            for option in options
+                            if isinstance(option, dict)
+                            and isinstance(option.get("id"), str)
+                            and isinstance(option.get("label"), str)
+                        ]
+                        if isinstance(options, list)
+                        else []
+                    )
+                    options_text = "\n".join(option_lines)
+                    question_details = f"{options_text}\n" if options_text else ""
                     question_widget.update(
                         f"{question_status}: {self._foreground_question['text']}\n"
-                        "Type /answer followed by your response to continue."
+                        f"{question_details}"
+                        "Use /answer <text> or /answer --option <id>; "
+                        "use /answer --text <text> for literal option syntax.\n"
+                        "Limits: question 2,000 characters; 4 options, 200-character labels; "
+                        "text answer 10,000 characters."
                     )
         projection = ForegroundConversationProjection(
             session_id, tuple(message for message in messages if isinstance(message, dict)),
@@ -2456,15 +2490,27 @@ class TerminalConversationApp(App[None]):
 
 
 
-def _cli_question_answer(text: str) -> str | None:
+def _cli_question_answer(text: str) -> tuple[str, str] | None:
     stripped = text.strip()
-    command, separator, value = stripped.partition(" ")
-    if command.casefold() != "/answer":
-        command, separator, value = stripped.partition("\n")
-        if command.casefold() != "/answer":
-            return None
-    answer = value.strip() if separator else ""
-    return answer
+    command = "/answer"
+    if stripped.casefold() == command:
+        return "text", ""
+    if not stripped.casefold().startswith((command + " ", command + "\n")):
+        return None
+    value = stripped[len(command) :].strip()
+    text_flag = "--text"
+    if value.casefold() == text_flag:
+        return "text", ""
+    if value.casefold().startswith((text_flag + " ", text_flag + "\n")):
+        return "text", value[len(text_flag) :].strip()
+    option_flag = "--option"
+    if value.casefold() == option_flag:
+        return "choice", ""
+    if value.casefold().startswith(option_flag + " ") or value.casefold().startswith(
+        option_flag + "\n"
+    ):
+        return "choice", value[len(option_flag) :].strip()
+    return "text", value
 
 
 def _stream_is_tty(stream: object) -> bool:

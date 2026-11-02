@@ -166,7 +166,7 @@ export async function answerForegroundQuestion(
   sendCommand: ClientCommandSender,
   context: ConversationCommandContext,
   question: ForegroundQuestionSnapshot,
-  answer: string,
+  answer: { kind: "text"; text: string } | { kind: "choice"; choice_id: string },
 ): Promise<ConversationInputAccepted> {
   const result = await sendCommand({
     request_id: createRequestId(),
@@ -176,7 +176,7 @@ export async function answerForegroundQuestion(
     claim_version: context.claim_version,
     payload: {
       question_id: question.question_id,
-      answer,
+      ...(answer.kind === "choice" ? { choice_id: answer.choice_id } : { answer: answer.text }),
       expected_revision: question.revision,
     },
   });

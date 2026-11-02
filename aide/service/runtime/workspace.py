@@ -727,8 +727,11 @@ class WorkspaceRecord:
                     "task_id": question.task_id,
                     "generation": question.generation,
                     "text": question.text,
+                    "options": [dict(option) for option in question.options],
                     "state": question.state,
                     "answer": question.answer,
+                    "answer_kind": question.answer_kind,
+                    "answer_option_id": question.answer_option_id,
                     "revision": foreground_work.revision,
                 }
                 for question in foreground_work.questions
@@ -1496,7 +1499,8 @@ class WorkspaceRecord:
         session_id: str,
         version: int,
         question_id: str,
-        answer: str,
+        answer: str | None,
+        choice_id: str | None,
         expected_revision: int,
         request_id: str,
     ) -> dict[str, object]:
@@ -1523,6 +1527,7 @@ class WorkspaceRecord:
             store.answer_question(
                 question_id,
                 answer,
+                choice_id=choice_id,
                 expected_revision=expected_revision,
                 request_id=request_id,
             )
@@ -1534,7 +1539,11 @@ class WorkspaceRecord:
                 run_id = question.resume_execution_id
                 if run_id is None:
                     raise ForegroundWorkConflict("completed question has no resume execution")
-                return {"run_id": run_id, "live_state": self.session_snapshot(session_id)["live_state"]}
+                return {
+                    "run_id": run_id,
+                    "answer": question.answer,
+                    "live_state": self.session_snapshot(session_id)["live_state"],
+                }
             if question.state in {"resuming", "executing"}:
                 run_id = question.resume_execution_id
                 if run_id is None:
@@ -1570,7 +1579,11 @@ class WorkspaceRecord:
             foreground_question_id=question_id,
             foreground_task_id=question.task_id,
         )
-        return {"run_id": run_id, "live_state": self.session_snapshot(session_id)["live_state"]}
+        return {
+            "run_id": run_id,
+            "answer": question.answer,
+            "live_state": self.session_snapshot(session_id)["live_state"],
+        }
 
     async def recall_queued_inputs(
         self,

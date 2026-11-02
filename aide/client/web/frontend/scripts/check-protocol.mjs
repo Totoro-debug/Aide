@@ -190,6 +190,12 @@ function checkMembers(name, members, definition, exact = true) {
     } else if (property.type === "object" && property.properties) {
       if (!ts.isTypeLiteralNode(member.type)) throw new Error(`${name}.${field} must be an object`);
       checkMembers(`${name}.${field}`, member.type.members, property);
+    } else if (property.type === "array" && property.items?.type === "object"
+      && property.items.properties) {
+      if (!ts.isArrayTypeNode(member.type) || !ts.isTypeLiteralNode(member.type.elementType)) {
+        throw new Error(`${name}.${field} must be an array of objects`);
+      }
+      checkMembers(`${name}.${field}[]`, member.type.elementType.members, property.items);
     } else if (webType(member.type) !== schemaType(property)) {
       throw new Error(`${name}.${field} type differs from the protocol schema`);
     }

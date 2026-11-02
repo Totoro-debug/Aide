@@ -1330,7 +1330,13 @@ class AgentRunExecutor:
                         "content": (
                             f"Human Answer to question {question_id}\n"
                             f"Question: {answered_question.text}\n"
-                            f"Answer: {current_user['content']}"
+                            f"Answer kind: {answered_question.answer_kind}\n"
+                            + (
+                                f"Choice ID: {answered_question.answer_option_id}\n"
+                                if answered_question.answer_kind == "choice"
+                                else ""
+                            )
+                            + f"Answer: {current_user['content']}"
                         ),
                     }
             return self._context_builder.build_run_messages(
@@ -1411,7 +1417,11 @@ class AgentRunExecutor:
         if foreground_work_store is not None and task_id is not None:
             assert isinstance(execution_id, str)
 
-            def register_question(question: str, tool_call_id: str) -> str:
+            def register_question(
+                question: str,
+                options: Sequence[Mapping[str, str]],
+                tool_call_id: str,
+            ) -> str:
                 question_id = str(self._new_uuid())
                 foreground_work_store.prepare_question(
                     task_id=cast(str, task_id),
@@ -1419,6 +1429,7 @@ class AgentRunExecutor:
                     question_id=question_id,
                     tool_call_id=tool_call_id,
                     text=question,
+                    options=[{"id": option["id"], "label": option["label"]} for option in options],
                 )
                 return question_id
 

@@ -1084,12 +1084,17 @@
             "properties": {
               "payload": {
                 "type": "object", "additionalProperties": false,
-                "required": ["question_id", "answer", "expected_revision"],
+                "required": ["question_id", "expected_revision"],
                 "properties": {
                   "question_id": {"$ref": "#/$defs/identifier"},
                   "answer": {"type": "string", "minLength": 1, "maxLength": 10000},
+                  "choice_id": {"$ref": "#/$defs/identifier"},
                   "expected_revision": {"type": "integer", "minimum": 1}
-                }
+                },
+                "oneOf": [
+                  {"required": ["answer"]},
+                  {"required": ["choice_id"]}
+                ]
               }
             }
           }
@@ -1412,14 +1417,29 @@
     "foreground_question": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["question_id", "task_id", "generation", "text", "state", "answer", "revision"],
+          "required": ["question_id", "task_id", "generation", "text", "options", "state", "answer", "answer_kind", "answer_option_id", "revision"],
       "properties": {
         "question_id": {"$ref": "#/$defs/identifier"},
         "task_id": {"$ref": "#/$defs/identifier"},
         "generation": {"type": "integer", "minimum": 1},
         "text": {"type": "string", "minLength": 1, "maxLength": 2000},
+          "options": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "label"],
+              "properties": {
+                "id": {"$ref": "#/$defs/identifier"},
+                "label": {"type": "string", "minLength": 1, "maxLength": 200}
+              }
+            }
+          },
         "state": {"enum": ["pending", "answer_received", "interrupted"]},
-        "answer": {"type": ["string", "null"], "maxLength": 10000},
+          "answer": {"type": ["string", "null"], "maxLength": 10000},
+          "answer_kind": {"type": ["string", "null"], "enum": ["text", "choice", null]},
+          "answer_option_id": {"anyOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]},
         "revision": {"type": "integer", "minimum": 1}
       }
     },

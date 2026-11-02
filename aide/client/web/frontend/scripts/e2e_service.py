@@ -241,6 +241,7 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
         for message in messages[last_user_index + 1 :]
         if isinstance(message, dict) and message.get("role") == "tool"
     }
+    question_tool_results = set(tool_result_ids)
     tool_search_completed = any(
         isinstance(result_id, str) and result_id.startswith("call-model-mcp-search-")
         for result_id in current_tool_result_ids
@@ -287,7 +288,28 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
     )
     streaming_request = "streaming markdown" in user_prompt.lower()
     wait_command = "Get-Content -LiteralPath .\\fixture.txt -Wait"
-    if "foreground question acceptance" in normalized_requested_prompt and "ask_user" in tool_names:
+    if (
+        "foreground question choice acceptance" in normalized_requested_prompt
+        and "ask_user" in tool_names
+        and "foreground-question-choice" not in question_tool_results
+    ):
+        chunks.append(_chunk(request_id=request_id, model=model, delta={"tool_calls": [{
+            "index": 0, "id": "foreground-question-choice", "type": "function", "function": {
+                "name": "ask_user", "arguments": json.dumps({
+                    "question": "Which output directory?",
+                    "options": [
+                        {"id": "reports", "label": "Reports folder"},
+                        {"id": "archives", "label": "Archives folder"},
+                    ],
+                }),
+            },
+        }]}))
+        chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="tool_calls"))
+    elif (
+        "foreground question acceptance" in normalized_requested_prompt
+        and "ask_user" in tool_names
+        and "foreground-question" not in question_tool_results
+    ):
         chunks.append(_chunk(request_id=request_id, model=model, delta={"tool_calls": [{
             "index": 0, "id": "foreground-question", "type": "function", "function": {
                 "name": "ask_user", "arguments": json.dumps({"question": "Which output directory?"}),

@@ -311,7 +311,12 @@ class RemoteManagementCommandDispatcher:
         )
 
     async def answer_question(
-        self, question_id: str, answer: str, expected_revision: int
+        self,
+        question_id: str,
+        answer: str | None,
+        expected_revision: int,
+        *,
+        choice_id: str | None = None,
     ) -> Any:
         from aide.management.commands import ManagementCommandResult
 
@@ -319,6 +324,7 @@ class RemoteManagementCommandDispatcher:
             question_id,
             answer,
             expected_revision,
+            choice_id=choice_id,
             request_id=str(uuid4()),
         )
         if result.get("kind") != "conversation_input" or not isinstance(result.get("run_id"), str):
@@ -1055,21 +1061,28 @@ class ServiceClient:
     async def answer_question(
         self,
         question_id: str,
-        answer: str,
+        answer: str | None,
         expected_revision: int,
         *,
+        choice_id: str | None = None,
         request_id: str | None = None,
     ) -> dict[str, object]:
+        if (answer is None) == (choice_id is None):
+            raise ValueError("Provide exactly one text answer or choice ID.")
+        payload: dict[str, object] = {
+            "question_id": question_id,
+            "expected_revision": expected_revision,
+        }
+        if choice_id is not None:
+            payload["choice_id"] = choice_id
+        else:
+            payload["answer"] = answer
         return await self._command(
             "answer_question",
             workspace_id=self.workspace_id,
             session_id=self.session_id,
             claim_version=self.claim_version,
-            payload={
-                "question_id": question_id,
-                "answer": answer,
-                "expected_revision": expected_revision,
-            },
+            payload=payload,
             request_id=request_id,
         )
 

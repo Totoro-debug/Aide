@@ -570,8 +570,11 @@ export interface ForegroundQuestionSnapshot {
   task_id: string;
   generation: number;
   text: string;
+  options: { id: string; label: string }[];
   state: "pending" | "answer_received" | "interrupted";
   answer: string | null;
+  answer_kind: "text" | "choice" | null;
+  answer_option_id: string | null;
   revision: number;
 }
 

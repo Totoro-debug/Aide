@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -184,3 +185,45 @@ def test_unsupported_or_corrupt_state_is_reported_without_reset(
     with pytest.raises(ForegroundWorkError):
         store.load()
     assert store.path.read_text(encoding="utf-8") == content
+
+
+@pytest.mark.parametrize("answered", [False, True])
+def test_v1_question_upgrades_on_write_and_preserves_answer_retry(
+    tmp_path: Path, answered: bool
+) -> None:
+    store = _store(tmp_path)
+    store.begin_task("task-1", "execution-1", generation=1)
+    store.prepare_question(
+        task_id="task-1",
+        execution_id="execution-1",
+        question_id="question-1",
+        tool_call_id="call-1",
+        text="Which directory?",
+    )
+    pending = store.publish_question("question-1", committed_tool_call_ids={"call-1"})
+    if answered:
+        store.answer_question(
+            "question-1", "reports", expected_revision=pending.revision, request_id="answer-1"
+        )
+    legacy = json.loads(store.path.read_text(encoding="utf-8"))
+    legacy["schema_version"] = 1
+    for question in legacy["questions"]:
+        for field in ("options", "answer_kind", "answer_option_id"):
+            del question[field]
+    store.path.write_text(json.dumps(legacy), encoding="utf-8")
+    before = store.path.read_bytes()
+    loaded = _store(tmp_path).load()
+    assert store.path.read_bytes() == before
+    question = loaded.question("question-1")
+    assert question is not None and question.options == ()
+    assert question.answer_kind == ("text" if answered else None)
+    accepted = store.answer_question(
+        "question-1", "reports", expected_revision=pending.revision, request_id="answer-1"
+    )
+    if answered:
+        assert accepted.revision == loaded.revision
+    store.begin_resume("question-1", "execution-2")
+    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 2
+    reloaded = _store(tmp_path).load().question("question-1")
+    assert reloaded is not None and reloaded.answer == "reports"
+    assert reloaded.answer_kind == "text"

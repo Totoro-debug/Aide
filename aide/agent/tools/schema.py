@@ -15,7 +15,7 @@ from typing import Any, Literal, TypeGuard, cast
 from aide.utils.json import json_validation_issue
 from aide.utils.validation import require_nonnegative_int
 
-type SchemaKind = Literal["string", "integer", "boolean", "object"]
+type SchemaKind = Literal["string", "integer", "boolean", "object", "array"]
 
 _MISSING = object()
 _INTEGER_TEXT = re.compile(r"^[+-]?[0-9]+$")
@@ -29,6 +29,7 @@ class ToolParam:
     description: str | None = None
     min_length: int | None = None
     max_length: int | None = None
+    max_items: int | None = None
     minimum: int | None = None
     maximum: int | None = None
     format: str | None = None
@@ -43,6 +44,7 @@ class ToolParam:
         for length_name, length_value in (
             ("min_length", self.min_length),
             ("max_length", self.max_length),
+            ("max_items", self.max_items),
         ):
             if length_value is not None and (
                 isinstance(length_value, bool)
@@ -98,7 +100,9 @@ class Schema:
         "_exclusive_maximum",
         "_exclusive_minimum",
         "_format",
+        "_items",
         "_kind",
+        "_max_items",
         "_max_length",
         "_maximum",
         "_min_length",
@@ -120,6 +124,7 @@ class Schema:
         enum: Sequence[builtins.object] | None = None,
         min_length: int | None = None,
         max_length: int | None = None,
+        max_items: int | None = None,
         pattern: str | None = None,
         format: str | None = None,
         minimum: int | float | None = None,
@@ -130,8 +135,9 @@ class Schema:
         properties: Mapping[str, Schema] | None = None,
         required: Iterable[str] = (),
         additional_properties: bool | Schema | None = None,
+        items: Schema | None = None,
     ) -> None:
-        if kind not in {"string", "integer", "boolean", "object"}:
+        if kind not in {"string", "integer", "boolean", "object", "array"}:
             raise ValueError(f"unsupported Schema type: {kind}")
         if not isinstance(nullable, bool):
             raise TypeError("Schema nullable must be a boolean")
@@ -150,6 +156,14 @@ class Schema:
             require_nonnegative_int(min_length, field="Schema min_length")
         if max_length is not None:
             require_nonnegative_int(max_length, field="Schema max_length")
+        if max_items is not None:
+            require_nonnegative_int(max_items, field="Schema max_items")
+        if kind == "array" and not isinstance(items, Schema):
+            raise TypeError("Schema array items must be a Schema")
+        if kind != "array" and items is not None:
+            raise TypeError("Schema items are supported only for arrays")
+        if kind != "array" and max_items is not None:
+            raise TypeError("Schema max_items is supported only for arrays")
         if min_length is not None and max_length is not None and min_length > max_length:
             raise ValueError("Schema min_length cannot exceed max_length")
         if pattern is not None:
@@ -210,6 +224,7 @@ class Schema:
         self._enum = enum_values
         self._min_length = min_length
         self._max_length = max_length
+        self._max_items = max_items
         self._pattern = pattern
         self._format = format
         self._minimum = minimum
@@ -220,6 +235,7 @@ class Schema:
         self._properties = property_values
         self._required = required_values
         self._additional_properties = additional_properties
+        self._items = items
 
         if default is not _MISSING:
             errors = self.validate(default)
@@ -325,6 +341,25 @@ class Schema:
             additional_properties=additional_properties,
         )
 
+    @classmethod
+    def array(
+        cls,
+        items: Schema,
+        *,
+        description: str | None = None,
+        default: builtins.object = _MISSING,
+        nullable: bool = False,
+        max_items: int | None = None,
+    ) -> Schema:
+        return cls(
+            "array",
+            description=description,
+            default=default,
+            nullable=nullable,
+            max_items=max_items,
+            items=items,
+        )
+
     @property
     def kind(self) -> SchemaKind:
         return self._kind
@@ -374,6 +409,11 @@ class Schema:
             }
         elif self._kind == "object":
             result["properties"] = {}
+        if self._kind == "array":
+            assert self._items is not None
+            result["items"] = self._items.to_json_schema()
+            if self._max_items is not None:
+                result["maxItems"] = self._max_items
         if self._required:
             result["required"] = list(self._required)
         elif self._kind == "object":
@@ -416,6 +456,9 @@ class Schema:
                 )
                 for name, member in value.items()
             }
+        if self._kind == "array" and isinstance(value, list):
+            assert self._items is not None
+            return [self._items.cast(member) for member in value]
         return deepcopy(value)
 
     def validate(self, value: builtins.object, *, path: str = "$") -> list[SchemaError]:
@@ -444,6 +487,22 @@ class Schema:
             self._validate_number(cast(int | float, value), path, errors)
         elif self._kind == "object":
             self._validate_object(cast(dict[str, builtins.object], value), path, errors)
+        elif self._kind == "array":
+            self._validate_array(cast(list[builtins.object], value), path, errors)
+
+    def _validate_array(
+        self,
+        value: list[builtins.object],
+        path: str,
+        errors: list[SchemaError],
+    ) -> None:
+        if self._max_items is not None and len(value) > self._max_items:
+            errors.append(
+                SchemaError(path, f"must contain at most {self._max_items} items", "maxItems")
+            )
+        assert self._items is not None
+        for index, member in enumerate(value):
+            self._items._validate(member, f"{path}[{index}]", errors)
 
     def _validate_string(self, value: str, path: str, errors: list[SchemaError]) -> None:
         if self._min_length is not None and len(value) < self._min_length:
@@ -525,6 +584,8 @@ def _matches_kind(kind: SchemaKind, value: object) -> bool:
         return isinstance(value, int) and not isinstance(value, bool)
     if kind == "boolean":
         return isinstance(value, bool)
+    if kind == "array":
+        return isinstance(value, list)
     return isinstance(value, dict)
 
 

@@ -21,6 +21,7 @@ from typing import (
     get_args,
     get_origin,
     get_type_hints,
+    is_typeddict,
 )
 from uuid import uuid4
 
@@ -735,6 +736,29 @@ def _schema_for_annotation(
         "nullable": nullable,
         **default_kwargs,
     }
+    if get_origin(annotation) is list:
+        arguments = get_args(annotation)
+        if len(arguments) != 1:
+            raise TypeError(f"Tool parameter {parameter_name} must declare one array item type")
+        if any(
+            value is not None
+            for value in (
+                metadata.min_length,
+                metadata.max_length,
+                metadata.minimum,
+                metadata.maximum,
+                metadata.format,
+                metadata.pattern,
+            )
+        ):
+            raise TypeError(f"Tool parameter {parameter_name} has incompatible array constraints")
+        return Schema.array(
+            _schema_for_typed_dict(arguments[0], parameter_name),
+            **common,
+            max_items=metadata.max_items,
+        )
+    if metadata.max_items is not None:
+        raise TypeError(f"Tool parameter {parameter_name} has an array constraint on a non-array")
     try:
         if annotation is str:
             return Schema.string(
@@ -774,6 +798,28 @@ def _schema_for_annotation(
     except TypeError:
         raise
     raise TypeError(f"Tool parameter {parameter_name} has an unsupported annotation")
+
+
+def _schema_for_typed_dict(annotation: object, parameter_name: str) -> Schema:
+    if not is_typeddict(annotation):
+        raise TypeError(f"Tool parameter {parameter_name} array items must be a TypedDict")
+    try:
+        annotations = get_type_hints(annotation, include_extras=True)
+    except (NameError, TypeError) as error:
+        raise TypeError(f"Tool parameter {parameter_name} item annotations are invalid") from error
+    properties: dict[str, Schema] = {}
+    for name, item_annotation in annotations.items():
+        metadata = _annotation_metadata(name, item_annotation)
+        base_annotation, nullable = _unwrap_annotation(item_annotation)
+        properties[name] = _schema_for_annotation(
+            name,
+            base_annotation,
+            metadata,
+            nullable=nullable,
+            default=_MISSING,
+        )
+    required = getattr(annotation, "__required_keys__", annotations.keys())
+    return Schema.object(properties, required=required, additional_properties=False)
 
 
 __all__ = [

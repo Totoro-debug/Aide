@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -37,9 +38,17 @@ class _QuestionProvider:
         self.stream_calls = 0
         self.complete_calls = 0
         self.question_calls = 0
+        self.question_options = [
+            {"id": "reports", "label": "Reports folder"},
+            {"id": "archives", "label": "Archives folder"},
+        ]
         self.user_texts: list[str] = []
         self.answer_started = asyncio.Event()
         self.release_answer = asyncio.Event()
+        self.block_choice_answers = False
+        self.write_on_choice = False
+        self.choice_answers_started: set[str] = set()
+        self.two_choice_answers_started = asyncio.Event()
         self.question_input_tokens = 1
 
     async def complete(
@@ -94,9 +103,10 @@ class _QuestionProvider:
         self.user_texts.append(user_text)
 
         async def emit() -> AsyncIterator[ModelStreamEvent]:
-            if "write-answer" in user_text and not any(
-                message.get("tool_call_id") == "answer-write" for message in messages
-            ):
+            if (
+                "write-answer" in user_text
+                or (self.write_on_choice and "Reports folder" in user_text)
+            ) and not any(message.get("tool_call_id") == "answer-write" for message in messages):
                 yield ModelCompleted(
                     ModelResponse(
                         message=AssistantModelMessage(
@@ -114,8 +124,18 @@ class _QuestionProvider:
                     )
                 )
                 return
-            if has_ask_user and "ask-foreground-question" in user_text:
+            if has_ask_user and (
+                "ask-foreground-question" in user_text or "ask-foreground-options" in user_text
+            ):
                 self.question_calls += 1
+                question_arguments = (
+                    {
+                        "question": "Which output directory should I use?",
+                        "options": self.question_options,
+                    }
+                    if "ask-foreground-options" in user_text
+                    else {"question": "Which output directory should I use?"}
+                )
                 yield ModelCompleted(
                     ModelResponse(
                         message=AssistantModelMessage(
@@ -124,7 +144,7 @@ class _QuestionProvider:
                                 ModelToolCall(
                                     "question-call",
                                     "ask_user",
-                                    '{"question":"Which output directory should I use?"}',
+                                    json.dumps(question_arguments),
                                 ),
                                 ModelToolCall(
                                     "after-question",
@@ -145,6 +165,14 @@ class _QuestionProvider:
             if "reports-directory" in user_text:
                 self.answer_started.set()
                 await self.release_answer.wait()
+            for label in ("Reports folder", "Archives folder"):
+                if label in user_text:
+                    self.answer_started.set()
+                    self.choice_answers_started.add(label)
+                    if len(self.choice_answers_started) == 2:
+                        self.two_choice_answers_started.set()
+                    if self.block_choice_answers:
+                        await self.release_answer.wait()
             yield ModelCompleted(_response("The request is complete."))
 
         return emit()
@@ -324,6 +352,10 @@ async def test_question_answer_is_durable_claimed_and_idempotent(
             list[dict[str, object]], workspace.session_snapshot(session_id)["foreground_questions"]
         )
         assert provider.stream_calls == streams_before_normal_input + 1
+        question = cast(
+            list[dict[str, object]], workspace.session_snapshot(session_id)["foreground_questions"]
+        )[0]
+        revision = cast(int, question["revision"])
         streams_before_answer = provider.stream_calls
 
         with pytest.raises(ServiceError, match="stale"):
@@ -389,6 +421,14 @@ async def test_question_answer_is_durable_claimed_and_idempotent(
                 )
         assert provider.complete_calls == completions_before
         assert provider.stream_calls == streams_before_answer
+        unchanged = cast(
+            list[dict[str, object]], workspace.session_snapshot(session_id)["foreground_questions"]
+        )[0]
+        assert unchanged["revision"] == revision
+        assert unchanged["state"] == "pending"
+        assert unchanged["answer"] is None
+        assert unchanged["answer_kind"] is None
+        assert unchanged["answer_option_id"] is None
 
         completions_before_restart = provider.complete_calls
         await service.stop()
@@ -483,6 +523,398 @@ async def test_question_answer_is_durable_claimed_and_idempotent(
             await replacement.stop()
         else:
             await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_question_options_survive_service_restart_and_reclaim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _home(tmp_path / "agent-home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    replacement: AgentService | None = None
+    try:
+        client_id, session_id, claim_version, workspace_id = await _open_chat(service, directory)
+        workspace = service.workspace(workspace_id)
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="question-options-input",
+                command_type="input",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={"text": "ask-foreground-options"},
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+        question = cast(
+            list[dict[str, object]], workspace.session_snapshot(session_id)["foreground_questions"]
+        )[0]
+        assert question["options"] == [
+            {"id": "reports", "label": "Reports folder"},
+            {"id": "archives", "label": "Archives folder"},
+        ]
+        await service.stop()
+
+        replacement = AgentService(home, ConfigLoader(home).load())
+        await replacement.start()
+        replacement_client = await replacement.register_client("cli")
+        attached = await replacement.attach_workspace(replacement_client.client_id, directory)
+        opened = await replacement.open_conversation(
+            replacement_client.client_id,
+            workspace_id=attached.workspace_id,
+            session_id=session_id,
+            create_new=False,
+        )
+        resumed_claim = cast(dict[str, object], opened["claim"])
+        restored_question = cast(
+            list[dict[str, object]],
+            replacement.workspace(attached.workspace_id).session_snapshot(session_id)[
+                "foreground_questions"
+            ],
+        )[0]
+        assert isinstance(resumed_claim["claim_version"], int)
+        assert restored_question["question_id"] == question["question_id"]
+        assert restored_question["options"] == question["options"]
+    finally:
+        if replacement is not None:
+            await replacement.stop()
+        elif getattr(service, "_started", False):
+            await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("duplicate_labels", [False, True])
+async def test_choice_answer_uses_stable_id_and_invalid_choice_preserves_question(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, duplicate_labels: bool
+) -> None:
+    home = _home(tmp_path / "agent-home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    if duplicate_labels:
+        provider.question_options[1]["label"] = "Reports folder"
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    replacement: AgentService | None = None
+    try:
+        client, session_id, claim_version, workspace_id = await _open_chat(service, directory)
+        workspace = service.workspace(workspace_id)
+        await service.handle_command(
+            client,
+            _command(
+                request_id="choice-question-input",
+                command_type="input",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={"text": "ask-foreground-options"},
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+        question = cast(
+            list[dict[str, object]], workspace.session_snapshot(session_id)["foreground_questions"]
+        )[0]
+        calls_before_rejection = provider.stream_calls
+        with pytest.raises(ServiceError):
+            await service.handle_command(
+                client,
+                _command(
+                    request_id="choice-invalid",
+                    command_type="answer_question",
+                    workspace_id=workspace_id,
+                    session_id=session_id,
+                    claim_version=claim_version,
+                    payload={
+                        "question_id": question["question_id"],
+                        "choice_id": "missing-option",
+                        "expected_revision": question["revision"],
+                    },
+                ),
+            )
+        unchanged = cast(
+            list[dict[str, object]], workspace.session_snapshot(session_id)["foreground_questions"]
+        )[0]
+        assert unchanged["revision"] == question["revision"]
+        assert unchanged["state"] == "pending"
+        assert unchanged["answer"] is None
+        assert provider.stream_calls == calls_before_rejection
+
+        old_claim = workspace.require_claim(client, session_id, claim_version)
+        await service.release_claim(
+            client, workspace_id, session_id, claim_version, old_claim.credential
+        )
+        current_client = await service.register_client("web")
+        await service.attach_workspace(current_client.client_id, directory)
+        reopened = await service.open_conversation(
+            current_client.client_id,
+            workspace_id=workspace_id,
+            session_id=session_id,
+            create_new=False,
+        )
+        current_claim = cast(dict[str, object], reopened["claim"])
+        current_claim_version = cast(int, current_claim["claim_version"])
+        with pytest.raises(ServiceError) as stale_claim:
+            await service.handle_command(
+                client,
+                _command(
+                    request_id="choice-stale-claim",
+                    command_type="answer_question",
+                    workspace_id=workspace_id,
+                    session_id=session_id,
+                    claim_version=claim_version,
+                    payload={
+                        "question_id": question["question_id"],
+                        "choice_id": "reports",
+                        "expected_revision": question["revision"],
+                    },
+                ),
+            )
+        assert stale_claim.value.code == "stale_claim"
+        assert (
+            cast(
+                list[dict[str, object]],
+                workspace.session_snapshot(session_id)["foreground_questions"],
+            )[0]["state"]
+            == "pending"
+        )
+
+        accepted = await service.handle_command(
+            current_client.client_id,
+            _command(
+                request_id="choice-valid",
+                command_type="answer_question",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=current_claim_version,
+                payload={
+                    "question_id": question["question_id"],
+                    "choice_id": "reports",
+                    "expected_revision": question["revision"],
+                },
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+        answer_run = cast(str, cast(dict[str, object], accepted["result"])["run_id"])
+        assert isinstance(answer_run, str)
+        history = cast(list[dict[str, object]], workspace.session_snapshot(session_id)["messages"])
+        answer_message = next(
+            message
+            for message in history
+            if message.get("role") == "user"
+            and message.get("foreground_question_id") == question["question_id"]
+        )
+        assert answer_message["content"] == "Reports folder"
+        assert "Reports folder" in provider.user_texts[-1]
+        assert "Choice ID: reports" in provider.user_texts[-1]
+        assert provider.stream_calls == calls_before_rejection + 1
+        for conflicting_answer in ({"answer": "Reports folder"}, {"choice_id": "archives"}):
+            with pytest.raises(ServiceError):
+                await service.handle_command(
+                    current_client.client_id,
+                    _command(
+                        request_id="choice-valid",
+                        command_type="answer_question",
+                        workspace_id=workspace_id,
+                        session_id=session_id,
+                        claim_version=current_claim_version,
+                        payload={
+                            "question_id": question["question_id"],
+                            "expected_revision": question["revision"],
+                            **conflicting_answer,
+                        },
+                    ),
+                )
+        duplicates = await asyncio.gather(
+            *(
+                service.handle_command(
+                    current_client.client_id,
+                    _command(
+                        request_id=f"choice-retry-{index}",
+                        command_type="answer_question",
+                        workspace_id=workspace_id,
+                        session_id=session_id,
+                        claim_version=current_claim_version,
+                        payload={
+                            "question_id": question["question_id"],
+                            "choice_id": "reports",
+                            "expected_revision": question["revision"],
+                        },
+                    ),
+                )
+                for index in range(10)
+            )
+        )
+        assert {
+            cast(str, cast(dict[str, object], result["result"])["run_id"]) for result in duplicates
+        } == {answer_run}
+        assert provider.stream_calls == calls_before_rejection + 1
+
+        await service.stop()
+        replacement = AgentService(home, ConfigLoader(home).load())
+        await replacement.start()
+        next_client, same_session_id, next_claim_version, next_workspace_id = await _open_chat(
+            replacement, directory, session_id=session_id
+        )
+        replayed = await replacement.handle_command(
+            next_client,
+            _command(
+                request_id="choice-valid",
+                command_type="answer_question",
+                workspace_id=next_workspace_id,
+                session_id=same_session_id,
+                claim_version=next_claim_version,
+                payload={
+                    "question_id": question["question_id"],
+                    "choice_id": "reports",
+                    "expected_revision": question["revision"],
+                },
+            ),
+        )
+        assert cast(dict[str, object], replayed["result"])["run_id"] == answer_run
+        assert provider.stream_calls == calls_before_rejection + 1
+    finally:
+        if replacement is not None:
+            await replacement.stop()
+        elif getattr(service, "_started", False):
+            await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_choice_answers_are_isolated_across_concurrent_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _home(tmp_path / "agent-home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    provider.block_choice_answers = True
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client_one, session_one, version_one, workspace_id = await _open_chat(service, directory)
+        client_two, session_two, version_two, second_workspace_id = await _open_chat(
+            service, directory
+        )
+        assert workspace_id == second_workspace_id
+        assert session_one != session_two
+        workspace = service.workspace(workspace_id)
+
+        await asyncio.gather(
+            *(
+                service.handle_command(
+                    client_id,
+                    _command(
+                        request_id=f"ask-options-{index}",
+                        command_type="input",
+                        workspace_id=workspace_id,
+                        session_id=session_id,
+                        claim_version=claim_version,
+                        payload={"text": "ask-foreground-options"},
+                    ),
+                )
+                for index, (client_id, session_id, claim_version) in enumerate(
+                    (
+                        (client_one, session_one, version_one),
+                        (client_two, session_two, version_two),
+                    )
+                )
+            )
+        )
+        await asyncio.gather(
+            _wait_for_idle(workspace, session_one),
+            _wait_for_idle(workspace, session_two),
+        )
+        question_one = cast(
+            list[dict[str, object]], workspace.session_snapshot(session_one)["foreground_questions"]
+        )[0]
+        question_two = cast(
+            list[dict[str, object]], workspace.session_snapshot(session_two)["foreground_questions"]
+        )[0]
+
+        first_answer = await service.handle_command(
+            client_one,
+            _command(
+                request_id="answer-options-one",
+                command_type="answer_question",
+                workspace_id=workspace_id,
+                session_id=session_one,
+                claim_version=version_one,
+                payload={
+                    "question_id": question_one["question_id"],
+                    "choice_id": "reports",
+                    "expected_revision": question_one["revision"],
+                },
+            ),
+        )
+        await asyncio.wait_for(provider.answer_started.wait(), timeout=5)
+        second_pending = cast(
+            list[dict[str, object]], workspace.session_snapshot(session_two)["foreground_questions"]
+        )[0]
+        assert second_pending["state"] == "pending"
+        assert second_pending["answer"] is None
+
+        second_answer = await service.handle_command(
+            client_two,
+            _command(
+                request_id="answer-options-two",
+                command_type="answer_question",
+                workspace_id=workspace_id,
+                session_id=session_two,
+                claim_version=version_two,
+                payload={
+                    "question_id": question_two["question_id"],
+                    "choice_id": "archives",
+                    "expected_revision": question_two["revision"],
+                },
+            ),
+        )
+        first_run = cast(str, cast(dict[str, object], first_answer["result"])["run_id"])
+        second_run = cast(str, cast(dict[str, object], second_answer["result"])["run_id"])
+        assert first_run != second_run
+        await asyncio.wait_for(provider.two_choice_answers_started.wait(), timeout=5)
+        first_live = cast(dict[str, object], workspace.session_snapshot(session_one)["live_state"])
+        second_live = cast(dict[str, object], workspace.session_snapshot(session_two)["live_state"])
+        assert first_run in {
+            item["run_id"] for item in cast(list[dict[str, object]], first_live["runs"])
+        }
+        assert second_run in {
+            item["run_id"] for item in cast(list[dict[str, object]], second_live["runs"])
+        }
+
+        provider.release_answer.set()
+        await asyncio.gather(
+            _wait_for_idle(workspace, session_one),
+            _wait_for_idle(workspace, session_two),
+        )
+        messages_one = cast(
+            list[dict[str, object]], workspace.session_snapshot(session_one)["messages"]
+        )
+        messages_two = cast(
+            list[dict[str, object]], workspace.session_snapshot(session_two)["messages"]
+        )
+        assert any(
+            item.get("role") == "user"
+            and item.get("foreground_question_id") == question_one["question_id"]
+            and item.get("content") == "Reports folder"
+            for item in messages_one
+        )
+        assert any(
+            item.get("role") == "user"
+            and item.get("foreground_question_id") == question_two["question_id"]
+            and item.get("content") == "Archives folder"
+            for item in messages_two
+        )
+        assert provider.choice_answers_started == {"Reports folder", "Archives folder"}
+    finally:
+        await service.stop()
 
 
 @pytest.mark.asyncio
@@ -581,8 +1013,9 @@ async def test_deleted_question_rejects_late_publication(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("answer_mode", ["text", "choice"])
 async def test_answer_restore_returns_conversation_question_and_real_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer_mode: str
 ) -> None:
     from aide.agent.session.restore import RestoreMode
 
@@ -592,6 +1025,7 @@ async def test_answer_restore_returns_conversation_question_and_real_file(
     target = directory / "answer.txt"
     target.write_bytes(b"original bytes")
     provider = _QuestionProvider()
+    provider.write_on_choice = answer_mode == "choice"
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
     service = AgentService(home, ConfigLoader(home).load())
     await service.start()
@@ -606,7 +1040,13 @@ async def test_answer_restore_returns_conversation_question_and_real_file(
                 workspace_id=wid,
                 session_id=sid,
                 claim_version=version,
-                payload={"text": "ask-foreground-question"},
+                payload={
+                    "text": (
+                        "ask-foreground-options"
+                        if answer_mode == "choice"
+                        else "ask-foreground-question"
+                    )
+                },
             ),
         )
         await _wait_for_idle(workspace, sid)
@@ -623,7 +1063,11 @@ async def test_answer_restore_returns_conversation_question_and_real_file(
                 claim_version=version,
                 payload={
                     "question_id": question["question_id"],
-                    "answer": "write-answer",
+                    **(
+                        {"choice_id": "reports"}
+                        if answer_mode == "choice"
+                        else {"answer": "write-answer"}
+                    ),
                     "expected_revision": question["revision"],
                 },
             ),
@@ -632,7 +1076,8 @@ async def test_answer_restore_returns_conversation_question_and_real_file(
         assert target.read_bytes() == b"answer effect"
         claim = workspace.require_claim(client, sid, version)
         anchors = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["restore_anchors"])
-        answer_anchor = next(a["anchor_id"] for a in anchors if a["content"] == "write-answer")
+        answer_text = "Reports folder" if answer_mode == "choice" else "write-answer"
+        answer_anchor = next(a["anchor_id"] for a in anchors if a["content"] == answer_text)
         await service.inspect_restore(
             client, wid, sid, version, claim.credential, "inspect", answer_anchor
         )
@@ -648,9 +1093,14 @@ async def test_answer_restore_returns_conversation_question_and_real_file(
         )
         snapshot = cast(dict[str, Any], restored["snapshot"])
         assert target.read_bytes() == b"original bytes"
-        assert all(m.get("content") != "write-answer" for m in snapshot["messages"])
-        assert snapshot["foreground_questions"][0]["question_id"] == question["question_id"]
-        assert snapshot["foreground_questions"][0]["answer"] is None
+        assert all(m.get("content") != answer_text for m in snapshot["messages"])
+        restored_question = snapshot["foreground_questions"][0]
+        assert restored_question["question_id"] == question["question_id"]
+        assert restored_question["state"] == "pending"
+        assert restored_question["answer"] is None
+        assert restored_question["answer_kind"] is None
+        assert restored_question["answer_option_id"] is None
+        assert restored_question["options"] == question["options"]
     finally:
         await service.stop()
 

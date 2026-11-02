@@ -249,6 +249,7 @@ async def test_blackboard_generate_assembles_one_safe_direct_request() -> None:
         blackboard=Blackboard(goal="New goal", completion_boundary="New boundary"),
         usage_delta=_usage(),
         status="resolved",
+        action="replace",
     )
     assert len(router.calls) == 1
     call = router.calls[0]
@@ -275,6 +276,45 @@ async def test_blackboard_generate_assembles_one_safe_direct_request() -> None:
     assert '### Latest assistant content\nAssistant {answer} with "quotes"' in system_content
     assert "<user_input>" not in system_content
     assert "<last_task>" not in system_content
+
+
+@pytest.mark.parametrize(
+    ("action", "task_goal", "completion_boundary", "expected_blackboard"),
+    [
+        (
+            "keep",
+            None,
+            None,
+            Blackboard(goal="Old goal", completion_boundary="Old boundary"),
+        ),
+        (
+            "replace",
+            "New goal",
+            "New boundary",
+            Blackboard(goal="New goal", completion_boundary="New boundary"),
+        ),
+        ("clear", None, None, None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_blackboard_generate_preserves_task_framing_action(
+    action: str,
+    task_goal: str | None,
+    completion_boundary: str | None,
+    expected_blackboard: Blackboard | None,
+) -> None:
+    router = _FakeRouter(_response(_decision(action, task_goal, completion_boundary)))
+
+    result = await Blackboard.generate(
+        router,
+        previous=Blackboard(goal="Old goal", completion_boundary="Old boundary"),
+        last_assistant_content="Previous answer",
+        current_user_input="Follow up",
+    )
+
+    assert result.status == "resolved"
+    assert result.action == action
+    assert result.blackboard == expected_blackboard
 
 
 @pytest.mark.parametrize(

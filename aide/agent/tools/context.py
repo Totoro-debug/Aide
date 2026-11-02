@@ -54,6 +54,7 @@ class ToolRunContext:
     task_id: str | None = None
     generation: int | None = None
     execution_id: str | None = None
+    foreground_task_is_current: Callable[[str, int, str], bool] | None = None
     tool_call_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -75,6 +76,10 @@ class ToolRunContext:
             or self.generation < 1
         ):
             raise ValueError("Tool Run Context generation must be positive")
+        if self.foreground_task_is_current is not None and (
+            self.task_id is None or self.generation is None or self.execution_id is None
+        ):
+            raise TypeError("Foreground Task validation requires Task and execution identity")
 
 
 __all__ = ["AgentRunSuspension", "ToolRunContext"]

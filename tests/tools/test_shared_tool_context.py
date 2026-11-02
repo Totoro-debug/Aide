@@ -128,6 +128,29 @@ async def test_shared_builtin_catalog_binds_each_workspace_per_call(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_stale_foreground_generation_cannot_start_a_tool_call(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    gateway = ToolGateway(
+        workspace=workspace,
+        tool_context=ToolRunContext(
+            workspace=workspace,
+            task_id="123e4567-e89b-42d3-a456-426614174000",
+            generation=1,
+            execution_id="foreground-run",
+            foreground_task_is_current=lambda _task_id, _generation, _execution_id: False,
+        ),
+    )
+
+    result = await gateway.call(
+        _call("write_file", {"path": "late.txt", "content": "must not persist"}, call_id="late")
+    )
+
+    assert result.status == "error"
+    assert not (workspace / "late.txt").exists()
+
+
+@pytest.mark.asyncio
 async def test_shared_schedule_tool_uses_the_gateway_workspace_service(tmp_path: Path) -> None:
     workspace_a = tmp_path / "workspace-a"
     workspace_b = tmp_path / "workspace-b"

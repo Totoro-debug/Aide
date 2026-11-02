@@ -456,6 +456,7 @@ class TerminalConversationApp(App[None]):
         self._session_switch_result: asyncio.Future[bool | None] | None = None
         self._pending_inputs: deque[str] = deque()
         self._foreground_question: dict[str, object] | None = None
+        self._foreground_tasks: list[dict[str, object]] = []
         self._bus_snapshot: tuple[InboundMessage, ...] = ()
         self._consumed_runs: deque[_ConsumedRun] = deque()
         self._run_ready = Event()
@@ -1152,10 +1153,13 @@ class TerminalConversationApp(App[None]):
         submit_user_input = getattr(self._management_dispatcher, "submit_user_input", None)
         answer_question = getattr(self._management_dispatcher, "answer_question", None)
         parsed_answer = _cli_question_answer(text)
+        parsed_task_command = _cli_task_command(text)
         self._draining_inputs = True
         self._submitting_input = True
         try:
-            if parsed_answer is not None:
+            if parsed_task_command is not None:
+                result = await self._dispatch_foreground_task_command(parsed_task_command)
+            elif parsed_answer is not None:
                 answer_kind, answer_value = parsed_answer
                 if not answer_value:
                     await self._mount_management_rows(
@@ -1275,6 +1279,33 @@ class TerminalConversationApp(App[None]):
             self._promote_consumed_inputs(1, run_id=result.submitted_run_id)
         else:
             await self._bus.put_inbound(InboundMessage(content=text))
+
+    async def _dispatch_foreground_task_command(
+        self,
+        command: tuple[str, str | None],
+    ) -> ManagementCommandResult:
+        action, task_id = command
+        if action == "list":
+            output = "\n".join(
+                f"Task {task['task_id']} · generation {task['generation']} · {task['state']}"
+                for task in self._foreground_tasks
+            ) or "No foreground tasks."
+            return ManagementCommandResult(handled=True, output=output)
+        if task_id is None:
+            return ManagementCommandResult(
+                handled=True,
+                output="Usage: /task list | /task cancel <task-id> | /task continue <task-id>",
+            )
+        task = next((item for item in self._foreground_tasks if item["task_id"] == task_id), None)
+        if task is None:
+            return ManagementCommandResult(handled=True, output="That foreground Task is unavailable.")
+        method_name = (
+            "cancel_foreground_task" if action == "cancel" else "continue_foreground_task"
+        )
+        operation = getattr(self._management_dispatcher, method_name, None)
+        if not callable(operation):
+            return ManagementCommandResult(handled=True, output="Task operations are unavailable.")
+        return cast(ManagementCommandResult, await operation(task_id, task["revision"]))
 
     @on(_ConversationInput.ControlAction)
     async def _handle_control_action(self, message: _ConversationInput.ControlAction) -> None:
@@ -1470,6 +1501,29 @@ class TerminalConversationApp(App[None]):
             ),
             None,
         ) if isinstance(questions, list) else None
+        task_snapshots = snapshot.get("foreground_tasks")
+        self._foreground_tasks = [
+            item for item in task_snapshots
+            if isinstance(item, dict)
+            and isinstance(item.get("task_id"), str)
+            and isinstance(item.get("generation"), int)
+            and isinstance(item.get("revision"), int)
+            and isinstance(item.get("state"), str)
+        ] if isinstance(task_snapshots, list) else []
+        task_widget = next(
+            (widget for widget in self.query(Static) if widget.id == "foreground-tasks"), None
+        )
+        if task_widget is None and self._foreground_tasks:
+            task_widget = Static("", id="foreground-tasks", markup=False)
+            await self.query_one("#conversation-input-region", Vertical).mount(
+                task_widget, before=self.query_one("#reasoning-effort-selector")
+            )
+        if task_widget is not None:
+            task_widget.display = bool(self._foreground_tasks)
+            task_widget.update("\n".join(
+                f"Task {task['task_id']} · generation {task['generation']} · {task['state']}"
+                for task in self._foreground_tasks
+            ))
         question_widget = next(
             (widget for widget in self.query(Static) if widget.id == "foreground-question"), None
         )
@@ -2511,6 +2565,17 @@ def _cli_question_answer(text: str) -> tuple[str, str] | None:
     ):
         return "choice", value[len(option_flag) :].strip()
     return "text", value
+
+
+def _cli_task_command(text: str) -> tuple[str, str | None] | None:
+    parts = text.strip().split()
+    if not parts or parts[0].casefold() != "/task":
+        return None
+    if len(parts) == 1 or (len(parts) == 2 and parts[1].casefold() == "list"):
+        return "list", None
+    if len(parts) == 3 and parts[1].casefold() in {"cancel", "continue"}:
+        return parts[1].casefold(), parts[2]
+    return "invalid", None
 
 
 def _stream_is_tty(stream: object) -> bool:

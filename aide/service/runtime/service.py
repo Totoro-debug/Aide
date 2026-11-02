@@ -3578,6 +3578,68 @@ class AgentService:
         )
         return {"kind": "conversation_input", **result}
 
+    async def cancel_foreground_task(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        claim_version: int,
+        task_id: str,
+        expected_revision: int,
+        request_id: str,
+    ) -> dict[str, object]:
+        workspace = self.workspace(workspace_id)
+        workspace.require_claim(client_id, session_id, claim_version)
+        result = await workspace.cancel_task(
+            client_id,
+            session_id,
+            claim_version,
+            task_id,
+            expected_revision,
+            request_id,
+        )
+        client = self._clients.get(client_id)
+        if client is not None:
+            await self._send_snapshot_required(client, reason="foreground_task_updated")
+        return {"kind": "task_cancelled", **result}
+
+    async def continue_foreground_task(
+        self,
+        client_id: str,
+        workspace_id: str,
+        session_id: str,
+        claim_version: int,
+        task_id: str,
+        expected_revision: int,
+        request_id: str,
+    ) -> dict[str, object]:
+        workspace = self.workspace(workspace_id)
+        workspace.require_claim(client_id, session_id, claim_version)
+        result = await workspace.continue_task(
+            client_id,
+            session_id,
+            claim_version,
+            task_id,
+            expected_revision,
+            request_id,
+        )
+        run_id = result.get("run_id")
+        if not isinstance(run_id, str):
+            raise service_error("service_state_invalid", "Task continuation state is invalid.", status=500)
+        await self.emit(
+            "input.accepted",
+            workspace_id=workspace_id,
+            session_id=session_id,
+            run_id=run_id,
+            payload={
+                "text": "Continue the current foreground task.",
+                "request_id": request_id,
+                "task_id": task_id,
+            },
+            target_client_ids=(client_id,),
+        )
+        return {"kind": "task_continued", **result}
+
     async def handle_command(
         self, client_id: str, command: Mapping[str, object]
     ) -> dict[str, object]:
@@ -3585,7 +3647,7 @@ class AgentService:
         request_id = command.get("request_id")
         if not isinstance(request_id, str) or not request_id:
             raise service_error("validation_error", "request_id is required.", status=422)
-        if command.get("type") == "answer_question":
+        if command.get("type") in {"answer_question", "cancel_task", "continue_task"}:
             workspace_id = command.get("workspace_id")
             session_id = command.get("session_id")
             claim_version = command.get("claim_version")
@@ -3596,24 +3658,34 @@ class AgentService:
         previous = client.results.get(request_id)
         if previous is not None:
             if (
-                command.get("type") == "answer_question"
+                command.get("type") in {"answer_question", "cancel_task", "continue_task"}
                 and client.result_fingerprints.get(request_id) != _command_fingerprint(command)
             ):
+                conflict_code = (
+                    "foreground_question_conflict"
+                    if command.get("type") == "answer_question"
+                    else "foreground_task_conflict"
+                )
                 raise service_error(
-                    "foreground_question_conflict",
-                    "This answer request ID was already used with a different payload.",
+                    conflict_code,
+                    "This foreground-work request ID was already used with a different payload.",
                     status=409,
                 )
             return previous
         inflight = client.inflight.get(request_id)
         if inflight is not None:
             if (
-                command.get("type") == "answer_question"
+                command.get("type") in {"answer_question", "cancel_task", "continue_task"}
                 and client.inflight_fingerprints.get(request_id) != _command_fingerprint(command)
             ):
+                conflict_code = (
+                    "foreground_question_conflict"
+                    if command.get("type") == "answer_question"
+                    else "foreground_task_conflict"
+                )
                 raise service_error(
-                    "foreground_question_conflict",
-                    "This answer request ID is already in use with a different payload.",
+                    conflict_code,
+                    "This foreground-work request ID is already in use with a different payload.",
                     status=409,
                 )
             return await asyncio.shield(inflight)
@@ -3717,6 +3789,54 @@ class AgentService:
                 question_id,
                 cast(str | None, answer),
                 cast(str | None, choice_id),
+                expected_revision,
+                request_id,
+            )
+        elif command_type == "cancel_task":
+            self._validate_claim_fields(client_id, workspace_id, session_id, claim_version)
+            if set(payload) != {"task_id", "expected_revision"}:
+                raise service_error("validation_error", "Invalid Task cancellation payload.", status=422)
+            task_id = payload.get("task_id")
+            expected_revision = payload.get("expected_revision")
+            if not isinstance(task_id, str) or not task_id:
+                raise service_error("validation_error", "task_id is required.", status=422)
+            if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+                raise service_error("validation_error", "expected_revision is required.", status=422)
+            assert (
+                isinstance(workspace_id, str)
+                and isinstance(session_id, str)
+                and isinstance(claim_version, int)
+            )
+            result = await self.cancel_foreground_task(
+                client_id,
+                workspace_id,
+                session_id,
+                claim_version,
+                task_id,
+                expected_revision,
+                request_id,
+            )
+        elif command_type == "continue_task":
+            self._validate_claim_fields(client_id, workspace_id, session_id, claim_version)
+            if set(payload) != {"task_id", "expected_revision"}:
+                raise service_error("validation_error", "Invalid Task continuation payload.", status=422)
+            task_id = payload.get("task_id")
+            expected_revision = payload.get("expected_revision")
+            if not isinstance(task_id, str) or not task_id:
+                raise service_error("validation_error", "task_id is required.", status=422)
+            if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+                raise service_error("validation_error", "expected_revision is required.", status=422)
+            assert (
+                isinstance(workspace_id, str)
+                and isinstance(session_id, str)
+                and isinstance(claim_version, int)
+            )
+            result = await self.continue_foreground_task(
+                client_id,
+                workspace_id,
+                session_id,
+                claim_version,
+                task_id,
                 expected_revision,
                 request_id,
             )

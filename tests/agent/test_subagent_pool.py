@@ -764,6 +764,60 @@ async def test_job_cancellation_covers_occurrences_without_cancelling_other_sour
 
 
 @pytest.mark.asyncio
+async def test_task_cancellation_is_scoped_to_one_task_generation(tmp_path: Path) -> None:
+    from aide.agent.subagents.coordinator import SubAgentPool
+
+    state, session_id = _workspace(tmp_path)
+    repository = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    executor = _ControlledExecutor()
+    pool = SubAgentPool(repository, executor)
+    task_id = _RUN_ID
+    other_task_id = "123e4567-e89b-42d3-a456-426614174003"
+
+    def foreground_source(owner: str, generation: int) -> SubAgentSource:
+        return SubAgentSource(
+            kind=SubAgentSourceKind.FOREGROUND,
+            restore_run_token=_RESTORE_TOKEN,
+            task_id=owner,
+            task_generation=generation,
+        )
+
+    sources = (
+        foreground_source(task_id, 7),
+        foreground_source(task_id, 6),
+        foreground_source(other_task_id, 7),
+    )
+    records = []
+    for index, source in enumerate(sources):
+        record = pool.submit(
+            title=f"Task generation {index}",
+            task=f"Do generation task {index}.",
+            parent_run_id=_RUN_ID,
+            source=source,
+            creator_snapshot=_snapshot(),
+        )
+        records.append(record)
+        executor.release[record.agent_id] = asyncio.Event()
+        executor.cancel_requested[record.agent_id] = asyncio.Event()
+    for record in records:
+        assert await asyncio.wait_for(executor.started.get(), timeout=2) == record.agent_id
+
+    cancellation = asyncio.create_task(pool.cancel_task_and_wait(task_id, 7))
+    await asyncio.wait_for(executor.cancel_requested[records[0].agent_id].wait(), timeout=2)
+    assert not executor.cancel_requested[records[1].agent_id].is_set()
+    assert not executor.cancel_requested[records[2].agent_id].is_set()
+    executor.release[records[0].agent_id].set()
+    await asyncio.wait_for(cancellation, timeout=2)
+    for record in records[1:]:
+        executor.release[record.agent_id].set()
+    results = await asyncio.wait_for(pool.wait([record.agent_id for record in records[1:]]), timeout=2)
+    await pool.shutdown()
+
+    assert _record(repository, records[0].agent_id).status is SubAgentStatus.CANCELLED
+    assert all(result.status is SubAgentStatus.COMPLETED for result in results)
+
+
+@pytest.mark.asyncio
 async def test_pool_publishes_execution_and_terminal_events_with_increasing_revisions(
     tmp_path: Path,
 ) -> None:

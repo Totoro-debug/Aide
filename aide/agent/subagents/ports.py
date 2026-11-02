@@ -123,6 +123,12 @@ class SubAgentSessionCoordinator(Protocol):
         interrupted: bool = False,
     ) -> tuple[SubAgentRecord, ...]: ...
 
+    async def cancel_task_and_wait(
+        self,
+        task_id: str,
+        generation: int,
+    ) -> tuple[SubAgentRecord, ...]: ...
+
     async def shutdown(self, *, interrupted: bool = True) -> None: ...
 
 

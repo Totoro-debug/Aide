@@ -14,6 +14,7 @@ import type {
   ConversationOpenResponse,
   DirectoryPickerResult,
   DreamRunResponse,
+  ForegroundTaskSnapshot,
   ForegroundQuestionSnapshot,
   ManagementResponse,
   ManagementResult,
@@ -185,6 +186,45 @@ export async function answerForegroundQuestion(
     throw new ServiceCommandError(null, false);
   }
   return result as unknown as ConversationInputAccepted;
+}
+
+export async function cancelForegroundTask(
+  sendCommand: ClientCommandSender,
+  context: ConversationCommandContext,
+  task: ForegroundTaskSnapshot,
+): Promise<ServiceCommandResult> {
+  const result = await sendCommand({
+    request_id: createRequestId(),
+    type: "cancel_task",
+    workspace_id: context.workspace_id,
+    session_id: context.session_id,
+    claim_version: context.claim_version,
+    payload: { task_id: task.task_id, expected_revision: task.revision },
+  });
+  if (result.kind !== "task_cancelled" || result.task_id !== task.task_id) {
+    throw new ServiceCommandError(null, false);
+  }
+  return result;
+}
+
+export async function continueForegroundTask(
+  sendCommand: ClientCommandSender,
+  context: ConversationCommandContext,
+  task: ForegroundTaskSnapshot,
+): Promise<ServiceCommandResult> {
+  const result = await sendCommand({
+    request_id: createRequestId(),
+    type: "continue_task",
+    workspace_id: context.workspace_id,
+    session_id: context.session_id,
+    claim_version: context.claim_version,
+    payload: { task_id: task.task_id, expected_revision: task.revision },
+  });
+  if (result.kind !== "task_continued" || result.task_id !== task.task_id
+    || typeof result.run_id !== "string") {
+    throw new ServiceCommandError(null, false);
+  }
+  return result;
 }
 
 export function cancelConversationRun(

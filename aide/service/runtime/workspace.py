@@ -737,6 +737,15 @@ class WorkspaceRecord:
                 for question in foreground_work.questions
                 if question.state in {"pending", "answer_received", "interrupted"}
             ],
+            "foreground_tasks": [
+                {
+                    "task_id": task.task_id,
+                    "generation": task.generation,
+                    "state": task.state,
+                    "revision": foreground_work.revision,
+                }
+                for task in foreground_work.tasks
+            ],
         }
 
     def _session_summary(self, session: Session, client_id: str) -> dict[str, object]:
@@ -1436,6 +1445,7 @@ class WorkspaceRecord:
         *,
         foreground_question_id: str | None = None,
         foreground_task_id: str | None = None,
+        foreground_task_continue: bool = False,
     ) -> SessionClaim:
         async with self._lock:
             self._require_admitted()
@@ -1484,6 +1494,8 @@ class WorkspaceRecord:
                         inbound_metadata["foreground_question_id"] = foreground_question_id
                     if foreground_task_id is not None:
                         inbound_metadata["foreground_task_id"] = foreground_task_id
+                    if foreground_task_continue:
+                        inbound_metadata["foreground_task_continue"] = True
                     await state.bus.put_inbound(
                         InboundMessage(
                             content=text,
@@ -1584,6 +1596,167 @@ class WorkspaceRecord:
             "answer": question.answer,
             "live_state": self.session_snapshot(session_id)["live_state"],
         }
+
+    async def cancel_task(
+        self,
+        client_id: str,
+        session_id: str,
+        version: int,
+        task_id: str,
+        expected_revision: int,
+        request_id: str,
+    ) -> dict[str, object]:
+        """Fence one foreground Task before cancelling its queued and active work."""
+        self._require_admitted()
+        self.require_claim(client_id, session_id, version)
+        self._ensure_session_available(session_id)
+        if self._restore_session_id == session_id or self._restore_commit_task is not None:
+            raise service_error("session_restore_active", "Session Restore is in progress.", retryable=True)
+        state = self._loops[session_id]
+        store = self.foreground_work_store(session_id)
+        if not state.loop.has_active_run and not state.run_ids and not state.live_runs:
+            store.reconcile(self._persisted_foreground_messages(session_id))
+        current = store.load()
+        task = next((item for item in current.tasks if item.task_id == task_id), None)
+        if task is None:
+            raise service_error("foreground_task_conflict", "The Task is no longer available.", status=409)
+        try:
+            cancelled = store.cancel_task(
+                task_id,
+                expected_revision=expected_revision,
+                request_id=request_id,
+            )
+        except StaleForegroundWorkRevision as error:
+            raise service_error(
+                "foreground_task_conflict", "The Task changed; reload it before cancelling.", status=409
+            ) from error
+        except (ForegroundWorkConflict, ValueError) as error:
+            raise service_error(
+                "foreground_task_conflict", "The Task can no longer be cancelled.", status=409
+            ) from error
+        except OSError as error:
+            raise service_error("persistence_error", "The Task cancellation could not be saved.", status=500) from error
+
+        cancelled_runs: list[str] = []
+        active_run_id: str | None = None
+        client = self.service.client(client_id)
+        async with state.coordination_lock:
+            async with client.delivery_lock:
+                for inbound in await state.bus.inbound_snapshot():
+                    if inbound.metadata.get("foreground_task_id") != task_id:
+                        continue
+                    queued_request_id = inbound.metadata.get("request_id")
+                    run_id = inbound.metadata.get("run_id")
+                    if not isinstance(queued_request_id, str) or not isinstance(run_id, str):
+                        continue
+                    if await state.bus.remove_inbound(queued_request_id) is None:
+                        continue
+                    try:
+                        state.run_ids.remove(run_id)
+                    except ValueError:
+                        pass
+                    state.live_runs.pop(run_id, None)
+                    cancelled_runs.append(run_id)
+                if not state.live_runs:
+                    state.completed_user_count = None
+                if (
+                    state.loop.has_active_run
+                    and state.run_ids
+                    and state.run_ids[0] == task.execution_id
+                ):
+                    active_run_id = task.execution_id
+                    if active_run_id in state.live_runs:
+                        state.live_runs[active_run_id]["cancel_requested"] = True
+
+        if active_run_id is not None:
+            await state.loop.cancel_active_run()
+            cancelled_runs.append(active_run_id)
+        for run_id in cancelled_runs:
+            await self.service.emit(
+                "run.cancelled",
+                workspace_id=self.workspace_id,
+                session_id=session_id,
+                run_id=run_id,
+                payload={},
+                target_client_ids=(client_id,),
+            )
+        current_task = next(item for item in cancelled.tasks if item.task_id == task_id)
+        coordinator = self._subagent_coordinators.get(session_id)
+        cancel_task_work = getattr(coordinator, "cancel_task_and_wait", None)
+        if callable(cancel_task_work):
+            await cancel_task_work(task_id, current_task.generation - 1)
+        return {
+            "task_id": current_task.task_id,
+            "generation": current_task.generation,
+            "state": current_task.state,
+            "revision": cancelled.revision,
+        }
+
+    async def continue_task(
+        self,
+        client_id: str,
+        session_id: str,
+        version: int,
+        task_id: str,
+        expected_revision: int,
+        request_id: str,
+    ) -> dict[str, object]:
+        """Admit a user-owned continuation for one explicitly selected Task."""
+        self._require_admitted()
+        self.require_claim(client_id, session_id, version)
+        self._ensure_session_available(session_id)
+        if not self.session_model_available(session_id):
+            raise service_error(
+                "model_unavailable",
+                "Choose an available model before continuing this Task.",
+                status=422,
+                field_errors={"model": "choose an available model"},
+            )
+        if self._restore_session_id == session_id or self._restore_commit_task is not None:
+            raise service_error("session_restore_active", "Session Restore is in progress.", retryable=True)
+        store = self.foreground_work_store(session_id)
+        state = self._loops[session_id]
+        if not state.loop.has_active_run and not state.run_ids and not state.live_runs:
+            store.reconcile(self._persisted_foreground_messages(session_id))
+        current = store.load()
+        if current.revision != expected_revision:
+            raise service_error(
+                "foreground_task_conflict", "The Task changed; reload it before continuing.", status=409
+            )
+        task = next((item for item in current.tasks if item.task_id == task_id), None)
+        unresolved = {"preparing", "pending", "answer_received", "resuming", "executing"}
+        if (
+            task is None
+            or task.state not in {"completed", "interrupted"}
+            or any(
+                question.task_id == task_id and question.state in unresolved
+                for question in current.questions
+            )
+        ):
+            raise service_error(
+                "foreground_task_conflict",
+                "The Task is active, cancelled, replaced, or waiting for an answer.",
+                status=409,
+            )
+        run_id = str(uuid4())
+        text = "Continue the current foreground task."
+        try:
+            store.start_execution(task_id, run_id, expected_generation=task.generation)
+        except (ForegroundWorkConflict, ValueError) as error:
+            raise service_error("foreground_task_conflict", "The Task changed.", status=409) from error
+        except OSError as error:
+            raise service_error("persistence_error", "Task continuation could not be saved.", status=500) from error
+        await self.input(
+            client_id,
+            session_id,
+            version,
+            text,
+            run_id,
+            request_id,
+            foreground_task_id=task_id,
+            foreground_task_continue=True,
+        )
+        return {"run_id": run_id, "task_id": task_id}
 
     async def recall_queued_inputs(
         self,
@@ -1854,6 +2027,11 @@ class WorkspaceRecord:
                 ModelRouter(configuration=current_configuration, provider_factory=create_provider)
                 if configured is None else configured.shared.router
             )
+            foreground_task_store = (
+                self.foreground_work_store(authority.session_id)
+                if authority._storage_partition is SessionStoragePartition.FOREGROUND
+                else None
+            )
             loop_kwargs: dict[str, Any] = {
                 "workspace_path": self.workspace_path,
                 "workspace_state": self.workspace_state,
@@ -1877,11 +2055,7 @@ class WorkspaceRecord:
                     self.service.built_in_tool_catalog if configured is None else configured.shared.built_in_catalog
                 ),
                 "subagent_model_router": router,
-                "foreground_work_store": (
-                    self.foreground_work_store(authority.session_id)
-                    if authority._storage_partition is SessionStoragePartition.FOREGROUND
-                    else None
-                ),
+                "foreground_work_store": foreground_task_store,
             }
             executor = AgentRunExecutor(
                 session=authority, session_id=None, session_run_state=session_state, **loop_kwargs
@@ -1901,6 +2075,13 @@ class WorkspaceRecord:
                     now=local_now,
                     workspace_id=self.workspace_id,
                     event_publisher=self,
+                    foreground_task_is_current=(
+                        None
+                        if foreground_task_store is None
+                        else lambda task_id, generation: self.foreground_work_store(
+                            authority.session_id
+                        ).is_active_generation(task_id, generation)
+                    ),
                 )
                 self.register_subagent_coordinator(coordinator, repository)
             executor.bind_subagent_coordinator(coordinator)
@@ -2029,6 +2210,21 @@ class WorkspaceRecord:
             while not self._closed and self._loops.get(session_id) is state:
                 message = await state.bus.get_outbound()
                 current_run_id = run_id or (state.run_ids[0] if state.run_ids else None)
+                if (
+                    message.metadata.get("_streamed") is True
+                    and not state.schedule
+                    and self.foreground_work_store(session_id).load().tasks
+                ):
+                    claim = self._claims.get(session_id)
+                    client = None if claim is None else self.service._clients.get(claim.client_id)
+                    if (
+                        client is not None
+                        and client.kind == "cli"
+                        and client.current_session_id == session_id
+                    ):
+                        await self.service._send_snapshot_required(
+                            client, reason="foreground_question_updated"
+                        )
                 await self.service.emit(
                     "run.output",
                     workspace_id=self.workspace_id,
@@ -2058,15 +2254,6 @@ class WorkspaceRecord:
                             "finish_reason": message.metadata.get("finish_reason", "completed")
                         },
                     )
-                    if not state.schedule and self.foreground_work_store(session_id).load().questions:
-                        claim = self._claims.get(session_id)
-                        client = (
-                            None if claim is None else self.service._clients.get(claim.client_id)
-                        )
-                        if client is not None and client.kind == "cli":
-                            await self.service._send_snapshot_required(
-                                client, reason="foreground_question_updated"
-                            )
                     return True
         except asyncio.CancelledError:
             raise

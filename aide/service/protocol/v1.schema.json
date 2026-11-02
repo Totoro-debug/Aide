@@ -1020,7 +1020,7 @@
       "properties": {
         "request_id": {"$ref": "#/$defs/request_id"},
         "type": {
-          "enum": ["claim", "release", "input", "answer_question", "session_model_configure", "cancel", "recall_queued_inputs", "confirmation_decide", "subscribe"]
+          "enum": ["claim", "release", "input", "answer_question", "cancel_task", "continue_task", "session_model_configure", "cancel", "recall_queued_inputs", "confirmation_decide", "subscribe"]
         },
         "workspace_id": {"type": ["string", "null"]},
         "session_id": {"type": ["string", "null"]},
@@ -1029,7 +1029,7 @@
       },
       "allOf": [
         {
-          "if": {"properties": {"type": {"enum": ["claim", "release", "input", "answer_question", "session_model_configure", "cancel", "recall_queued_inputs"]}}},
+          "if": {"properties": {"type": {"enum": ["claim", "release", "input", "answer_question", "cancel_task", "continue_task", "session_model_configure", "cancel", "recall_queued_inputs"]}}},
           "then": {
             "properties": {
               "workspace_id": {"$ref": "#/$defs/identifier"},
@@ -1038,7 +1038,7 @@
           }
         },
         {
-          "if": {"properties": {"type": {"enum": ["release", "input", "answer_question", "session_model_configure", "cancel", "recall_queued_inputs"]}}},
+          "if": {"properties": {"type": {"enum": ["release", "input", "answer_question", "cancel_task", "continue_task", "session_model_configure", "cancel", "recall_queued_inputs"]}}},
           "then": {"properties": {"claim_version": {"$ref": "#/$defs/claim_version"}}}
         },
         {
@@ -1095,6 +1095,21 @@
                   {"required": ["answer"]},
                   {"required": ["choice_id"]}
                 ]
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"type": {"enum": ["cancel_task", "continue_task"]}}},
+          "then": {
+            "properties": {
+              "payload": {
+                "type": "object", "additionalProperties": false,
+                "required": ["task_id", "expected_revision"],
+                "properties": {
+                  "task_id": {"$ref": "#/$defs/identifier"},
+                  "expected_revision": {"type": "integer", "minimum": 1}
+                }
               }
             }
           }
@@ -1385,6 +1400,10 @@
           "type": "array",
           "items": {"$ref": "#/$defs/foreground_question"}
         },
+        "foreground_tasks": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/foreground_task"}
+        },
         "active_model_configuration": {"anyOf": [{"$ref": "#/$defs/session_model_configuration"}, {"type": "null"}]},
         "model_configuration_available": {"type": "boolean"},
         "restore_anchors": {
@@ -1440,6 +1459,17 @@
           "answer": {"type": ["string", "null"], "maxLength": 10000},
           "answer_kind": {"type": ["string", "null"], "enum": ["text", "choice", null]},
           "answer_option_id": {"anyOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]},
+        "revision": {"type": "integer", "minimum": 1}
+      }
+    },
+    "foreground_task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "generation", "state", "revision"],
+      "properties": {
+        "task_id": {"$ref": "#/$defs/identifier"},
+        "generation": {"type": "integer", "minimum": 1},
+        "state": {"enum": ["running", "waiting_for_answer", "completed", "interrupted", "cancelled", "superseded"]},
         "revision": {"type": "integer", "minimum": 1}
       }
     },

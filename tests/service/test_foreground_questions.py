@@ -47,9 +47,11 @@ class _QuestionProvider:
         self.release_answer = asyncio.Event()
         self.block_choice_answers = False
         self.write_on_choice = False
+        self.write_on_continue = False
         self.choice_answers_started: set[str] = set()
         self.two_choice_answers_started = asyncio.Event()
         self.question_input_tokens = 1
+        self.framing_actions: list[str] = []
 
     async def complete(
         self,
@@ -68,9 +70,17 @@ class _QuestionProvider:
         system = messages[0].get("content") if messages else None
         if isinstance(system, str) and system.startswith("Generate a concise title"):
             return _response("Question flow")
+        action = self.framing_actions.pop(0) if self.framing_actions else "replace"
+        if action == "replace":
+            return _response(
+                '{"action":"replace","task_goal":"answer the input",'
+                '"completion_boundary":"return one answer"}'
+            )
         return _response(
-            '{"action":"replace","task_goal":"answer the input",'
-            '"completion_boundary":"return one answer"}'
+            json.dumps(
+                {"action": action, "task_goal": None, "completion_boundary": None},
+                separators=(",", ":"),
+            )
         )
 
     def stream(
@@ -105,6 +115,7 @@ class _QuestionProvider:
         async def emit() -> AsyncIterator[ModelStreamEvent]:
             if (
                 "write-answer" in user_text
+                or (self.write_on_continue and "Continue the current foreground task." in user_text)
                 or (self.write_on_choice and "Reports folder" in user_text)
             ) and not any(message.get("tool_call_id") == "answer-write" for message in messages):
                 yield ModelCompleted(
@@ -274,6 +285,7 @@ async def test_question_answer_is_durable_claimed_and_idempotent(
     directory = tmp_path / "workspace"
     directory.mkdir()
     provider = _QuestionProvider()
+    provider.framing_actions = ["replace", "keep"]
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
     service = AgentService(home, ConfigLoader(home).load())
     await service.start()
@@ -432,6 +444,8 @@ async def test_question_answer_is_durable_claimed_and_idempotent(
 
         completions_before_restart = provider.complete_calls
         await service.stop()
+
+
         replacement = AgentService(home, ConfigLoader(home).load())
         await replacement.start()
         next_client, same_session_id, next_claim_version, next_workspace_id = await _open_chat(
@@ -523,6 +537,570 @@ async def test_question_answer_is_durable_claimed_and_idempotent(
             await replacement.stop()
         else:
             await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_keep_framing_retains_task_identity_across_question_answer_and_next_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _home(tmp_path / "agent-home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    provider.framing_actions = ["replace", "keep", "keep"]
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client_id, session_id, claim_version, workspace_id = await _open_chat(service, directory)
+        workspace = service.workspace(workspace_id)
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="keep-task-first-question",
+                command_type="input",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={"text": "ask-foreground-question"},
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+        first_question = cast(
+            list[dict[str, object]], workspace.session_snapshot(session_id)["foreground_questions"]
+        )[0]
+
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="keep-task-answer",
+                command_type="answer_question",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={
+                    "question_id": first_question["question_id"],
+                    "answer": "continue this task",
+                    "expected_revision": first_question["revision"],
+                },
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="keep-task-second-question",
+                command_type="input",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={"text": "ask-foreground-question again"},
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+        second_question = cast(
+            list[dict[str, object]], workspace.session_snapshot(session_id)["foreground_questions"]
+        )[0]
+
+        assert second_question["task_id"] == first_question["task_id"]
+        assert second_question["generation"] == first_question["generation"]
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["replace", "clear"])
+async def test_replace_and_clear_framing_fence_old_task_and_pending_question(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    home = _home(tmp_path / "agent-home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    provider.framing_actions = ["replace", action]
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client_id, session_id, claim_version, workspace_id = await _open_chat(service, directory)
+        workspace = service.workspace(workspace_id)
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id=f"{action}-old-task-question",
+                command_type="input",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={"text": "ask-foreground-question"},
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+        question = workspace.foreground_work_store(session_id).load().pending_questions[0]
+
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id=f"{action}-new-task-input",
+                command_type="input",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={"text": "start a separate task"},
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+
+        snapshot = workspace.foreground_work_store(session_id).load()
+        old_task = next(item for item in snapshot.tasks if item.task_id == question.task_id)
+        new_task = snapshot.tasks[-1]
+        invalidated_question = snapshot.question(question.question_id)
+        assert old_task.state == "superseded"
+        assert old_task.generation == question.generation + 1
+        assert new_task.task_id != old_task.task_id
+        assert invalidated_question is not None and invalidated_question.state == "invalidated"
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_manual_skill_owns_new_task_without_inheriting_pending_question(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _home(tmp_path / "agent-home")
+    instruction = home.skills_directory / "planner" / "SKILL.md"
+    instruction.parent.mkdir(parents=True)
+    instruction.write_text(
+        "---\nname: planner\ndescription: Plan work\n---\nUse the planning instructions.\n",
+        encoding="utf-8",
+    )
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    provider.framing_actions = ["replace"]
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client_id, session_id, claim_version, workspace_id = await _open_chat(service, directory)
+        workspace = service.workspace(workspace_id)
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="manual-skill-old-task-question",
+                command_type="input",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={"text": "ask-foreground-question"},
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+        before = workspace.foreground_work_store(session_id).load()
+        question = before.pending_questions[0]
+
+        manual_input = "/planner plan a separate task"
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="manual-skill-new-task",
+                command_type="input",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={"text": manual_input},
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+
+        after = workspace.foreground_work_store(session_id).load()
+        manual_task = after.tasks[-1]
+        old_task = next(item for item in after.tasks if item.task_id == question.task_id)
+        manual_message = next(
+            message
+            for message in reversed(workspace._loops[session_id].loop.session.messages)
+            if message.get("role") == "user" and message.get("content") == manual_input
+        )
+        retained_question = after.question(question.question_id)
+        assert manual_task.task_id != old_task.task_id
+        assert manual_message.get("foreground_task_id") == manual_task.task_id
+        assert old_task.state == "waiting_for_answer"
+        assert retained_question is not None and retained_question.state == "pending"
+        assert retained_question.task_id == old_task.task_id
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_fences_pending_question_and_repeated_cancel_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _home(tmp_path / "agent-home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client_id, session_id, claim_version, workspace_id = await _open_chat(service, directory)
+        workspace = service.workspace(workspace_id)
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="cancel-task-question",
+                command_type="input",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={"text": "ask-foreground-question"},
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+        question = cast(
+            list[dict[str, object]], workspace.session_snapshot(session_id)["foreground_questions"]
+        )[0]
+        streams_before_cancel = provider.stream_calls
+
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="cancel-task-once",
+                command_type="cancel_task",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={
+                    "task_id": question["task_id"],
+                    "expected_revision": question["revision"],
+                },
+            ),
+        )
+        cancelled_snapshot = workspace.session_snapshot(session_id)
+        task = next(
+            item
+            for item in cast(list[dict[str, object]], cancelled_snapshot["foreground_tasks"])
+            if item["task_id"] == question["task_id"]
+        )
+        assert task["state"] == "cancelled"
+        assert task["generation"] == cast(int, question["generation"]) + 1
+        assert cancelled_snapshot["foreground_questions"] == []
+
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="cancel-task-again",
+                command_type="cancel_task",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={
+                    "task_id": question["task_id"],
+                    "expected_revision": question["revision"],
+                },
+            ),
+        )
+        assert workspace.session_snapshot(session_id)["foreground_tasks"] == cancelled_snapshot[
+            "foreground_tasks"
+        ]
+        with pytest.raises(ServiceError) as late_answer:
+            await service.handle_command(
+                client_id,
+                _command(
+                    request_id="answer-after-task-cancel",
+                    command_type="answer_question",
+                    workspace_id=workspace_id,
+                    session_id=session_id,
+                    claim_version=claim_version,
+                    payload={
+                        "question_id": question["question_id"],
+                        "answer": "reports-directory",
+                        "expected_revision": question["revision"],
+                    },
+                ),
+            )
+        assert late_answer.value.code == "foreground_question_conflict"
+        assert provider.stream_calls == streams_before_cancel
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_fences_an_answer_execution_already_in_flight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _home(tmp_path / "agent-home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client_id, session_id, claim_version, workspace_id = await _open_chat(service, directory)
+        workspace = service.workspace(workspace_id)
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="cancel-in-flight-question",
+                command_type="input",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={"text": "ask-foreground-question"},
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+        question = workspace.foreground_work_store(session_id).load().pending_questions[0]
+
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="answer-before-in-flight-cancel",
+                command_type="answer_question",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={
+                    "question_id": question.question_id,
+                    "answer": "reports-directory",
+                    "expected_revision": workspace.foreground_work_store(session_id).load().revision,
+                },
+            ),
+        )
+        await asyncio.wait_for(provider.answer_started.wait(), timeout=5)
+        current = workspace.foreground_work_store(session_id).load()
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="cancel-after-answer-started",
+                command_type="cancel_task",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={"task_id": question.task_id, "expected_revision": current.revision},
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+
+        cancelled = workspace.foreground_work_store(session_id).load()
+        task = next(item for item in cancelled.tasks if item.task_id == question.task_id)
+        invalidated = cancelled.question(question.question_id)
+        assert task.state == "cancelled"
+        assert task.generation == question.generation + 1
+        assert invalidated is not None and invalidated.state == "invalidated"
+        assert not (directory / "after-question.txt").exists()
+    finally:
+        provider.release_answer.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_continue_task_rejects_pending_question_and_resumes_after_explicit_user_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _home(tmp_path / "agent-home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client_id, session_id, claim_version, workspace_id = await _open_chat(service, directory)
+        workspace = service.workspace(workspace_id)
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="continue-task-question",
+                command_type="input",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={"text": "ask-foreground-question"},
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+        question = cast(
+            list[dict[str, object]], workspace.session_snapshot(session_id)["foreground_questions"]
+        )[0]
+        streams_before_continue = provider.stream_calls
+
+        with pytest.raises(ServiceError) as pending_continue:
+            await service.handle_command(
+                client_id,
+                _command(
+                    request_id="continue-task-before-answer",
+                    command_type="continue_task",
+                    workspace_id=workspace_id,
+                    session_id=session_id,
+                    claim_version=claim_version,
+                    payload={
+                        "task_id": question["task_id"],
+                        "expected_revision": question["revision"],
+                    },
+                ),
+            )
+        assert pending_continue.value.code == "foreground_task_conflict"
+        assert provider.stream_calls == streams_before_continue
+
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="continue-task-answer",
+                command_type="answer_question",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={
+                    "question_id": question["question_id"],
+                    "answer": "continue this task",
+                    "expected_revision": question["revision"],
+                },
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+        before = workspace.session_snapshot(session_id)
+        task_before = next(
+            item
+            for item in cast(list[dict[str, object]], before["foreground_tasks"])
+            if item["task_id"] == question["task_id"]
+        )
+        assert task_before["state"] == "completed"
+
+        continued = await service.handle_command(
+            client_id,
+            _command(
+                request_id="continue-task-after-answer",
+                command_type="continue_task",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={
+                    "task_id": question["task_id"],
+                    "expected_revision": task_before["revision"],
+                },
+            ),
+        )
+        assert cast(dict[str, object], continued["result"])["kind"] == "task_continued"
+        await _wait_for_idle(workspace, session_id)
+        after_task = next(
+            item
+            for item in cast(
+                list[dict[str, object]], workspace.session_snapshot(session_id)["foreground_tasks"]
+            )
+            if item["task_id"] == question["task_id"]
+        )
+        assert after_task["state"] == "completed"
+        assert after_task["generation"] == question["generation"]
+        assert provider.stream_calls == streams_before_continue + 2
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_explicit_task_continuation_uses_lower_current_permission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _home(tmp_path / "agent-home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    provider.framing_actions = ["replace"]
+    provider.write_on_continue = True
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client_id, session_id, claim_version, workspace_id = await _open_chat(service, directory)
+        service.client_permission(client_id).select("workspace-write")
+        workspace = service.workspace(workspace_id)
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="permission-task-question",
+                command_type="input",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={"text": "ask-foreground-question"},
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+        question = workspace.foreground_work_store(session_id).load().pending_questions[0]
+        task = next(
+            item
+            for item in workspace.foreground_work_store(session_id).load().tasks
+            if item.task_id == question.task_id
+        )
+        assert task.permission_level == "workspace-write"
+
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="permission-task-answer",
+                command_type="answer_question",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={
+                    "question_id": question.question_id,
+                    "answer": "continue this task",
+                    "expected_revision": workspace.foreground_work_store(session_id).load().revision,
+                },
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+        service.client_permission(client_id).select("read-only")
+        snapshot = workspace.session_snapshot(session_id)
+        task_snapshot = next(
+            item
+            for item in cast(list[dict[str, object]], snapshot["foreground_tasks"])
+            if item["task_id"] == question.task_id
+        )
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="permission-task-continue",
+                command_type="continue_task",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={
+                    "task_id": question.task_id,
+                    "expected_revision": task_snapshot["revision"],
+                },
+            ),
+        )
+        await _wait_until(
+            lambda: any(
+                event.get("type") == "confirmation.requested"
+                and event.get("session_id") == session_id
+                for event in service.client(client_id).events
+            )
+        )
+        confirmation = next(
+            event
+            for event in service.client(client_id).events
+            if event.get("type") == "confirmation.requested"
+            and event.get("session_id") == session_id
+        )
+        confirmation_payload = cast(dict[str, object], confirmation["payload"])
+        service.decide_confirmation(
+            client_id,
+            cast(str, confirmation_payload["token"]),
+            "declined",
+        )
+        await _wait_for_idle(workspace, session_id)
+        assert not (directory / "answer.txt").exists()
+    finally:
+        await service.stop()
 
 
 @pytest.mark.asyncio
@@ -927,6 +1505,7 @@ async def test_uncommitted_question_cannot_borrow_an_earlier_tool_receipt(
     directory = tmp_path / "workspace"
     directory.mkdir()
     provider = _QuestionProvider()
+    provider.framing_actions = ["replace", "keep"]
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
     service = AgentService(home, ConfigLoader(home).load())
     await service.start()
@@ -1268,6 +1847,7 @@ async def test_compaction_preserves_question_and_projects_answer_identity(
     provider = _QuestionProvider()
     provider.question_input_tokens = 7000
     provider.release_answer.set()
+    provider.framing_actions = ["replace", "keep"]
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
     service = AgentService(home, ConfigLoader(home).load())
     await service.start()
@@ -1377,5 +1957,245 @@ async def test_question_publication_failure_pairs_tools_and_recovers_without_exe
             1 if phase == "pending" else 0
         )
         assert provider.stream_calls == calls_after_run
+    finally:
+        await service.stop()
+
+@pytest.mark.asyncio
+async def test_invalid_framing_interrupts_prior_task_until_explicit_continuation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _home(tmp_path / "home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    provider.framing_actions = ["replace", "invalid"]
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client, sid, version, wid = await _open_chat(service, directory)
+        workspace = service.workspace(wid)
+        for index in range(2):
+            await service.handle_command(client, _command(
+                request_id=f"input-{index}", command_type="input", workspace_id=wid,
+                session_id=sid, claim_version=version, payload={"text": "ordinary input"},
+            ))
+            await _wait_for_idle(workspace, sid)
+        tasks = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_tasks"])
+        assert tasks[0]["state"] == "interrupted"
+        await service.continue_foreground_task(client, wid, sid, version,
+                                              tasks[0]["task_id"], tasks[0]["revision"], "continue")
+        await _wait_for_idle(workspace, sid)
+        assert "Continue the current foreground task." in provider.user_texts[-1]
+    finally:
+        await service.stop()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cancel_task", "continue_task"])
+async def test_task_publication_failure_admits_no_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    from aide.utils.host_filesystem import HOST_FILESYSTEM
+
+    home = _home(tmp_path / "home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client, sid, version, wid = await _open_chat(service, directory)
+        workspace = service.workspace(wid)
+        await service.handle_command(client, _command(
+            request_id="initial", command_type="input", workspace_id=wid,
+            session_id=sid, claim_version=version, payload={"text": "ordinary input"},
+        ))
+        await _wait_for_idle(workspace, sid)
+        task = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_tasks"])[-1]
+        calls = provider.stream_calls
+        original = HOST_FILESYSTEM.atomic_replace_text
+
+        def fail(path: Path, content: str) -> None:
+            if path.name == "state.json":
+                raise OSError("injected Task publication failure")
+            original(path, content)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(HOST_FILESYSTEM, "atomic_replace_text", fail)
+            with pytest.raises(ServiceError) as failure:
+                await service.handle_command(client, _command(
+                    request_id="operation", command_type=operation, workspace_id=wid,
+                    session_id=sid, claim_version=version,
+                    payload={"task_id": task["task_id"], "expected_revision": task["revision"]},
+                ))
+            assert failure.value.code == "persistence_error"
+        await _wait_for_idle(workspace, sid)
+        assert provider.stream_calls == calls
+        assert workspace.session_snapshot(sid)["foreground_tasks"] == [task]
+    finally:
+        await service.stop()
+
+@pytest.mark.asyncio
+async def test_cancel_queued_continuation_does_not_stop_another_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _home(tmp_path / "home")
+    skill = home.skills_directory / "planner" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: planner\ndescription: Plan\n---\nPlan work.\n", encoding="utf-8")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client, sid, version, wid = await _open_chat(service, directory)
+        workspace = service.workspace(wid)
+        async def command(kind: str, request: str, payload: dict[str, object]) -> dict[str, object]:
+            return await service.handle_command(client, _command(
+                request_id=request, command_type=kind, workspace_id=wid,
+                session_id=sid, claim_version=version, payload=payload,
+            ))
+        await command("input", "ask", {"text": "ask-foreground-question"})
+        await _wait_for_idle(workspace, sid)
+        await command("input", "manual", {"text": "/planner independent work"})
+        await _wait_for_idle(workspace, sid)
+        snapshot = workspace.session_snapshot(sid)
+        question = cast(list[dict[str, Any]], snapshot["foreground_questions"])[0]
+        task = cast(list[dict[str, Any]], snapshot["foreground_tasks"])[-1]
+        await command("answer_question", "answer", {
+            "question_id": question["question_id"], "answer": "reports-directory",
+            "expected_revision": question["revision"],
+        })
+        await asyncio.wait_for(provider.answer_started.wait(), timeout=5)
+        task = next(t for t in cast(list[dict[str, Any]],
+                    workspace.session_snapshot(sid)["foreground_tasks"]) if t["task_id"] == task["task_id"])
+        await command("continue_task", "queued", {
+            "task_id": task["task_id"], "expected_revision": task["revision"],
+        })
+        task = next(t for t in cast(list[dict[str, Any]],
+                    workspace.session_snapshot(sid)["foreground_tasks"]) if t["task_id"] == task["task_id"])
+        calls = provider.stream_calls
+        await command("cancel_task", "cancel", {
+            "task_id": task["task_id"], "expected_revision": task["revision"],
+        })
+        provider.release_answer.set()
+        await _wait_for_idle(workspace, sid)
+        assert provider.stream_calls == calls
+        tasks = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_tasks"])
+        assert next(t for t in tasks if t["task_id"] == question["task_id"])["state"] == "completed"
+        assert next(t for t in tasks if t["task_id"] == task["task_id"])["state"] == "cancelled"
+    finally:
+        provider.release_answer.set()
+        await service.stop()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["cancel", "replace"])
+async def test_revoked_task_stays_revoked_after_restore_and_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ending: str
+) -> None:
+    from aide.agent.session.restore import RestoreMode
+
+    home = _home(tmp_path / "home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client, sid, version, wid = await _open_chat(service, directory)
+        workspace = service.workspace(wid)
+        await service.handle_command(client, _command(
+            request_id="ask", command_type="input", workspace_id=wid, session_id=sid,
+            claim_version=version, payload={"text": "ask-foreground-question"},
+        ))
+        await _wait_for_idle(workspace, sid)
+        question = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_questions"])[0]
+        if ending == "cancel":
+            await service.cancel_foreground_task(client, wid, sid, version,
+                                                question["task_id"], question["revision"], "cancel")
+        await service.handle_command(client, _command(
+            request_id="new", command_type="input", workspace_id=wid, session_id=sid,
+            claim_version=version, payload={"text": "separate work"},
+        ))
+        await _wait_for_idle(workspace, sid)
+        anchor = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["restore_anchors"])[-1]
+        claim = workspace.require_claim(client, sid, version)
+        old_store = workspace.foreground_work_store(sid)
+        await service.inspect_restore(client, wid, sid, version, claim.credential,
+                                      "inspect", anchor["anchor_id"])
+        await service.commit_restore(client, wid, sid, version, claim.credential,
+                                     "restore", anchor["anchor_id"], RestoreMode.CONVERSATION_ONLY.value)
+        assert not old_store.is_active_generation(question["task_id"], question["generation"])
+        calls = provider.stream_calls
+    finally:
+        await service.stop()
+    replacement = AgentService(home, ConfigLoader(home).load())
+    await replacement.start()
+    try:
+        client, sid, version, wid = await _open_chat(replacement, directory, session_id=sid)
+        snapshot = replacement.workspace(wid).session_snapshot(sid)
+        task = next(t for t in cast(list[dict[str, Any]], snapshot["foreground_tasks"])
+                    if t["task_id"] == question["task_id"])
+        assert task["state"] == ("cancelled" if ending == "cancel" else "superseded")
+        assert snapshot["foreground_questions"] == []
+        assert provider.stream_calls == calls
+        with pytest.raises(ServiceError):
+            await replacement.continue_foreground_task(client, wid, sid, version,
+                                                       task["task_id"], task["revision"], "late")
+        assert provider.stream_calls == calls
+    finally:
+        await replacement.stop()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer_first", [False, True])
+async def test_answer_cancel_race_and_cached_request_revalidate_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer_first: bool
+) -> None:
+    home = _home(tmp_path / "home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    provider.release_answer.set()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client, sid, version, wid = await _open_chat(service, directory)
+        workspace = service.workspace(wid)
+        await service.handle_command(client, _command(
+            request_id="ask", command_type="input", workspace_id=wid, session_id=sid,
+            claim_version=version, payload={"text": "ask-foreground-question"},
+        ))
+        await _wait_for_idle(workspace, sid)
+        question = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_questions"])[0]
+        commands = [_command(
+            request_id="answer", command_type="answer_question", workspace_id=wid, session_id=sid,
+            claim_version=version, payload={"question_id": question["question_id"],
+                                          "answer": "reports-directory", "expected_revision": question["revision"]},
+        ), _command(
+            request_id="cancel", command_type="cancel_task", workspace_id=wid, session_id=sid,
+            claim_version=version, payload={"task_id": question["task_id"], "expected_revision": question["revision"]},
+        )]
+        if not answer_first:
+            commands.reverse()
+        calls_before_race = provider.stream_calls
+        results = await asyncio.gather(*(service.handle_command(client, c) for c in commands),
+                                       return_exceptions=True)
+        assert sum(isinstance(r, dict) for r in results) == 1
+        assert sum(isinstance(r, ServiceError) for r in results) == 1
+        await _wait_for_idle(workspace, sid)
+        assert provider.stream_calls == calls_before_race + int(answer_first)
+        credential = workspace.require_claim(client, sid, version).credential
+        await service.release_claim(client, wid, sid, version, credential)
+        await service.claim(client, wid, sid)
+        calls = provider.stream_calls
+        with pytest.raises(ServiceError) as stale:
+            await service.handle_command(client, commands[0])
+        assert stale.value.code == "stale_claim"
+        assert provider.stream_calls == calls
     finally:
         await service.stop()

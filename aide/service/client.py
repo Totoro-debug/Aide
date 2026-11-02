@@ -336,6 +336,42 @@ class RemoteManagementCommandDispatcher:
             submitted_run_id=cast(str, result["run_id"]),
         )
 
+    async def cancel_foreground_task(self, task_id: str, expected_revision: int) -> Any:
+        from aide.management.commands import ManagementCommandResult
+
+        result = await self.client.cancel_task(
+            task_id,
+            expected_revision,
+            request_id=str(uuid4()),
+        )
+        if result.get("kind") != "task_cancelled" or result.get("task_id") != task_id:
+            raise ServiceStartupError("service_protocol_error", "Task cancellation result is invalid.")
+        return ManagementCommandResult(
+            handled=True,
+            output=f"Task {task_id} cancelled.",
+        )
+
+    async def continue_foreground_task(self, task_id: str, expected_revision: int) -> Any:
+        from aide.management.commands import ManagementCommandResult
+
+        result = await self.client.continue_task(
+            task_id,
+            expected_revision,
+            request_id=str(uuid4()),
+        )
+        if (
+            result.get("kind") != "task_continued"
+            or result.get("task_id") != task_id
+            or not isinstance(result.get("run_id"), str)
+        ):
+            raise ServiceStartupError("service_protocol_error", "Task continuation result is invalid.")
+        return ManagementCommandResult(
+            handled=False,
+            output=None,
+            submitted=True,
+            submitted_run_id=cast(str, result["run_id"]),
+        )
+
     async def recall_queued_inputs(self) -> list[dict[str, str]]:
         result = await self.client.recall_queued_inputs()
         items = result.get("recalled_inputs")
@@ -1083,6 +1119,38 @@ class ServiceClient:
             session_id=self.session_id,
             claim_version=self.claim_version,
             payload=payload,
+            request_id=request_id,
+        )
+
+    async def cancel_task(
+        self,
+        task_id: str,
+        expected_revision: int,
+        *,
+        request_id: str | None = None,
+    ) -> dict[str, object]:
+        return await self._command(
+            "cancel_task",
+            workspace_id=self.workspace_id,
+            session_id=self.session_id,
+            claim_version=self.claim_version,
+            payload={"task_id": task_id, "expected_revision": expected_revision},
+            request_id=request_id,
+        )
+
+    async def continue_task(
+        self,
+        task_id: str,
+        expected_revision: int,
+        *,
+        request_id: str | None = None,
+    ) -> dict[str, object]:
+        return await self._command(
+            "continue_task",
+            workspace_id=self.workspace_id,
+            session_id=self.session_id,
+            claim_version=self.claim_version,
+            payload={"task_id": task_id, "expected_revision": expected_revision},
             request_id=request_id,
         )
 

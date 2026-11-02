@@ -48,7 +48,7 @@ for (const field of [
   }
 }
 const commandTypes = new Set(definitions.client_command.properties.type.enum);
-for (const command of ["claim", "release", "input", "answer_question", "session_model_configure", "cancel", "recall_queued_inputs", "confirmation_decide", "subscribe"]) {
+for (const command of ["claim", "release", "input", "answer_question", "session_model_configure", "cancel", "cancel_task", "continue_task", "recall_queued_inputs", "confirmation_decide", "subscribe"]) {
   if (!commandTypes.has(command)) {
     throw new Error(`The client command contract is missing ${command}`);
   }
@@ -81,6 +81,7 @@ const referenceTypes = {
   confirmation_event_owner: "ConfirmationEventOwner",
   restore_anchor: "RestoreAnchor",
   foreground_question: "ForegroundQuestionSnapshot",
+  foreground_task: "ForegroundTaskSnapshot",
   identifier: "string",
   claim_version: "number",
   request_id: "string",
@@ -237,6 +238,7 @@ for (const [name, definitionName] of [
   ["ActiveRunSnapshot", "active_run_snapshot"],
   ["SessionLiveState", "session_live_state"],
   ["ForegroundQuestionSnapshot", "foreground_question"],
+  ["ForegroundTaskSnapshot", "foreground_task"],
   ["ConversationInputAccepted", "conversation_input_accepted"],
   ["ManagementInputResult", "management_input_result"],
   ["RecalledConversationInput", "recalled_conversation_input"],

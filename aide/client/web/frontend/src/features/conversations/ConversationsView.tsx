@@ -8,6 +8,7 @@ import {
   FolderOpen,
   Info,
   MessageSquare,
+  Play,
   Plus,
   RotateCcw,
   Send,
@@ -25,11 +26,13 @@ import {
   ServiceCommandError,
   acknowledgeRestore,
   answerForegroundQuestion,
+  cancelForegroundTask,
   cancelConversationRun,
   cancelRestore,
   claimProjectSessionDeletion,
   claimWorkspaceSessionDeletion,
   configureConversationModel,
+  continueForegroundTask,
   createRequestId,
   deleteProjectSession,
   deleteWorkspaceSession,
@@ -59,6 +62,7 @@ import type {
   AvailableModelsResponse,
   ClientCommand,
   ConversationOpenResponse,
+  ForegroundTaskSnapshot,
   ProjectSessionsResponse,
   ReasoningEffort,
   RegisteredClient,
@@ -619,6 +623,7 @@ function ProjectSessionsContent({
   const [questionAnswer, setQuestionAnswer] = useState("");
   const [questionChoiceId, setQuestionChoiceId] = useState("");
   const [questionSubmitting, setQuestionSubmitting] = useState(false);
+  const [taskActionId, setTaskActionId] = useState<string | null>(null);
   const activeForegroundQuestion = snapshot?.foreground_questions?.[0];
   useEffect(() => {
     setQuestionAnswer(activeForegroundQuestion?.answer_kind === "text"
@@ -1816,6 +1821,30 @@ function ProjectSessionsContent({
     }
   }
 
+  async function runForegroundTaskAction(
+    task: ForegroundTaskSnapshot,
+    action: "cancel" | "continue",
+  ) {
+    const currentClaim = claimRef.current;
+    if (currentClaim === null || connectionState !== "online" || taskActionId !== null) return;
+    setTaskActionId(task.task_id);
+    setComposerError(null);
+    try {
+      if (action === "cancel") {
+        await cancelForegroundTask(sendServiceCommand, currentClaim, task);
+      } else {
+        await continueForegroundTask(sendServiceCommand, currentClaim, task);
+      }
+    } catch (error) {
+      const message = error instanceof ServiceCommandError && error.body !== null
+        ? error.body.message
+        : null;
+      setComposerError(message ?? "conversation.taskActionFailed");
+    } finally {
+      setTaskActionId(null);
+    }
+  }
+
   async function recallQueuedConversationInputs() {
     const currentClaim = claimRef.current;
     if (currentClaim === null || connectionState !== "online") return;
@@ -2440,6 +2469,52 @@ function ProjectSessionsContent({
                       </div>
                     )}
                   </div>
+                  {snapshot.foreground_tasks?.length ? (
+                    <section className={styles.foregroundTasks} aria-label={t("conversation.foregroundTasks")}>
+                      {snapshot.foreground_tasks.map((task) => {
+                        const hasUnansweredQuestion = snapshot.foreground_questions?.some((question) => (
+                          question.task_id === task.task_id
+                          && ["pending", "answer_received", "interrupted"].includes(question.state)
+                        )) ?? false;
+                        const canContinue = ["completed", "interrupted"].includes(task.state)
+                          && !hasUnansweredQuestion;
+                        const canCancel = !["cancelled", "superseded"].includes(task.state);
+                        const busy = taskActionId === task.task_id;
+                        return (
+                          <div className={styles.foregroundTaskRow} key={task.task_id}>
+                            <code title={task.task_id}>{task.task_id.slice(0, 8)}</code>
+                            <span>{t(`conversation.taskStates.${task.state}`)}</span>
+                            <div className={styles.foregroundTaskActions}>
+                              {canContinue ? (
+                                <button
+                                  className={styles.iconButton}
+                                  type="button"
+                                  aria-label={t("conversation.continueTask", { id: task.task_id })}
+                                  title={t("conversation.continueTask", { id: task.task_id })}
+                                  disabled={busy || taskActionId !== null || connectionState !== "online"}
+                                  onClick={() => void runForegroundTaskAction(task, "continue")}
+                                >
+                                  <Play size={15} aria-hidden="true" />
+                                </button>
+                              ) : null}
+                              {canCancel ? (
+                                <button
+                                  className={`${styles.iconButton} ${styles.dangerIconButton}`}
+                                  type="button"
+                                  aria-label={t("conversation.cancelTask", { id: task.task_id })}
+                                  title={t("conversation.cancelTask", { id: task.task_id })}
+                                  disabled={busy || taskActionId !== null || connectionState !== "online"}
+                                  onClick={() => void runForegroundTaskAction(task, "cancel")}
+                                >
+                                  <X size={15} aria-hidden="true" />
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </section>
+                  ) : null}
                   {snapshot.foreground_questions?.[0] ? (
                     <section className={styles.foregroundQuestion} aria-live="polite">
                       <div className={styles.foregroundQuestionText}>

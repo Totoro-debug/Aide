@@ -45,6 +45,7 @@ from aide.agent.message_bus import (
     OutboundMessageType,
 )
 from aide.agent.permission import (
+    PERMISSION_LEVELS,
     PermissionSnapshot,
     RuntimePermissionControl,
     ToolPermissionLevel,
@@ -367,6 +368,10 @@ class AgentRunExecutor:
             mcp_keywords=self._mcp_keywords,
             confirmation_for=confirmation_for,
             tool_context_for=(self._subagent_tool_context_for if coordinator is None else child_context),
+            foreground_task_is_current=(
+                None if self._foreground_work_store is None
+                else self._foreground_work_store.is_active_generation
+            ),
             file_mutation_recorder_for=lambda record: FileBackupStore(
                 workspace_state,
                 record.session_id,
@@ -1275,36 +1280,27 @@ class AgentRunExecutor:
         question_id = inbound.metadata.get("foreground_question_id")
         task_id = inbound.metadata.get("foreground_task_id")
         execution_id = inbound.metadata.get("run_id")
+        explicit_continuation = inbound.metadata.get("foreground_task_continue") is True
         task_generation = 1
         if self._foreground_work_store is not None and inbound.content.strip():
-            if not isinstance(task_id, str):
-                task_id = str(self._new_uuid())
             if not isinstance(execution_id, str):
                 execution_id = str(self._new_uuid())
             if isinstance(question_id, str):
+                if not isinstance(task_id, str):
+                    raise ValueError("Foreground question resume is missing its Task ID")
                 current_user["foreground_question_id"] = question_id
                 current_user["foreground_task_id"] = task_id
                 self._foreground_work_store.start_resume(question_id, execution_id)
-            else:
-                anchor_id = next(
+                task = next(
                     (
-                        message.get("restore_anchor_id")
-                        for message in reversed(active_session.messages)
-                        if type(message.get("restore_anchor_id")) is int
+                        item
+                        for item in self._foreground_work_store.load().tasks
+                        if item.task_id == task_id
                     ),
                     None,
                 )
-                self._foreground_work_store.begin_task(
-                    task_id, execution_id, generation=1, origin_anchor_id=anchor_id
-                )
-            task = next(
-                (
-                    item for item in self._foreground_work_store.load().tasks
-                    if item.task_id == task_id
-                ),
-                None,
-            )
-            if task is not None:
+                if task is None:
+                    raise ValueError("Foreground question Task is no longer available")
                 task_generation = task.generation
         if title_work is not None:
             title_work.coordination.preparation_started.set()
@@ -1365,13 +1361,13 @@ class AgentRunExecutor:
         framing_usage: dict[str, int] | None = None
 
         def metadata_patch() -> tuple[dict[str, Any] | None, tuple[str, ...]]:
-            if manual_invocation is not None:
+            if manual_invocation is not None or explicit_continuation:
                 return None, ()
             if staged_blackboard is None:
                 return None, ("blackboard",)
             return {"blackboard": staged_blackboard.to_dict()}, ()
 
-        if manual_invocation is None:
+        if manual_invocation is None and not explicit_continuation:
             previous_blackboard = Blackboard.from_dict(active_session.metadata.get("blackboard"))
             last_assistant_content = _latest_assistant_content(active_session)
             try:
@@ -1407,13 +1403,134 @@ class AgentRunExecutor:
         else:
             staged_blackboard = None
             framing_usage = None
+            framing_result = None
+
+        foreground_work_store = self._foreground_work_store
+        if foreground_work_store is not None and inbound.content.strip() and not isinstance(
+            question_id, str
+        ):
+            assert isinstance(execution_id, str)
+            anchor_id = next(
+                (
+                    message.get("restore_anchor_id")
+                    for message in reversed(active_session.messages)
+                    if type(message.get("restore_anchor_id")) is int
+                ),
+                None,
+            )
+            if explicit_continuation:
+                if not isinstance(task_id, str):
+                    raise ValueError("Foreground Task continuation is missing its Task ID")
+                current_task = next(
+                    (
+                        item
+                        for item in foreground_work_store.load().tasks
+                        if item.task_id == task_id
+                    ),
+                    None,
+                )
+                if current_task is None:
+                    raise ValueError("Foreground Task is no longer available")
+                foreground_work_store.start_execution(
+                    task_id,
+                    execution_id,
+                    expected_generation=current_task.generation,
+                )
+            elif manual_invocation is not None:
+                task_id = str(self._new_uuid())
+                foreground_work_store.begin_task(
+                    task_id,
+                    execution_id,
+                    generation=1,
+                    origin_anchor_id=anchor_id,
+                    permission_level=permission_snapshot.level,
+                    iteration_budget_limit=self._max_iterations,
+                )
+            elif framing_result is not None and framing_result.status == "resolved":
+                if framing_result.action == "keep":
+                    latest_task = next(reversed(foreground_work_store.load().tasks), None)
+                    if latest_task is not None and latest_task.state not in {
+                        "cancelled",
+                        "superseded",
+                    }:
+                        task_id = latest_task.task_id
+                        foreground_work_store.start_execution(
+                            task_id,
+                            execution_id,
+                            expected_generation=latest_task.generation,
+                        )
+                    else:
+                        task_id = str(self._new_uuid())
+                        foreground_work_store.begin_task(
+                            task_id,
+                            execution_id,
+                            generation=1,
+                            origin_anchor_id=anchor_id,
+                            permission_level=permission_snapshot.level,
+                            iteration_budget_limit=self._max_iterations,
+                        )
+                elif framing_result.action in {"replace", "clear"}:
+                    prior_task = next(reversed(foreground_work_store.load().tasks), None)
+                    task_id = str(self._new_uuid())
+                    foreground_work_store.replace_current_task(
+                        task_id,
+                        execution_id,
+                        origin_anchor_id=anchor_id,
+                        permission_level=permission_snapshot.level,
+                        iteration_budget_limit=self._max_iterations,
+                    )
+                    if prior_task is not None and self._subagent_coordinator is not None:
+                        await self._subagent_coordinator.cancel_task_and_wait(
+                            prior_task.task_id, prior_task.generation
+                        )
+                else:
+                    task_id = str(self._new_uuid())
+                    foreground_work_store.begin_task(
+                        task_id,
+                        execution_id,
+                        generation=1,
+                        origin_anchor_id=anchor_id,
+                        permission_level=permission_snapshot.level,
+                        iteration_budget_limit=self._max_iterations,
+                    )
+            else:
+                foreground_work_store.interrupt_uncertain_tasks()
+                task_id = str(self._new_uuid())
+                foreground_work_store.begin_task(
+                    task_id,
+                    execution_id,
+                    generation=1,
+                    origin_anchor_id=anchor_id,
+                    permission_level=permission_snapshot.level,
+                    iteration_budget_limit=self._max_iterations,
+                )
+        if foreground_work_store is not None and isinstance(task_id, str):
+            task = next(
+                (
+                    item for item in foreground_work_store.load().tasks
+                    if item.task_id == task_id
+                ),
+                None,
+            )
+            if task is None:
+                raise ValueError("Foreground Task registration was not persisted")
+            task_generation = task.generation
+            permission_level = min(
+                (task.permission_level, permission_snapshot.level),
+                key=PERMISSION_LEVELS.index,
+            )
+            permission_snapshot = PermissionSnapshot(
+                level=permission_level,
+                exec_shell=permission_snapshot.exec_shell,
+            )
+            current_user["foreground_task_id"] = task_id
+
         subagents_eligible = (
             self._subagent_coordinator is not None
             and restore_run_token is not None
         )
         foreground_tools: tuple[BaseTool, ...] = ()
         foreground_context: ToolRunContext | None = None
-        foreground_work_store = self._foreground_work_store
         if foreground_work_store is not None and task_id is not None:
             assert isinstance(execution_id, str)
 
@@ -1442,6 +1559,7 @@ class AgentRunExecutor:
                 task_id=task_id,
                 generation=task_generation,
                 execution_id=execution_id,
+                foreground_task_is_current=foreground_work_store.is_current_execution,
             )
         run_gateway = self._new_run_gateway(
             excluded_names=(
@@ -1460,6 +1578,8 @@ class AgentRunExecutor:
                 source=SubAgentSource(
                     kind=SubAgentSourceKind.FOREGROUND,
                     restore_run_token=parent_run_id,
+                    task_id=task_id,
+                    task_generation=task_generation,
                 ),
                 parent_run_id=parent_run_id,
                 permission_snapshot=permission_snapshot,
@@ -1640,7 +1760,7 @@ class AgentRunExecutor:
             return False
 
         metadata_removals: tuple[str, ...]
-        if manual_invocation is not None:
+        if manual_invocation is not None or explicit_continuation:
             metadata_updates = None
             metadata_removals = ()
         elif staged_blackboard is None:
@@ -1696,6 +1816,19 @@ class AgentRunExecutor:
             )
             return False
         if self._foreground_work_store is not None and isinstance(task_id, str):
+            if isinstance(task_generation, int) and isinstance(execution_id, str):
+                try:
+                    self._foreground_work_store.record_iteration_usage(
+                        task_id,
+                        generation=task_generation,
+                        execution_id=execution_id,
+                        model_calls=result.usage["model_calls"],
+                    )
+                except (OSError, UnicodeError, ValueError) as failure:
+                    _runtime_logger().error(
+                        "Foreground Task iteration usage could not be persisted type={}",
+                        type(failure).__name__,
+                    )
             if result.suspension is not None or isinstance(question_id, str):
                 try:
                     await active_session.wait_for_pending_persist()

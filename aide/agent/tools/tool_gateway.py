@@ -829,6 +829,8 @@ class ToolGateway:
         trace_capture: _ToolTraceCapture | None,
     ) -> ToolResult:
         """Parse, prepare, confirm when needed, execute, and normalize one call."""
+        if not _foreground_task_is_current(self._tool_context):
+            return _result(tool_call, "error", "The foreground Task execution is no longer active.")
         raw_arguments = tool_call.arguments
         if not isinstance(raw_arguments, str):
             return _result(tool_call, "error", "Tool arguments could not be parsed.")
@@ -1051,6 +1053,13 @@ class ToolGateway:
         trace_capture: _ToolTraceCapture | None = None,
     ) -> ToolResult:
         try:
+            if not _foreground_task_is_current(tool_context):
+                return _result(
+                    tool_call,
+                    "error",
+                    "The foreground Task execution is no longer active.",
+                    confirmation=confirmation_state[0],
+                )
             tool_scope = (
                 None
                 if trace_capture is None
@@ -1202,6 +1211,22 @@ def _result(
         confirmation=confirmation,
         suspension=suspension,
     )
+
+
+def _foreground_task_is_current(context: ToolRunContext | None) -> bool:
+    if context is None or context.foreground_task_is_current is None:
+        return True
+    assert context.task_id is not None
+    assert context.generation is not None
+    assert context.execution_id is not None
+    try:
+        return context.foreground_task_is_current(
+            context.task_id,
+            context.generation,
+            context.execution_id,
+        )
+    except Exception:
+        return False
 
 
 __all__ = [

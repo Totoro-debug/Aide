@@ -6,15 +6,16 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
+from aide.agent.permission import ToolPermissionLevel, validate_permission_level
 from aide.agent.session.session import Session, SessionStoragePartition
 from aide.agent.workspace_state import WorkspaceState
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 4
 _MAX_QUESTION_LENGTH = 2_000
 _MAX_ANSWER_LENGTH = 10_000
 _SESSION_ID = re.compile(
@@ -32,7 +33,14 @@ QuestionState = Literal[
     "invalidated",
 ]
 AnswerKind = Literal["text", "choice"]
-TaskState = Literal["running", "waiting_for_answer", "completed", "interrupted", "cancelled"]
+TaskState = Literal[
+    "running",
+    "waiting_for_answer",
+    "completed",
+    "interrupted",
+    "cancelled",
+    "superseded",
+]
 
 
 class ForegroundQuestionOption(TypedDict):
@@ -59,6 +67,31 @@ class ForegroundWorkTask:
     execution_id: str
     state: TaskState
     origin_anchor_id: int | None = None
+    permission_level: ToolPermissionLevel = "read-only"
+    iteration_stage: int = 1
+    iteration_budget_limit: int = 50
+    iteration_budget_used: int = 0
+    charged_execution_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("iteration_stage", self.iteration_stage),
+            ("iteration_budget_limit", self.iteration_budget_limit),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if (
+            isinstance(self.iteration_budget_used, bool)
+            or not isinstance(self.iteration_budget_used, int)
+            or self.iteration_budget_used < 0
+        ):
+            raise ValueError("iteration_budget_used must be a nonnegative integer")
+        if not isinstance(self.charged_execution_ids, tuple) or any(
+            not isinstance(item, str) or not item for item in self.charged_execution_ids
+        ):
+            raise ValueError("charged_execution_ids must contain nonempty strings")
+        if len(set(self.charged_execution_ids)) != len(self.charged_execution_ids):
+            raise ValueError("charged_execution_ids must be unique")
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +167,8 @@ class ForegroundWorkStore:
         *,
         generation: int,
         origin_anchor_id: int | None = None,
+        permission_level: ToolPermissionLevel = "read-only",
+        iteration_budget_limit: int = 50,
     ) -> ForegroundWorkSnapshot:
         _require_identifier(task_id, "task_id")
         _require_identifier(execution_id, "execution_id")
@@ -145,16 +180,158 @@ class ForegroundWorkStore:
             or origin_anchor_id < 1
         ):
             raise ValueError("origin_anchor_id must be a positive integer")
+        validate_permission_level(permission_level)
+        _require_positive_integer(iteration_budget_limit, "iteration_budget_limit")
         current = self.load()
         existing = next((item for item in current.tasks if item.task_id == task_id), None)
         if existing is not None:
             if existing.execution_id == execution_id and existing.generation == generation:
                 return current
             raise ForegroundWorkConflict("task_id is already bound to another execution")
-        task = ForegroundWorkTask(task_id, generation, execution_id, "running", origin_anchor_id)
+        task = ForegroundWorkTask(
+            task_id,
+            generation,
+            execution_id,
+            "running",
+            origin_anchor_id,
+            permission_level,
+            1,
+            iteration_budget_limit,
+        )
         return self._publish(
             ForegroundWorkSnapshot(current.revision + 1, (*current.tasks, task), current.questions)
         )
+
+    def start_execution(
+        self,
+        task_id: str,
+        execution_id: str,
+        *,
+        expected_generation: int,
+        explicit_user_operation: bool = True,
+    ) -> ForegroundWorkSnapshot:
+        """Start one user-owned execution while keeping a Task's valid generation."""
+        _require_identifier(task_id, "task_id")
+        _require_identifier(execution_id, "execution_id")
+        if isinstance(expected_generation, bool) or not isinstance(expected_generation, int):
+            raise ValueError("expected_generation must be an integer")
+        current = self.load()
+        task = next((item for item in current.tasks if item.task_id == task_id), None)
+        if task is None or task.generation != expected_generation:
+            raise ForegroundWorkConflict("task generation is no longer current")
+        if task.state in {"cancelled", "superseded"}:
+            raise ForegroundWorkConflict("task is no longer active")
+        if not isinstance(explicit_user_operation, bool):
+            raise ValueError("explicit_user_operation must be a boolean")
+        if task.execution_id == execution_id and task.state == "running":
+            return current
+        updated = ForegroundWorkTask(
+            task.task_id,
+            task.generation,
+            execution_id,
+            "running",
+            task.origin_anchor_id,
+            task.permission_level,
+            task.iteration_stage + int(explicit_user_operation),
+            task.iteration_budget_limit,
+            0 if explicit_user_operation else task.iteration_budget_used,
+            () if explicit_user_operation else task.charged_execution_ids,
+        )
+        tasks = (*[item for item in current.tasks if item.task_id != task_id], updated)
+        return self._publish(
+            ForegroundWorkSnapshot(current.revision + 1, tasks, current.questions)
+        )
+
+    def replace_current_task(
+        self,
+        task_id: str,
+        execution_id: str,
+        *,
+        origin_anchor_id: int | None = None,
+        permission_level: ToolPermissionLevel = "read-only",
+        iteration_budget_limit: int = 50,
+    ) -> ForegroundWorkSnapshot:
+        """Supersede the latest Task and atomically register its replacement."""
+        _require_identifier(task_id, "task_id")
+        _require_identifier(execution_id, "execution_id")
+        if origin_anchor_id is not None and (
+            isinstance(origin_anchor_id, bool)
+            or not isinstance(origin_anchor_id, int)
+            or origin_anchor_id < 1
+        ):
+            raise ValueError("origin_anchor_id must be a positive integer")
+        validate_permission_level(permission_level)
+        _require_positive_integer(iteration_budget_limit, "iteration_budget_limit")
+        current = self.load()
+        if any(item.task_id == task_id for item in current.tasks):
+            raise ForegroundWorkConflict("replacement task ID already exists")
+        tasks = list(current.tasks)
+        questions = list(current.questions)
+        if tasks and tasks[-1].state not in {"cancelled", "superseded"}:
+            prior = tasks[-1]
+            tasks[-1] = ForegroundWorkTask(
+                prior.task_id,
+                prior.generation + 1,
+                prior.execution_id,
+                "superseded",
+                prior.origin_anchor_id,
+                prior.permission_level,
+                prior.iteration_stage,
+                prior.iteration_budget_limit,
+                prior.iteration_budget_used,
+                prior.charged_execution_ids,
+            )
+            unresolved = {"preparing", "pending", "answer_received", "resuming", "executing"}
+            questions = [
+                ForegroundWorkQuestion(
+                    item.question_id,
+                    item.task_id,
+                    item.generation,
+                    item.execution_id,
+                    item.tool_call_id,
+                    item.text,
+                    "invalidated"
+                    if item.task_id == prior.task_id and item.state in unresolved
+                    else item.state,
+                    item.answer,
+                    item.answer_request_id,
+                    item.answer_fingerprint,
+                    item.answer_kind,
+                    item.answer_option_id,
+                    item.resume_execution_id,
+                    item.answer_anchor_id,
+                    item.options,
+                )
+                for item in questions
+            ]
+        tasks.append(
+            ForegroundWorkTask(
+                task_id,
+                1,
+                execution_id,
+                "running",
+                origin_anchor_id,
+                permission_level,
+                1,
+                iteration_budget_limit,
+            )
+        )
+        return self._publish(
+            ForegroundWorkSnapshot(current.revision + 1, tuple(tasks), tuple(questions))
+        )
+
+    def interrupt_uncertain_tasks(self) -> ForegroundWorkSnapshot:
+        """Keep ambiguous prior work visible but closed to automatic admission."""
+        current = self.load()
+        tasks = tuple(
+            replace(task, state="interrupted")
+            if task.state not in {"cancelled", "superseded"}
+            else task
+            for task in current.tasks
+        )
+        if tasks == current.tasks:
+            return current
+        return self._publish(ForegroundWorkSnapshot(current.revision + 1, tasks, current.questions))
 
     def prepare_question(
         self,
@@ -266,6 +443,11 @@ class ForegroundWorkStore:
                 item.execution_id,
                 task_state,
                 item.origin_anchor_id,
+                item.permission_level,
+                item.iteration_stage,
+                item.iteration_budget_limit,
+                item.iteration_budget_used,
+                item.charged_execution_ids,
             )
             if item.task_id == question.task_id
             else item
@@ -369,7 +551,16 @@ class ForegroundWorkStore:
             question.options,
         )
         updated_task = ForegroundWorkTask(
-            task.task_id, task.generation + 1, execution_id, "running", task.origin_anchor_id
+            task.task_id,
+            task.generation,
+            execution_id,
+            "running",
+            task.origin_anchor_id,
+            task.permission_level,
+            task.iteration_stage + 1,
+            task.iteration_budget_limit,
+            0,
+            (),
         )
         return self._publish(
             ForegroundWorkSnapshot(
@@ -382,6 +573,68 @@ class ForegroundWorkStore:
                     for item in current.questions
                 ),
             )
+        )
+
+    def cancel_task(
+        self,
+        task_id: str,
+        *,
+        expected_revision: int,
+        request_id: str,
+    ) -> ForegroundWorkSnapshot:
+        """Persist a generation fence and invalidate unanswered questions for one Task."""
+        _require_identifier(task_id, "task_id")
+        _require_identifier(request_id, "request_id")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+            raise ValueError("expected_revision must be an integer")
+        current = self.load()
+        task = next((item for item in current.tasks if item.task_id == task_id), None)
+        if task is None:
+            raise ForegroundWorkConflict("task does not exist")
+        if task.state == "cancelled":
+            return current
+        if task.state == "superseded":
+            raise ForegroundWorkConflict("task has been superseded")
+        if current.revision != expected_revision:
+            raise StaleForegroundWorkRevision("foreground-work revision is stale")
+        tasks = tuple(
+            ForegroundWorkTask(
+                item.task_id,
+                item.generation + 1 if item.task_id == task_id else item.generation,
+                item.execution_id,
+                "cancelled" if item.task_id == task_id else item.state,
+                item.origin_anchor_id,
+                item.permission_level,
+                item.iteration_stage,
+                item.iteration_budget_limit,
+                item.iteration_budget_used,
+                item.charged_execution_ids,
+            )
+            for item in current.tasks
+        )
+        unresolved = {"preparing", "pending", "answer_received", "resuming", "executing"}
+        questions = tuple(
+            ForegroundWorkQuestion(
+                item.question_id,
+                item.task_id,
+                item.generation,
+                item.execution_id,
+                item.tool_call_id,
+                item.text,
+                "invalidated" if item.task_id == task_id and item.state in unresolved else item.state,
+                item.answer,
+                item.answer_request_id,
+                item.answer_fingerprint,
+                item.answer_kind,
+                item.answer_option_id,
+                item.resume_execution_id,
+                item.answer_anchor_id,
+                item.options,
+            )
+            for item in current.questions
+        )
+        return self._publish(
+            ForegroundWorkSnapshot(current.revision + 1, tasks, questions)
         )
 
     def start_resume(self, question_id: str, execution_id: str) -> None:
@@ -399,7 +652,7 @@ class ForegroundWorkStore:
     def complete_task(self, task_id: str, execution_id: str) -> ForegroundWorkSnapshot:
         current = self.load()
         task = next((item for item in current.tasks if item.task_id == task_id), None)
-        if task is None or task.execution_id != execution_id:
+        if task is None or task.execution_id != execution_id or task.state != "running":
             return current
         return self._publish(
             ForegroundWorkSnapshot(
@@ -411,11 +664,92 @@ class ForegroundWorkStore:
                         item.execution_id,
                         "completed" if item.task_id == task_id else item.state,
                         item.origin_anchor_id,
+                        item.permission_level,
+                        item.iteration_stage,
+                        item.iteration_budget_limit,
+                        item.iteration_budget_used,
+                        item.charged_execution_ids,
                     )
                     for item in current.tasks
                 ),
                 current.questions,
             )
+        )
+
+    def record_iteration_usage(
+        self,
+        task_id: str,
+        *,
+        generation: int,
+        execution_id: str,
+        model_calls: int,
+    ) -> ForegroundWorkSnapshot:
+        """Charge one committed execution once, ignoring callbacks from revoked generations."""
+        _require_identifier(task_id, "task_id")
+        _require_identifier(execution_id, "execution_id")
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+            raise ValueError("generation must be a positive integer")
+        if isinstance(model_calls, bool) or not isinstance(model_calls, int) or model_calls < 0:
+            raise ValueError("model_calls must be a nonnegative integer")
+        current = self.load()
+        task = next((item for item in current.tasks if item.task_id == task_id), None)
+        if (
+            task is None
+            or task.generation != generation
+            or task.execution_id != execution_id
+            or task.state not in {"running", "waiting_for_answer", "completed"}
+            or execution_id in task.charged_execution_ids
+        ):
+            return current
+        updated = ForegroundWorkTask(
+            task.task_id,
+            task.generation,
+            task.execution_id,
+            task.state,
+            task.origin_anchor_id,
+            task.permission_level,
+            task.iteration_stage,
+            task.iteration_budget_limit,
+            task.iteration_budget_used + model_calls,
+            (*task.charged_execution_ids, execution_id),
+        )
+        tasks = tuple(updated if item.task_id == task_id else item for item in current.tasks)
+        return self._publish(ForegroundWorkSnapshot(current.revision + 1, tasks, current.questions))
+
+    def remaining_iteration_budget(self, task_id: str, *, generation: int) -> int:
+        """Return the nonnegative budget remaining for the current Task generation."""
+        _require_identifier(task_id, "task_id")
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+            raise ValueError("generation must be a positive integer")
+        current = self.load()
+        task = next((item for item in current.tasks if item.task_id == task_id), None)
+        if task is None or task.generation != generation:
+            raise ForegroundWorkConflict("task generation is no longer current")
+        return max(0, task.iteration_budget_limit - task.iteration_budget_used)
+
+    def is_active_generation(self, task_id: str, generation: int) -> bool:
+        """Return whether a Task generation can still admit delegated work."""
+        if self._closed:
+            return False
+        current = self.load()
+        task = next((item for item in current.tasks if item.task_id == task_id), None)
+        return (
+            task is not None
+            and task.generation == generation
+            and task.state in {"running", "waiting_for_answer", "completed"}
+        )
+
+    def is_current_execution(self, task_id: str, generation: int, execution_id: str) -> bool:
+        """Return whether callbacks from this exact foreground execution remain admitted."""
+        if self._closed:
+            return False
+        current = self.load()
+        task = next((item for item in current.tasks if item.task_id == task_id), None)
+        return (
+            task is not None
+            and task.generation == generation
+            and task.execution_id == execution_id
+            and task.state == "running"
         )
 
     def reconcile(self, messages: list[dict[str, Any]]) -> ForegroundWorkSnapshot:
@@ -521,7 +855,11 @@ class ForegroundWorkStore:
                 task_states[question.task_id] = (question.execution_id, "interrupted")
         tasks: list[ForegroundWorkTask] = []
         for task in current.tasks:
-            override = task_states.get(task.task_id)
+            override = (
+                None
+                if task.state in {"cancelled", "superseded", "interrupted"}
+                else task_states.get(task.task_id)
+            )
             if override is None and task.state == "running":
                 override = (task.execution_id, "interrupted")
             execution_id, task_state = (
@@ -535,6 +873,11 @@ class ForegroundWorkStore:
                     execution_id,
                     task_state,
                     task.origin_anchor_id,
+                    task.permission_level,
+                    task.iteration_stage,
+                    task.iteration_budget_limit,
+                    task.iteration_budget_used,
+                    task.charged_execution_ids,
                 )
             )
         if not changed:
@@ -635,14 +978,16 @@ def _snapshot_from_dict(value: object) -> ForegroundWorkSnapshot:
     if set(data) != {"schema_version", "revision", "tasks", "questions"}:
         raise ForegroundWorkError("Foreground Work state has an unsupported shape")
     schema_version = data["schema_version"]
-    if type(schema_version) is not int or schema_version not in {1, _SCHEMA_VERSION}:
+    if type(schema_version) is not int or schema_version not in {1, 2, 3, _SCHEMA_VERSION}:
         raise ForegroundWorkError("Foreground Work state has an unsupported version")
     revision, tasks_value, questions_value = (data["revision"], data["tasks"], data["questions"])
     if type(revision) is not int or revision < 1:
         raise ForegroundWorkError("Foreground Work revision is malformed")
     if not isinstance(tasks_value, list) or not isinstance(questions_value, list):
         raise ForegroundWorkError("Foreground Work state collections are malformed")
-    tasks = tuple(_task_from_dict(item) for item in tasks_value)
+    tasks = tuple(
+        _task_from_dict(item, schema_version=schema_version) for item in tasks_value
+    )
     questions = tuple(
         _question_from_dict(item, schema_version=schema_version) for item in questions_value
     )
@@ -660,25 +1005,80 @@ def _task_to_dict(task: ForegroundWorkTask) -> dict[str, object]:
         "execution_id": task.execution_id,
         "state": task.state,
         "origin_anchor_id": task.origin_anchor_id,
+        "permission_level": task.permission_level,
+        "iteration_stage": task.iteration_stage,
+        "iteration_budget_limit": task.iteration_budget_limit,
+        "iteration_budget_used": task.iteration_budget_used,
+        "charged_execution_ids": list(task.charged_execution_ids),
     }
 
 
-def _task_from_dict(value: object) -> ForegroundWorkTask:
+def _task_from_dict(value: object, *, schema_version: int) -> ForegroundWorkTask:
     if not isinstance(value, dict):
         raise ForegroundWorkError("Foreground Work task is malformed")
     item = cast(dict[str, object], value)
-    if set(item) != {"task_id", "generation", "execution_id", "state", "origin_anchor_id"}:
+    expected = {"task_id", "generation", "execution_id", "state", "origin_anchor_id"}
+    if schema_version >= 3:
+        expected.add("permission_level")
+    if schema_version >= 4:
+        expected.update(
+            {
+                "iteration_stage",
+                "iteration_budget_limit",
+                "iteration_budget_used",
+                "charged_execution_ids",
+            }
+        )
+    if set(item) != expected:
         raise ForegroundWorkError("Foreground Work task has an unsupported shape")
     task_id = _require_stored_string(item["task_id"], "task_id")
     execution_id = _require_stored_string(item["execution_id"], "execution_id")
     generation, state, anchor = item["generation"], item["state"], item["origin_anchor_id"]
     if type(generation) is not int or generation < 1:
         raise ForegroundWorkError("Foreground Work task generation is malformed")
-    if state not in {"running", "waiting_for_answer", "completed", "interrupted", "cancelled"}:
+    if state not in {
+        "running",
+        "waiting_for_answer",
+        "completed",
+        "interrupted",
+        "cancelled",
+        "superseded",
+    }:
         raise ForegroundWorkError("Foreground Work task state is malformed")
     if anchor is not None and (type(anchor) is not int or anchor < 1):
         raise ForegroundWorkError("Foreground Work task anchor is malformed")
-    return ForegroundWorkTask(task_id, generation, execution_id, cast(TaskState, state), anchor)
+    try:
+        permission_level = validate_permission_level(item.get("permission_level", "read-only"))
+    except ValueError as error:
+        raise ForegroundWorkError("Foreground Work task permission is malformed") from error
+    iteration_stage = item.get("iteration_stage", 1)
+    iteration_budget_limit = item.get("iteration_budget_limit", 50)
+    iteration_budget_used = item.get("iteration_budget_used", 0)
+    charged_execution_ids_value = item.get("charged_execution_ids", [])
+    if (
+        type(iteration_stage) is not int
+        or iteration_stage < 1
+        or type(iteration_budget_limit) is not int
+        or iteration_budget_limit < 1
+        or type(iteration_budget_used) is not int
+        or iteration_budget_used < 0
+        or not isinstance(charged_execution_ids_value, list)
+        or any(not isinstance(value, str) or not value for value in charged_execution_ids_value)
+        or len(set(charged_execution_ids_value)) != len(charged_execution_ids_value)
+    ):
+        raise ForegroundWorkError("Foreground Work task iteration budget is malformed")
+    return ForegroundWorkTask(
+        task_id,
+        generation,
+        execution_id,
+        cast(TaskState, state),
+        anchor,
+        permission_level,
+        iteration_stage,
+        iteration_budget_limit,
+        iteration_budget_used,
+        tuple(charged_execution_ids_value),
+    )
 
 
 def _question_to_dict(question: ForegroundWorkQuestion) -> dict[str, object]:
@@ -825,6 +1225,11 @@ def _validated_question_options(
 def _require_identifier(value: str, name: str) -> None:
     if not isinstance(value, str) or not value or value.strip() != value or len(value) > 200:
         raise ValueError(f"{name} must be a non-empty stable identifier")
+
+
+def _require_positive_integer(value: object, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer")
 
 
 def _require_stored_string(value: object, name: str) -> str:

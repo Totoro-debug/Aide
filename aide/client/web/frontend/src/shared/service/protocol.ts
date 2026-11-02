@@ -138,6 +138,8 @@ export type ClientCommandType =
   | "release"
   | "input"
   | "answer_question"
+  | "cancel_task"
+  | "continue_task"
   | "session_model_configure"
   | "cancel"
   | "recall_queued_inputs"
@@ -563,6 +565,20 @@ export interface SessionSnapshot {
   model_configuration: SessionModelConfiguration | null;
   model_configuration_version: number;
   foreground_questions?: ForegroundQuestionSnapshot[];
+  foreground_tasks?: ForegroundTaskSnapshot[];
+}
+
+export interface ForegroundTaskSnapshot {
+  task_id: string;
+  generation: number;
+  state:
+    | "running"
+    | "waiting_for_answer"
+    | "completed"
+    | "interrupted"
+    | "cancelled"
+    | "superseded";
+  revision: number;
 }
 
 export interface ForegroundQuestionSnapshot {

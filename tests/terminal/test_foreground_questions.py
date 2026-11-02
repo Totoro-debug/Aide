@@ -8,7 +8,11 @@ import pytest
 from textual.pilot import Pilot
 from textual.widgets import Static, TextArea
 
-from aide.client.cli.conversation import TerminalConversationApp, _cli_question_answer
+from aide.client.cli.conversation import (
+    TerminalConversationApp,
+    _cli_question_answer,
+    _cli_task_command,
+)
 from tests.agent.test_fixed_catalog import _FixedCatalogProvider
 from tests.service.test_foreground_questions import _QuestionProvider
 from tests.terminal.test_conversation import (
@@ -38,6 +42,15 @@ def test_cli_question_answer_is_explicit_and_preserves_ordinary_input() -> None:
     assert _cli_question_answer("/answer --option") == ("choice", "")
     assert _cli_question_answer("use /answer in the README") is None
     assert _cli_question_answer("ordinary input") is None
+
+
+def test_cli_task_command_requires_an_explicit_task_id_for_actions() -> None:
+    assert _cli_task_command("/task") == ("list", None)
+    assert _cli_task_command("/task list") == ("list", None)
+    assert _cli_task_command("/task cancel task-123") == ("cancel", "task-123")
+    assert _cli_task_command("/task continue task-123") == ("continue", "task-123")
+    assert _cli_task_command("/task cancel") == ("invalid", None)
+    assert _cli_task_command("ordinary /task text") is None
 
 
 @pytest.mark.asyncio
@@ -135,4 +148,115 @@ async def test_cli_question_options_keep_choice_and_text_answers_explicit(
         scenario=scenario,
         provider=cast(_FixedCatalogProvider, provider),
         size=(120, 40),
+    )
+
+
+@pytest.mark.asyncio
+async def test_cli_task_cancel_invalidates_its_question(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _QuestionProvider()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
+        input_area = app.query_one("#conversation-input", TextArea)
+        input_area.text = "ask-foreground-question"
+        await pilot.press("enter")
+        await _wait_for_turn(app)
+        await _wait_for_question(app, pilot, "Which output directory")
+        async with asyncio.timeout(10):
+            while not app._foreground_tasks:
+                await pilot.pause()
+        task_id = str(app._foreground_tasks[-1]["task_id"])
+
+        input_area.text = "/task cancel " + task_id
+        await pilot.press("enter")
+        await _wait_for_turn(app)
+        async with asyncio.timeout(10):
+            while app._foreground_question is not None:
+                await pilot.pause()
+
+        assert app._foreground_tasks[-1]["state"] == "cancelled"
+        assert "cancelled" in str(app.query_one("#foreground-tasks", Static).content)
+        assert provider.question_calls == 1
+        assert not (workspace / "after-question.txt").exists()
+
+    await _run_cli_terminal_case(
+        agent_home=tmp_path / "home",
+        workspace=workspace,
+        monkeypatch=monkeypatch,
+        scenario=scenario,
+        provider=cast(_FixedCatalogProvider, provider),
+        size=(120, 40),
+    )
+
+
+@pytest.mark.asyncio
+async def test_cli_task_continue_is_an_explicit_user_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _QuestionProvider()
+    provider.release_answer.set()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
+        input_area = app.query_one("#conversation-input", TextArea)
+        input_area.text = "ask-foreground-question"
+        await pilot.press("enter")
+        await _wait_for_turn(app)
+        await _wait_for_question(app, pilot, "Which output directory")
+        task_id = str(app._foreground_tasks[-1]["task_id"])
+        input_area.text = "/answer reports-directory"
+        await pilot.press("enter")
+        await _wait_for_turn(app)
+        async with asyncio.timeout(10):
+            while app._foreground_tasks[-1]["state"] != "completed":
+                await pilot.pause()
+
+        input_area.text = "/task continue " + task_id
+        await pilot.press("enter")
+        await _wait_for_turn(app)
+
+        assert "Continue the current foreground task." in provider.user_texts[-1]
+        assert app._foreground_tasks[-1]["task_id"] == task_id
+        assert app._foreground_tasks[-1]["generation"] == 1
+
+    await _run_cli_terminal_case(
+        agent_home=tmp_path / "home",
+        workspace=workspace,
+        monkeypatch=monkeypatch,
+        scenario=scenario,
+        provider=cast(_FixedCatalogProvider, provider),
+        size=(120, 40),
+    )
+
+@pytest.mark.asyncio
+async def test_cli_ordinary_task_is_visible_and_can_continue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _QuestionProvider()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    async def scenario(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
+        input_area = app.query_one("#conversation-input", TextArea)
+        input_area.text = "ordinary task without a question"
+        await pilot.press("enter")
+        await _wait_for_turn(app)
+        async with asyncio.timeout(10):
+            while not app._foreground_tasks:
+                await pilot.pause()
+        widget = app.query_one("#foreground-tasks", Static)
+        assert "completed" in str(widget.content)
+        task_id = str(app._foreground_tasks[-1]["task_id"])
+        input_area.text = "/task continue " + task_id
+        await pilot.press("enter")
+        await _wait_for_turn(app)
+        assert "Continue the current foreground task." in provider.user_texts[-1]
+
+    await _run_cli_terminal_case(
+        agent_home=tmp_path / "home", workspace=workspace, monkeypatch=monkeypatch,
+        scenario=scenario, provider=cast(_FixedCatalogProvider, provider), size=(120, 40),
     )

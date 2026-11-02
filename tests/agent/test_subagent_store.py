@@ -121,7 +121,7 @@ def test_record_round_trips_through_a_new_session_scoped_store(tmp_path: Path) -
     assert loaded.creator_snapshot.tool_names == ("read_file", "list_dir")
     path = state.subagents_directory / session_id / f"{completed.agent_id}.json"
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["schema_version"] == 2
+    assert saved["schema_version"] == 3
     assert saved["creator_snapshot"] == {
         "provider_id": "test-provider",
         "model": "chat",
@@ -132,6 +132,52 @@ def test_record_round_trips_through_a_new_session_scoped_store(tmp_path: Path) -
         "system_prompt": "You are Aide.",
     }
     assert repository.session_id == session_id
+
+
+def test_foreground_subagent_record_retains_its_task_generation(tmp_path: Path) -> None:
+    state, session_id = _workspace(tmp_path)
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    record = store.register(
+        title="Task-owned delegated work",
+        task="Keep this result within its owning Task generation.",
+        parent_run_id=_RUN_ID,
+        source=SubAgentSource(
+            kind=SubAgentSourceKind.FOREGROUND,
+            restore_run_token=_RESTORE_TOKEN,
+            task_id=_RUN_ID,
+            task_generation=7,
+        ),
+        creator_snapshot=_snapshot(),
+    )
+
+    reopened = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    retained = reopened.get(record.agent_id)
+
+    assert retained is not None
+    assert retained.source.task_id == _RUN_ID
+    assert retained.source.task_generation == 7
+
+
+def test_legacy_subagent_record_upgrades_from_schema_v2(tmp_path: Path) -> None:
+    state, session_id = _workspace(tmp_path)
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    record = _register(store, "Legacy record")
+    path = state.subagents_directory / session_id / f"{record.agent_id}.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["schema_version"] = 2
+    value["source"].pop("task_id")
+    value["source"].pop("task_generation")
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    loaded = store.get(record.agent_id)
+
+    assert loaded is not None
+    assert loaded.source.task_id is None
+    assert loaded.source.task_generation is None
+    store.save(replace(loaded, revision=loaded.revision + 1))
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["schema_version"] == 3
+    assert saved["source"]["task_id"] is None
 
 
 def test_session_without_subagents_lists_no_records_without_creating_subagent_storage(
@@ -773,3 +819,21 @@ def test_failed_update_after_publication_leaves_the_new_complete_checkpoint(
     assert recovered is not None
     assert recovered.status is SubAgentStatus.INTERRUPTED
     assert recovered.conversation == running.conversation
+
+@pytest.mark.parametrize("schema_version", [2, 3])
+def test_subagent_source_rejects_unknown_fields(tmp_path: Path, schema_version: int) -> None:
+    state, session_id = _workspace(tmp_path)
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    record = _register(store, "Unknown source field")
+    path = state.subagents_directory / session_id / f"{record.agent_id}.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["schema_version"] = schema_version
+    if schema_version == 2:
+        value["source"].pop("task_id")
+        value["source"].pop("task_generation")
+    value["source"]["unknown"] = True
+    path.write_text(json.dumps(value), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(SubAgentStoreError):
+        store.get(record.agent_id)
+    assert path.read_bytes() == before

@@ -1014,7 +1014,7 @@ async def test_foreground_main_run_delegates_and_later_reads_the_completed_resul
 
 
 @pytest.mark.asyncio
-async def test_missing_subagent_route_keeps_main_runs_and_existing_task_queries(
+async def test_missing_subagent_route_keeps_query_tools_but_fences_completed_run_gateway(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1069,9 +1069,10 @@ async def test_missing_subagent_route_keeps_main_runs_and_existing_task_queries(
             id="wait", name="wait_agent",
             arguments=json.dumps({"agent_ids": [completed.agent_id]}),
         ))
-        assert listed.status == waited.status == "success"
-        assert completed.agent_id in listed.content
-        assert completed.agent_id in waited.content
+        assert listed.status == waited.status == "error"
+        assert listed.content == waited.content == (
+            "The foreground Task execution is no longer active."
+        )
 
         job = ScheduleJob(
             job_id=str(uuid4()),
@@ -2392,3 +2393,137 @@ async def test_workspace_startup_interrupts_persisted_subagent_tasks(
         assert _require_record(recovered, running.agent_id).status is SubAgentStatus.INTERRUPTED
     finally:
         await service.stop()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cancel", "replace", "clear"])
+async def test_task_control_drains_owned_child_and_keeps_history(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    operation: str,
+) -> None:
+    from tests.service.test_foreground_questions import _wait_for_idle
+
+    service, workspace, client_id, session_id, _ = management_case
+    provider = _DelegatingProvider()
+    assert service._model_router is not None
+    service._model_router._provider_factory = lambda _configuration: provider
+    service._model_router._providers.clear()
+    claim = cast(dict[str, Any], (await service.claim(
+        client_id, workspace.workspace_id, session_id
+    ))["claim"])
+    version = cast(int, claim["claim_version"])
+    try:
+        await workspace.input(client_id, session_id, version,
+                              "initial delegation request", str(uuid4()))
+        await asyncio.wait_for(provider.child_started.wait(), timeout=5)
+        await _wait_for_idle(workspace, session_id)
+        snapshot = workspace.session_snapshot(session_id)
+        task = cast(list[dict[str, Any]], snapshot["foreground_tasks"])[-1]
+        items = cast(list[dict[str, Any]], service.list_subagents(
+            client_id, workspace.workspace_id, session_id
+        )["items"])
+        agent_id = items[0]["agent_id"]
+        if operation == "cancel":
+            await service.cancel_foreground_task(client_id, workspace.workspace_id, session_id,
+                                                 version, task["task_id"], task["revision"], "cancel")
+        else:
+            original_complete = provider.complete
+
+            async def framing(**kwargs: Any) -> ModelResponse:
+                if operation == "clear":
+                    return provider._response(
+                        '{"action":"clear","task_goal":null,"completion_boundary":null}'
+                    )
+                return await original_complete(**kwargs)
+
+            provider.complete = framing  # type: ignore[method-assign]
+            await workspace.input(client_id, session_id, version,
+                                  "follow-up result request", str(uuid4()))
+            await _wait_for_idle(workspace, session_id)
+        detail = service.get_subagent(client_id, workspace.workspace_id, session_id, agent_id)
+        assert detail["status"] == "cancelled"
+        requests_after = len(provider.requests)
+        provider.release_child.set()
+        await _wait_for_idle(workspace, session_id)
+        assert len(provider.requests) == requests_after
+    finally:
+        provider.release_child.set()
+
+@pytest.mark.asyncio
+async def test_restored_session_can_delegate_through_resident_pool(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+) -> None:
+    from aide.agent.session.restore import RestoreMode
+    from tests.service.test_foreground_questions import _wait_for_idle
+
+    service, workspace, client_id, sid, _ = management_case
+    provider = _DelegatingProvider()
+    provider.release_child.set()
+    assert service._model_router is not None
+    service._model_router._provider_factory = lambda _: provider
+    service._model_router._providers.clear()
+    claim = cast(dict[str, Any], (await service.claim(client_id, workspace.workspace_id, sid))["claim"])
+    version = cast(int, claim["claim_version"])
+    await workspace.input(client_id, sid, version, "initial delegation request", str(uuid4()))
+    await asyncio.wait_for(provider.child_started.wait(), timeout=5)
+    await _wait_for_idle(workspace, sid)
+    pool = workspace._subagent_coordinator(sid)
+    assert pool is not None
+    items = cast(list[dict[str, Any]], service.list_subagents(client_id, workspace.workspace_id, sid)["items"])
+    await pool.wait([items[0]["agent_id"]], timeout_ms=3000)
+    anchors = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["restore_anchors"])
+    credential = workspace.require_claim(client_id, sid, version).credential
+    await service.inspect_restore(client_id, workspace.workspace_id, sid, version, credential,
+                                  "inspect", anchors[-1]["anchor_id"])
+    restored = await service.commit_restore(client_id, workspace.workspace_id, sid, version, credential,
+                                 "restore", anchors[-1]["anchor_id"], RestoreMode.CONVERSATION_ONLY.value)
+    version = cast(int, restored["claim_version"])
+    provider.spawn_requested = False
+    provider.child_started.clear()
+    await workspace.input(client_id, sid, version, "initial delegation request", str(uuid4()))
+    await asyncio.wait_for(provider.child_started.wait(), timeout=5)
+    await _wait_for_idle(workspace, sid)
+    items = cast(list[dict[str, Any]], service.list_subagents(client_id, workspace.workspace_id, sid)["items"])
+    assert len(items) == 1
+
+@pytest.mark.asyncio
+async def test_task_fence_blocks_child_tools_before_cleanup_finishes(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.service.test_foreground_questions import _wait_for_idle
+
+    service, workspace, client_id, sid, _ = management_case
+    provider = _DelegatingProvider()
+    provider.write_path = "late-child.txt"
+    service.client_permission(client_id).select("workspace-write")
+    assert service._model_router is not None
+    service._model_router._provider_factory = lambda _: provider
+    service._model_router._providers.clear()
+    claim = cast(dict[str, Any], (await service.claim(client_id, workspace.workspace_id, sid))["claim"])
+    version = cast(int, claim["claim_version"])
+    await workspace.input(client_id, sid, version, "initial delegation request", str(uuid4()))
+    await asyncio.wait_for(provider.child_started.wait(), timeout=5)
+    await _wait_for_idle(workspace, sid)
+    task = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_tasks"])[-1]
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original = SubAgentPool.cancel_task_and_wait
+
+    async def delayed(pool: SubAgentPool, task_id: str, generation: int) -> tuple[SubAgentRecord, ...]:
+        entered.set()
+        await release.wait()
+        return await original(pool, task_id, generation)
+
+    monkeypatch.setattr(SubAgentPool, "cancel_task_and_wait", delayed)
+    cancellation = asyncio.create_task(service.cancel_foreground_task(
+        client_id, workspace.workspace_id, sid, version, task["task_id"], task["revision"], "cancel"
+    ))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        provider.allow_write.set()
+        await asyncio.wait_for(provider.write_seen.wait(), timeout=5)
+        assert not (workspace.workspace_path / "late-child.txt").exists()
+    finally:
+        release.set()
+        provider.release_child.set()
+        await cancellation

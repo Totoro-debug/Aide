@@ -46,6 +46,7 @@ class SubAgentPool:
         now: Callable[[], datetime] | None = None,
         workspace_id: str | None = None,
         event_publisher: SubAgentEventPublisher | None = None,
+        foreground_task_is_current: Callable[[str, int], bool] | None = None,
     ) -> None:
         if not isinstance(getattr(repository, "session_id", None), str):
             raise TypeError("SubAgent Pool requires a Session-scoped record repository")
@@ -69,6 +70,7 @@ class SubAgentPool:
         self._now = now or (lambda: datetime.now(UTC))
         self._workspace_id = workspace_id
         self._event_publisher = event_publisher
+        self._foreground_task_is_current = foreground_task_is_current
         self._event_revisions: dict[str, int] = {}
         self._events: deque[SubAgentEvent] = deque()
         self._event_task: asyncio.Task[None] | None = None
@@ -120,6 +122,13 @@ class SubAgentPool:
             raise SubAgentRequestError("SubAgent task must not be empty")
         if source.kind is SubAgentSourceKind.SCHEDULE and source.job_id in self._blocked_job_ids:
             raise SubAgentRequestError("Schedule Job is being removed")
+        if source.kind is SubAgentSourceKind.FOREGROUND and self._foreground_task_is_current is not None:
+            if (
+                source.task_id is None
+                or source.task_generation is None
+                or not self._foreground_task_is_current(source.task_id, source.task_generation)
+            ):
+                raise SubAgentRequestError("Foreground Task generation is no longer active")
         record = self._repository.register(
             title=title,
             task=task,
@@ -337,6 +346,45 @@ class SubAgentPool:
             raise BaseExceptionGroup("SubAgent source cleanup failed", failures)
         return tuple(record for record in results if isinstance(record, SubAgentRecord))
 
+    async def cancel_task_and_wait(
+        self,
+        task_id: str,
+        generation: int,
+    ) -> tuple[SubAgentRecord, ...]:
+        """Cancel only delegated work owned by the selected Task generation."""
+        self._bind_loop()
+        if not isinstance(task_id, str) or not task_id:
+            raise SubAgentRequestError("Foreground Task ID is invalid")
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+            raise SubAgentRequestError("Foreground Task generation is invalid")
+        agent_ids: list[str] = []
+        cursor: str | None = None
+        while True:
+            page = self._repository.list(cursor=cursor, limit=100)
+            for item in page.items:
+                record = self._repository.get(item.agent_id)
+                if (
+                    record is not None
+                    and record.status in {SubAgentStatus.QUEUED, SubAgentStatus.RUNNING}
+                    and record.source.kind is SubAgentSourceKind.FOREGROUND
+                    and record.source.task_id == task_id
+                    and record.source.task_generation == generation
+                ):
+                    agent_ids.append(record.agent_id)
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+        results = await asyncio.gather(
+            *(self.cancel_and_wait(agent_id) for agent_id in agent_ids),
+            return_exceptions=True,
+        )
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise BaseExceptionGroup("Foreground Task cleanup failed", failures)
+        return tuple(record for record in results if isinstance(record, SubAgentRecord))
+
     async def shutdown(self, *, interrupted: bool = True) -> None:
         """Stop admission and drain every task before its Workspace closes resources."""
         self._bind_loop()
@@ -419,6 +467,19 @@ class SubAgentPool:
         try:
             record = self._repository.get(agent_id)
             if record is None or record.status is not SubAgentStatus.QUEUED:
+                return
+            if (
+                record.source.kind is SubAgentSourceKind.FOREGROUND
+                and self._foreground_task_is_current is not None
+                and (
+                    record.source.task_id is None
+                    or record.source.task_generation is None
+                    or not self._foreground_task_is_current(
+                        record.source.task_id, record.source.task_generation
+                    )
+                )
+            ):
+                self.cancel(agent_id)
                 return
             running = self._repository.save(
                 replace(

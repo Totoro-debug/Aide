@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 _DECISION_KEYS = frozenset({"action", "task_goal", "completion_boundary"})
 _NOT_PARSED = object()
+FramingAction = Literal["keep", "replace", "clear"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,11 +118,12 @@ class Blackboard:
             **response.usage.to_dict(),
         }
         decision = _extract_decision(response.message.content)
-        resolved, blackboard = _reduce_decision(decision, previous)
+        resolved, action, blackboard = _reduce_decision(decision, previous)
         return FramingResult(
             blackboard=blackboard,
             usage_delta=usage_delta,
             status="resolved" if resolved else "invalid_response",
+            action=action,
         )
 
 
@@ -132,12 +134,17 @@ class FramingResult:
     blackboard: Blackboard | None
     usage_delta: dict[str, int] | None
     status: Literal["resolved", "invalid_response", "model_failed"]
+    action: FramingAction | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, str):
             raise TypeError("Framing status must be a string")
         if self.status not in {"resolved", "invalid_response", "model_failed"}:
             raise ValueError("Framing status is invalid")
+        if self.action is not None and self.action not in {"keep", "replace", "clear"}:
+            raise ValueError("Framing action is invalid")
+        if self.status != "resolved" and self.action is not None:
+            raise ValueError("Unresolved framing cannot include an action")
         if self.blackboard is not None and not isinstance(self.blackboard, Blackboard):
             raise TypeError("Framing blackboard must be a Blackboard or None")
         if self.usage_delta is not None and not isinstance(self.usage_delta, dict):
@@ -251,26 +258,26 @@ def _first_balanced_json_object(content: str) -> str | None:
 def _reduce_decision(
     decision: object,
     previous: Blackboard | None,
-) -> tuple[bool, Blackboard | None]:
+) -> tuple[bool, FramingAction | None, Blackboard | None]:
     if not isinstance(decision, dict) or set(decision) != _DECISION_KEYS:
-        return False, None
+        return False, None, None
     action = decision["action"]
     task_goal = decision["task_goal"]
     completion_boundary = decision["completion_boundary"]
     if not isinstance(action, str):
-        return False, None
+        return False, None, None
     if action in {"keep", "clear"}:
         if task_goal is not None or completion_boundary is not None:
-            return False, None
-        return True, previous if action == "keep" else None
+            return False, None, None
+        return True, "keep" if action == "keep" else "clear", previous if action == "keep" else None
     if action != "replace":
-        return False, None
+        return False, None, None
     if not isinstance(task_goal, str) or not isinstance(completion_boundary, str):
-        return False, None
+        return False, None, None
     try:
-        return True, Blackboard(goal=task_goal, completion_boundary=completion_boundary)
+        return True, "replace", Blackboard(goal=task_goal, completion_boundary=completion_boundary)
     except (TypeError, ValueError):
-        return False, None
+        return False, None, None
 
 
 __all__ = [

@@ -98,6 +98,7 @@ class SubAgentRunnerExecutor:
         confirmation_for: SubAgentConfirmationFactory | None = None,
         file_mutation_recorder_for: SubAgentFileMutationRecorderFactory | None = None,
         tool_context_for: Callable[[SubAgentRecord], SubAgentToolContext] | None = None,
+        foreground_task_is_current: Callable[[str, int], bool] | None = None,
         trace_recorder: TraceRecorder | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -144,6 +145,7 @@ class SubAgentRunnerExecutor:
         self._confirmation_for = confirmation_for
         self._file_mutation_recorder_for = file_mutation_recorder_for
         self._tool_context_for = tool_context_for
+        self._foreground_task_is_current = foreground_task_is_current
         self._trace_recorder = (
             NoOpTraceRecorder() if trace_recorder is None else trace_recorder
         )
@@ -476,11 +478,20 @@ class SubAgentRunnerExecutor:
         shell = self._exec_host.resolved_shell
         if (creator.shell or "auto") != shell.selector:
             raise ValueError("SubAgent snapshot shell does not match the shared Exec Host")
+        task_guard = self._foreground_task_is_current
+        guarded = record.source.task_id is not None and task_guard is not None
         tool_context = ToolRunContext(
             workspace=workspace,
             schedule_service=base_context.schedule_service,
             exec_host=self._exec_host,
             subagent=(None if self._tool_context_for is None else self._tool_context_for(record)),
+            task_id=record.source.task_id if guarded else None,
+            generation=record.source.task_generation if guarded else None,
+            execution_id=record.agent_id if guarded else None,
+            foreground_task_is_current=(
+                None if not guarded or task_guard is None
+                else lambda task_id, generation, _execution_id: task_guard(task_id, generation)
+            ),
         )
         permission_snapshot = PermissionSnapshot(
             level=cast(ToolPermissionLevel, creator.permission_level),

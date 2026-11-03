@@ -11,6 +11,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
+from aide.agent.foreground_work.options import (
+    ForegroundQuestionOption,
+)
+from aide.agent.foreground_work.options import (
+    validate_question_options as _validated_question_options,
+)
 from aide.agent.permission import ToolPermissionLevel, validate_permission_level
 from aide.agent.session.session import Session, SessionStoragePartition
 from aide.agent.subagents.models import (
@@ -48,11 +54,6 @@ TaskState = Literal[
     "superseded",
 ]
 DeliveryState = Literal["pending", "claimed", "committed", "invalidated"]
-
-
-class ForegroundQuestionOption(TypedDict):
-    id: str
-    label: str
 
 
 class ForegroundAttentionSummary(TypedDict):
@@ -2001,30 +2002,6 @@ def _question_from_dict(value: object, *, schema_version: int) -> ForegroundWork
         options,
         owner_agent_id,
     )
-
-
-def _validated_question_options(
-    value: object,
-) -> tuple[ForegroundQuestionOption, ...]:
-    if value is None:
-        return ()
-    if not isinstance(value, list) or len(value) > 4:
-        raise ValueError("question options must contain at most 4 items")
-    normalized: list[ForegroundQuestionOption] = []
-    seen_ids: set[str] = set()
-    for option in value:
-        if not isinstance(option, dict) or set(option) != {"id", "label"}:
-            raise ValueError("each question option must contain only id and label")
-        option_id = option["id"]
-        label = option["label"]
-        _require_identifier(option_id, "option id")
-        if not isinstance(label, str) or not label.strip() or len(label) > 200:
-            raise ValueError("option label must contain 1 to 200 characters")
-        if option_id in seen_ids:
-            raise ValueError("question option IDs must be unique")
-        seen_ids.add(option_id)
-        normalized.append({"id": option_id, "label": label})
-    return tuple(normalized)
 
 
 def _require_identifier(value: str, name: str) -> None:

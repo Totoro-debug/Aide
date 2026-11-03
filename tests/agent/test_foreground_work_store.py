@@ -4,10 +4,12 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 import pytest
 
+from aide.agent.foreground_work.options import ForegroundQuestionOption
 from aide.agent.foreground_work.store import (
     ForegroundWorkConflict,
     ForegroundWorkError,
@@ -267,6 +269,36 @@ def test_failed_publication_preserves_previous_revision(
     reloaded = _store(tmp_path).load()
     assert reloaded.revision == original.revision
     assert reloaded.questions == ()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        [{"id": "duplicate", "label": "One"}, {"id": "duplicate", "label": "Two"}],
+        [{"id": " padded", "label": "Label"}],
+        [{"id": "valid", "label": " "}],
+        [{"id": "valid", "label": "x" * 201}],
+        [{"id": "valid", "label": "Label", "extra": "field"}],
+        [{"id": "valid", "label": "Label"}] * 5,
+    ],
+)
+def test_prepare_question_rejects_invalid_options(
+    tmp_path: Path, options: list[dict[str, str]]
+) -> None:
+    store = _store(tmp_path)
+    store.begin_task("task-1", "execution-1", generation=1)
+
+    with pytest.raises(ValueError):
+        store.prepare_question(
+            task_id="task-1",
+            execution_id="execution-1",
+            question_id="question-1",
+            tool_call_id="call-1",
+            text="Which directory should I use?",
+            options=cast(list[ForegroundQuestionOption], options),
+        )
+
+    assert store.load().questions == ()
 
 
 def test_restart_and_restore_reconcile_question_and_answer_anchor(tmp_path: Path) -> None:

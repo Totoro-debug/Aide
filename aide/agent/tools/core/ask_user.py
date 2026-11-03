@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, TypedDict, cast
 
+from aide.agent.foreground_work.options import (
+    MAX_QUESTION_OPTION_COUNT,
+    MAX_QUESTION_OPTION_FIELD_LENGTH,
+    validate_question_options,
+)
 from aide.agent.tools.base import BaseTool, ToolError, ToolParam
 from aide.agent.tools.context import AgentRunSuspension, ToolRunContext
 from aide.agent.tools.permission import ToolAuthorizationSession
 
 _MAX_QUESTION_LENGTH = 2_000
-_MAX_OPTIONS = 4
-_MAX_OPTION_LENGTH = 200
 
 
 class _AskUserQuestionOption(TypedDict):
-    id: Annotated[str, ToolParam(min_length=1, max_length=_MAX_OPTION_LENGTH)]
-    label: Annotated[str, ToolParam(min_length=1, max_length=_MAX_OPTION_LENGTH)]
+    id: Annotated[str, ToolParam(min_length=1, max_length=MAX_QUESTION_OPTION_FIELD_LENGTH)]
+    label: Annotated[str, ToolParam(min_length=1, max_length=MAX_QUESTION_OPTION_FIELD_LENGTH)]
 
 
 class AskUserTool(BaseTool):
@@ -37,7 +40,7 @@ class AskUserTool(BaseTool):
         list[_AskUserQuestionOption] | None,
         ToolParam(
             description="Optional choices with stable IDs and display labels; at most four.",
-            max_items=_MAX_OPTIONS,
+            max_items=MAX_QUESTION_OPTION_COUNT,
         ),
     ] = None
 
@@ -108,33 +111,13 @@ class AskUserTool(BaseTool):
 
 
 def _validate_question_options(value: object) -> list[_AskUserQuestionOption]:
-    if value is None:
-        return []
-    if not isinstance(value, list) or len(value) > _MAX_OPTIONS:
-        raise ToolError("ask_user accepts at most four options.")
-    normalized: list[_AskUserQuestionOption] = []
-    seen: set[str] = set()
-    for item in value:
-        if not isinstance(item, dict) or set(item) != {"id", "label"}:
-            raise ToolError("Each ask_user option must contain only an id and label.")
-        option_id = item["id"]
-        label = item["label"]
-        if (
-            not isinstance(option_id, str)
-            or not option_id
-            or option_id.strip() != option_id
-            or len(option_id) > _MAX_OPTION_LENGTH
-            or not isinstance(label, str)
-            or not label.strip()
-            or len(label) > _MAX_OPTION_LENGTH
-            or option_id in seen
-        ):
-            raise ToolError(
-                "Question option IDs must be unique and labels must contain 1 to 200 characters."
-            )
-        seen.add(option_id)
-        normalized.append({"id": option_id, "label": label})
-    return normalized
+    try:
+        return [
+            cast(_AskUserQuestionOption, dict(option))
+            for option in validate_question_options(value)
+        ]
+    except ValueError as error:
+        raise ToolError(f"Invalid ask_user options: {error}") from error
 
 
 __all__ = ["AskUserTool"]

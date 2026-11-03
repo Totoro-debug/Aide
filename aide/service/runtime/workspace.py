@@ -27,6 +27,7 @@ from aide.agent.foreground_work.store import (
     ForegroundWorkConflict,
     ForegroundWorkDelivery,
     ForegroundWorkStore,
+    ForegroundWorkTask,
     StaleForegroundWorkRevision,
 )
 from aide.agent.loop import (
@@ -2092,6 +2093,13 @@ class WorkspaceRecord:
             store.reconcile(self._persisted_foreground_messages(session_id),
                             subagents=records)
         current = store.load()
+        previous_continue = next((message for message in self._persisted_foreground_messages(session_id)
+            if message.get("foreground_continue_request_id") == request_id), None)
+        if previous_continue is not None:
+            if previous_continue.get("foreground_task_id") != task_id:
+                raise service_error("foreground_task_conflict", "Continuation request belongs to another Task.", status=409)
+            return {"run_id": previous_continue["foreground_continue_run_id"], "task_id": task_id,
+                    "children_resumed": True}
         if current.revision != expected_revision:
             raise service_error(
                 "foreground_task_conflict", "The Task changed; reload it before continuing.", status=409
@@ -2102,7 +2110,8 @@ class WorkspaceRecord:
             task is None
             or task.state not in {"completed", "interrupted"}
             or any(
-                question.task_id == task_id and question.state in unresolved
+                question.task_id == task_id and (question.state in unresolved
+                    or (question.state == "interrupted" and question.answer is None))
                 for question in current.questions
             )
         ):
@@ -2112,6 +2121,14 @@ class WorkspaceRecord:
                 status=409,
             )
         record_by_id = {record.agent_id: record for record in records}
+        interrupted_children = tuple(record for record in records
+            if record.source.task_id == task_id
+            and record.source.task_generation == task.generation
+            and record.status is SubAgentStatus.INTERRUPTED)
+        if interrupted_children:
+            return await self._continue_interrupted_children(
+                client_id, session_id, version, request_id, task, interrupted_children, expected_revision,
+            )
         foreground_delivery: dict[str, object] | None = None
         for delivery in current.deliveries:
             if (
@@ -2162,6 +2179,97 @@ class WorkspaceRecord:
             foreground_delivery=foreground_delivery,
         )
         return {"run_id": run_id, "task_id": task_id}
+
+    async def _continue_interrupted_children(
+        self, client_id: str, session_id: str, version: int, request_id: str,
+        task: ForegroundWorkTask, children: tuple[SubAgentRecord, ...], expected_revision: int,
+    ) -> dict[str, object]:
+        """Persist a real user recovery anchor before queueing registered child segments."""
+        state = self._loops[session_id]
+        coordinator = self._subagent_coordinators.get(session_id)
+        if not isinstance(coordinator, SubAgentPool):
+            raise service_error("resource_unavailable", "SubAgent execution resources are unavailable.", status=422)
+        for child in children:
+            creator = child.creator_snapshot
+            try:
+                self.configuration.resolve_session_model_route(
+                    creator.provider_id, creator.model, creator.reasoning_effort,
+                )
+            except (ConfigError, ValueError) as error:
+                raise service_error("model_unavailable", "The registered SubAgent model is unavailable.", status=422) from error
+            if self._exec_host is None or (creator.shell or "auto") != self._exec_host.resolved_shell.selector:
+                raise service_error("resource_unavailable", "The registered SubAgent shell is unavailable.", status=422)
+        async with state.coordination_lock:
+            self.require_claim(client_id, session_id, version)
+            self._ensure_session_available(session_id)
+            previous = next((message for message in self._persisted_foreground_messages(session_id)
+                if message.get("foreground_continue_request_id") == request_id), None)
+            if previous is not None:
+                if previous.get("foreground_task_id") != task.task_id:
+                    raise service_error("foreground_task_conflict", "Continuation request belongs to another Task.", status=409)
+                return {"run_id": previous["foreground_continue_run_id"],
+                        "task_id": task.task_id, "children_resumed": True}
+            store = self.foreground_work_store(session_id)
+            latest = store.load()
+            if latest.revision != expected_revision or next((item for item in latest.tasks if item.task_id == task.task_id), None) != task:
+                raise service_error("foreground_task_conflict", "The Task changed before recovery admission.", status=409)
+            if state.loop.has_active_run or state.run_ids or state.live_runs:
+                raise service_error("foreground_run_active", "Wait for the current foreground input before continuing children.", retryable=True)
+            run_id = str(uuid4())
+            token = uuid4()
+            executions = {child.agent_id: str(uuid4()) for child in children}
+            session = state.loop.session
+            summary = session.metadata.get("summary", "")
+            session.commit_agent_run([{
+                "role": "user", "content": "Continue the current foreground task.",
+                "foreground_task_id": task.task_id,
+                "foreground_continue_request_id": request_id,
+                "foreground_continue_run_id": run_id,
+                "foreground_child_executions": executions,
+            }], pending_last_compacted=session.last_compacted,
+                pending_action_summary=summary if isinstance(summary, str) else "",
+                restore_before=session.capture_restore_before(), restore_run_token=token)
+            await session.wait_for_pending_persist()
+            if not any(message.get("foreground_continue_request_id") == request_id
+                       for message in self._persisted_foreground_messages(session_id)):
+                raise service_error("persistence_error", "The continuation intent could not be saved.", status=500)
+            self.require_claim(client_id, session_id, version)
+            store = self.foreground_work_store(session_id)
+            self._require_admitted()
+            latest = store.load()
+            if self._restore_session_id == session_id or self._restore_commit_task is not None:
+                raise service_error("session_restore_active", "Session Restore is in progress.", retryable=True)
+            if any(question.task_id == task.task_id and question.state in {
+                "preparing", "pending", "answer_received", "resuming", "executing",
+            } for question in latest.questions):
+                raise service_error("foreground_task_conflict", "Answer the pending question before continuing.", status=409)
+            if not any(item.task_id == task.task_id and item.generation == task.generation
+                       and item.state not in {"cancelled", "superseded"} for item in latest.tasks):
+                raise service_error("foreground_task_conflict", "The Task was revoked while saving continuation.", status=409)
+            assert self._exec_host is not None
+            permission = self.service.client_permission(client_id).snapshot(self._exec_host.resolved_shell)
+            try:
+                store.start_execution(task.task_id, run_id, expected_generation=task.generation)
+                store.complete_task(task.task_id, run_id)
+                for child in children:
+                    saved_answer = next((question.answer for question in store.load().questions
+                        if question.owner_agent_id == child.agent_id and question.answer is not None), None)
+                    coordinator.resume_interrupted(child.agent_id, execution_id=executions[child.agent_id],
+                        restore_run_token=str(token), permission_level=permission.level,
+                        saved_answer=saved_answer)
+                    store.acknowledge_subagent_recovery(child.agent_id, executions[child.agent_id])
+            except (OSError, SubAgentStoreError, SubAgentRequestError, ValueError) as error:
+                repository = self.subagent_repository(session_id)
+                for child in children:
+                    saved = repository.get(child.agent_id)
+                    if saved is not None and saved.status is SubAgentStatus.QUEUED:
+                        repository.save(replace(saved, status=SubAgentStatus.INTERRUPTED,
+                            finished_at=local_now(), error=SubAgentError(
+                                code="resume_interrupted", message="Continuation queue publication was interrupted."),
+                            revision=saved.revision + 1), expected_revision=saved.revision)
+                store.interrupt_uncertain_tasks()
+                raise service_error("persistence_error", "SubAgent continuation was interrupted; inspect saved state before continuing.", status=500) from error
+        return {"run_id": run_id, "task_id": task.task_id, "children_resumed": True}
 
     async def recall_queued_inputs(
         self,

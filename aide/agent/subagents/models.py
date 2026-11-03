@@ -19,7 +19,7 @@ from aide.utils.validation import (
     token_usage_validation_issue,
 )
 
-SUBAGENT_RECORD_SCHEMA_VERSION = 4
+SUBAGENT_RECORD_SCHEMA_VERSION = 5
 _USAGE_FIELDS = frozenset({"model_calls", "input_tokens", "output_tokens", "total_tokens"})
 
 
@@ -345,14 +345,14 @@ class SubAgentRecord:
             "usage",
         }
         schema_version = _integer(value.get("schema_version"), field="schema_version")
-        if schema_version not in {2, 3, SUBAGENT_RECORD_SCHEMA_VERSION}:
+        if schema_version not in {2, 3, 4, SUBAGENT_RECORD_SCHEMA_VERSION}:
             raise ValueError("SubAgent record schema version is unsupported")
         current_fields = fields | {
             "execution_id",
             "restore_run_token",
             "restore_prefixes",
         }
-        expected_fields = current_fields if schema_version == SUBAGENT_RECORD_SCHEMA_VERSION else fields
+        expected_fields = current_fields if schema_version >= 4 else fields
         if set(value) != expected_fields:
             raise ValueError("SubAgent record fields do not match the current format")
         source = _source_from_dict(value["source"], schema_version=schema_version)
@@ -390,16 +390,16 @@ class SubAgentRecord:
         usage = _usage_from_value(value["usage"])
         execution_id = (
             None
-            if schema_version < SUBAGENT_RECORD_SCHEMA_VERSION
+            if schema_version < 4
             else _optional_string(value["execution_id"], field="execution_id")
         )
         restore_run_token = (
             None
-            if schema_version < SUBAGENT_RECORD_SCHEMA_VERSION
+            if schema_version < 4
             else _optional_string(value["restore_run_token"], field="restore_run_token")
         )
         restore_prefixes_value = (
-            [] if schema_version < SUBAGENT_RECORD_SCHEMA_VERSION else value["restore_prefixes"]
+            [] if schema_version < 4 else value["restore_prefixes"]
         )
         if not isinstance(restore_prefixes_value, list) or any(
             not isinstance(item, dict) for item in restore_prefixes_value
@@ -673,8 +673,14 @@ def _restore_prefix_from_value(value: object) -> dict[str, Any]:
         "execution_id",
         "current_restore_run_token",
     }
-    if not isinstance(value, dict) or set(value) != fields:
+    if not isinstance(value, dict) or set(value) not in (fields, fields | {"status", "error"}):
         raise ValueError("SubAgent restore prefix fields do not match the current format")
+    status = value.get("status", "waiting_for_answer")
+    if status not in {"waiting_for_answer", "interrupted"}:
+        raise ValueError("SubAgent restore prefix status is invalid")
+    error = _error_from_value(value.get("error"))
+    if status == "interrupted" and error is None:
+        raise ValueError("Interrupted restore prefix requires an error")
     restore_run_token = _string(
         value["restore_run_token"], field="restore_prefix.restore_run_token"
     )
@@ -688,9 +694,12 @@ def _restore_prefix_from_value(value: object) -> dict[str, Any]:
         require_uuid4_string(
             current_restore_run_token, field="restore_prefix.current_restore_run_token"
         )
-    _datetime_from_value(value["started_at"], field="restore_prefix.started_at")
-    if value["finished_at"] is not None:
+    if value["started_at"] is not None or status == "waiting_for_answer":
+        _datetime_from_value(value["started_at"], field="restore_prefix.started_at")
+    if status == "waiting_for_answer" and value["finished_at"] is not None:
         raise ValueError("waiting restore prefix cannot have a finish timestamp")
+    if value["finished_at"] is not None:
+        _datetime_from_value(value["finished_at"], field="restore_prefix.finished_at")
     conversation = value["conversation"]
     if not isinstance(conversation, list) or any(
         not isinstance(item, dict) for item in conversation
@@ -718,6 +727,7 @@ def _restore_prefix_from_value(value: object) -> dict[str, Any]:
         "usage": copy.deepcopy(usage),
         "execution_id": execution_id,
         "current_restore_run_token": current_restore_run_token,
+        **({} if "status" not in value else {"status": status, "error": value["error"]}),
     }
 
 

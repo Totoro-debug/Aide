@@ -999,6 +999,11 @@ async def test_continue_task_rejects_pending_question_and_resumes_after_explicit
         assert after_task["state"] == "completed"
         assert after_task["generation"] == question["generation"]
         assert provider.stream_calls == streams_before_continue + 2
+        # Explicit continuation starts a fresh bounded stage. Reading/reconciling
+        # the history must not charge the preceding answer again.
+        work = workspace.foreground_work_store(session_id).load()
+        task = next(item for item in work.tasks if item.task_id == question["task_id"])
+        assert task.iteration_budget_used == 1
     finally:
         await service.stop()
 
@@ -1137,6 +1142,7 @@ async def test_question_options_survive_service_restart_and_reclaim(
             {"id": "reports", "label": "Reports folder"},
             {"id": "archives", "label": "Archives folder"},
         ]
+        calls_before_restart = (provider.stream_calls, provider.complete_calls)
         await service.stop()
 
         replacement = AgentService(home, ConfigLoader(home).load())
@@ -1159,6 +1165,122 @@ async def test_question_options_survive_service_restart_and_reclaim(
         assert isinstance(resumed_claim["claim_version"], int)
         assert restored_question["question_id"] == question["question_id"]
         assert restored_question["options"] == question["options"]
+        assert (provider.stream_calls, provider.complete_calls) == calls_before_restart
+
+        provider.release_answer.set()
+        await replacement.handle_command(
+            replacement_client.client_id,
+            _command(
+                request_id="answer-restored-question",
+                command_type="answer_question",
+                workspace_id=attached.workspace_id,
+                session_id=session_id,
+                claim_version=resumed_claim["claim_version"],
+                payload={
+                    "question_id": restored_question["question_id"],
+                    "answer": "reports-directory",
+                    "expected_revision": restored_question["revision"],
+                },
+            ),
+        )
+        await _wait_for_idle(replacement.workspace(attached.workspace_id), session_id)
+        assert "reports-directory" in provider.user_texts[-1]
+        assert provider.question_calls == 1
+    finally:
+        if replacement is not None:
+            await replacement.stop()
+        elif getattr(service, "_started", False):
+            await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_restart_reconciles_a_committed_foreground_execution_without_rerunning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aide.utils.host_filesystem import HOST_FILESYSTEM
+
+    home = _home(tmp_path / "agent-home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    replacement: AgentService | None = None
+    try:
+        client, session_id, claim_version, workspace_id = await _open_chat(service, directory)
+        workspace = service.workspace(workspace_id)
+        original_replace = HOST_FILESYSTEM.atomic_replace_text
+        failed_charge = False
+        failed_task_id: str | None = None
+
+        def fail_execution_charge(path: Path, content: str) -> None:
+            nonlocal failed_charge, failed_task_id
+            if path.name == "state.json" and not failed_charge:
+                state = json.loads(content)
+                for task in state.get("tasks", []):
+                    execution_id = task.get("execution_id")
+                    charged_ids = task.get("charged_execution_ids", [])
+                    if (
+                        task.get("state") == "running"
+                        and isinstance(execution_id, str)
+                        and execution_id in charged_ids
+                    ):
+                        failed_charge = True
+                        failed_task_id = task.get("task_id")
+                        raise OSError("injected execution charge publication failure")
+            original_replace(path, content)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(HOST_FILESYSTEM, "atomic_replace_text", fail_execution_charge)
+            await service.handle_command(
+                client,
+                _command(
+                    request_id="committed-execution",
+                    command_type="input",
+                    workspace_id=workspace_id,
+                    session_id=session_id,
+                    claim_version=claim_version,
+                    payload={"text": "ordinary foreground execution"},
+                ),
+            )
+            await _wait_for_idle(workspace, session_id)
+
+        assert failed_charge
+        assert isinstance(failed_task_id, str)
+        await service.stop()
+        before_restart_calls = provider.stream_calls + provider.complete_calls
+
+        replacement = AgentService(home, ConfigLoader(home).load())
+        await replacement.start()
+        client, resumed_session_id, claim_version, workspace_id = await _open_chat(
+            replacement, directory, session_id=session_id
+        )
+        assert resumed_session_id == session_id
+        workspace = replacement.workspace(workspace_id)
+        recovered = workspace.session_snapshot(session_id)
+        recovered_task = next(
+            task
+            for task in cast(list[dict[str, object]], recovered["foreground_tasks"])
+            if task["task_id"] == failed_task_id
+        )
+        assert recovered_task["state"] == "completed"
+        persisted_work = workspace.foreground_work_store(session_id).load()
+        persisted_task = next(
+            task for task in persisted_work.tasks if task.task_id == failed_task_id
+        )
+        assert persisted_task.iteration_budget_used == 1
+        assert provider.stream_calls + provider.complete_calls == before_restart_calls
+        assert workspace.session_snapshot(session_id)["foreground_tasks"] == recovered[
+            "foreground_tasks"
+        ]
+        persisted_after_snapshot = workspace.foreground_work_store(session_id).load()
+        task_after_snapshot = next(
+            task
+            for task in persisted_after_snapshot.tasks
+            if task.task_id == failed_task_id
+        )
+        assert task_after_snapshot.iteration_budget_used == 1
     finally:
         if replacement is not None:
             await replacement.stop()
@@ -1947,7 +2069,7 @@ async def test_question_publication_failure_pairs_tools_and_recovers_without_exe
         assert not (directory / "after-question.txt").exists()
         calls_after_run = provider.stream_calls
         snapshot = workspace.session_snapshot(sid)
-        history = workspace._loops[sid].loop.session.messages
+        history = cast(list[dict[str, object]], snapshot["messages"])
         assert [m["tool_call_id"] for m in history if m["role"] == "tool"] == [
             "question-call",
             "after-question",

@@ -963,6 +963,18 @@ class ForegroundWorkStore:
             )
         )
 
+    def acknowledge_subagent_recovery(self, agent_id: str, execution_id: str) -> ForegroundWorkSnapshot:
+        """An explicit continuation has queued an already accepted child answer."""
+        current = self.load()
+        questions = tuple(
+            replace(question, state="answered", resume_execution_id=execution_id)
+            if question.owner_agent_id == agent_id and question.state == "interrupted"
+            and question.answer is not None else question for question in current.questions
+        )
+        if questions == current.questions:
+            return current
+        return self._publish(replace(current, revision=current.revision + 1, questions=questions))
+
     def interrupt_subagent_question(self, question_id: str) -> ForegroundWorkSnapshot:
         """Mark a child question interrupted when its saved execution resource is absent."""
         current = self.load()
@@ -1202,6 +1214,53 @@ class ForegroundWorkStore:
             for receipt in message["foreground_delivery_receipts"]
             if isinstance(receipt, str)
         }
+        execution_commits: dict[tuple[str, int, str], int] = {}
+        execution_commit_positions: dict[tuple[str, int, str], int] = {}
+        conflicting_commits: set[tuple[str, int, str]] = set()
+        current_stages = {task.task_id: task.iteration_stage for task in current.tasks}
+        latest_foreground_input_position = -1
+        for position, message in enumerate(messages):
+            if (
+                message.get("role") == "user"
+                and isinstance(message.get("foreground_task_id"), str)
+            ):
+                latest_foreground_input_position = position
+            if message.get("role") != "assistant" or message.get("status") != "completed":
+                continue
+            receipt = message.get("foreground_execution_commit")
+            if not isinstance(receipt, dict):
+                continue
+            task_id = receipt.get("task_id")
+            generation = receipt.get("generation")
+            execution_id = receipt.get("execution_id")
+            commit_id = receipt.get("commit_id")
+            model_calls = receipt.get("model_calls")
+            if (
+                not isinstance(task_id, str)
+                or not task_id
+                or type(generation) is not int
+                or generation < 1
+                or not isinstance(execution_id, str)
+                or not execution_id
+                or commit_id != f"{task_id}:{generation}:{execution_id}"
+                or type(model_calls) is not int
+                or model_calls < 0
+                or receipt.get("iteration_stage") != current_stages.get(task_id)
+            ):
+                continue
+            key = (task_id, generation, execution_id)
+            previous_model_calls = execution_commits.get(key)
+            if key in conflicting_commits:
+                continue
+            if previous_model_calls is not None and previous_model_calls != model_calls:
+                execution_commits.pop(key, None)
+                execution_commit_positions.pop(key, None)
+                conflicting_commits.add(key)
+                continue
+            execution_commits[key] = model_calls
+            execution_commit_positions[key] = max(
+                position, execution_commit_positions.get(key, -1)
+            )
         waited_results: set[tuple[str, int]] = set()
         for message in messages:
             if message.get("role") != "tool" or message.get("name") != "wait_agent":
@@ -1445,12 +1504,48 @@ class ForegroundWorkStore:
                 if task.state in {"cancelled", "superseded", "interrupted"}
                 else task_states.get(task.task_id)
             )
+            committed_execution = (
+                task.task_id,
+                task.generation,
+                task.execution_id,
+            ) in execution_commits
+            committed_execution_is_latest = (
+                execution_commit_positions.get(
+                    (task.task_id, task.generation, task.execution_id), -1
+                )
+                > latest_foreground_input_position
+            )
             if override is None and task.state == "running":
-                override = (task.execution_id, "interrupted")
+                override = (
+                    task.execution_id,
+                    "completed" if committed_execution else "interrupted",
+                )
+            elif (
+                override is None
+                and task.state == "interrupted"
+                and committed_execution_is_latest
+            ):
+                override = (task.execution_id, "completed")
             execution_id, task_state = (
                 (task.execution_id, task.state) if override is None else override
             )
-            changed |= execution_id != task.execution_id or task_state != task.state
+            charged_execution_ids = list(task.charged_execution_ids)
+            iteration_budget_used = task.iteration_budget_used
+            for key, model_calls in execution_commits.items():
+                committed_task_id, committed_generation, committed_execution_id = key
+                if (
+                    committed_task_id == task.task_id
+                    and committed_generation == task.generation
+                    and committed_execution_id not in charged_execution_ids
+                ):
+                    iteration_budget_used += model_calls
+                    charged_execution_ids.append(committed_execution_id)
+            changed |= (
+                execution_id != task.execution_id
+                or task_state != task.state
+                or iteration_budget_used != task.iteration_budget_used
+                or tuple(charged_execution_ids) != task.charged_execution_ids
+            )
             tasks.append(
                 ForegroundWorkTask(
                     task.task_id,
@@ -1461,8 +1556,8 @@ class ForegroundWorkStore:
                     task.permission_level,
                     task.iteration_stage,
                     task.iteration_budget_limit,
-                    task.iteration_budget_used,
-                    task.charged_execution_ids,
+                    iteration_budget_used,
+                    tuple(charged_execution_ids),
                 )
             )
         if not changed:

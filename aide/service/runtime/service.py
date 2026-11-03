@@ -3656,6 +3656,13 @@ class AgentService:
             },
             target_client_ids=(client_id,),
         )
+        if result.get("children_resumed") is True:
+            await self.emit("run.completed", workspace_id=workspace_id,
+                session_id=session_id, run_id=run_id, payload={"finish_reason": "completed"},
+                target_client_ids=(client_id,))
+            client = self._clients.get(client_id)
+            if client is not None:
+                await self._send_snapshot_required(client, reason="foreground_task_updated")
         return {"kind": "task_continued", **result}
 
     async def handle_command(

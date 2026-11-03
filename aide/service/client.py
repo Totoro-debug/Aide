@@ -1415,6 +1415,15 @@ class ServiceClient:
                 action == "restore/execute" and isinstance(result.get("restore_result"), dict)
             ):
                 await self._apply_conversation_context(result)
+                snapshot = result.get("snapshot")
+                if action == "resume" and isinstance(snapshot, dict):
+                    await self.bus.put_remote_output({
+                        "type": "system_control",
+                        "metadata": {
+                            "_remote_state_snapshot": snapshot,
+                            "_remote_foreground_state_only": True,
+                        },
+                    })
         except ServiceStartupError:
             if action == "resume":
                 self.control.set_admitted(False)

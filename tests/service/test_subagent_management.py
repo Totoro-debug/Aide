@@ -4576,6 +4576,19 @@ async def test_saved_answer_with_failed_queue_publication_is_explicitly_interrup
     assert service.get_subagent(client, workspace.workspace_id, sid, question["owner_agent_id"])["status"] == "interrupted"
     assert provider.child_question_count == 2
     assert "saved answer" in str(workspace.session_snapshot(sid)["messages"])
+    other = next(item for item in cast(list[dict[str, Any]],
+        workspace.session_snapshot(sid)["foreground_questions"])
+        if item["question_id"] != question["question_id"])
+    await service.answer_foreground_question(client, workspace.workspace_id, sid,
+        claim["claim_version"], other["question_id"], "finish", None, other["revision"], str(uuid4()))
+    await _wait_until(lambda: service.get_subagent(client, workspace.workspace_id, sid,
+        other["owner_agent_id"])["status"] == "completed")
+    task = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_tasks"])[0]
+    await service.continue_foreground_task(client, workspace.workspace_id, sid,
+        claim["claim_version"], task["task_id"], task["revision"], str(uuid4()))
+    await _wait_until(lambda: service.get_subagent(client, workspace.workspace_id, sid,
+        question["owner_agent_id"])["status"] == "completed")
+    assert not workspace.session_snapshot(sid)["foreground_questions"]
 
 
 @pytest.mark.asyncio
@@ -4693,3 +4706,233 @@ async def test_queued_users_and_wait_delivery_precede_automatic_arbitration(
         started = next(i for i, e in enumerate(sink.events) if e["type"] == "run.started" and e["run_id"] == following)
         assert completed < started
     assert sum(m["role"] == "user" for m in cast(list[dict[str, Any]], snapshot["messages"])) >= 3
+
+@pytest.mark.asyncio
+async def test_restart_two_child_questions_only_resumes_answered_chain(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
+
+    service, workspace, client, sid, _ = management_case
+    provider = _DelegatingProvider()
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _: provider)
+    monkeypatch.setattr("aide.service.runtime.workspace.create_provider", lambda _: provider)
+    monkeypatch.setattr("aide.provider.factory.create_provider", lambda _: provider)
+    service.model_router._provider_factory = lambda _: provider
+    service.model_router._providers.clear()
+    claim = cast(dict[str, Any], (await service.claim(client, workspace.workspace_id, sid))["claim"])
+    await workspace.input(client, sid, claim["claim_version"],
+                          "SubAgent question delegation request", str(uuid4()))
+    await _wait_until(lambda: provider.child_question_count == 2)
+    await _wait_for_idle(workspace, sid)
+    questions = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_questions"])
+    assert len(questions) == 2
+    calls = len(provider.requests)
+    await service.stop()
+    recovered = AgentService(service.agent_home, ConfigLoader(service.agent_home).load())
+    await recovered.start()
+    recovered.model_router._provider_factory = lambda _: provider
+    recovered.model_router._providers.clear()
+    try:
+        owner = await recovered.register_client("cli")
+        await recovered.connect_client(owner.client_id, _CollectingSink())
+        resident = await recovered.attach_workspace(owner.client_id, workspace.workspace_path)
+        current = cast(dict[str, Any], (await recovered.claim(owner.client_id, resident.workspace_id, sid))["claim"])
+        snapshot = resident.session_snapshot(sid)
+        restored = cast(list[dict[str, Any]], snapshot["foreground_questions"])
+        assert {q["question_id"] for q in restored} == {q["question_id"] for q in questions}
+        assert len(provider.requests) == calls
+        task = cast(list[dict[str, Any]], snapshot["foreground_tasks"])[0]
+        with pytest.raises(ServiceError):
+            await recovered.continue_foreground_task(owner.client_id, resident.workspace_id, sid,
+                current["claim_version"], task["task_id"], task["revision"], str(uuid4()))
+        first = restored[0]
+        await recovered.answer_foreground_question(owner.client_id, resident.workspace_id, sid,
+            current["claim_version"], first["question_id"], "finish", None,
+            first["revision"], str(uuid4()))
+        await _wait_until(lambda: recovered.get_subagent(owner.client_id, resident.workspace_id,
+            sid, first["owner_agent_id"])["status"] == "completed")
+        other = restored[1]
+        assert recovered.get_subagent(owner.client_id, resident.workspace_id, sid,
+            other["owner_agent_id"])["status"] == "waiting_for_answer"
+        assert provider.child_question_count == 3
+        pending = cast(list[dict[str, Any]], resident.session_snapshot(sid)["foreground_questions"])
+        assert [q["question_id"] for q in pending] == [other["question_id"]]
+    finally:
+        await recovered.stop()
+
+@pytest.mark.asyncio
+async def test_deletion_marker_restart_does_not_recreate_child_or_task_records(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aide.agent.session.deletion import begin_session_deletion
+    from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
+
+    service, workspace, client, sid, _ = management_case
+    provider = _DelegatingProvider()
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _: provider)
+    monkeypatch.setattr("aide.service.runtime.workspace.create_provider", lambda _: provider)
+    service.model_router._provider_factory = lambda _: provider
+    service.model_router._providers.clear()
+    claim = cast(dict[str, Any], (await service.claim(client, workspace.workspace_id, sid))["claim"])
+    await workspace.input(client, sid, claim["claim_version"],
+                          "SubAgent question delegation request", str(uuid4()))
+    await _wait_until(lambda: provider.child_question_count == 2)
+    await _wait_for_idle(workspace, sid)
+    old_store = workspace.foreground_work_store(sid)
+    task = old_store.load().tasks[0]
+    repository = workspace.subagent_repository(sid)
+    child = repository.get(repository.list().items[0].agent_id)
+    assert child is not None
+    await service.stop()
+    begin_session_deletion(workspace.workspace_state, sid)
+    replacement = AgentService(service.agent_home, ConfigLoader(service.agent_home).load())
+    await replacement.start()
+    try:
+        owner = await replacement.register_client("cli")
+        await replacement.connect_client(owner.client_id, _CollectingSink())
+        await replacement.attach_workspace(owner.client_id, workspace.workspace_path)
+        old_store.complete_task(task.task_id, task.execution_id)
+        with pytest.raises(SubAgentStoreError):
+            repository.save(replace(child, revision=child.revision + 1))
+        assert not (workspace.workspace_state.path / "foreground-work" / sid).exists()
+        assert not (workspace.workspace_state.subagents_directory / sid).exists()
+        assert provider.child_question_count == 2
+    finally:
+        await replacement.stop()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_fault", ["none", "stage", "queue_after", "missing_model", "lower_permission"])
+async def test_explicit_continue_resumes_original_interrupted_child_after_restart(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_fault: str,
+) -> None:
+    from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
+
+    service, workspace, client, sid, _ = management_case
+    provider = _DelegatingProvider()
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _: provider)
+    monkeypatch.setattr("aide.service.runtime.workspace.create_provider", lambda _: provider)
+    service.model_router._provider_factory = lambda _: provider
+    service.model_router._providers.clear()
+    claim = cast(dict[str, Any], (await service.claim(client, workspace.workspace_id, sid))["claim"])
+    service.client_permission(client).select("workspace-write")
+    await workspace.input(client, sid, claim["claim_version"], "initial delegation request", str(uuid4()))
+    await asyncio.wait_for(provider.child_started.wait(), 5)
+    await _wait_for_idle(workspace, sid)
+    agent = cast(list[dict[str, Any]], service.list_subagents(client, workspace.workspace_id, sid)["items"])[0]
+    await service.stop()
+    original = _require_record(workspace.subagent_repository(sid), agent["agent_id"])
+    requests_before_restart = len(provider.requests)
+    replacement = AgentService(service.agent_home, ConfigLoader(service.agent_home).load())
+    await replacement.start()
+    replacement.model_router._provider_factory = lambda _: provider
+    replacement.model_router._providers.clear()
+    try:
+        owner = await replacement.register_client("cli")
+        sink = _CollectingSink()
+        await replacement.connect_client(owner.client_id, sink)
+        resident = await replacement.attach_workspace(owner.client_id, workspace.workspace_path)
+        current = cast(dict[str, Any], (await replacement.claim(owner.client_id, resident.workspace_id, sid))["claim"])
+        assert replacement.get_subagent(owner.client_id, resident.workspace_id, sid, agent["agent_id"])["status"] == "interrupted"
+        assert len(provider.requests) == requests_before_restart
+        task = cast(list[dict[str, Any]], resident.session_snapshot(sid)["foreground_tasks"])[0]
+        provider.release_child.set()
+        request_id = str(uuid4())
+        if recovery_fault == "missing_model":
+            from tests.configuration.test_model_configuration import editable_models
+            models = editable_models(ConfigLoader(replacement.agent_home))
+            creator = original.creator_snapshot
+            available = models["providers"][creator.provider_id]["models"]
+            available["replacement-model"] = available.pop(creator.model)
+            for route in models["routes"].values():
+                if route.get("provider_id") == creator.provider_id:
+                    route["model"] = "replacement-model"
+            await replacement.update_configuration("remove-recovery-model",
+                cast(str, replacement.config_view()["revision"]), {"models": models})
+            with pytest.raises(ServiceError) as missing:
+                await replacement.continue_foreground_task(owner.client_id, resident.workspace_id, sid,
+                    current["claim_version"], task["task_id"], task["revision"], request_id)
+            assert missing.value.code == "model_unavailable"
+            assert len(provider.requests) == requests_before_restart
+            assert _require_record(resident.subagent_repository(sid), agent["agent_id"]) == original
+            return
+        if recovery_fault == "lower_permission":
+            replacement.client_permission(owner.client_id).select("read-only")
+            provider.write_path = "recovery-write.txt"
+            provider.allow_write.set()
+        if recovery_fault in {"stage", "queue_after"}:
+            atomic = HOST_FILESYSTEM.atomic_replace_text
+            failed = False
+
+            def interrupt_publication(path: Path, content: str) -> None:
+                nonlocal failed
+                value = json.loads(content)
+                stage_match = recovery_fault == "stage" and path.name == "state.json" and any(
+                    item.get("iteration_stage") == 2 for item in value.get("tasks", []))
+                queue_match = recovery_fault == "queue_after" and path.stem == agent["agent_id"] and value.get("status") == "queued"
+                if not failed and (stage_match or queue_match):
+                    failed = True
+                    if queue_match:
+                        atomic(path, content)
+                    raise OSError("injected interrupted child recovery publication")
+                atomic(path, content)
+
+            with monkeypatch.context() as fault:
+                fault.setattr(HOST_FILESYSTEM, "atomic_replace_text", interrupt_publication)
+                if recovery_fault == "queue_after":
+                    fault.setattr(resident.subagent_repository(sid), "_replace_text", interrupt_publication)
+                with pytest.raises(ServiceError):
+                    await replacement.continue_foreground_task(owner.client_id, resident.workspace_id, sid,
+                        current["claim_version"], task["task_id"], task["revision"], request_id)
+            assert failed
+            assert len(provider.requests) == requests_before_restart
+            await replacement.continue_foreground_task(owner.client_id, resident.workspace_id, sid,
+                current["claim_version"], task["task_id"], task["revision"], request_id)
+            assert len(provider.requests) == requests_before_restart
+            task = cast(list[dict[str, Any]], resident.session_snapshot(sid)["foreground_tasks"])[0]
+            request_id = str(uuid4())
+        continued = await replacement.continue_foreground_task(owner.client_id, resident.workspace_id, sid,
+            current["claim_version"], task["task_id"], task["revision"], request_id)
+        for _ in range(10):
+            repeated = await replacement.continue_foreground_task(owner.client_id, resident.workspace_id, sid,
+                current["claim_version"], task["task_id"], task["revision"], request_id)
+            assert repeated["run_id"] == continued["run_id"]
+        await _wait_for_idle(resident, sid)
+        if recovery_fault == "lower_permission":
+            await _wait_until(lambda: any(e["type"] == "confirmation.requested" for e in sink.events))
+            event = next(e for e in sink.events if e["type"] == "confirmation.requested")
+            replacement.decide_confirmation(owner.client_id, cast(dict[str, Any], event["payload"])["token"], "declined")
+        await _wait_until(lambda: replacement.get_subagent(owner.client_id, resident.workspace_id,
+            sid, agent["agent_id"])["status"] == "completed")
+        assert not (resident.workspace_path / "recovery-write.txt").exists()
+        assert len(cast(list[object], replacement.list_subagents(owner.client_id,
+            resident.workspace_id, sid)["items"])) == 1
+        restored = _require_record(resident.subagent_repository(sid), agent["agent_id"])
+        assert restored.creator_snapshot == original.creator_snapshot
+        assert restored.conversation[:len(original.conversation)] == original.conversation
+        assert restored.execution_id != original.execution_id
+        messages = cast(list[dict[str, Any]], resident.session_snapshot(sid)["messages"])
+        assert sum(m.get("foreground_continue_request_id") == request_id for m in messages) == 1
+        await _wait_until(lambda: provider.automatic_continuation_count == 1)
+        await _wait_for_idle(resident, sid)
+        from aide.agent.session.restore import RestoreMode
+        anchor = cast(list[dict[str, Any]], resident.session_snapshot(sid)["restore_anchors"])[-1]["anchor_id"]
+        credential = resident.require_claim(owner.client_id, sid, current["claim_version"]).credential
+        prefix = restored.restore_prefixes[-1]
+        await replacement.inspect_restore(owner.client_id, resident.workspace_id, sid,
+            current["claim_version"], credential, "inspect-recovery", anchor)
+        await replacement.commit_restore(owner.client_id, resident.workspace_id, sid,
+            current["claim_version"], credential, "restore-recovery", anchor,
+            RestoreMode.CONVERSATION_ONLY.value)
+        rolled_back = _require_record(resident.subagent_repository(sid), agent["agent_id"])
+        assert rolled_back.status is SubAgentStatus.INTERRUPTED
+        assert rolled_back.conversation == tuple(prefix["conversation"])
+        assert rolled_back.usage == prefix["usage"]
+        assert rolled_back.execution_id == prefix["execution_id"]
+    finally:
+        provider.release_child.set()
+        await replacement.stop()

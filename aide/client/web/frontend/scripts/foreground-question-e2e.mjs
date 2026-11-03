@@ -14,7 +14,24 @@ try {
     new globalThis.URL(response.url()).pathname.endsWith("/conversations/open")
       && response.request().method() === "POST");
   await page.goto(`${control.details.url}/#ticket=${control.details.ticket}`);
-  assert.equal((await openedConversation).status(), 200);
+  const initialOpen = await openedConversation;
+  assert.equal(initialOpen.status(), 200);
+  const initialConversation = await initialOpen.json();
+  assert.equal(typeof initialConversation.session_id, "string");
+  assert.equal(typeof initialConversation.directory, "string");
+
+  async function readProviderObservationRows() {
+    const content = await readFile(control.details.provider_observation_path, "utf8");
+    return content.trim()
+      ? content.trim().split("\n").map((line) => JSON.parse(line))
+      : [];
+  }
+  async function navigateWithinApp(path) {
+    await page.evaluate((nextPath) => {
+      window.history.pushState({}, "", nextPath);
+      window.dispatchEvent(new window.PopStateEvent("popstate"));
+    }, path);
+  }
   await setInterfaceLanguage(page, "en");
   const input = page.getByRole("textbox", { name: "Message input", exact: true });
   const fixtureResponse = page.getByText("Fixture response.", { exact: true });
@@ -32,9 +49,39 @@ try {
   await input.press("Enter");
   await expect(page.getByRole("log")).toContainText("independent supplement");
   await waitForRunResponse(responseCount);
-  await page.reload();
+  const beforeRestart = await readProviderObservationRows();
+  const replayableRequestsBeforeRestart = beforeRestart.filter((item) =>
+    item.prompt.includes("foreground question acceptance")
+      || item.prompt.includes("independent supplement")).length;
+  const restarted = await control.restart();
+  await page.goto(`${restarted.url}/status#ticket=${encodeURIComponent(restarted.ticket)}`);
+  await expect(page.getByRole("heading", { name: "Service status", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Service status" }).getByRole("status"))
+    .toContainText("Online", { timeout: 30000 });
+  const resumedQuery = new globalThis.URLSearchParams({
+    directory: initialConversation.directory,
+    session: initialConversation.session_id,
+  });
+  const reopenedConversation = page.waitForResponse((response) =>
+    new globalThis.URL(response.url()).pathname.endsWith("/conversations/open")
+      && response.request().method() === "POST"
+      && response.request().postDataJSON()?.session_id === initialConversation.session_id);
+  await navigateWithinApp(`/chat?${resumedQuery.toString()}`);
+  const reopened = await reopenedConversation;
+  assert.equal(reopened.status(), 200);
+  assert.equal(reopened.request().postDataJSON()?.session_id, initialConversation.session_id);
+  assert.equal((await reopened.json()).session_id, initialConversation.session_id);
   await expect(page.getByText("Which output directory?", { exact: true })).toBeVisible();
+  const afterRestart = await readProviderObservationRows();
+  assert.equal(
+    afterRestart.filter((item) =>
+      item.prompt.includes("foreground question acceptance")
+        || item.prompt.includes("independent supplement")).length,
+    replayableRequestsBeforeRestart,
+  );
   const answer = page.getByRole("textbox", { name: "Answer to Aide's question", exact: true });
+  const taskPanel = page.getByRole("region", { name: "Foreground tasks" });
+  await expect(taskPanel).toContainText("Interrupted");
   responseCount = await fixtureResponse.count();
   await answer.fill("reports-directory");
   await page.getByRole("button", { name: "Send answer", exact: true }).click();
@@ -42,7 +89,6 @@ try {
   await expect(answer).toHaveCount(0);
   await expect(page.getByRole("log")).toContainText("reports-directory");
   await assert.rejects(access(join(control.details.home_root, ".aide", "chat", "after-question.txt")));
-  const taskPanel = page.getByRole("region", { name: "Foreground tasks" });
   await expect(taskPanel).toContainText("Completed");
   responseCount = await fixtureResponse.count();
   await taskPanel.getByRole("button", { name: /Continue task/ }).first().click();

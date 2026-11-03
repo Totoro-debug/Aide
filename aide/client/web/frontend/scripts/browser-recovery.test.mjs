@@ -114,10 +114,22 @@ test("expected restart on settings updates the return destination", () => {
 test("unexpected service replacement clears the stale conversation", () => {
   const decision = reconcileBrowserRecovery(recovery("high"), connection({
     currentInstanceId: "service-2",
+    location: { pathname: "/chat", search: "" },
   }));
   assert.equal(decision.snapshot, null);
   assert.equal(decision.storage, "clear");
   assert.deepEqual(decision.navigation, { kind: "conversation", route: "/" });
+});
+
+test("unexpected service replacement keeps an explicit Session route", () => {
+  const decision = reconcileBrowserRecovery(recovery("high"), connection({
+    currentInstanceId: "service-2",
+    location: { pathname: "/chat", search: "?session=session-1&directory=D%3A%5Cworkspace" },
+  }));
+  assert.equal(decision.snapshot, null);
+  assert.equal(decision.storage, "clear");
+  assert.equal(decision.serviceChanged, true);
+  assert.equal(decision.navigation, null);
 });
 
 test("stale recovery on initial settings connection keeps the settings page", () => {

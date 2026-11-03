@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any, cast
 
@@ -93,6 +94,110 @@ async def test_cli_question_and_answer_through_live_service(
         workspace=workspace,
         monkeypatch=monkeypatch,
         scenario=scenario,
+        provider=cast(_FixedCatalogProvider, provider),
+        size=(120, 40),
+    )
+
+
+@pytest.mark.asyncio
+async def test_cli_restarts_service_before_answering_and_continuing_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _QuestionProvider()
+    provider.release_answer.set()
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task_id: str | None = None
+    calls_before_restart: tuple[int, int] | None = None
+
+    async def create_interrupted_question(
+        app: TerminalConversationApp, pilot: Pilot[None]
+    ) -> None:
+        nonlocal task_id, calls_before_restart
+        input_area = app.query_one("#conversation-input", TextArea)
+        input_area.text = "ask-foreground-question"
+        await pilot.press("enter")
+        await _wait_for_turn(app)
+        await _wait_for_question(app, pilot, "Which output directory")
+
+        task_text = str(app.query_one("#foreground-tasks", Static).content)
+        match = re.search(r"Task ([^ ]+) · generation", task_text)
+        assert match is not None
+        task_id = match.group(1)
+        provider.framing_actions.append("invalid")
+        input_area.text = "independent supplement with uncertain task framing"
+        await pilot.press("enter")
+        await _wait_for_turn(app)
+        async with asyncio.timeout(10):
+            while "interrupted" not in str(app.query_one("#foreground-tasks", Static).content):
+                await pilot.pause()
+        calls_before_restart = (provider.stream_calls, provider.complete_calls)
+
+    await _run_cli_terminal_case(
+        agent_home=home,
+        workspace=workspace,
+        monkeypatch=monkeypatch,
+        scenario=create_interrupted_question,
+        provider=cast(_FixedCatalogProvider, provider),
+        size=(120, 40),
+    )
+
+    async def resume_and_continue(app: TerminalConversationApp, pilot: Pilot[None]) -> None:
+        assert task_id is not None
+        assert calls_before_restart is not None
+        input_area = app.query_one("#conversation-input", TextArea)
+        input_area.text = "/resume"
+        await pilot.press("enter")
+        await _wait_for_session_picker(app, pilot)
+        options = app.screen.query_one("#session-picker-options", OptionList)
+        selected_indices = [
+            index
+            for index, option in enumerate(options.options)
+            if re.search(r"\b[1-9][0-9]* messages?\b", str(option.prompt))
+        ]
+        assert len(selected_indices) == 1
+        selected = selected_indices[0]
+        options.highlighted = selected
+        await pilot.press("enter")
+        async with asyncio.timeout(10):
+            while app.query_one("#conversation-input", TextArea).read_only:
+                await pilot.pause()
+        question_widget = await _wait_for_question(app, pilot, "Which output directory")
+        assert "interrupted" in str(app.query_one("#foreground-tasks", Static).content)
+        assert (provider.stream_calls, provider.complete_calls) == calls_before_restart
+
+        async def wait_for_visible_response(previous_count: int) -> None:
+            async with asyncio.timeout(10):
+                while _visible_screen_text(app).count("The request is complete.") <= previous_count:
+                    await pilot.pause()
+
+        response_count = _visible_screen_text(app).count("The request is complete.")
+        input_area.text = "/answer reports-directory"
+        await pilot.press("enter")
+        await asyncio.wait_for(provider.answer_started.wait(), timeout=10)
+        await wait_for_visible_response(response_count)
+        async with asyncio.timeout(10):
+            while str(question_widget.content):
+                await pilot.pause()
+        assert "reports-directory" in provider.user_texts[-1]
+        assert provider.question_calls == 1
+
+        input_area.text = "/task continue " + task_id
+        calls_before_continue = provider.stream_calls
+        response_count = _visible_screen_text(app).count("The request is complete.")
+        await pilot.press("enter")
+        async with asyncio.timeout(10):
+            while provider.stream_calls == calls_before_continue:
+                await pilot.pause()
+        await wait_for_visible_response(response_count)
+        assert "Continue the current foreground task." in provider.user_texts[-1]
+
+    await _run_cli_terminal_case(
+        agent_home=home,
+        workspace=workspace,
+        monkeypatch=monkeypatch,
+        scenario=resume_and_continue,
         provider=cast(_FixedCatalogProvider, provider),
         size=(120, 40),
     )

@@ -1574,6 +1574,8 @@ class TerminalConversationApp(App[None]):
                         "Limits: question 2,000 characters; 4 options, 200-character labels; "
                         "text answer 10,000 characters."
                     )
+        if outbound.metadata.get("_remote_foreground_state_only") is True:
+            return True
         projection = ForegroundConversationProjection(
             session_id, tuple(message for message in messages if isinstance(message, dict)),
         )

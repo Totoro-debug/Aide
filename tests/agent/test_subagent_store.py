@@ -121,7 +121,7 @@ def test_record_round_trips_through_a_new_session_scoped_store(tmp_path: Path) -
     assert loaded.creator_snapshot.tool_names == ("read_file", "list_dir")
     path = state.subagents_directory / session_id / f"{completed.agent_id}.json"
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["schema_version"] == 4
+    assert saved["schema_version"] == 5
     assert saved["creator_snapshot"] == {
         "provider_id": "test-provider",
         "model": "chat",
@@ -178,7 +178,7 @@ def test_legacy_subagent_record_upgrades_from_schema_v2(tmp_path: Path) -> None:
     assert loaded.source.task_generation is None
     store.save(replace(loaded, revision=loaded.revision + 1))
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["schema_version"] == 4
+    assert saved["schema_version"] == 5
     assert saved["source"]["task_id"] is None
 
 
@@ -200,7 +200,7 @@ def test_legacy_subagent_record_upgrades_from_schema_v3(tmp_path: Path) -> None:
     assert loaded.restore_run_token == _RESTORE_TOKEN
     store.save(replace(loaded, revision=loaded.revision + 1))
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["schema_version"] == 4
+    assert saved["schema_version"] == 5
 
 
 def test_restore_discards_child_answer_and_restores_waiting_checkpoint_and_artifacts(
@@ -1007,3 +1007,21 @@ def test_subagent_source_rejects_unknown_fields(tmp_path: Path, schema_version: 
     with pytest.raises(SubAgentStoreError):
         store.get(record.agent_id)
     assert path.read_bytes() == before
+
+
+
+def test_schema_four_keeps_execution_identity_when_upgraded(tmp_path: Path) -> None:
+    state, sid = _workspace(tmp_path)
+    store = SubAgentRecordStore(state, sid, now=lambda: _NOW)
+    record = _register(store, "Legacy execution")
+    payload = record.to_dict()
+    payload["schema_version"] = 4
+    path = state.subagents_directory / sid / f"{record.agent_id}.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    restored = SubAgentRecordStore(state, sid, now=lambda: _NOW).get(record.agent_id)
+    assert restored is not None
+    assert restored.execution_id == record.execution_id
+    assert restored.restore_run_token == record.restore_run_token
+    assert restored.creator_snapshot == record.creator_snapshot
+    assert restored.status is SubAgentStatus.INTERRUPTED
+    assert restored.schema_version == 5

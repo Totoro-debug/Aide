@@ -633,3 +633,24 @@ def test_delivery_schema_rejects_damaged_or_future_state(tmp_path: Path, mutatio
     store.path.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(ForegroundWorkError):
         store.load()
+
+@pytest.mark.parametrize("receipts", [
+    [{"generation": 2, "model_calls": 1}],
+    [{"model_calls": 1}, {"model_calls": 2}],
+    [{"iteration_stage": 0, "model_calls": 1}],
+])
+def test_uncertain_execution_receipts_never_complete_or_charge_task(
+    tmp_path: Path, receipts: list[dict[str, int]],
+) -> None:
+    store = _store(tmp_path)
+    store.begin_task("task", "execution", generation=1)
+    messages = []
+    for values in receipts:
+        marker = {"task_id": "task", "generation": 1, "execution_id": "execution",
+                  "commit_id": "task:1:execution", "iteration_stage": 1, **values}
+        messages.append({"role": "assistant", "status": "completed",
+                         "foreground_execution_commit": marker})
+    recovered = store.reconcile(messages)
+    assert recovered.tasks[0].state == "interrupted"
+    assert store.remaining_iteration_budget("task", generation=1) == 50
+    assert store.reconcile(messages) == recovered

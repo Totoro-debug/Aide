@@ -2053,6 +2053,29 @@ class AgentRunExecutor:
                     if receipt_id not in receipt_list:
                         receipt_list.append(receipt_id)
                 assistant_message["foreground_delivery_receipts"] = receipt_list
+        if (
+            self._foreground_work_store is not None
+            and result.finish_reason == "completed"
+            and result.suspension is None
+            and (framing_result is None or framing_result.status == "resolved")
+            and isinstance(task_id, str)
+            and type(task_generation) is int
+            and isinstance(execution_id, str)
+            and task is not None
+        ):
+            assistant_message = next(
+                (message for message in reversed(run_messages) if message.get("role") == "assistant"),
+                None,
+            )
+            if assistant_message is not None:
+                assistant_message["foreground_execution_commit"] = {
+                    "commit_id": f"{task_id}:{task_generation}:{execution_id}",
+                    "task_id": task_id,
+                    "generation": task_generation,
+                    "execution_id": execution_id,
+                    "model_calls": result.usage["model_calls"],
+                    "iteration_stage": task.iteration_stage,
+                }
         durable_current_user = deepcopy(current_user)
         durable_current_user.pop("_runtime_input_kind", None)
         durable_current_user.pop("_runtime_subagent_result", None)

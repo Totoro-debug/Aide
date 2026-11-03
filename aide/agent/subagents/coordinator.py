@@ -170,6 +170,28 @@ class SubAgentPool:
         permission_level: str | None = None,
     ) -> SubAgentRecord:
         """Queue one answered foreground SubAgent as a new FIFO execution segment."""
+        return self._resume_segment(
+            agent_id, question_id=question_id, answer=answer, execution_id=execution_id,
+            restore_run_token=restore_run_token, permission_level=permission_level,
+        )
+
+    def resume_interrupted(
+        self, agent_id: str, *, execution_id: str, restore_run_token: str,
+        permission_level: str, saved_answer: str | None = None,
+    ) -> SubAgentRecord:
+        """Continue saved history after an explicit user operation, without replaying tools."""
+        return self._resume_segment(
+            agent_id, question_id=None,
+            answer=("Continue this interrupted task. Earlier tool outcomes may be uncertain; do not replay them."
+                    if saved_answer is None else f"Human Answer: {saved_answer}"),
+            execution_id=execution_id, restore_run_token=restore_run_token,
+            permission_level=permission_level,
+        )
+
+    def _resume_segment(
+        self, agent_id: str, *, question_id: str | None, answer: str,
+        execution_id: str, restore_run_token: str, permission_level: str | None,
+    ) -> SubAgentRecord:
         loop = self._bind_loop()
         if not self._accepting or self._shutdown:
             raise SubAgentRequestError("SubAgent Pool is not accepting resumed tasks")
@@ -181,9 +203,12 @@ class SubAgentPool:
             SubAgentStatus.RUNNING,
         }:
             return current
-        if current.status is not SubAgentStatus.WAITING_FOR_ANSWER:
+        expected_status = (
+            SubAgentStatus.INTERRUPTED if question_id is None else SubAgentStatus.WAITING_FOR_ANSWER
+        )
+        if current.status is not expected_status:
             raise SubAgentRequestError("SubAgent is not waiting for an answer")
-        if (current.context_state or {}).get("pending_question_id") != question_id:
+        if question_id is not None and (current.context_state or {}).get("pending_question_id") != question_id:
             raise SubAgentRequestError("SubAgent question is no longer current")
         if not isinstance(answer, str) or not answer.strip():
             raise SubAgentRequestError("SubAgent answer must not be empty")
@@ -209,12 +234,31 @@ class SubAgentPool:
             "usage": current.usage,
             "execution_id": current.execution_id,
             "current_restore_run_token": current.restore_run_token,
+            **({} if question_id is not None else {
+                "status": current.status.value,
+                "error": None if current.error is None else current.error.to_dict(),
+            }),
         }
         next_context = dict(current.context_state or {})
         next_context.pop("pending_question_id", None)
         next_context["segment_usage_base"] = dict(current.usage or {})
         if permission_level is not None:
             next_context["resume_permission_level"] = permission_level
+        recovery_results: list[dict[str, object]] = []
+        if question_id is None:
+            completed_calls = {message.get("tool_call_id") for message in current.conversation
+                               if message.get("role") == "tool"}
+            for message in current.conversation:
+                calls = message.get("tool_calls", [])
+                if not isinstance(calls, list):
+                    continue
+                for call in calls:
+                    if not isinstance(call, dict) or call.get("id") in completed_calls:
+                        continue
+                    recovery_results.append({
+                        "role": "tool", "tool_call_id": call["id"], "status": "error",
+                        "content": "Execution interrupted before this tool outcome was committed. The side effect may have occurred; it was not replayed.",
+                    })
         updated = self._repository.save(
             replace(
                 current,
@@ -223,10 +267,11 @@ class SubAgentPool:
                 finished_at=None,
                 conversation=(
                     *current.conversation,
+                    *recovery_results,
                     {
                         "role": "user",
-                        "content": f"Human Answer: {answer}",
-                        "foreground_question_id": question_id,
+                        "content": answer if question_id is None else f"Human Answer: {answer}",
+                        **({} if question_id is None else {"foreground_question_id": question_id}),
                     },
                 ),
                 context_state=next_context,

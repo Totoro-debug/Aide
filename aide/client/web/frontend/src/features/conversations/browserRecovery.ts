@@ -55,6 +55,7 @@ export function reconcileBrowserRecovery(
   const { currentInstanceId, previousInstanceId, initial, location } = connection;
   const serviceChanged = previousInstanceId !== null && previousInstanceId !== currentInstanceId;
   const expectedRestart = serviceChanged && connection.expectedRestart;
+  const explicitSession = new URLSearchParams(location.search).get("session");
   let recovery = snapshot;
   let storage: BrowserRecoveryDecision["storage"] = "keep";
   let navigation: BrowserRecoveryDecision["navigation"] = null;
@@ -71,7 +72,8 @@ export function reconcileBrowserRecovery(
     || (recovery !== null && recovery.service_instance_id !== currentInstanceId)) {
     recovery = null;
     storage = "clear";
-    if ((initial || serviceChanged) && isConversationPath(location.pathname)) {
+    if ((initial || serviceChanged) && isConversationPath(location.pathname)
+      && !isNonEmptyString(explicitSession)) {
       navigation = { kind: "conversation", route: "/" };
     }
   } else if (recovery !== null && initial

@@ -272,14 +272,14 @@ class SubAgentRecordStore:
                     raise SubAgentStoreError("SubAgent Restore directory is unavailable")
                 restored = replace(
                     record,
-                    status=SubAgentStatus.WAITING_FOR_ANSWER,
+                    status=SubAgentStatus(prefix.get("status", "waiting_for_answer")),
                     started_at=_datetime_from_prefix(prefix.get("started_at")),
                     finished_at=_datetime_from_prefix(prefix.get("finished_at")),
                     conversation=tuple(cast(list[dict[str, object]], prefix["conversation"])),
                     context_state=cast(dict[str, object], prefix["context_state"]),
                     artifact_paths=prior_artifacts,
                     result=None,
-                    error=None,
+                    error=(None if prefix.get("error") is None else SubAgentError(**prefix["error"])),
                     usage=cast(dict[str, int], prefix["usage"]),
                     execution_id=cast(str, prefix["execution_id"]),
                     restore_run_token=cast(str | None, prefix["current_restore_run_token"]),
@@ -520,6 +520,10 @@ class SubAgentRecordStore:
                 SubAgentStatus.CANCELLED,
                 SubAgentStatus.INTERRUPTED,
             }
+        elif existing.status is SubAgentStatus.INTERRUPTED:
+            if candidate.execution_id == existing.execution_id:
+                raise SubAgentStoreError("Interrupted recovery requires a new execution")
+            allowed = {SubAgentStatus.QUEUED}
         else:
             raise SubAgentStoreError("terminal SubAgent records cannot be changed")
         if candidate.status not in allowed:

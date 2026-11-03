@@ -17,6 +17,7 @@ import tomlkit
 from aiohttp.test_utils import TestServer
 
 from aide.agent.confirmation import ConfirmationEnvelope, SubAgentConfirmationOwner
+from aide.agent.message_bus import InboundMessage
 from aide.agent.permission import ToolPermissionLevel
 from aide.agent.runner import AgentRunner, AgentRunnerResult
 from aide.agent.session.deletion import begin_session_deletion
@@ -2294,20 +2295,44 @@ async def test_claimless_automatic_continuation_keeps_task_ceiling_and_denies_un
     workspace._schedule_permission.select(schedule_permission)
     target = workspace.workspace_path / "auto-output.txt"
     target.write_bytes(b"original bytes")
-    claim = cast(
-        dict[str, object],
-        (await service.claim(client_id, workspace.workspace_id, session_id))["claim"],
-    )
+    await service.claim(client_id, workspace.workspace_id, session_id)
     sink = cast(_CollectingSink, service.client(client_id).sink)
-    await workspace.input(
-        client_id,
-        session_id,
-        cast(int, claim["claim_version"]),
-        "Please make an initial delegation request.",
-        _RUN_ID,
+    task_id, execution_id, restore_run_token = str(uuid4()), str(uuid4()), str(uuid4())
+    work_store = workspace.foreground_work_store(session_id)
+    work_store.begin_task(
+        task_id, execution_id, generation=1, origin_anchor_id=None,
+        permission_level=task_permission,
     )
-    await asyncio.wait_for(provider.child_started.wait(), timeout=5)
-    await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=5)
+    work_store.complete_task(task_id, execution_id)
+    task = next(item for item in work_store.load().tasks if item.task_id == task_id)
+    repository = workspace.subagent_repository(session_id)
+    child = repository.register(
+        title="Previously accepted child",
+        task="Complete the previously accepted work.",
+        parent_run_id=task.execution_id,
+        source=SubAgentSource(
+            kind=SubAgentSourceKind.FOREGROUND,
+            restore_run_token=restore_run_token,
+            task_id=task.task_id,
+            task_generation=task.generation,
+        ),
+        creator_snapshot=replace(_snapshot(), permission_level=task_permission),
+    )
+    child = _complete(repository, child)
+    state = workspace._loops[session_id]
+    automatic_inbound = InboundMessage(
+        content=(
+            "SubAgent result for automatic continuation:\n"
+            f"Title: {child.title}\nStatus: completed\nResult: {child.result}"
+        ),
+        metadata={
+            "run_id": str(uuid4()),
+            "foreground_task_id": task.task_id,
+            "foreground_automatic_continuation": True,
+            "foreground_task_generation": task.generation,
+            "foreground_effect_run_token": restore_run_token,
+        },
+    )
 
     await workspace.release(client_id, session_id)
     service.client_permission(client_id).select(current_permission)
@@ -2328,7 +2353,7 @@ async def test_claimless_automatic_continuation_keeps_task_ceiling_and_denies_un
         await asyncio.wait_for(expiry_waiting.wait(), timeout=5)
         allow_expiry.set()
         await asyncio.wait_for(expiry, timeout=5)
-    provider.release_child.set()
+    await state.loop.run_automatic_continuation(automatic_inbound)
     await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=10)
     async with asyncio.timeout(12):
         while True:

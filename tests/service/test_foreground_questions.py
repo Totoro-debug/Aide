@@ -52,6 +52,7 @@ class _QuestionProvider:
         self.two_choice_answers_started = asyncio.Event()
         self.question_input_tokens = 1
         self.framing_actions: list[str] = []
+        self.router_tool_catalogs: list[tuple[str, ...]] = []
 
     async def complete(
         self,
@@ -97,6 +98,11 @@ class _QuestionProvider:
     ) -> AsyncIterator[ModelStreamEvent]:
         del model, max_output, temperature, reasoning_effort, timeout, continuation
         self.stream_calls += 1
+        tool_names = tuple(
+            cast(str, tool.get("name") or cast(dict[str, Any], tool.get("function", {})).get("name"))
+            for tool in tools
+        )
+        self.router_tool_catalogs.append(tool_names)
         has_ask_user = any(
             tool.get("name") == "ask_user"
             or (
@@ -233,8 +239,9 @@ async def _open_chat(
     directory: Path,
     *,
     session_id: str | None = None,
+    client_kind: str = "cli",
 ) -> tuple[str, str, int, str]:
-    client = await service.register_client("cli")
+    client = await service.register_client(client_kind)
     workspace = await service.attach_workspace(client.client_id, directory)
     opened = await service.open_conversation(
         client.client_id,
@@ -278,8 +285,9 @@ async def _wait_for_idle(workspace: Any, session_id: str) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("client_kind", ["cli", "web"])
 async def test_question_answer_is_durable_claimed_and_idempotent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client_kind: str
 ) -> None:
     home = _home(tmp_path / "agent-home")
     directory = tmp_path / "workspace"
@@ -291,7 +299,9 @@ async def test_question_answer_is_durable_claimed_and_idempotent(
     await service.start()
     replacement: AgentService | None = None
     try:
-        client_id, session_id, claim_version, workspace_id = await _open_chat(service, directory)
+        client_id, session_id, claim_version, workspace_id = await _open_chat(
+            service, directory, client_kind=client_kind
+        )
         workspace = service.workspace(workspace_id)
         first = await service.handle_command(
             client_id,
@@ -313,6 +323,20 @@ async def test_question_answer_is_durable_claimed_and_idempotent(
         revision = cast(int, question["revision"])
         assert question["state"] == "pending"
         assert provider.question_calls == 1
+        assert any(
+            set(names) == {"ask_user", "dispatch_worker", "finish"}
+            for names in provider.router_tool_catalogs
+        ), provider.router_tool_catalogs
+        assert all(
+            not set(names) & {
+                "read_file", "write_file", "edit_file", "exec", "schedule",
+                "spawn_agent", "wait_agent", "list_agents", "tool_search",
+            }
+            for names in provider.router_tool_catalogs
+            if set(names) == {"ask_user", "dispatch_worker", "finish"}
+        )
+        assert workspace.session_snapshot(session_id)["session_id"] == session_id
+        assert workspace.workspace_id == workspace_id
         assert not (directory / "after-question.txt").exists()
         history = workspace._loops[session_id].loop.session.messages
         tool_messages = [message for message in history if message.get("role") == "tool"]

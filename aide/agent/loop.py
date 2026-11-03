@@ -51,6 +51,7 @@ from aide.agent.permission import (
     RuntimePermissionControl,
     ToolPermissionLevel,
 )
+from aide.agent.router import DispatchWorkerTool, FinishRouterTool, RouterDecisionValidator
 from aide.agent.run_errors import CommittableAgentRunError
 from aide.agent.runner import (
     AgentRunner,
@@ -304,6 +305,7 @@ class AgentRunExecutor:
         self,
         *,
         excluded_names: Sequence[str] = (),
+        allowed_names: Sequence[str] | None = None,
         permission_snapshot: PermissionSnapshot | None = None,
         permission_context: PermissionContext | None = None,
         tool_context: ToolRunContext | None = None,
@@ -312,6 +314,7 @@ class AgentRunExecutor:
         return build_agent_run_gateway(
             self._tool_gateway,
             excluded_names=excluded_names,
+            allowed_names=allowed_names,
             mcp_keywords=self._mcp_keywords,
             permission_snapshot=permission_snapshot,
             permission_context=permission_context,
@@ -1695,6 +1698,12 @@ class AgentRunExecutor:
         subagents_eligible = (
             self._subagent_coordinator is not None
             and restore_run_token is not None
+            and (
+                foreground_work_store is None
+                or isinstance(question_id, str)
+                or explicit_continuation
+                or automatic_continuation
+            )
         )
         foreground_tools: tuple[BaseTool, ...] = ()
         foreground_context: ToolRunContext | None = None
@@ -1769,7 +1778,16 @@ class AgentRunExecutor:
                     )
                 return None
 
-            foreground_tools = (AskUserTool(),)
+            foreground_tools = (
+                AskUserTool(),
+                FinishRouterTool(),
+                DispatchWorkerTool(
+                    RouterDecisionValidator(
+                        session_id=active_session.session_id,
+                        workspace_id=str(self._workspace_state.workspace_path),
+                    )
+                ),
+            )
             foreground_context = ToolRunContext(
                 workspace=self._workspace_state.workspace_path,
                 schedule_service=self._schedule_service,
@@ -1788,6 +1806,14 @@ class AgentRunExecutor:
             permission_snapshot=permission_snapshot,
             tool_context=foreground_context,
             run_tools=foreground_tools,
+            allowed_names=("ask_user", "dispatch_worker", "finish")
+            if (
+                foreground_work_store is not None
+                and not isinstance(question_id, str)
+                and not explicit_continuation
+                and not automatic_continuation
+            )
+            else None,
         )
         if subagents_eligible:
             assert restore_run_token is not None

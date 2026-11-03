@@ -1107,6 +1107,108 @@ async def test_runner_executes_all_tools_in_provider_order_in_one_iteration() ->
 
 
 @pytest.mark.asyncio
+async def test_runner_finishes_with_router_response_without_another_model_call() -> None:
+    provider = ScriptedFakeProvider(
+        streams=(
+            StreamScript(
+                events=(
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(
+                                content="",
+                                tool_calls=(ModelToolCall(
+                                    "finish-call", "finish", '{"response":"Final answer"}'
+                                ),),
+                            ),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="tool_calls",
+                        )
+                    ),
+                )
+            ),
+        )
+    )
+    from aide.agent.router import FinishRouterTool
+
+    gateway = SingleToolGateway([FinishRouterTool()])
+    result = await _runner(ScriptedFakeRouter(provider)).run(
+        [{"role": "user", "content": "Respond directly."}],
+        model="chat",
+        tool_gateway=gateway,
+        on_output=_ignore_output,
+        confirmation=None,
+        externalize_result=None,
+        cancel_requested=None,
+        max_iterations=50,
+    )
+
+    assert result.finish_reason == "completed"
+    assert result.final_content == "Final answer"
+    assert len(provider.stream_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_emits_start_for_tool_calls_skipped_after_router_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import aide.agent.runner as runner_module
+
+    monkeypatch.setattr(runner_module, "max_tool_call_concurrency", lambda: 1)
+    provider = ScriptedFakeProvider(
+        streams=(
+            StreamScript(
+                events=(
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(
+                                content="",
+                                tool_calls=(
+                                    ModelToolCall(
+                                        "finish-call", "finish", '{"response":"Final answer"}'
+                                    ),
+                                    ModelToolCall("skipped-call", "other", "{}"),
+                                ),
+                            ),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="tool_calls",
+                        )
+                    ),
+                )
+            ),
+        )
+    )
+    from aide.agent.router import FinishRouterTool
+
+    gateway = SingleToolGateway([
+        FinishRouterTool(),
+        FakeTool(name="other", description="Other tool.", outcomes=["unused"]),
+    ])
+    events: list[object] = []
+    result = await _runner(ScriptedFakeRouter(provider)).run(
+        [{"role": "user", "content": "Respond directly."}],
+        model="chat",
+        tool_gateway=gateway,
+        on_output=lambda event: _observe(events, event),
+        confirmation=None,
+        externalize_result=None,
+        cancel_requested=None,
+        max_iterations=50,
+    )
+
+    assert result.finish_reason == "completed"
+    assert [
+        (type(event).__name__, event.tool_call_id)
+        for event in events
+        if isinstance(event, (AgentRunnerToolCallStarted, AgentRunnerToolCallFinished))
+    ] == [
+        ("AgentRunnerToolCallStarted", "finish-call"),
+        ("AgentRunnerToolCallFinished", "finish-call"),
+        ("AgentRunnerToolCallStarted", "skipped-call"),
+        ("AgentRunnerToolCallFinished", "skipped-call"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_runner_limits_read_only_batches_and_keeps_result_order(monkeypatch: pytest.MonkeyPatch) -> None:
     import aide.agent.runner as runner_module
 

@@ -634,6 +634,46 @@ class AgentRunner:
                         ),
                         None,
                     )
+                    finish_result = next(
+                        (
+                            result
+                            for call, result in zip(batch_calls, completed_results, strict=True)
+                            if call.name == "finish" and result.status == "success"
+                        ),
+                        None,
+                    )
+                    if finish_result is not None:
+                        for tool_call in pending_tool_calls:
+                            await emit(
+                                AgentRunnerToolCallStarted(
+                                    tool_call_id=tool_call.id,
+                                    tool_name=tool_call.name,
+                                    arguments=tool_call.arguments,
+                                )
+                            )
+                            deferred = ToolResult(
+                                tool_call_id=tool_call.id,
+                                name=tool_call.name,
+                                status="error",
+                                content="Tool call not executed because the Router finished.",
+                                artifact=None,
+                            )
+                            _append_run_message(runtime_messages, increment, _tool_run_message(deferred))
+                            await emit(AgentRunnerToolCallFinished(
+                                tool_call_id=tool_call.id,
+                                tool_name=tool_call.name,
+                                status="error",
+                                result=deferred.content,
+                            ))
+                        pending_tool_calls.clear()
+                        await checkpoint()
+                        await close_segment()
+                        return AgentRunnerResult(
+                            messages=increment,
+                            final_content=finish_result.content,
+                            usage=usage,
+                            finish_reason="completed",
+                        )
                     if question_failure is not None:
                         for tool_call in pending_tool_calls:
                             await emit(

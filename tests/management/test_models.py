@@ -109,6 +109,12 @@ def test_session_summary_exposes_only_picker_fields_and_validates_message_count(
         created_at=datetime(2026, 7, 11, 15, 30, 12, 123000, tzinfo=LOCAL_OFFSET),
         updated_at=datetime(2026, 7, 11, 15, 31, 2, 456000, tzinfo=LOCAL_OFFSET),
         message_count=12,
+        foreground_attention={
+            "question_count": 0,
+            "main_question_count": 0,
+            "subagent_question_count": 0,
+            "interrupted_task_count": 0,
+        },
     )
 
     assert summary.id == "20260711-153012-123456_550e8400-e29b-41d4-a716-446655440000"
@@ -116,5 +122,11 @@ def test_session_summary_exposes_only_picker_fields_and_validates_message_count(
     assert summary.created_at == datetime(2026, 7, 11, 15, 30, 12, 123000, tzinfo=LOCAL_OFFSET)
     assert summary.updated_at == datetime(2026, 7, 11, 15, 31, 2, 456000, tzinfo=LOCAL_OFFSET)
     assert summary.message_count == 12
+    assert summary.foreground_attention == {
+        "question_count": 0,
+        "main_question_count": 0,
+        "subagent_question_count": 0,
+        "interrupted_task_count": 0,
+    }
     with pytest.raises(ValueError, match="message_count"):
         replace(summary, message_count=-1)

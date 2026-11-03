@@ -258,4 +258,13 @@ class _ConversationRecoveryScreen(ModalScreen[str]):
 def _session_picker_label(session: SessionListingEntry) -> str:
     local_updated_at = session.updated_at.astimezone().strftime("%Y-%m-%d %H:%M")
     noun = "message" if session.message_count == 1 else "messages"
-    return f"{session.title} | {local_updated_at} | {session.message_count} {noun}"
+    label = f"{session.title} | {local_updated_at} | {session.message_count} {noun}"
+    attention = session.foreground_attention
+    if attention["question_count"] > 0:
+        label += (
+            f" | Questions: {attention['question_count']}"
+            f" (Main {attention['main_question_count']}, SubAgent {attention['subagent_question_count']})"
+        )
+    if attention["interrupted_task_count"] > 0:
+        label += f" | Interrupted tasks: {attention['interrupted_task_count']}"
+    return label

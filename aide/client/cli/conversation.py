@@ -457,6 +457,7 @@ class TerminalConversationApp(App[None]):
         self._session_switch_result: asyncio.Future[bool | None] | None = None
         self._pending_inputs: deque[str] = deque()
         self._foreground_question: dict[str, object] | None = None
+        self._foreground_questions: list[dict[str, object]] = []
         self._foreground_tasks: list[dict[str, object]] = []
         self._bus_snapshot: tuple[InboundMessage, ...] = ()
         self._consumed_runs: deque[_ConsumedRun] = deque()
@@ -1161,13 +1162,34 @@ class TerminalConversationApp(App[None]):
             if parsed_task_command is not None:
                 result = await self._dispatch_foreground_task_command(parsed_task_command)
             elif parsed_answer is not None:
-                answer_kind, answer_value = parsed_answer
+                answer_kind, answer_value = parsed_answer[:2]
+                requested_question_id = parsed_answer[2] if len(parsed_answer) == 3 else None
                 if not answer_value:
                     await self._mount_management_rows(
-                        "input", "Use /answer <text>, /answer --option <id>, or /answer --text <text>."
+                        "input", "Use /answer <text>, /answer --option <id>, or "
+                        "/answer --question <question_id> <text>."
                     )
                     return
-                question = self._foreground_question
+                available_questions = [
+                    item for item in self._foreground_questions
+                    if item.get("state") in {"pending", "answer_received"}
+                ]
+                question = (
+                    next(
+                        (item for item in available_questions
+                         if item.get("question_id") == requested_question_id),
+                        None,
+                    )
+                    if requested_question_id is not None
+                    else available_questions[0] if len(available_questions) == 1 else None
+                )
+                if requested_question_id is None and len(available_questions) > 1:
+                    await self._mount_management_rows(
+                        "input",
+                        "Multiple foreground questions are waiting; use "
+                        "/answer --question <question_id> before the answer.",
+                    )
+                    return
                 if (
                     question is None
                     or not callable(answer_question)
@@ -1491,17 +1513,15 @@ class TerminalConversationApp(App[None]):
         if not isinstance(messages, list):
             return True
         questions = snapshot.get("foreground_questions")
-        self._foreground_question = next(
-            (
-                item for item in questions
-                if isinstance(item, dict)
-                and item.get("state") in {"pending", "answer_received", "interrupted"}
-                and isinstance(item.get("question_id"), str)
-                and isinstance(item.get("revision"), int)
-                and isinstance(item.get("text"), str)
-            ),
-            None,
-        ) if isinstance(questions, list) else None
+        self._foreground_questions = [
+            item for item in questions
+            if isinstance(item, dict)
+            and item.get("state") in {"pending", "answer_received", "interrupted"}
+            and isinstance(item.get("question_id"), str)
+            and isinstance(item.get("revision"), int)
+            and isinstance(item.get("text"), str)
+        ] if isinstance(questions, list) else []
+        self._foreground_question = next(iter(self._foreground_questions), None)
         task_snapshots = snapshot.get("foreground_tasks")
         self._foreground_tasks = [
             item for item in task_snapshots
@@ -1528,52 +1548,57 @@ class TerminalConversationApp(App[None]):
         question_widget = next(
             (widget for widget in self.query(Static) if widget.id == "foreground-question"), None
         )
-        if question_widget is None and self._foreground_question is not None:
+        if question_widget is None and self._foreground_questions:
             question_widget = Static("", id="foreground-question", markup=False)
             await self.query_one("#conversation-input-region", Vertical).mount(
                 question_widget, before=self.query_one("#reasoning-effort-selector")
             )
         if question_widget is not None:
-            question_widget.display = self._foreground_question is not None
-            if self._foreground_question is None:
+            question_widget.display = bool(self._foreground_questions)
+            if not self._foreground_questions:
                 question_widget.update("")
             else:
-                saved = self._foreground_question.get("state") == "answer_received"
-                owner_agent_id = self._foreground_question.get("owner_agent_id")
-                question_status = (
-                    "Answer saved"
-                    if saved
-                    else f"SubAgent {owner_agent_id} is waiting for an answer"
-                    if isinstance(owner_agent_id, str)
-                    else "Aide is waiting for an answer"
-                )
-                if self._foreground_question.get("state") == "interrupted":
-                    question_widget.update(
-                        "Work interrupted while saving. Check its effects before sending a new instruction."
+                question_lines: list[str] = []
+                for question in self._foreground_questions:
+                    question_id = str(question["question_id"])
+                    owner_agent_id = question.get("owner_agent_id")
+                    source = (
+                        f"SubAgent {owner_agent_id}"
+                        if isinstance(owner_agent_id, str)
+                        else "Main Agent"
                     )
-                else:
-                    options = self._foreground_question.get("options")
-                    option_lines = (
-                        [
+                    if question.get("state") == "interrupted":
+                        question_lines.append(
+                            f"{source} question {question_id}: interrupted while saving. "
+                            "Check its effects before continuing."
+                        )
+                        continue
+                    question_status = (
+                        "Answer saved"
+                        if question.get("state") == "answer_received"
+                        else f"{source} is waiting for an answer"
+                    )
+                    question_lines.append(
+                        f"{question_status} (question {question_id}): {question['text']}"
+                    )
+                    options = question.get("options")
+                    if isinstance(options, list):
+                        question_lines.extend(
                             f"  {option['id']}: {option['label']}"
                             for option in options
                             if isinstance(option, dict)
                             and isinstance(option.get("id"), str)
                             and isinstance(option.get("label"), str)
-                        ]
-                        if isinstance(options, list)
-                        else []
-                    )
-                    options_text = "\n".join(option_lines)
-                    question_details = f"{options_text}\n" if options_text else ""
-                    question_widget.update(
-                        f"{question_status}: {self._foreground_question['text']}\n"
-                        f"{question_details}"
+                        )
+                    question_lines.append(
                         "Use /answer <text> or /answer --option <id>; "
-                        "use /answer --text <text> for literal option syntax.\n"
-                        "Limits: question 2,000 characters; 4 options, 200-character labels; "
-                        "text answer 10,000 characters."
+                        "use /answer --question <question_id> for multiple questions."
                     )
+                question_lines.append(
+                    "Limits: question 2,000 characters; 4 options, 200-character labels; "
+                    "text answer 10,000 characters."
+                )
+                question_widget.update("\n".join(question_lines))
         if outbound.metadata.get("_remote_foreground_state_only") is True:
             return True
         projection = ForegroundConversationProjection(
@@ -2558,7 +2583,7 @@ class TerminalConversationApp(App[None]):
 
 
 
-def _cli_question_answer(text: str) -> tuple[str, str] | None:
+def _cli_question_answer(text: str) -> tuple[str, str] | tuple[str, str, str] | None:
     stripped = text.strip()
     command = "/answer"
     if stripped.casefold() == command:
@@ -2566,6 +2591,19 @@ def _cli_question_answer(text: str) -> tuple[str, str] | None:
     if not stripped.casefold().startswith((command + " ", command + "\n")):
         return None
     value = stripped[len(command) :].strip()
+    question_flag = "--question"
+    if value.casefold() == question_flag:
+        return "text", "", ""
+    if value.casefold().startswith((question_flag + " ", question_flag + "\n")):
+        parts = value.split(None, 2)
+        if len(parts) < 2:
+            return "text", "", ""
+        if len(parts) == 2:
+            return "text", "", parts[1]
+        answer = _cli_question_answer(f"/answer {parts[2]}")
+        if answer is None or len(answer) != 2:
+            return None
+        return answer[0], answer[1], parts[1]
     text_flag = "--text"
     if value.casefold() == text_flag:
         return "text", ""

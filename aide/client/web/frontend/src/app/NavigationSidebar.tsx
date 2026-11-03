@@ -8,6 +8,7 @@ import { getChatSessions, getProjectSessions } from "../shared/service/api";
 import type {
   ChatSessionSummary,
   ChatSessionsResponse,
+  ForegroundAttentionSummary,
   ProjectSessionsResponse,
   RegisteredProject,
   SessionSummary,
@@ -16,6 +17,25 @@ import commonStyles from "../shared/styles/controls.module.css";
 import moduleStyles from "./App.module.css";
 
 const styles = { ...commonStyles, ...moduleStyles };
+
+function SessionAttentionBadge({ summary }: { summary: ForegroundAttentionSummary }) {
+  const { t } = useTranslation();
+  const reminders = [
+    summary.question_count > 0
+      ? t("sessions.attentionQuestions", {
+        count: summary.question_count,
+        main: summary.main_question_count,
+        subagent: summary.subagent_question_count,
+      })
+      : null,
+    summary.interrupted_task_count > 0
+      ? t("sessions.attentionInterrupted", { count: summary.interrupted_task_count })
+      : null,
+  ].filter((item): item is string => item !== null);
+  if (reminders.length === 0) return null;
+  const label = reminders.join(" · ");
+  return <small className={styles.attentionBadge} title={label} aria-label={label}>{label}</small>;
+}
 
 const EXPANDED_PROJECTS_KEY = "aide.sidebar.expanded-projects";
 const SESSION_PAGE_SIZE = 100;
@@ -337,6 +357,7 @@ export default function NavigationSidebar({
                     >
                       <span>{session.title}</span>
                       <small>{session.directory}</small>
+                      <SessionAttentionBadge summary={session.foreground_attention} />
                     </button>
                     <SessionActionMenu
                       sessionTitle={session.title}
@@ -606,6 +627,7 @@ function ProjectNavigationItem({
                     >
                       <MessageSquare size={13} aria-hidden="true" />
                       <span>{session.title}</span>
+                      <SessionAttentionBadge summary={session.foreground_attention} />
                       {session.occupied ? (
                         <small className={styles.occupiedBadge}>
                           {t(session.occupied_by === "client" ? "sessions.occupied" : "sessions.occupiedHere")}

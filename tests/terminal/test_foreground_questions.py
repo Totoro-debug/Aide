@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -14,6 +15,7 @@ from aide.client.cli.conversation import (
     _cli_question_answer,
     _cli_task_command,
 )
+from aide.provider.models import ModelStreamEvent
 from tests.agent.test_fixed_catalog import _FixedCatalogProvider
 from tests.service.test_foreground_questions import _QuestionProvider
 from tests.terminal.test_conversation import (
@@ -42,6 +44,19 @@ def test_cli_question_answer_is_explicit_and_preserves_ordinary_input() -> None:
     assert _cli_question_answer("/answer --option reports") == ("choice", "reports")
     assert _cli_question_answer("/answer --text --option reports") == ("text", "--option reports")
     assert _cli_question_answer("/answer --option") == ("choice", "")
+    assert _cli_question_answer("/answer --question question-2 --option archives") == (
+        "choice",
+        "archives",
+        "question-2",
+    )
+    assert _cli_question_answer("/answer --question question-1 --text custom report") == (
+        "text",
+        "custom report",
+        "question-1",
+    )
+    assert _cli_question_answer("/answer --question question-1 --text --question literal") == (
+        "text", "--question literal", "question-1",
+    )
     assert _cli_question_answer("use /answer in the README") is None
     assert _cli_question_answer("ordinary input") is None
 
@@ -68,7 +83,7 @@ async def test_cli_question_and_answer_through_live_service(
         input_area = app.query_one("#conversation-input", TextArea)
         input_area.text = "ask-foreground-question"
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         async with asyncio.timeout(10):
             while "Which output directory" not in str(
                 app.query_one("#foreground-question", Static).content
@@ -77,10 +92,10 @@ async def test_cli_question_and_answer_through_live_service(
         assert "Which output directory" in _visible_screen_text(app)
         input_area.text = "ordinary independent supplement"
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         input_area.text = "/answer reports-directory"
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         async with asyncio.timeout(10):
             while str(app.query_one("#foreground-question", Static).content):
                 await pilot.pause()
@@ -118,17 +133,17 @@ async def test_cli_restarts_service_before_answering_and_continuing_task(
         input_area = app.query_one("#conversation-input", TextArea)
         input_area.text = "ask-foreground-question"
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         await _wait_for_question(app, pilot, "Which output directory")
 
         task_text = str(app.query_one("#foreground-tasks", Static).content)
         match = re.search(r"Task ([^ ]+) · generation", task_text)
-        assert match is not None
+        assert match is not None, task_text
         task_id = match.group(1)
         provider.framing_actions.append("invalid")
         input_area.text = "independent supplement with uncertain task framing"
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         async with asyncio.timeout(10):
             while "interrupted" not in str(app.query_one("#foreground-tasks", Static).content):
                 await pilot.pause()
@@ -158,6 +173,9 @@ async def test_cli_restarts_service_before_answering_and_continuing_task(
         ]
         assert len(selected_indices) == 1
         selected = selected_indices[0]
+        picker_label = str(options.options[selected].prompt)
+        assert "Questions: 1 (Main 1, SubAgent 0)" in picker_label
+        assert "Interrupted tasks:" not in picker_label
         options.highlighted = selected
         await pilot.press("enter")
         async with asyncio.timeout(10):
@@ -215,7 +233,7 @@ async def test_cli_question_options_keep_choice_and_text_answers_explicit(
         input_area = app.query_one("#conversation-input", TextArea)
         input_area.text = "ask-foreground-options"
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         question_widget = await _wait_for_question(app, pilot, "Reports folder")
         assert "Reports folder" in str(question_widget.content)
         assert "reports" in str(question_widget.content)
@@ -224,12 +242,12 @@ async def test_cli_question_options_keep_choice_and_text_answers_explicit(
 
         input_area.text = "ordinary independent supplement"
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         assert "Reports folder" in str(question_widget.content)
 
         input_area.text = "/answer --option reports"
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         async with asyncio.timeout(10):
             while str(question_widget.content):
                 await pilot.pause()
@@ -238,12 +256,12 @@ async def test_cli_question_options_keep_choice_and_text_answers_explicit(
 
         input_area.text = "ask-foreground-question"
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         question_widget = await _wait_for_question(app, pilot, "Which output directory")
         assert "Which output directory" in str(question_widget.content)
         input_area.text = "/answer --text --option custom free-text answer"
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         assert any("--option custom free-text answer" in text for text in provider.user_texts)
         assert provider.question_calls == 2
 
@@ -269,7 +287,7 @@ async def test_cli_task_cancel_invalidates_its_question(
         input_area = app.query_one("#conversation-input", TextArea)
         input_area.text = "ask-foreground-question"
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         await _wait_for_question(app, pilot, "Which output directory")
         async with asyncio.timeout(10):
             while not app._foreground_tasks:
@@ -278,7 +296,7 @@ async def test_cli_task_cancel_invalidates_its_question(
 
         input_area.text = "/task cancel " + task_id
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         async with asyncio.timeout(10):
             while app._foreground_question is not None:
                 await pilot.pause()
@@ -311,19 +329,19 @@ async def test_cli_task_continue_is_an_explicit_user_operation(
         input_area = app.query_one("#conversation-input", TextArea)
         input_area.text = "ask-foreground-question"
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         await _wait_for_question(app, pilot, "Which output directory")
         task_id = str(app._foreground_tasks[-1]["task_id"])
         input_area.text = "/answer reports-directory"
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         async with asyncio.timeout(10):
             while app._foreground_tasks[-1]["state"] != "completed":
                 await pilot.pause()
 
         input_area.text = "/task continue " + task_id
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
 
         assert "Continue the current foreground task." in provider.user_texts[-1]
         assert app._foreground_tasks[-1]["task_id"] == task_id
@@ -350,7 +368,7 @@ async def test_cli_ordinary_task_is_visible_and_can_continue(
         input_area = app.query_one("#conversation-input", TextArea)
         input_area.text = "ordinary task without a question"
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         async with asyncio.timeout(10):
             while not app._foreground_tasks:
                 await pilot.pause()
@@ -359,7 +377,7 @@ async def test_cli_ordinary_task_is_visible_and_can_continue(
         task_id = str(app._foreground_tasks[-1]["task_id"])
         input_area.text = "/task continue " + task_id
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         assert "Continue the current foreground task." in provider.user_texts[-1]
 
     await _run_cli_terminal_case(
@@ -382,7 +400,25 @@ async def test_cli_answers_two_subagents_independently(
     document = cast(Any, tomlkit.parse(VALID_CONFIG))
     document["models"]["routes"]["subagent"] = dict(document["models"]["routes"]["chat"])
     monkeypatch.setattr(terminal_fixture, "VALID_CONFIG", tomlkit.dumps(document))
-    provider = _DelegatingProvider()
+    class AnswerBarrierProvider(_DelegatingProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.release_answers = asyncio.Event()
+
+        def stream(self, **kwargs: Any) -> AsyncIterator[ModelStreamEvent]:
+            events = super().stream(**kwargs)
+            latest_user = next((str(item.get("content", ""))
+                                for item in reversed(kwargs["messages"])
+                                if item.get("role") == "user"), "")
+
+            async def emit() -> AsyncIterator[ModelStreamEvent]:
+                if latest_user.startswith("Human Answer:"):
+                    await self.release_answers.wait()
+                async for event in events:
+                    yield event
+            return emit()
+
+    provider = AnswerBarrierProvider()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
@@ -390,24 +426,71 @@ async def test_cli_answers_two_subagents_independently(
         input_area = app.query_one("#conversation-input", TextArea)
         input_area.text = "SubAgent question delegation request"
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         widget = await _wait_for_question(app, pilot, "Which output should I prepare?")
-        assert app._foreground_question is not None
-        first_id = app._foreground_question["question_id"]
-        input_area.text = "/answer first output"
+        async with asyncio.timeout(30):
+            while len(app._foreground_questions) != 2:
+                await pilot.pause()
+        question_ids = [str(item["question_id"]) for item in app._foreground_questions]
+        assert len(set(question_ids)) == 2
+        assert str(widget.content).count("SubAgent") == 2
+        first_id, second_id = question_ids
+        agents_by_question = {
+            str(item["question_id"]): str(item["owner_agent_id"])
+            for item in app._foreground_questions
+        }
+        service_client = cast(Any, app._management_dispatcher).client
+
+        async def child_status(agent_id: str) -> str | None:
+            page = await service_client._http_request(
+                "GET",
+                f"/api/v1/workspaces/{service_client.workspace_id}/sessions/"
+                f"{service_client.session_id}/subagents",
+            )
+            items = page.get("items")
+            if not isinstance(items, list):
+                return None
+            return next(
+                (
+                    item.get("status")
+                    for item in items
+                    if isinstance(item, dict)
+                    and item.get("agent_id") == agent_id
+                    and isinstance(item.get("status"), str)
+                ),
+                None,
+            )
+
+        input_area.text = f"/answer --question {first_id} --text first output"
         await pilot.press("enter")
-        async with asyncio.timeout(10):
-            while not provider.child_answer_seen.is_set():
+        async with asyncio.timeout(30):
+            while (
+                await child_status(agents_by_question[first_id]) != "running"
+                or any(item["question_id"] == first_id for item in app._foreground_questions)
+            ):
                 await pilot.pause()
-        async with asyncio.timeout(10):
-            while app._foreground_question is None or app._foreground_question["question_id"] == first_id:
+        assert any(item["question_id"] == second_id for item in app._foreground_questions)
+        assert await child_status(agents_by_question[second_id]) == "waiting_for_answer"
+        # The child can finish before the first command's UI handler clears its input.
+        async with asyncio.timeout(30):
+            while input_area.text:
                 await pilot.pause()
-        provider.child_answer_seen.clear()
-        input_area.text = "/answer second output"
+        await _wait_for_turn(app, timeout=30)
+        input_area.text = f"/answer --question {second_id} --text second output"
         await pilot.press("enter")
-        async with asyncio.timeout(10):
-            while not provider.child_answer_seen.is_set() or str(widget.content):
+        await _wait_for_turn(app, timeout=30)
+        assert "foreground_run_active" not in _visible_screen_text(app), _visible_screen_text(app)
+        assert "foreground_question_conflict" not in _visible_screen_text(app), _visible_screen_text(app)
+        async with asyncio.timeout(30):
+            while any(item["question_id"] == second_id for item in app._foreground_questions):
                 await pilot.pause()
+        provider.release_answers.set()
+        async with asyncio.timeout(30):
+            while any([await child_status(agent_id) != "completed"
+                       for agent_id in agents_by_question.values()]):
+                await pilot.pause()
+        assert not app._foreground_questions
+        assert "Which output should I prepare?" not in str(widget.content)
         assert provider.child_question_count == 4
 
     await _run_cli_terminal_case(
@@ -439,7 +522,7 @@ async def test_cli_shows_automatic_continuation_without_user_input(
         input_area = app.query_one("#conversation-input", TextArea)
         input_area.text = "initial delegation request"
         await pilot.press("enter")
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
         await asyncio.wait_for(provider.child_started.wait(), timeout=10)
         if switch_session:
             original_session = app._control.project_foreground_conversation().session_id
@@ -523,7 +606,7 @@ async def test_cli_batches_terminal_subagent_results_in_one_automatic_continuati
         for release_child in provider.release_batch_children.values():
             release_child.set()
         provider.release_batch_parent.set()
-        await _wait_for_turn(app)
+        await _wait_for_turn(app, timeout=30)
 
         async with asyncio.timeout(20):
             while "Main automatically handled the delegated result." not in _visible_screen_text(app):

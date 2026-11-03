@@ -211,7 +211,8 @@ export class WebServiceClient {
       seq: event.seq,
     };
     this.handlers.onEvent(event);
-    if (event.type.startsWith("session.")
+    if (event.type === "snapshot.required"
+      || event.type.startsWith("session.")
       || ["run.completed", "run.failed", "run.cancelled"].includes(event.type)) {
       this.handlers.onSessionEvent();
     }

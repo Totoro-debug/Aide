@@ -1068,6 +1068,9 @@ async def test_service_terminal_preserves_output_delivered_before_submission_ack
         await _wait_for_turn(app)
         assert finished.is_set()
         assert not app._consumed_runs
+        await _wait_for_refresh_condition(
+            app, lambda: "early response" in _visible_screen_text(app),
+        )
         assert "early response" in _visible_screen_text(app)
 
     await _run_cli_terminal_case(
@@ -1202,9 +1205,9 @@ def _screenshot_width(app: TerminalConversationApp) -> float:
     return float(_screenshot(app).attrib["viewBox"].split()[2])
 
 
-async def _wait_for_turn(app: TerminalConversationApp) -> None:
+async def _wait_for_turn(app: TerminalConversationApp, *, timeout: float = 2) -> None:
     text_area = app.query_one("#conversation-input", TextArea)
-    async with asyncio.timeout(2):
+    async with asyncio.timeout(timeout):
         while (
             text_area.read_only
             or getattr(text_area, "active_turn_token", None) is not None
@@ -6828,8 +6831,14 @@ async def test_config_output_keeps_original_text_and_scrolls(size: tuple[int, in
         assert heading.region.y < rendered.region.y
         assert display.max_scroll_y > 0
         await pilot.press("ctrl+home")
+        await _wait_for_refresh_condition(
+            app, lambda: "Configuration" in _visible_screen_text(app),
+        )
         assert "Configuration" in _visible_screen_text(app)
         await pilot.press("ctrl+end")
+        await _wait_for_refresh_condition(
+            app, lambda: "key_29" in _visible_screen_text(app),
+        )
         assert "key_29" in _visible_screen_text(app)
 
 

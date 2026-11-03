@@ -453,6 +453,15 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
             "Chat scoped",
             "Other chat",
         }
+        assert all(
+            item["foreground_attention"] == {
+                "question_count": 0,
+                "main_question_count": 0,
+                "subagent_question_count": 0,
+                "interrupted_task_count": 0,
+            }
+            for item in sessions
+        )
         assert {item["id"] for item in project_page["sessions"]} == {
             expected_project_id,
         }
@@ -479,6 +488,7 @@ async def test_chat_history_lists_only_chat_sessions_without_activating_old_work
         assert unregistered_project_path.read_bytes() == unregistered_project_before
         assert all("messages" not in item for item in sessions)
         assert any(item["directory"] == str(old_chat.resolve()) for item in sessions)
+        assert not (old_chat / ".aide" / "foreground-work").exists()
         assert all(
             workspace.workspace_path != old_chat.resolve()
             for workspace in service._workspaces.values()

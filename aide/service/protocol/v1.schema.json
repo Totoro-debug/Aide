@@ -815,7 +815,7 @@
         "published_permission_level": {"anyOf": [{"$ref": "#/$defs/tool_permission_level"}, {"type": "null"}]},
         "resumed_session_id": {"type": ["string", "null"]},
         "resume_skipped_count": {"type": "integer", "minimum": 0},
-        "resume_sessions": {"type": "array", "items": {"type": "object"}},
+        "resume_sessions": {"type": "array", "items": {"$ref": "#/$defs/session_listing_entry"}},
         "skill_metadata": {"type": "array", "items": {"$ref": "#/$defs/skill_metadata"}},
         "restore_listing": {"type": "object"},
         "restore_plan": {"type": "object"},
@@ -1373,7 +1373,7 @@
       "additionalProperties": false,
       "required": [
         "id", "title", "created_at", "updated_at", "message_count", "occupied", "occupied_by",
-        "metadata_version"
+        "metadata_version", "foreground_attention"
       ],
       "properties": {
         "id": {"$ref": "#/$defs/identifier"},
@@ -1383,7 +1383,59 @@
         "message_count": {"type": "integer", "minimum": 0},
         "occupied": {"type": "boolean"},
         "occupied_by": {"type": ["string", "null"]},
-        "metadata_version": {"type": "integer", "minimum": 0}
+        "metadata_version": {"type": "integer", "minimum": 0},
+        "foreground_attention": {"$ref": "#/$defs/foreground_attention_summary"}
+      }
+    },
+    "foreground_attention_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "question_count", "main_question_count", "subagent_question_count", "interrupted_task_count"
+      ],
+      "properties": {
+        "question_count": {"type": "integer", "minimum": 0},
+        "main_question_count": {"type": "integer", "minimum": 0},
+        "subagent_question_count": {"type": "integer", "minimum": 0},
+        "interrupted_task_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "session_listing_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "created_at", "updated_at", "message_count", "foreground_attention"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "title": {"type": "string", "minLength": 1},
+        "created_at": {"type": "string", "minLength": 1},
+        "updated_at": {"type": "string", "minLength": 1},
+        "message_count": {"type": "integer", "minimum": 0},
+        "foreground_attention": {"$ref": "#/$defs/foreground_attention_summary"}
+      }
+    },
+    "chat_session_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "title", "created_at", "updated_at", "directory", "available", "foreground_attention"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "title": {"type": "string", "minLength": 1},
+        "created_at": {"type": "string", "minLength": 1},
+        "updated_at": {"type": "string", "minLength": 1},
+        "directory": {"type": "string", "minLength": 1},
+        "available": {"type": "boolean"},
+        "foreground_attention": {"$ref": "#/$defs/foreground_attention_summary"}
+      }
+    },
+    "chat_sessions_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessions", "next_cursor"],
+      "properties": {
+        "sessions": {"type": "array", "items": {"$ref": "#/$defs/chat_session_summary"}},
+        "next_cursor": {"type": ["string", "null"]}
       }
     },
     "session_snapshot": {

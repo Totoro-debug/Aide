@@ -62,6 +62,7 @@ import type {
   AvailableModelsResponse,
   ClientCommand,
   ConversationOpenResponse,
+  ForegroundQuestionSnapshot,
   ForegroundTaskSnapshot,
   ProjectSessionsResponse,
   ReasoningEffort,
@@ -620,18 +621,10 @@ function ProjectSessionsContent({
   }, []);
   const [composerError, setComposerError] = useState<string | null>(null);
   const [composerNotice, setComposerNotice] = useState<string | null>(null);
-  const [questionAnswer, setQuestionAnswer] = useState("");
-  const [questionChoiceId, setQuestionChoiceId] = useState("");
-  const [questionSubmitting, setQuestionSubmitting] = useState(false);
+  const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({});
+  const [questionChoiceIds, setQuestionChoiceIds] = useState<Record<string, string>>({});
+  const [questionSubmittingId, setQuestionSubmittingId] = useState<string | null>(null);
   const [taskActionId, setTaskActionId] = useState<string | null>(null);
-  const activeForegroundQuestion = snapshot?.foreground_questions?.[0];
-  useEffect(() => {
-    setQuestionAnswer(activeForegroundQuestion?.answer_kind === "text"
-      ? activeForegroundQuestion.answer ?? "" : "");
-    setQuestionChoiceId(activeForegroundQuestion?.answer_kind === "choice"
-      ? activeForegroundQuestion.answer_option_id ?? "" : "");
-  }, [activeForegroundQuestion?.answer, activeForegroundQuestion?.answer_kind,
-    activeForegroundQuestion?.answer_option_id, activeForegroundQuestion?.question_id]);
   const claimRef = useRef<SessionClaim | null>(null);
   const snapshotRef = useRef<SessionSnapshot | null>(null);
   const sessionModelSavingRef = useRef(false);
@@ -1790,35 +1783,52 @@ function ProjectSessionsContent({
     await sendPendingSubmission(pending);
   }
 
-  async function submitQuestionAnswer(event: React.FormEvent<HTMLFormElement>) {
+  async function submitQuestionAnswer(
+    questionSnapshot: ForegroundQuestionSnapshot,
+    event: React.FormEvent<HTMLFormElement>,
+  ) {
     event.preventDefault();
     const currentClaim = claimRef.current;
-    const question = snapshotRef.current?.foreground_questions?.[0];
-    const answer = questionAnswer.trim();
-    const choiceId = questionChoiceId || (answer === "" && question?.answer_kind === "choice"
-      ? question.answer_option_id ?? "" : "");
-    if (currentClaim === null || question === undefined || (!answer && !choiceId) || questionSubmitting
+    const question = snapshotRef.current?.foreground_questions?.find(
+      (item) => item.question_id === questionSnapshot.question_id,
+    );
+    if (currentClaim === null || question === undefined || questionSubmittingId !== null || taskActionId !== null
       || connectionState !== "online") return;
-    setQuestionSubmitting(true);
+    const answer = (question.state === "answer_received" && question.answer_kind === "text"
+      ? question.answer ?? "" : questionAnswers[question.question_id] ?? "").trim();
+    const choiceId = question.state === "answer_received" && question.answer_kind === "choice"
+      ? question.answer_option_id ?? ""
+      : questionChoiceIds[question.question_id] ?? "";
+    if (!answer && !choiceId) return;
+    setQuestionSubmittingId(question.question_id);
     setComposerError(null);
     try {
+      const currentSnapshot = await readRunSnapshot(currentClaim);
+      if (claimRef.current !== currentClaim) return;
+      adoptSnapshot(currentSnapshot);
+      const currentQuestion = currentSnapshot.foreground_questions?.find(
+        (item) => item.question_id === question.question_id && item.generation === question.generation,
+      );
+      if (currentQuestion === undefined) throw new Error();
       await answerForegroundQuestion(
         sendServiceCommand,
         currentClaim,
-        question,
+        currentQuestion,
         choiceId
           ? { kind: "choice", choice_id: choiceId }
           : { kind: "text", text: answer },
       );
-      setQuestionAnswer("");
-      setQuestionChoiceId("");
+      setQuestionAnswers((current) => ({ ...current, [question.question_id]: "" }));
+      setQuestionChoiceIds((current) => ({ ...current, [question.question_id]: "" }));
+      const nextSnapshot = await readRunSnapshot(currentClaim);
+      if (claimRef.current === currentClaim) adoptSnapshot(nextSnapshot);
     } catch (error) {
       const message = error instanceof ServiceCommandError && error.body !== null
         ? error.body.message
         : null;
       setComposerError(message ?? "conversation.questionAnswerFailed");
     } finally {
-      setQuestionSubmitting(false);
+      setQuestionSubmittingId(null);
     }
   }
 
@@ -1827,15 +1837,25 @@ function ProjectSessionsContent({
     action: "cancel" | "continue",
   ) {
     const currentClaim = claimRef.current;
-    if (currentClaim === null || connectionState !== "online" || taskActionId !== null) return;
+    if (currentClaim === null || connectionState !== "online" || taskActionId !== null
+      || questionSubmittingId !== null) return;
     setTaskActionId(task.task_id);
     setComposerError(null);
     try {
+      const currentSnapshot = await readRunSnapshot(currentClaim);
+      if (claimRef.current !== currentClaim) return;
+      adoptSnapshot(currentSnapshot);
+      const currentTask = currentSnapshot.foreground_tasks?.find(
+        (item) => item.task_id === task.task_id && item.generation === task.generation,
+      );
+      if (currentTask === undefined) throw new Error();
       if (action === "cancel") {
-        await cancelForegroundTask(sendServiceCommand, currentClaim, task);
+        await cancelForegroundTask(sendServiceCommand, currentClaim, currentTask);
       } else {
-        await continueForegroundTask(sendServiceCommand, currentClaim, task);
+        await continueForegroundTask(sendServiceCommand, currentClaim, currentTask);
       }
+      const nextSnapshot = await readRunSnapshot(currentClaim);
+      if (claimRef.current === currentClaim) adoptSnapshot(nextSnapshot);
     } catch (error) {
       const message = error instanceof ServiceCommandError && error.body !== null
         ? error.body.message
@@ -2480,7 +2500,7 @@ function ProjectSessionsContent({
                         const canContinue = ["completed", "interrupted"].includes(task.state)
                           && !hasUnansweredQuestion;
                         const canCancel = !["cancelled", "superseded"].includes(task.state);
-                        const busy = taskActionId === task.task_id;
+                        const busy = taskActionId !== null || questionSubmittingId !== null;
                         return (
                           <div className={styles.foregroundTaskRow} key={task.task_id}>
                             <code title={task.task_id}>{task.task_id.slice(0, 8)}</code>
@@ -2492,7 +2512,7 @@ function ProjectSessionsContent({
                                   type="button"
                                   aria-label={t("conversation.continueTask", { id: task.task_id })}
                                   title={t("conversation.continueTask", { id: task.task_id })}
-                                  disabled={busy || taskActionId !== null || connectionState !== "online"}
+                                  disabled={busy || connectionState !== "online"}
                                   onClick={() => void runForegroundTaskAction(task, "continue")}
                                 >
                                   <Play size={15} aria-hidden="true" />
@@ -2504,7 +2524,7 @@ function ProjectSessionsContent({
                                   type="button"
                                   aria-label={t("conversation.cancelTask", { id: task.task_id })}
                                   title={t("conversation.cancelTask", { id: task.task_id })}
-                                  disabled={busy || taskActionId !== null || connectionState !== "online"}
+                                  disabled={busy || connectionState !== "online"}
                                   onClick={() => void runForegroundTaskAction(task, "cancel")}
                                 >
                                   <X size={15} aria-hidden="true" />
@@ -2516,72 +2536,82 @@ function ProjectSessionsContent({
                       })}
                     </section>
                   ) : null}
-                  {snapshot.foreground_questions?.[0] ? (
-                    <section className={styles.foregroundQuestion} aria-live="polite">
-                      <div className={styles.foregroundQuestionText}>
-                        <span>{snapshot.foreground_questions[0].state === "interrupted"
-                          ? t("conversation.questionInterrupted")
-                          : snapshot.foreground_questions[0].owner_agent_id
-                            ? t("conversation.subagentQuestion", {
-                              agentId: snapshot.foreground_questions[0].owner_agent_id,
-                            })
-                            : t("conversation.foregroundQuestion")}</span>
-                        <p>{snapshot.foreground_questions[0].text}</p>
-                      </div>
-                      {snapshot.foreground_questions[0].options.length > 0 ? (
-                        <fieldset className={styles.foregroundQuestionOptions}
-                          disabled={questionSubmitting || connectionState !== "online"
-                            || snapshot.foreground_questions[0].state !== "pending"}>
-                          <legend>{t("conversation.questionOptions")}</legend>
-                          {snapshot.foreground_questions[0].options.map((option) => (
-                            <label key={option.id}>
-                              <input
-                                type="radio"
-                                name={`foreground-question-${activeForegroundQuestion?.question_id ?? ""}`}
-                                value={option.id}
-                                aria-label={option.label}
-                                checked={(questionChoiceId || (activeForegroundQuestion?.answer_kind === "choice"
-                                  ? activeForegroundQuestion.answer_option_id ?? "" : "")) === option.id}
-                                onChange={() => {
-                                  setQuestionChoiceId(option.id);
-                                  setQuestionAnswer("");
-                                }}
-                              />
-                              <span>{option.label}</span>
-                              <code>{option.id}</code>
-                            </label>
-                          ))}
-                        </fieldset>
-                      ) : null}
-                      <form className={styles.foregroundQuestionForm} onSubmit={(event) => void submitQuestionAnswer(event)}>
-                        <textarea
-                          aria-label={t("conversation.questionAnswerLabel")}
-                          value={questionAnswer}
-                          onChange={(event) => {
-                            setQuestionAnswer(event.currentTarget.value);
-                            setQuestionChoiceId("");
-                          }}
-                          rows={2}
-                          maxLength={10000}
-                          disabled={questionSubmitting || connectionState !== "online"
-                            || snapshot.foreground_questions[0].state !== "pending"}
-                        />
-                        <button
-                          type="submit"
-                          disabled={snapshot.foreground_questions[0].state === "interrupted"
-                            || !questionAnswer.trim() && !questionChoiceId
-                              && !snapshot.foreground_questions[0].answer
-                            || questionSubmitting || connectionState !== "online"}
-                        >
-                          <Send size={14} aria-hidden="true" />
-                          {snapshot.foreground_questions[0].state === "answer_received"
-                            ? t("conversation.questionContinue")
-                            : t("conversation.questionSend")}
-                        </button>
-                      </form>
-                      <p className={styles.foregroundQuestionLimits}>{t("conversation.questionLimits")}</p>
-                    </section>
-                  ) : null}
+                  {snapshot.foreground_questions?.map((question) => {
+                    const answer = question.state === "answer_received" && question.answer_kind === "text"
+                      ? question.answer ?? ""
+                      : questionAnswers[question.question_id] ?? "";
+                    const choiceId = question.state === "answer_received" && question.answer_kind === "choice"
+                      ? question.answer_option_id ?? ""
+                      : questionChoiceIds[question.question_id] ?? "";
+                    const submitting = questionSubmittingId !== null || taskActionId !== null;
+                    return (
+                      <section className={styles.foregroundQuestion} key={question.question_id} aria-live="polite">
+                        <div className={styles.foregroundQuestionText}>
+                          <span>{question.state === "interrupted"
+                            ? t("conversation.questionInterrupted")
+                            : question.owner_agent_id
+                              ? t("conversation.subagentQuestion", { agentId: question.owner_agent_id })
+                              : t("conversation.foregroundQuestion")}</span>
+                          <p>{question.text}</p>
+                        </div>
+                        {question.options.length > 0 ? (
+                          <fieldset className={styles.foregroundQuestionOptions}
+                            disabled={submitting || connectionState !== "online" || question.state !== "pending"}>
+                            <legend>{t("conversation.questionOptions")}</legend>
+                            {question.options.map((option) => (
+                              <label key={option.id}>
+                                <input
+                                  type="radio"
+                                  name={`foreground-question-${question.question_id}`}
+                                  value={option.id}
+                                  aria-label={option.label}
+                                  checked={choiceId === option.id}
+                                  onChange={() => {
+                                    setQuestionChoiceIds((current) => ({
+                                      ...current,
+                                      [question.question_id]: option.id,
+                                    }));
+                                    setQuestionAnswers((current) => ({ ...current, [question.question_id]: "" }));
+                                  }}
+                                />
+                                <span>{option.label}</span>
+                                <code>{option.id}</code>
+                              </label>
+                            ))}
+                          </fieldset>
+                        ) : null}
+                        <form className={styles.foregroundQuestionForm}
+                          onSubmit={(event) => void submitQuestionAnswer(question, event)}>
+                          <textarea
+                            aria-label={t("conversation.questionAnswerLabel")}
+                            value={answer}
+                            onChange={(event) => {
+                              const answerValue = event.currentTarget.value;
+                              setQuestionAnswers((current) => ({
+                                ...current,
+                                [question.question_id]: answerValue,
+                              }));
+                              setQuestionChoiceIds((current) => ({ ...current, [question.question_id]: "" }));
+                            }}
+                            rows={2}
+                            maxLength={10000}
+                            disabled={submitting || connectionState !== "online" || question.state !== "pending"}
+                          />
+                          <button
+                            type="submit"
+                            disabled={question.state === "interrupted"
+                              || !answer.trim() && !choiceId || submitting || connectionState !== "online"}
+                          >
+                            <Send size={14} aria-hidden="true" />
+                            {question.state === "answer_received"
+                              ? t("conversation.questionContinue")
+                              : t("conversation.questionSend")}
+                          </button>
+                        </form>
+                        <p className={styles.foregroundQuestionLimits}>{t("conversation.questionLimits")}</p>
+                      </section>
+                    );
+                  })}
                   <form className={styles.composer} onSubmit={(event) => void submitInput(event)}>
                   <div className={styles.composerBox}>
                   <label className={styles.srOnly} htmlFor="conversation-input">{t("conversation.inputLabel")}</label>

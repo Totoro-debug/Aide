@@ -55,6 +55,13 @@ class ForegroundQuestionOption(TypedDict):
     label: str
 
 
+class ForegroundAttentionSummary(TypedDict):
+    question_count: int
+    main_question_count: int
+    subagent_question_count: int
+    interrupted_task_count: int
+
+
 class ForegroundWorkError(ValueError):
     """A persisted foreground-work record is malformed or unsupported."""
 
@@ -152,6 +159,31 @@ class ForegroundWorkSnapshot:
     @property
     def pending_deliveries(self) -> tuple[ForegroundWorkDelivery, ...]:
         return tuple(item for item in self.deliveries if item.state == "pending")
+
+
+def summarize_foreground_attention(
+    snapshot: ForegroundWorkSnapshot,
+) -> ForegroundAttentionSummary:
+    """Project actionable questions and interrupted tasks for Session navigation."""
+    questions = tuple(
+        item for item in snapshot.questions
+        if item.state in {"pending", "answer_received", "interrupted"}
+    )
+    main_questions = sum(item.owner_agent_id is None for item in questions)
+    subagent_questions = len(questions) - main_questions
+    blocked_tasks = {
+        item.task_id for item in snapshot.questions
+        if item.state in {"preparing", "pending", "answer_received", "resuming", "executing", "interrupted"}
+    }
+    return {
+        "question_count": len(questions),
+        "main_question_count": main_questions,
+        "subagent_question_count": subagent_questions,
+        "interrupted_task_count": sum(
+            item.state == "interrupted" and item.task_id not in blocked_tasks
+            for item in snapshot.tasks
+        ),
+    }
 
 
 class ForegroundWorkStore:

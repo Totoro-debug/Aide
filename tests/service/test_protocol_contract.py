@@ -31,6 +31,53 @@ def _validator(definition: str) -> Draft202012Validator:
     return Draft202012Validator(schema)
 
 
+def test_session_summary_contract_includes_redacted_foreground_attention_counts() -> None:
+    attention = {
+        "question_count": 2,
+        "main_question_count": 1,
+        "subagent_question_count": 1,
+        "interrupted_task_count": 1,
+    }
+    _validator("session").validate(
+        {
+            "id": "session-1",
+            "title": "Question session",
+            "created_at": "2026-11-03T00:00:00Z",
+            "updated_at": "2026-11-03T00:00:00Z",
+            "message_count": 1,
+            "occupied": False,
+            "occupied_by": None,
+            "metadata_version": 1,
+            "foreground_attention": attention,
+        }
+    )
+    _validator("chat_session_summary").validate(
+        {
+            "id": "session-1",
+            "title": "Question session",
+            "created_at": "2026-11-03T00:00:00Z",
+            "updated_at": "2026-11-03T00:00:00Z",
+            "directory": "C:/workspace",
+            "available": True,
+            "foreground_attention": attention,
+        }
+    )
+    _validator("session_listing_entry").validate(
+        {
+            "id": "session-1",
+            "title": "Question session",
+            "created_at": "2026-11-03T00:00:00Z",
+            "updated_at": "2026-11-03T00:00:00Z",
+            "message_count": 1,
+            "foreground_attention": attention,
+        }
+    )
+    with pytest.raises(ValidationError):
+        _validator("foreground_attention_summary").validate(
+            {**attention, "question_count": -1}
+        )
+
+
 @pytest.mark.parametrize("field", ("tool_keywords", "tool_keyword_rows"))
 def test_keyword_patch_contract_accepts_mixed_items_but_requires_arrays(field: str) -> None:
     validator = _validator("config_patch_mcp_fields")

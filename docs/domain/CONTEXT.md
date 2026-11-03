@@ -248,6 +248,10 @@ _Avoid_: Tool Confirmation, permission grant, ordinary progress message
 The user's response to one Human Question, expressed as a supplied choice or free text.
 _Avoid_: Tool Confirmation, automatic default, ordinary conversation input
 
+**Foreground Attention Summary**:
+The count-only projection attached to a Session navigation entry, reporting actionable Human Questions split between Main Agent and SubAgent owners plus interrupted Foreground Tasks that are not blocked by unresolved questions. It omits question text; detailed state is loaded only after the owning Session is opened under its current Session Claim.
+_Avoid_: task inbox, question preview, unclaimed Session content
+
 **Tool Confirmation**:
 A host-mediated, one-shot user decision bound to one validated Tool call in one live Agent Run.
 _Avoid_: Permission Policy, model approval, chat reply, persistent approval

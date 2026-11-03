@@ -1889,11 +1889,26 @@ def _session_entries(value: object) -> tuple[Any, ...] | None:
                     created_at=datetime.fromisoformat(_require_string(item, "created_at")),
                     updated_at=datetime.fromisoformat(_require_string(item, "updated_at")),
                     message_count=_require_int(item, "message_count"),
+                    foreground_attention=_foreground_attention(item.get("foreground_attention")),
                 )
             )
         except (TypeError, ValueError, ServiceStartupError):
             continue
     return tuple(entries)
+
+
+def _foreground_attention(value: object) -> Any:
+    if not isinstance(value, dict):
+        raise ServiceStartupError("service_protocol_error", "Session attention summary is invalid.")
+    fields = (
+        "question_count",
+        "main_question_count",
+        "subagent_question_count",
+        "interrupted_task_count",
+    )
+    if any(type(value.get(field)) is not int or value[field] < 0 for field in fields):
+        raise ServiceStartupError("service_protocol_error", "Session attention summary is invalid.")
+    return {field: value[field] for field in fields}
 
 
 def _restore_listing(value: object) -> Any:

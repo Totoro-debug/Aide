@@ -458,6 +458,15 @@ async def test_question_answer_is_durable_claimed_and_idempotent(
             next_workspace.session_snapshot(session_id)["foreground_questions"],
         )
         assert restored_questions[0]["question_id"] == question_id
+        listing = await replacement.list_sessions_page(next_client, next_workspace_id, limit=100)
+        summary = next(item for item in cast(list[dict[str, object]], listing["sessions"])
+                       if item["id"] == session_id)
+        assert summary["foreground_attention"] == {
+            "question_count": 1,
+            "main_question_count": 1,
+            "subagent_question_count": 0,
+            "interrupted_task_count": 0,
+        }
         assert provider.stream_calls == streams_before_answer
         assert provider.complete_calls == completions_before_restart
 
@@ -537,6 +546,135 @@ async def test_question_answer_is_durable_claimed_and_idempotent(
             await replacement.stop()
         else:
             await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("framing", ["keep", "invalid"])
+@pytest.mark.parametrize("has_question", [True, False])
+async def test_restart_attention_distinguishes_questions_from_continuable_tasks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, framing: str, has_question: bool,
+) -> None:
+    home = _home(tmp_path / "home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    provider.framing_actions = ["replace", framing]
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client, sid, version, wid = await _open_chat(service, directory)
+        initial = "ask-foreground-question" if has_question else "ordinary work"
+        for index, text in enumerate((initial, "independent supplement")):
+            await service.handle_command(client, _command(
+                request_id=str(index), command_type="input", workspace_id=wid,
+                session_id=sid, claim_version=version, payload={"text": text},
+            ))
+            await _wait_for_idle(service.workspace(wid), sid)
+    finally:
+        await service.stop()
+    replacement = AgentService(home, ConfigLoader(home).load())
+    await replacement.start()
+    try:
+        client, sid, version, wid = await _open_chat(replacement, directory, session_id=sid)
+        listing = await replacement.list_sessions_page(client, wid, limit=100)
+        summary = next(item for item in cast(list[dict[str, Any]], listing["sessions"])
+                       if item["id"] == sid)
+        assert summary["foreground_attention"] == {
+            "question_count": int(has_question), "main_question_count": int(has_question),
+            "subagent_question_count": 0,
+            "interrupted_task_count": int(framing == "invalid" and not has_question),
+        }
+    finally:
+        await replacement.stop()
+
+
+@pytest.mark.asyncio
+async def test_session_listing_reports_a_pending_foreground_question(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _home(tmp_path / "agent-home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _QuestionProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client_id, session_id, claim_version, workspace_id = await _open_chat(service, directory)
+        workspace = service.workspace(workspace_id)
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="listed-question-input",
+                command_type="input",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={"text": "ask-foreground-question"},
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+        question = cast(
+            list[dict[str, object]], workspace.session_snapshot(session_id)["foreground_questions"]
+        )[0]
+
+        listing = await service.list_sessions_page(client_id, workspace_id, limit=100)
+        sessions = cast(list[dict[str, object]], listing["sessions"])
+        summary = next(item for item in sessions if item["id"] == session_id)
+
+        assert summary["foreground_attention"] == {
+            "question_count": 1,
+            "main_question_count": 1,
+            "subagent_question_count": 0,
+            "interrupted_task_count": 0,
+        }
+        assert cast(str, question["text"]) not in json.dumps(summary)
+        reader = await service.register_client("cli")
+        readable = await service.list_sessions_page(reader.client_id, workspace_id, limit=100)
+        assert next(item for item in cast(list[dict[str, object]], readable["sessions"])
+                    if item["id"] == session_id)["foreground_attention"] == summary["foreground_attention"]
+        with pytest.raises(ServiceError):
+            await service.get_session_snapshot(reader.client_id, workspace_id, session_id,
+                                               claim_version, "")
+        with pytest.raises(ServiceError):
+            await service.handle_command(reader.client_id, _command(
+                request_id="reader-answer", command_type="answer_question",
+                workspace_id=workspace_id, session_id=session_id, claim_version=claim_version,
+                payload={"question_id": question["question_id"], "answer": "wrong reader",
+                         "expected_revision": question["revision"]},
+            ))
+
+        provider.release_answer.set()
+        await service.handle_command(
+            client_id,
+            _command(
+                request_id="answer-listed-question",
+                command_type="answer_question",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                claim_version=claim_version,
+                payload={
+                    "question_id": question["question_id"],
+                    "answer": "reports-directory",
+                    "expected_revision": question["revision"],
+                },
+            ),
+        )
+        await _wait_for_idle(workspace, session_id)
+        refreshed = await service.list_sessions_page(client_id, workspace_id, limit=100)
+        refreshed_summary = next(
+            item for item in cast(list[dict[str, object]], refreshed["sessions"])
+            if item["id"] == session_id
+        )
+        assert refreshed_summary["foreground_attention"] == {
+            "question_count": 0,
+            "main_question_count": 0,
+            "subagent_question_count": 0,
+            "interrupted_task_count": 0,
+        }
+    finally:
+        await service.stop()
 
 
 @pytest.mark.asyncio
@@ -662,6 +800,17 @@ async def test_replace_and_clear_framing_fence_old_task_and_pending_question(
         assert old_task.generation == question.generation + 1
         assert new_task.task_id != old_task.task_id
         assert invalidated_question is not None and invalidated_question.state == "invalidated"
+        listing = await service.list_sessions_page(client_id, workspace_id, limit=100)
+        listed_session = next(
+            item for item in cast(list[dict[str, object]], listing["sessions"])
+            if item["id"] == session_id
+        )
+        assert listed_session["foreground_attention"] == {
+            "question_count": 0,
+            "main_question_count": 0,
+            "subagent_question_count": 0,
+            "interrupted_task_count": 0,
+        }
     finally:
         await service.stop()
 
@@ -789,6 +938,17 @@ async def test_cancel_task_fences_pending_question_and_repeated_cancel_is_idempo
         assert task["state"] == "cancelled"
         assert task["generation"] == cast(int, question["generation"]) + 1
         assert cancelled_snapshot["foreground_questions"] == []
+        listing = await service.list_sessions_page(client_id, workspace_id, limit=100)
+        listed_session = next(
+            item for item in cast(list[dict[str, object]], listing["sessions"])
+            if item["id"] == session_id
+        )
+        assert listed_session["foreground_attention"] == {
+            "question_count": 0,
+            "main_question_count": 0,
+            "subagent_question_count": 0,
+            "interrupted_task_count": 0,
+        }
 
         await service.handle_command(
             client_id,
@@ -1706,6 +1866,11 @@ async def test_deleted_question_rejects_late_publication(
         claim = workspace.require_claim(client, sid, version)
         await workspace.delete_session(client, sid, version, claim.credential, "delete")
         assert not old_store.path.exists()
+        listing = await service.list_sessions_page(client, wid, limit=100)
+        assert all(
+            item["id"] != sid
+            for item in cast(list[dict[str, object]], listing["sessions"])
+        )
         with pytest.raises(ForegroundWorkConflict):
             old_store.begin_task("late-task", "late-execution", generation=1)
         assert not old_store.path.parent.exists()

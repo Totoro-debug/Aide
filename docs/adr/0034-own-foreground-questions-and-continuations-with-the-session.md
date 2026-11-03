@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Keep Foreground Questions and Continuations with the Session
@@ -14,4 +14,6 @@ Separate a Task's logical origin from each execution segment's side-effect owner
 
 The first delivery covers Web and CLI foreground work and its SubAgents. A Client switching conversations does not end that work while the service has online Clients. Service shutdown follows the current on-demand lifetime; startup exposes saved questions and interrupted work but does not execute it until a person answers or explicitly continues. Schedule integration is deferred because an unanswered occurrence needs separate recurrence and overlap rules.
 
-This changes the explicit-wait-only choice in [ADR-0030](0030-delegate-single-use-subagents-through-explicit-start-and-wait.md) and the relationship between execution and Client Claims in [ADR-0029](0029-host-cli-and-web-through-one-local-service.md). Those documents describe current behavior until this proposal is implemented and accepted. File ownership and Restore boundaries remain grounded in [ADR-0001](0001-file-first-local-persistence.md) and [ADR-0028](0028-session-restore-architecture.md).
+Session navigation entries expose a count-only Foreground Attention Summary: total Human Questions, Main Agent and SubAgent counts, and interrupted Foreground Tasks without unresolved questions. They omit question text and are read from the owning Workspace's persisted coordination state. Web refreshes this summary when the service requires a state snapshot; CLI shows the same counts in `/resume`. Opening a Session under its current Claim loads the full question and task state, so summary visibility does not grant answer or task-operation authority.
+
+This supersedes the explicit-wait-only choice in [ADR-0030](0030-delegate-single-use-subagents-through-explicit-start-and-wait.md) and qualifies the relationship between foreground execution and Client Claims in [ADR-0029](0029-host-cli-and-web-through-one-local-service.md). File ownership and Restore boundaries remain grounded in [ADR-0001](0001-file-first-local-persistence.md) and [ADR-0028](0028-session-restore-architecture.md).

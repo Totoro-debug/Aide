@@ -1,15 +1,24 @@
 import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { chromium, expect } from "@playwright/test";
+import { chromium, expect as playwrightExpect } from "@playwright/test";
 import setup from "./e2e-setup.mjs";
 import { setInterfaceLanguage } from "./settings-e2e.mjs";
 
+const expect = playwrightExpect.configure({ timeout: 30000 });
 const control = await setup();
 let browser;
 try {
   browser = await chromium.launch({ channel: process.env.AIDE_E2E_BROWSER_CHANNEL ?? "msedge" });
   const page = await browser.newPage();
+  const commandErrors = [];
+  page.on("websocket", (socket) => socket.on("framereceived", ({ payload }) => {
+    const frame = JSON.parse(String(payload));
+    if (typeof frame.code === "string" && typeof frame.request_id === "string") {
+      commandErrors.push({ code: frame.code, message: frame.message });
+      console.error("Service command rejected:", frame.code, frame.message);
+    }
+  }));
   const openedConversation = page.waitForResponse((response) =>
     new globalThis.URL(response.url()).pathname.endsWith("/conversations/open")
       && response.request().method() === "POST");
@@ -56,8 +65,8 @@ try {
   const restarted = await control.restart();
   await page.goto(`${restarted.url}/status#ticket=${encodeURIComponent(restarted.ticket)}`);
   await expect(page.getByRole("heading", { name: "Service status", exact: true })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Service status" }).getByRole("status"))
-    .toContainText("Online", { timeout: 30000 });
+  await expect(page.getByRole("region", { name: "Service status" }).getByRole("status")
+    .filter({ hasText: /^Online$/ })).toBeVisible({ timeout: 30000 });
   const resumedQuery = new globalThis.URLSearchParams({
     directory: initialConversation.directory,
     session: initialConversation.session_id,
@@ -71,7 +80,12 @@ try {
   assert.equal(reopened.status(), 200);
   assert.equal(reopened.request().postDataJSON()?.session_id, initialConversation.session_id);
   assert.equal((await reopened.json()).session_id, initialConversation.session_id);
+  const answeredTaskId = (await reopened.json()).snapshot.foreground_questions.find(
+    (question) => question.text === "Which output directory?",
+  ).task_id;
   await expect(page.getByText("Which output directory?", { exact: true })).toBeVisible();
+  await expect(page.locator("#app-sidebar")).toContainText("Questions: 1 · Main 1 · SubAgent 0");
+  await expect(page.locator("#app-sidebar")).not.toContainText("Interrupted tasks: 1");
   const afterRestart = await readProviderObservationRows();
   assert.equal(
     afterRestart.filter((item) =>
@@ -84,14 +98,18 @@ try {
   await expect(taskPanel).toContainText("Interrupted");
   responseCount = await fixtureResponse.count();
   await answer.fill("reports-directory");
-  await page.getByRole("button", { name: "Send answer", exact: true }).click();
+  const answerSubmit = page.getByRole("button", { name: "Send answer", exact: true });
+  await expect(answerSubmit).toBeEnabled();
+  await answerSubmit.click();
   await waitForRunResponse(responseCount);
   await expect(answer).toHaveCount(0);
   await expect(page.getByRole("log")).toContainText("reports-directory");
+  await expect(page.locator("#app-sidebar")).not.toContainText("Questions: 1 · Main 1 · SubAgent 0");
+  await expect(page.locator("#app-sidebar")).not.toContainText("Interrupted tasks: 1");
   await assert.rejects(access(join(control.details.home_root, ".aide", "chat", "after-question.txt")));
   await expect(taskPanel).toContainText("Completed");
   responseCount = await fixtureResponse.count();
-  await taskPanel.getByRole("button", { name: /Continue task/ }).first().click();
+  await taskPanel.getByRole("button", { name: `Continue task ${answeredTaskId}`, exact: true }).click();
   await expect(page.getByRole("log")).toContainText("Continue the current foreground task.");
   await waitForRunResponse(responseCount);
 
@@ -127,6 +145,9 @@ try {
   await expect(page.getByText("Which output directory?", { exact: true })).toBeVisible();
   await taskPanel.getByRole("button", { name: /Cancel task/ }).last().click();
   await expect(page.getByText("Which output directory?", { exact: true })).toHaveCount(0);
+  const activeSessionReminder = page.locator("#app-sidebar button[aria-current='page']");
+  await expect(activeSessionReminder).not.toContainText("Questions:");
+  await expect(activeSessionReminder).not.toContainText("Interrupted tasks:");
   await page.reload();
   await expect(taskPanel).toContainText("Cancelled");
   await expect(page.getByRole("textbox", { name: "Answer to Aide's question", exact: true })).toHaveCount(0);
@@ -153,6 +174,14 @@ try {
   await expect(input).toBeEnabled();
   await input.fill("automatic continuation acceptance");
   await input.press("Enter");
+  // Keep Main busy until all three terminal records are publicly observable.
+  await expect.poll(async () => {
+    const batch = await control.command(
+      `batch-subagents ${autoConversation.workspace_id} ${autoConversation.session_id}`,
+    );
+    return batch.items.filter((item) => item.status === "completed").length;
+  }, { timeout: 30000 }).toBe(3);
+  await control.command("batch-main-release");
   await expect(page.getByRole("log")).toContainText("Automatic result handled in browser.", { timeout: 30000 });
   await expect(cancelRun).toHaveCount(0);
   const subagents = await control.command(
@@ -226,6 +255,61 @@ try {
   await page.reload();
   await expect(page.getByRole("log")).toContainText("Automatic result handled in browser.");
   await expect(cancelRun).toHaveCount(0);
+  await input.fill("multi subagent question acceptance");
+  await input.press("Enter");
+  await expect(page.getByText("Which output should child 1 prepare?", { exact: true })).toBeVisible();
+  await expect(page.getByText("Which output should child 2 prepare?", { exact: true })).toBeVisible();
+  await expect(page.locator("#app-sidebar")).toContainText("Questions: 2 · Main 0 · SubAgent 2");
+  const newQuestionSession = page.waitForResponse((response) =>
+    response.request().method() === "POST"
+      && new globalThis.URL(response.url()).pathname.endsWith("/conversations/open"));
+  await page.locator("#app-sidebar").getByRole("link", { name: "New conversation", exact: true }).click();
+  assert.equal((await newQuestionSession).status(), 200);
+  await page.locator("#app-sidebar").getByRole("button")
+    .filter({ hasText: "Questions: 2 · Main 0 · SubAgent 2" }).first().click();
+  await expect(page.getByText("Which output should child 1 prepare?", { exact: true })).toBeVisible();
+  await expect(page.getByText("Which output should child 2 prepare?", { exact: true })).toBeVisible();
+  const firstChildQuestion = page.locator("section").filter({
+    hasText: "Which output should child 1 prepare?",
+  }).last();
+  await firstChildQuestion.getByRole("radio", { name: "Reports folder", exact: true }).check();
+  await firstChildQuestion.getByRole("button", { name: "Send answer", exact: true }).click();
+  await expect(page.getByText("Which output should child 1 prepare?", { exact: true })).toHaveCount(0);
+  await expect(page.locator("#app-sidebar")).toContainText("Questions: 1 · Main 0 · SubAgent 1");
+  let answeredChildren;
+  await expect.poll(async () => {
+    const children = await control.command(`batch-subagents ${original.workspace_id} ${original.session_id}`);
+    answeredChildren = children;
+    return children.items.filter((item) => item.title === "Browser question child 1"
+      && item.status === "running").length;
+  }, { timeout: 30000 }).toBe(1).catch((error) => {
+    throw new Error(`${error.message}\n${JSON.stringify(answeredChildren)}\n${control.serviceLog()}`);
+  });
+  assert.equal(answeredChildren.items.find(
+    (item) => item.title === "Browser question child 2",
+  ).status, "waiting_for_answer");
+  await expect.poll(async () => (await readProviderObservationRows()).filter(
+    (row) => row.prompt.includes("Human Answer: Reports folder")
+      && row.tool_results.includes("multi-child-question-1"),
+  ).length).toBe(1);
+  await expect(page.getByText("Which output should child 1 prepare?", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Which output should child 2 prepare?", { exact: true })).toBeVisible();
+  const secondChildQuestion = page.locator("section").filter({
+    hasText: "Which output should child 2 prepare?",
+  }).last();
+  await secondChildQuestion.getByRole("textbox", { name: "Answer to Aide's question", exact: true })
+    .fill("child two output");
+  await secondChildQuestion.getByRole("button", { name: "Send answer", exact: true }).click();
+  await expect(page.locator("[role='alert']")).toHaveCount(0);
+  await expect(page.getByText("Which output should child 2 prepare?", { exact: true })).toHaveCount(0)
+    .catch((error) => { throw new Error(`${error.message}\n${JSON.stringify(commandErrors)}`); });
+  await expect(page.locator("#app-sidebar")).not.toContainText("Questions: 1 · Main 0 · SubAgent 1");
+  await control.command("multi-answer-release");
+  await expect.poll(async () => {
+    const children = await control.command(`batch-subagents ${original.workspace_id} ${original.session_id}`);
+    return children.items.filter((item) => item.title.startsWith("Browser question child")
+      && item.status === "completed").length;
+  }, { timeout: 30000 }).toBe(2);
   console.log("Foreground question and task operations: Web answer/continue/cancel passed");
 } finally {
   await browser?.close();

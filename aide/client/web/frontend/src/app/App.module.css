@@ -327,6 +327,17 @@
   font-weight: 650;
 }
 
+.attentionBadge {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--warning-text);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .confirmationNotice {
   position: fixed;
   z-index: 22;

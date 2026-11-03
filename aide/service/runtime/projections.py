@@ -116,6 +116,7 @@ def _encode_management_result(result: object) -> dict[str, object]:
                 "created_at": item.created_at.isoformat(),
                 "updated_at": item.updated_at.isoformat(),
                 "message_count": item.message_count,
+                "foreground_attention": dict(item.foreground_attention),
             }
             for item in result.resume_sessions
         ]

@@ -42,6 +42,8 @@ MODEL_MCP_ENTERED = asyncio.Event()
 MODEL_MCP_RELEASE = asyncio.Event()
 PROVIDER_OBSERVATION_PATH: Path | None = None
 AUTO_CHILD_RELEASE = asyncio.Event()
+BATCH_MAIN_RELEASE = asyncio.Event()
+MULTI_ANSWER_RELEASE = asyncio.Event()
 
 
 async def _release_session(client: ServiceClient) -> None:
@@ -247,6 +249,13 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
         if isinstance(message, dict) and message.get("role") == "tool"
     }
     question_tool_results = set(tool_result_ids)
+    if requested_prompt.startswith("Human Answer:") and any(
+        isinstance(message, dict)
+        and message.get("role") == "user"
+        and "browser-multi-child-question-" in str(message.get("content", ""))
+        for message in messages
+    ):
+        await MULTI_ANSWER_RELEASE.wait()
     tool_search_completed = any(
         isinstance(result_id, str) and result_id.startswith("call-model-mcp-search-")
         for result_id in current_tool_result_ids
@@ -329,6 +338,8 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
                 ]
             text_auto = ""
         else:
+            if "automatic continuation acceptance" in normalized_requested_prompt:
+                await BATCH_MAIN_RELEASE.wait()
             text_auto = "Main delegated the browser task."
         auto_calls = [] if call_auto is None else [call_auto]
         auto_calls.extend(batch_calls)
@@ -346,10 +357,62 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
         else:
             chunks.append(_chunk(request_id=request_id, model=model, delta={"content": text_auto}))
             chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="stop"))
+    elif "multi subagent question acceptance" in normalized_requested_prompt and tool_names:
+        missing_spawns = [
+            index for index in (1, 2)
+            if f"multi-question-spawn-{index}" not in current_tool_result_ids
+        ]
+        if not missing_spawns:
+            chunks.append(_chunk(request_id=request_id, model=model,
+                                 delta={"content": "Both child questions are waiting for answers."}))
+            chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="stop"))
+        elif "spawn_agent" not in tool_names:
+            chunks.append(_chunk(request_id=request_id, model=model, delta={"tool_calls": [{
+                "index": 0,
+                "id": "multi-question-search",
+                "type": "function",
+                "function": {"name": "tool_search", "arguments": json.dumps({"query": "spawn agent"})},
+            }]}))
+            chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="tool_calls"))
+        else:
+            calls = [
+                (
+                    f"multi-question-spawn-{index}",
+                    {
+                        "title": f"Browser question child {index}",
+                        "task": f"browser-multi-child-question-{index}",
+                    },
+                )
+                for index in missing_spawns
+            ]
+            chunks.append(_chunk(request_id=request_id, model=model, delta={"tool_calls": [
+                {
+                    "index": index,
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": "spawn_agent", "arguments": json.dumps(arguments)},
+                }
+                for index, (call_id, arguments) in enumerate(calls)
+            ]}))
+            chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="tool_calls"))
     elif ("subagent question acceptance" in normalized_requested_prompt
-            or "browser-child-question" in normalized_requested_prompt) and tool_names:
+            or "browser-child-question" in normalized_requested_prompt
+            or "browser-multi-child-question-" in normalized_requested_prompt) and tool_names:
         call: tuple[str, str, dict[str, object]] | None = None
-        if "browser-child-question" in normalized_requested_prompt:
+        if "browser-multi-child-question-" in normalized_requested_prompt:
+            child_index = normalized_requested_prompt.rsplit("-", 1)[-1]
+            question_id = f"multi-child-question-{child_index}"
+            if question_id not in question_tool_results:
+                question: dict[str, object] = {
+                    "question": f"Which output should child {child_index} prepare?"
+                }
+                if child_index == "1":
+                    question["options"] = [
+                        {"id": "reports", "label": "Reports folder"},
+                        {"id": "archives", "label": "Archives folder"},
+                    ]
+                call = (question_id, "ask_user", question)
+        elif "browser-child-question" in normalized_requested_prompt:
             if "child-browser-question" not in question_tool_results:
                 call = ("child-browser-question", "ask_user", {"question": "Which child output?"})
         elif "browser-spawn" not in current_tool_result_ids:
@@ -621,19 +684,25 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
         nonstream_tool_calls: list[dict[str, object]] = []
         nonstream_finish_reason = "stop"
         for chunk in chunks:
-            choices = chunk.get("choices")
-            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            chunk_choices = chunk.get("choices")
+            if (
+                not isinstance(chunk_choices, list)
+                or not chunk_choices
+                or not isinstance(chunk_choices[0], dict)
+            ):
                 continue
-            choice = choices[0]
-            delta = choice.get("delta")
+            parsed_choice = chunk_choices[0]
+            delta = parsed_choice.get("delta")
             if isinstance(delta, dict):
                 delta_content = delta.get("content")
                 if isinstance(delta_content, str):
                     content_parts.append(delta_content)
-                calls = delta.get("tool_calls")
-                if isinstance(calls, list):
-                    nonstream_tool_calls.extend(call for call in calls if isinstance(call, dict))
-            finish_value = choice.get("finish_reason")
+                delta_tool_calls = delta.get("tool_calls")
+                if isinstance(delta_tool_calls, list):
+                    nonstream_tool_calls.extend(
+                        tool_call for tool_call in delta_tool_calls if isinstance(tool_call, dict)
+                    )
+            finish_value = parsed_choice.get("finish_reason")
             if isinstance(finish_value, str):
                 nonstream_finish_reason = finish_value
         nonstream_message: dict[str, object] = {
@@ -1062,6 +1131,14 @@ async def _run_e2e(provider_base_url: str) -> None:
                     AUTO_CHILD_RELEASE.set()
                     print(json.dumps({"released": True}), flush=True)
                     continue
+                if command.strip() == "batch-main-release":
+                    BATCH_MAIN_RELEASE.set()
+                    print(json.dumps({"released": True}), flush=True)
+                    continue
+                if command.strip() == "multi-answer-release":
+                    MULTI_ANSWER_RELEASE.set()
+                    print(json.dumps({"released": True}), flush=True)
+                    continue
                 if command.startswith("batch-subagents "):
                     _, workspace_id, session_id = command.strip().split(maxsplit=2)
                     result = await project_client._http_request(
@@ -1225,6 +1302,8 @@ async def _run_e2e(provider_base_url: str) -> None:
                 await announce()
         finally:
             AUTO_CHILD_RELEASE.set()
+            BATCH_MAIN_RELEASE.set()
+            MULTI_ANSWER_RELEASE.set()
             if peer_client is not None:
                 await peer_client.close()
             await project_client.close()

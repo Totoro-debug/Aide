@@ -23,6 +23,10 @@ from aide.agent.confirmation import (
     ConfirmationOwner,
     ToolConfirmationCoordinator,
 )
+from aide.agent.foreground_work.store import (
+    ForegroundWorkStore,
+    summarize_foreground_attention,
+)
 from aide.agent.memory.dream import Dream
 from aide.agent.memory.manager import MemoryManager
 from aide.agent.permission import RuntimePermissionControl
@@ -2694,6 +2698,9 @@ class AgentService:
                             "updated_at": updated_at.isoformat(),
                             "directory": str(path),
                             "available": path.is_dir(),
+                            "foreground_attention": summarize_foreground_attention(
+                                ForegroundWorkStore(state, loaded_id).load()
+                            ),
                         },
                     )
                 )

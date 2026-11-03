@@ -15,6 +15,11 @@ from aide.agent.context.budget import (
     ProjectionSource,
 )
 from aide.agent.context.tokenizer import ContextTokenizerError
+from aide.agent.foreground_work.store import (
+    ForegroundAttentionSummary,
+    ForegroundWorkStore,
+    summarize_foreground_attention,
+)
 from aide.agent.memory.contracts import DreamResult
 from aide.agent.permission import (
     RuntimePermissionControl,
@@ -71,6 +76,7 @@ class SessionListingEntry:
     created_at: datetime
     updated_at: datetime
     message_count: int
+    foreground_attention: ForegroundAttentionSummary
 
     def __post_init__(self) -> None:
         Session._require_id(self.id, field="id", partition=SessionStoragePartition.FOREGROUND)
@@ -81,6 +87,16 @@ class SessionListingEntry:
         if self.updated_at.tzinfo is None or self.updated_at.utcoffset() is None:
             raise ValueError("updated_at must be timezone-aware")
         require_nonnegative_int(self.message_count, field="message_count")
+        if not isinstance(self.foreground_attention, dict) or set(self.foreground_attention) != {
+            "question_count",
+            "main_question_count",
+            "subagent_question_count",
+            "interrupted_task_count",
+        } or any(
+            type(count) is not int or count < 0
+            for count in self.foreground_attention.values()
+        ):
+            raise ValueError("foreground_attention must contain nonnegative counts")
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,6 +575,9 @@ class ManagementViewService:
                     created_at=session.created_at,
                     updated_at=session.updated_at,
                     message_count=len(session.messages),
+                    foreground_attention=summarize_foreground_attention(
+                        ForegroundWorkStore(workspace_state, session.session_id).load()
+                    ),
                 )
             )
         return SessionListingReport(

@@ -94,6 +94,8 @@ aide service stop
 
 **历史会话**：Web 从侧栏打开历史对话；CLI 用 `/resume` 选择当前工作区的会话。同一工作区可同时运行多个会话，每个会话只能由一个客户端操作。同一服务支持一个 Web 客户端和多个 CLI 客户端。
 
+**待答问题与中断任务**：Web 会话侧栏和 CLI 的 `/resume` 列表显示待答问题来源数量及中断任务数量，不展示问题内容。打开对应会话并取得当前 Session Claim 后，Web 会展示全部 Main Agent 与 SubAgent 问题；CLI 会在问题中显示来源和 ID。单个问题可用 `/answer <text>`、`/answer --text <text>` 或 `/answer --option <id>` 回答；同一会话有多个问题时用 `/answer --question <question_id> <text>` 或配合 `--text`、`--option` 指定问题。`/task list` 查看前台任务，`/task continue <task_id>` 显式继续中断任务，`/task cancel <task_id>` 取消任务。回答和任务操作仍受当前 Session Claim 约束；服务重启后只展示待处理状态，不会自动重放。
+
 **统计与执行追踪**：Web 的「统计」页提供日期、工作区和调用维度筛选；从会话或统计页打开 Execution Trace，可查看模型输出、工具参数与最终结果，并在模型和关联工具之间跳转；协议和端点等补充信息默认折叠。可以只读查看 CLI 正在持有的会话，无需接管。页面通过手动刷新更新；统计基于仍保留的已保存记录，未知用量、采集缺失及丢弃的重试尝试不代表完整账单。删除会话会清理关联 Trace，其余记录保留 30 天；Restore 保留历史并标记被回退的执行。
 
 **记忆与定时任务**：Web 项目菜单或普通对话菜单提供记忆、Dream 和定时任务入口。Dream 将待处理的对话摘要整理为长期记忆。也可以在对话中让 Agent 创建定时任务，例如「每天上午 9 点总结这个项目的待办事项」。
@@ -111,6 +113,10 @@ CLI 中，`Enter` 提交、`Ctrl+J` 换行、`Ctrl+C` 取消当前回复，输�
 | 命令 | 用途 |
 | --- | --- |
 | `/resume` | 继续历史会话 |
+| `/answer <text>` | 回答当前会话中的一个问题；多个问题时用 `--question <question_id>` 指定 |
+| `/task list` | 查看前台任务及可用操作 |
+| `/task continue <task_id>` | 显式继续一个中断的前台任务 |
+| `/task cancel <task_id>` | 取消前台任务并使其待答问题失效 |
 | `/restore` | 回退当前会话，可选择同时恢复文件 |
 | `/status` | 查看运行状态与上下文用量 |
 | `/config` | 查看脱敏后的配置 |

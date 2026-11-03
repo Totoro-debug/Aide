@@ -29,6 +29,7 @@ from aide.agent.foreground_work.store import (
     ForegroundWorkStore,
     ForegroundWorkTask,
     StaleForegroundWorkRevision,
+    summarize_foreground_attention,
 )
 from aide.agent.loop import (
     AgentRunExecutor,
@@ -880,6 +881,9 @@ class WorkspaceRecord:
             "occupied": claim is not None,
             "occupied_by": None if claim is None or claim.client_id == client_id else "client",
             "metadata_version": session.metadata_version,
+            "foreground_attention": summarize_foreground_attention(
+                self.foreground_work_store(session.session_id).load()
+            ),
         }
 
     async def list_sessions_page(

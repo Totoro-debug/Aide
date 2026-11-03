@@ -554,6 +554,14 @@ export interface SessionSummary {
   occupied: boolean;
   occupied_by: string | null;
   metadata_version: number;
+  foreground_attention: ForegroundAttentionSummary;
+}
+
+export interface ForegroundAttentionSummary {
+  question_count: number;
+  main_question_count: number;
+  subagent_question_count: number;
+  interrupted_task_count: number;
 }
 
 export interface SessionSnapshot {
@@ -793,6 +801,7 @@ export interface ChatSessionSummary {
   updated_at: string;
   directory: string;
   available: boolean;
+  foreground_attention: ForegroundAttentionSummary;
 }
 
 export interface ChatSessionsResponse {

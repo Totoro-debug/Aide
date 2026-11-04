@@ -16,6 +16,7 @@ from aide.agent.foreground_work.store import (
     ForegroundWorkStore,
     StaleForegroundWorkRevision,
 )
+from aide.agent.session.session import Session
 from aide.agent.subagents.models import (
     SubAgentCreatorSnapshot,
     SubAgentError,
@@ -89,6 +90,28 @@ def test_router_role_survives_question_resume_and_task_transitions(tmp_path: Pat
     snapshot = store.load()
     store.cancel_task("replacement", expected_revision=snapshot.revision, request_id="cancel")
     assert all(task.execution_role == "router" for task in _store(tmp_path).load().tasks)
+
+
+def test_schedule_session_can_persist_a_router_task(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    state = WorkspaceState(workspace)
+    state.initialize(agent_home_root=tmp_path / "agent-home")
+    session_id = Session.schedule_session_id(uuid4())
+    store = ForegroundWorkStore(state, session_id)
+    task_id = str(uuid4())
+
+    snapshot = store.begin_task(
+        task_id,
+        task_id,
+        generation=1,
+        permission_level="read-only",
+        execution_role="router",
+    )
+
+    assert snapshot.tasks[0].task_id == task_id
+    assert snapshot.tasks[0].execution_role == "router"
+    assert ForegroundWorkStore(state, session_id).load() == snapshot
 
 
 @pytest.mark.parametrize("role", ["worker", "", None, [], {}])

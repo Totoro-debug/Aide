@@ -58,6 +58,7 @@ class WorkerRunnerExecutor:
         max_tool_result_chars: int,
         enable_tool_micro_compression: bool,
         mcp_keywords: Mapping[str, Sequence[str]],
+        schedule_session: bool = False,
         subagent_coordinator: SubAgentSessionCoordinator | None = None,
         trace_recorder: TraceRecorder | None = None,
         now: Callable[[], datetime] | None = None,
@@ -73,6 +74,8 @@ class WorkerRunnerExecutor:
             raise ValueError("Worker compact ratio must be between zero and one")
         if max_iterations < 1 or max_tool_result_chars < 1:
             raise ValueError("Worker execution limits must be positive")
+        if not isinstance(schedule_session, bool):
+            raise ValueError("Worker Schedule Session flag must be a boolean")
         self._workspace_state = workspace_state
         self._store = store
         self._model_router = model_router
@@ -84,6 +87,7 @@ class WorkerRunnerExecutor:
         self._max_tool_result_chars = max_tool_result_chars
         self._enable_tool_micro_compression = enable_tool_micro_compression
         self._mcp_keywords = deepcopy(dict(mcp_keywords))
+        self._schedule_session = schedule_session
         self._subagent_coordinator = subagent_coordinator
         self._trace_recorder = NoOpTraceRecorder() if trace_recorder is None else trace_recorder
         self._now = now or (lambda: datetime.now(UTC))
@@ -259,6 +263,16 @@ class WorkerRunnerExecutor:
                 runner_usage = dict(usage)
                 current_worker = current_record[0]
                 appended = deepcopy(list(messages[runner_message_count:]))
+                if self._schedule_session and any(
+                    isinstance(item.get("confirmation"), dict)
+                    and item["confirmation"].get("decision") is None
+                    for item in messages if item.get("role") == "tool"
+                ):
+                    if appended and appended[-1].get("role") == "assistant" and not appended[-1].get("tool_calls"):
+                        appended[-1].update(status="error", error={
+                            "code": "interactive_terminal_required",
+                            "message": "Schedule Worker Tool confirmation is unavailable.",
+                        })
                 context_values = controller.terminal_commit_values()
                 next_state = deepcopy(current_worker.context_state)
                 next_state["last_compacted"] = context_values.pending_last_compacted
@@ -289,9 +303,10 @@ class WorkerRunnerExecutor:
                     externalize_result=externalize_result,
                     cancel_requested=cancel_requested,
                     max_iterations=self._max_iterations,
-                    file_mutation_recorder=FileBackupStore(
-                        self._workspace_state,
-                        worker.session_id,
+                    file_mutation_recorder=(
+                        None
+                        if self._schedule_session
+                        else FileBackupStore(self._workspace_state, worker.session_id)
                     ),
                     run_token=(
                         None if worker.restore_run_token is None else UUID(worker.restore_run_token)
@@ -299,6 +314,14 @@ class WorkerRunnerExecutor:
                     on_checkpoint=checkpoint,
                 )
             await checkpoint(result.messages, result.usage)
+            if self._schedule_session and any(
+                isinstance(item.get("confirmation"), dict)
+                and item["confirmation"].get("decision") is None
+                for item in result.messages if item.get("role") == "tool"
+            ):
+                return self._failed(current_record[0], ErrorInfo(
+                    "interactive_terminal_required", "Schedule Worker Tool confirmation is unavailable.",
+                ))
             if result.finish_reason == "completed":
                 state: WorkerReportStatus = "ready"
                 summary = result.final_content or "Worker completed without a text response."
@@ -378,12 +401,13 @@ class WorkerRunnerExecutor:
         source = TraceRootSource(
             workspace_key=workspace_key_for(self._workspace_state.workspace_path),
             workspace_path=str(self._workspace_state.workspace_path),
-            origin=TraceOrigin.FOREGROUND,
+            origin=TraceOrigin.SCHEDULE if self._schedule_session else TraceOrigin.FOREGROUND,
             purpose=TracePurpose.AGENT_RUN,
             owner_session_id=worker.session_id,
             subject_session_id=None,
             run_id=worker.runtime_facts.get("foreground_execution_id"),
-            restore_run_token=worker.restore_run_token,
+            restore_run_token=None if self._schedule_session else worker.restore_run_token,
+            schedule_run_id=worker.parent_task_id if self._schedule_session else None,
             agent_id=worker.worker_id,
             parent_root_id=None if parent is None else parent.context.root_id,
         )

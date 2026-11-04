@@ -16,7 +16,7 @@ from aide.provider.model_router import ModelRouteStatus
 from aide.provider.models import AssistantModelMessage, ModelResponse, ModelUsage
 from aide.schedule.model import JobSchedule, ScheduleJob, ScheduleJobState
 from aide.schedule.service import ScheduleService
-from aide.schedule.store import ScheduleStateError, WorkspaceScheduleStore
+from aide.schedule.store import ScheduleReservation, ScheduleStateError, WorkspaceScheduleStore
 from aide.utils.errors import ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from tests.fixtures import ScriptedFakeProvider, ScriptedFakeRouter
@@ -81,7 +81,7 @@ class _BlockingReservation:
     async def reserve_due(
         self,
         candidates: tuple[ScheduleJob, ...],
-    ) -> tuple[ScheduleJob, ...]:
+    ) -> tuple[ScheduleReservation, ...]:
         self.calls += 1
         if self.calls == 1:
             reserved = await self._reserve_due(candidates)
@@ -1544,7 +1544,7 @@ async def test_pause_after_snapshot_await_does_not_start_a_new_reservation(
 
     async def record_reservation(
         candidates: tuple[ScheduleJob, ...],
-    ) -> tuple[ScheduleJob, ...]:
+    ) -> tuple[ScheduleReservation, ...]:
         nonlocal reserve_calls
         reserve_calls += 1
         return await original_reserve_due(candidates)
@@ -1889,7 +1889,7 @@ async def test_close_rejects_a_run_registered_after_its_initial_task_snapshot(
 
     async def completed_after_cancellation(
         candidates: tuple[ScheduleJob, ...],
-    ) -> tuple[ScheduleJob, ...]:
+    ) -> tuple[ScheduleReservation, ...]:
         reserve_started.set()
         try:
             await asyncio.Event().wait()

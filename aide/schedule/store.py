@@ -6,9 +6,10 @@ import asyncio
 import copy
 import json
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
+from uuid import UUID, uuid4
 
 from aide.agent.workspace_state import WorkspaceState, WorkspaceStateError
 from aide.schedule.model import DREAM_JOB_ID, JobStatus, ScheduleJob, ScheduleJobState
@@ -45,6 +46,14 @@ class ScheduleStaleRemovalError(ScheduleStoreError):
     """Raised when the public Job snapshot changes before removal."""
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduleReservation:
+    """One due Job paired with its durable user occurrence identity."""
+
+    job: ScheduleJob
+    occurrence_id: UUID | None
+
+
 class WorkspaceScheduleStore:
     """Strict, copy-on-write Schedule state for one Runtime and Workspace."""
 
@@ -63,7 +72,7 @@ class WorkspaceScheduleStore:
                 self._state_path,
                 within=workspace_root,
             )
-            self._jobs = self._load_once()
+            self._jobs, self._pending_occurrences = self._load_once()
         except ScheduleStateError:
             raise
         except (OSError, UnicodeError, TypeError, ValueError) as error:
@@ -90,17 +99,55 @@ class WorkspaceScheduleStore:
     async def reserve_due(
         self,
         candidates: tuple[ScheduleJob, ...],
-    ) -> tuple[ScheduleJob, ...]:
-        """Revalidate due candidates while holding the Store authority lock."""
+    ) -> tuple[ScheduleReservation, ...]:
+        """Durably reserve due user occurrences while holding Store authority."""
         async with self._condition:
             self._ensure_available()
             current = {job.job_id: job for job in self._jobs}
-            reserved = tuple(
-                current[job.job_id]
-                for job in sorted(candidates, key=lambda candidate: candidate.job_id)
-                if current.get(job.job_id) == job
+            pending = dict(self._pending_occurrences)
+            reservations: list[ScheduleReservation] = []
+            changed = False
+            for candidate in sorted(candidates, key=lambda item: item.job_id):
+                job = current.get(candidate.job_id)
+                if job != candidate:
+                    continue
+                if job.source != "user":
+                    reservations.append(ScheduleReservation(copy.deepcopy(job), None))
+                    continue
+                occurrence_id = pending.get(job.job_id)
+                if occurrence_id is None:
+                    occurrence_id = uuid4()
+                    pending[job.job_id] = occurrence_id
+                    changed = True
+                reservations.append(ScheduleReservation(copy.deepcopy(job), occurrence_id))
+            if changed:
+                self._publish(self._jobs, pending)
+            return tuple(reservations)
+
+    async def pending_occurrences(self) -> tuple[ScheduleReservation, ...]:
+        """Return durable user occurrence intents eligible for restart replay."""
+        async with self._condition:
+            self._ensure_available()
+            jobs = {job.job_id: job for job in self._jobs}
+            return tuple(
+                ScheduleReservation(copy.deepcopy(jobs[job_id]), occurrence_id)
+                for job_id, occurrence_id in sorted(self._pending_occurrences.items())
+                if job_id in jobs
             )
-            return copy.deepcopy(reserved)
+
+    async def clear_pending_occurrence(self, job_id: str, occurrence_id: UUID) -> bool:
+        """Release one exact recurring reservation after an in-process pause."""
+        require_uuid4_string(job_id, field="job_id")
+        if not isinstance(occurrence_id, UUID) or occurrence_id.version != 4:
+            raise ValueError("occurrence_id must be a UUID4")
+        async with self._condition:
+            self._ensure_available()
+            if self._pending_occurrences.get(job_id) != occurrence_id:
+                return False
+            pending = dict(self._pending_occurrences)
+            pending.pop(job_id)
+            self._publish(self._jobs, pending)
+            return True
 
     async def public_snapshot(self) -> tuple[ScheduleJob, ...]:
         async with self._condition:
@@ -162,15 +209,22 @@ class WorkspaceScheduleStore:
         job_id: str,
         *,
         expected: ScheduleJob,
+        occurrence_id: UUID | None = None,
     ) -> bool:
         require_uuid4_string(job_id, field="job_id")
-        return await self._remove(job_id, expected=expected, user_only=False)
+        return await self._remove(
+            job_id,
+            expected=expected,
+            user_only=False,
+            occurrence_id=occurrence_id,
+        )
 
     async def commit_terminal(
         self,
         job_id: str,
         *,
         expected: ScheduleJob | None = None,
+        occurrence_id: UUID | None = None,
         finished_at_ms: int,
         status: JobStatus,
         error: str | None = None,
@@ -180,6 +234,7 @@ class WorkspaceScheduleStore:
         return await self._commit_terminal(
             job_id,
             expected=expected,
+            occurrence_id=occurrence_id,
             finished_at_ms=finished_at_ms,
             status=status,
             error=error,
@@ -202,6 +257,7 @@ class WorkspaceScheduleStore:
         return await self._commit_terminal(
             job_id,
             expected=expected,
+            occurrence_id=None,
             finished_at_ms=finished_at_ms,
             status=status,
             error=error,
@@ -214,6 +270,7 @@ class WorkspaceScheduleStore:
         job_id: str,
         *,
         expected: ScheduleJob | None,
+        occurrence_id: UUID | None,
         finished_at_ms: int,
         status: JobStatus,
         error: str | None,
@@ -237,13 +294,18 @@ class WorkspaceScheduleStore:
                 return None
             if expected is not None and current != expected:
                 return None
+            pending_occurrence_id = self._pending_occurrences.get(job_id)
+            if pending_occurrence_id is not None and pending_occurrence_id != occurrence_id:
+                return None
             updated = replace(
                 current,
                 state=terminal_state,
                 updated_at_ms=max(current.updated_at_ms, commit_now),
             )
             candidate = tuple(updated if job.job_id == job_id else job for job in self._jobs)
-            self._publish(candidate)
+            pending = dict(self._pending_occurrences)
+            pending.pop(job_id, None)
+            self._publish(candidate, pending)
             return copy.deepcopy(updated)
 
     async def wait_for_change(self, revision: int) -> int:
@@ -252,11 +314,11 @@ class WorkspaceScheduleStore:
             await self._condition.wait_for(lambda: self._revision != revision or self._faulted)
             return self._revision
 
-    def _load_once(self) -> tuple[ScheduleJob, ...]:
+    def _load_once(self) -> tuple[tuple[ScheduleJob, ...], dict[str, UUID]]:
         try:
             self.path.lstat()
         except FileNotFoundError:
-            return ()
+            return (), {}
         owned_path = HOST_FILESYSTEM.require_owned_regular_file(
             self.path,
             within=self._state_root,
@@ -270,6 +332,7 @@ class WorkspaceScheduleStore:
         *,
         expected: ScheduleJob | None,
         user_only: bool,
+        occurrence_id: UUID | None = None,
     ) -> bool:
         if user_only:
             require_uuid4_string(job_id, field="job_id")
@@ -288,18 +351,39 @@ class WorkspaceScheduleStore:
                         raise ScheduleStaleRemovalError("Schedule Job changed before removal")
                 elif current != expected:
                     return False
+            pending_occurrence_id = self._pending_occurrences.get(job_id)
+            if (
+                not user_only
+                and pending_occurrence_id is not None
+                and pending_occurrence_id != occurrence_id
+            ):
+                return False
             candidate = tuple(job for job in self._jobs if job.job_id != job_id)
-            self._publish(candidate)
+            pending = {
+                pending_job_id: occurrence_id
+                for pending_job_id, occurrence_id in self._pending_occurrences.items()
+                if pending_job_id != job_id
+            }
+            self._publish(candidate, pending)
             return True
 
     def _ensure_available(self) -> None:
         if self._faulted:
             raise ScheduleStoreFaultedError("Schedule Store is faulted")
 
-    def _publish(self, candidate: tuple[ScheduleJob, ...]) -> None:
+    def _publish(
+        self,
+        candidate: tuple[ScheduleJob, ...],
+        pending_occurrences: dict[str, UUID] | None = None,
+    ) -> None:
+        pending = (
+            self._pending_occurrences
+            if pending_occurrences is None
+            else pending_occurrences
+        )
         try:
-            encoded = _serialize_document(candidate)
-            if _parse_document(encoded) != candidate:
+            encoded = _serialize_document(candidate, pending)
+            if _parse_document(encoded) != (candidate, pending):
                 raise ValueError("Schedule mutation did not produce canonical state")
             self._require_write_location()
             self._replace_text(self.path, encoded)
@@ -308,6 +392,7 @@ class WorkspaceScheduleStore:
             self._condition.notify_all()
             raise
         self._jobs = copy.deepcopy(candidate)
+        self._pending_occurrences = dict(pending)
         self._revision += 1
         self._condition.notify_all()
 
@@ -324,16 +409,30 @@ class WorkspaceScheduleStore:
         HOST_FILESYSTEM.require_owned_regular_file(self.path, within=self._state_root)
 
 
-def _parse_document(content: str) -> tuple[ScheduleJob, ...]:
+def _parse_document(content: str) -> tuple[tuple[ScheduleJob, ...], dict[str, UUID]]:
     try:
         loaded = strict_json_loads(content)
     except (json.JSONDecodeError, RecursionError, UnicodeError, ValueError) as error:
         raise ValueError("Schedule state is not valid strict JSON") from error
-    if not isinstance(loaded, list):
-        raise ValueError("Schedule state root must be a JSON array")
+    if isinstance(loaded, list):
+        job_values = loaded
+        pending_values: object = {}
+    elif isinstance(loaded, dict) and set(loaded) == {
+        "version",
+        "jobs",
+        "pending_occurrences",
+    }:
+        if loaded["version"] != 1:
+            raise ValueError("Schedule state version is unsupported")
+        job_values = loaded["jobs"]
+        pending_values = loaded["pending_occurrences"]
+    else:
+        raise ValueError("Schedule state root is invalid")
+    if not isinstance(job_values, list):
+        raise ValueError("Schedule state Jobs must be a JSON array")
     jobs: list[ScheduleJob] = []
     seen: set[str] = set()
-    for value in loaded:
+    for value in job_values:
         if not isinstance(value, dict):
             raise ValueError("Schedule state entries must be JSON objects")
         job = ScheduleJob.from_dict(value)
@@ -341,16 +440,58 @@ def _parse_document(content: str) -> tuple[ScheduleJob, ...]:
             raise ValueError("Schedule state contains duplicate Job IDs")
         seen.add(job.job_id)
         jobs.append(job)
-    canonical_values = [job.to_dict() for job in jobs]
-    if canonical_values != loaded:
+    if [job.to_dict() for job in jobs] != job_values:
         raise ValueError("Schedule state contains non-canonical values")
-    return tuple(jobs)
+    if not isinstance(pending_values, dict):
+        raise ValueError("Schedule pending occurrence state must be an object")
+    pending: dict[str, UUID] = {}
+    job_sources = {job.job_id: job.source for job in jobs}
+    for job_id, value in pending_values.items():
+        if (
+            not isinstance(job_id, str)
+            or job_sources.get(job_id) != "user"
+            or not isinstance(value, str)
+        ):
+            raise ValueError("Schedule pending occurrence entry is invalid")
+        try:
+            occurrence_id = UUID(value)
+        except ValueError as error:
+            raise ValueError("Schedule pending occurrence ID is invalid") from error
+        if occurrence_id.version != 4 or str(occurrence_id) != value:
+            raise ValueError("Schedule pending occurrence ID is not canonical UUID4")
+        pending[job_id] = occurrence_id
+    if not isinstance(loaded, list) and {
+        "version": 1,
+        "jobs": job_values,
+        "pending_occurrences": {
+            job_id: str(value) for job_id, value in pending.items()
+        },
+    } != loaded:
+        raise ValueError("Schedule state contains non-canonical values")
+    return tuple(jobs), pending
 
 
-def _serialize_document(jobs: tuple[ScheduleJob, ...]) -> str:
+def _serialize_document(
+    jobs: tuple[ScheduleJob, ...],
+    pending_occurrences: dict[str, UUID],
+) -> str:
+    if not pending_occurrences:
+        return json.dumps(
+            [job.to_dict() for job in jobs],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     return json.dumps(
-        [job.to_dict() for job in jobs],
+        {
+            "version": 1,
+            "jobs": [job.to_dict() for job in jobs],
+            "pending_occurrences": {
+                job_id: str(occurrence_id)
+                for job_id, occurrence_id in sorted(pending_occurrences.items())
+            },
+        },
         ensure_ascii=False,
+        sort_keys=True,
         separators=(",", ":"),
     )
 
@@ -389,6 +530,7 @@ def _reconcile_system_job(
 
 
 __all__ = [
+    "ScheduleReservation",
     "ScheduleStaleRemovalError",
     "ScheduleStateError",
     "ScheduleStoreError",

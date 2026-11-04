@@ -622,6 +622,99 @@ class _ParallelWorkerScheduleProvider(_ParallelWorkerProvider):
         return emit()
 
 
+class _ScheduledRouterWorkerProvider(_ParallelWorkerProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.router_started = asyncio.Event()
+        self.schedule_worker_started = asyncio.Event()
+        self.report_followup_started = asyncio.Event()
+        self.router_tool_names: set[str] = set()
+        self.models: list[str] = []
+
+    def _response_for(
+        self,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        model: str,
+    ) -> ModelResponse:
+        system = messages[0].get("content", "") if messages else ""
+        user_text = "\n".join(
+            content
+            for item in messages
+            if item.get("role") == "user"
+            and isinstance((content := item.get("content")), str)
+        )
+        tool_names = {
+            schema["function"]["name"]
+            for schema in tools
+            if isinstance(schema.get("function"), dict)
+            and isinstance(schema["function"].get("name"), str)
+        }
+        self.models.append(model)
+
+        if isinstance(system, str) and system.startswith("You are an Aide Worker."):
+            self.schedule_worker_started.set()
+            return _response("Scheduled source checked.")
+
+        self.router_tool_names = tool_names
+        tool_results = {
+            item.get("tool_call_id")
+            for item in messages
+            if item.get("role") == "tool"
+        }
+        if "Worker reports for automatic continuation:" in user_text:
+            self.report_followup_started.set()
+            call = ModelToolCall(
+                "schedule-report-finish",
+                "finish",
+                '{"response":"Scheduled check completed."}',
+            )
+        elif "dispatch-scheduled-check" in tool_results:
+            call = ModelToolCall(
+                "schedule-initial-finish",
+                "finish",
+                '{"response":"Waiting for scheduled check."}',
+            )
+        else:
+            self.router_started.set()
+            call = ModelToolCall(
+                "dispatch-scheduled-check",
+                "dispatch_worker",
+                json.dumps({
+                    "task_id": "schedule-check",
+                    "task": "Inspect the scheduled source",
+                }),
+            )
+        return ModelResponse(
+            message=AssistantModelMessage(content="", tool_calls=(call,)),
+            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+            finish_reason="tool_calls",
+        )
+
+    async def complete(
+        self,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        model: str,
+        max_output: int,
+        temperature: float,
+        reasoning_effort: object,
+        timeout: int,
+        continuation: object = None,
+    ) -> ModelResponse:
+        del max_output, temperature, reasoning_effort, timeout, continuation
+        return self._response_for(messages, tools, model)
+
+    def stream(self, **kwargs: Any) -> AsyncIterator[ModelStreamEvent]:
+        async def emit() -> AsyncIterator[ModelStreamEvent]:
+            yield ModelCompleted(self._response_for(
+                kwargs["messages"], kwargs["tools"], str(kwargs["model"]),
+            ))
+
+        return emit()
+
+
 def _home(path: Path) -> AgentHome:
     home = AgentHome(path)
     home.initialize()
@@ -633,6 +726,174 @@ async def _wait_until(predicate: Any) -> None:
     async with asyncio.timeout(10):
         while not predicate():
             await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_schedule_router_waits_for_worker_report_and_finishes_occurrence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime, timedelta
+    from uuid import uuid4
+
+    from aide.agent.session.session import Session
+    from aide.schedule.model import JobSchedule, ScheduleJob
+    from aide.utils.time import format_rfc3339_milliseconds
+    from tests.service.test_service_concurrency import _CollectingSink
+
+    home = _home(tmp_path / "home")
+    configuration_path = home.path / "config.toml"
+    configuration_path.write_text(
+        configuration_path.read_text(encoding="utf-8")
+        + "\n"
+        + "\n".join((
+            '[models.providers.primary.models."schedule-model"]',
+            "context_window = 8192",
+            "max_output = 1024",
+            "temperature = 0",
+            'reasoning_effort = "high"',
+            "timeout = 30",
+            "",
+            "[models.routes.schedule]",
+            'provider_id = "primary"',
+            'model = "schedule-model"',
+        )),
+        encoding="utf-8",
+    )
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _ScheduledRouterWorkerProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        await service.connect_client(client.client_id, _CollectingSink())
+        workspace = await service.attach_workspace(client.client_id, directory)
+        assert workspace.schedule_status()["admitted"] is True
+        now = datetime.now(UTC)
+        created_at_ms = int(now.timestamp() * 1000)
+        job = ScheduleJob(
+            job_id=str(uuid4()),
+            message="Inspect the scheduled source with a Worker.",
+            schedule=JobSchedule.from_at_input(
+                format_rfc3339_milliseconds(now - timedelta(seconds=3))
+            ),
+            created_at_ms=created_at_ms,
+            updated_at_ms=created_at_ms,
+            title="Scheduled Worker check",
+        )
+        await workspace.schedule_service.add_user_job(job)
+        session_id = Session.schedule_session_id(job.job_id)
+
+        await asyncio.wait_for(provider.router_started.wait(), 10)
+        await asyncio.wait_for(provider.schedule_worker_started.wait(), 10)
+        await asyncio.wait_for(provider.report_followup_started.wait(), 10)
+        async with asyncio.timeout(10):
+            while not any(
+                item.state == "completed"
+                for item in workspace.foreground_work_store(session_id).load().tasks
+            ):
+                await asyncio.sleep(0.01)
+        async with asyncio.timeout(10):
+            while await workspace.schedule_service.public_snapshot():
+                await asyncio.sleep(0.01)
+
+        tasks = workspace.foreground_work_store(session_id).load().tasks
+        workers = workspace.worker_store(session_id).load().workers
+        schedule_loop = workspace._schedule_loops[job.job_id]
+        assert provider.router_tool_names >= {"dispatch_worker", "finish"}
+        assert "schedule-model" in provider.models
+        assert not schedule_loop.bus._outbound
+        assert len(tasks) == 1
+        assert tasks[0].state == "completed"
+        assert tasks[0].execution_role == "router"
+        assert len(workers) == 1
+        assert workers[0].parent_task_id == tasks[0].task_id
+        assert workers[0].restore_run_token == tasks[0].task_id
+        assert workers[0].state == "ready"
+        assert workers[0].model_configuration.reasoning_effort == "high"
+        assert workers[0].report is not None
+        assert workers[0].report.summary == "Scheduled source checked."
+        assert workers[0].report_delivery_state == "consumed"
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_schedule_recovery_does_not_rerun_router_waiting_for_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from uuid import uuid4
+
+    from aide.agent.foreground_work.store import ForegroundWorkStore
+    from aide.agent.session.session import Session
+    from aide.agent.workers.store import WorkerStore
+    from aide.agent.workspace_state import WorkspaceState
+    from aide.schedule.model import JobSchedule, ScheduleJob
+    from aide.schedule.service import ScheduleJobExecutionError, ScheduleOccurrence
+    from aide.service.runtime.workspace import WorkspaceRecord
+    from aide.utils.time import format_rfc3339_milliseconds
+
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    state = WorkspaceState(workspace_path)
+    state.initialize(agent_home_root=tmp_path / "agent-home")
+    job_id = uuid4()
+    occurrence_id = uuid4()
+    now = datetime.now(UTC)
+    created_at_ms = int(now.timestamp() * 1000)
+    job = ScheduleJob(
+        job_id=str(job_id),
+        message="Continue the scheduled check.",
+        schedule=JobSchedule.from_at_input(format_rfc3339_milliseconds(now)),
+        created_at_ms=created_at_ms,
+        updated_at_ms=created_at_ms,
+        title="Scheduled input check",
+    )
+    session_id = Session.schedule_session_id(job_id)
+    session = Session.create_schedule(state, job_id)
+    work_store = ForegroundWorkStore(state, session_id)
+    task_id = str(occurrence_id)
+    work_store.begin_task(
+        task_id,
+        "prior-execution",
+        generation=1,
+        execution_role="router",
+    )
+    work_store.prepare_question(
+        task_id=task_id,
+        execution_id="prior-execution",
+        question_id="question",
+        tool_call_id="call",
+        text="Which source should I inspect?",
+    )
+    work_store.publish_question("question", committed_tool_call_ids={"call"})
+    session.messages.append({
+        "role": "tool",
+        "tool_call_id": "call",
+        "foreground_question_id": "question",
+    })
+
+    run_schedule_job = AsyncMock()
+    loop_state = SimpleNamespace(
+        loop=SimpleNamespace(session=session, run_schedule_job=run_schedule_job)
+    )
+    workspace = object.__new__(WorkspaceRecord)
+    workspace._schedule_worker_wakeups = {}
+    monkeypatch.setattr(workspace, "_get_schedule_loop", AsyncMock(return_value=loop_state))
+    monkeypatch.setattr(workspace, "foreground_work_store", lambda _session_id: work_store)
+    monkeypatch.setattr(workspace, "worker_store", lambda _session_id: WorkerStore(state, session_id))
+
+    with pytest.raises(ScheduleJobExecutionError) as raised:
+        await workspace._run_schedule_occurrence(
+            ScheduleOccurrence(job, occurrence_id)
+        )
+
+    assert raised.value.error.code == "interactive_terminal_required"
+    run_schedule_job.assert_not_awaited()
 
 
 @pytest.mark.asyncio

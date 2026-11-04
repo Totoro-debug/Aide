@@ -2,6 +2,7 @@ import asyncio
 import json
 from dataclasses import replace
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -133,6 +134,75 @@ async def test_terminal_commit_updates_state_without_exposing_mutable_authority(
     )
     assert committed.updated_at_ms == 25
     assert (await store.snapshot())[0] == committed
+
+
+@pytest.mark.asyncio
+async def test_reserved_occurrence_identity_survives_store_reopen_and_is_consumed(
+    workspace: Path,
+) -> None:
+    state = _state(workspace)
+    job = _job()
+    store = WorkspaceScheduleStore(state)
+    await store.add_user_job(job)
+
+    reserved = await store.reserve_due((job,))
+
+    assert len(reserved) == 1
+    occurrence_id = reserved[0].occurrence_id
+    assert isinstance(occurrence_id, UUID)
+    assert reserved[0].job == job
+    assert job.to_dict() == (await store.snapshot())[0].to_dict()
+
+    reopened = WorkspaceScheduleStore(state)
+    pending = await reopened.pending_occurrences()
+    assert pending == reserved
+
+    committed = await reopened.commit_terminal(
+        job.job_id,
+        expected=job,
+        occurrence_id=occurrence_id,
+        finished_at_ms=20,
+        status="ok",
+        now_ms=20,
+    )
+    assert committed is not None
+    assert await WorkspaceScheduleStore(state).pending_occurrences() == ()
+
+    next_occurrence = await reopened.reserve_due((committed,))
+    assert len(next_occurrence) == 1
+    assert next_occurrence[0].occurrence_id != occurrence_id
+
+
+@pytest.mark.asyncio
+async def test_removing_job_also_removes_its_pending_occurrence(workspace: Path) -> None:
+    state = _state(workspace)
+    job = _job()
+    store = WorkspaceScheduleStore(state)
+    await store.add_user_job(job)
+    await store.reserve_due((job,))
+
+    assert await store.remove_user_job(job.job_id, expected=job) is True
+    assert await WorkspaceScheduleStore(state).pending_occurrences() == ()
+
+
+@pytest.mark.asyncio
+async def test_clearing_exact_pending_occurrence_allows_a_new_recurring_identity(
+    workspace: Path,
+) -> None:
+    state = _state(workspace)
+    job = _job()
+    store = WorkspaceScheduleStore(state)
+    await store.add_user_job(job)
+    first = (await store.reserve_due((job,)))[0]
+    assert first.occurrence_id is not None
+
+    assert await store.clear_pending_occurrence(job.job_id, first.occurrence_id) is True
+    assert await WorkspaceScheduleStore(state).pending_occurrences() == ()
+    assert await store.clear_pending_occurrence(job.job_id, first.occurrence_id) is False
+
+    next_occurrence = (await store.reserve_due((job,)))[0]
+    assert next_occurrence.occurrence_id is not None
+    assert next_occurrence.occurrence_id != first.occurrence_id
 
 
 @pytest.mark.asyncio

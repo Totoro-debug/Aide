@@ -12,7 +12,7 @@ from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 from aide.agent.permission import PermissionSnapshot, validate_permission_level
-from aide.agent.session.session import Session, SessionStoragePartition
+from aide.agent.session.session import Session
 from aide.agent.workers.models import (
     WorkerRecord,
     WorkerReport,
@@ -57,7 +57,7 @@ class WorkerStoreSnapshot:
 
 
 class WorkerStore:
-    """Own one foreground Session's Worker records in a single atomic file."""
+    """Own one Conversation Session's Worker records in a single atomic file."""
 
     def __init__(
         self,
@@ -68,7 +68,7 @@ class WorkerStore:
     ) -> None:
         if not isinstance(workspace_state, WorkspaceState):
             raise TypeError("Worker Store requires WorkspaceState")
-        Session._require_id(session_id, partition=SessionStoragePartition.FOREGROUND)
+        Session._require_id(session_id)
         self.workspace_state = workspace_state
         self.session_id = session_id
         self.path = workspace_state.workers_directory / session_id / "state.json"
@@ -88,7 +88,7 @@ class WorkerStore:
         for directory in directories:
             try:
                 owned = HOST_FILESYSTEM.require_owned_directory(directory, within=root)
-                Session._require_id(owned.name, partition=SessionStoragePartition.FOREGROUND)
+                Session._require_id(owned.name)
                 store = cls(workspace_state, owned.name)
                 for worker in store.load().workers:
                     worker = store.recover_completed_result(worker.worker_id)
@@ -484,7 +484,13 @@ class WorkerStore:
             receipt_metadata = message.get("worker_report_receipts")
             is_report_commit = (
                 message.get("role") == "assistant"
-                and message.get("status") == "completed"
+                and (
+                    message.get("status") == "completed"
+                    or (
+                        message.get("status") == "error"
+                        and isinstance(message.get("schedule_occurrence_id"), str)
+                    )
+                )
             )
             is_dispatch_result = (
                 message.get("role") == "tool"

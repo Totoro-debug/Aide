@@ -38,7 +38,11 @@ from aide.schedule.service import (
     ScheduleOccurrence,
     ScheduleService,
 )
-from aide.schedule.store import ScheduleStoreFaultedError, WorkspaceScheduleStore
+from aide.schedule.store import (
+    ScheduleReservation,
+    ScheduleStoreFaultedError,
+    WorkspaceScheduleStore,
+)
 from aide.utils import scheduler as scheduler_module
 from aide.utils.errors import ErrorInfo
 from aide.utils.scheduler import AsyncioSchedulerClock
@@ -283,11 +287,11 @@ def _every_job(
     )
 
 
-async def _wait_until(predicate: object) -> None:
+async def _wait_until(predicate: object, *, attempts: int = 100) -> None:
     check = predicate
     if not callable(check):
         raise TypeError("predicate must be callable")
-    for _ in range(100):
+    for _ in range(attempts):
         if check():
             return
         await asyncio.sleep(0)
@@ -405,6 +409,70 @@ async def test_cron_startup_ignores_match_at_startup_boundary(
     saved = (await store.snapshot())[0]
     assert saved.state.last_status == "ok"
     assert saved.state.last_finished_at_ms == int(clock.now().timestamp() * 1000)
+
+
+@pytest.mark.asyncio
+async def test_reserved_occurrence_replays_with_the_same_identity_after_restart(
+    workspace: Path,
+    agent_home: Path,
+) -> None:
+    state = _state(workspace, agent_home)
+    store = WorkspaceScheduleStore(state)
+    job = _job()
+    await store.add_user_job(job)
+    clock = ControlledClock(START)
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    occurrence_ids: list[UUID] = []
+
+    async def ignore_job(active_job: ScheduleJob) -> None:
+        del active_job
+
+    async def execute_first(occurrence: ScheduleOccurrence) -> None:
+        occurrence_ids.append(occurrence.occurrence_id)
+        first_started.set()
+        await release_first.wait()
+
+    async def execute_second(occurrence: ScheduleOccurrence) -> None:
+        occurrence_ids.append(occurrence.occurrence_id)
+
+    async def execute_dream() -> object:
+        return None
+
+    first = ScheduleService(
+        workspace_state=state,
+        clock=clock,
+        execute_user_job=ignore_job,
+        execute_user_occurrence=execute_first,
+        execute_dream=execute_dream,
+    )
+    first._store = store
+    first.start()
+    await first_started.wait()
+    first_occurrence_id = occurrence_ids[0]
+    await first.close()
+
+    pending_after_restart = await WorkspaceScheduleStore(state).pending_occurrences()
+    assert len(pending_after_restart) == 1
+    assert pending_after_restart[0].occurrence_id == first_occurrence_id
+
+    reopened = WorkspaceScheduleStore(state)
+    second = ScheduleService(
+        workspace_state=state,
+        clock=clock,
+        execute_user_job=ignore_job,
+        execute_user_occurrence=execute_second,
+        execute_dream=execute_dream,
+    )
+    second._store = reopened
+    second.start()
+    await _wait_until(
+        lambda: len(occurrence_ids) == 2
+        and state.schedule_path.read_text(encoding="utf-8") == "[]"
+    )
+    await second.close()
+
+    assert occurrence_ids == [first_occurrence_id, first_occurrence_id]
 
 
 @pytest.mark.asyncio
@@ -1041,7 +1109,7 @@ async def test_due_candidates_are_revalidated_before_reservation(
 
     async def remove_before_reservation(
         candidates: tuple[ScheduleJob, ...],
-    ) -> tuple[ScheduleJob, ...]:
+    ) -> tuple[ScheduleReservation, ...]:
         await store.remove_user_job(job.job_id, expected=job)
         return await original_reserve_due(candidates)
 
@@ -1166,12 +1234,15 @@ async def test_every_terminal_store_fault_preserves_previous_state_and_faults_se
     job = _every_job(created_at_ms=int((START - timedelta(seconds=20)).timestamp() * 1000))
     await initial_store.add_user_job(job)
 
+    failure_enabled = False
+
     def fail_replace(path: Path, content: str) -> None:
         del path, content
-        raise OSError("PRIVATE_TERMINAL_STORE_BODY")
+        if failure_enabled:
+            raise OSError("PRIVATE_TERMINAL_STORE_BODY")
 
     store = WorkspaceScheduleStore(state, replace_text=fail_replace)
-    callback = RecordingScheduleCallback()
+    callback = RecordingScheduleCallback(block=True)
     capture = capture_diagnostics()
     service = _service(
         store=store,
@@ -1182,6 +1253,8 @@ async def test_every_terminal_store_fault_preserves_previous_state_and_faults_se
     try:
         service.start()
         await callback.started.wait()
+        failure_enabled = True
+        callback.release.set()
         await _wait_until(lambda: service.status_snapshot().active_job_count == 0)
         for drain in (service.pause_and_wait_idle, service.pause_and_drain, service.close):
             with pytest.raises(ScheduleStoreFaultedError, match="Schedule terminal update failed"):
@@ -1785,7 +1858,10 @@ async def test_agent_loop_executes_at_job_with_schedule_route_and_partition(
     )
 
     schedule.start()
-    await _wait_until(lambda: len(provider.complete_requests) == 1)
+    await asyncio.sleep(0.05)
+    async with asyncio.timeout(10):
+        while len(provider.complete_requests) != 1:
+            await asyncio.sleep(0.01)
     await _wait_until(lambda: schedule.status_snapshot().active_job_count == 0)
     await loop.close()
     await schedule.close()

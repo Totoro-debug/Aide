@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 
+from aide.agent.foreground_work.store import ForegroundWorkStore
 from aide.agent.permission import PermissionSnapshot
 from aide.agent.session.session import Session
 from aide.agent.tools.core.exec_policy import ResolvedExecShell
@@ -322,6 +323,58 @@ def test_interrupted_work_is_recovered_as_blocked_with_a_report(tmp_path: Path) 
     assert recovered.report is not None
     assert recovered.report.error_code == "service_interrupted"
     assert recovered.report_delivery_state == "pending"
+
+
+def test_schedule_worker_recovery_interrupts_its_router_task(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = WorkspaceState(workspace)
+    state.initialize(agent_home_root=tmp_path / "home")
+    occurrence_id = str(uuid4())
+    session_id = Session.schedule_session_id(uuid4())
+    execution_id = str(uuid4())
+    foreground = ForegroundWorkStore(state, session_id)
+    foreground.begin_task(
+        occurrence_id,
+        execution_id,
+        generation=1,
+        execution_role="router",
+    )
+    foreground.suspend_for_worker_reports(
+        occurrence_id,
+        generation=1,
+        execution_id=execution_id,
+    )
+    workers = WorkerStore(state, session_id)
+    worker = workers.create(
+        parent_task_id=occurrence_id,
+        parent_generation=1,
+        task_id="schedule-check",
+        task="Inspect the scheduled source",
+        explicit_context=(),
+        runtime_facts={"workspace": str(state.workspace_path)},
+        permission_snapshot=PermissionSnapshot("workspace-write", _shell()),
+        session_model_configuration=SessionModelConfiguration(
+            provider_id="controlled", model="test-model", reasoning_effort="low"
+        ),
+        system_prompt="Worker system prompt",
+        initial_message="Task: Inspect the scheduled source",
+        restore_run_token=occurrence_id,
+    )
+
+    WorkerStore.recover_workspace(state)
+
+    recovered = WorkerStore(state, session_id).get(worker.worker_id)
+    task = ForegroundWorkStore(state, session_id).load().tasks[0]
+    assert recovered is not None
+    assert recovered.state == "blocked"
+    assert recovered.report is not None
+    assert recovered.report.error_code == "service_interrupted"
+    assert recovered.restore_run_token == occurrence_id
+    assert recovered.report_delivery_state == "pending"
+    assert task.task_id == occurrence_id
+    assert task.execution_role == "router"
+    assert task.state == "interrupted"
 
 
 def test_restart_recovers_completed_checkpoint_before_report_publication(tmp_path: Path) -> None:

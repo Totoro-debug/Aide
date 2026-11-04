@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -18,7 +17,7 @@ from aide.agent.foreground_work.options import (
     validate_question_options as _validated_question_options,
 )
 from aide.agent.permission import ToolPermissionLevel, validate_permission_level
-from aide.agent.session.session import Session, SessionStoragePartition
+from aide.agent.session.session import Session
 from aide.agent.subagents.models import (
     SubAgentRecord,
     SubAgentSourceKind,
@@ -30,10 +29,6 @@ from aide.utils.host_filesystem import HOST_FILESYSTEM
 _SCHEMA_VERSION = 7
 _MAX_QUESTION_LENGTH = 2_000
 _MAX_ANSWER_LENGTH = 10_000
-_SESSION_ID = re.compile(
-    r"\d{8}-\d{6}-\d{6}_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
-    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}"
-)
 QuestionState = Literal[
     "preparing",
     "pending",
@@ -197,9 +192,7 @@ class ForegroundWorkStore:
     def __init__(self, workspace_state: WorkspaceState, session_id: str) -> None:
         if not isinstance(workspace_state, WorkspaceState):
             raise TypeError("Foreground Work Store requires WorkspaceState")
-        if not isinstance(session_id, str) or _SESSION_ID.fullmatch(session_id) is None:
-            raise ValueError("Foreground Work Store requires a canonical foreground Session ID")
-        Session._require_id(session_id, partition=SessionStoragePartition.FOREGROUND)
+        Session._require_id(session_id)
         self.workspace_state = workspace_state
         self.session_id = session_id
         self.path = workspace_state.foreground_work_directory / session_id / "state.json"

@@ -810,6 +810,12 @@ class ScheduleService:
     async def _pause_owned_tasks(self) -> None:
         async with self._reservation_gate:
             self._paused = True
+        recurring_occurrences = tuple(
+            (active.occurrence.job.job_id, active.occurrence.occurrence_id)
+            for active in self._active_runs.values()
+            if active.occurrence.job.source == "user"
+            and active.occurrence.job.schedule.kind in {"every", "cron"}
+        )
         loop_task = self._loop_task
         if loop_task is not None and not loop_task.done():
             loop_task.cancel()
@@ -833,6 +839,8 @@ class ScheduleService:
                 require_terminal=True,
             )
         await self._cancel_and_drain_job_tasks(cancel_terminal=True)
+        for job_id, occurrence_id in recurring_occurrences:
+            await self._store.clear_pending_occurrence(job_id, occurrence_id)
         retry_at_jobs.update(self._retry_at_jobs_after_resume)
         self._consumed_at_jobs.difference_update(retry_at_jobs)
         self._retry_at_jobs_after_resume.clear()
@@ -1003,6 +1011,7 @@ class ScheduleService:
             self._latch_fault()
             return None
         jobs = await self._store.snapshot()
+        pending = await self._store.pending_occurrences()
         if self._closing.is_set() or self._paused or not self._admission_guard():
             return None
         current = self._clock.now()
@@ -1012,17 +1021,25 @@ class ScheduleService:
         self._sync_cron_cursors(jobs, current)
         if forward_jump:
             self._skip_missed_cron_occurrences(jobs, current)
+        pending_job_ids = {reservation.job.job_id for reservation in pending}
         due = sorted(
             (
                 job
                 for job in jobs
-                if job.job_id not in self._consumed_at_jobs
-                and _is_due(
-                    job,
-                    current,
-                    current_monotonic,
-                    self._every_deadlines,
-                    self._cron_cursors,
+                if (
+                    job.job_id in pending_job_ids
+                    and job.job_id not in self._active_job_ids
+                    and job.job_id not in self._consumed_at_jobs
+                )
+                or (
+                    job.job_id not in self._consumed_at_jobs
+                    and _is_due(
+                        job,
+                        current,
+                        current_monotonic,
+                        self._every_deadlines,
+                        self._cron_cursors,
+                    )
                 )
             ),
             key=lambda job: job.job_id,
@@ -1036,8 +1053,12 @@ class ScheduleService:
                 reserved = await self._store.reserve_due(tuple(due))
                 if not self._admission_guard():
                     return None
-                for job in reserved:
-                    self._reserve(job, current_monotonic=current_monotonic)
+                for reservation in reserved:
+                    self._reserve(
+                        reservation.job,
+                        occurrence_id=reservation.occurrence_id,
+                        current_monotonic=current_monotonic,
+                    )
             return 0.0
         return _next_delay(
             jobs,
@@ -1077,6 +1098,7 @@ class ScheduleService:
         self,
         job: ScheduleJob,
         *,
+        occurrence_id: UUID | None = None,
         current_monotonic: float,
     ) -> None:
         if self._faulted or self._closing.is_set() or self._paused or not self._admission_guard():
@@ -1091,11 +1113,11 @@ class ScheduleService:
                         job.schedule.kind,
                     )
             return
-        if job.job_id in self._consumed_at_jobs:
+        if occurrence_id is None and job.job_id in self._consumed_at_jobs:
             return
         occurrence = ScheduleOccurrence(
             job=job,
-            occurrence_id=uuid4(),
+            occurrence_id=uuid4() if occurrence_id is None else occurrence_id,
             permission_snapshot=(
                 self._permission_snapshot_factory()
                 if lane == "user" and self._permission_snapshot_factory is not None
@@ -1327,6 +1349,7 @@ class ScheduleService:
                 if terminal is not None and terminal_ready:
                     terminal_persisted = await self._commit_terminal(
                         job,
+                        occurrence,
                         terminal,
                         terminal_error,
                         propagate_failure=confirmation_aborted,
@@ -1352,6 +1375,7 @@ class ScheduleService:
     async def _commit_terminal(
         self,
         job: ScheduleJob,
+        occurrence: ScheduleOccurrence,
         terminal: Literal["ok", "error"],
         error: str | None,
         *,
@@ -1368,22 +1392,38 @@ class ScheduleService:
                 deadline=self._clock.monotonic() + every_seconds,
                 every_seconds=every_seconds,
             )
-        operation = asyncio.create_task(
-            self._store._remove_terminal_job(job.job_id, expected=job)
-            if job.schedule.kind == "at"
-            else (
-                self._store._commit_system_terminal
-                if job.source == "system"
-                else self._store.commit_terminal
-            )(
-                job.job_id,
-                expected=job,
-                finished_at_ms=finished_at_ms,
-                status=terminal,
-                error=error,
-                now_ms=finished_at_ms,
+        if job.schedule.kind == "at":
+            operation: asyncio.Task[bool | ScheduleJob | None]
+            operation = asyncio.create_task(
+                self._store._remove_terminal_job(
+                    job.job_id,
+                    expected=job,
+                    occurrence_id=occurrence.occurrence_id,
+                )
             )
-        )
+        elif job.source == "system":
+            operation = asyncio.create_task(
+                self._store._commit_system_terminal(
+                    job.job_id,
+                    expected=job,
+                    finished_at_ms=finished_at_ms,
+                    status=terminal,
+                    error=error,
+                    now_ms=finished_at_ms,
+                )
+            )
+        else:
+            operation = asyncio.create_task(
+                self._store.commit_terminal(
+                    job.job_id,
+                    expected=job,
+                    occurrence_id=occurrence.occurrence_id,
+                    finished_at_ms=finished_at_ms,
+                    status=terminal,
+                    error=error,
+                    now_ms=finished_at_ms,
+                )
+            )
         self._terminal_commit_tasks.add(operation)
         operation.add_done_callback(self._terminal_commit_tasks.discard)
         if self._cancel_terminal_commits and not operation.done():

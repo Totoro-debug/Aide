@@ -85,6 +85,8 @@ from aide.config.config import (
 from aide.provider.factory import create_provider
 from aide.provider.model_router import ModelRouter
 from aide.schedule.service import (
+    ScheduleJobExecutionError,
+    ScheduleOccurrence,
     ScheduleService,
 )
 from aide.service.configuration_resources import (
@@ -106,7 +108,7 @@ from aide.service.runtime.records import (
 )
 from aide.skills.catalog import SkillLoader
 from aide.trace.context import workspace_key_for
-from aide.utils.errors import ErrorInfo
+from aide.utils.errors import STABLE_ERROR_CODES, ErrorCode, ErrorInfo
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 from aide.utils.time import local_now
 
@@ -197,6 +199,7 @@ class WorkspaceRecord:
         self._worker_tasks: dict[
             str, tuple[str, str, int, asyncio.Task[None]]
         ] = {}
+        self._schedule_worker_wakeups: dict[str, asyncio.Event] = {}
         self._subagent_coordinators: dict[str, SubAgentSessionCoordinator] = {}
         self._subagent_admission_closed = False
         self._subagent_blocked_job_ids: set[str] = set()
@@ -301,6 +304,9 @@ class WorkspaceRecord:
                 self.worker_store(session_id).recover_completed_result(worker.worker_id)
             except (OSError, UnicodeError, ValueError, WorkerStoreError):
                 pass
+            wakeup = self._schedule_worker_wakeups.get(session_id)
+            if wakeup is not None:
+                wakeup.set()
             self.wake_foreground_continuations()
 
         task.add_done_callback(worker_finished)
@@ -2533,9 +2539,15 @@ class WorkspaceRecord:
         if not self.service.foreground_continuation_admission_open():
             return
         for state in tuple(self._loops.values()):
+            if state.schedule:
+                wakeup = self._schedule_worker_wakeups.get(
+                    state.loop.session.session_id
+                )
+                if wakeup is not None and self._has_pending_automatic_worker_result(state):
+                    wakeup.set()
+                continue
             if (
-                state.schedule
-                or state.processor_stopping
+                state.processor_stopping
                 or state.foreground_permission_control is None
                 or not state.loop.foreground_input_admitted()
                 or not self.session_model_available(state.loop.session.session_id)
@@ -2561,10 +2573,18 @@ class WorkspaceRecord:
             if question.state
             in {"preparing", "pending", "answer_received", "resuming", "executing", "interrupted"}
         }
+        eligible_task_states = {
+            "running",
+            "waiting_for_answer",
+            "waiting_for_workers",
+            "completed",
+        }
+        if state.schedule:
+            eligible_task_states.add("interrupted")
         tasks = {
             (task.task_id, task.generation): task
             for task in work.tasks
-            if task.state in {"running", "waiting_for_answer", "waiting_for_workers", "completed"}
+            if task.state in eligible_task_states
             and task.iteration_budget_used < task.iteration_budget_limit
             and task.task_id not in active_questions
         }
@@ -2733,10 +2753,12 @@ class WorkspaceRecord:
             or self._restore_blocked
             or self.service.state in {"draining", "stopped"}
             or not state.loop.foreground_input_admitted()
-            or state.schedule
-            or state.foreground_permission_control is None
-            or not self.service.foreground_continuation_admission_open()
-            or not self.session_model_available(session_id)
+            or (not state.schedule and state.foreground_permission_control is None)
+            or (
+                not state.schedule
+                and not self.service.foreground_continuation_admission_open()
+            )
+            or (not state.schedule and not self.session_model_available(session_id))
         ):
             return None
         store = self.foreground_work_store(session_id)
@@ -2872,10 +2894,12 @@ class WorkspaceRecord:
             or self._restore_blocked
             or self.service.state in {"draining", "stopped"}
             or not state.loop.foreground_input_admitted()
-            or state.schedule
-            or state.foreground_permission_control is None
-            or not self.service.foreground_continuation_admission_open()
-            or not self.session_model_available(session_id)
+            or (not state.schedule and state.foreground_permission_control is None)
+            or (
+                not state.schedule
+                and not self.service.foreground_continuation_admission_open()
+            )
+            or (not state.schedule and not self.session_model_available(session_id))
         ):
             return None
         try:
@@ -2919,9 +2943,20 @@ class WorkspaceRecord:
                 (worker.restore_run_token for worker in workers if worker.restore_run_token),
                 None,
             )
-            effect_run_token = _effective_task_restore_token(
-                state.loop.session.messages, task.task_id, fallback_token
-            )
+            if state.schedule:
+                try:
+                    occurrence_id = UUID(task.task_id)
+                except ValueError:
+                    continue
+                effect_run_token = (
+                    task.task_id
+                    if occurrence_id.version == 4 and str(occurrence_id) == task.task_id
+                    else None
+                )
+            else:
+                effect_run_token = _effective_task_restore_token(
+                    state.loop.session.messages, task.task_id, fallback_token
+                )
             if effect_run_token is None:
                 continue
             inbound = InboundMessage(
@@ -2935,6 +2970,11 @@ class WorkspaceRecord:
                     "foreground_worker_report": True,
                     "worker_report_receipts": receipts,
                     "foreground_effect_run_token": effect_run_token,
+                    **(
+                        {"schedule_occurrence_id": task.task_id}
+                        if state.schedule
+                        else {}
+                    ),
                 },
             )
             state.completed_user_count = sum(
@@ -3092,16 +3132,8 @@ class WorkspaceRecord:
                 ModelRouter(configuration=current_configuration, provider_factory=create_provider)
                 if configured is None else configured.shared.router
             )
-            foreground_task_store = (
-                self.foreground_work_store(authority.session_id)
-                if authority._storage_partition is SessionStoragePartition.FOREGROUND
-                else None
-            )
-            worker_store = (
-                self.worker_store(authority.session_id)
-                if authority._storage_partition is SessionStoragePartition.FOREGROUND
-                else None
-            )
+            foreground_task_store = self.foreground_work_store(authority.session_id)
+            worker_store = self.worker_store(authority.session_id)
 
             def schedule_worker(worker: WorkerRecord, factory: Callable[[], Any]) -> None:
                 release = (
@@ -3284,7 +3316,10 @@ class WorkspaceRecord:
             session_id=record.session_id,
             agent_id=record.agent_id,
         )
-        background = record.source.kind is SubAgentSourceKind.SCHEDULE
+        background = (
+            record.source.kind is SubAgentSourceKind.SCHEDULE
+            or record.session_id.startswith("schedule_")
+        )
 
         async def request(request: ConfirmationRequest) -> ConfirmationDecision:
             return await self.service.confirmation.request(
@@ -3292,7 +3327,7 @@ class WorkspaceRecord:
                     request=request,
                     origin="background" if background else "foreground",
                     owner=owner,
-                    job_id=record.source.job_id if background else None,
+                    job_id=(record.source.job_id or record.session_id.removeprefix("schedule_")) if background else None,
                     title=record.title if background else None,
                 )
             )
@@ -3317,6 +3352,180 @@ class WorkspaceRecord:
         self._loops[session.session_id] = state
         self._schedule_loops[job_id] = state
         return state
+
+    async def _run_schedule_occurrence(self, occurrence: ScheduleOccurrence) -> None:
+        state = await self._get_schedule_loop(occurrence.job.job_id, title=occurrence.job.title)
+        try:
+            await self._drive_schedule_occurrence(occurrence)
+        except asyncio.CancelledError:
+            session = state.loop.session
+            last = session.messages[-1] if session.messages else {}
+            error = last.get("error")
+            if isinstance(error, dict) and error.get("code") == "turn_cancelled":
+                last.update(status="error", content="Schedule occurrence was cancelled.")
+                session.persist()
+            else:
+                session.commit_agent_run(
+                    [{
+                        "role": "assistant", "content": "Schedule occurrence was cancelled.",
+                        "tool_calls": [], "status": "error",
+                        "error": {"code": "turn_cancelled", "message": "Schedule occurrence was cancelled."},
+                        "token_usage": {"model_calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                    }],
+                    pending_last_compacted=session.last_compacted,
+                    pending_action_summary=session.metadata.get("action_summary"),
+                )
+            await session.wait_for_pending_persist()
+            raise
+
+    async def _drive_schedule_occurrence(self, occurrence: ScheduleOccurrence) -> None:
+        """Run a Schedule Router and consume its durable Worker reports to terminal."""
+        state = await self._get_schedule_loop(
+            occurrence.job.job_id,
+            title=occurrence.job.title,
+        )
+        session_id = state.loop.session.session_id
+        task_id = str(occurrence.occurrence_id)
+        def raise_saved_failure() -> None:
+            for message in reversed(state.loop.session.messages):
+                saved_error = message.get("error")
+                if message.get("schedule_occurrence_id") == task_id and isinstance(saved_error, dict):
+                    code = saved_error.get("code")
+                    raise ScheduleJobExecutionError(ErrorInfo(
+                        cast(ErrorCode, code) if isinstance(code, str) and code in STABLE_ERROR_CODES else "model_failed",
+                        str(saved_error.get("message") or "Schedule Router failed."),
+                    ))
+
+        raise_saved_failure()
+        work_store = self.foreground_work_store(session_id)
+        worker_store = self.worker_store(session_id)
+        work_store.reconcile(state.loop.session.messages)
+        wakeup = self._schedule_worker_wakeups.setdefault(session_id, asyncio.Event())
+
+        def task_snapshot() -> ForegroundWorkTask | None:
+            return next(
+                (item for item in work_store.load().tasks if item.task_id == task_id),
+                None,
+            )
+
+        def task_workers() -> tuple[WorkerRecord, ...]:
+            task = task_snapshot()
+            if task is None:
+                return ()
+            return tuple(
+                worker
+                for worker in worker_store.load().workers
+                if worker.parent_task_id == task_id
+                and worker.parent_generation == task.generation
+            )
+
+        task = task_snapshot()
+        workers = task_workers()
+        if task is not None and task.state == "waiting_for_answer":
+            raise ScheduleJobExecutionError(
+                ErrorInfo(
+                    "interactive_terminal_required",
+                    "Schedule Router requires user input before it can continue.",
+                )
+            )
+        if task is None or (
+            task.state not in {"waiting_for_workers", "interrupted"} or not workers
+        ):
+            if task is None or task.state != "completed":
+                await state.loop.run_schedule_job(occurrence.job, occurrence)
+
+        while True:
+            raise_saved_failure()
+            # The Session increment is the completion authority even when indexing
+            # its Worker receipts or Task state failed after the durable commit.
+            persisted = Session.load(self.workspace_state, session_id)
+            work_store.reconcile(persisted.messages)
+            task = task_snapshot()
+            if task is None:
+                raise ScheduleJobExecutionError(
+                    ErrorInfo("schedule_state_error", "Schedule Router state was not persisted.")
+                )
+            workers = task_workers()
+            if task.state == "completed":
+                if any(
+                    worker.report is not None and worker.report.status != "ready"
+                    for worker in workers
+                ):
+                    raise ScheduleJobExecutionError(
+                        ErrorInfo(
+                            "model_failed",
+                            "One or more Schedule Workers could not complete their assignments.",
+                        )
+                    )
+                return
+            if task.state == "waiting_for_answer":
+                raise ScheduleJobExecutionError(
+                    ErrorInfo(
+                        "interactive_terminal_required",
+                        "Schedule Router requires user input before it can continue.",
+                    )
+                )
+            if task.state in {"waiting_for_workers", "interrupted"} and workers:
+                wakeup.clear()
+                inbound = self._claim_automatic_worker_result(state)
+                if inbound is None:
+                    if not self._has_active_workers(session_id):
+                        delivery_error = ErrorInfo(
+                            "persistence_error",
+                            "Schedule Worker reports could not be delivered durably.",
+                        )
+                        session = state.loop.session
+                        session.commit_agent_run(
+                            [{
+                                "role": "assistant", "content": "", "tool_calls": [],
+                                "status": "error",
+                                "schedule_occurrence_id": task_id,
+                                "error": {"code": delivery_error.code, "message": delivery_error.message},
+                                "token_usage": {"model_calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                            }],
+                            pending_last_compacted=session.last_compacted,
+                            pending_action_summary=session.metadata.get("action_summary"),
+                        )
+                        await session.wait_for_pending_persist()
+                        raise ScheduleJobExecutionError(delivery_error)
+                    await wakeup.wait()
+                    continue
+                inbound.metadata["schedule_permission_snapshot"] = occurrence.permission_snapshot
+                inbound.metadata["schedule_job_id"] = occurrence.job.job_id
+                inbound.metadata["schedule_title"] = occurrence.job.title
+                await state.loop.run_automatic_continuation(inbound)
+                continue
+
+            terminal = next(
+                (
+                    message
+                    for message in reversed(state.loop.session.messages)
+                    if message.get("role") == "assistant"
+                ),
+                None,
+            )
+            error = None if terminal is None else terminal.get("error")
+            if isinstance(error, dict):
+                code = error.get("code")
+                error_message = error.get("message")
+                raise ScheduleJobExecutionError(
+                    ErrorInfo(
+                        cast(ErrorCode, code)
+                        if isinstance(code, str) and code in STABLE_ERROR_CODES
+                        else "model_failed",
+                        error_message if isinstance(error_message, str) else "Schedule Router failed.",
+                    )
+                )
+            if terminal is not None and terminal.get("status") == "interrupted":
+                raise ScheduleJobExecutionError(
+                    ErrorInfo("turn_cancelled", "Schedule Router execution was interrupted.")
+                )
+            raise ScheduleJobExecutionError(
+                ErrorInfo(
+                    "model_failed",
+                    "Schedule Router ended without a completed result.",
+                )
+            )
 
     async def _forward_output(self, state: _LoopState, run_id: str | None = None) -> bool:
         session_id = state.loop.session.session_id

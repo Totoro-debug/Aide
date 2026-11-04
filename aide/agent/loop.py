@@ -286,6 +286,7 @@ class AgentRunExecutor:
         self._confirmation_requester: RuntimeConfirmationRequester | None = None
         self._active_foreground_owner: ForegroundConfirmationOwner | None = None
         self._cancel_requested = False
+        self._schedule_outbound_suppressed = False
         self._aborted = False
         self._started = False
         self._preflighted = False
@@ -468,9 +469,9 @@ class AgentRunExecutor:
             foreground_question_handler_for=child_question_handler_for,
             foreground_question_publisher=publish_child_question,
             foreground_task_finished=finish_child_execution,
-            file_mutation_recorder_for=lambda record: FileBackupStore(
-                workspace_state,
-                record.session_id,
+            file_mutation_recorder_for=(
+                None if self._session._storage_partition is SessionStoragePartition.SCHEDULE
+                else lambda record: FileBackupStore(workspace_state, record.session_id)
             ),
             now=self._now,
             trace_recorder=self._trace_recorder,
@@ -738,7 +739,7 @@ class AgentRunExecutor:
             self._cancel_requested = False
 
     async def run_automatic_continuation(self, inbound: InboundMessage) -> None:
-        """Run an internal SubAgent result through the foreground Session authority."""
+        """Run an internal result through its owning Session authority."""
         if inbound.metadata.get("foreground_automatic_continuation") is not True:
             raise ValueError("automatic continuation metadata is required")
         await self.run_foreground(inbound)
@@ -748,7 +749,7 @@ class AgentRunExecutor:
         job: ScheduleJob,
         occurrence: ScheduleOccurrence | None = None,
     ) -> None:
-        """Execute one Schedule Job without using foreground state or output."""
+        """Execute one Schedule Job in its isolated Session without outbound output."""
         if self._aborted:
             raise RuntimeError("Agent Loop is no longer active")
         if job.source != "user":
@@ -772,7 +773,30 @@ class AgentRunExecutor:
         if current_task is not None:
             self._schedule_tasks.add(current_task)
         try:
-            await self._execute_schedule_job(job, occurrence)
+            if (
+                occurrence is not None
+                and self._session._storage_partition is SessionStoragePartition.SCHEDULE
+                and self._foreground_work_store is not None
+                and self._worker_store is not None
+                and self._worker_scheduler is not None
+            ):
+                occurrence_id = str(occurrence.occurrence_id)
+                inbound = InboundMessage(
+                    job.message,
+                    metadata={
+                        "run_id": occurrence_id,
+                        "schedule_occurrence_id": occurrence_id,
+                        "schedule_permission_snapshot": occurrence.permission_snapshot,
+                        "schedule_job_id": job.job_id,
+                        "schedule_title": job.title,
+                        "foreground_task_id": occurrence_id,
+                        "foreground_task_generation": 1,
+                    },
+                )
+                with self._context_builder.schedule_projection_scope():
+                    await self.run_foreground(inbound)
+            else:
+                await self._execute_schedule_job(job, occurrence)
         finally:
             if occurrence is not None and background_owner is not None:
                 self._schedule_service.unbind_occurrence_owner(occurrence, background_owner)
@@ -1254,6 +1278,19 @@ class AgentRunExecutor:
         if not inbound.content.strip():
             execution_ready.set()
             return
+        schedule_occurrence_id: UUID | None = None
+        if active_session._storage_partition is SessionStoragePartition.SCHEDULE:
+            occurrence_value = inbound.metadata.get("schedule_occurrence_id")
+            if isinstance(occurrence_value, str):
+                try:
+                    candidate_occurrence_id = UUID(occurrence_value)
+                except ValueError as error:
+                    execution_ready.set()
+                    raise ValueError("Schedule input has an invalid occurrence identity") from error
+                if candidate_occurrence_id.version != 4 or str(candidate_occurrence_id) != occurrence_value:
+                    execution_ready.set()
+                    raise ValueError("Schedule input has an invalid occurrence identity")
+                schedule_occurrence_id = candidate_occurrence_id
         automatic_continuation = (
             inbound.metadata.get("foreground_automatic_continuation") is True
         )
@@ -1266,7 +1303,15 @@ class AgentRunExecutor:
             if restore_run_token is None or restore_run_token.version != 4:
                 execution_ready.set()
                 raise ValueError("automatic continuation is missing a valid Task Run token")
+            if schedule_occurrence_id is not None:
+                if restore_run_token != schedule_occurrence_id:
+                    execution_ready.set()
+                    raise ValueError("Schedule continuation does not match its occurrence")
+                restore_run_token = None
             restore_before = None
+        elif schedule_occurrence_id is not None:
+            restore_before = None
+            restore_run_token = None
         else:
             restore_before = active_session.capture_restore_before()
             restore_run_token = self._new_uuid()
@@ -1274,25 +1319,46 @@ class AgentRunExecutor:
         if not isinstance(run_id, str):
             run_id = None
         workspace_path = self._workspace_state.workspace_path
-        with trace_scope(
-            self._trace_recorder,
-            TraceRootSource(
-                workspace_key=workspace_key_for(workspace_path),
-                workspace_path=str(workspace_path),
-                origin=TraceOrigin.FOREGROUND,
-                purpose=TracePurpose.AGENT_RUN,
-                owner_session_id=active_session.session_id,
-                subject_session_id=active_session.session_id,
-                run_id=run_id,
-                restore_run_token=str(restore_run_token),
-            ),
-        ):
-            await self._execute_foreground_scoped(
-                inbound,
-                execution_ready=execution_ready,
-                restore_before=restore_before,
-                restore_run_token=restore_run_token,
-            )
+        previous_suppression = self._schedule_outbound_suppressed
+        if schedule_occurrence_id is not None:
+            self._schedule_outbound_suppressed = True
+        try:
+            with trace_scope(
+                self._trace_recorder,
+                TraceRootSource(
+                    workspace_key=workspace_key_for(workspace_path),
+                    workspace_path=str(workspace_path),
+                    origin=(
+                        TraceOrigin.SCHEDULE
+                        if schedule_occurrence_id is not None
+                        else TraceOrigin.FOREGROUND
+                    ),
+                    purpose=(
+                        TracePurpose.SCHEDULE_RUN
+                        if schedule_occurrence_id is not None
+                        else TracePurpose.AGENT_RUN
+                    ),
+                    owner_session_id=active_session.session_id,
+                    subject_session_id=active_session.session_id,
+                    run_id=run_id,
+                    restore_run_token=(
+                        None if restore_run_token is None else str(restore_run_token)
+                    ),
+                    schedule_run_id=(
+                        None
+                        if schedule_occurrence_id is None
+                        else str(schedule_occurrence_id)
+                    ),
+                ),
+            ):
+                await self._execute_foreground_scoped(
+                    inbound,
+                    execution_ready=execution_ready,
+                    restore_before=restore_before,
+                    restore_run_token=restore_run_token,
+                )
+        finally:
+            self._schedule_outbound_suppressed = previous_suppression
 
     async def _execute_foreground_scoped(
         self,
@@ -1300,18 +1366,33 @@ class AgentRunExecutor:
         *,
         execution_ready: asyncio.Event,
         restore_before: SessionRestoreBefore | None,
-        restore_run_token: UUID,
+        restore_run_token: UUID | None,
     ) -> None:
         active_session = self._session
+        schedule_occurrence_value = inbound.metadata.get("schedule_occurrence_id")
+        schedule_occurrence_id = (
+            schedule_occurrence_value
+            if active_session._storage_partition is SessionStoragePartition.SCHEDULE
+            and isinstance(schedule_occurrence_value, str)
+            else None
+        )
+        scheduled_run = schedule_occurrence_id is not None
         if self._captured_foreground is None:
             permission_snapshot = self._permission_control.snapshot(self._exec_host.resolved_shell)
             session_model_configuration = active_session.model_configuration
         else:
             permission_snapshot, session_model_configuration = self._captured_foreground
+        captured_schedule_permission = inbound.metadata.get("schedule_permission_snapshot")
+        if isinstance(captured_schedule_permission, PermissionSnapshot):
+            permission_snapshot = captured_schedule_permission
+        if scheduled_run:
+            session_model_configuration = None
         self._run_model_configuration = session_model_configuration
-        skill_state = self._skill_loader.skills
-        manual_invocation = self._skill_loader.resolve_manual(inbound.content)
-        start_title = not active_session.messages
+        skill_state = () if scheduled_run else self._skill_loader.skills
+        manual_invocation = (
+            None if scheduled_run else self._skill_loader.resolve_manual(inbound.content)
+        )
+        start_title = not active_session.messages and not scheduled_run
 
         async def resolve_title(content: str) -> tuple[str, dict[str, int] | None]:
             parent = current_trace_scope()
@@ -1403,6 +1484,11 @@ class AgentRunExecutor:
         restore_run_token: UUID | None = None,
     ) -> bool:
         current_user = {"role": "user", "content": inbound.content}
+        schedule_occurrence_value = inbound.metadata.get("schedule_occurrence_id")
+        scheduled_run = (
+            active_session._storage_partition is SessionStoragePartition.SCHEDULE
+            and isinstance(schedule_occurrence_value, str)
+        )
         question_id = inbound.metadata.get("foreground_question_id")
         task_id = inbound.metadata.get("foreground_task_id")
         execution_id = inbound.metadata.get("run_id")
@@ -1515,39 +1601,59 @@ class AgentRunExecutor:
                             + f"Answer: {current_user['content']}"
                         ),
                     }
-            return self._context_builder.build_run_messages(
-                history,
-                current_user=current_user,
-                increment=increment,
-                compaction_cursor=compaction_cursor,
-                action_summary=action_summary,
-                project_messages=lambda messages: self._context_builder.build_foreground_messages(
+
+            def project_foreground(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+                return self._context_builder.build_foreground_messages(
                     messages,
                     session_id=active_session.session_id,
                     blackboard=staged_blackboard,
                     manual_invocation=manual_invocation,
                     summary="",
                     permission_snapshot=permission_snapshot,
-                ),
+                )
+
+            def project_schedule(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+                return self._context_builder.build_schedule_messages(
+                    messages,
+                    session_id=active_session.session_id,
+                    summary="",
+                    permission_snapshot=permission_snapshot,
+                )
+            return self._context_builder.build_run_messages(
+                history,
+                current_user=current_user,
+                increment=increment,
+                compaction_cursor=compaction_cursor,
+                action_summary=action_summary,
+                project_messages=project_schedule if scheduled_run else project_foreground,
             )
 
         run_context = self._new_agent_run_context(
             active_session,
             current_user=deepcopy(current_user),
-            route="chat",
+            route="schedule" if scheduled_run else "chat",
             project_messages=project_messages,
-            session_model_configuration=session_model_configuration,
+            session_model_configuration=(
+                None if scheduled_run else session_model_configuration
+            ),
         )
         framing_usage: dict[str, int] | None = None
 
         def metadata_patch() -> tuple[dict[str, Any] | None, tuple[str, ...]]:
+            if scheduled_run:
+                return None, ()
             if manual_invocation is not None or explicit_continuation or automatic_continuation:
                 return None, ()
             if staged_blackboard is None:
                 return None, ("blackboard",)
             return {"blackboard": staged_blackboard.to_dict()}, ()
 
-        if manual_invocation is None and not explicit_continuation and not automatic_continuation:
+        if (
+            not scheduled_run
+            and manual_invocation is None
+            and not explicit_continuation
+            and not automatic_continuation
+        ):
             previous_blackboard = Blackboard.from_dict(active_session.metadata.get("blackboard"))
             last_assistant_content = _latest_assistant_content(active_session)
             try:
@@ -1617,6 +1723,40 @@ class AgentRunExecutor:
                     expected_generation=task_generation,
                     explicit_user_operation=False,
                 )
+            elif scheduled_run:
+                occurrence_id = cast(str, schedule_occurrence_value)
+                if not isinstance(task_id, str) or task_id != occurrence_id:
+                    raise ValueError("Schedule Router Task does not match its occurrence")
+                current_task = next(
+                    (
+                        item
+                        for item in foreground_work_store.load().tasks
+                        if item.task_id == task_id
+                    ),
+                    None,
+                )
+                if current_task is None:
+                    foreground_work_store.begin_task(
+                        task_id,
+                        execution_id,
+                        generation=1,
+                        permission_level=permission_snapshot.level,
+                        iteration_budget_limit=self._max_iterations,
+                        execution_role="router",
+                    )
+                    task_generation = 1
+                elif current_task.state == "completed":
+                    execution_ready.set()
+                    return False
+                else:
+                    task_generation = current_task.generation
+                    foreground_work_store.start_execution(
+                        task_id,
+                        execution_id,
+                        expected_generation=task_generation,
+                        explicit_user_operation=False,
+                    )
+                current_user["foreground_task_id"] = task_id
             elif explicit_continuation:
                 if not isinstance(task_id, str):
                     raise ValueError("Foreground Task continuation is missing its Task ID")
@@ -1969,13 +2109,27 @@ class AgentRunExecutor:
 
                 if existing is None:
                     worker_model_configuration = session_model_configuration
+                    if scheduled_run:
+                        worker_model_configuration = next(
+                            (item.model_configuration for item in worker_store.load().workers
+                             if item.parent_task_id == parent_task_id
+                             and item.parent_generation == parent_generation),
+                            worker_model_configuration,
+                        )
                     if worker_model_configuration is None:
                         route = RunModelRouter(agent_executor._model_router)
-                        route_status = route.call_route_status("chat", continuation=None)
+                        route_status = route.call_route_status(
+                            "schedule" if scheduled_run else "chat",
+                            continuation=None,
+                        )
                         worker_model_configuration = SessionModelConfiguration(
                             route_status.provider_id,
                             route_status.model,
-                            agent_executor._model_router.reasoning_effort,
+                            (
+                                agent_executor._configuration.resolve_route("schedule").route.reasoning_effort
+                                if scheduled_run
+                                else agent_executor._model_router.reasoning_effort
+                            ),
                         )
                     try:
                         worker = worker_store.create(
@@ -1990,7 +2144,11 @@ class AgentRunExecutor:
                             system_prompt=system_prompt,
                             initial_message=initial_message,
                             restore_run_token=(
-                                None if restore_run_token is None else str(restore_run_token)
+                                cast(str, schedule_occurrence_value)
+                                if scheduled_run
+                                else None
+                                if restore_run_token is None
+                                else str(restore_run_token)
                             ),
                         )
                     except (OSError, UnicodeError, ValueError) as error:
@@ -2013,15 +2171,27 @@ class AgentRunExecutor:
                             agent_executor._configuration.runtime.enable_tool_micro_compression
                         ),
                         mcp_keywords=agent_executor._mcp_keywords,
+                        schedule_session=scheduled_run,
                         subagent_coordinator=agent_executor._subagent_coordinator,
                         trace_recorder=agent_executor._trace_recorder,
                         now=agent_executor._now,
                     )
                     requester = agent_executor._confirmation_requester
-                    owner = ForegroundConfirmationOwner(
-                        generation_id=agent_executor._session_run_state.generation_id,
-                        run_id=UUID(worker.execution_id),
-                    )
+                    owner: ForegroundConfirmationOwner | BackgroundConfirmationOwner
+                    if scheduled_run:
+                        job_id = inbound.metadata.get("schedule_job_id")
+                        if not isinstance(job_id, str):
+                            job_id = active_session.session_id.removeprefix("schedule_")
+                        owner = BackgroundConfirmationOwner(
+                            generation_id=agent_executor._session_run_state.generation_id,
+                            job_id=job_id,
+                            occurrence_id=UUID(cast(str, schedule_occurrence_value)),
+                        )
+                    else:
+                        owner = ForegroundConfirmationOwner(
+                            generation_id=agent_executor._session_run_state.generation_id,
+                            run_id=UUID(worker.execution_id),
+                        )
 
                     async def request_worker_confirmation(
                         request: ConfirmationRequest,
@@ -2033,8 +2203,19 @@ class AgentRunExecutor:
                         return await requester(
                             ConfirmationEnvelope(
                                 request=request,
-                                origin="foreground",
+                                origin="background" if scheduled_run else "foreground",
                                 owner=owner,
+                                job_id=(
+                                    owner.job_id
+                                    if isinstance(owner, BackgroundConfirmationOwner)
+                                    else None
+                                ),
+                                title=(
+                                    inbound.metadata.get("schedule_title")
+                                    if scheduled_run
+                                    and isinstance(inbound.metadata.get("schedule_title"), str)
+                                    else None
+                                ),
                             )
                         )
 
@@ -2149,7 +2330,17 @@ class AgentRunExecutor:
             excluded_names=(
                 () if subagents_eligible else ("spawn_agent", "wait_agent", "list_agents")
             ),
-            permission_snapshot=permission_snapshot,
+            permission_snapshot=None if scheduled_run else permission_snapshot,
+            permission_context=(
+                PermissionContext.from_snapshot(
+                    permission_snapshot,
+                    workspace_root=self._workspace_state.workspace_path,
+                    origin="schedule",
+                    configured_schedule_level=self._permission_control.configured(),
+                )
+                if scheduled_run
+                else None
+            ),
             tool_context=foreground_context,
             run_tools=foreground_tools,
             allowed_names=RouterCatalog().tool_names
@@ -2185,9 +2376,9 @@ class AgentRunExecutor:
         try:
             initial_messages = run_context.controller.initial_messages()
         except asyncio.CancelledError:
-            if not self._cancel_requested:
+            if not self._cancel_requested and not scheduled_run:
                 raise
-            return await self._finish_foreground_terminal(
+            cancelled_result = await self._finish_foreground_terminal(
                 active_session,
                 run_context,
                 current_user,
@@ -2198,6 +2389,10 @@ class AgentRunExecutor:
                 restore_before=restore_before,
                 restore_run_token=restore_run_token,
             )
+            if scheduled_run and not self._cancel_requested:
+                await active_session.wait_for_pending_persist()
+                raise
+            return cancelled_result
         except CommittableAgentRunError as failure:
             return await self._finish_foreground_terminal(
                 active_session,
@@ -2269,9 +2464,13 @@ class AgentRunExecutor:
             run_id=self._new_uuid(),
         )
         self._active_foreground_owner = foreground_owner
-        file_mutation_recorder = FileBackupStore(
-            active_session.workspace_state,
-            active_session.session_id,
+        file_mutation_recorder = (
+            None
+            if scheduled_run
+            else FileBackupStore(
+                active_session.workspace_state,
+                active_session.session_id,
+            )
         )
 
         first_request_prepared = False
@@ -2285,9 +2484,9 @@ class AgentRunExecutor:
         try:
             result = await run_context.runner.run(
                 initial_messages,
-                model="chat",
+                model="schedule" if scheduled_run else "chat",
                 tool_gateway=run_gateway,
-                on_output=self._publish_runner_output,
+                on_output=None if scheduled_run else self._publish_runner_output,
                 confirmation=self._request_confirmation,
                 externalize_result=externalize_foreground_result,
                 cancel_requested=lambda: self._cancel_requested,
@@ -2331,9 +2530,9 @@ class AgentRunExecutor:
                 restore_run_token=restore_run_token,
             )
         except asyncio.CancelledError:
-            if not self._cancel_requested:
+            if not self._cancel_requested and not scheduled_run:
                 raise
-            return await self._finish_foreground_terminal(
+            cancelled_result = await self._finish_foreground_terminal(
                 active_session,
                 run_context,
                 current_user,
@@ -2344,6 +2543,10 @@ class AgentRunExecutor:
                 restore_before=restore_before,
                 restore_run_token=restore_run_token,
             )
+            if scheduled_run and not self._cancel_requested:
+                await active_session.wait_for_pending_persist()
+                raise
+            return cancelled_result
         except Exception as failure:
             if first_request_prepared:
                 raise
@@ -2394,6 +2597,38 @@ class AgentRunExecutor:
             metadata_removals = ()
 
         run_messages = deepcopy(result.messages)
+        failed_workers = False
+        if scheduled_run and result.suspension is not None and result.suspension.kind == "human_question":
+            run_messages.append(_build_assistant_repair_message(
+                content="",
+                status="error",
+                error=ErrorInfo("interactive_terminal_required", "Schedule Router requires user input before it can continue."),
+                model_calls=0,
+            ))
+        if scheduled_run and result.finish_reason == "completed" and result.suspension is None:
+            failed_workers = (
+                self._worker_store is not None
+                and any(
+                    worker.parent_task_id == task_id
+                    and worker.report is not None
+                    and worker.report.status != "ready"
+                    for worker in self._worker_store.load().workers
+                )
+            )
+            if failed_workers:
+                worker_failure = ErrorInfo("model_failed", "One or more Schedule Workers failed.")
+                result = replace(result, finish_reason="failed", error=worker_failure, final_content="")
+                terminal = next(
+                    (message for message in reversed(run_messages) if message.get("role") == "assistant"),
+                    None,
+                )
+                if terminal is not None:
+                    terminal.pop("router_finish_call_id", None)
+                    terminal.update(status="error", content="", error={"code": worker_failure.code, "message": worker_failure.message})
+        if scheduled_run:
+            for message in run_messages:
+                if message.get("role") == "assistant" and message.get("status") == "error":
+                    message["schedule_occurrence_id"] = schedule_occurrence_value
         for message in run_messages:
             observation = wait_observations.get(message.get("tool_call_id", ""))
             if (message.get("role") == "tool" and message.get("name") == "wait_agent"
@@ -2413,7 +2648,7 @@ class AgentRunExecutor:
                 ]
                 if worker_receipt_metadata:
                     message["worker_report_receipts"] = worker_receipt_metadata
-        if result.finish_reason == "completed" or result.suspension is not None:
+        if result.finish_reason == "completed" or result.suspension is not None or failed_workers:
             automatic_worker_receipts = [
                 {
                     "worker_id": worker_id,
@@ -2587,7 +2822,7 @@ class AgentRunExecutor:
                     persisted_session = Session.load(
                         self._workspace_state,
                         active_session.session_id,
-                        partition=SessionStoragePartition.FOREGROUND,
+                        partition=active_session._storage_partition,
                         now=self._now,
                     )
                     work_snapshot = self._foreground_work_store.reconcile(
@@ -2741,7 +2976,7 @@ class AgentRunExecutor:
         return externalize
 
     async def _publish_runner_output(self, event: object) -> None:
-        if self._aborted:
+        if self._aborted or self._schedule_outbound_suppressed:
             return
         if isinstance(event, ReasoningDelta):
             await self._bus.put_outbound(
@@ -2792,7 +3027,7 @@ class AgentRunExecutor:
         raise TypeError(f"Unsupported Agent Runner output: {type(event).__name__}")
 
     async def _publish_terminal(self, result: AgentRunnerResult) -> None:
-        if self._aborted:
+        if self._aborted or self._schedule_outbound_suppressed:
             return
         if result.finish_reason == "suspended" and result.suspension is not None:
             payload: dict[str, object] = {
@@ -2830,7 +3065,7 @@ class AgentRunExecutor:
         )
 
     async def _publish_preparation_failure(self, error: ErrorInfo) -> None:
-        if self._aborted:
+        if self._aborted or self._schedule_outbound_suppressed:
             return
         if error.code != "turn_cancelled":
             _log_agent_failure(error)
@@ -2848,7 +3083,7 @@ class AgentRunExecutor:
         )
 
     async def _publish_commit_failure(self) -> None:
-        if self._aborted:
+        if self._aborted or self._schedule_outbound_suppressed:
             return
         error = ErrorInfo(
             "persistence_error",

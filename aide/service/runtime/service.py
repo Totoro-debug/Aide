@@ -328,10 +328,38 @@ class AgentService:
                 await loop.loop.run_schedule_job(job)
 
             async def execute_user_occurrence(occurrence: ScheduleOccurrence) -> None:
-                loop = await workspace._get_schedule_loop(occurrence.job.job_id, title=occurrence.job.title)
-                await loop.loop.run_schedule_job(occurrence.job, occurrence)
+                await workspace._run_schedule_occurrence(occurrence)
 
-            async def cancel_subagents_for_job(job_id: str) -> None:
+            async def cancel_job_dependents(job_id: str) -> None:
+                session_id = Session.schedule_session_id(job_id)
+                work_store = workspace.foreground_work_store(session_id)
+                for task in tuple(work_store.load().tasks):
+                    current = work_store.load()
+                    latest = next(
+                        (item for item in current.tasks if item.task_id == task.task_id),
+                        None,
+                    )
+                    if latest is None:
+                        continue
+                    if latest.state not in {
+                        "completed",
+                        "interrupted",
+                        "cancelled",
+                        "superseded",
+                    }:
+                        work_store.cancel_task(
+                            latest.task_id,
+                            expected_revision=current.revision,
+                            request_id=str(uuid4()),
+                        )
+                    await workspace._cancel_worker_generation(
+                        session_id,
+                        latest.task_id,
+                        latest.generation,
+                    )
+                    coordinator = workspace._subagent_coordinators.get(session_id)
+                    if coordinator is not None:
+                        await coordinator.cancel_task_and_wait(latest.task_id, latest.generation)
                 results = await asyncio.gather(
                     *(
                         coordinator.cancel_source_and_wait(job_id=job_id)
@@ -343,7 +371,7 @@ class AgentService:
                 if len(failures) == 1:
                     raise failures[0]
                 if failures:
-                    raise BaseExceptionGroup("Schedule SubAgent cleanup failed", failures)
+                    raise BaseExceptionGroup("Schedule dependent cleanup failed", failures)
 
             registered_resources = False
             release_shared = self._configuration_resources.retain_shared(shared)
@@ -409,7 +437,7 @@ class AgentService:
                     cancel_confirmation_owner=self.confirmation.cancel_owner,
                     block_subagent_source=workspace.block_subagent_source,
                     unblock_subagent_source=workspace.unblock_subagent_source,
-                    cancel_subagents_for_job=cancel_subagents_for_job,
+                    cancel_subagents_for_job=cancel_job_dependents,
                     execute_dream=dream.run,
                     timezone_name=get_localzone_name(),
                 )

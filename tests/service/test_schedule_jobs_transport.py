@@ -8,7 +8,7 @@ import socket
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import aiohttp
 import pytest
@@ -20,9 +20,11 @@ from aide.agent.confirmation import BackgroundConfirmationOwner
 from aide.agent.session.session import Session, SessionStoragePartition
 from aide.agent.tools.core.read_file import ReadFileTool
 from aide.agent.tools.tool_gateway import ModelToolCall
+from aide.agent.workers.store import WorkerStore
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigLoader
+from aide.provider.models import ModelResponse
 from aide.schedule.store import WorkspaceScheduleStore
 from aide.service.client import ServiceClient
 from aide.service.discovery import create_credential
@@ -678,8 +680,18 @@ async def test_schedule_http_delete_drains_real_tool_and_preserves_session_termi
     canceled = asyncio.Event()
     external = tmp_path / "external.txt"
     external.write_text("external data", encoding="utf-8")
-    provider = _ScheduleProvider(
-        schedule_responses=(
+    class RouterWorkerProvider(_ScheduleProvider):
+        async def complete(self, **kwargs: Any) -> ModelResponse:
+            if any(tool["function"]["name"] == "dispatch_worker" for tool in kwargs["tools"]):
+                if not any(message.get("tool_call_id") == "dispatch-read" for message in kwargs["messages"]):
+                    return _response("", tool_call=ModelToolCall(
+                        "dispatch-read", "dispatch_worker", '{"task_id":"read","task":"Read task.txt"}',
+                    ))
+                return _response("", tool_call=ModelToolCall("wait-read", "finish", '{"response":"Waiting for Worker."}'))
+            return await super().complete(**kwargs)
+
+    provider = RouterWorkerProvider(
+        chat_responses=(
             _response(
                 "",
                 tool_call=ModelToolCall(
@@ -784,7 +796,8 @@ async def test_schedule_http_delete_drains_real_tool_and_preserves_session_termi
             )
             assert any(
                 message["role"] == "tool" and message.get("tool_call_id") == "blocked-read"
-                for message in history.messages
+                for worker in WorkerStore(workspace.workspace_state, job["session_id"]).load().workers
+                for message in worker.conversation
             )
             assert history.messages[-1]["status"] == "error"
             assert "cancelled" in history.messages[-1]["content"]

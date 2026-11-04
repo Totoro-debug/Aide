@@ -37,7 +37,6 @@ from aide.trace.types import TraceOrigin, TracePurpose
 from aide.utils.errors import ErrorInfo
 from aide.utils.validation import empty_token_usage
 
-_EXCLUDED_TOOL_NAMES = ("schedule",)
 _SUBAGENT_TOOL_NAMES = ("spawn_agent", "wait_agent", "list_agents")
 _USAGE_FIELDS = ("model_calls", "input_tokens", "output_tokens", "total_tokens")
 
@@ -137,12 +136,10 @@ class WorkerRunnerExecutor:
                 )
             )
 
-        excluded_names = _EXCLUDED_TOOL_NAMES
         allowed_names = tuple(
             tool.name
             for tool in self._tool_gateway.catalog
-            if tool.name not in excluded_names
-            and (self._subagent_coordinator is not None or tool.name not in _SUBAGENT_TOOL_NAMES)
+            if self._subagent_coordinator is not None or tool.name not in _SUBAGENT_TOOL_NAMES
         )
         if self._subagent_coordinator is not None:
             source = SubAgentSource(
@@ -184,9 +181,7 @@ class WorkerRunnerExecutor:
         gateway = build_agent_run_gateway(
             self._tool_gateway,
             excluded_names=(
-                excluded_names
-                if self._subagent_coordinator is not None
-                else (*excluded_names, *_SUBAGENT_TOOL_NAMES)
+                () if self._subagent_coordinator is not None else _SUBAGENT_TOOL_NAMES
             ),
             allowed_names=(*allowed_names, "tool_search"),
             mcp_keywords=self._mcp_keywords,

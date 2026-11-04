@@ -421,6 +421,207 @@ class _SilentSink:
         return None
 
 
+class _WorkerScheduleProvider(_ParallelWorkerProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.worker_started_event = asyncio.Event()
+        self.schedule_tool_names: set[str] = set()
+        self.initial_tool_names: set[str] | None = None
+        self.add_result: dict[str, Any] | None = None
+        self.list_result: dict[str, Any] | None = None
+        self.remove_result: dict[str, Any] | None = None
+        self.listed = asyncio.Event()
+        self.allow_removal = asyncio.Event()
+        self.finished = asyncio.Event()
+
+    def stream(self, **kwargs: Any) -> AsyncIterator[ModelStreamEvent]:
+        messages = kwargs["messages"]
+        system = messages[0].get("content", "") if messages else ""
+        if not isinstance(system, str) or not system.startswith("You are an Aide Worker."):
+            return self._router_stream(kwargs)
+
+        self.schedule_tool_names.update(
+            schema["function"]["name"]
+            for schema in kwargs["tools"]
+            if isinstance(schema.get("function"), dict)
+            and isinstance(schema["function"].get("name"), str)
+        )
+        if self.initial_tool_names is None:
+            self.initial_tool_names = set(self.schedule_tool_names)
+        tool_results = {
+            item.get("tool_call_id"): item
+            for item in messages
+            if item.get("role") == "tool"
+        }
+
+        async def emit() -> AsyncIterator[ModelStreamEvent]:
+            if "schedule" not in self.schedule_tool_names:
+                if "worker-schedule-search" not in tool_results:
+                    yield self._tool_call(ModelToolCall(
+                        "worker-schedule-search",
+                        "tool_search",
+                        '{"query":"schedule"}',
+                    ))
+                    return
+                self.worker_started_event.set()
+                self.finished.set()
+                yield ModelCompleted(_response("Schedule Tool is unavailable."))
+                return
+
+            self.worker_started_event.set()
+            add_result = tool_results.get("worker-schedule-add")
+            if add_result is None:
+                yield self._tool_call(ModelToolCall(
+                    "worker-schedule-add",
+                    "schedule",
+                    json.dumps({
+                        "action": "add",
+                        "title": "Scheduled check",
+                        "message": "Run the scheduled check",
+                        "every_seconds": 3600,
+                    }),
+                ))
+                return
+
+            self.add_result = add_result
+            if add_result.get("status") != "success":
+                self.finished.set()
+                yield ModelCompleted(_response("Schedule creation did not complete."))
+                return
+
+            list_result = tool_results.get("worker-schedule-list")
+            if list_result is None:
+                yield self._tool_call(ModelToolCall(
+                    "worker-schedule-list",
+                    "schedule",
+                    '{"action":"list"}',
+                ))
+                return
+
+            self.list_result = list_result
+            list_content = json.loads(cast(str, list_result.get("content", "{}")))
+            job_id = cast(str, list_content["jobs"][0]["job_id"])
+            self.listed.set()
+            await self.allow_removal.wait()
+
+            if "worker-schedule-remove" not in tool_results:
+                yield self._tool_call(ModelToolCall(
+                    "worker-schedule-remove",
+                    "schedule",
+                    json.dumps({"action": "remove", "job_id": job_id}),
+                ))
+                return
+
+            self.remove_result = tool_results["worker-schedule-remove"]
+            self.finished.set()
+            message = (
+                "Schedule management completed."
+                if self.remove_result.get("status") == "success"
+                else "Schedule removal did not complete."
+            )
+            yield ModelCompleted(_response(message))
+
+        return emit()
+
+    def _router_stream(self, kwargs: dict[str, Any]) -> AsyncIterator[ModelStreamEvent]:
+        messages = kwargs["messages"]
+        if any(
+            item.get("role") == "tool"
+            and item.get("tool_call_id") == "dispatch-schedule-worker"
+            for item in messages
+        ):
+            call = ModelToolCall("schedule-router-finish", "finish", '{"response":"Done."}')
+        else:
+            call = ModelToolCall(
+                "dispatch-schedule-worker",
+                "dispatch_worker",
+                json.dumps({"task_id": "schedule-check", "task": "Manage a Schedule Job"}),
+            )
+
+        async def emit() -> AsyncIterator[ModelStreamEvent]:
+            yield self._tool_call(call)
+
+        return emit()
+
+    @staticmethod
+    def _tool_call(call: ModelToolCall) -> ModelCompleted:
+        return ModelCompleted(ModelResponse(
+            message=AssistantModelMessage(content="", tool_calls=(call,)),
+            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+            finish_reason="tool_calls",
+        ))
+
+
+class _ParallelWorkerScheduleProvider(_ParallelWorkerProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started_workers: set[str] = set()
+        self.searched_workers: set[str] = set()
+        self.finished_workers: set[str] = set()
+        self.schedule_tool_names: dict[str, set[str]] = {}
+
+    def stream(self, **kwargs: Any) -> AsyncIterator[ModelStreamEvent]:
+        messages = kwargs["messages"]
+        system = messages[0].get("content", "") if messages else ""
+        if not isinstance(system, str) or not system.startswith("You are an Aide Worker."):
+            return super().stream(**kwargs)
+
+        user_text = "\n".join(
+            content
+            for item in messages
+            if item.get("role") == "user"
+            and isinstance((content := item.get("content")), str)
+        )
+        worker = "first" if "first source" in user_text else "second"
+        self.started_workers.add(worker)
+        if len(self.started_workers) == 2:
+            self.two_workers_started.set()
+        tool_names = {
+            schema["function"]["name"]
+            for schema in kwargs["tools"]
+            if isinstance(schema.get("function"), dict)
+            and isinstance(schema["function"].get("name"), str)
+        }
+        self.schedule_tool_names[worker] = tool_names
+        tool_results = {
+            item.get("tool_call_id"): item
+            for item in messages
+            if item.get("role") == "tool"
+        }
+        call_id = f"worker-schedule-{worker}"
+
+        async def emit() -> AsyncIterator[ModelStreamEvent]:
+            search_id = f"worker-schedule-search-{worker}"
+            if "schedule" not in tool_names:
+                if search_id not in tool_results:
+                    yield _WorkerScheduleProvider._tool_call(ModelToolCall(
+                        search_id, "tool_search", '{"query":"schedule"}',
+                    ))
+                    return
+                self.searched_workers.add(worker)
+                yield ModelCompleted(_response("Schedule Tool is unavailable."))
+                return
+
+            self.searched_workers.add(worker)
+            if call_id not in tool_results:
+                yield _WorkerScheduleProvider._tool_call(ModelToolCall(
+                    call_id,
+                    "schedule",
+                    json.dumps({
+                        "action": "add",
+                        "title": f"{worker.title()} scheduled check",
+                        "message": f"Run the {worker} scheduled check",
+                        "every_seconds": 3600,
+                    }),
+                ))
+                return
+
+            self.finished_workers.add(worker)
+            yield ModelCompleted(_response("Schedule Job created."))
+
+        return emit()
+
+
 def _home(path: Path) -> AgentHome:
     home = AgentHome(path)
     home.initialize()
@@ -432,6 +633,406 @@ async def _wait_until(predicate: Any) -> None:
     async with asyncio.timeout(10):
         while not predicate():
             await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_worker_schedule_tool_creates_lists_and_removes_workspace_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aide.agent.session.session import Session
+    from aide.schedule.store import WorkspaceScheduleStore
+    from tests.service.test_service_concurrency import _CollectingSink
+
+    home = _home(tmp_path / "home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _WorkerScheduleProvider()
+    provider.release_report_continuation.set()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        service.client_permission(client.client_id).select("full-access")
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, directory)
+        opened = await service.open_conversation(
+            client.client_id, workspace_id=workspace.workspace_id, create_new=True,
+        )
+        session_id = str(opened["session_id"])
+        claim = cast(dict[str, object], opened["claim"])
+        await workspace.input(
+            client.client_id,
+            session_id,
+            cast(int, claim["claim_version"]),
+            "Create and manage a Schedule Job.",
+            "worker-schedule-input",
+        )
+
+        await asyncio.wait_for(provider.worker_started_event.wait(), 10)
+        assert provider.initial_tool_names is not None
+        assert "tool_search" in provider.initial_tool_names
+        assert "schedule" not in provider.initial_tool_names
+        assert "schedule" in provider.schedule_tool_names
+        await asyncio.wait_for(provider.listed.wait(), 10)
+
+        assert provider.add_result is not None
+        assert provider.add_result["status"] == "success"
+        assert provider.list_result is not None
+        listed = json.loads(cast(str, provider.list_result["content"]))
+        assert len(listed["jobs"]) == 1
+        job_id = str(listed["jobs"][0]["job_id"])
+
+        persisted = await WorkspaceScheduleStore(workspace.workspace_state).public_snapshot()
+        assert len(persisted) == 1
+        job = persisted[0]
+        assert job.job_id == job_id
+        assert job.source == "user"
+        assert job.title == "Scheduled check"
+        assert job.message == "Run the scheduled check"
+        assert job.schedule.kind == "every"
+        assert job.schedule.every_seconds == 3600
+        assert job.created_at_ms == job.updated_at_ms
+        assert job.created_at_ms > 0
+
+        history = await service.get_schedule_job_history(
+            client.client_id, workspace.workspace_id, job_id,
+        )
+        assert history["session_id"] == Session.schedule_session_id(job_id)
+        assert history["groups"] == []
+
+        provider.allow_removal.set()
+        await asyncio.wait_for(provider.finished.wait(), 10)
+        await _wait_until(lambda: all(
+            worker.report is not None
+            for worker in workspace.worker_store(session_id).load().workers
+        ))
+        assert provider.remove_result is not None
+        assert provider.remove_result["status"] == "success"
+        assert await WorkspaceScheduleStore(workspace.workspace_state).public_snapshot() == ()
+    finally:
+        provider.allow_removal.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_worker_schedule_confirmation_keeps_captured_permission_and_call_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aide.schedule.store import WorkspaceScheduleStore
+    from aide.service.errors import ServiceError
+    from tests.service.test_service_concurrency import _CollectingSink
+
+    home = _home(tmp_path / "home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _WorkerScheduleProvider()
+    provider.release_report_continuation.set()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        service.client_permission(client.client_id).select("read-only")
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, directory)
+        opened = await service.open_conversation(
+            client.client_id, workspace_id=workspace.workspace_id, create_new=True,
+        )
+        session_id = str(opened["session_id"])
+        claim = cast(dict[str, object], opened["claim"])
+        await workspace.input(
+            client.client_id,
+            session_id,
+            cast(int, claim["claim_version"]),
+            "Create and manage a Schedule Job.",
+            "worker-schedule-confirmation-input",
+        )
+
+        await asyncio.wait_for(provider.worker_started_event.wait(), 10)
+        await _wait_until(lambda: any(
+            event.get("type") == "confirmation.requested" for event in sink.events
+        ))
+        requests = [
+            event for event in sink.events
+            if event.get("type") == "confirmation.requested"
+        ]
+        add_confirmation = requests[0]
+        add_payload = cast(dict[str, Any], add_confirmation["payload"])
+        add_request = cast(dict[str, Any], add_payload["request"])
+        worker = workspace.worker_store(session_id).load().workers[0]
+        assert worker.permission_level == "read-only"
+        assert add_payload["origin"] == "foreground"
+        assert cast(dict[str, Any], add_payload["owner"])["run_id"] == worker.execution_id
+        assert add_confirmation["run_id"] == worker.execution_id
+        assert add_request["tool_name"] == "schedule"
+        assert add_request["tool_call_id"] == "worker-schedule-add"
+        assert "requires confirmation" in str(add_request["reason"])
+        assert await WorkspaceScheduleStore(workspace.workspace_state).public_snapshot() == ()
+
+        service.client_permission(client.client_id).select("full-access")
+        service.decide_confirmation(
+            client.client_id, str(add_payload["token"]), "approved",
+        )
+        await asyncio.wait_for(provider.listed.wait(), 10)
+        assert len([
+            event for event in sink.events
+            if event.get("type") == "confirmation.requested"
+        ]) == 1
+        assert worker.permission_level == "read-only"
+        persisted = await WorkspaceScheduleStore(workspace.workspace_state).public_snapshot()
+        assert len(persisted) == 1
+
+        provider.allow_removal.set()
+        await _wait_until(lambda: len([
+            event for event in sink.events
+            if event.get("type") == "confirmation.requested"
+        ]) == 2)
+        remove_confirmation = [
+            event for event in sink.events
+            if event.get("type") == "confirmation.requested"
+        ][1]
+        remove_payload = cast(dict[str, Any], remove_confirmation["payload"])
+        remove_request = cast(dict[str, Any], remove_payload["request"])
+        assert remove_confirmation["run_id"] == worker.execution_id
+        assert cast(dict[str, Any], remove_payload["owner"])["run_id"] == worker.execution_id
+        assert remove_request["tool_name"] == "schedule"
+        assert remove_request["tool_call_id"] == "worker-schedule-remove"
+        with pytest.raises(ServiceError):
+            service.decide_confirmation(client.client_id, str(add_payload["token"]), "approved")
+        assert await WorkspaceScheduleStore(workspace.workspace_state).public_snapshot() == persisted
+
+        service.decide_confirmation(
+            client.client_id, str(remove_payload["token"]), "declined",
+        )
+        await asyncio.wait_for(provider.finished.wait(), 10)
+        await _wait_until(lambda: all(
+            record.report is not None
+            for record in workspace.worker_store(session_id).load().workers
+        ))
+        assert provider.remove_result is not None
+        assert provider.remove_result["status"] == "refused"
+        remove_report = workspace.worker_store(session_id).load().workers[0].report
+        assert remove_report is not None
+        assert remove_report.summary == (
+            "Schedule removal did not complete."
+        )
+        assert await WorkspaceScheduleStore(workspace.workspace_state).public_snapshot() == persisted
+    finally:
+        provider.allow_removal.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_mode", ["declined", "unavailable", "store_error", "escalation_declined"],
+)
+async def test_worker_schedule_decline_and_failures_do_not_create_jobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_mode: str,
+) -> None:
+    from aide.agent.confirmation import ConfirmationUnavailable
+    from aide.schedule.store import WorkspaceScheduleStore
+    from tests.service.test_service_concurrency import _CollectingSink
+
+    home = _home(tmp_path / "home")
+    if failure_mode == "escalation_declined":
+        configuration_path = home.path / "config.toml"
+        configuration_path.write_text(
+            MINIMAL_VALID_CONFIG.replace(
+                "[runtime]", '[runtime]\npermission_level = "full-access"',
+            ),
+            encoding="utf-8",
+        )
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _WorkerScheduleProvider()
+    provider.release_report_continuation.set()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    if failure_mode == "unavailable":
+        async def unavailable(_envelope: object) -> Any:
+            raise ConfirmationUnavailable("injected missing presenter")
+
+        monkeypatch.setattr(service.confirmation, "request", unavailable)
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        if failure_mode == "escalation_declined":
+            service.client_permission(client.client_id).select("workspace-write")
+        else:
+            service.client_permission(client.client_id).select("read-only")
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, directory)
+        if failure_mode == "store_error":
+            async def fail_add(_job: object) -> Any:
+                raise OSError("injected Schedule persistence failure")
+
+            monkeypatch.setattr(workspace.schedule_service, "add_user_job", fail_add)
+        opened = await service.open_conversation(
+            client.client_id, workspace_id=workspace.workspace_id, create_new=True,
+        )
+        session_id = str(opened["session_id"])
+        claim = cast(dict[str, object], opened["claim"])
+        await workspace.input(
+            client.client_id,
+            session_id,
+            cast(int, claim["claim_version"]),
+            "Create a Schedule Job.",
+            f"worker-schedule-{failure_mode}-input",
+        )
+
+        await asyncio.wait_for(provider.worker_started_event.wait(), 10)
+        service.client_permission(client.client_id).select("full-access")
+        if failure_mode == "unavailable":
+            await asyncio.wait_for(provider.finished.wait(), 10)
+        else:
+            await _wait_until(lambda: any(
+                event.get("type") == "confirmation.requested" for event in sink.events
+            ))
+            event = next(
+                event for event in sink.events
+                if event.get("type") == "confirmation.requested"
+            )
+            payload = cast(dict[str, Any], event["payload"])
+            assert payload["origin"] == "foreground"
+            if failure_mode in {"declined", "escalation_declined"}:
+                if failure_mode == "escalation_declined":
+                    request = cast(dict[str, Any], payload["request"])
+                    assert "above current foreground level 'workspace-write'" in request["reason"]
+                service.decide_confirmation(
+                    client.client_id, str(payload["token"]), "declined",
+                )
+            else:
+                service.decide_confirmation(
+                    client.client_id, str(payload["token"]), "approved",
+                )
+            await asyncio.wait_for(provider.finished.wait(), 10)
+
+        await _wait_until(lambda: all(
+            record.report is not None
+            for record in workspace.worker_store(session_id).load().workers
+        ))
+        worker = workspace.worker_store(session_id).load().workers[0]
+        assert worker.permission_level == (
+            "workspace-write" if failure_mode == "escalation_declined" else "read-only"
+        )
+        assert provider.add_result is not None
+        assert provider.add_result["status"] == (
+            "error" if failure_mode == "store_error" else "refused"
+        )
+        assert worker.report is not None
+        assert worker.report.summary == "Schedule creation did not complete."
+        assert await WorkspaceScheduleStore(workspace.workspace_state).public_snapshot() == ()
+    finally:
+        provider.allow_removal.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_parallel_worker_schedule_confirmations_do_not_share_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aide.schedule.store import WorkspaceScheduleStore
+    from aide.service.errors import ServiceError
+    from tests.service.test_service_concurrency import _CollectingSink
+
+    home = _home(tmp_path / "home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _ParallelWorkerScheduleProvider()
+    provider.release_workers.set()
+    provider.release_report_continuation.set()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        service.client_permission(client.client_id).select("read-only")
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, directory)
+        opened = await service.open_conversation(
+            client.client_id, workspace_id=workspace.workspace_id, create_new=True,
+        )
+        session_id = str(opened["session_id"])
+        claim = cast(dict[str, object], opened["claim"])
+        await workspace.input(
+            client.client_id,
+            session_id,
+            cast(int, claim["claim_version"]),
+            "Run both independent checks.",
+            "parallel-worker-schedule-input",
+        )
+
+        await asyncio.wait_for(provider.two_workers_started.wait(), 10)
+        await _wait_until(lambda: provider.searched_workers == {"first", "second"})
+        assert all("schedule" in names for names in provider.schedule_tool_names.values())
+        workers = workspace.worker_store(session_id).load().workers
+        assert len(workers) == 2
+        assert all(worker.permission_level == "read-only" for worker in workers)
+
+        def requests() -> list[dict[str, Any]]:
+            return [
+                event for event in sink.events
+                if event.get("type") == "confirmation.requested"
+            ]
+
+        async def wait_for_job_count(expected: int) -> None:
+            async with asyncio.timeout(10):
+                while len(
+                    await WorkspaceScheduleStore(workspace.workspace_state).public_snapshot()
+                ) != expected:
+                    await asyncio.sleep(0.01)
+
+        await _wait_until(lambda: len(requests()) == 1)
+        first = requests()[0]
+        first_payload = cast(dict[str, Any], first["payload"])
+        first_request = cast(dict[str, Any], first_payload["request"])
+        first_worker = next(worker for worker in workers if worker.execution_id == first["run_id"])
+        assert first_payload["origin"] == "foreground"
+        assert cast(dict[str, Any], first_payload["owner"])["run_id"] == first_worker.execution_id
+        assert first_request["tool_name"] == "schedule"
+        assert first_request["tool_call_id"] == f"worker-schedule-{first_worker.task_id.removesuffix('-check')}"
+        assert await WorkspaceScheduleStore(workspace.workspace_state).public_snapshot() == ()
+
+        service.client_permission(client.client_id).select("full-access")
+        service.decide_confirmation(
+            client.client_id, str(first_payload["token"]), "approved",
+        )
+        await _wait_until(lambda: len(requests()) == 2)
+        await wait_for_job_count(1)
+        second = requests()[1]
+        second_payload = cast(dict[str, Any], second["payload"])
+        second_request = cast(dict[str, Any], second_payload["request"])
+        second_worker = next(worker for worker in workers if worker.execution_id == second["run_id"])
+        assert second_worker.worker_id != first_worker.worker_id
+        assert second_request["tool_name"] == "schedule"
+        assert second_request["tool_call_id"] == f"worker-schedule-{second_worker.task_id.removesuffix('-check')}"
+        with pytest.raises(ServiceError):
+            service.decide_confirmation(
+                client.client_id, str(first_payload["token"]), "approved",
+            )
+        persisted = await WorkspaceScheduleStore(workspace.workspace_state).public_snapshot()
+        assert len(persisted) == 1
+
+        service.decide_confirmation(
+            client.client_id, str(second_payload["token"]), "approved",
+        )
+        await wait_for_job_count(2)
+        await _wait_until(lambda: all(
+            worker.report is not None
+            for worker in workspace.worker_store(session_id).load().workers
+        ))
+        persisted = await WorkspaceScheduleStore(workspace.workspace_state).public_snapshot()
+        assert len(persisted) == 2
+        assert len({job.job_id for job in persisted}) == 2
+        assert {job.title for job in persisted} == {"First scheduled check", "Second scheduled check"}
+        assert all(job.source == "user" for job in persisted)
+    finally:
+        await service.stop()
 
 
 @pytest.mark.parametrize("client_kind", ["cli", "web"])
@@ -593,6 +1194,7 @@ async def test_parallel_workers_manage_owned_subagent_results_before_router_repo
         provider.release_workers.set()
         await asyncio.wait_for(provider.two_subagents_started.wait(), timeout=10)
         assert "spawn_agent" not in provider.subagent_tool_names
+        assert "schedule" not in provider.subagent_tool_names
         children = cast(
             list[dict[str, object]],
             service.list_subagents(client.client_id, workspace.workspace_id, session_id)["items"],

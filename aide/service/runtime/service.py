@@ -53,6 +53,7 @@ from aide.agent.tools.mcp_runtime import MCPRuntimeManager
 from aide.agent.tools.tool_gateway import (
     BuiltInToolCatalog,
 )
+from aide.agent.workers.store import WorkerStore
 from aide.agent.workspace_state import WorkspaceState, WorkspaceStateError
 from aide.config.agent_home import AgentHome
 from aide.config.config import (
@@ -354,6 +355,7 @@ class AgentService:
                 )
                 recover_session_deletions(state)
                 SubAgentRecordStore.recover_workspace(state)
+                WorkerStore.recover_workspace(state)
                 restore_manager = RestoreManager(state)
                 workspace._restore_result = await restore_manager.recover_pending()
                 workspace.workspace_state = state

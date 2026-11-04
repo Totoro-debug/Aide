@@ -75,6 +75,7 @@ from aide.agent.tools.tool_gateway import (
     ConfirmationRequest,
     ConfirmationRequester,
 )
+from aide.agent.workers.store import WorkerStore
 from aide.config.config import (
     ConfigError,
     UserConfiguration,
@@ -190,6 +191,7 @@ class WorkspaceRecord:
         self._restore_commit_task: asyncio.Task[Any] | None = None
         self._subagent_repositories: dict[str, SubAgentRecordRepository] = {}
         self._foreground_work_stores: dict[str, ForegroundWorkStore] = {}
+        self._worker_stores: dict[str, WorkerStore] = {}
         self._subagent_coordinators: dict[str, SubAgentSessionCoordinator] = {}
         self._subagent_admission_closed = False
         self._subagent_blocked_job_ids: set[str] = set()
@@ -234,6 +236,13 @@ class WorkspaceRecord:
         if store is None:
             store = ForegroundWorkStore(self.workspace_state, session_id)
             self._foreground_work_stores[session_id] = store
+        return store
+
+    def worker_store(self, session_id: str) -> WorkerStore:
+        store = self._worker_stores.get(session_id)
+        if store is None:
+            store = WorkerStore(self.workspace_state, session_id)
+            self._worker_stores[session_id] = store
         return store
 
     def _committed_subagents(self, session_id: str) -> tuple[SubAgentRecord, ...]:
@@ -1214,6 +1223,7 @@ class WorkspaceRecord:
             self._draft_clients.pop(session_id, None)
             self._subagent_coordinators.pop(session_id, None)
             self._subagent_repositories.pop(session_id, None)
+            self._worker_stores.pop(session_id, None)
             self.service.client_claim_released(client_id, self.workspace_id, session_id)
             response = {
                 "workspace_id": self.workspace_id,
@@ -1472,6 +1482,9 @@ class WorkspaceRecord:
                 self.foreground_work_store(stored.session_id).reconcile(
                     restored_loop.session.messages,
                     subagents=self._committed_subagents(stored.session_id),
+                )
+                self.worker_store(stored.session_id).discard_restore_run_tokens(
+                    stored.discarded_run_tokens
                 )
                 self._restore_results[(client_id, stored.session_id)] = result
                 return result
@@ -2774,6 +2787,11 @@ class WorkspaceRecord:
                 if authority._storage_partition is SessionStoragePartition.FOREGROUND
                 else None
             )
+            worker_store = (
+                self.worker_store(authority.session_id)
+                if authority._storage_partition is SessionStoragePartition.FOREGROUND
+                else None
+            )
             loop_kwargs: dict[str, Any] = {
                 "workspace_path": self.workspace_path,
                 "workspace_state": self.workspace_state,
@@ -2798,6 +2816,7 @@ class WorkspaceRecord:
                 ),
                 "subagent_model_router": router,
                 "foreground_work_store": foreground_task_store,
+                "worker_store": worker_store,
             }
             executor = AgentRunExecutor(
                 session=authority, session_id=None, session_run_state=session_state, **loop_kwargs

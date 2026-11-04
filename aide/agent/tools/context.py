@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -59,6 +59,7 @@ class ToolRunContext:
     execution_id: str | None = None
     foreground_task_is_current: Callable[[str, int, str], bool] | None = None
     tool_call_id: str | None = None
+    worker_dispatch_handler: Callable[[str, str, Sequence[str], str], Awaitable[str]] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.workspace, Path):
@@ -83,6 +84,8 @@ class ToolRunContext:
             self.task_id is None or self.generation is None or self.execution_id is None
         ):
             raise TypeError("Foreground Task validation requires Task and execution identity")
+        if self.worker_dispatch_handler is not None and not callable(self.worker_dispatch_handler):
+            raise TypeError("Worker dispatch handler must be callable")
 
 
 __all__ = ["AgentRunSuspension", "ToolRunContext"]

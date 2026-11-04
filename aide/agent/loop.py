@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -83,7 +84,7 @@ from aide.agent.subagents.models import (
     SubAgentSourceKind,
 )
 from aide.agent.subagents.ports import SubAgentRecordRepository, SubAgentSessionCoordinator
-from aide.agent.tools.base import BaseTool
+from aide.agent.tools.base import BaseTool, ToolError
 from aide.agent.tools.context import AgentRunSuspension, ToolRunContext
 from aide.agent.tools.core.ask_user import AskUserTool
 from aide.agent.tools.core.exec_host import ExecHost
@@ -98,6 +99,8 @@ from aide.agent.tools.tool_gateway import (
     ToolGateway,
     ToolResult,
 )
+from aide.agent.workers.executor import WorkerRunnerExecutor
+from aide.agent.workers.store import WorkerStore
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigError, UserConfiguration
@@ -177,6 +180,7 @@ class AgentRunExecutor:
         subagent_model_router: ModelRouter | None = None,
         trace_recorder: TraceRecorder | None = None,
         foreground_work_store: ForegroundWorkStore | None = None,
+        worker_store: WorkerStore | None = None,
     ) -> None:
         if workspace_state.workspace_path != workspace_path:
             raise ValueError("Agent Loop Workspace State must belong to the Workspace")
@@ -251,6 +255,7 @@ class AgentRunExecutor:
             NoOpTraceRecorder() if trace_recorder is None else trace_recorder
         )
         self._foreground_work_store = foreground_work_store
+        self._worker_store = worker_store
         self._now = now
         self._new_uuid = new_uuid
         self._monotonic_now = monotonic_now
@@ -1715,8 +1720,10 @@ class AgentRunExecutor:
         )
         foreground_tools: tuple[BaseTool, ...] = ()
         foreground_context: ToolRunContext | None = None
+        worker_report_receipts: list[tuple[str, str, str, str]] = []
         if foreground_work_store is not None and task_id is not None:
             assert isinstance(execution_id, str)
+            executor_reference = weakref.ref(self)
 
             def register_question(
                 question: str,
@@ -1786,6 +1793,190 @@ class AgentRunExecutor:
                     )
                 return None
 
+            async def dispatch_worker(
+                worker_task_id: str,
+                worker_task: str,
+                explicit_context: Sequence[str],
+                tool_call_id: str,
+            ) -> str:
+                agent_executor = executor_reference()
+                if agent_executor is None:
+                    raise ToolError("The foreground execution is no longer available.")
+                worker_store = agent_executor._worker_store
+                if not router_restricted or worker_store is None:
+                    raise ToolError("Persistent Worker execution is unavailable.")
+                parent_task_id = cast(str, task_id)
+                parent_generation = task_generation
+                if not foreground_work_store.is_current_execution(
+                    parent_task_id, parent_generation, execution_id
+                ):
+                    raise ToolError("The foreground Task is no longer current.")
+                try:
+                    durable_session = Session.load(
+                        agent_executor._workspace_state, active_session.session_id
+                    )
+                    worker_store.reconcile_deliveries(durable_session.messages)
+                except FileNotFoundError:
+                    worker_store.reconcile_deliveries(())
+                except (OSError, UnicodeError, ValueError) as error:
+                    raise ToolError("Worker report receipt state could not be recovered.") from error
+
+                runtime_facts = {
+                    "workspace": str(agent_executor._workspace_state.workspace_path),
+                    "session_id": active_session.session_id,
+                    "foreground_task_id": parent_task_id,
+                    "foreground_task_generation": str(parent_generation),
+                    "foreground_execution_id": execution_id,
+                    "permission_level": permission_snapshot.level,
+                    "exec_shell": permission_snapshot.exec_shell.selector,
+                }
+                initial_message = "Assigned task:\n" + worker_task
+                if explicit_context:
+                    initial_message += "\n\nExplicit context:\n" + "\n".join(
+                        f"- {item}" for item in explicit_context
+                    )
+                system_prompt = (
+                    "You are an Aide Worker. Perform only the assigned task. You do not have the "
+                    "user's Conversation Session history. Treat the assigned task, explicit "
+                    "context, and runtime facts below as the complete input. Use only the Tools "
+                    "available in this run; Tool Gateway authorization applies to every call. "
+                    "Return a concise factual report.\n\n"
+                    "Captured authorization snapshot: "
+                    f"permission_level={permission_snapshot.level}; "
+                    f"exec_shell={permission_snapshot.exec_shell.selector}.\n"
+                    "Runtime facts: "
+                    + json.dumps(runtime_facts, ensure_ascii=True, separators=(",", ":"))
+                )
+                existing = worker_store.find_for_dispatch(
+                    parent_task_id, parent_generation, worker_task_id
+                )
+                if existing is not None and (
+                    existing.task != worker_task
+                    or existing.explicit_context != tuple(explicit_context)
+                ):
+                    raise ToolError("Worker dispatch identity was reused with different input.")
+
+                if existing is None:
+                    worker_model_configuration = session_model_configuration
+                    if worker_model_configuration is None:
+                        route = RunModelRouter(agent_executor._model_router)
+                        route_status = route.call_route_status("chat", continuation=None)
+                        worker_model_configuration = SessionModelConfiguration(
+                            route_status.provider_id,
+                            route_status.model,
+                            agent_executor._model_router.reasoning_effort,
+                        )
+                    try:
+                        worker = worker_store.create(
+                            parent_task_id=parent_task_id,
+                            parent_generation=parent_generation,
+                            task_id=worker_task_id,
+                            task=worker_task,
+                            explicit_context=tuple(explicit_context),
+                            runtime_facts=runtime_facts,
+                            permission_snapshot=permission_snapshot,
+                            session_model_configuration=worker_model_configuration,
+                            system_prompt=system_prompt,
+                            initial_message=initial_message,
+                            restore_run_token=(
+                                None if restore_run_token is None else str(restore_run_token)
+                            ),
+                        )
+                    except (OSError, UnicodeError, ValueError) as error:
+                        raise ToolError("Worker assignment could not be persisted.") from error
+                else:
+                    worker = existing
+
+                if worker.report is None:
+                    executor = WorkerRunnerExecutor(
+                        workspace_state=agent_executor._workspace_state,
+                        store=worker_store,
+                        model_router=cast(ModelRouter, agent_executor._model_router),
+                        tool_gateway=agent_executor._tool_gateway,
+                        exec_host=agent_executor._exec_host,
+                        schedule_service=agent_executor._schedule_service,
+                        compact_ratio=agent_executor._configuration.runtime.compact_ratio,
+                        max_iterations=agent_executor._max_iterations,
+                        max_tool_result_chars=agent_executor._configuration.runtime.max_tool_result_chars,
+                        enable_tool_micro_compression=(
+                            agent_executor._configuration.runtime.enable_tool_micro_compression
+                        ),
+                        mcp_keywords=agent_executor._mcp_keywords,
+                        trace_recorder=agent_executor._trace_recorder,
+                        now=agent_executor._now,
+                    )
+                    requester = agent_executor._confirmation_requester
+                    owner = ForegroundConfirmationOwner(
+                        generation_id=agent_executor._session_run_state.generation_id,
+                        run_id=UUID(worker.execution_id),
+                    )
+
+                    async def request_worker_confirmation(
+                        request: ConfirmationRequest,
+                    ) -> ConfirmationDecision:
+                        if requester is None:
+                            raise ConfirmationUnavailable(
+                                "foreground confirmation requester is not bound"
+                            )
+                        return await requester(
+                            ConfirmationEnvelope(
+                                request=request,
+                                origin="foreground",
+                                owner=owner,
+                            )
+                        )
+
+                    try:
+                        worker = await executor.execute(
+                            worker,
+                            foreground_task_is_current=foreground_work_store.is_current_execution,
+                            confirmation=request_worker_confirmation,
+                            cancel_requested=lambda: (
+                                agent_executor._cancel_requested
+                                or not foreground_work_store.is_current_execution(
+                                    parent_task_id, parent_generation, execution_id
+                                )
+                            ),
+                            externalize_result=agent_executor._result_externalizer_for(active_session),
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as error:
+                        raise ToolError("Worker execution did not produce a durable report.") from error
+
+                if worker.report is None:
+                    raise ToolError("Worker execution did not produce a durable report.")
+                delivery = worker_store.claim_report(worker.worker_id, worker.report.report_id)
+                if delivery is None:
+                    return "Worker report was already consumed by the Router."
+                worker_report_receipts.append(
+                    (
+                        tool_call_id,
+                        worker.worker_id,
+                        delivery.report.report_id,
+                        delivery.receipt_id,
+                    )
+                )
+                return json.dumps(
+                    {
+                        "worker_id": delivery.report.worker_id,
+                        "report_id": delivery.report.report_id,
+                        "receipt_id": delivery.receipt_id,
+                        "sequence": delivery.report.sequence,
+                        "status": delivery.report.status,
+                        "summary": delivery.report.summary,
+                        "error": (
+                            None if delivery.report.error_code is None else {
+                                "code": delivery.report.error_code,
+                                "message": delivery.report.error_message,
+                            }
+                        ),
+                        "usage": delivery.report.usage,
+                    },
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                )
+
             foreground_tools = (RouterAskUserTool() if router_restricted else AskUserTool(),)
             if router_restricted:
                 foreground_tools += (
@@ -1807,6 +1998,7 @@ class AgentRunExecutor:
                 generation=task_generation,
                 execution_id=execution_id,
                 foreground_task_is_current=foreground_work_store.is_current_execution,
+                worker_dispatch_handler=dispatch_worker if router_restricted else None,
             )
         run_gateway = self._new_run_gateway(
             excluded_names=(
@@ -2062,6 +2254,20 @@ class AgentRunExecutor:
             if (message.get("role") == "tool" and message.get("name") == "wait_agent"
                     and observation is not None and message.get("content") == observation[0]):
                 message["foreground_wait_results"] = observation[1]
+            if message.get("role") == "tool" and message.get("name") == "dispatch_worker":
+                tool_call_id = message.get("tool_call_id")
+                worker_receipt_metadata = [
+                    {
+                        "worker_id": worker_id,
+                        "report_id": report_id,
+                        "receipt_id": receipt_id,
+                    }
+                    for receipt_tool_call_id, worker_id, report_id, receipt_id
+                    in worker_report_receipts
+                    if receipt_tool_call_id == tool_call_id
+                ]
+                if worker_receipt_metadata:
+                    message["worker_report_receipts"] = worker_receipt_metadata
         if result.finish_reason == "cancelled" and not any(
             message.get("status") == "interrupted" for message in run_messages
         ):
@@ -2152,7 +2358,9 @@ class AgentRunExecutor:
             return False
         # Session.commit_agent_run queues a best-effort save. Delivery acknowledgement
         # requires reading the durable increment, never just the resident history.
-        if self._foreground_work_store is not None and (automatic_continuation or wait_observations):
+        if self._foreground_work_store is not None and (
+            automatic_continuation or wait_observations or worker_report_receipts
+        ):
             await active_session.wait_for_pending_persist()
             try:
                 persisted = Session.load(self._workspace_state, active_session.session_id)
@@ -2160,6 +2368,19 @@ class AgentRunExecutor:
                     raise OSError("Foreground result increment is not durable")
             except (OSError, UnicodeError, ValueError):
                 self._foreground_work_store.interrupt_uncertain_tasks()
+                await self._publish_commit_failure()
+                return False
+        if worker_report_receipts and self._worker_store is not None:
+            try:
+                persisted = Session.load(self._workspace_state, active_session.session_id)
+                if persisted.messages != active_session.messages:
+                    raise OSError("Worker report receipt is not durable")
+                self._worker_store.reconcile_deliveries(persisted.messages)
+            except (OSError, UnicodeError, ValueError) as failure:
+                _runtime_logger().error(
+                    "Worker report delivery receipt could not be indexed type={}",
+                    type(failure).__name__,
+                )
                 await self._publish_commit_failure()
                 return False
         if self._foreground_work_store is not None and isinstance(task_id, str):

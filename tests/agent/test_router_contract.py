@@ -67,6 +67,14 @@ def test_dispatch_validation_is_bounded_and_does_not_start_a_worker() -> None:
 async def test_dispatch_tool_is_callable_through_the_public_gateway_and_is_idempotent(
     tmp_path: Path,
 ) -> None:
+    dispatched: list[tuple[str, str, tuple[str, ...], str]] = []
+
+    async def dispatch(
+        task_id: str, task: str, context: Sequence[str], tool_call_id: str
+    ) -> str:
+        dispatched.append((task_id, task, tuple(context), tool_call_id))
+        return "Worker report"
+
     tool = DispatchWorkerTool(
         RouterDecisionValidator(session_id="session-1", workspace_id=str(tmp_path))
     )
@@ -75,6 +83,7 @@ async def test_dispatch_tool_is_callable_through_the_public_gateway_and_is_idemp
         task_id="foreground-task",
         generation=1,
         execution_id="execution-1",
+        worker_dispatch_handler=dispatch,
     )
     gateway = ToolGateway(workspace=tmp_path).for_run(
         exposed_names=("dispatch_worker",),
@@ -83,13 +92,20 @@ async def test_dispatch_tool_is_callable_through_the_public_gateway_and_is_idemp
     )
 
     result = await gateway.call(
-        ModelToolCall("dispatch-1", "dispatch_worker", '{"task_id":"task-1","task":"Inspect"}')
+        ModelToolCall(
+            "dispatch-1", "dispatch_worker",
+            '{"task_id":"task-1","task":"Inspect","context":[{"text":"file.txt"}]}',
+        )
     )
     assert result.status == "success"
-    assert "task-1" in result.content
+    assert result.content == "Worker report"
+    assert dispatched == [("task-1", "Inspect", ("file.txt",), "dispatch-1")]
 
     duplicate = await gateway.call(
-        ModelToolCall("dispatch-2", "dispatch_worker", '{"task_id":"task-1","task":"Inspect"}')
+        ModelToolCall(
+            "dispatch-2", "dispatch_worker",
+            '{"task_id":"task-1","task":"Inspect","context":[]}',
+        )
     )
     assert duplicate.status == "error"
     assert "unique" in duplicate.content
@@ -107,6 +123,15 @@ async def test_dispatch_tool_is_callable_through_the_public_gateway_and_is_idemp
 async def test_dispatch_gateway_rejects_forged_ownership_references_without_side_effects(
     tmp_path: Path, extra_argument: str
 ) -> None:
+    dispatched: list[str] = []
+
+    async def dispatch(
+        task_id: str, task: str, context: Sequence[str], tool_call_id: str
+    ) -> str:
+        del task, context, tool_call_id
+        dispatched.append(task_id)
+        return "Worker report"
+
     tool = DispatchWorkerTool(
         RouterDecisionValidator(session_id="session-1", workspace_id=str(tmp_path))
     )
@@ -115,6 +140,7 @@ async def test_dispatch_gateway_rejects_forged_ownership_references_without_side
         task_id="foreground-task",
         generation=1,
         execution_id="execution-1",
+        worker_dispatch_handler=dispatch,
     )
     gateway = ToolGateway(workspace=tmp_path).for_run(
         exposed_names=("dispatch_worker",),
@@ -125,16 +151,19 @@ async def test_dispatch_gateway_rejects_forged_ownership_references_without_side
     result = await gateway.call(ModelToolCall(
         "forged-dispatch",
         "dispatch_worker",
-        '{"task_id":"task-foreign","task":"Inspect",' + extra_argument + "}",
+        '{"task_id":"task-foreign","task":"Inspect","context":[], '
+        + extra_argument + "}",
     ))
 
     assert result.status == "error"
+    assert dispatched == []
     valid_retry = await gateway.call(ModelToolCall(
         "valid-dispatch",
         "dispatch_worker",
-        '{"task_id":"task-foreign","task":"Inspect"}',
+        '{"task_id":"task-foreign","task":"Inspect","context":[]}',
     ))
     assert valid_retry.status == "success"
+    assert dispatched == ["task-foreign"]
 
 
 @pytest.mark.asyncio

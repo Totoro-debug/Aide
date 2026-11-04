@@ -20,6 +20,9 @@ class PermissionExecShell(Protocol):
     @property
     def family(self) -> str: ...
 
+    @property
+    def selector(self) -> Literal["auto", "powershell", "pwsh"]: ...
+
 
 def validate_permission_level(level: object) -> ToolPermissionLevel:
     if level not in PERMISSION_LEVELS:

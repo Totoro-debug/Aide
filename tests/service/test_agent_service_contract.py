@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import json
+import os
 import weakref
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 import pytest
 
@@ -13,14 +17,28 @@ from aide.agent.loop import AgentRunExecutor
 from aide.agent.message_bus import InboundMessage
 from aide.agent.permission import PermissionSnapshot, RuntimePermissionControl
 from aide.agent.session.session import Session
+from aide.agent.tools.core.exec_policy import ResolvedExecShell
+from aide.agent.tools.tool_gateway import ModelToolCall
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigLoader
+from aide.provider.models import (
+    AssistantModelMessage,
+    ModelCompleted,
+    ModelMessages,
+    ModelResponse,
+    ModelStreamEvent,
+    ModelUsage,
+)
+from aide.provider.session_configuration import SessionModelConfiguration
 from aide.service.errors import ServiceError
 from aide.service.execution import SessionExecution
 from aide.service.runtime import AgentService
+from aide.trace.sqlite_recorder import SQLiteTraceRecorder
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures import FakeClock
 from tests.fixtures.service_runtime import register_project, workspace_loops
+from tests.fixtures.trace import wait_for_trace_writer
+from tests.service.test_foreground_questions import _wait_for_idle
 from tests.service.test_protocol_contract import _validator
 from tests.service.test_service_concurrency import (
     _claim_version,
@@ -34,6 +52,509 @@ def _home(path: Path) -> AgentHome:
     home.initialize()
     (home.path / "config.toml").write_text(MINIMAL_VALID_CONFIG, encoding="utf-8")
     return home
+
+
+class _WorkerFlowProvider:
+    """Drive one Router to Worker to Router exchange through a real file read."""
+
+    def __init__(self) -> None:
+        self.worker_requests: list[list[dict[str, object]]] = []
+        self.retry_failed_dispatch = False
+        self.worker_tool = "read_file"
+
+    async def complete(
+        self,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        model: str,
+        max_output: int,
+        temperature: float,
+        reasoning_effort: object,
+        timeout: int,
+        continuation: object = None,
+    ) -> ModelResponse:
+        del tools, model, max_output, temperature, reasoning_effort, timeout, continuation
+        system = messages[0].get("content", "") if messages else ""
+        if isinstance(system, str) and system.startswith("Generate a concise title"):
+            return self._response("Worker handoff")
+        return self._response(
+            '{"action":"replace","task_goal":"delegate the file inspection",'
+            '"completion_boundary":"return the Worker result"}'
+        )
+
+    def stream(
+        self,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        model: str,
+        max_output: int,
+        temperature: float,
+        reasoning_effort: object,
+        timeout: int,
+        continuation: object = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        del model, max_output, temperature, reasoning_effort, timeout, continuation
+        tool_names = {
+            name
+            for tool in tools
+            if isinstance((name := tool.get("name")), str)
+            or isinstance(
+                (
+                    name := tool.get("function", {}).get("name")
+                    if isinstance(tool.get("function"), dict)
+                    else None
+                ),
+                str,
+            )
+        }
+
+        system_prompt = (
+            messages[0].get("content", "")
+            if messages and isinstance(messages[0].get("content"), str)
+            else ""
+        )
+        worker_request = system_prompt.startswith("You are an Aide Worker.")
+
+        async def emit() -> AsyncIterator[ModelStreamEvent]:
+            if {"ask_user", "dispatch_worker", "finish"} <= tool_names:
+                tool_messages = [item for item in messages if item.get("role") == "tool"]
+                dispatch_result = next(
+                    (
+                        item
+                        for item in reversed(tool_messages)
+                        if item.get("name") == "dispatch_worker"
+                    ),
+                    None,
+                )
+                finish_result = next(
+                    (item for item in reversed(tool_messages) if item.get("name") == "finish"),
+                    None,
+                )
+                if dispatch_result is None or (
+                    self.retry_failed_dispatch
+                    and not str(dispatch_result.get("content", "")).startswith('{"worker_id":')
+                ):
+                    response = self._response(
+                        "",
+                        ModelToolCall(
+                            "router-dispatch",
+                            "dispatch_worker",
+                            json.dumps(
+                                {
+                                    "task_id": "inspect-report",
+                                    "task": "Read report.txt and report its first line.",
+                                    "context": [{"text": "Only inspect report.txt."}],
+                                }
+                            ),
+                        ),
+                    )
+                elif finish_result is None:
+                    report = json.loads(str(dispatch_result.get("content", "{}")))
+                    response = self._response(
+                        "",
+                        ModelToolCall(
+                            "router-finish",
+                            "finish",
+                            json.dumps({"response": f"Worker found: {report['summary']}"}),
+                        ),
+                    )
+                else:
+                    response = self._response("Router delivered the Worker report to the user.")
+            elif worker_request:
+                self.worker_requests.append([dict(item) for item in messages])
+                tool_messages = [item for item in messages if item.get("role") == "tool"]
+                read_result = next(
+                    (
+                        item
+                        for item in reversed(tool_messages)
+                        if item.get("name") == self.worker_tool
+                    ),
+                    None,
+                )
+                if read_result is None:
+                    response = self._response(
+                        "",
+                        ModelToolCall(
+                            "worker-read",
+                            self.worker_tool,
+                            json.dumps(
+                                {
+                                    "path": "report.txt",
+                                    **(
+                                        {"content": "authorized Worker write"}
+                                        if self.worker_tool == "write_file"
+                                        else {}
+                                    ),
+                                }
+                            ),
+                        ),
+                    )
+                else:
+                    file_content = str(read_result.get("content", ""))
+                    response = self._response(f"First line: {file_content.splitlines()[0]}")
+            else:
+                response = self._response("Preparation complete.")
+            yield ModelCompleted(response)
+
+        return emit()
+
+    async def close(self) -> None:
+        return None
+
+    @staticmethod
+    def _response(content: str, tool_call: ModelToolCall | None = None) -> ModelResponse:
+        return ModelResponse(
+            message=AssistantModelMessage(
+                content=content,
+                tool_calls=() if tool_call is None else (tool_call,),
+            ),
+            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+            finish_reason="stop" if tool_call is None else "tool_calls",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_kind", ["cli", "web"])
+@pytest.mark.parametrize("trace_failure", [False, True])
+async def test_worker_dispatch_runs_between_router_and_user_through_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client_kind: str, trace_failure: bool
+) -> None:
+    provider = _WorkerFlowProvider()
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _config: provider)
+    home = _home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    (path / "report.txt").write_text("release 42\nsecond line\n", encoding="utf-8")
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    trace_failures: list[str] = []
+    if trace_failure:
+        original_begin = service.trace_recorder.begin_call
+
+        def begin_call(context: Any, metadata: Any) -> Any:
+            if context.agent_id is not None:
+                trace_failures.append(context.agent_id)
+                raise OSError("injected trace storage failure")
+            return original_begin(context, metadata)
+
+        monkeypatch.setattr(service.trace_recorder, "begin_call", begin_call)
+    try:
+        client = await service.register_client(client_kind)
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, path)
+        session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
+        claimed = await service.claim(client.client_id, workspace.workspace_id, session_id)
+        accepted = await service.submit_user_input(
+            client.client_id,
+            workspace.workspace_id,
+            session_id,
+            _claim_version(claimed),
+            "Please inspect the report. Parent-only detail: hidden from the Worker.",
+            f"worker-flow-{client_kind}",
+        )
+        run_id = accepted["run_id"]
+        assert isinstance(run_id, str)
+        await asyncio.wait_for(sink.wait_for("run.completed", run_id), timeout=8)
+
+        session_state = workspace_loops(workspace)[session_id]
+        await session_state.loop.session.wait_for_pending_persist()
+        persisted = Session.load(workspace.workspace_state, session_id)
+        workers = workspace.worker_store(session_id).load().workers
+
+        assert len(workers) == 1
+        worker = workers[0]
+        assert worker.state == "ready"
+        assert worker.report is not None
+        assert worker.report.summary == "First line: release 42"
+        assert worker.usage == {
+            "model_calls": 2,
+            "input_tokens": 2,
+            "output_tokens": 2,
+            "total_tokens": 4,
+        }
+        assert worker.report_delivery_state == "consumed"
+        assert "Parent-only detail" not in json.dumps(provider.worker_requests)
+        assert any(
+            item.get("role") == "tool" and item.get("name") == "read_file"
+            for item in worker.conversation
+        )
+        recorder = service.trace_recorder
+        assert isinstance(recorder, SQLiteTraceRecorder)
+        await wait_for_trace_writer(recorder)
+        records = (await recorder.list_records(limit=200)).items
+        worker_records = [r for r in records if r.agent_id == worker.worker_id]
+        if trace_failure:
+            assert trace_failures and set(trace_failures) == {worker.worker_id}
+            assert worker_records == []
+        else:
+            assert len(worker_records) == 3  # two model calls and the real file read
+            assert all(r.owner_session_id == session_id for r in worker_records)
+            assert all(r.parent_root_id is not None for r in worker_records)
+            assert any(r.tool_name == "read_file" for r in worker_records)
+        dispatch_message = next(
+            item
+            for item in persisted.messages
+            if item.get("role") == "tool" and item.get("name") == "dispatch_worker"
+        )
+        assert dispatch_message["worker_report_receipts"] == [
+            {
+                "worker_id": worker.worker_id,
+                "report_id": worker.report.report_id,
+                "receipt_id": worker.report_receipt_id,
+            }
+        ]
+        assert any(
+            event.get("type") == "run.output" and "release 42" in str(event.get("payload"))
+            for event in sink.events
+        )
+        credential = workspace.require_claim(
+            client.client_id, session_id, _claim_version(claimed)
+        ).credential
+        await service.delete_session(
+            client.client_id,
+            workspace.workspace_id,
+            session_id,
+            _claim_version(claimed),
+            credential,
+            "delete-worker-session",
+        )
+        assert not (workspace.workspace_state.workers_directory / session_id).exists()
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_worker_exact_call_confirmation_retains_owner_and_permission_ceiling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _WorkerFlowProvider()
+    provider.worker_tool = "write_file"
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _config: provider)
+    home = _home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        foreign = await service.register_client("web")
+        service.client_permission(client.client_id).select("read-only")
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, path)
+        sid = await workspace.create_draft(client.client_id, creation_scope="chat")
+        claimed = await service.claim(client.client_id, workspace.workspace_id, sid)
+        accepted = await service.submit_user_input(
+            client.client_id,
+            workspace.workspace_id,
+            sid,
+            _claim_version(claimed),
+            "write report",
+            "permission",
+        )
+
+        async def wait_confirmation() -> None:
+            while not any(e.get("type") == "confirmation.requested" for e in sink.events):
+                sink.changed.clear()
+                await sink.changed.wait()
+
+        await asyncio.wait_for(wait_confirmation(), 8)
+        event = next(e for e in sink.events if e.get("type") == "confirmation.requested")
+        payload = cast(dict[str, Any], event["payload"])
+        worker = workspace.worker_store(sid).load().workers[0]
+        assert worker.permission_level == "read-only"
+        assert event["run_id"] == worker.execution_id
+        assert event["session_id"] == sid
+        assert not (path / "report.txt").exists()
+        with pytest.raises(ServiceError):
+            service.decide_confirmation(foreign.client_id, payload["token"], "approved")
+        service.client_permission(client.client_id).select("full-access")
+        service.decide_confirmation(client.client_id, payload["token"], "approved")
+        await asyncio.wait_for(sink.wait_for("run.completed", cast(str, accepted["run_id"])), 8)
+        assert (path / "report.txt").read_text(encoding="utf-8") == "authorized Worker write"
+        worker = workspace.worker_store(sid).load().workers[0]
+        assert worker.permission_level == "read-only"
+        with pytest.raises(ServiceError):
+            service.decide_confirmation(client.client_id, payload["token"], "approved")
+        await _wait_for_idle(workspace, sid)
+        credential = workspace.require_claim(
+            client.client_id, sid, _claim_version(claimed)
+        ).credential
+        inspected = await service.inspect_restore(
+            client.client_id,
+            workspace.workspace_id,
+            sid,
+            _claim_version(claimed),
+            credential,
+            "inspect",
+            1,
+        )
+        assert "restore_plan" in inspected, inspected
+        restored = await service.handle_management(
+            client.client_id,
+            workspace.workspace_id,
+            sid,
+            "restore/execute",
+            {"request_id": "restore", "plan": {"anchor_id": 1}, "mode": "files"},
+            claim_version=_claim_version(claimed),
+            claim_credential=credential,
+        )
+        assert "restore_result" in restored, restored
+        assert not (path / "report.txt").exists()
+        assert workspace.worker_store(sid).load().workers == ()
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restart", [False, True])
+async def test_report_write_failure_recovers_completed_worker_after_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    restart: bool,
+) -> None:
+    provider = _WorkerFlowProvider()
+    provider.retry_failed_dispatch = not restart
+    monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _config: provider)
+    home = _home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    (path / "report.txt").write_text("release 42\n", encoding="utf-8")
+    original_replace = os.replace
+    failed = False
+
+    def replace(source: Any, target: Any) -> None:
+        nonlocal failed
+        target_path = Path(target)
+        if "workers" in target_path.parts and target_path.name == "state.json" and not failed:
+            value = json.loads(Path(source).read_text(encoding="utf-8"))
+            if value["workers"][0].get("report") is not None:
+                failed = True
+                raise OSError("injected report publication failure")
+        original_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", replace)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, path)
+        sid = await workspace.create_draft(client.client_id, creation_scope="chat")
+        claimed = await service.claim(client.client_id, workspace.workspace_id, sid)
+        accepted = await service.submit_user_input(
+            client.client_id,
+            workspace.workspace_id,
+            sid,
+            _claim_version(claimed),
+            "inspect report",
+            "fault",
+        )
+        await asyncio.wait_for(sink.wait_for("run.completed", cast(str, accepted["run_id"])), 8)
+        assert failed
+        worker = workspace.worker_store(sid).load().workers[0]
+        if not restart:
+            assert worker.report is not None and worker.report.summary == "First line: release 42"
+            assert worker.report_delivery_state == "consumed"
+            assert len(provider.worker_requests) == 2
+            return
+        assert worker.report is None
+        assert worker.conversation[-1]["content"] == "First line: release 42"
+    finally:
+        await service.stop()
+    provider.retry_failed_dispatch = True
+    restarted = AgentService(home, ConfigLoader(home).load())
+    await restarted.start()
+    try:
+        client = await restarted.register_client("web")
+        sink = _CollectingSink()
+        await restarted.connect_client(client.client_id, sink)
+        workspace = await restarted.attach_workspace(client.client_id, path)
+        claimed = await restarted.claim(client.client_id, workspace.workspace_id, sid)
+        recovered = workspace.worker_store(sid).get(worker.worker_id)
+        assert recovered is not None and recovered.report is not None
+        assert recovered.report.summary == "First line: release 42"
+        task = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_tasks"])[-1]
+        accepted = await restarted.continue_foreground_task(
+            client.client_id,
+            workspace.workspace_id,
+            sid,
+            _claim_version(claimed),
+            task["task_id"],
+            task["revision"],
+            "recover",
+        )
+        await asyncio.wait_for(sink.wait_for("run.completed", cast(str, accepted["run_id"])), 8)
+        recovered = workspace.worker_store(sid).get(worker.worker_id)
+        assert recovered is not None and recovered.report_delivery_state == "consumed"
+        assert len(provider.worker_requests) == 2
+        assert any(
+            e.get("type") == "run.output" and "release 42" in str(e.get("payload"))
+            for e in sink.events
+        )
+    finally:
+        await restarted.stop()
+
+
+@pytest.mark.asyncio
+async def test_service_restart_recovers_an_interrupted_worker_report(
+    tmp_path: Path,
+) -> None:
+    home = _home(tmp_path / "home")
+    path = tmp_path / "workspace"
+    path.mkdir()
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    client = await service.register_client("cli")
+    workspace = await service.attach_workspace(client.client_id, path)
+    session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
+    store = workspace.worker_store(session_id)
+    worker = store.create(
+        parent_task_id="interrupted-task",
+        parent_generation=1,
+        task_id="interrupted-worker",
+        task="Inspect one file",
+        explicit_context=("Read report.txt",),
+        runtime_facts={"workspace": str(path), "foreground_execution_id": str(uuid4())},
+        permission_snapshot=PermissionSnapshot(
+            "workspace-write",
+            ResolvedExecShell(
+                selector="auto",
+                platform="windows",
+                family="powershell",
+                executable="powershell.exe",
+                flags=("-NoProfile",),
+                environment=(),
+                available=True,
+            ),
+        ),
+        session_model_configuration=SessionModelConfiguration(
+            provider_id="controlled", model="test-model", reasoning_effort="low"
+        ),
+        system_prompt="Worker system prompt",
+        initial_message="Assigned task: Inspect one file",
+        restore_run_token=None,
+    )
+    await service.stop()
+
+    restarted = AgentService(home, ConfigLoader(home).load())
+    await restarted.start()
+    try:
+        restarted_client = await restarted.register_client("web")
+        restarted_workspace = await restarted.attach_workspace(restarted_client.client_id, path)
+        recovered = restarted_workspace.worker_store(session_id).get(worker.worker_id)
+        assert recovered is not None
+        assert recovered.state == "blocked"
+        assert recovered.report is not None
+        assert recovered.report.error_code == "service_interrupted"
+        assert recovered.report_delivery_state == "pending"
+    finally:
+        await restarted.stop()
 
 
 @pytest.mark.asyncio
@@ -574,9 +1095,7 @@ async def test_workspace_activation_has_one_authority_for_normalized_paths(tmp_p
 async def test_departure_cancels_blocked_title_and_flushes_retained_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ending: str
 ) -> None:
-    from collections.abc import AsyncIterator
 
-    from aide.provider.models import ModelStreamEvent
 
     title_started, title_release, title_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
 

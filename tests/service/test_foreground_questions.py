@@ -341,6 +341,17 @@ async def test_router_answer_keeps_restricted_catalog_and_rejects_business_calls
     class RouterProvider(_QuestionProvider):
         def stream(self, **kwargs: Any) -> AsyncIterator[ModelStreamEvent]:
             messages = kwargs["messages"]
+            system = messages[0].get("content", "") if messages else ""
+            if isinstance(system, str) and system.startswith("You are an Aide Worker."):
+                names = {tool.get("name") or tool.get("function", {}).get("name")
+                         for tool in kwargs["tools"]}
+                assert "read_file" in names
+                assert not names.intersection({"dispatch_worker", "finish", "spawn_agent"})
+
+                async def worker_report() -> AsyncIterator[ModelStreamEvent]:
+                    yield ModelCompleted(_response("Worker inspected the request."))
+
+                return worker_report()
             user = next((m.get("content", "") for m in reversed(messages)
                          if m.get("role") == "user"), "")
             continuing = "Continue the current foreground task." in user

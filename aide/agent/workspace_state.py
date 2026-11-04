@@ -79,6 +79,11 @@ class WorkspaceState:
         return self.path / "foreground-work"
 
     @property
+    def workers_directory(self) -> Path:
+        """Canonical Workspace-owned root for persistent foreground Workers."""
+        return self.path / "workers"
+
+    @property
     def schedule_sessions_directory(self) -> Path:
         """Dedicated, lazily-created storage for Schedule Sessions."""
         return self.path / "schedule-sessions"
@@ -114,6 +119,10 @@ class WorkspaceState:
         """Return the validated SubAgent directory without materializing state."""
         return self._existing_sessions_directory(self.subagents_directory)
 
+    def existing_workers_directory(self) -> Path | None:
+        """Return the validated Worker directory without materializing state."""
+        return self._existing_sessions_directory(self.workers_directory)
+
     def _existing_sessions_directory(self, path: Path) -> Path | None:
         workspace_root = self._owned_workspace_root()
         state_root = self._existing_owned_directory(self.path, within=workspace_root)
@@ -136,6 +145,10 @@ class WorkspaceState:
     def prepare_foreground_work_directory(self) -> Path:
         """Lazily prepare Session-scoped foreground coordination storage."""
         return self._prepare_sessions_directory(self.foreground_work_directory)
+
+    def prepare_workers_directory(self) -> Path:
+        """Lazily prepare the Workspace-owned persistent Worker directory."""
+        return self._prepare_sessions_directory(self.workers_directory)
 
     def _prepare_sessions_directory(self, path: Path) -> Path:
         workspace_root = self._owned_workspace_root()

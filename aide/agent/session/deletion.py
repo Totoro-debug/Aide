@@ -218,6 +218,13 @@ def _deletion_targets(
             _validate_owned_tree(subagent_root, within=subagents)
             trees.append((subagent_root, subagents))
 
+    workers = workspace_state.existing_workers_directory()
+    if workers is not None:
+        worker_root = workers / session_id
+        if HOST_FILESYSTEM.entry_exists(worker_root):
+            _validate_owned_tree(worker_root, within=workers)
+            trees.append((worker_root, workers))
+
     foreground_work = _existing_owned_directory(
         workspace_state.foreground_work_directory, state_root
     )

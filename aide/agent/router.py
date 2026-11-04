@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Annotated, Any, TypedDict, cast
 
 from aide.agent.tools.base import BaseTool, ToolError, ToolParam
 from aide.agent.tools.context import ToolRunContext
@@ -34,7 +33,7 @@ class RouterDecisionValidator:
         self._session_id = session_id
         self._workspace_id = workspace_id
 
-    def validate(self, decision: object) -> dict[str, str]:
+    def validate(self, decision: object) -> dict[str, Any]:
         if not isinstance(decision, dict):
             raise ValueError("Router decision must be an object")
         action = decision.get("action")
@@ -60,7 +59,10 @@ class RouterDecisionValidator:
             if not isinstance(question, str) or not question.strip() or len(question) > 2000:
                 raise ValueError("Router question must contain 1 to 2000 characters")
             return {"action": "ask_user", "question": question}
-        self._require_fields(decision, {"action", "task_id", "task", "session_id", "workspace_id"})
+        self._require_fields(
+            decision,
+            {"action", "task_id", "task", "context", "session_id", "workspace_id"},
+        )
         task_id, task = decision.get("task_id"), decision.get("task")
         if (
             not isinstance(task_id, str)
@@ -71,7 +73,23 @@ class RouterDecisionValidator:
             or len(task) > 8000
         ):
             raise ValueError("Router dispatch requires bounded task_id and task")
-        return {"action": "dispatch", "task_id": task_id, "task": task}
+        context = decision.get("context", [])
+        if (
+            not isinstance(context, list)
+            or len(context) > 10
+            or any(
+                not isinstance(item, str) or not item.strip() or len(item) > 1000
+                for item in context
+            )
+            or sum(len(item) for item in context) > 4000
+        ):
+            raise ValueError("Router dispatch context must contain at most 10 bounded strings")
+        return {
+            "action": "dispatch",
+            "task_id": task_id,
+            "task": task,
+            **({} if "context" not in decision else {"context": list(context)}),
+        }
 
     @staticmethod
     def _require_fields(decision: dict[object, object], allowed: set[str]) -> None:
@@ -79,30 +97,45 @@ class RouterDecisionValidator:
             raise ValueError("Router decision contains unsupported fields")
 
 
+class _WorkerContextItem(TypedDict):
+    text: Annotated[str, ToolParam(min_length=1, max_length=1000)]
+
+
 class DispatchWorkerTool(BaseTool):
-    """Validate and return a dispatch intent without starting a Worker."""
+    """Execute one validated Worker dispatch through the Service-provided handler."""
 
     name = "dispatch_worker"
-    description = "Record a validated task dispatch decision for a later Worker stage."
-    required = ("task_id", "task")
+    description = "Assign one bounded task and explicit context to a persistent Worker."
+    required = ("task_id", "task", "context")
     _contextual = True
     task_id: Annotated[str, ToolParam(min_length=1, max_length=128)]
     task: Annotated[str, ToolParam(min_length=1, max_length=8000)]
+    context: Annotated[list[_WorkerContextItem], ToolParam(max_items=10)]
 
     def __init__(self, validator: RouterDecisionValidator) -> None:
         self._validator = validator
         self._task_ids: set[str] = set()
 
-    async def execute(self, *, task_id: str, task: str) -> str:
+    async def execute(
+        self, *, task_id: str, task: str, context: list[_WorkerContextItem]
+    ) -> str:
+        del task_id, task, context
         raise ToolError("dispatch_worker requires the active foreground context.")
 
     async def prepare_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        if set(arguments) != {"task_id", "task"}:
-            raise ToolError("dispatch_worker accepts only task_id and task.")
-        return await super().prepare_arguments(arguments)
+        if set(arguments) - {"task_id", "task", "context"}:
+            raise ToolError("dispatch_worker accepts only task_id, task, and context.")
+        return await super().prepare_arguments({"context": [], **arguments})
 
     def validate_arguments(self, /, **arguments: Any) -> None:
-        self._validator.validate({"action": "dispatch", **arguments})
+        try:
+            normalized = {
+                **arguments,
+                "context": _normalize_context_items(arguments.get("context")),
+            }
+            self._validator.validate({"action": "dispatch", **normalized})
+        except ValueError as error:
+            raise ToolError(str(error)) from error
 
     async def execute_authorized_for_context(
         self,
@@ -116,14 +149,31 @@ class DispatchWorkerTool(BaseTool):
         if context.task_id is None or context.execution_id is None:
             raise ToolError("dispatch_worker requires an active foreground Task.")
         try:
-            decision = self._validator.validate({"action": "dispatch", **arguments})
+            normalized = {
+                **arguments,
+                "context": _normalize_context_items(arguments.get("context")),
+            }
+            decision = self._validator.validate({"action": "dispatch", **normalized})
         except ValueError as error:
             raise ToolError(str(error)) from error
         task_id = decision["task_id"]
         if task_id in self._task_ids:
             raise ToolError("dispatch_worker task_id must be unique in this Router run.")
+        handler = context.worker_dispatch_handler
+        if handler is None:
+            raise ToolError("dispatch_worker is unavailable in this execution context.")
+        if context.tool_call_id is None:
+            raise ToolError("dispatch_worker requires an active Tool call identity.")
+        try:
+            result = await handler(
+                task_id, decision["task"], decision["context"], context.tool_call_id
+            )
+        except ToolError:
+            raise
+        except Exception as error:
+            raise ToolError("Worker dispatch failed before a report was delivered.") from error
         self._task_ids.add(task_id)
-        return json.dumps(decision, ensure_ascii=True, separators=(",", ":"))
+        return result
 
 
 class RouterAskUserTool(AskUserTool):
@@ -159,3 +209,14 @@ __all__ = [
     "DispatchWorkerTool", "FinishRouterTool", "RouterAskUserTool", "RouterCatalog",
     "RouterDecisionValidator",
 ]
+
+
+def _normalize_context_items(value: object) -> list[str]:
+    if not isinstance(value, list) or any(
+        not isinstance(item, dict)
+        or set(item) != {"text"}
+        or not isinstance(item.get("text"), str)
+        for item in value
+    ):
+        raise ValueError("Worker dispatch context must be a list of text entries")
+    return [cast(str, item["text"]) for item in value]

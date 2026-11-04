@@ -398,6 +398,9 @@ type ModelAttemptGuard = Callable[
 class ModelRouterDelegate(Protocol):
     """Router methods needed by a bound Agent Run."""
 
+    @property
+    def reasoning_effort(self) -> ReasoningEffort: ...
+
     def stream(
         self,
         route: ModelRoute,

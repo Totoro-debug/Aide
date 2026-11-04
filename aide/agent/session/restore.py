@@ -504,6 +504,11 @@ class RestoreManager:
 
             repository = SubAgentRecordStore(self._workspace_state, pending.session_id)
         repository.discard_restore_run_tokens(pending.discarded_run_tokens)
+        from aide.agent.workers.store import WorkerStore
+
+        WorkerStore(self._workspace_state, pending.session_id).discard_restore_run_tokens(
+            pending.discarded_run_tokens
+        )
 
         if pending.mode is RestoreMode.FILES and pending.phase in {
             _RestorePhase.JOURNAL_PRUNED,

@@ -101,6 +101,19 @@ class WorkerStore:
                             error_message="The Worker did not reach a persisted terminal result.",
                             usage=worker.usage,
                         )
+                workers = store.load().workers
+                pending_tasks = {
+                    (worker.parent_task_id, worker.parent_generation)
+                    for worker in workers
+                    if worker.report is not None
+                    and worker.report_delivery_state != "consumed"
+                }
+                if pending_tasks:
+                    from aide.agent.foreground_work.store import ForegroundWorkStore
+
+                    foreground = ForegroundWorkStore(workspace_state, owned.name)
+                    for task_id, generation in pending_tasks:
+                        foreground.interrupt_worker_wait(task_id, generation=generation)
             except (OSError, ValueError, WorkerStoreError) as error:
                 raise WorkerStoreError(
                     "Workspace contains an invalid Worker Session entry"
@@ -175,6 +188,7 @@ class WorkerStore:
                     for worker in current.workers
                     if worker.parent_task_id == parent_task_id
                     and worker.parent_generation == parent_generation
+                    and worker.task_id == task_id
                 ),
                 None,
             )
@@ -182,13 +196,17 @@ class WorkerStore:
             normalized_facts = dict(runtime_facts)
             if existing is not None:
                 if (
-                    existing.task_id != task_id
-                    or existing.task != task
+                    existing.task != task
                     or existing.explicit_context != normalized_context
                     or existing.runtime_facts != normalized_facts
                     or existing.initial_message != initial_message
+                    or existing.permission_level != permission_snapshot.level
+                    or existing.exec_shell_selector != permission_snapshot.exec_shell.selector
+                    or existing.model_configuration != session_model_configuration
+                    or existing.system_prompt != system_prompt
+                    or existing.restore_run_token != restore_run_token
                 ):
-                    raise WorkerStoreConflict("foreground Task already has another Worker dispatch")
+                    raise WorkerStoreConflict("Worker dispatch identity was reused with different input")
                 return existing
 
             worker = WorkerRecord(
@@ -263,7 +281,7 @@ class WorkerStore:
             return self._replace_worker(current, worker, updated)
 
     def recover_completed_result(self, worker_id: str) -> WorkerRecord:
-        """Publish a completed checkpoint without replaying model or Tool work."""
+        """Publish a terminal checkpoint without replaying model or Tool work."""
         with self._lock:
             worker = self._require_worker(self.load(), worker_id)
             last = worker.conversation[-1]
@@ -280,6 +298,27 @@ class WorkerStore:
                     state="ready",
                     summary=last.get("content") or "Worker completed without a text response.",
                     usage=worker.usage,
+                )
+            error = last.get("error")
+            if (
+                worker.state == "working"
+                and worker.report is None
+                and last.get("role") == "assistant"
+                and not last.get("tool_calls")
+                and last.get("status") in {"error", "interrupted"}
+                and isinstance(error, dict)
+                and isinstance(error.get("code"), str)
+                and isinstance(error.get("message"), str)
+            ):
+                state: WorkerReportStatus = (
+                    "cancelled" if last.get("status") == "interrupted"
+                    else "blocked" if error["code"] == "agent_iteration_limit"
+                    else "failed"
+                )
+                return self.publish_report(
+                    worker.worker_id, state=state,
+                    summary=error["message"], error_code=error["code"],
+                    error_message=error["message"], usage=worker.usage,
                 )
             return worker
 
@@ -353,6 +392,67 @@ class WorkerStore:
                 raise WorkerStoreError("Worker report outbox receipt is inconsistent")
             return WorkerReportDelivery(report=report, receipt_id=receipt_id)
 
+    def claim_report_batch(
+        self, parent_task_id: str, parent_generation: int
+    ) -> tuple[WorkerReportDelivery, ...] | None:
+        """Claim every unconsumed report after all Workers for a Task generation terminate."""
+        if (
+            not isinstance(parent_task_id, str)
+            or not parent_task_id
+            or isinstance(parent_generation, bool)
+            or not isinstance(parent_generation, int)
+            or parent_generation < 1
+        ):
+            raise ValueError("Worker report batch identity is invalid")
+        with self._lock:
+            current = self.load()
+            workers = tuple(
+                worker
+                for worker in current.workers
+                if worker.parent_task_id == parent_task_id
+                and worker.parent_generation == parent_generation
+            )
+            if not workers or any(worker.report is None for worker in workers):
+                return None
+
+            pending = tuple(
+                worker
+                for worker in workers
+                if worker.report_delivery_state != "consumed"
+            )
+            if not pending:
+                return ()
+
+            updated_by_id: dict[str, WorkerRecord] = {}
+            deliveries: list[WorkerReportDelivery] = []
+            for worker in pending:
+                report = worker.report
+                assert report is not None
+                receipt_id = _receipt_id(worker.worker_id, report.sequence)
+                if worker.report_delivery_state == "pending":
+                    updated = replace(
+                        worker,
+                        report_delivery_state="claimed",
+                        report_receipt_id=receipt_id,
+                        revision=worker.revision + 1,
+                    )
+                    updated_by_id[worker.worker_id] = updated
+                elif worker.report_delivery_state == "claimed":
+                    if worker.report_receipt_id != receipt_id:
+                        raise WorkerStoreError("Worker report outbox receipt is inconsistent")
+                else:
+                    raise WorkerStoreError("Worker report delivery state is invalid")
+                deliveries.append(WorkerReportDelivery(report=report, receipt_id=receipt_id))
+
+            if updated_by_id:
+                snapshot = replace(
+                    current,
+                    revision=current.revision + 1,
+                    workers=tuple(updated_by_id.get(item.worker_id, item) for item in current.workers),
+                )
+                self._publish(snapshot)
+            return tuple(deliveries)
+
     def acknowledge_report(self, worker_id: str, receipt_id: str) -> bool:
         """Commit one stable Router receipt; duplicate acknowledgements are inert."""
         require_uuid4_string(worker_id, field="worker_id")
@@ -381,14 +481,17 @@ class WorkerStore:
         """Acknowledge claimed reports already present in durable Router history."""
         persisted: set[tuple[str, str, str]] = set()
         for message in messages:
-            if (
-                message.get("role") != "tool"
-                or message.get("name") != "dispatch_worker"
-                or message.get("status") != "success"
-            ):
-                continue
             receipt_metadata = message.get("worker_report_receipts")
-            if isinstance(receipt_metadata, list):
+            is_report_commit = (
+                message.get("role") == "assistant"
+                and message.get("status") == "completed"
+            )
+            is_dispatch_result = (
+                message.get("role") == "tool"
+                and message.get("name") == "dispatch_worker"
+                and message.get("status") == "success"
+            )
+            if isinstance(receipt_metadata, list) and (is_report_commit or is_dispatch_result):
                 for item in receipt_metadata:
                     if not isinstance(item, dict):
                         continue
@@ -401,6 +504,8 @@ class WorkerStore:
                         persisted.add(
                             (cast(str, worker_id), cast(str, report_id), cast(str, receipt_id))
                         )
+            if not is_dispatch_result:
+                continue
             content = message.get("content")
             if not isinstance(content, str):
                 continue
@@ -533,10 +638,12 @@ def _snapshot_from_value(value: object, session_id: str) -> WorkerStoreSnapshot:
         raise WorkerStoreError("Worker state contains a record from another Session")
     if len({worker.worker_id for worker in workers}) != len(workers):
         raise WorkerStoreError("Worker state contains duplicate identities")
-    if len({(worker.parent_task_id, worker.parent_generation) for worker in workers}) != len(
-        workers
-    ):
-        raise WorkerStoreError("Foreground Task has more than one Worker")
+    dispatch_ids = {
+        (worker.parent_task_id, worker.parent_generation, worker.task_id)
+        for worker in workers
+    }
+    if len(dispatch_ids) != len(workers):
+        raise WorkerStoreError("Worker state contains duplicate dispatch identities")
     return WorkerStoreSnapshot(revision=value["revision"], workers=workers)
 
 

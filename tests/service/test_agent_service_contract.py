@@ -152,16 +152,42 @@ class _WorkerFlowProvider:
                     )
                 elif finish_result is None:
                     report = json.loads(str(dispatch_result.get("content", "{}")))
+                    summary = report.get("summary")
                     response = self._response(
                         "",
                         ModelToolCall(
                             "router-finish",
                             "finish",
-                            json.dumps({"response": f"Worker found: {report['summary']}"}),
+                            json.dumps(
+                                {
+                                    "response": (
+                                        f"Worker found: {summary}"
+                                        if isinstance(summary, str)
+                                        else "Worker report pending."
+                                    )
+                                }
+                            ),
                         ),
                     )
                 else:
-                    response = self._response("Router delivered the Worker report to the user.")
+                    latest_user = next(
+                        (item for item in reversed(messages) if item.get("role") == "user"),
+                        {},
+                    )
+                    user_content = latest_user.get("content")
+                    summary = next(
+                        (
+                            line.removeprefix("Report: ")
+                            for line in str(user_content).splitlines()
+                            if line.startswith("Report: ")
+                        ),
+                        None,
+                    )
+                    response = self._response(
+                        f"Worker found: {summary}"
+                        if summary is not None
+                        else "Router delivered the Worker report to the user."
+                    )
             elif worker_request:
                 self.worker_requests.append([dict(item) for item in messages])
                 tool_messages = [item for item in messages if item.get("role") == "tool"]
@@ -259,6 +285,19 @@ async def test_worker_dispatch_runs_between_router_and_user_through_service(
         assert isinstance(run_id, str)
         await asyncio.wait_for(sink.wait_for("run.completed", run_id), timeout=8)
 
+        async def wait_for_report_delivery() -> None:
+            while True:
+                current_workers = workspace.worker_store(session_id).load().workers
+                if (
+                    current_workers
+                    and current_workers[0].report_delivery_state == "consumed"
+                ):
+                    return
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_for_report_delivery(), timeout=8)
+        await _wait_for_idle(workspace, session_id)
+
         session_state = workspace_loops(workspace)[session_id]
         await session_state.loop.session.wait_for_pending_persist()
         persisted = Session.load(workspace.workspace_state, session_id)
@@ -294,12 +333,14 @@ async def test_worker_dispatch_runs_between_router_and_user_through_service(
             assert all(r.owner_session_id == session_id for r in worker_records)
             assert all(r.parent_root_id is not None for r in worker_records)
             assert any(r.tool_name == "read_file" for r in worker_records)
-        dispatch_message = next(
+        report_commit = next(
             item
             for item in persisted.messages
-            if item.get("role") == "tool" and item.get("name") == "dispatch_worker"
+            if item.get("role") == "assistant"
+            and item.get("status") == "completed"
+            and item.get("worker_report_receipts")
         )
-        assert dispatch_message["worker_report_receipts"] == [
+        assert report_commit["worker_report_receipts"] == [
             {
                 "worker_id": worker.worker_id,
                 "report_id": worker.report.report_id,
@@ -425,16 +466,17 @@ async def test_report_write_failure_recovers_completed_worker_after_restart(
     path.mkdir()
     (path / "report.txt").write_text("release 42\n", encoding="utf-8")
     original_replace = os.replace
-    failed = False
+    report_write_failures = 0
 
     def replace(source: Any, target: Any) -> None:
-        nonlocal failed
+        nonlocal report_write_failures
         target_path = Path(target)
-        if "workers" in target_path.parts and target_path.name == "state.json" and not failed:
+        if "workers" in target_path.parts and target_path.name == "state.json":
             value = json.loads(Path(source).read_text(encoding="utf-8"))
             if value["workers"][0].get("report") is not None:
-                failed = True
-                raise OSError("injected report publication failure")
+                report_write_failures += 1
+                if restart or report_write_failures == 1:
+                    raise OSError("injected report publication failure")
         original_replace(source, target)
 
     monkeypatch.setattr(os, "replace", replace)
@@ -456,9 +498,25 @@ async def test_report_write_failure_recovers_completed_worker_after_restart(
             "fault",
         )
         await asyncio.wait_for(sink.wait_for("run.completed", cast(str, accepted["run_id"])), 8)
-        assert failed
+        failure_count = 2 if restart else 1
+
+        async def wait_for_report_write_failure() -> None:
+            while report_write_failures < failure_count:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_for_report_write_failure(), 8)
         worker = workspace.worker_store(sid).load().workers[0]
         if not restart:
+            async def wait_for_consumed_report() -> None:
+                while True:
+                    current = workspace.worker_store(sid).get(worker.worker_id)
+                    if current is not None and current.report_delivery_state == "consumed":
+                        return
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_for_consumed_report(), 8)
+            worker = workspace.worker_store(sid).get(worker.worker_id)
+            assert worker is not None
             assert worker.report is not None and worker.report.summary == "First line: release 42"
             assert worker.report_delivery_state == "consumed"
             assert len(provider.worker_requests) == 2
@@ -467,6 +525,7 @@ async def test_report_write_failure_recovers_completed_worker_after_restart(
         assert worker.conversation[-1]["content"] == "First line: release 42"
     finally:
         await service.stop()
+    monkeypatch.setattr(os, "replace", original_replace)
     provider.retry_failed_dispatch = True
     restarted = AgentService(home, ConfigLoader(home).load())
     await restarted.start()
@@ -490,6 +549,16 @@ async def test_report_write_failure_recovers_completed_worker_after_restart(
             "recover",
         )
         await asyncio.wait_for(sink.wait_for("run.completed", cast(str, accepted["run_id"])), 8)
+
+        async def wait_for_recovered_delivery() -> None:
+            while True:
+                current = workspace.worker_store(sid).get(worker.worker_id)
+                if current is not None and current.report_delivery_state == "consumed":
+                    return
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_for_recovered_delivery(), 8)
+        await _wait_for_idle(workspace, sid)
         recovered = workspace.worker_store(sid).get(worker.worker_id)
         assert recovered is not None and recovered.report_delivery_state == "consumed"
         assert len(provider.worker_requests) == 2
@@ -513,6 +582,16 @@ async def test_service_restart_recovers_an_interrupted_worker_report(
     client = await service.register_client("cli")
     workspace = await service.attach_workspace(client.client_id, path)
     session_id = await workspace.create_draft(client.client_id, creation_scope="chat")
+    foreground = workspace.foreground_work_store(session_id)
+    foreground.begin_task(
+        "interrupted-task",
+        "router-execution",
+        generation=1,
+        execution_role="router",
+    )
+    foreground.suspend_for_worker_reports(
+        "interrupted-task", generation=1, execution_id="router-execution"
+    )
     store = workspace.worker_store(session_id)
     worker = store.create(
         parent_task_id="interrupted-task",
@@ -553,6 +632,12 @@ async def test_service_restart_recovers_an_interrupted_worker_report(
         assert recovered.report is not None
         assert recovered.report.error_code == "service_interrupted"
         assert recovered.report_delivery_state == "pending"
+        task = next(
+            item
+            for item in restarted_workspace.foreground_work_store(session_id).load().tasks
+            if item.task_id == "interrupted-task"
+        )
+        assert task.state == "interrupted"
     finally:
         await restarted.stop()
 

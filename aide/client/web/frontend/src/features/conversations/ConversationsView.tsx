@@ -2502,35 +2502,50 @@ function ProjectSessionsContent({
                         const canCancel = !["cancelled", "superseded"].includes(task.state);
                         const busy = taskActionId !== null || questionSubmittingId !== null;
                         return (
-                          <div className={styles.foregroundTaskRow} key={task.task_id}>
-                            <code title={task.task_id}>{task.task_id.slice(0, 8)}</code>
-                            <span>{t(`conversation.taskStates.${task.state}`)}</span>
-                            <div className={styles.foregroundTaskActions}>
-                              {canContinue ? (
-                                <button
-                                  className={styles.iconButton}
-                                  type="button"
-                                  aria-label={t("conversation.continueTask", { id: task.task_id })}
-                                  title={t("conversation.continueTask", { id: task.task_id })}
-                                  disabled={busy || connectionState !== "online"}
-                                  onClick={() => void runForegroundTaskAction(task, "continue")}
-                                >
-                                  <Play size={15} aria-hidden="true" />
-                                </button>
-                              ) : null}
-                              {canCancel ? (
-                                <button
-                                  className={`${styles.iconButton} ${styles.dangerIconButton}`}
-                                  type="button"
-                                  aria-label={t("conversation.cancelTask", { id: task.task_id })}
-                                  title={t("conversation.cancelTask", { id: task.task_id })}
-                                  disabled={busy || connectionState !== "online"}
-                                  onClick={() => void runForegroundTaskAction(task, "cancel")}
-                                >
-                                  <X size={15} aria-hidden="true" />
-                                </button>
-                              ) : null}
+                          <div key={task.task_id}>
+                            <div className={styles.foregroundTaskRow}>
+                              <span>{task.execution_role === "router" ? "Router" : "Agent"}</span>
+                              <code title={task.task_id}>{task.task_id.slice(0, 8)}</code>
+                              <span>{t(`conversation.taskStates.${task.state}`)}</span>
+                              <div className={styles.foregroundTaskActions}>
+                                {canContinue ? (
+                                  <button
+                                    className={styles.iconButton}
+                                    type="button"
+                                    aria-label={t("conversation.continueTask", { id: task.task_id })}
+                                    title={t("conversation.continueTask", { id: task.task_id })}
+                                    disabled={busy || connectionState !== "online"}
+                                    onClick={() => void runForegroundTaskAction(task, "continue")}
+                                  >
+                                    <Play size={15} aria-hidden="true" />
+                                  </button>
+                                ) : null}
+                                {canCancel ? (
+                                  <button
+                                    className={`${styles.iconButton} ${styles.dangerIconButton}`}
+                                    type="button"
+                                    aria-label={t("conversation.cancelTask", { id: task.task_id })}
+                                    title={t("conversation.cancelTask", { id: task.task_id })}
+                                    disabled={busy || connectionState !== "online"}
+                                    onClick={() => void runForegroundTaskAction(task, "cancel")}
+                                  >
+                                    <X size={15} aria-hidden="true" />
+                                  </button>
+                                ) : null}
+                              </div>
                             </div>
+                            {task.workers?.length ? (
+                              <div className={styles.foregroundTaskWorkers}>
+                                {task.workers.map((worker) => (
+                                  <span key={worker.worker_id}>
+                                    Worker <code title={worker.worker_id}>{worker.worker_id.slice(0, 8)}</code>
+                                    <code title={worker.task_id}>{worker.task_id}</code>
+                                    <span>g{worker.generation}</span>
+                                    {t(`conversation.workerStates.${worker.state}`)}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : null}
                           </div>
                         );
                       })}

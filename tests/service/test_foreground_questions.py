@@ -199,6 +199,14 @@ class _QuestionProvider:
         return None
 
 
+class _QuietSink:
+    async def send_event(self, event: dict[str, object]) -> None:
+        del event
+
+    async def close(self) -> None:
+        return None
+
+
 def _home(path: Path) -> AgentHome:
     home = AgentHome(path)
     home.initialize()
@@ -354,7 +362,8 @@ async def test_router_answer_keeps_restricted_catalog_and_rejects_business_calls
                 return worker_report()
             user = next((m.get("content", "") for m in reversed(messages)
                          if m.get("role") == "user"), "")
-            continuing = "Continue the current foreground task." in user
+            worker_report = "worker reports for automatic continuation" in user.lower()
+            continuing = "Continue the current foreground task." in user or worker_report
             if "router-answer" not in user and not continuing:
                 return super().stream(**kwargs)
             self.router_tool_catalogs.append(tuple(
@@ -363,6 +372,21 @@ async def test_router_answer_keeps_restricted_catalog_and_rejects_business_calls
             ))
 
             async def emit() -> AsyncIterator[ModelStreamEvent]:
+                if worker_report:
+                    response = ModelResponse(
+                        message=AssistantModelMessage(
+                            content="",
+                            tool_calls=(ModelToolCall(
+                                "worker-report-finish",
+                                "finish",
+                                '{"response":"Routed answer"}',
+                            ),),
+                        ),
+                        usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                        finish_reason="tool_calls",
+                    )
+                    yield ModelCompleted(response)
+                    return
                 write_id = "forbidden-continue" if continuing else "forbidden-write"
                 if not any(m.get("tool_call_id") == write_id for m in messages):
                     calls = (ModelToolCall(
@@ -397,6 +421,7 @@ async def test_router_answer_keeps_restricted_catalog_and_rejects_business_calls
     await service.start()
     try:
         client, sid, version, wid = await _open_chat(service, directory, client_kind=client_kind)
+        await service.connect_client(client, _QuietSink())
         await service.handle_command(client, _command(
             request_id="router-question", command_type="input", workspace_id=wid,
             session_id=sid, claim_version=version, payload={"text":"ask-foreground-question"},
@@ -409,6 +434,7 @@ async def test_router_answer_keeps_restricted_catalog_and_rejects_business_calls
             client, sid, version, wid = await _open_chat(
                 service, directory, session_id=sid, client_kind=client_kind,
             )
+            await service.connect_client(client, _QuietSink())
         workspace = service.workspace(wid)
         before = cast(dict[str, Any], workspace.session_snapshot(sid))
         question = before["foreground_questions"][0]
@@ -420,6 +446,16 @@ async def test_router_answer_keeps_restricted_catalog_and_rejects_business_calls
             },
         ))
         await _wait_for_idle(workspace, sid)
+        if decision == "dispatch":
+            async def wait_for_worker_delivery() -> None:
+                while True:
+                    workers = workspace.worker_store(sid).load().workers
+                    if workers and workers[0].report_delivery_state == "consumed":
+                        return
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_for_worker_delivery(), 8)
+            await _wait_for_idle(workspace, sid)
         snapshot = cast(dict[str, Any], workspace.session_snapshot(sid))
         assert not (directory / "router-effect.txt").exists()
         results = {m.get("tool_call_id"): m for m in snapshot["messages"]

@@ -955,6 +955,27 @@
   gap: 4px;
 }
 
+.foregroundTaskWorkers {
+  display: grid;
+  gap: 3px;
+  padding: 3px 0 8px 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.foregroundTaskWorkers span {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.foregroundTaskWorkers code {
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+}
+
 .foregroundQuestionText > span {
   color: var(--text-muted);
   font-size: 11px;

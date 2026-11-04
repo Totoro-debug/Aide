@@ -1520,10 +1520,26 @@
       "additionalProperties": false,
       "required": ["task_id", "generation", "state", "revision"],
       "properties": {
+        "execution_role": {"enum": ["agent", "router"]},
         "task_id": {"$ref": "#/$defs/identifier"},
         "generation": {"type": "integer", "minimum": 1},
-        "state": {"enum": ["running", "waiting_for_answer", "completed", "interrupted", "cancelled", "superseded"]},
-        "revision": {"type": "integer", "minimum": 1}
+        "state": {"enum": ["running", "waiting_for_answer", "waiting_for_workers", "completed", "interrupted", "cancelled", "superseded"]},
+        "revision": {"type": "integer", "minimum": 1},
+        "workers": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/foreground_worker"}
+        }
+      }
+    },
+    "foreground_worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["worker_id", "task_id", "generation", "state"],
+      "properties": {
+        "worker_id": {"$ref": "#/$defs/identifier"},
+        "task_id": {"$ref": "#/$defs/identifier"},
+        "generation": {"type": "integer", "minimum": 1},
+        "state": {"enum": ["working", "waiting", "ready", "blocked", "failed", "cancelled"]}
       }
     },
     "session_claim": {

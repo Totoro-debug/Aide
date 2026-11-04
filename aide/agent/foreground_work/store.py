@@ -48,6 +48,7 @@ AnswerKind = Literal["text", "choice"]
 TaskState = Literal[
     "running",
     "waiting_for_answer",
+    "waiting_for_workers",
     "completed",
     "interrupted",
     "cancelled",
@@ -804,6 +805,61 @@ class ForegroundWorkStore:
             )
         )
 
+    def suspend_for_worker_reports(
+        self,
+        task_id: str,
+        *,
+        generation: int,
+        execution_id: str,
+    ) -> ForegroundWorkSnapshot:
+        """Keep a Router Task active while its assigned Workers are still reporting."""
+        current = self.load()
+        task = next((item for item in current.tasks if item.task_id == task_id), None)
+        if (
+            task is None
+            or task.generation != generation
+            or task.execution_id != execution_id
+            or task.state != "running"
+            or task.execution_role != "router"
+        ):
+            raise ForegroundWorkConflict("foreground Router execution is no longer current")
+        updated = replace(task, state="waiting_for_workers")
+        return self._publish(
+            ForegroundWorkSnapshot(
+                current.revision + 1,
+                tuple(updated if item.task_id == task_id else item for item in current.tasks),
+                current.questions,
+                current.deliveries,
+            )
+        )
+
+    def interrupt_worker_wait(self, task_id: str, *, generation: int) -> ForegroundWorkSnapshot:
+        """Close an interrupted Router Task while preserving any human question."""
+        current = self.load()
+        task = next((item for item in current.tasks if item.task_id == task_id), None)
+        if (
+            task is None
+            or task.generation != generation
+            or task.execution_role != "router"
+            or task.state not in {"running", "waiting_for_workers"}
+        ):
+            return current
+        unresolved = {"preparing", "pending", "answer_received", "resuming", "executing"}
+        if any(
+            question.task_id == task_id and question.state in unresolved
+            for question in current.questions
+        ):
+            return current
+        updated = replace(task, state="interrupted")
+        return self._publish(
+            ForegroundWorkSnapshot(
+                current.revision + 1,
+                tuple(updated if item.task_id == task_id else item for item in current.tasks),
+                current.questions,
+                current.deliveries,
+            )
+        )
+
     def answer_question(
         self,
         question_id: str,
@@ -1226,7 +1282,8 @@ class ForegroundWorkStore:
         return (
             task is not None
             and task.generation == generation
-            and task.state in {"running", "waiting_for_answer", "completed"}
+            and task.state
+            in {"running", "waiting_for_answer", "waiting_for_workers", "completed"}
         )
 
     def is_current_execution(self, task_id: str, generation: int, execution_id: str) -> bool:
@@ -1856,6 +1913,7 @@ def _task_from_dict(value: object, *, schema_version: int) -> ForegroundWorkTask
     if state not in {
         "running",
         "waiting_for_answer",
+        "waiting_for_workers",
         "completed",
         "interrupted",
         "cancelled",

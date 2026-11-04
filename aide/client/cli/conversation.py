@@ -1309,10 +1309,26 @@ class TerminalConversationApp(App[None]):
     ) -> ManagementCommandResult:
         action, task_id = command
         if action == "list":
-            output = "\n".join(
-                f"Task {task['task_id']} · generation {task['generation']} · {task['state']}"
-                for task in self._foreground_tasks
-            ) or "No foreground tasks."
+            task_lines: list[str] = []
+            for foreground_task in self._foreground_tasks:
+                task_lines.append(
+                    f"{str(foreground_task.get('execution_role', 'agent')).capitalize()} "
+                    f"Task {foreground_task['task_id']} · generation {foreground_task['generation']} · {foreground_task['state']}"
+                )
+                workers = foreground_task.get("workers")
+                if isinstance(workers, list):
+                    task_lines.extend(
+                        f"  Worker {worker['worker_id']} · {worker['task_id']} · "
+                        f"generation {worker['generation']} · {worker['state']}"
+                        for worker in workers
+                        if isinstance(worker, dict)
+                        and all(
+                            isinstance(worker.get(key), str)
+                            for key in ("worker_id", "task_id", "state")
+                        )
+                        and isinstance(worker.get("generation"), int)
+                    )
+            output = "\n".join(task_lines) or "No foreground tasks."
             return ManagementCommandResult(handled=True, output=output)
         if task_id is None:
             return ManagementCommandResult(
@@ -1541,10 +1557,26 @@ class TerminalConversationApp(App[None]):
             )
         if task_widget is not None:
             task_widget.display = bool(self._foreground_tasks)
-            task_widget.update("\n".join(
-                f"Task {task['task_id']} · generation {task['generation']} · {task['state']}"
-                for task in self._foreground_tasks
-            ))
+            task_lines = []
+            for task in self._foreground_tasks:
+                task_lines.append(
+                    f"{str(task.get('execution_role', 'agent')).capitalize()} "
+                    f"Task {task['task_id']} · generation {task['generation']} · {task['state']}"
+                )
+                workers = task.get("workers")
+                if isinstance(workers, list):
+                    task_lines.extend(
+                        f"  Worker {worker['worker_id']} · {worker['task_id']} · "
+                        f"generation {worker['generation']} · {worker['state']}"
+                        for worker in workers
+                        if isinstance(worker, dict)
+                        and all(
+                            isinstance(worker.get(key), str)
+                            for key in ("worker_id", "task_id", "state")
+                        )
+                        and isinstance(worker.get("generation"), int)
+                    )
+            task_widget.update("\n".join(task_lines))
         question_widget = next(
             (widget for widget in self.query(Static) if widget.id == "foreground-question"), None
         )

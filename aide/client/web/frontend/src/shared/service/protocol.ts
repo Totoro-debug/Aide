@@ -578,16 +578,26 @@ export interface SessionSnapshot {
 }
 
 export interface ForegroundTaskSnapshot {
+  execution_role?: "agent" | "router";
   task_id: string;
   generation: number;
   state:
     | "running"
     | "waiting_for_answer"
+    | "waiting_for_workers"
     | "completed"
     | "interrupted"
     | "cancelled"
     | "superseded";
   revision: number;
+  workers?: ForegroundWorkerSnapshot[];
+}
+
+export interface ForegroundWorkerSnapshot {
+  worker_id: string;
+  task_id: string;
+  generation: number;
+  state: "working" | "waiting" | "ready" | "blocked" | "failed" | "cancelled";
 }
 
 export interface ForegroundQuestionSnapshot {

@@ -82,6 +82,7 @@ const referenceTypes = {
   restore_anchor: "RestoreAnchor",
   foreground_question: "ForegroundQuestionSnapshot",
   foreground_task: "ForegroundTaskSnapshot",
+  foreground_worker: "ForegroundWorkerSnapshot",
   identifier: "string",
   claim_version: "number",
   request_id: "string",

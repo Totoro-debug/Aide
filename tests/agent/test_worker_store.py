@@ -160,6 +160,62 @@ def test_worker_report_delivery_uses_stable_receipt_and_is_consumed_once(
     assert consumed.report_delivery_state == "consumed"
 
 
+def test_worker_report_batch_waits_for_all_workers_and_reconciles_session_receipts(
+    tmp_path: Path,
+) -> None:
+    store, _session_id = _create_store(tmp_path)
+    first = _create_worker(store)
+    second = store.create(
+        parent_task_id=first.parent_task_id,
+        parent_generation=first.parent_generation,
+        task_id="second-worker-task",
+        task="Inspect a second file",
+        explicit_context=(),
+        runtime_facts=first.runtime_facts,
+        permission_snapshot=PermissionSnapshot(first.permission_level, _shell()),
+        session_model_configuration=first.model_configuration,
+        system_prompt=first.system_prompt,
+        initial_message="Inspect a second file",
+        restore_run_token=first.restore_run_token,
+    )
+    store.publish_report(
+        first.worker_id,
+        state="ready",
+        summary="First result",
+        usage=first.usage,
+    )
+    assert store.claim_report_batch(first.parent_task_id, first.parent_generation) is None
+
+    store.publish_report(
+        second.worker_id,
+        state="ready",
+        summary="Second result",
+        usage=second.usage,
+    )
+    deliveries = store.claim_report_batch(first.parent_task_id, first.parent_generation)
+    assert deliveries is not None
+    assert {item.report.worker_id for item in deliveries} == {first.worker_id, second.worker_id}
+    assert all(
+        store.claim_report_batch(first.parent_task_id, first.parent_generation) == deliveries
+        for _ in range(10)
+    )
+
+    assistant_receipt = {
+        "role": "assistant",
+        "status": "completed",
+        "worker_report_receipts": [
+            {
+                "worker_id": item.report.worker_id,
+                "report_id": item.report.report_id,
+                "receipt_id": item.receipt_id,
+            }
+            for item in deliveries
+        ],
+    }
+    assert store.reconcile_deliveries([assistant_receipt]) == 2
+    assert store.claim_report_batch(first.parent_task_id, first.parent_generation) == ()
+
+
 def test_worker_report_receipt_requires_a_successful_dispatch_message(tmp_path: Path) -> None:
     store, _session_id = _create_store(tmp_path)
     worker = _create_worker(store)
@@ -190,7 +246,7 @@ def test_worker_report_receipt_requires_a_successful_dispatch_message(tmp_path: 
     assert store.reconcile_deliveries([successful_message]) == 1
 
 
-def test_worker_dispatch_identity_is_idempotent_and_parent_scope_allows_one_worker(
+def test_worker_dispatch_identity_is_idempotent_and_parent_scope_allows_many_workers(
     tmp_path: Path,
 ) -> None:
     store, _session_id = _create_store(tmp_path)
@@ -228,22 +284,24 @@ def test_worker_dispatch_identity_is_idempotent_and_parent_scope_allows_one_work
     )
     assert duplicate.worker_id == first.worker_id
 
-    with pytest.raises(WorkerStoreConflict):
-        store.create(
-            parent_task_id=parent_task_id,
-            parent_generation=1,
-            task_id="another-worker-task",
-            task="Inspect the release notes",
-            explicit_context=("Compare the latest two entries",),
-            runtime_facts={"workspace": str(store.workspace_state.workspace_path)},
-            permission_snapshot=PermissionSnapshot("workspace-write", _shell()),
-            session_model_configuration=SessionModelConfiguration(
-                provider_id="controlled", model="test-model", reasoning_effort="low"
-            ),
-            system_prompt="Worker system prompt",
-            initial_message="Task: Inspect the release notes",
-            restore_run_token=str(uuid4()),
-        )
+    second = store.create(
+        parent_task_id=parent_task_id,
+        parent_generation=1,
+        task_id="another-worker-task",
+        task="Inspect the release history",
+        explicit_context=("Compare the latest two commits",),
+        runtime_facts={"workspace": str(store.workspace_state.workspace_path)},
+        permission_snapshot=PermissionSnapshot("workspace-write", _shell()),
+        session_model_configuration=SessionModelConfiguration(
+            provider_id="controlled", model="test-model", reasoning_effort="low"
+        ),
+        system_prompt="Worker system prompt",
+        initial_message="Task: Inspect the release history",
+        restore_run_token=restore_run_token,
+    )
+
+    assert second.worker_id != first.worker_id
+    assert len(store.load().workers) == 2
 
 
 def test_interrupted_work_is_recovered_as_blocked_with_a_report(tmp_path: Path) -> None:
@@ -451,3 +509,27 @@ def test_receipt_write_failure_can_reconcile_once_after_store_restart(tmp_path: 
     assert recovered.reconcile_deliveries([persisted_dispatch]) == 1
     assert [recovered.reconcile_deliveries([persisted_dispatch]) for _ in range(10)] == [0] * 10
     assert recovered.claim_report(worker.worker_id, terminal.report.report_id) is None
+
+@pytest.mark.parametrize(("status", "code", "expected"), [
+    ("error", "model_failed", "failed"),
+    ("error", "agent_iteration_limit", "blocked"),
+    ("interrupted", "turn_cancelled", "cancelled"),
+])
+def test_report_retry_recovers_terminal_failure_checkpoint(
+    tmp_path: Path, status: str, code: str, expected: str,
+) -> None:
+    store, _ = _create_store(tmp_path)
+    worker = _create_worker(store)
+    store.checkpoint(
+        worker.worker_id,
+        conversation=(*worker.conversation, {
+            "role": "assistant", "content": "Terminal execution diagnostic",
+            "tool_calls": [], "status": status,
+            "error": {"code": code, "message": "Terminal execution diagnostic"},
+        }),
+        context_state={}, usage=worker.usage,
+    )
+    recovered = store.recover_completed_result(worker.worker_id)
+    assert recovered.report is not None
+    assert recovered.state == expected
+    assert recovered.report.error_code == code

@@ -100,6 +100,7 @@ from aide.agent.tools.tool_gateway import (
     ToolResult,
 )
 from aide.agent.workers.executor import WorkerRunnerExecutor
+from aide.agent.workers.models import WorkerRecord
 from aide.agent.workers.store import WorkerStore
 from aide.agent.workspace_state import WorkspaceState
 from aide.config.agent_home import AgentHome
@@ -140,6 +141,8 @@ from aide.utils.validation import empty_token_usage
 type RuntimeConfirmationRequester = Callable[
     [ConfirmationEnvelope], Awaitable[ConfirmationDecision]
 ]
+type WorkerScheduler = Callable[[WorkerRecord, Callable[[], Awaitable[None]]], None]
+type WorkerGenerationFencer = Callable[[str, int], Awaitable[None]]
 
 
 @dataclass(slots=True)
@@ -181,6 +184,8 @@ class AgentRunExecutor:
         trace_recorder: TraceRecorder | None = None,
         foreground_work_store: ForegroundWorkStore | None = None,
         worker_store: WorkerStore | None = None,
+        worker_scheduler: WorkerScheduler | None = None,
+        worker_generation_fencer: WorkerGenerationFencer | None = None,
     ) -> None:
         if workspace_state.workspace_path != workspace_path:
             raise ValueError("Agent Loop Workspace State must belong to the Workspace")
@@ -256,6 +261,8 @@ class AgentRunExecutor:
         )
         self._foreground_work_store = foreground_work_store
         self._worker_store = worker_store
+        self._worker_scheduler = worker_scheduler
+        self._worker_generation_fencer = worker_generation_fencer
         self._now = now
         self._new_uuid = new_uuid
         self._monotonic_now = monotonic_now
@@ -352,6 +359,7 @@ class AgentRunExecutor:
         *,
         workspace_id: str,
         confirmation_for: Callable[[SubAgentRecord], ConfirmationRequester | None],
+        coordinator_for: Callable[[], SubAgentSessionCoordinator | None] | None = None,
     ) -> SubAgentRunnerExecutor:
         """Build the child executor from this Service Loop's shared runtime resources."""
         model_router = self._subagent_model_router
@@ -359,19 +367,30 @@ class AgentRunExecutor:
             raise RuntimeError("SubAgent execution requires the shared Service Model Router")
         coordinator = self._subagent_coordinator
         workspace_state = self._workspace_state
+        foreground_work_store = self._foreground_work_store
+        new_uuid = self._new_uuid
+        parent_executor_reference = weakref.ref(self)
 
         def child_context(record: SubAgentRecord) -> SubAgentToolContext:
-            if coordinator is None:
+            active_coordinator = coordinator
+            if active_coordinator is None and coordinator_for is not None:
+                active_coordinator = coordinator_for()
+            if active_coordinator is None:
+                parent_executor = parent_executor_reference()
+                active_coordinator = (
+                    None if parent_executor is None else parent_executor._subagent_coordinator
+                )
+            if active_coordinator is None:
                 raise RuntimeError("SubAgent coordinator is unavailable for this Agent Run")
             return SubAgentToolContext(
-                coordinator=coordinator, parent_run_id=record.parent_run_id,
+                coordinator=active_coordinator, parent_run_id=record.parent_run_id,
                 source=record.source, creator_snapshot=record.creator_snapshot,
             )
 
         def child_question_handler_for(
             record: SubAgentRecord,
         ) -> Callable[[str, Sequence[Mapping[str, str]], str], str] | None:
-            store = self._foreground_work_store
+            store = foreground_work_store
             if (
                 store is None
                 or record.source.kind is not SubAgentSourceKind.FOREGROUND
@@ -385,7 +404,7 @@ class AgentRunExecutor:
                 options: Sequence[Mapping[str, str]],
                 tool_call_id: str,
             ) -> str:
-                question_id = str(self._new_uuid())
+                question_id = str(new_uuid())
                 store.prepare_question(
                     task_id=cast(str, record.source.task_id),
                     execution_id=cast(str, record.execution_id),
@@ -404,7 +423,7 @@ class AgentRunExecutor:
             question_id: str,
             committed_tool_call_ids: set[str],
         ) -> None:
-            store = self._foreground_work_store
+            store = foreground_work_store
             if store is not None:
                 store.publish_question(
                     question_id,
@@ -412,7 +431,7 @@ class AgentRunExecutor:
                 )
 
         def finish_child_execution(record: SubAgentRecord) -> None:
-            store = self._foreground_work_store
+            store = foreground_work_store
             if (
                 store is not None
                 and record.source.task_id is not None
@@ -427,7 +446,7 @@ class AgentRunExecutor:
 
         return SubAgentRunnerExecutor(
             workspace_id=workspace_id,
-            workspace_state=self._workspace_state,
+            workspace_state=workspace_state,
             repository=repository,
             model_router=model_router,
             tool_gateway=self._tool_gateway,
@@ -439,7 +458,7 @@ class AgentRunExecutor:
             ),
             mcp_keywords=self._mcp_keywords,
             confirmation_for=confirmation_for,
-            tool_context_for=(self._subagent_tool_context_for if coordinator is None else child_context),
+            tool_context_for=child_context,
             foreground_task_is_current=(
                 None if self._foreground_work_store is None
                 else self._foreground_work_store.is_active_generation
@@ -1387,7 +1406,11 @@ class AgentRunExecutor:
             inbound.metadata.get("foreground_automatic_continuation") is True
         )
         if automatic_continuation:
-            current_user["_runtime_input_kind"] = "subagent_result"
+            current_user["_runtime_input_kind"] = (
+                "worker_result"
+                if inbound.metadata.get("foreground_worker_report") is True
+                else "subagent_result"
+            )
         runtime_subagent_result = inbound.metadata.get("foreground_subagent_result")
         if isinstance(runtime_subagent_result, str):
             current_user["_runtime_subagent_result"] = runtime_subagent_result
@@ -1667,6 +1690,13 @@ class AgentRunExecutor:
                         await self._subagent_coordinator.cancel_task_and_wait(
                             prior_task.task_id, prior_task.generation
                         )
+                    if (
+                        prior_task is not None
+                        and self._worker_generation_fencer is not None
+                    ):
+                        await self._worker_generation_fencer(
+                            prior_task.task_id, prior_task.generation
+                        )
                 else:
                     task_id = str(self._new_uuid())
                     foreground_work_store.begin_task(
@@ -1721,6 +1751,18 @@ class AgentRunExecutor:
         foreground_tools: tuple[BaseTool, ...] = ()
         foreground_context: ToolRunContext | None = None
         worker_report_receipts: list[tuple[str, str, str, str]] = []
+        inbound_worker_receipts = inbound.metadata.get("worker_report_receipts")
+        if isinstance(inbound_worker_receipts, list):
+            for item in inbound_worker_receipts:
+                if not isinstance(item, dict):
+                    continue
+                worker_id = item.get("worker_id")
+                report_id = item.get("report_id")
+                receipt_id = item.get("receipt_id")
+                if all(isinstance(value, str) for value in (worker_id, report_id, receipt_id)):
+                    worker_report_receipts.append(
+                        ("", cast(str, worker_id), cast(str, report_id), cast(str, receipt_id))
+                    )
         if foreground_work_store is not None and task_id is not None:
             assert isinstance(execution_id, str)
             executor_reference = weakref.ref(self)
@@ -1792,6 +1834,70 @@ class AgentRunExecutor:
                         tool_call_id=tool_call_id,
                     )
                 return None
+
+            def suspend_for_worker_reports(
+                tool_name: str,
+                arguments: Mapping[str, object],
+                tool_call_id: str,
+                content: str,
+            ) -> AgentRunSuspension | None:
+                del arguments, content
+                agent_executor = executor_reference()
+                if (
+                    tool_name != "finish"
+                    or not router_restricted
+                    or agent_executor is None
+                    or agent_executor._worker_scheduler is None
+                    or agent_executor._worker_store is None
+                ):
+                    return None
+                reports_in_input = {
+                    (item.get("worker_id"), item.get("report_id"))
+                    for item in (
+                        inbound.metadata.get("worker_report_receipts", [])
+                        if isinstance(inbound.metadata.get("worker_report_receipts", []), list)
+                        else []
+                    )
+                    if isinstance(item, dict)
+                }
+                workers = tuple(
+                    worker
+                    for worker in agent_executor._worker_store.load().workers
+                    if worker.parent_task_id == task_id
+                    and worker.parent_generation == task_generation
+                )
+                if not workers or all(
+                    worker.report is not None
+                    and (
+                        worker.report_delivery_state == "consumed"
+                        or (worker.worker_id, worker.report.report_id) in reports_in_input
+                    )
+                    for worker in workers
+                ):
+                    return None
+                foreground_work_store.suspend_for_worker_reports(
+                    cast(str, task_id),
+                    generation=task_generation,
+                    execution_id=execution_id,
+                )
+                return AgentRunSuspension(
+                    kind="worker_reports",
+                    task_id=cast(str, task_id),
+                    generation=task_generation,
+                    execution_id=execution_id,
+                    question_id=None,
+                    tool_call_id=tool_call_id,
+                )
+
+            def suspend_foreground_run(
+                tool_name: str,
+                arguments: Mapping[str, object],
+                tool_call_id: str,
+                content: str,
+            ) -> AgentRunSuspension | None:
+                return suspend_for_subagent_attention(
+                    tool_name, arguments, tool_call_id, content
+                ) or suspend_for_worker_reports(tool_name, arguments, tool_call_id, content)
 
             async def dispatch_worker(
                 worker_task_id: str,
@@ -1926,16 +2032,49 @@ class AgentRunExecutor:
                             )
                         )
 
+                    if agent_executor._worker_scheduler is not None:
+                        async def run_worker() -> None:
+                            await executor.execute(
+                                worker,
+                                foreground_task_is_current=lambda parent_task, generation, _execution: (
+                                    foreground_work_store.is_active_generation(
+                                        parent_task, generation
+                                    )
+                                ),
+                                confirmation=request_worker_confirmation,
+                                cancel_requested=lambda: not foreground_work_store.is_active_generation(
+                                    parent_task_id, parent_generation
+                                ),
+                                externalize_result=agent_executor._result_externalizer_for(
+                                    active_session
+                                ),
+                            )
+
+                        try:
+                            agent_executor._worker_scheduler(worker, run_worker)
+                        except (RuntimeError, ValueError) as error:
+                            raise ToolError("Worker could not be scheduled for execution.") from error
+                        return json.dumps(
+                            {
+                                "worker_id": worker.worker_id,
+                                "task_id": worker.task_id,
+                                "status": worker.state,
+                            },
+                            ensure_ascii=True,
+                            separators=(",", ":"),
+                        )
+
                     try:
                         worker = await executor.execute(
                             worker,
-                            foreground_task_is_current=foreground_work_store.is_current_execution,
-                            confirmation=request_worker_confirmation,
-                            cancel_requested=lambda: (
-                                agent_executor._cancel_requested
-                                or not foreground_work_store.is_current_execution(
-                                    parent_task_id, parent_generation, execution_id
+                            foreground_task_is_current=lambda parent_task, generation, _execution: (
+                                foreground_work_store.is_active_generation(
+                                    parent_task, generation
                                 )
+                            ),
+                            confirmation=request_worker_confirmation,
+                            cancel_requested=lambda: not foreground_work_store.is_active_generation(
+                                parent_task_id, parent_generation
                             ),
                             externalize_result=agent_executor._result_externalizer_for(active_session),
                         )
@@ -1993,7 +2132,7 @@ class AgentRunExecutor:
                 schedule_service=self._schedule_service,
                 exec_host=self._exec_host,
                 foreground_question_handler=register_question,
-                run_suspension_handler=suspend_for_subagent_attention,
+                run_suspension_handler=suspend_foreground_run,
                 task_id=task_id,
                 generation=task_generation,
                 execution_id=execution_id,
@@ -2268,6 +2407,27 @@ class AgentRunExecutor:
                 ]
                 if worker_receipt_metadata:
                     message["worker_report_receipts"] = worker_receipt_metadata
+        if result.finish_reason == "completed" or result.suspension is not None:
+            automatic_worker_receipts = [
+                {
+                    "worker_id": worker_id,
+                    "report_id": report_id,
+                    "receipt_id": receipt_id,
+                }
+                for tool_call_id, worker_id, report_id, receipt_id in worker_report_receipts
+                if not tool_call_id
+            ]
+            if automatic_worker_receipts:
+                assistant_message = next(
+                    (
+                        message
+                        for message in reversed(run_messages)
+                        if message.get("role") == "assistant"
+                    ),
+                    None,
+                )
+                if assistant_message is not None:
+                    assistant_message["worker_report_receipts"] = automatic_worker_receipts
         if result.finish_reason == "cancelled" and not any(
             message.get("status") == "interrupted" for message in run_messages
         ):
@@ -2431,15 +2591,34 @@ class AgentRunExecutor:
                     work_snapshot = self._foreground_work_store.load()
                     persisted_session = None
                 if result.suspension is not None:
-                    question = work_snapshot.question(result.suspension.question_id)
-                    if question is None or question.state != "pending":
+                    if result.suspension.kind == "worker_reports":
+                        task = next(
+                            (
+                                item
+                                for item in work_snapshot.tasks
+                                if item.task_id == result.suspension.task_id
+                                and item.generation == result.suspension.generation
+                            ),
+                            None,
+                        )
+                        valid_boundary = (
+                            task is not None and task.state == "waiting_for_workers"
+                        )
+                    else:
+                        question = (
+                            None
+                            if result.suspension.question_id is None
+                            else work_snapshot.question(result.suspension.question_id)
+                        )
+                        valid_boundary = question is not None and question.state == "pending"
+                    if persisted_session is None or not valid_boundary:
                         result = replace(
                             result,
                             finish_reason="failed",
                             final_content="",
                             error=ErrorInfo(
                                 "persistence_error",
-                                "The question could not be saved to the Session.",
+                                "The foreground wait could not be saved safely.",
                             ),
                             suspension=None,
                         )
@@ -2485,7 +2664,10 @@ class AgentRunExecutor:
     ) -> bool:
         if self._aborted:
             return False
-        runtime_only = current_user.get("_runtime_input_kind") == "subagent_result"
+        runtime_only = current_user.get("_runtime_input_kind") in {
+            "subagent_result",
+            "worker_result",
+        }
         durable_current_user = deepcopy(current_user)
         durable_current_user.pop("_runtime_input_kind", None)
         durable_current_user.pop("_runtime_subagent_result", None)
@@ -2607,17 +2789,19 @@ class AgentRunExecutor:
         if self._aborted:
             return
         if result.finish_reason == "suspended" and result.suspension is not None:
+            payload: dict[str, object] = {
+                "finish_reason": "suspended",
+                "task_id": result.suspension.task_id,
+                "execution_id": result.suspension.execution_id,
+                "_streamed": True,
+            }
+            if result.suspension.question_id is not None:
+                payload["question_id"] = result.suspension.question_id
             await self._bus.put_outbound(
                 OutboundMessage(
                     "system_control",
                     "",
-                    {
-                        "finish_reason": "suspended",
-                        "task_id": result.suspension.task_id,
-                        "question_id": result.suspension.question_id,
-                        "execution_id": result.suspension.execution_id,
-                        "_streamed": True,
-                    },
+                    payload,
                 )
             )
             return

@@ -27,7 +27,7 @@ from aide.agent.subagents.models import (
 from aide.agent.workspace_state import WorkspaceState
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 _MAX_QUESTION_LENGTH = 2_000
 _MAX_ANSWER_LENGTH = 10_000
 _SESSION_ID = re.compile(
@@ -87,8 +87,11 @@ class ForegroundWorkTask:
     iteration_budget_limit: int = 50
     iteration_budget_used: int = 0
     charged_execution_ids: tuple[str, ...] = ()
+    execution_role: Literal["agent", "router"] = "agent"
 
     def __post_init__(self) -> None:
+        if self.execution_role not in ("agent", "router"):
+            raise ValueError("Foreground Task execution role is invalid")
         for name, value in (
             ("iteration_stage", self.iteration_stage),
             ("iteration_budget_limit", self.iteration_budget_limit),
@@ -226,6 +229,7 @@ class ForegroundWorkStore:
         origin_anchor_id: int | None = None,
         permission_level: ToolPermissionLevel = "read-only",
         iteration_budget_limit: int = 50,
+        execution_role: Literal["agent", "router"] = "agent",
     ) -> ForegroundWorkSnapshot:
         _require_identifier(task_id, "task_id")
         _require_identifier(execution_id, "execution_id")
@@ -254,6 +258,7 @@ class ForegroundWorkStore:
             permission_level,
             1,
             iteration_budget_limit,
+            execution_role=execution_role,
         )
         return self._publish(
             ForegroundWorkSnapshot(current.revision + 1, (*current.tasks, task), current.questions)
@@ -293,6 +298,7 @@ class ForegroundWorkStore:
             task.iteration_budget_limit,
             0 if explicit_user_operation else task.iteration_budget_used,
             () if explicit_user_operation else task.charged_execution_ids,
+            execution_role=task.execution_role,
         )
         tasks = (*[item for item in current.tasks if item.task_id != task_id], updated)
         return self._publish(
@@ -542,6 +548,7 @@ class ForegroundWorkStore:
         origin_anchor_id: int | None = None,
         permission_level: ToolPermissionLevel = "read-only",
         iteration_budget_limit: int = 50,
+        execution_role: Literal["agent", "router"] = "agent",
     ) -> ForegroundWorkSnapshot:
         """Supersede the latest Task and atomically register its replacement."""
         _require_identifier(task_id, "task_id")
@@ -572,6 +579,7 @@ class ForegroundWorkStore:
                 prior.iteration_budget_limit,
                 prior.iteration_budget_used,
                 prior.charged_execution_ids,
+                execution_role=prior.execution_role,
             )
             unresolved = {"preparing", "pending", "answer_received", "resuming", "executing"}
             questions = [
@@ -607,6 +615,7 @@ class ForegroundWorkStore:
                 permission_level,
                 1,
                 iteration_budget_limit,
+                execution_role=execution_role,
             )
         )
         return self._publish(
@@ -761,6 +770,7 @@ class ForegroundWorkStore:
                 item.iteration_budget_limit,
                 item.iteration_budget_used,
                 item.charged_execution_ids,
+                execution_role=item.execution_role,
             )
             if item.task_id == question.task_id
             else item
@@ -901,6 +911,7 @@ class ForegroundWorkStore:
             task.iteration_budget_limit,
             0,
             (),
+            execution_role=task.execution_role,
         )
         return self._publish(
             ForegroundWorkSnapshot(
@@ -1075,6 +1086,7 @@ class ForegroundWorkStore:
                 item.iteration_budget_limit,
                 item.iteration_budget_used,
                 item.charged_execution_ids,
+                execution_role=item.execution_role,
             )
             for item in current.tasks
         )
@@ -1145,6 +1157,7 @@ class ForegroundWorkStore:
                         item.iteration_budget_limit,
                         item.iteration_budget_used,
                         item.charged_execution_ids,
+                        execution_role=item.execution_role,
                     )
                     for item in current.tasks
                 ),
@@ -1188,6 +1201,7 @@ class ForegroundWorkStore:
             task.iteration_budget_limit,
             task.iteration_budget_used + model_calls,
             (*task.charged_execution_ids, execution_id),
+            execution_role=task.execution_role,
         )
         tasks = tuple(updated if item.task_id == task_id else item for item in current.tasks)
         return self._publish(ForegroundWorkSnapshot(current.revision + 1, tasks, current.questions))
@@ -1591,6 +1605,7 @@ class ForegroundWorkStore:
                     task.iteration_budget_limit,
                     iteration_budget_used,
                     tuple(charged_execution_ids),
+                    execution_role=task.execution_role,
                 )
             )
         if not changed:
@@ -1700,7 +1715,7 @@ def _snapshot_from_dict(value: object) -> ForegroundWorkSnapshot:
         raise ForegroundWorkError("Foreground Work state must be an object")
     data = cast(dict[str, object], value)
     schema_version = data.get("schema_version")
-    if type(schema_version) is not int or schema_version not in {1, 2, 3, 4, 5, _SCHEMA_VERSION}:
+    if type(schema_version) is not int or schema_version not in {1, 2, 3, 4, 5, 6, _SCHEMA_VERSION}:
         raise ForegroundWorkError("Foreground Work state has an unsupported version")
     expected_fields = {"schema_version", "revision", "tasks", "questions"}
     if schema_version >= 6:
@@ -1807,6 +1822,7 @@ def _task_to_dict(task: ForegroundWorkTask) -> dict[str, object]:
         "iteration_budget_limit": task.iteration_budget_limit,
         "iteration_budget_used": task.iteration_budget_used,
         "charged_execution_ids": list(task.charged_execution_ids),
+        "execution_role": task.execution_role,
     }
 
 
@@ -1826,8 +1842,12 @@ def _task_from_dict(value: object, *, schema_version: int) -> ForegroundWorkTask
                 "charged_execution_ids",
             }
         )
+    if schema_version >= 7:
+        expected.add("execution_role")
     if set(item) != expected:
         raise ForegroundWorkError("Foreground Work task has an unsupported shape")
+    if item.get("execution_role", "agent") not in ("agent", "router"):
+        raise ForegroundWorkError("Foreground Work task execution role is malformed")
     task_id = _require_stored_string(item["task_id"], "task_id")
     execution_id = _require_stored_string(item["execution_id"], "execution_id")
     generation, state, anchor = item["generation"], item["state"], item["origin_anchor_id"]
@@ -1875,6 +1895,7 @@ def _task_from_dict(value: object, *, schema_version: int) -> ForegroundWorkTask
         iteration_budget_limit,
         iteration_budget_used,
         tuple(charged_execution_ids_value),
+        execution_role=cast(Literal["agent", "router"], item.get("execution_role", "agent")),
     )
 
 

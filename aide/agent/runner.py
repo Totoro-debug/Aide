@@ -517,6 +517,8 @@ class AgentRunner:
                                 content=f"{tool_call.name} could not complete the request.",
                                 artifact=None,
                             )
+                        if tool_call.name == "finish" and result.status == "success":
+                            state.terminal_response = result.content
                         result = _externalize_tool_result(result, externalize, trace=state.trace)
                         state.result = result
                         return index, result
@@ -634,15 +636,19 @@ class AgentRunner:
                         ),
                         None,
                     )
-                    finish_result = next(
+                    finish_response = next(
                         (
-                            result
-                            for call, result in zip(batch_calls, completed_results, strict=True)
+                            (call.id, state.terminal_response)
+                            for call, result, state in zip(
+                                batch_calls, completed_results, states, strict=True
+                            )
                             if call.name == "finish" and result.status == "success"
                         ),
                         None,
                     )
-                    if finish_result is not None:
+                    if finish_response is not None:
+                        finish_result_id, final_response = finish_response
+                        assert final_response is not None
                         for tool_call in pending_tool_calls:
                             await emit(
                                 AgentRunnerToolCallStarted(
@@ -666,11 +672,22 @@ class AgentRunner:
                                 result=deferred.content,
                             ))
                         pending_tool_calls.clear()
+                        _append_run_message(runtime_messages, increment, {
+                            "role": "assistant",
+                            "content": final_response,
+                            "tool_calls": [],
+                            "status": "completed",
+                            "error": None,
+                            "token_usage": empty_token_usage(),
+                            "router_finish_call_id": finish_result_id,
+                        })
                         await checkpoint()
+                        await start_segment("response")
+                        await emit(TextDelta(delta=final_response))
                         await close_segment()
                         return AgentRunnerResult(
                             messages=increment,
-                            final_content=finish_result.content,
+                            final_content=final_response,
                             usage=usage,
                             finish_reason="completed",
                         )
@@ -932,6 +949,7 @@ def _cancelled_result(
 @dataclass(slots=True)
 class _ToolCallState:
     result: ToolResult | None = None
+    terminal_response: str | None = None
     trace: ToolResultTrace = field(default_factory=ToolResultTrace)
 
 

@@ -1152,6 +1152,8 @@ def _validate_message(message: dict[str, Any]) -> None:
         raise ValueError("context_usage is only valid on assistant messages")
     if role != "assistant" and "cached_input_tokens" in message:
         raise ValueError("cached_input_tokens is only valid on assistant messages")
+    if role != "assistant" and "router_finish_call_id" in message:
+        raise ValueError("router_finish_call_id is only valid on assistant messages")
     _restore_anchor_fields(message)
     if role == "user":
         if not message["content"].strip():
@@ -1195,6 +1197,16 @@ def _validate_assistant_message(message: dict[str, Any]) -> None:
             raise ValueError("assistant error must contain a message")
     token_usage = message["token_usage"]
     _validate_token_usage(token_usage, field="assistant.token_usage")
+    router_finish = "router_finish_call_id" in message
+    if router_finish:
+        call_id = message["router_finish_call_id"]
+        if (
+            not isinstance(call_id, str) or not call_id
+            or status != "completed" or tool_calls
+            or token_usage != empty_token_usage()
+            or "cached_input_tokens" in message or "context_usage" in message
+        ):
+            raise ValueError("Router finish response must be a completed zero-call assistant")
     if "cached_input_tokens" in message:
         require_nonnegative_int(message["cached_input_tokens"], field="cached_input_tokens")
         if message["cached_input_tokens"] > token_usage["input_tokens"]:
@@ -1205,7 +1217,7 @@ def _validate_assistant_message(message: dict[str, Any]) -> None:
             raise ValueError("context_usage requires exactly one assistant model call")
     if token_usage["model_calls"] != 1 and not (
         status in {"error", "interrupted"} and token_usage["model_calls"] == 0 and error is not None
-    ):
+    ) and not router_finish:
         raise ValueError("assistant.token_usage.model_calls must equal 1")
     if status != "error":
         if not message["content"] and not tool_calls:

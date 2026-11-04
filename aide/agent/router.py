@@ -8,6 +8,7 @@ from typing import Annotated, Any
 
 from aide.agent.tools.base import BaseTool, ToolError, ToolParam
 from aide.agent.tools.context import ToolRunContext
+from aide.agent.tools.core.ask_user import AskUserTool
 from aide.agent.tools.permission import ToolAuthorizationSession
 
 
@@ -125,6 +126,15 @@ class DispatchWorkerTool(BaseTool):
         return json.dumps(decision, ensure_ascii=True, separators=(",", ":"))
 
 
+class RouterAskUserTool(AskUserTool):
+    """Keep Router ownership fields outside model-authored question arguments."""
+
+    async def prepare_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        if set(arguments) - {"question", "options"}:
+            raise ToolError("ask_user accepts only question and options.")
+        return await super().prepare_arguments(arguments)
+
+
 class FinishRouterTool(BaseTool):
     """Return a validated final response from the foreground Router."""
 
@@ -133,8 +143,19 @@ class FinishRouterTool(BaseTool):
     required = ("response",)
     response: Annotated[str, ToolParam(min_length=1, max_length=20000)]
 
+    async def prepare_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        if set(arguments) != {"response"}:
+            raise ToolError("finish accepts only response.")
+        response = arguments.get("response")
+        if not isinstance(response, str) or not response.strip():
+            raise ToolError("Router finish response is required.")
+        return await super().prepare_arguments(arguments)
+
     async def execute(self, *, response: str) -> str:
         return response
 
 
-__all__ = ["DispatchWorkerTool", "FinishRouterTool", "RouterCatalog", "RouterDecisionValidator"]
+__all__ = [
+    "DispatchWorkerTool", "FinishRouterTool", "RouterAskUserTool", "RouterCatalog",
+    "RouterDecisionValidator",
+]

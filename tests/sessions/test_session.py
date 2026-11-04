@@ -2280,6 +2280,44 @@ def test_assistant_context_usage_rejects_missing_or_unknown_fields_at_constructi
     assert session.metadata["token_usage"] == ZERO_USAGE
 
 
+@pytest.mark.parametrize("invalid", [None, "missing-source", "empty-source", "model-usage", "context"])
+@pytest.mark.asyncio
+async def test_router_finish_response_round_trips_without_counting_another_model_call(
+    agent_home: Path, workspace: Path, invalid: str | None,
+) -> None:
+    state = _state(workspace, agent_home)
+    session = Session.create(state)
+    message: dict[str, Any] = {
+        "role": "assistant", "content": "Final Router answer", "tool_calls": [],
+        "status": "completed", "error": None, "token_usage": dict(ZERO_USAGE),
+        "router_finish_call_id": "finish-call",
+    }
+    if invalid == "missing-source":
+        del message["router_finish_call_id"]
+    elif invalid == "empty-source":
+        message["router_finish_call_id"] = ""
+    elif invalid == "model-usage":
+        message["token_usage"] = {**ZERO_USAGE, "model_calls": 1}
+    elif invalid == "context":
+        message["context_usage"] = _context_usage()
+
+    def commit() -> None:
+        session.commit_agent_run([message], pending_last_compacted=0, pending_action_summary="")
+
+    if invalid:
+        with pytest.raises(ValueError):
+            commit()
+        assert session.messages == []
+    else:
+        commit()
+        session.persist()
+        await session.wait_for_pending_persist()
+        restored = Session.load(state, session.session_id)
+        assert restored.messages[-1]["content"] == "Final Router answer"
+        assert restored.messages[-1]["token_usage"] == ZERO_USAGE
+        assert restored.metadata["token_usage"] == ZERO_USAGE
+
+
 def test_context_usage_is_rejected_for_a_synthetic_zero_call_assistant(
     agent_home: Path,
     workspace: Path,

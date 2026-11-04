@@ -65,6 +65,43 @@ def test_question_answer_survives_reload_and_same_answer_is_idempotent(tmp_path:
     assert duplicate.questions[0].state == "answer_received"
 
 
+def test_router_role_survives_question_resume_and_task_transitions(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.begin_task("task", "initial", generation=1, execution_role="router")
+    store.prepare_question(task_id="task", execution_id="initial", question_id="question",
+                           tool_call_id="call", text="Which one?")
+    pending = store.publish_question("question", committed_tool_call_ids={"call"})
+    assert _store(tmp_path).load().tasks[0].execution_role == "router"
+    store.answer_question("question", "first", expected_revision=pending.revision,
+                          request_id="answer")
+    store.begin_resume("question", "resumed")
+    store.start_resume("question", "resumed")
+    store.record_iteration_usage("task", generation=1, execution_id="resumed", model_calls=2)
+    store.complete_task("task", "resumed")
+    store.reconcile([
+        {"role": "tool", "tool_call_id": "call", "foreground_question_id": "question"},
+        {"role": "user", "foreground_question_id": "question", "restore_anchor_id": 2},
+    ])
+    assert _store(tmp_path).load().tasks[0].execution_role == "router"
+    store.start_execution("task", "continued", expected_generation=1)
+    store.interrupt_uncertain_tasks()
+    store.replace_current_task("replacement", "new", execution_role="router")
+    snapshot = store.load()
+    store.cancel_task("replacement", expected_revision=snapshot.revision, request_id="cancel")
+    assert all(task.execution_role == "router" for task in _store(tmp_path).load().tasks)
+
+
+@pytest.mark.parametrize("role", ["worker", "", None, [], {}])
+def test_invalid_persisted_execution_role_is_rejected(tmp_path: Path, role: object) -> None:
+    store = _store(tmp_path)
+    store.begin_task("task", "initial", generation=1)
+    value = json.loads(store.path.read_text(encoding="utf-8"))
+    value["tasks"][0]["execution_role"] = role
+    store.path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(ForegroundWorkError):
+        store.load()
+
+
 def test_stale_answer_and_reused_request_with_different_payload_are_rejected(
     tmp_path: Path,
 ) -> None:
@@ -423,6 +460,7 @@ def test_legacy_question_state_upgrades_on_write_and_preserves_answer_retry(
     for question in legacy["questions"]:
         question.pop("owner_agent_id", None)
     for task in legacy["tasks"]:
+        task.pop("execution_role", None)
         if legacy_version < 3:
             task.pop("permission_level", None)
         for field in (
@@ -449,7 +487,7 @@ def test_legacy_question_state_upgrades_on_write_and_preserves_answer_retry(
     if answered:
         assert accepted.revision == loaded.revision
     store.begin_resume("question-1", "execution-2")
-    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 6
+    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 7
     reloaded = _store(tmp_path).load().question("question-1")
     assert reloaded is not None and reloaded.answer == "reports"
     assert reloaded.answer_kind == "text"

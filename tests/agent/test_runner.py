@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from collections.abc import AsyncIterator, Callable, Sequence
 from copy import deepcopy
 from dataclasses import replace
@@ -1107,7 +1108,8 @@ async def test_runner_executes_all_tools_in_provider_order_in_one_iteration() ->
 
 
 @pytest.mark.asyncio
-async def test_runner_finishes_with_router_response_without_another_model_call() -> None:
+@pytest.mark.parametrize("response", ["Final answer", "Long answer " * 1000], ids=["short", "long"])
+async def test_runner_finishes_with_router_response_without_another_model_call(response: str) -> None:
     provider = ScriptedFakeProvider(
         streams=(
             StreamScript(
@@ -1117,7 +1119,7 @@ async def test_runner_finishes_with_router_response_without_another_model_call()
                             message=AssistantModelMessage(
                                 content="",
                                 tool_calls=(ModelToolCall(
-                                    "finish-call", "finish", '{"response":"Final answer"}'
+                                    "finish-call", "finish", json.dumps({"response": response})
                                 ),),
                             ),
                             usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
@@ -1131,19 +1133,26 @@ async def test_runner_finishes_with_router_response_without_another_model_call()
     from aide.agent.router import FinishRouterTool
 
     gateway = SingleToolGateway([FinishRouterTool()])
+    events: list[object] = []
     result = await _runner(ScriptedFakeRouter(provider)).run(
         [{"role": "user", "content": "Respond directly."}],
         model="chat",
         tool_gateway=gateway,
-        on_output=_ignore_output,
+        on_output=lambda event: _observe(events, event),
         confirmation=None,
-        externalize_result=None,
+        externalize_result=lambda result: replace(result, content=result.content[:100]),
         cancel_requested=None,
         max_iterations=50,
     )
 
     assert result.finish_reason == "completed"
-    assert result.final_content == "Final answer"
+    assert result.final_content == response
+    assert result.messages[-1]["role"] == "assistant"
+    assert result.messages[-1]["content"] == response
+    assert "".join(event.delta for event in events if isinstance(event, TextDelta)) == response
+    assert result.usage["model_calls"] == 1
+    assert sum(message.get("token_usage", {}).get("model_calls", 0)
+               for message in result.messages) == 1
     assert len(provider.stream_requests) == 1
 
 

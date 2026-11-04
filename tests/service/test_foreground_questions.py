@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 
 import aide.service.runtime.service as service_runtime
+from aide.agent.foreground_work.options import ForegroundQuestionOption
 from aide.agent.tools.tool_gateway import ModelToolCall
 from aide.config.agent_home import AgentHome
 from aide.config.config import ConfigLoader
@@ -38,7 +39,7 @@ class _QuestionProvider:
         self.stream_calls = 0
         self.complete_calls = 0
         self.question_calls = 0
-        self.question_options = [
+        self.question_options: list[ForegroundQuestionOption] = [
             {"id": "reports", "label": "Reports folder"},
             {"id": "archives", "label": "Archives folder"},
         ]
@@ -209,6 +210,51 @@ def _home(path: Path) -> AgentHome:
     return home
 
 
+def _legacy_agent_question(
+    directory: Path, home: AgentHome, *, options: list[ForegroundQuestionOption] | None = None,
+) -> str:
+    """Seed an upgrade fixture authored by the pre-Router Agent, without a role field."""
+    from uuid import uuid4
+
+    from aide.agent.foreground_work.store import ForegroundWorkStore
+    from aide.agent.session.session import Session
+    from aide.agent.workspace_state import WorkspaceState
+    from aide.utils.time import local_now
+
+    state = WorkspaceState(directory)
+    state.initialize(agent_home_root=home.path)
+    session = Session.create(state, now=local_now, new_uuid=uuid4)
+    task_id, execution_id, question_id = str(uuid4()), str(uuid4()), str(uuid4())
+    store = ForegroundWorkStore(state, session.session_id)
+    store.begin_task(task_id, execution_id, generation=1, permission_level="workspace-write")
+    store.prepare_question(
+        task_id=task_id, execution_id=execution_id, question_id=question_id,
+        tool_call_id="question-call", text="Which output directory should I use?",
+        options=options,
+    )
+    session.commit_agent_run([
+        {"role": "user", "content": "Legacy Agent work", "foreground_task_id": task_id},
+        {"role": "assistant", "content": "", "status": "completed", "error": None,
+         "token_usage": {"model_calls": 1, "input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+         "tool_calls": [{
+            "id": "question-call", "name": "ask_user",
+            "arguments": '{"question":"Which output directory should I use?"}',
+        }]},
+        {"role": "tool", "tool_call_id": "question-call", "name": "ask_user",
+         "status": "success", "content": "Waiting for an answer.", "artifact": None,
+         "foreground_question_id": question_id, "foreground_execution_id": execution_id},
+    ], pending_last_compacted=0, pending_action_summary="",
+        restore_before=session.capture_restore_before(), restore_run_token=uuid4())
+    session.persist()
+    store.publish_question(question_id, committed_tool_call_ids={"question-call"})
+    legacy = json.loads(store.path.read_text(encoding="utf-8"))
+    legacy["schema_version"] = 6
+    for task in legacy["tasks"]:
+        task.pop("execution_role", None)
+    store.path.write_text(json.dumps(legacy), encoding="utf-8")
+    return session.session_id
+
+
 async def _wait_until(predicate: Any) -> None:
     async with asyncio.timeout(5):
         while not predicate():
@@ -282,6 +328,138 @@ async def _wait_for_idle(workspace: Any, session_id: str) -> None:
             f"active={state.loop.has_active_run!r}, messages={state.loop.session.messages!r}, "
             f"task_stacks={task_stacks!r}"
         ) from error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_kind", ["cli", "web"])
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("decision", ["finish", "dispatch"])
+async def test_router_answer_keeps_restricted_catalog_and_rejects_business_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client_kind: str,
+    restart: bool, decision: str,
+) -> None:
+    class RouterProvider(_QuestionProvider):
+        def stream(self, **kwargs: Any) -> AsyncIterator[ModelStreamEvent]:
+            messages = kwargs["messages"]
+            user = next((m.get("content", "") for m in reversed(messages)
+                         if m.get("role") == "user"), "")
+            continuing = "Continue the current foreground task." in user
+            if "router-answer" not in user and not continuing:
+                return super().stream(**kwargs)
+            self.router_tool_catalogs.append(tuple(
+                tool.get("name") or tool.get("function", {}).get("name")
+                for tool in kwargs["tools"]
+            ))
+
+            async def emit() -> AsyncIterator[ModelStreamEvent]:
+                write_id = "forbidden-continue" if continuing else "forbidden-write"
+                if not any(m.get("tool_call_id") == write_id for m in messages):
+                    calls = (ModelToolCall(
+                        write_id, "write_file",
+                        '{"path":"router-effect.txt","content":"must not run"}',
+                    ),)
+                elif decision == "dispatch" and not any(
+                    m.get("tool_call_id") == "valid-dispatch" for m in messages
+                ):
+                    calls = (ModelToolCall(
+                        "valid-dispatch", "dispatch_worker",
+                        '{"task_id":"worker-task","task":"Inspect the request"}',
+                    ),)
+                else:
+                    calls = (ModelToolCall(
+                        "valid-finish", "finish", '{"response":"Routed answer"}',
+                    ),)
+                yield ModelCompleted(ModelResponse(
+                    message=AssistantModelMessage(content="", tool_calls=calls),
+                    usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                    finish_reason="tool_calls",
+                ))
+
+            return emit()
+
+    home = _home(tmp_path / "home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = RouterProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client, sid, version, wid = await _open_chat(service, directory, client_kind=client_kind)
+        await service.handle_command(client, _command(
+            request_id="router-question", command_type="input", workspace_id=wid,
+            session_id=sid, claim_version=version, payload={"text":"ask-foreground-question"},
+        ))
+        await _wait_for_idle(service.workspace(wid), sid)
+        if restart:
+            await service.stop()
+            service = AgentService(home, ConfigLoader(home).load())
+            await service.start()
+            client, sid, version, wid = await _open_chat(
+                service, directory, session_id=sid, client_kind=client_kind,
+            )
+        workspace = service.workspace(wid)
+        before = cast(dict[str, Any], workspace.session_snapshot(sid))
+        question = before["foreground_questions"][0]
+        await service.handle_command(client, _command(
+            request_id="router-answer", command_type="answer_question", workspace_id=wid,
+            session_id=sid, claim_version=version, payload={
+                "question_id": question["question_id"], "answer": "router-answer",
+                "expected_revision": question["revision"],
+            },
+        ))
+        await _wait_for_idle(workspace, sid)
+        snapshot = cast(dict[str, Any], workspace.session_snapshot(sid))
+        assert not (directory / "router-effect.txt").exists()
+        results = {m.get("tool_call_id"): m for m in snapshot["messages"]
+                   if m.get("role") == "tool"}
+        assert results["forbidden-write"]["status"] == "error"
+        assert results["valid-finish"]["status"] == "success"
+        assert any(m.get("role") == "assistant" and m.get("content") == "Routed answer"
+                   for m in snapshot["messages"])
+        if decision == "dispatch":
+            assert results["valid-dispatch"]["status"] == "success"
+        assert snapshot["foreground_questions"] == []
+        assert snapshot["foreground_tasks"][0]["task_id"] == question["task_id"]
+        assert all(set(names) == {"ask_user", "dispatch_worker", "finish"}
+                   for names in provider.router_tool_catalogs if names), provider.router_tool_catalogs
+
+        # An explicit continuation must inherit the same persisted Router role.
+        task = snapshot["foreground_tasks"][0]
+        await service.handle_command(client, _command(
+            request_id="router-continue", command_type="continue_task", workspace_id=wid,
+            session_id=sid, claim_version=version,
+            payload={"task_id": task["task_id"], "expected_revision": task["revision"]},
+        ))
+        await _wait_for_idle(workspace, sid)
+        snapshot = cast(dict[str, Any], workspace.session_snapshot(sid))
+        assert any(m.get("tool_call_id") == "forbidden-continue" and m.get("status") == "error"
+                   for m in snapshot["messages"])
+        assert not (directory / "router-effect.txt").exists()
+
+        # Restore the answer, then answer the retained Router question again.
+        anchor = next(a["anchor_id"] for a in snapshot["restore_anchors"]
+                      if a["content"] == "router-answer")
+        credential = workspace.require_claim(client, sid, version).credential
+        await service.inspect_restore(client, wid, sid, version, credential, "inspect", anchor)
+        restored = await service.commit_restore(
+            client, wid, sid, version, credential, "restore", anchor, "conversation-only",
+        )
+        claim = (await service.claim(client, wid, sid))["claim"]
+        question = cast(dict[str, Any], restored["snapshot"])["foreground_questions"][0]
+        await service.handle_command(client, _command(
+            request_id="restored-router-answer", command_type="answer_question", workspace_id=wid,
+            session_id=sid, claim_version=cast(int, cast(dict[str, Any], claim)["claim_version"]), payload={
+                "question_id": question["question_id"], "answer": "router-answer",
+                "expected_revision": question["revision"],
+            },
+        ))
+        await _wait_for_idle(workspace, sid)
+        assert not (directory / "router-effect.txt").exists()
+        assert all(set(names) == {"ask_user", "dispatch_worker", "finish"}
+                   for names in provider.router_tool_catalogs if names), provider.router_tool_catalogs
+    finally:
+        await service.stop()
 
 
 @pytest.mark.asyncio
@@ -1205,23 +1383,12 @@ async def test_explicit_task_continuation_uses_lower_current_permission(
     provider.write_on_continue = True
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
     service = AgentService(home, ConfigLoader(home).load())
+    legacy_sid = _legacy_agent_question(directory, home)
     await service.start()
     try:
-        client_id, session_id, claim_version, workspace_id = await _open_chat(service, directory)
+        client_id, session_id, claim_version, workspace_id = await _open_chat(service, directory, session_id=legacy_sid)
         service.client_permission(client_id).select("workspace-write")
         workspace = service.workspace(workspace_id)
-        await service.handle_command(
-            client_id,
-            _command(
-                request_id="permission-task-question",
-                command_type="input",
-                workspace_id=workspace_id,
-                session_id=session_id,
-                claim_version=claim_version,
-                payload={"text": "ask-foreground-question"},
-            ),
-        )
-        await _wait_for_idle(workspace, session_id)
         question = workspace.foreground_work_store(session_id).load().pending_questions[0]
         task = next(
             item
@@ -1918,28 +2085,11 @@ async def test_answer_restore_returns_conversation_question_and_real_file(
     provider.write_on_choice = answer_mode == "choice"
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
     service = AgentService(home, ConfigLoader(home).load())
+    legacy_sid = _legacy_agent_question(directory, home, options=provider.question_options if answer_mode == "choice" else None)
     await service.start()
     try:
-        client, sid, version, wid = await _open_chat(service, directory)
+        client, sid, version, wid = await _open_chat(service, directory, session_id=legacy_sid)
         workspace = service.workspace(wid)
-        await service.handle_command(
-            client,
-            _command(
-                request_id="ask",
-                command_type="input",
-                workspace_id=wid,
-                session_id=sid,
-                claim_version=version,
-                payload={
-                    "text": (
-                        "ask-foreground-options"
-                        if answer_mode == "choice"
-                        else "ask-foreground-question"
-                    )
-                },
-            ),
-        )
-        await _wait_for_idle(workspace, sid)
         question = cast(
             list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_questions"]
         )[0]
@@ -2010,22 +2160,11 @@ async def test_answer_publication_failure_does_not_replay_effects(
     provider = _QuestionProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
     service = AgentService(home, ConfigLoader(home).load())
+    legacy_sid = _legacy_agent_question(directory, home, options=None)
     await service.start()
     try:
-        client, sid, version, wid = await _open_chat(service, directory)
+        client, sid, version, wid = await _open_chat(service, directory, session_id=legacy_sid)
         workspace = service.workspace(wid)
-        await service.handle_command(
-            client,
-            _command(
-                request_id="ask",
-                command_type="input",
-                workspace_id=wid,
-                session_id=sid,
-                claim_version=version,
-                payload={"text": "ask-foreground-question"},
-            ),
-        )
-        await _wait_for_idle(workspace, sid)
         question = cast(
             list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_questions"]
         )[0]
@@ -2093,22 +2232,11 @@ async def test_uncommitted_answer_effect_is_visible_and_cannot_be_replayed(
     provider = _QuestionProvider()
     monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
     service = AgentService(home, ConfigLoader(home).load())
+    legacy_sid = _legacy_agent_question(directory, home, options=None)
     await service.start()
     try:
-        client, sid, version, wid = await _open_chat(service, directory)
+        client, sid, version, wid = await _open_chat(service, directory, session_id=legacy_sid)
         workspace = service.workspace(wid)
-        await service.handle_command(
-            client,
-            _command(
-                request_id="ask",
-                command_type="input",
-                workspace_id=wid,
-                session_id=sid,
-                claim_version=version,
-                payload={"text": "ask-foreground-question"},
-            ),
-        )
-        await _wait_for_idle(workspace, sid)
         question = cast(
             list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_questions"]
         )[0]

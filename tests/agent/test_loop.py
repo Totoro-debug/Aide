@@ -1131,6 +1131,7 @@ async def test_foreground_context_and_runner_share_exactly_one_run_gateway(
     def new_run_gateway(
         *,
         excluded_names: Sequence[str] = (),
+        allowed_names: Sequence[str] | None = None,
         permission_snapshot: PermissionSnapshot | None = None,
         permission_context: object = None,
         tool_context: ToolRunContext | None = None,
@@ -1141,6 +1142,7 @@ async def test_foreground_context_and_runner_share_exactly_one_run_gateway(
         gateway_snapshots.append(permission_snapshot)
         gateway = original_new_run_gateway(
             excluded_names=excluded_names,
+            allowed_names=allowed_names,
             permission_snapshot=permission_snapshot,
             tool_context=tool_context,
             run_tools=run_tools,
@@ -1254,6 +1256,7 @@ async def test_foreground_captures_once_before_title_and_framing_and_switches_ne
     def new_run_gateway(
         *,
         excluded_names: Sequence[str] = (),
+        allowed_names: Sequence[str] | None = None,
         permission_snapshot: PermissionSnapshot | None = None,
         permission_context: object = None,
         tool_context: ToolRunContext | None = None,
@@ -1264,6 +1267,7 @@ async def test_foreground_captures_once_before_title_and_framing_and_switches_ne
         gateway_snapshots.append(permission_snapshot)
         return original_new_run_gateway(
             excluded_names=excluded_names,
+            allowed_names=allowed_names,
             permission_snapshot=permission_snapshot,
             tool_context=tool_context,
             run_tools=run_tools,

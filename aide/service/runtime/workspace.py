@@ -2303,7 +2303,8 @@ class WorkspaceRecord:
             )
         record_by_id = {record.agent_id: record for record in records}
         interrupted_children = tuple(record for record in records
-            if record.source.task_id == task_id
+            if record.source.kind is SubAgentSourceKind.FOREGROUND
+            and record.source.task_id == task_id
             and record.source.task_generation == task.generation
             and record.status is SubAgentStatus.INTERRUPTED)
         if interrupted_children:
@@ -3501,8 +3502,17 @@ class WorkspaceRecord:
                 restore_task = self._restore_commit_task
                 if restore_task is not None and restore_task is not asyncio.current_task():
                     await asyncio.shield(asyncio.gather(restore_task, return_exceptions=True))
-                await self._shutdown_subagents(interrupted=interrupted)
-                await self._shutdown_workers()
+                cleanup_errors: list[Exception] = []
+                for cleanup in (
+                    self._shutdown_workers,
+                    lambda: self._shutdown_subagents(interrupted=interrupted),
+                ):
+                    try:
+                        await cleanup()
+                    except Exception as error:
+                        cleanup_errors.append(error)
+                if cleanup_errors:
+                    raise ExceptionGroup("Workspace execution cleanup failed", cleanup_errors)
                 if self._restore_blocked:
                     raise service_error(
                         "restore_pending",

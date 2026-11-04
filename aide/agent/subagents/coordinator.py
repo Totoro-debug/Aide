@@ -122,7 +122,7 @@ class SubAgentPool:
             raise SubAgentRequestError("SubAgent task must not be empty")
         if source.kind is SubAgentSourceKind.SCHEDULE and source.job_id in self._blocked_job_ids:
             raise SubAgentRequestError("Schedule Job is being removed")
-        if source.kind is SubAgentSourceKind.FOREGROUND and self._foreground_task_is_current is not None:
+        if source.kind in {SubAgentSourceKind.FOREGROUND, SubAgentSourceKind.WORKER} and self._foreground_task_is_current is not None:
             if (
                 source.task_id is None
                 or source.task_generation is None
@@ -155,8 +155,17 @@ class SubAgentPool:
         status: SubAgentStatus | str | None = None,
         cursor: str | None = None,
         limit: int | None = None,
+        source: SubAgentSource | None = None,
+        owner_agent_id: str | None = None,
+        exclude_worker_owned: bool = False,
     ) -> SubAgentPage:
         """List durable checkpoints, which may predate a reported storage failure."""
+        if source is not None or owner_agent_id is not None or exclude_worker_owned:
+            return self._repository.list(
+                status=status, cursor=cursor, limit=limit,
+                source=source, owner_agent_id=owner_agent_id,
+                exclude_worker_owned=exclude_worker_owned,
+            )
         return self._repository.list(status=status, cursor=cursor, limit=limit)
 
     def resume_for_answer(
@@ -303,6 +312,9 @@ class SubAgentPool:
         agent_ids: Sequence[str],
         *,
         timeout_ms: int | None = None,
+        source: SubAgentSource | None = None,
+        owner_agent_id: str | None = None,
+        exclude_worker_owned: bool = False,
     ) -> tuple[SubAgentWaitResult, ...]:
         selected_ids = self._validate_agent_ids(agent_ids)
         if timeout_ms is not None and (
@@ -310,7 +322,12 @@ class SubAgentPool:
         ):
             raise SubAgentRequestError("SubAgent wait timeout must be a nonnegative integer")
         loop = self._bind_loop()
-        self._require_all_owned(selected_ids)
+        self._require_all_owned(
+            selected_ids,
+            source=source,
+            owner_agent_id=owner_agent_id,
+            exclude_worker_owned=exclude_worker_owned,
+        )
 
         results = self._completed_results(selected_ids)
         if results or timeout_ms == 0:
@@ -517,7 +534,10 @@ class SubAgentPool:
                         SubAgentStatus.RUNNING,
                         SubAgentStatus.WAITING_FOR_ANSWER,
                     }
-                    and record.source.kind is SubAgentSourceKind.FOREGROUND
+                    and record.source.kind in {
+                        SubAgentSourceKind.FOREGROUND,
+                        SubAgentSourceKind.WORKER,
+                    }
                     and record.source.task_id == task_id
                     and record.source.task_generation == generation
                 ):
@@ -620,7 +640,10 @@ class SubAgentPool:
             if record is None or record.status is not SubAgentStatus.QUEUED:
                 return
             if (
-                record.source.kind is SubAgentSourceKind.FOREGROUND
+                record.source.kind in {
+                    SubAgentSourceKind.FOREGROUND,
+                    SubAgentSourceKind.WORKER,
+                }
                 and self._foreground_task_is_current is not None
                 and (
                     record.source.task_id is None
@@ -881,13 +904,26 @@ class SubAgentPool:
                 )
         return tuple(results)
 
-    def _require_all_owned(self, agent_ids: Sequence[str]) -> None:
+    def _require_all_owned(
+        self,
+        agent_ids: Sequence[str],
+        *,
+        source: SubAgentSource | None = None,
+        owner_agent_id: str | None = None,
+        exclude_worker_owned: bool = False,
+    ) -> None:
         for agent_id in agent_ids:
             try:
                 record = self._repository.get(agent_id)
             except (TypeError, ValueError) as error:
                 raise SubAgentRequestError("SubAgent ID is invalid") from error
-            if record is None or record.session_id != self.session_id:
+            if (
+                record is None
+                or record.session_id != self.session_id
+                or (exclude_worker_owned and record.source.kind is SubAgentSourceKind.WORKER)
+                or (source is not None and record.source != source)
+                or (owner_agent_id is not None and record.agent_id != owner_agent_id)
+            ):
                 raise SubAgentRequestError("SubAgent does not belong to this Session")
 
     @staticmethod

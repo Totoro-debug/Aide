@@ -19,7 +19,7 @@ from aide.utils.validation import (
     token_usage_validation_issue,
 )
 
-SUBAGENT_RECORD_SCHEMA_VERSION = 5
+SUBAGENT_RECORD_SCHEMA_VERSION = 6
 _USAGE_FIELDS = frozenset({"model_calls", "input_tokens", "output_tokens", "total_tokens"})
 
 
@@ -36,10 +36,11 @@ class SubAgentStatus(StrEnum):
 
 
 class SubAgentSourceKind(StrEnum):
-    """Main Agent lane that created a SubAgent."""
+    """Execution owner that created a SubAgent."""
 
     FOREGROUND = "foreground"
     SCHEDULE = "schedule"
+    WORKER = "worker"
 
 
 class SubAgentEventKind(StrEnum):
@@ -53,7 +54,7 @@ class SubAgentEventKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class SubAgentSource:
-    """Restore or Schedule ownership that determines the task's parent operation."""
+    """Execution and Restore ownership that determines the task's parent operation."""
 
     kind: SubAgentSourceKind
     restore_run_token: str | None = None
@@ -61,6 +62,7 @@ class SubAgentSource:
     occurrence_id: str | None = None
     task_id: str | None = None
     task_generation: int | None = None
+    worker_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, SubAgentSourceKind):
@@ -70,6 +72,7 @@ class SubAgentSource:
                 self.restore_run_token is None
                 or self.job_id is not None
                 or self.occurrence_id is not None
+                or self.worker_id is not None
                 or (self.task_id is None) != (self.task_generation is None)
             ):
                 raise ValueError("foreground SubAgent source fields are invalid")
@@ -82,17 +85,37 @@ class SubAgentSource:
                     or self.task_generation < 1
                 ):
                     raise ValueError("task_generation must be a positive integer")
-        else:
+        elif self.kind is SubAgentSourceKind.SCHEDULE:
             if (
                 self.restore_run_token is not None
                 or self.job_id is None
                 or self.occurrence_id is None
                 or self.task_id is not None
                 or self.task_generation is not None
+                or self.worker_id is not None
             ):
                 raise ValueError("Schedule SubAgent source requires Job and occurrence IDs")
             require_uuid4_string(self.job_id, field="job_id")
             _require_nonempty_string(self.occurrence_id, field="occurrence_id")
+        else:
+            if (
+                self.job_id is not None
+                or self.occurrence_id is not None
+                or self.task_id is None
+                or self.task_generation is None
+                or self.worker_id is None
+            ):
+                raise ValueError("Worker SubAgent source requires Worker and Task identities")
+            require_uuid4_string(self.worker_id, field="worker_id")
+            require_uuid4_string(self.task_id, field="task_id")
+            if (
+                isinstance(self.task_generation, bool)
+                or not isinstance(self.task_generation, int)
+                or self.task_generation < 1
+            ):
+                raise ValueError("task_generation must be a positive integer")
+            if self.restore_run_token is not None:
+                require_uuid4_string(self.restore_run_token, field="restore_run_token")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -102,6 +125,7 @@ class SubAgentSource:
             "occurrence_id": self.occurrence_id,
             "task_id": self.task_id,
             "task_generation": self.task_generation,
+            "worker_id": self.worker_id,
         }
 
 
@@ -229,7 +253,10 @@ class SubAgentRecord:
         require_uuid4_string(execution_id, field="execution_id")
         object.__setattr__(self, "execution_id", execution_id)
         restore_run_token = self.restore_run_token
-        if restore_run_token is None and self.source.kind is SubAgentSourceKind.FOREGROUND:
+        if restore_run_token is None and self.source.kind in {
+            SubAgentSourceKind.FOREGROUND,
+            SubAgentSourceKind.WORKER,
+        }:
             restore_run_token = self.source.restore_run_token
         if restore_run_token is not None:
             require_uuid4_string(restore_run_token, field="restore_run_token")
@@ -345,7 +372,7 @@ class SubAgentRecord:
             "usage",
         }
         schema_version = _integer(value.get("schema_version"), field="schema_version")
-        if schema_version not in {2, 3, 4, SUBAGENT_RECORD_SCHEMA_VERSION}:
+        if schema_version not in {2, 3, 4, 5, SUBAGENT_RECORD_SCHEMA_VERSION}:
             raise ValueError("SubAgent record schema version is unsupported")
         current_fields = fields | {
             "execution_id",
@@ -586,8 +613,15 @@ def _source_from_dict(value: object, *, schema_version: int) -> SubAgentSource:
         "job_id",
         "occurrence_id",
     }
-    current_fields = legacy_fields | {"task_id", "task_generation"}
-    expected_fields = legacy_fields if schema_version == 2 else current_fields
+    previous_fields = legacy_fields | {"task_id", "task_generation"}
+    current_fields = previous_fields | {"worker_id"}
+    expected_fields = (
+        legacy_fields
+        if schema_version == 2
+        else current_fields
+        if schema_version >= 6
+        else previous_fields
+    )
     if not isinstance(value, dict) or set(value) != expected_fields:
         raise ValueError("SubAgent source fields do not match the current format")
     return SubAgentSource(
@@ -606,6 +640,11 @@ def _source_from_dict(value: object, *, schema_version: int) -> SubAgentSource:
             None
             if schema_version == 2 or value["task_generation"] is None
             else _integer(value["task_generation"], field="source.task_generation")
+        ),
+        worker_id=(
+            None
+            if schema_version < 6
+            else _optional_string(value["worker_id"], field="source.worker_id")
         ),
     )
 

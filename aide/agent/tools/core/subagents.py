@@ -40,6 +40,11 @@ def _run_context(context: ToolRunContext) -> SubAgentToolContext:
     subagent = context.subagent
     if subagent is None:
         raise ToolError(_CONTEXT_REQUIRED)
+    if subagent.caller_role == "worker":
+        try:
+            subagent.require_current_worker()
+        except ValueError as error:
+            raise ToolError("Worker is no longer allowed to manage SubAgents.") from error
     return subagent
 
 
@@ -103,6 +108,8 @@ class SpawnAgentTool(_SubAgentTool):
         request = _run_context(context)
         if request.creator_snapshot is None:
             raise ToolError("SubAgent Model Route is unavailable.")
+        if request.caller_role == "subagent":
+            raise ToolError("SubAgents cannot create further SubAgents.")
         try:
             record = request.coordinator.submit(
                 title=arguments["title"],
@@ -179,10 +186,15 @@ class WaitAgentTool(_SubAgentTool):
     ) -> str:
         del authorization, kwargs
         request = _run_context(context)
+        if request.caller_role == "subagent":
+            raise ToolError("SubAgents cannot wait for other SubAgents.")
         try:
             results = await request.coordinator.wait(
                 arguments["agent_ids"],
                 timeout_ms=arguments["timeout_ms"],
+                source=request.query_source,
+                owner_agent_id=request.query_owner_agent_id,
+                exclude_worker_owned=request.caller_role == "main",
             )
         except SubAgentRequestError as error:
             raise ToolError(error.args[0]) from error
@@ -255,6 +267,9 @@ class ListAgentsTool(_SubAgentTool):
                 status=arguments["status"],
                 cursor=arguments["cursor"],
                 limit=arguments["limit"],
+                source=request.query_source,
+                owner_agent_id=request.query_owner_agent_id,
+                exclude_worker_owned=request.caller_role == "main",
             )
         except SubAgentRequestError as error:
             raise ToolError(error.args[0]) from error

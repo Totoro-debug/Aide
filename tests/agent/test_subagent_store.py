@@ -121,7 +121,7 @@ def test_record_round_trips_through_a_new_session_scoped_store(tmp_path: Path) -
     assert loaded.creator_snapshot.tool_names == ("read_file", "list_dir")
     path = state.subagents_directory / session_id / f"{completed.agent_id}.json"
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["schema_version"] == 5
+    assert saved["schema_version"] == 6
     assert saved["creator_snapshot"] == {
         "provider_id": "test-provider",
         "model": "chat",
@@ -158,6 +158,51 @@ def test_foreground_subagent_record_retains_its_task_generation(tmp_path: Path) 
     assert retained.source.task_generation == 7
 
 
+def test_worker_subagent_source_round_trips_and_v5_foreground_source_is_compatible(
+    tmp_path: Path,
+) -> None:
+    state, session_id = _workspace(tmp_path)
+    store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    worker_id = "123e4567-e89b-42d3-a456-426614174002"
+    worker_source = SubAgentSource(
+        kind=SubAgentSourceKind.WORKER,
+        restore_run_token=_RESTORE_TOKEN,
+        task_id=_RUN_ID,
+        task_generation=3,
+        worker_id=worker_id,
+    )
+    record = store.register(
+        title="Worker-owned result",
+        task="Keep this result with its Worker.",
+        parent_run_id=worker_id,
+        source=worker_source,
+        creator_snapshot=_snapshot(),
+    )
+
+    reopened = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
+    restored_record = reopened.get(record.agent_id)
+    assert restored_record is not None
+    assert restored_record.source == worker_source
+    assert restored_record.restore_run_token == _RESTORE_TOKEN
+    assert restored_record.status is SubAgentStatus.INTERRUPTED
+    saved = json.loads(
+        (state.subagents_directory / session_id / f"{record.agent_id}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert saved["schema_version"] == 6
+    assert saved["source"]["worker_id"] == worker_id
+    assert saved["source"]["task_id"] == _RUN_ID
+    assert saved["source"]["task_generation"] == 3
+
+    legacy = _register(store, "Legacy foreground result").to_dict()
+    legacy["schema_version"] = 5
+    cast(dict[str, object], legacy["source"]).pop("worker_id")
+    restored = SubAgentRecord.from_dict(legacy)
+    assert restored.source.kind is SubAgentSourceKind.FOREGROUND
+    assert restored.source.worker_id is None
+
+
 def test_legacy_subagent_record_upgrades_from_schema_v2(tmp_path: Path) -> None:
     state, session_id = _workspace(tmp_path)
     store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
@@ -169,6 +214,7 @@ def test_legacy_subagent_record_upgrades_from_schema_v2(tmp_path: Path) -> None:
         value.pop(field)
     value["source"].pop("task_id")
     value["source"].pop("task_generation")
+    value["source"].pop("worker_id")
     path.write_text(json.dumps(value), encoding="utf-8")
 
     loaded = store.get(record.agent_id)
@@ -178,7 +224,7 @@ def test_legacy_subagent_record_upgrades_from_schema_v2(tmp_path: Path) -> None:
     assert loaded.source.task_generation is None
     store.save(replace(loaded, revision=loaded.revision + 1))
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["schema_version"] == 5
+    assert saved["schema_version"] == 6
     assert saved["source"]["task_id"] is None
 
 
@@ -191,6 +237,7 @@ def test_legacy_subagent_record_upgrades_from_schema_v3(tmp_path: Path) -> None:
     value["schema_version"] = 3
     for field in ("execution_id", "restore_run_token", "restore_prefixes"):
         value.pop(field)
+    value["source"].pop("worker_id")
     path.write_text(json.dumps(value), encoding="utf-8")
 
     loaded = store.get(record.agent_id)
@@ -200,7 +247,7 @@ def test_legacy_subagent_record_upgrades_from_schema_v3(tmp_path: Path) -> None:
     assert loaded.restore_run_token == _RESTORE_TOKEN
     store.save(replace(loaded, revision=loaded.revision + 1))
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["schema_version"] == 5
+    assert saved["schema_version"] == 6
 
 
 def test_restore_discards_child_answer_and_restores_waiting_checkpoint_and_artifacts(
@@ -390,7 +437,19 @@ def test_session_scoped_lookup_cannot_read_another_sessions_record(tmp_path: Pat
 def test_restore_discards_only_matching_subagents_and_their_artifacts(tmp_path: Path) -> None:
     state, session_id = _workspace(tmp_path)
     store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
-    discarded = _register(store, "Discarded task")
+    discarded = store.register(
+        title="Discarded Worker task",
+        task="This task belongs to the restored Worker input.",
+        parent_run_id="123e4567-e89b-42d3-a456-426614174002",
+        source=SubAgentSource(
+            kind=SubAgentSourceKind.WORKER,
+            restore_run_token=_RESTORE_TOKEN,
+            task_id=_RUN_ID,
+            task_generation=1,
+            worker_id="123e4567-e89b-42d3-a456-426614174002",
+        ),
+        creator_snapshot=_snapshot(),
+    )
     kept = store.register(
         title="Kept task",
         task="This task belongs to an earlier input.",
@@ -1016,6 +1075,7 @@ def test_schema_four_keeps_execution_identity_when_upgraded(tmp_path: Path) -> N
     record = _register(store, "Legacy execution")
     payload = record.to_dict()
     payload["schema_version"] = 4
+    cast(dict[str, object], payload["source"]).pop("worker_id")
     path = state.subagents_directory / sid / f"{record.agent_id}.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     restored = SubAgentRecordStore(state, sid, now=lambda: _NOW).get(record.agent_id)
@@ -1024,4 +1084,26 @@ def test_schema_four_keeps_execution_identity_when_upgraded(tmp_path: Path) -> N
     assert restored.restore_run_token == record.restore_run_token
     assert restored.creator_snapshot == record.creator_snapshot
     assert restored.status is SubAgentStatus.INTERRUPTED
-    assert restored.schema_version == 5
+    assert restored.schema_version == 6
+
+
+@pytest.mark.parametrize("field,value", [
+    ("worker_id", None), ("worker_id", "not-a-uuid"),
+    ("task_id", None), ("task_generation", True),
+    ("task_generation", 0), ("job_id", "123e4567-e89b-42d3-a456-426614174002"),
+])
+def test_schema_six_rejects_corrupt_worker_ownership(
+    tmp_path: Path, field: str, value: object,
+) -> None:
+    state, sid = _workspace(tmp_path)
+    store = SubAgentRecordStore(state, sid, now=lambda: _NOW)
+    record = _register(store, "Corrupt Worker source")
+    payload = record.to_dict()
+    source = cast(dict[str, object], payload["source"])
+    source.update(kind="worker", worker_id="123e4567-e89b-42d3-a456-426614174002",
+                  task_id=_RUN_ID, task_generation=1)
+    source[field] = value
+    path = state.subagents_directory / sid / f"{record.agent_id}.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(SubAgentStoreError):
+        store.get(record.agent_id)

@@ -186,10 +186,20 @@ class SubAgentRecordStore:
         status: SubAgentStatus | str | None = None,
         cursor: str | None = None,
         limit: int | None = None,
+        source: SubAgentSource | None = None,
+        owner_agent_id: str | None = None,
+        exclude_worker_owned: bool = False,
     ) -> SubAgentPage:
         """Return a stable page of brief task DTOs in registration order."""
         page_limit = self._validate_limit(limit)
         selected_status = self._validate_status(status)
+        if source is not None and not isinstance(source, SubAgentSource):
+            raise SubAgentRequestError("SubAgent source filter is invalid")
+        if owner_agent_id is not None:
+            try:
+                require_uuid4_string(owner_agent_id, field="owner_agent_id")
+            except ValueError as error:
+                raise SubAgentRequestError("SubAgent owner filter is invalid") from error
         after_order = self._decode_cursor(cursor) if cursor is not None else 0
         with self._lock:
             records = self._read_records()
@@ -198,6 +208,9 @@ class SubAgentRecordStore:
                 for record in records
                 if record.registered_order > after_order
                 and (selected_status is None or record.status is selected_status)
+                and (not exclude_worker_owned or record.source.kind is not SubAgentSourceKind.WORKER)
+                and (source is None or record.source == source)
+                and (owner_agent_id is None or record.agent_id == owner_agent_id)
             )
             selected = matching[:page_limit]
             next_cursor = None
@@ -238,7 +251,10 @@ class SubAgentRecordStore:
             records = tuple(
                 record
                 for record in self._read_records()
-                if record.source.kind is SubAgentSourceKind.FOREGROUND
+                if record.source.kind in {
+                    SubAgentSourceKind.FOREGROUND,
+                    SubAgentSourceKind.WORKER,
+                }
             )
             directory = self._existing_session_directory()
             for record in records:

@@ -46,6 +46,9 @@ class SubAgentRecordRepository(Protocol):
         status: SubAgentStatus | str | None = None,
         cursor: str | None = None,
         limit: int | None = None,
+        source: SubAgentSource | None = None,
+        owner_agent_id: str | None = None,
+        exclude_worker_owned: bool = False,
     ) -> SubAgentPage: ...
 
     def discard_restore_run_tokens(self, restore_run_tokens: Sequence[str | UUID]) -> None: ...
@@ -88,6 +91,9 @@ class SubAgentSessionCoordinator(Protocol):
         status: SubAgentStatus | str | None = None,
         cursor: str | None = None,
         limit: int | None = None,
+        source: SubAgentSource | None = None,
+        owner_agent_id: str | None = None,
+        exclude_worker_owned: bool = False,
     ) -> SubAgentPage: ...
 
     def resume_for_answer(
@@ -106,6 +112,9 @@ class SubAgentSessionCoordinator(Protocol):
         agent_ids: Sequence[str],
         *,
         timeout_ms: int | None = None,
+        source: SubAgentSource | None = None,
+        owner_agent_id: str | None = None,
+        exclude_worker_owned: bool = False,
     ) -> tuple[SubAgentWaitResult, ...]: ...
 
     def cancel(self, agent_id: str) -> bool: ...

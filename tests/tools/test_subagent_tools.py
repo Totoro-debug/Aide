@@ -333,6 +333,138 @@ async def test_wait_tool_returns_compact_results_and_rejects_invalid_or_foreign_
 
 
 @pytest.mark.asyncio
+async def test_worker_subagent_results_are_owner_scoped_and_children_cannot_spawn(
+    tmp_path: Path,
+) -> None:
+    _state, repository, pool, executor, gateway = _harness(tmp_path)
+    base_context = gateway.tool_context
+    assert base_context is not None and base_context.subagent is not None
+    task_id = "123e4567-e89b-42d3-a456-426614174003"
+    base_subagent = base_context.subagent
+    worker_current = True
+    worker_ids = (
+        "123e4567-e89b-42d3-a456-426614174004",
+        "123e4567-e89b-42d3-a456-426614174005",
+    )
+
+    def worker_gateway(worker_id: str) -> ToolGateway:
+        source = SubAgentSource(
+            kind=SubAgentSourceKind.WORKER,
+            restore_run_token=_RESTORE_TOKEN,
+            task_id=task_id,
+            task_generation=1,
+            worker_id=worker_id,
+        )
+        subagent_context = replace(
+            base_subagent,
+            source=source,
+            caller_role="worker",
+            owner_is_current=lambda: worker_current,
+        )
+        return ToolGateway(
+            workspace=base_context.workspace,
+            additional_tools=build_subagent_tools(),
+            tool_context=replace(base_context, subagent=subagent_context),
+        )
+
+    legacy = await gateway.call(ModelToolCall(
+        id="legacy-spawn", name="spawn_agent",
+        arguments=json.dumps({"title": "legacy", "task": "Legacy foreground work"}),
+    ))
+    legacy_id = json.loads(legacy.content)["agent_id"]
+    first, second = (worker_gateway(worker_id) for worker_id in worker_ids)
+    spawned: list[str] = []
+    spawn_calls = ((first, "first-a"), (first, "first-b"), (second, "second"))
+    for index, (worker, title) in enumerate(spawn_calls, start=1):
+        result = await worker.call(
+            ModelToolCall(
+                id=f"spawn-{index}",
+                name="spawn_agent",
+                arguments=json.dumps({"title": title, "task": "Inspect one item."}),
+            )
+        )
+        assert result.status == "success"
+        spawned.append(json.loads(result.content)["agent_id"])
+
+    first_list = await first.call(ModelToolCall(id="first-list", name="list_agents", arguments="{}"))
+    second_list = await second.call(ModelToolCall(id="second-list", name="list_agents", arguments="{}"))
+    assert [item["agent_id"] for item in json.loads(first_list.content)["items"]] == spawned[:2]
+    assert [item["agent_id"] for item in json.loads(second_list.content)["items"]] == spawned[2:]
+
+    legacy_list = await gateway.call(ModelToolCall(id="legacy-list", name="list_agents", arguments="{}"))
+    assert [item["agent_id"] for item in json.loads(legacy_list.content)["items"]] == [legacy_id]
+    legacy_wait = await gateway.call(ModelToolCall(
+        id="legacy-wait", name="wait_agent",
+        arguments=json.dumps({"agent_ids": [spawned[0]], "timeout_ms": 0}),
+    ))
+    assert legacy_wait.status == "error"
+
+    foreign_wait = await first.call(
+        ModelToolCall(
+            id="foreign-wait",
+            name="wait_agent",
+            arguments=json.dumps({"agent_ids": [spawned[2]]}),
+        )
+    )
+    assert foreign_wait.status == "error"
+    for extra in ({"worker_id": worker_ids[1]}, {"task_id": task_id}, {"execution_id": _RUN_ID}):
+        forged = await first.call(ModelToolCall(
+            id="forged", name="wait_agent",
+            arguments=json.dumps({"agent_ids": [spawned[2]], **extra}),
+        ))
+        assert forged.status == "error"
+    legacy_access = await first.call(ModelToolCall(
+        id="worker-legacy-wait", name="wait_agent",
+        arguments=json.dumps({"agent_ids": [legacy_id], "timeout_ms": 0}),
+    ))
+    assert legacy_access.status == "error"
+
+
+    assert first.tool_context is not None and first.tool_context.subagent is not None
+    child_context = replace(
+        first.tool_context.subagent,
+        caller_role="subagent",
+        owner_agent_id=spawned[0],
+        owner_is_current=None,
+    )
+    child_gateway = ToolGateway(
+        workspace=base_context.workspace,
+        additional_tools=build_subagent_tools(),
+        tool_context=replace(first.tool_context, subagent=child_context),
+    )
+    recursive_spawn = await child_gateway.call(
+        ModelToolCall(
+            id="recursive-spawn",
+            name="spawn_agent",
+            arguments=json.dumps({"title": "Recursive", "task": "Must be rejected."}),
+        )
+    )
+    recursive_wait = await child_gateway.call(
+        ModelToolCall(
+            id="recursive-wait",
+            name="wait_agent",
+            arguments=json.dumps({"agent_ids": [spawned[2]]}),
+        )
+    )
+    assert recursive_spawn.status == "error"
+    assert recursive_wait.status == "error"
+    assert len(repository.list().items) == 4
+    worker_current = False
+    stale_list = await first.call(ModelToolCall(id="stale-list", name="list_agents", arguments="{}"))
+    assert stale_list.status == "error"
+    assert "spawn_agent" not in {
+        tool.name
+        for tool in build_agent_run_gateway(
+            first,
+            excluded_names=("spawn_agent", "wait_agent", "schedule"),
+        ).catalog
+    }
+
+    executor.release.set()
+    assert len(await pool.wait(spawned)) == 3
+
+
+@pytest.mark.asyncio
 async def test_spawn_tool_rejects_empty_fields_without_registering_a_task(tmp_path: Path) -> None:
     _, repository, _, _, gateway = _harness(tmp_path)
     result = await gateway.call(

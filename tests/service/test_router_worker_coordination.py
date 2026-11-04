@@ -166,6 +166,256 @@ class _ParallelWorkerProvider:
         self.closed = True
 
 
+class _WorkerSubAgentProvider(_ParallelWorkerProvider):
+    def __init__(self, *, request_subagent_confirmation: bool = True) -> None:
+        super().__init__()
+        self.request_subagent_confirmation = request_subagent_confirmation
+        self.release_subagent = asyncio.Event()
+        self.subagent_started = asyncio.Event()
+        self.two_subagents_started = asyncio.Event()
+        self.subagent_started_labels: set[str] = set()
+        self.followup_started = asyncio.Event()
+        self.release_followup = asyncio.Event()
+        self.router_report_texts: list[str] = []
+        self.worker_tool_names: dict[str, set[str]] = {}
+        self.subagent_tool_names: set[str] = set()
+        self.calls: list[str] = []
+
+    def stream(
+        self,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        model: str,
+        max_output: int,
+        temperature: float,
+        reasoning_effort: object,
+        timeout: int,
+        continuation: object = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        del model, max_output, temperature, reasoning_effort, timeout, continuation
+        system = messages[0].get("content", "") if messages else ""
+        user_text = "\n".join(
+            content
+            for item in messages
+            if item.get("role") == "user"
+            and isinstance((content := item.get("content")), str)
+        )
+        tool_names = {
+            schema["function"]["name"]
+            for schema in tools
+            if isinstance(schema.get("function"), dict)
+            and isinstance(schema["function"].get("name"), str)
+        }
+
+        async def emit() -> AsyncIterator[ModelStreamEvent]:
+            child_label = next(
+                (label for label in ("first", "second")
+                 if f"Return the private result {label}." in user_text),
+                None,
+            )
+            if child_label is not None:
+                self.calls.append(f"subagent:{child_label}")
+                self.subagent_tool_names.update(tool_names)
+                self.subagent_started_labels.add(child_label)
+                self.subagent_started.set()
+                if len(self.subagent_started_labels) >= 2:
+                    self.two_subagents_started.set()
+                await self.release_subagent.wait()
+                call_id = f"subagent-write-{child_label}"
+                tool_results = {
+                    item.get("tool_call_id"): item
+                    for item in messages
+                    if item.get("role") == "tool"
+                }
+                if self.request_subagent_confirmation and call_id not in tool_results:
+                    call = ModelToolCall(
+                        call_id,
+                        "write_file",
+                        json.dumps({
+                            "path": f"subagent-{child_label}.txt",
+                            "content": f"SubAgent {child_label} result",
+                        }),
+                    )
+                    yield ModelCompleted(ModelResponse(
+                        message=AssistantModelMessage(content="", tool_calls=(call,)),
+                        usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                        finish_reason="tool_calls",
+                    ))
+                    return
+                yield ModelCompleted(_response(f"SUBAGENT-PRIVATE-RESULT-{child_label.upper()}"))
+                return
+
+            if isinstance(system, str) and system.startswith("You are an Aide Worker."):
+                delegated = "SubAgent" in user_text
+                worker_name = "delegating" if delegated else "file-reader"
+                self.calls.append(f"worker:{worker_name}:{','.join(sorted(item.get('tool_call_id', '') for item in messages if item.get('role') == 'tool'))}")
+                self.worker_tool_names[worker_name] = set(tool_names)
+                self.worker_started += 1
+                if self.worker_started >= 2:
+                    self.two_workers_started.set()
+                await self.two_workers_started.wait()
+                await self.release_workers.wait()
+                tool_results = {
+                    item.get("tool_call_id"): item
+                    for item in messages
+                    if item.get("role") == "tool"
+                }
+                if delegated:
+                    if "worker-search-spawn" not in tool_results:
+                        call = ModelToolCall(
+                            "worker-search-spawn",
+                            "tool_search",
+                            json.dumps({"query": "spawn_agent"}),
+                        )
+                    elif "worker-spawn" not in tool_results:
+                        call = ModelToolCall(
+                            "worker-spawn",
+                            "spawn_agent",
+                            json.dumps({
+                                "title": "Inspect first detail",
+                                "task": "Return the private result first.",
+                            }),
+                        )
+                    elif "worker-spawn-second" not in tool_results:
+                        call = ModelToolCall(
+                            "worker-spawn-second",
+                            "spawn_agent",
+                            json.dumps({
+                                "title": "Inspect second detail",
+                                "task": "Return the private result second.",
+                            }),
+                        )
+                    elif "worker-search-wait" not in tool_results:
+                        call = ModelToolCall(
+                            "worker-search-wait",
+                            "tool_search",
+                            json.dumps({"query": "wait_agent"}),
+                        )
+                    elif "worker-list" not in tool_results:
+                        call = ModelToolCall("worker-list", "list_agents", "{}")
+                    else:
+                        child_ids = [
+                            json.loads(str(tool_results[key].get("content", "{}")))["agent_id"]
+                            for key in ("worker-spawn", "worker-spawn-second")
+                        ]
+                        listed = json.loads(str(tool_results["worker-list"].get("content", "{}")))
+                        assert {item["agent_id"] for item in listed["items"]} == set(child_ids)
+                        consumed = {
+                            item["agent_id"]: item
+                            for key, value in tool_results.items()
+                            if isinstance(key, str) and key.startswith("worker-wait-")
+                            for item in json.loads(str(value.get("content", "[]")))
+                        }
+                        remaining = [child_id for child_id in child_ids if child_id not in consumed]
+                        if remaining:
+                            call = ModelToolCall(
+                                f"worker-wait-{len(consumed)}", "wait_agent",
+                                json.dumps({"agent_ids": remaining}),
+                            )
+                        else:
+                            assert all(item["status"] == "completed" for item in consumed.values())
+                            yield ModelCompleted(_response(
+                                "Worker incorporated " + " and ".join(
+                                    consumed[child_id]["result"] for child_id in child_ids
+                                ) + "."
+                            ))
+                            return
+                elif "file-read" not in tool_results:
+                    call = ModelToolCall(
+                        "file-read",
+                        "read_file",
+                        json.dumps({"path": "worker-input.txt"}),
+                    )
+                else:
+                    yield ModelCompleted(_response("Worker read WORKER-FILE-CONTENT."))
+                    return
+                yield ModelCompleted(
+                    ModelResponse(
+                        message=AssistantModelMessage(content="", tool_calls=(call,)),
+                        usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                        finish_reason="tool_calls",
+                    )
+                )
+                return
+
+            if "Worker reports for automatic continuation:" in user_text:
+                self.calls.append("router:reports")
+                self.report_continuations += 1
+                self.router_report_texts.append(user_text)
+                self.report_continuation_started.set()
+                yield ModelCompleted(
+                    ModelResponse(
+                        message=AssistantModelMessage(
+                            content="",
+                            tool_calls=(ModelToolCall(
+                                "report-finish",
+                                "finish",
+                                '{"response":"Both Worker reports are complete."}',
+                            ),),
+                        ),
+                        usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                        finish_reason="tool_calls",
+                    )
+                )
+                return
+
+            if "Follow-up update" in user_text:
+                self.followup_started.set()
+                await self.release_followup.wait()
+                yield ModelCompleted(_response("Follow-up handled."))
+                return
+
+            if any(
+                item.get("tool_call_id")
+                in {"dispatch-subagent-worker", "dispatch-file-worker"}
+                for item in messages
+                if item.get("role") == "tool"
+            ):
+                call = ModelToolCall(
+                    "initial-finish",
+                    "finish",
+                    '{"response":"The Router is waiting for Worker reports."}',
+                )
+                yield ModelCompleted(
+                    ModelResponse(
+                        message=AssistantModelMessage(content="", tool_calls=(call,)),
+                        usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                        finish_reason="tool_calls",
+                    )
+                )
+                return
+
+            self.calls.append(f"router:dispatch:{user_text[:120]!r}")
+            tool_calls = (
+                ModelToolCall(
+                    "dispatch-subagent-worker",
+                    "dispatch_worker",
+                    json.dumps({
+                        "task_id": "subagent-review",
+                        "task": "Delegate to one SubAgent, wait for its result, and report it.",
+                    }),
+                ),
+                ModelToolCall(
+                    "dispatch-file-worker",
+                    "dispatch_worker",
+                    json.dumps({
+                        "task_id": "file-review",
+                        "task": "Read worker-input.txt and report its contents.",
+                    }),
+                ),
+            )
+            yield ModelCompleted(
+                ModelResponse(
+                    message=AssistantModelMessage(content="", tool_calls=tool_calls),
+                    usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                    finish_reason="tool_calls",
+                )
+            )
+
+        return emit()
+
+
 class _SilentSink:
     async def send_event(self, _event: dict[str, object]) -> None:
         return None
@@ -299,6 +549,219 @@ async def test_parallel_workers_overlap_and_reports_produce_one_router_reply(
     finally:
         provider.release_workers.set()
         provider.release_report_continuation.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_parallel_workers_manage_owned_subagent_results_before_router_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.service.test_service_concurrency import _CollectingSink
+
+    home = _home(tmp_path / "home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    (directory / "worker-input.txt").write_text("WORKER-FILE-CONTENT", encoding="utf-8")
+    provider = _WorkerSubAgentProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        service.client_permission(client.client_id).select("read-only")
+        sink = _CollectingSink()
+        await service.connect_client(client.client_id, sink)
+        workspace = await service.attach_workspace(client.client_id, directory)
+        opened = await service.open_conversation(
+            client.client_id,
+            workspace_id=workspace.workspace_id,
+            create_new=True,
+        )
+        session_id = str(opened["session_id"])
+        claim = cast(dict[str, object], opened["claim"])
+        await workspace.input(
+            client.client_id,
+            session_id,
+            cast(int, claim["claim_version"]),
+            "Run the independent checks.",
+            "worker-subagent-input",
+        )
+
+        await asyncio.wait_for(provider.two_workers_started.wait(), timeout=10)
+        assert provider.worker_started == 2
+        assert set(provider.worker_tool_names) == {"delegating", "file-reader"}
+        provider.release_workers.set()
+        await asyncio.wait_for(provider.two_subagents_started.wait(), timeout=10)
+        assert "spawn_agent" not in provider.subagent_tool_names
+        children = cast(
+            list[dict[str, object]],
+            service.list_subagents(client.client_id, workspace.workspace_id, session_id)["items"],
+        )
+        assert len(children) == 2
+        child_ids = {cast(str, child["agent_id"]) for child in children}
+        repository = workspace.subagent_repository(session_id)
+        owner = next(
+            worker
+            for worker in workspace.worker_store(session_id).load().workers
+            if worker.task_id == "subagent-review"
+        )
+        child_records = [repository.get(child_id) for child_id in child_ids]
+        assert all(child is not None for child in child_records)
+        assert all(child.source.kind.value == "worker" for child in child_records if child)
+        assert all(child.source.worker_id == owner.worker_id for child in child_records if child)
+        assert all(child.creator_snapshot.permission_level == "read-only" for child in child_records if child)
+
+        provider.release_subagent.set()
+        def confirmation_requests() -> list[dict[str, object]]:
+            return [
+                event for event in sink.events
+                if event.get("type") == "confirmation.requested"
+            ]
+
+        for index in range(2):
+            await _wait_until(lambda index=index: len(confirmation_requests()) > index)
+            payload = cast(dict[str, object], confirmation_requests()[index]["payload"])
+            request = cast(dict[str, object], payload["request"])
+            confirmation_owner = cast(dict[str, object], payload["owner"])
+            assert confirmation_owner["kind"] == "subagent"
+            assert confirmation_owner["agent_id"] in child_ids
+            assert request["tool_name"] == "write_file"
+            assert request["tool_call_id"] in {"subagent-write-first", "subagent-write-second"}
+            service.decide_confirmation(
+                client.client_id,
+                cast(str, payload["token"]),
+                "approved",
+            )
+
+        try:
+            await asyncio.wait_for(provider.report_continuation_started.wait(), timeout=10)
+        except TimeoutError as error:
+            raise AssertionError(
+                f"provider_calls={provider.calls[-10:]!r}; "
+                f"router_report_texts={provider.router_report_texts!r}; "
+                f"workers={[(item.task_id, item.state) for item in workspace.worker_store(session_id).load().workers]!r}"
+            ) from error
+        await _wait_until(
+            lambda: not cast(
+                list[dict[str, object]],
+                cast(dict[str, object], workspace.session_snapshot(session_id)["live_state"])["runs"],
+            )
+        )
+
+        workers = workspace.worker_store(session_id).load().workers
+        assert len(workers) == 2
+        assert all(worker.state == "ready" for worker in workers)
+        child_records = [repository.get(child_id) for child_id in child_ids]
+        assert len(child_records) == 2
+        assert all(child is not None and child.status.value == "completed" for child in child_records)
+        subagent_owner = next(worker for worker in workers if worker.task_id == "subagent-review")
+        assert subagent_owner.report is not None
+        assert "SUBAGENT-PRIVATE-RESULT-FIRST" in subagent_owner.report.summary
+        assert "SUBAGENT-PRIVATE-RESULT-SECOND" in subagent_owner.report.summary
+        file_worker = next(worker for worker in workers if worker.task_id == "file-review")
+        assert file_worker.report is not None
+        assert "WORKER-FILE-CONTENT" in file_worker.report.summary
+
+        snapshot = workspace.session_snapshot(session_id)
+        messages = cast(list[dict[str, object]], snapshot["messages"])
+        assert provider.report_continuations == 1
+        assert len(provider.router_report_texts) == 1
+        assert all(child_id not in provider.router_report_texts[0] for child_id in child_ids)
+        assert provider.router_report_texts[0].count("Worker ID:") == 2
+        assert sum(
+            message.get("role") == "assistant"
+            and message.get("content") == "Both Worker reports are complete."
+            for message in messages
+        ) == 1
+    finally:
+        provider.release_workers.set()
+        provider.release_subagent.set()
+        provider.release_followup.set()
+        await service.stop()
+
+
+@pytest.mark.parametrize("operation", ["cancel", "replace"])
+@pytest.mark.asyncio
+async def test_cancel_or_replace_drains_worker_owned_subagents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    home = _home(tmp_path / "home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _WorkerSubAgentProvider(request_subagent_confirmation=False)
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        await service.connect_client(client.client_id, _SilentSink())
+        workspace = await service.attach_workspace(client.client_id, directory)
+        opened = await service.open_conversation(
+            client.client_id, workspace_id=workspace.workspace_id, create_new=True,
+        )
+        session_id = str(opened["session_id"])
+        claim = cast(dict[str, object], opened["claim"])
+        version = cast(int, claim["claim_version"])
+        await workspace.input(client.client_id, session_id, version,
+                              "Run the independent checks.", "worker-subagent-start")
+        await asyncio.wait_for(provider.two_workers_started.wait(), timeout=10)
+        provider.release_workers.set()
+        await asyncio.wait_for(provider.two_subagents_started.wait(), timeout=10)
+        await _wait_until(lambda: not cast(
+            list[dict[str, object]],
+            cast(dict[str, object], workspace.session_snapshot(session_id)["live_state"])["runs"],
+        ))
+        children = cast(
+            list[dict[str, object]],
+            service.list_subagents(client.client_id, workspace.workspace_id, session_id)["items"],
+        )
+        assert len(children) == 2
+        child_ids = [cast(str, child["agent_id"]) for child in children]
+
+        task = cast(list[dict[str, object]],
+                    workspace.session_snapshot(session_id)["foreground_tasks"])[0]
+        task_id = cast(str, task["task_id"])
+        if operation == "cancel":
+            cancellation = asyncio.create_task(workspace.cancel_task(
+                client.client_id,
+                session_id,
+                version,
+                task_id,
+                cast(int, task["revision"]),
+                "cancel-worker-subagents",
+            ))
+        else:
+            provider.replace_followup = True
+            provider.release_followup.set()
+            await workspace.input(client.client_id, session_id, version,
+                                  "Follow-up update", "replace-worker-subagents")
+
+        await _wait_until(lambda: any(
+            worker.task_id == "subagent-review"
+            and worker.report is not None
+            and worker.report.status == "cancelled"
+            for worker in workspace.worker_store(session_id).load().workers
+        ))
+        provider.release_subagent.set()
+        if operation == "cancel":
+            result = await cancellation
+            assert result["state"] == "cancelled"
+        else:
+            await asyncio.wait_for(provider.followup_started.wait(), timeout=10)
+
+        await _wait_until(lambda: all(
+            service.get_subagent(client.client_id, workspace.workspace_id, session_id, child_id)[
+                "status"
+            ] == "cancelled"
+            for child_id in child_ids
+        ))
+        assert provider.report_continuations == 0
+    finally:
+        provider.release_workers.set()
+        provider.release_subagent.set()
+        provider.release_followup.set()
         await service.stop()
 
 
@@ -746,4 +1209,92 @@ async def test_parallel_worker_confirmation_tokens_keep_distinct_owners(
         await _wait_until(lambda: all((directory / name).exists()
                                       for name in ("first.txt", "second.txt")))
     finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["file_restore", "shutdown_restart"])
+async def test_worker_children_restore_files_or_remain_interrupted_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    from aide.agent.session.restore import RestoreMode
+
+    home = _home(tmp_path / "home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    (directory / "worker-input.txt").write_text("retained input", encoding="utf-8")
+    provider = _WorkerSubAgentProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        service.client_permission(client.client_id).select("full-access")
+        await service.connect_client(client.client_id, _SilentSink())
+        workspace = await service.attach_workspace(client.client_id, directory)
+        opened = await service.open_conversation(
+            client.client_id, workspace_id=workspace.workspace_id, create_new=True,
+        )
+        sid = str(opened["session_id"])
+        claim = cast(dict[str, Any], opened["claim"])
+        await workspace.input(client.client_id, sid, claim["claim_version"], "start", "start")
+        await asyncio.wait_for(provider.two_workers_started.wait(), 10)
+        provider.release_workers.set()
+        await asyncio.wait_for(provider.two_subagents_started.wait(), 10)
+        children = cast(list[dict[str, Any]], service.list_subagents(
+            client.client_id, workspace.workspace_id, sid,
+        )["items"])
+        assert len(children) == 2
+        if operation == "file_restore":
+            provider.release_subagent.set()
+            await asyncio.wait_for(provider.report_continuation_started.wait(), 10)
+            await _wait_until(lambda: not cast(dict[str, Any],
+                workspace.session_snapshot(sid)["live_state"])["runs"])
+            assert (directory / "subagent-first.txt").read_text() == "SubAgent first result"
+            assert (directory / "subagent-second.txt").read_text() == "SubAgent second result"
+            async with asyncio.timeout(10):
+                attempt = 0
+                while True:
+                    inspected = await service.inspect_restore(
+                        client.client_id, workspace.workspace_id, sid,
+                        claim["claim_version"], claim["reconnect_credential"],
+                        f"inspect-{attempt}", 1,
+                    )
+                    if "restore_plan" in inspected:
+                        break
+                    assert "Finish the active run" in str(inspected), inspected
+                    attempt += 1
+                    await asyncio.sleep(0.01)
+            restored = await service.handle_management(client.client_id, workspace.workspace_id,
+                sid, "restore/execute", {"request_id": "restore",
+                "plan": {"anchor_id": 1}, "mode": RestoreMode.FILES.value},
+                claim_version=claim["claim_version"], claim_credential=claim["reconnect_credential"])
+            assert "restore_result" in restored, restored
+            assert not (directory / "subagent-first.txt").exists()
+            assert not (directory / "subagent-second.txt").exists()
+            assert (directory / "worker-input.txt").read_text() == "retained input"
+            assert not workspace.worker_store(sid).load().workers
+            assert not workspace.subagent_repository(sid).list().items
+        else:
+            await service.stop()
+            for child in children:
+                record = workspace.subagent_repository(sid).get(child["agent_id"])
+                assert record is not None and record.status.value == "interrupted"
+            calls = len(provider.calls)
+            provider.release_subagent.set()
+            service = AgentService(home, ConfigLoader(home).load())
+            await service.start()
+            client = await service.register_client("cli")
+            await service.connect_client(client.client_id, _SilentSink())
+            workspace = await service.attach_workspace(client.client_id, directory)
+            await service.open_conversation(client.client_id,
+                workspace_id=workspace.workspace_id, session_id=sid)
+            await asyncio.sleep(0.05)
+            assert len(provider.calls) == calls
+            assert provider.report_continuations == 0
+            assert all(service.get_subagent(client.client_id, workspace.workspace_id, sid,
+                child["agent_id"])["status"] == "interrupted" for child in children)
+    finally:
+        provider.release_workers.set()
+        provider.release_subagent.set()
         await service.stop()

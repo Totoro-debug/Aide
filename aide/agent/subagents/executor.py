@@ -411,12 +411,14 @@ class SubAgentRunnerExecutor:
             recorder = (
                 self._file_mutation_recorder_for(record)
                 if self._file_mutation_recorder_for is not None
-                and record.source.kind is SubAgentSourceKind.FOREGROUND
+                and record.source.kind
+                in {SubAgentSourceKind.FOREGROUND, SubAgentSourceKind.WORKER}
                 else None
             )
             run_token = (
                 UUID(record.restore_run_token)
-                if record.source.kind is SubAgentSourceKind.FOREGROUND
+                if record.source.kind
+                in {SubAgentSourceKind.FOREGROUND, SubAgentSourceKind.WORKER}
                 and record.restore_run_token is not None
                 else None
             )

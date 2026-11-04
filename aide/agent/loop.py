@@ -385,6 +385,7 @@ class AgentRunExecutor:
             return SubAgentToolContext(
                 coordinator=active_coordinator, parent_run_id=record.parent_run_id,
                 source=record.source, creator_snapshot=record.creator_snapshot,
+                caller_role="subagent", owner_agent_id=record.agent_id,
             )
 
         def child_question_handler_for(
@@ -434,6 +435,7 @@ class AgentRunExecutor:
             store = foreground_work_store
             if (
                 store is not None
+                and record.source.kind is SubAgentSourceKind.FOREGROUND
                 and record.source.task_id is not None
                 and record.source.task_generation is not None
             ):
@@ -483,6 +485,8 @@ class AgentRunExecutor:
             parent_run_id=record.parent_run_id,
             source=record.source,
             creator_snapshot=record.creator_snapshot,
+            caller_role="subagent",
+            owner_agent_id=record.agent_id,
         )
 
     def _subagent_run_gateway(
@@ -535,6 +539,7 @@ class AgentRunExecutor:
                 parent_run_id=parent_run_id,
                 source=source,
                 creator_snapshot=snapshot,
+                caller_role="main",
             ),
         )
         return self._new_run_gateway(
@@ -2008,6 +2013,7 @@ class AgentRunExecutor:
                             agent_executor._configuration.runtime.enable_tool_micro_compression
                         ),
                         mcp_keywords=agent_executor._mcp_keywords,
+                        subagent_coordinator=agent_executor._subagent_coordinator,
                         trace_recorder=agent_executor._trace_recorder,
                         now=agent_executor._now,
                     )

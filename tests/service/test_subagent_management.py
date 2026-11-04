@@ -3339,8 +3339,11 @@ async def test_session_delete_is_fenced_by_active_subagents_then_removes_them(
         task="Wait for cleanup.",
         parent_run_id=_RUN_ID,
         source=SubAgentSource(
-            kind=SubAgentSourceKind.FOREGROUND,
+            kind=SubAgentSourceKind.WORKER,
             restore_run_token=_RESTORE_TOKEN,
+            task_id=_RUN_ID,
+            task_generation=1,
+            worker_id=str(uuid4()),
         ),
         creator_snapshot=_snapshot(),
     )
@@ -3959,8 +3962,11 @@ async def test_cleanup_fences_all_pools_before_draining_and_respects_workspace_s
             task="Wait for cleanup.",
             parent_run_id=_RUN_ID,
             source=SubAgentSource(
-                kind=SubAgentSourceKind.FOREGROUND,
+                kind=SubAgentSourceKind.WORKER,
                 restore_run_token=_RESTORE_TOKEN,
+                task_id=_RUN_ID,
+                task_generation=1,
+                worker_id=str(uuid4()),
             ),
             creator_snapshot=_snapshot(),
         )
@@ -3983,8 +3989,11 @@ async def test_cleanup_fences_all_pools_before_draining_and_respects_workspace_s
                     task="Must not start.",
                     parent_run_id=_RUN_ID,
                     source=SubAgentSource(
-                        kind=SubAgentSourceKind.FOREGROUND,
+                        kind=SubAgentSourceKind.WORKER,
                         restore_run_token=_RESTORE_TOKEN,
+                        task_id=_RUN_ID,
+                        task_generation=1,
+                        worker_id=str(uuid4()),
                     ),
                     creator_snapshot=_snapshot(),
                 )
@@ -4030,8 +4039,11 @@ async def test_service_close_marks_children_interrupted_before_closing_shared_co
         task="Wait for Service shutdown.",
         parent_run_id=_RUN_ID,
         source=SubAgentSource(
-            kind=SubAgentSourceKind.FOREGROUND,
+            kind=SubAgentSourceKind.WORKER,
             restore_run_token=_RESTORE_TOKEN,
+            task_id=_RUN_ID,
+            task_generation=1,
+            worker_id=str(uuid4()),
         ),
         creator_snapshot=_snapshot(),
     )

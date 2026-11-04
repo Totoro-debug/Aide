@@ -14,6 +14,13 @@ from aide.agent.context.run_context import AgentRunContextSnapshot, ContextContr
 from aide.agent.permission import PermissionSnapshot
 from aide.agent.runner import AgentRunner
 from aide.agent.session.backup_store import FileBackupStore
+from aide.agent.subagents.context import SubAgentToolContext
+from aide.agent.subagents.models import (
+    SubAgentCreatorSnapshot,
+    SubAgentSource,
+    SubAgentSourceKind,
+)
+from aide.agent.subagents.ports import SubAgentSessionCoordinator
 from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.core.exec_host import ExecHost
 from aide.agent.tools.deferred import build_agent_run_gateway
@@ -30,7 +37,8 @@ from aide.trace.types import TraceOrigin, TracePurpose
 from aide.utils.errors import ErrorInfo
 from aide.utils.validation import empty_token_usage
 
-_EXCLUDED_TOOL_NAMES = ("spawn_agent", "wait_agent", "list_agents", "schedule")
+_EXCLUDED_TOOL_NAMES = ("schedule",)
+_SUBAGENT_TOOL_NAMES = ("spawn_agent", "wait_agent", "list_agents")
 _USAGE_FIELDS = ("model_calls", "input_tokens", "output_tokens", "total_tokens")
 
 
@@ -51,6 +59,7 @@ class WorkerRunnerExecutor:
         max_tool_result_chars: int,
         enable_tool_micro_compression: bool,
         mcp_keywords: Mapping[str, Sequence[str]],
+        subagent_coordinator: SubAgentSessionCoordinator | None = None,
         trace_recorder: TraceRecorder | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -76,6 +85,7 @@ class WorkerRunnerExecutor:
         self._max_tool_result_chars = max_tool_result_chars
         self._enable_tool_micro_compression = enable_tool_micro_compression
         self._mcp_keywords = deepcopy(dict(mcp_keywords))
+        self._subagent_coordinator = subagent_coordinator
         self._trace_recorder = NoOpTraceRecorder() if trace_recorder is None else trace_recorder
         self._now = now or (lambda: datetime.now(UTC))
 
@@ -112,24 +122,73 @@ class WorkerRunnerExecutor:
             level=worker.permission_level,
             exec_shell=self._exec_host.resolved_shell,
         )
+
+        def worker_is_current() -> bool:
+            current_worker = self._store.get(worker.worker_id)
+            return (
+                current_worker is not None
+                and current_worker.execution_id == worker.execution_id
+                and current_worker.state == "working"
+                and current_worker.report is None
+                and foreground_task_is_current(
+                    worker.parent_task_id,
+                    worker.parent_generation,
+                    parent_execution_id,
+                )
+            )
+
+        excluded_names = _EXCLUDED_TOOL_NAMES
+        allowed_names = tuple(
+            tool.name
+            for tool in self._tool_gateway.catalog
+            if tool.name not in excluded_names
+            and (self._subagent_coordinator is not None or tool.name not in _SUBAGENT_TOOL_NAMES)
+        )
+        if self._subagent_coordinator is not None:
+            source = SubAgentSource(
+                kind=SubAgentSourceKind.WORKER,
+                restore_run_token=worker.restore_run_token,
+                task_id=worker.parent_task_id,
+                task_generation=worker.parent_generation,
+                worker_id=worker.worker_id,
+            )
+            subagent_snapshot = SubAgentCreatorSnapshot(
+                provider_id=worker.model_configuration.provider_id,
+                model=worker.model_configuration.model,
+                reasoning_effort=worker.model_configuration.reasoning_effort,
+                permission_level=worker.permission_level,
+                shell=worker.exec_shell_selector,
+                tool_names=tuple(dict.fromkeys((*allowed_names, "tool_search"))),
+                system_prompt=worker.system_prompt,
+            )
+            subagent_context = SubAgentToolContext(
+                coordinator=self._subagent_coordinator,
+                parent_run_id=worker.execution_id,
+                source=source,
+                creator_snapshot=subagent_snapshot,
+                caller_role="worker",
+                owner_is_current=worker_is_current,
+            )
+        else:
+            subagent_context = None
         tool_context = ToolRunContext(
             workspace=self._workspace_state.workspace_path,
             schedule_service=self._schedule_service,
             exec_host=self._exec_host,
+            subagent=subagent_context,
             task_id=worker.parent_task_id,
             generation=worker.parent_generation,
             execution_id=parent_execution_id,
             foreground_task_is_current=foreground_task_is_current,
         )
-        allowed_names = tuple(
-            tool.name
-            for tool in self._tool_gateway.catalog
-            if tool.name not in _EXCLUDED_TOOL_NAMES
-        )
         gateway = build_agent_run_gateway(
             self._tool_gateway,
-            excluded_names=_EXCLUDED_TOOL_NAMES,
-            allowed_names=allowed_names,
+            excluded_names=(
+                excluded_names
+                if self._subagent_coordinator is not None
+                else (*excluded_names, *_SUBAGENT_TOOL_NAMES)
+            ),
+            allowed_names=(*allowed_names, "tool_search"),
             mcp_keywords=self._mcp_keywords,
             permission_snapshot=permission_snapshot,
             tool_context=tool_context,

@@ -6170,6 +6170,7 @@ async def test_historical_streaming_pauses_follow_and_exposes_new_content() -> N
         conversation.pause_after_next_first_delta()
         submission = asyncio.create_task(pilot.press(*list("stream"), "enter"))
         try:
+            await asyncio.wait_for(submission, timeout=2)
             await asyncio.wait_for(conversation.first_delta_emitted.wait(), timeout=1)
             await asyncio.sleep(0.1)
             await pilot.pause()

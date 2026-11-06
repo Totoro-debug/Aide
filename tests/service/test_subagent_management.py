@@ -5084,13 +5084,13 @@ async def test_deletion_marker_restart_does_not_recreate_child_or_task_records(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("recovery_fault", ["none", "stage", "queue_after", "missing_model", "lower_permission"])
 async def test_explicit_continue_resumes_original_interrupted_child_after_restart(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    router_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
     monkeypatch: pytest.MonkeyPatch,
     recovery_fault: str,
 ) -> None:
     from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
 
-    service, workspace, client, sid, _ = management_case
+    service, workspace, client, sid, _ = router_management_case
     provider = _DelegatingProvider()
     monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _: provider)
     monkeypatch.setattr("aide.service.runtime.workspace.create_provider", lambda _: provider)
@@ -5104,6 +5104,14 @@ async def test_explicit_continue_resumes_original_interrupted_child_after_restar
     agent = cast(list[dict[str, Any]], service.list_subagents(client, workspace.workspace_id, sid)["items"])[0]
     await service.stop()
     original = _require_record(workspace.subagent_repository(sid), agent["agent_id"])
+    assert original.source.kind is SubAgentSourceKind.WORKER
+    assert original.source.worker_id is not None
+    assert original.source.task_id is not None
+    assert original.source.task_generation is not None
+    original_worker = workspace.worker_store(sid).get(original.source.worker_id)
+    assert original_worker is not None
+    assert original_worker.parent_task_id == original.source.task_id
+    assert original_worker.parent_generation == original.source.task_generation
     requests_before_restart = len(provider.requests)
     replacement = AgentService(service.agent_home, ConfigLoader(service.agent_home).load())
     await replacement.start()
@@ -5211,7 +5219,7 @@ async def test_explicit_continue_resumes_original_interrupted_child_after_restar
         assert restored.execution_id != original.execution_id
         messages = cast(list[dict[str, Any]], resident.session_snapshot(sid)["messages"])
         assert sum(m.get("foreground_continue_request_id") == request_id for m in messages) == 1
-        await _wait_until(lambda: provider.automatic_continuation_count == 1)
+        await _wait_until(lambda: provider.router_report_continuation_count == 1)
         await _wait_for_idle(resident, sid)
         from aide.agent.session.restore import RestoreMode
         anchor = cast(list[dict[str, Any]], resident.session_snapshot(sid)["restore_anchors"])[-1]["anchor_id"]
@@ -5227,6 +5235,8 @@ async def test_explicit_continue_resumes_original_interrupted_child_after_restar
         assert rolled_back.conversation == tuple(prefix["conversation"])
         assert rolled_back.usage == prefix["usage"]
         assert rolled_back.execution_id == prefix["execution_id"]
+        assert provider.router_dispatch_count == 1
+        assert provider.router_report_continuation_count == 1
     finally:
         provider.release_child.set()
         await replacement.stop()
